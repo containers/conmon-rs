@@ -1,7 +1,11 @@
 use tonic::{transport::Server, Request, Response, Status};
 
+mod config;
+
 use conmon::conmon_server::{Conmon, ConmonServer};
 use conmon::{VersionRequest, VersionResponse};
+use derive_builder::Builder;
+use getset::{Getters, MutGetters};
 
 const VERSION: &str = "0.1.0";
 
@@ -9,8 +13,13 @@ pub mod conmon {
     tonic::include_proto!("conmon");
 }
 
-#[derive(Debug, Default)]
-pub struct ConmonServerImpl {}
+#[derive(Builder, Debug, Default, Getters, MutGetters)]
+#[builder(default, pattern = "owned", setter(into))]
+pub struct ConmonServerImpl {
+    #[doc = "The main conmon configuration."]
+    #[getset(get, get_mut)]
+    config: config::Config,
+}
 
 #[tonic::async_trait]
 impl Conmon for ConmonServerImpl {
