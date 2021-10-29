@@ -1,0 +1,19 @@
+[package]
+name = "conmon-rs"
+version = "0.1.0"
+edition = "2021"
+
+
+[[bin]] # Bin to run the ConmonServer gRPC server
+name = "conmon-server"
+path = "src/server.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tonic = "0.6"
+prost = "0.9"
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+
+[build-dependencies]
+tonic-build = "0.6"
