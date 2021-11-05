@@ -26,7 +26,11 @@ nix = "0.23.0"
 serde = { version = "1.0.130", features = ["derive"] }
 strum = { version = "0.22.0", features = ["derive"] }
 
-
 [build-dependencies]
 tonic-build = "0.6"
 anyhow = "1.0.44"
+
+[profile.release]
+lto = true
+opt-level = "z"
+codegen-units = 1
