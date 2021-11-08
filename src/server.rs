@@ -3,7 +3,6 @@ use conmon::{
     conmon_server::{Conmon, ConmonServer},
     VersionRequest, VersionResponse,
 };
-use derive_builder::Builder;
 use env_logger::fmt::Color;
 use getset::{Getters, MutGetters};
 use log::{info, LevelFilter};
@@ -18,8 +17,7 @@ pub mod conmon {
     tonic::include_proto!("conmon");
 }
 
-#[derive(Builder, Debug, Default, Getters, MutGetters)]
-#[builder(default, pattern = "owned", setter(into))]
+#[derive(Debug, Default, Getters, MutGetters)]
 pub struct ConmonServerImpl {
     #[doc = "The main conmon configuration."]
     #[getset(get, get_mut)]
