@@ -31,6 +31,7 @@ impl ConmonServerImpl {
     pub fn new() -> Result<Self> {
         let server = Self::default();
         server.init_logging().context("set log verbosity")?;
+        server.config().validate().context("validate config")?;
         Ok(server)
     }
 
