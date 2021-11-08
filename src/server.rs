@@ -81,7 +81,8 @@ impl Conmon for ConmonServerImpl {
     }
 }
 
-#[tokio::main]
+// Use the single threaded runtime to save rss memory
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "[::1]:50051".parse()?;
     let server = ConmonServerImpl::new()?;
