@@ -4,7 +4,7 @@ use clap::{crate_version, Parser};
 use getset::{CopyGetters, Getters, Setters};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
-use std::{env, path::PathBuf};
+use std::{env, net::SocketAddr, path::PathBuf};
 
 macro_rules! prefix {
     () => {
@@ -37,7 +37,7 @@ pub struct Config {
         env(concat!(prefix!(), "PIDFILE")),
         long("conmon-pidfile"),
         short('P'),
-        value_name("PATH")
+        value_name("PIDFILE")
     )]
     /// PID file for the conmon server.
     conmon_pidfile: Option<PathBuf>,
@@ -47,10 +47,22 @@ pub struct Config {
         env(concat!(prefix!(), "RUNTIME")),
         long("runtime"),
         short('r'),
-        value_name("PATH")
+        value_name("RUNTIME")
     )]
     /// Path of the OCI runtime to use to operate on the containers.
     runtime: PathBuf,
+
+    #[get = "pub"]
+    #[clap(
+        env(concat!(prefix!(), "ADDRESS")),
+        long("address"),
+        short('a'),
+        default_value("[::1]:50051"),
+        value_name("ADDRESS")
+    )]
+    /// Address of the listening socket for the grpc server
+    /// todo: change to domain socket
+    address: SocketAddr,
 }
 
 impl Default for Config {

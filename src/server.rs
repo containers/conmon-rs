@@ -1,4 +1,5 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
+use clap::crate_version;
 use conmon::{
     conmon_server::{Conmon, ConmonServer},
     VersionRequest, VersionResponse,
@@ -7,11 +8,15 @@ use env_logger::fmt::Color;
 use getset::{Getters, MutGetters};
 use log::{info, LevelFilter};
 use std::{env, io::Write};
+use tokio::{
+    signal::unix::{signal, SignalKind},
+    sync::oneshot,
+};
 use tonic::{transport::Server, Request, Response, Status};
 
 mod config;
 
-const VERSION: &str = "0.1.0";
+const VERSION: &str = crate_version!();
 
 pub mod conmon {
     tonic::include_proto!("conmon");
@@ -83,14 +88,36 @@ impl Conmon for ConmonServerImpl {
 
 // Use the single threaded runtime to save rss memory
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "[::1]:50051".parse()?;
+async fn main() -> Result<(), Error> {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
     let server = ConmonServerImpl::new()?;
 
+    let sigterm_handler = tokio::spawn(start_sigterm_handler(shutdown_tx));
+    let grpc_backend = tokio::spawn(start_grpc_backend(server, shutdown_rx));
+
+    let _ = tokio::join!(sigterm_handler, grpc_backend);
+    Ok(())
+}
+
+async fn start_sigterm_handler(shutdown_tx: oneshot::Sender<()>) {
+    let mut sigterm = signal(SignalKind::terminate()).unwrap();
+    sigterm.recv().await;
+    info!("received SIGTERM");
+    let _ = shutdown_tx.send(());
+}
+
+async fn start_grpc_backend(
+    server: ConmonServerImpl,
+    shutdown_rx: oneshot::Receiver<()>,
+) -> Result<(), Error> {
+    let addr = server.config().address().to_owned();
     Server::builder()
         .add_service(ConmonServer::new(server))
-        .serve(addr)
+        .serve_with_shutdown(addr, async move {
+            let _ = shutdown_rx.await.ok();
+            info!("gracefully shutting down grpc backend")
+        })
         .await?;
-
     Ok(())
 }
