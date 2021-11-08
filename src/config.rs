@@ -1,10 +1,9 @@
 //! Configuration related structures
 use anyhow::{bail, Result};
 use clap::{crate_version, Parser};
-use derive_builder::Builder;
 use getset::{CopyGetters, Getters, Setters};
+use log::LevelFilter;
 use serde::{Deserialize, Serialize};
-use log::{LevelFilter};
 use std::{env, path::PathBuf};
 
 macro_rules! prefix {
@@ -13,10 +12,7 @@ macro_rules! prefix {
     };
 }
 
-#[derive(
-    Builder, CopyGetters, Debug, Deserialize, Eq, Getters, Parser, PartialEq, Serialize, Setters,
-)]
-#[builder(default, pattern = "owned", setter(into, strip_option))]
+#[derive(CopyGetters, Debug, Deserialize, Eq, Getters, Parser, PartialEq, Serialize, Setters)]
 #[serde(rename_all = "kebab-case")]
 #[clap(
     after_help("More info at: https://github.com/containers/conmon"),
@@ -45,7 +41,7 @@ pub struct Config {
     )]
     /// PID file for the conmon server.
     conmon_pidfile: Option<PathBuf>,
-    
+
     #[get = "pub"]
     #[clap(
         env(concat!(prefix!(), "RUNTIME")),
@@ -73,4 +69,3 @@ impl Config {
         Ok(())
     }
 }
-
