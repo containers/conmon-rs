@@ -5,11 +5,11 @@ pub mod conmon {
     tonic::include_proto!("conmon");
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = ConmonClient::connect("http://[::1]:50051").await?;
 
-    let req = tonic::Request::new(VersionRequest{});
+    let req = tonic::Request::new(VersionRequest {});
 
     let resp = client.version(req).await?;
 
