@@ -15,23 +15,22 @@ path = "src/client.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tonic = "0.6.1"
-prost = "0.9.0"
-tokio = { version = "1.13.0", features = ["macros", "rt-multi-thread"] }
 anyhow = "1.0.45"
+capnp = "0.14.3"
+capnp-rpc = "0.14.1"
 clap = { git = "https://github.com/clap-rs/clap", features = ["wrap_help"] }
 derive_builder = { git = "https://github.com/colin-kiegel/rust-derive-builder" }
 env_logger = "0.9.0"
+futures = "0.3.17"
 getset = "0.1.1"
-libc = "0.2.106"
 log = { version = "0.4.14", features = ["serde", "std"] }
-nix = "0.23.0"
 serde = { version = "1.0.130", features = ["derive"] }
-strum = { version = "0.22.0", features = ["derive"] }
+tokio = { version = "1.13.0", features = ["macros", "net", "rt"] }
+tokio-util = { version = "0.6.9", features = ["compat"] }
 
 [build-dependencies]
-tonic-build = "0.6.0"
-anyhow = "1.0.45"
+capnp = "0.14.3"
+capnpc = "0.14.4"
 
 [profile.release]
 lto = true

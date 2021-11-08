@@ -1,4 +1,6 @@
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tonic_build::compile_protos("proto/conmon.proto")?;
-    Ok(())
+use capnp::Error;
+use capnpc::CompilerCommand;
+
+fn main() -> Result<(), Error> {
+    CompilerCommand::new().file("proto/conmon.capnp").run()
 }

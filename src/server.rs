@@ -1,22 +1,22 @@
 use anyhow::{Context, Result};
-use conmon::{
-    conmon_server::{Conmon, ConmonServer},
-    VersionRequest, VersionResponse,
-};
+use capnp::capability::Promise;
+use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
+use conmon_capnp::conmon;
 use derive_builder::Builder;
 use env_logger::fmt::Color;
+use futures::{AsyncReadExt, FutureExt};
 use getset::{Getters, MutGetters};
 use log::{info, LevelFilter};
-use std::{env, io::Write};
-use tonic::{transport::Server, Request, Response, Status};
+use std::{env, io::Write, net::ToSocketAddrs};
+use tokio_util::compat::TokioAsyncReadCompatExt;
 
 mod config;
 
-const VERSION: &str = "0.1.0";
-
-pub mod conmon {
-    tonic::include_proto!("conmon");
+pub mod conmon_capnp {
+    include!(concat!(env!("OUT_DIR"), "/proto/conmon_capnp.rs"));
 }
+
+const VERSION: &str = "0.1.0";
 
 #[derive(Builder, Debug, Default, Getters, MutGetters)]
 #[builder(default, pattern = "owned", setter(into))]
@@ -66,31 +66,47 @@ impl ConmonServerImpl {
     }
 }
 
-#[tonic::async_trait]
-impl Conmon for ConmonServerImpl {
-    async fn version(
-        &self,
-        request: Request<VersionRequest>,
-    ) -> Result<Response<VersionResponse>, Status> {
-        info!("Got a request: {:?}", request);
+impl conmon::Server for ConmonServerImpl {
+    fn version(
+        &mut self,
+        _: conmon::VersionParams,
+        mut results: conmon::VersionResults,
+    ) -> Promise<(), capnp::Error> {
+        info!("Got a request");
 
-        let res = VersionResponse {
-            version: String::from(VERSION),
-        };
+        results.get().init_response().set_version(VERSION);
 
-        Ok(Response::new(res))
+        Promise::ok(())
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "[::1]:50051".parse()?;
+    let addr = "[::1]:50051"
+        .to_socket_addrs()?
+        .next()
+        .context("could not parse address")?;
     let server = ConmonServerImpl::new()?;
 
-    Server::builder()
-        .add_service(ConmonServer::new(server))
-        .serve(addr)
-        .await?;
+    tokio::task::LocalSet::new()
+        .run_until(async move {
+            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            let client: conmon::Client = capnp_rpc::new_client(server);
 
-    Ok(())
+            loop {
+                let (stream, _) = listener.accept().await?;
+                stream.set_nodelay(true)?;
+                let (reader, writer) = TokioAsyncReadCompatExt::compat(stream).split();
+                let network = twoparty::VatNetwork::new(
+                    reader,
+                    writer,
+                    rpc_twoparty_capnp::Side::Server,
+                    Default::default(),
+                );
+
+                let rpc_system = RpcSystem::new(Box::new(network), Some(client.clone().client));
+                tokio::task::spawn_local(Box::pin(rpc_system.map(|_| ())));
+            }
+        })
+        .await
 }
