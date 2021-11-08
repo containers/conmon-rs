@@ -13,21 +13,23 @@ path = "src/client.rs"
 
 [dependencies]
 anyhow = "1.0.45"
-async-stream = "0.3.2"
+async-io = "1.6.0"
+async-net = "1.6.1"
+capnp = "0.14.3"
+capnp-rpc = "0.14.1"
 clap = { git = "https://github.com/clap-rs/clap", features = ["wrap_help"] }
 futures = "0.3.17"
 getset = "0.1.1"
+gettext-rs = "0.7.0"
 log = { version = "0.4.14", features = ["serde", "std"] }
-prost = "0.9.0"
 serde = { version = "1.0.130", features = ["derive"] }
 simple_logger = "1.13.0"
-tokio = { version = "1.13.0", features = ["fs", "macros", "process", "rt", "signal", "time"] }
-tonic = "0.6.1"
-tower = "0.4.10"
-gettext-rs = "0.7.0"
+tokio = { version = "1.13.0", features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
+tokio-util = { version = "0.6.9", features = ["compat"] }
 
 [build-dependencies]
-tonic-build = "0.6.0"
+capnp = "0.14.3"
+capnpc = "0.14.4"
 
 [profile.release]
 lto = true

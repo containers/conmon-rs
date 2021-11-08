@@ -20,6 +20,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - run: .github/install-deps
       - name: Select Nighly Toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -41,6 +42,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock') }}
+      - run: .github/install-deps
       - name: Select Nighly Toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -63,6 +65,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+      - run: .github/install-deps
       - name: Select Nighly Toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -91,6 +94,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v2
+      - run: .github/install-deps
       - name: Select Nighly Toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -130,6 +134,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-test-integration-${{ hashFiles('**/Cargo.lock') }}
+      - run: .github/install-deps
       - name: Select Toolchain
         uses: actions-rs/toolchain@v1
         with:

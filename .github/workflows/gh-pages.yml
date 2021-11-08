@@ -11,6 +11,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v2
+      - run: .github/install-deps
       - name: Select Nighly Toolchain
         uses: actions-rs/toolchain@v1
         with:

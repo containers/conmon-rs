@@ -1,5 +1,6 @@
-use std::io::Error;
+use capnp::Error;
+use capnpc::CompilerCommand;
 
 fn main() -> Result<(), Error> {
-    tonic_build::compile_protos("proto/conmon.proto")
+    CompilerCommand::new().file("proto/conmon.capnp").run()
 }
