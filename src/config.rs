@@ -65,7 +65,7 @@ impl Default for Config {
 
 impl Config {
     /// Validate the configuration integrity.
-    pub fn validate(&mut self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if !self.runtime().exists() {
             bail!("runtime path '{}' does not exist", self.runtime().display())
         }
