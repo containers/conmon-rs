@@ -11,6 +11,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v2
+      - name: Select Nighly Toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
       - name: Generate lockfile
         run: cargo generate-lockfile
       - name: Setup Cache
@@ -22,7 +27,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Build Documentation
-        run: cargo doc --all-features
+        run: cargo doc --all-features --no-deps
       - name: Deploy Documentation
         uses: peaceiris/actions-gh-pages@v3
         with:
