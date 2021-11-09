@@ -100,11 +100,12 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-async fn start_sigterm_handler(shutdown_tx: oneshot::Sender<()>) {
-    let mut sigterm = signal(SignalKind::terminate()).unwrap();
+async fn start_sigterm_handler(shutdown_tx: oneshot::Sender<()>) -> Result<()> {
+    let mut sigterm = signal(SignalKind::terminate())?;
     sigterm.recv().await;
     info!("received SIGTERM");
     let _ = shutdown_tx.send(());
+    Ok(())
 }
 
 async fn start_grpc_backend(
