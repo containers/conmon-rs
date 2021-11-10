@@ -13,14 +13,17 @@ path = "src/client.rs"
 
 [dependencies]
 anyhow = "1.0.45"
+async-stream = "0.3.2"
 clap = { git = "https://github.com/clap-rs/clap", features = ["wrap_help"] }
 env_logger = "0.9.0"
+futures = "0.3.17"
 getset = "0.1.1"
 log = { version = "0.4.14", features = ["serde", "std"] }
 prost = "0.9.0"
 serde = { version = "1.0.130", features = ["derive"] }
-tokio = { version = "1.13.0", features = ["macros", "rt", "signal"] }
+tokio = { version = "1.13.0", features = ["fs", "macros", "rt", "signal"] }
 tonic = "0.6.1"
+tower = "0.4.10"
 
 [build-dependencies]
 tonic-build = "0.6.0"

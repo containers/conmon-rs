@@ -1,20 +1,26 @@
 use anyhow::{Context, Error, Result};
+use async_stream::stream;
 use clap::crate_version;
 use conmon::{
     conmon_server::{Conmon, ConmonServer},
     VersionRequest, VersionResponse,
 };
 use env_logger::fmt::Color;
+use futures::TryFutureExt;
 use getset::{Getters, MutGetters};
-use log::{info, LevelFilter};
-use std::{env, io::Write};
+use log::{debug, info, LevelFilter};
+use std::{env, io::Write, path::PathBuf};
+use stream::Stream;
 use tokio::{
+    fs,
+    net::UnixListener,
     signal::unix::{signal, SignalKind},
     sync::oneshot,
 };
 use tonic::{transport::Server, Request, Response, Status};
 
 mod config;
+mod stream;
 
 const VERSION: &str = crate_version!();
 
@@ -31,10 +37,14 @@ pub struct ConmonServerImpl {
 
 impl ConmonServerImpl {
     /// Create a new ConmonServerImpl instance.
-    pub fn new() -> Result<Self> {
+    pub async fn new() -> Result<Self> {
         let server = Self::default();
         server.init_logging().context("set log verbosity")?;
-        server.config().validate().context("validate config")?;
+        server
+            .config()
+            .validate()
+            .await
+            .context("validate config")?;
         Ok(server)
     }
 
@@ -91,20 +101,25 @@ impl Conmon for ConmonServerImpl {
 async fn main() -> Result<(), Error> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
-    let server = ConmonServerImpl::new()?;
+    let server = ConmonServerImpl::new().await?;
 
-    let sigterm_handler = tokio::spawn(start_sigterm_handler(shutdown_tx));
+    let socket = server.config().socket().clone();
+    let sigterm_handler = tokio::spawn(start_sigterm_handler(socket, shutdown_tx));
     let grpc_backend = tokio::spawn(start_grpc_backend(server, shutdown_rx));
 
     let _ = tokio::join!(sigterm_handler, grpc_backend);
     Ok(())
 }
 
-async fn start_sigterm_handler(shutdown_tx: oneshot::Sender<()>) -> Result<()> {
+async fn start_sigterm_handler(socket: PathBuf, shutdown_tx: oneshot::Sender<()>) -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate())?;
     sigterm.recv().await;
-    info!("received SIGTERM");
+    info!("Received SIGTERM");
     let _ = shutdown_tx.send(());
+    debug!("Removing socket file {}", socket.display());
+    fs::remove_file(socket)
+        .await
+        .context("remove existing socket file")?;
     Ok(())
 }
 
@@ -112,10 +127,19 @@ async fn start_grpc_backend(
     server: ConmonServerImpl,
     shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<(), Error> {
-    let addr = server.config().address().to_owned();
+    let incoming = {
+        let uds = UnixListener::bind(server.config().socket()).context("bind server socket")?;
+        stream! {
+            loop {
+                let item = uds.accept().map_ok(|(st, _)| Stream(st)).await;
+                yield item;
+            }
+        }
+    };
+
     Server::builder()
         .add_service(ConmonServer::new(server))
-        .serve_with_shutdown(addr, async move {
+        .serve_with_incoming_shutdown(incoming, async move {
             let _ = shutdown_rx.await.ok();
             info!("gracefully shutting down grpc backend")
         })
