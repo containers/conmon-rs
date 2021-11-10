@@ -103,7 +103,7 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --no-fail-fast
+          args: --bins --no-fail-fast
         env:
           CARGO_INCREMENTAL: '0'
           RUSTFLAGS: '-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Zpanic_abort_tests'
@@ -115,3 +115,29 @@ jobs:
       #     config: .github/grcov.yml
       # - name: Upload Results
       #   uses: codecov/codecov-action@v2
+      #
+
+  test-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Setup Cache
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-integration-${{ hashFiles('**/Cargo.lock') }}
+      - name: Select Toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          components: rustfmt
+      - name: Integration tests
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --test integration --release -- --nocapture
