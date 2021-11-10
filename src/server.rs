@@ -19,6 +19,7 @@ use tokio::{
 use tonic::{transport::Server, Request, Response, Status};
 
 mod config;
+mod init;
 mod stream;
 
 const VERSION: &str = crate_version!();
@@ -44,7 +45,17 @@ impl ConmonServerImpl {
             .validate()
             .await
             .context("validate config")?;
+
+        server.init_self()?;
         Ok(server)
+    }
+
+    fn init_self(&self) -> Result<(), Error> {
+        init::unset_locale();
+        // While we could configure this, standard practice has it as -1000,
+        // so it may be YAGNI to add configuration.
+        init::set_oom("-1000")?;
+        Ok(())
     }
 
     fn init_logging(&self) -> Result<()> {

@@ -159,6 +159,7 @@ dependencies = [
  "clap",
  "futures",
  "getset",
+ "gettext-rs",
  "log",
  "nix",
  "prost",
@@ -303,6 +304,25 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "gettext-rs"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df454a42d8a718280c78666efe0707c120873736961ae91ead898f17ac66ce7c"
+dependencies = [
+ "gettext-sys",
+ "locale_config",
+]
+
+[[package]]
+name = "gettext-sys"
+version = "0.19.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e034c4ba5bb796730a6cc5eb0d654c16885006a7c3d6c6603581ed809434f153"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -454,6 +474,17 @@ name = "libc"
 version = "0.2.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fbe5e23404da5b4f555ef85ebed98fb4083e55a00c317800bc2a50ede9f3d219"
+
+[[package]]
+name = "locale_config"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73ac19ebe45489e5d53b4346d8b90bb3dd03275c5fdf2ce22a982516d86b535c"
+dependencies = [
+ "lazy_static",
+ "regex",
+ "winapi",
+]
 
 [[package]]
 name = "log"
