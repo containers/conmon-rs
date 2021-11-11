@@ -10,7 +10,7 @@ use tokio::{
 };
 
 // The maximum amount of allowed VmRSS in Kilobytes
-const MAX_RSS_KB: u32 = 3500;
+const MAX_RSS_KB: u32 = 2000;
 
 // We assume that the tests run in release mode
 const SERVER_BINARY: &str = "target/release/conmon-server";

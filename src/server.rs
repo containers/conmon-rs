@@ -38,12 +38,14 @@ impl ConmonServerImpl {
     /// Create a new ConmonServerImpl instance.
     pub async fn new() -> Result<Self> {
         let server = Self::default();
+        /*
         server.init_logging().context("set log verbosity")?;
         server
             .config()
             .validate()
             .await
             .context("validate config")?;
+        */
         Ok(server)
     }
 

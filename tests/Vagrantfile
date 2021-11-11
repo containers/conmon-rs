@@ -1,0 +1,41 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# Vagrant box for testing
+Vagrant.configure("2") do |config|
+  config.vm.box = "fedora/35-cloud-base"
+  memory = 4096
+  cpus = 4
+
+  config.vm.provider :virtualbox do |v|
+    v.memory = memory
+    v.cpus = cpus
+  end
+
+  config.vm.provider :libvirt do |v|
+    v.memory = memory
+    v.cpus = cpus
+  end
+
+  config.vm.provision "install-dependencies", type: "shell", run: "once" do |sh|
+    sh.inline = <<~SHELL
+      set -euxo pipefail
+
+      dnf install -y gcc
+
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      echo 'export PATH=$HOME/cargo/bin:$PATH' >> /etc/profile
+
+    SHELL
+  end
+
+  config.vm.provision "run-tests", type: "shell", run: "once" do |sh|
+    sh.inline = <<~SHELL
+      set -euxo pipefail
+
+      cd /vagrant
+      cargo test --test integration --release -- --nocapture
+
+    SHELL
+  end
+end

@@ -118,7 +118,8 @@ jobs:
       #
 
   test-integration:
-    runs-on: ubuntu-latest
+    runs-on: macos-10.15
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v2
@@ -126,18 +127,7 @@ jobs:
         uses: actions/cache@v2
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-test-integration-${{ hashFiles('**/Cargo.lock') }}
-      - name: Select Toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-          components: rustfmt
+            ~/.vagrant.d/boxes
+          key: cargo-test-integration-${{ hashFiles('tests/Vagrantfile') }}
       - name: Integration tests
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --test integration --release -- --nocapture
+        run: vagrant up
