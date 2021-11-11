@@ -27,6 +27,7 @@ pub struct Config {
         default_value("info"),
         env(concat!(prefix!(), "LOG_LEVEL")),
         long("log-level"),
+        short('l'),
         possible_values(["trace", "debug", "info", "warn", "error", "off"]),
         value_name("LEVEL")
     )]
