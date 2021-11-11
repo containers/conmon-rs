@@ -16,6 +16,7 @@ jobs:
         with:
           toolchain: nightly
           override: true
+          components: rustfmt
       - name: Generate lockfile
         run: cargo generate-lockfile
       - name: Setup Cache
