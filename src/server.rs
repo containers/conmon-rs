@@ -113,8 +113,17 @@ async fn main() -> Result<(), Error> {
 
 async fn start_sigterm_handler(socket: PathBuf, shutdown_tx: oneshot::Sender<()>) -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate())?;
-    sigterm.recv().await;
-    info!("Received SIGTERM");
+    let mut sigint = signal(SignalKind::interrupt())?;
+
+    tokio::select! {
+        _ = sigterm.recv() => {
+            info!("Received SIGTERM");
+        }
+        _ = sigint.recv() => {
+            info!("Received SIGINT");
+        }
+    };
+
     let _ = shutdown_tx.send(());
     debug!("Removing socket file {}", socket.display());
     fs::remove_file(socket)
@@ -141,7 +150,7 @@ async fn start_grpc_backend(
         .add_service(ConmonServer::new(server))
         .serve_with_incoming_shutdown(incoming, async move {
             let _ = shutdown_rx.await.ok();
-            info!("gracefully shutting down grpc backend")
+            info!("Gracefully shutting down grpc backend")
         })
         .await?;
     Ok(())
