@@ -24,7 +24,7 @@ simple_logger = "1.13.0"
 tokio = { version = "1.13.0", features = ["fs", "macros", "process", "rt", "signal", "time"] }
 tonic = "0.6.1"
 tower = "0.4.10"
-gettext-rs = "0.4.1"
+gettext-rs = "0.7.0"
 
 [build-dependencies]
 tonic-build = "0.6.0"
