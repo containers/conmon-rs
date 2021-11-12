@@ -10,7 +10,7 @@ use nix::{
     libc::_exit,
     unistd::{fork, ForkResult},
 };
-use std::{env, path::PathBuf};
+use std::{env, fs::File, io::Write, path::PathBuf};
 use tokio::{
     fs,
     net::UnixListener,
@@ -88,7 +88,11 @@ fn main() -> Result<(), Error> {
     // interrupt the child's execution.
     // 1: https://docs.rs/nix/0.23.0/nix/unistd/fn.fork.html#safety
     match unsafe { fork()? } {
-        ForkResult::Parent { child: _, .. } => {
+        ForkResult::Parent { child, .. } => {
+            if let Some(path) = server.config().conmon_pidfile() {
+                let child_str = format!("{}", child);
+                File::create(path)?.write_all(child_str.as_bytes())?;
+            }
             unsafe { _exit(0) };
         }
         ForkResult::Child => (),
