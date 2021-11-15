@@ -1,26 +1,41 @@
-use conmon::conmon_client::ConmonClient;
-use conmon::VersionRequest;
-use std::convert::TryFrom;
-use tokio::net::UnixStream;
-use tonic::transport::{Endpoint, Uri};
-use tower::service_fn;
+use async_net::unix;
+use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
+use conmon_capnp::conmon;
+use futures::{AsyncReadExt, FutureExt};
+use std::os::unix::net::UnixStream;
 
-pub mod conmon {
-    tonic::include_proto!("conmon");
+pub mod conmon_capnp {
+    include!(concat!(env!("OUT_DIR"), "/proto/conmon_capnp.rs"));
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let channel = Endpoint::try_from("http://[::]:50051")?
-        .connect_with_connector(service_fn(|_: Uri| UnixStream::connect("conmon.sock")))
-        .await?;
-    let mut client = ConmonClient::new(channel);
+    tokio::task::LocalSet::new()
+        .run_until(async move {
+            let stream = UnixStream::connect("conmon.sock")?;
+            let stream: unix::UnixStream = async_io::Async::new(stream)?.into();
+            let (reader, writer) = stream.split();
 
-    let req = tonic::Request::new(VersionRequest {});
+            let rpc_network = Box::new(twoparty::VatNetwork::new(
+                reader,
+                writer,
+                rpc_twoparty_capnp::Side::Client,
+                Default::default(),
+            ));
 
-    let resp = client.version(req).await?;
+            let mut rpc_system = RpcSystem::new(rpc_network, None);
+            let client: conmon::Client = rpc_system.bootstrap(rpc_twoparty_capnp::Side::Server);
 
-    println!("Version: {:?}", resp);
+            tokio::task::spawn_local(Box::pin(rpc_system.map(|_| ())));
 
-    Ok(())
+            let request = client.version_request();
+            let response = request.send().promise.await?;
+
+            println!(
+                "received: {}",
+                response.get()?.get_response()?.get_version()?
+            );
+            Ok(())
+        })
+        .await
 }

@@ -1,31 +1,30 @@
 use anyhow::{Context, Error, Result};
-use async_stream::stream;
+use capnp::capability::Promise;
+use capnp_rpc::{rpc_twoparty_capnp::Side, twoparty, RpcSystem};
 use clap::crate_version;
-use conmon::{
-    conmon_server::{Conmon, ConmonServer},
-    VersionRequest, VersionResponse,
-};
-use futures::TryFutureExt;
+use conmon_capnp::conmon;
+use futures::{AsyncReadExt, FutureExt};
 use getset::{Getters, MutGetters};
 use log::{debug, info};
 use std::{env, path::PathBuf};
-use stream::Stream;
 use tokio::{
     fs,
     net::UnixListener,
+    runtime,
     signal::unix::{signal, SignalKind},
     sync::oneshot,
+    task::{self, LocalSet},
 };
-use tonic::{transport::Server, Request, Response, Status};
+use tokio_util::compat::TokioAsyncReadCompatExt;
+use twoparty::VatNetwork;
 
 mod config;
 mod init;
-mod stream;
 
 const VERSION: &str = crate_version!();
 
-pub mod conmon {
-    tonic::include_proto!("conmon");
+pub mod conmon_capnp {
+    include!(concat!(env!("OUT_DIR"), "/proto/conmon_capnp.rs"));
 }
 
 #[derive(Debug, Default, Getters, MutGetters)]
@@ -67,35 +66,36 @@ impl ConmonServerImpl {
     }
 }
 
-#[tonic::async_trait]
-impl Conmon for ConmonServerImpl {
-    async fn version(
-        &self,
-        request: Request<VersionRequest>,
-    ) -> Result<Response<VersionResponse>, Status> {
-        info!("Got a request: {:?}", request);
-
-        let res = VersionResponse {
-            version: String::from(VERSION),
-        };
-
-        Ok(Response::new(res))
+impl conmon::Server for ConmonServerImpl {
+    fn version(
+        &mut self,
+        _: conmon::VersionParams,
+        mut results: conmon::VersionResults,
+    ) -> Promise<(), capnp::Error> {
+        info!("Got a request");
+        results.get().init_response().set_version(VERSION);
+        Promise::ok(())
     }
 }
 
 // Use the single threaded runtime to save rss memory
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let server = ConmonServerImpl::new().await?;
 
     let socket = server.config().socket().clone();
-    let sigterm_handler = tokio::spawn(start_sigterm_handler(socket, shutdown_tx));
-    let grpc_backend = tokio::spawn(start_grpc_backend(server, shutdown_rx));
+    tokio::spawn(start_sigterm_handler(socket, shutdown_tx));
 
-    let _ = tokio::join!(sigterm_handler, grpc_backend);
-    Ok(())
+    task::spawn_blocking(move || {
+        let rt = runtime::Handle::current();
+        rt.block_on(async {
+            LocalSet::new()
+                .run_until(start_grpc_backend(server, shutdown_rx))
+                .await
+        })
+    })
+    .await?
 }
 
 async fn start_sigterm_handler(socket: PathBuf, shutdown_tx: oneshot::Sender<()>) -> Result<()> {
@@ -121,24 +121,28 @@ async fn start_sigterm_handler(socket: PathBuf, shutdown_tx: oneshot::Sender<()>
 
 async fn start_grpc_backend(
     server: ConmonServerImpl,
-    shutdown_rx: oneshot::Receiver<()>,
+    mut shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<(), Error> {
-    let incoming = {
-        let uds = UnixListener::bind(server.config().socket()).context("bind server socket")?;
-        stream! {
-            loop {
-                let item = uds.accept().map_ok(|(st, _)| Stream(st)).await;
-                yield item;
-            }
-        }
-    };
+    let listener = UnixListener::bind(server.config().socket()).context("bind server socket")?;
+    let client: conmon::Client = capnp_rpc::new_client(server);
 
-    Server::builder()
-        .add_service(ConmonServer::new(server))
-        .serve_with_incoming_shutdown(incoming, async move {
-            let _ = shutdown_rx.await.ok();
-            info!("Gracefully shutting down grpc backend")
-        })
-        .await?;
-    Ok(())
+    loop {
+        let stream = tokio::select! {
+            _ = &mut shutdown_rx => {
+                return Ok(())
+            }
+            stream = listener.accept() => {
+                stream?.0
+            },
+        };
+        let (reader, writer) = TokioAsyncReadCompatExt::compat(stream).split();
+        let network = Box::new(VatNetwork::new(
+            reader,
+            writer,
+            Side::Server,
+            Default::default(),
+        ));
+        let rpc_system = RpcSystem::new(network, Some(client.clone().client));
+        task::spawn_local(Box::pin(rpc_system.map(|_| ())));
+    }
 }
