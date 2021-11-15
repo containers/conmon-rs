@@ -1,8 +1,13 @@
 use anyhow::{Context, Result};
 use nix::{
-    sys::signal::{kill, SIGINT},
+    sys::{
+        signal::{kill, SIGINT},
+        wait,
+    },
     unistd::Pid,
 };
+use std::fs::read_to_string;
+use tempfile::NamedTempFile;
 use tokio::{
     fs,
     process::Command,
@@ -18,11 +23,22 @@ const CLIENT_BINARY: &str = "target/release/conmon-client";
 
 #[tokio::test]
 async fn rss_verification() -> Result<()> {
+    let pidfile = NamedTempFile::new()?;
+    let pidfile_arg = format!("--conmon-pidfile={}", pidfile.path().display());
     // Start the server
-    let mut server = Command::new(SERVER_BINARY).arg("--runtime=/tmp").spawn()?;
-    let pid = server.id().context("no pid for child")?;
+    let mut server = Command::new(SERVER_BINARY)
+        .arg("--runtime=/tmp")
+        .arg(pidfile_arg)
+        .spawn()?;
+
+    // Wait until parent has terminated.
+    server.wait().await?;
+
+    // However, that's not our actual server, that's the parent.
+    // We need to wait for the child now.
+    let pid = read_to_string(pidfile)?.parse::<i32>()?;
     tokio::spawn(async move {
-        server.wait().await.expect("wait for server process");
+        wait::waitpid(Pid::from_raw(pid), None).expect("wait for server process");
     });
 
     // Wait for the server up and running
@@ -52,6 +68,7 @@ async fn rss_verification() -> Result<()> {
         .arg(pid.to_string())
         .status()
         .await?;
+
     kill(Pid::from_raw(pid as i32), SIGINT)?;
 
     // Verify the results
