@@ -24,7 +24,7 @@ gettext-rs = "0.7.0"
 log = { version = "0.4.14", features = ["serde", "std"] }
 serde = { version = "1.0.130", features = ["derive"] }
 simple_logger = "1.13.0"
-tokio = { version = "1.13.0", features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
+tokio = { version = "1.14.0", features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
 tokio-util = { version = "0.6.9", features = ["compat"] }
 
 [build-dependencies]
