@@ -62,7 +62,7 @@ pub struct Config {
         default_value("conmon.sock"),
         value_name("SOCKET")
     )]
-    /// Path of the listening socket for the grpc server.
+    /// Path of the listening socket for the server.
     socket: PathBuf,
 }
 

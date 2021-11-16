@@ -3,7 +3,7 @@ name = "conmon-rs"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]] # Bin to run the ConmonServer gRPC server
+[[bin]] # Bin to run the ConmonServer server
 name = "conmon-server"
 path = "src/server.rs"
 
