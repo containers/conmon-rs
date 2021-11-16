@@ -1,0 +1,3 @@
+using Go = import "/go.capnp";
+$Go.package("proto");
+$Go.import("github.com/containers/conmon-rs/internal/pkg/proto");
