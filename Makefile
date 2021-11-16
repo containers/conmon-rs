@@ -1,3 +1,6 @@
+MAKEFILE_PATH := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+RUNTIME_PATH ?= "/usr/bin/runc"
+
 default:
 	cargo build
 
@@ -9,6 +12,9 @@ lint:
 
 unit:
 	cargo test --bins --no-fail-fast
+
+integration: default
+	CONMON_BINARY="$(MAKEFILE_PATH)target/debug/conmon-server" RUNTIME_BINARY="$(RUNTIME_PATH)" go test pkg/client/*
 
 clean:
 	rm -rf target/
