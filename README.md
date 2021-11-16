@@ -12,7 +12,7 @@ The goal of this project is to provide a container monitor in Rust. The scope of
 
 However, the goal of conmon-rs also extends past that of conmon, attempting to become a monitor for a full pod (or a group of containers).
 Instead of a container engine creating a conmon per container (as well as subsequent conmons per container exec), the engine
-will spawn a conmon-rs instance when a pod is created. That instance will listen over [gRPC](https://grpc.io/) for new requests to
+will spawn a conmon-rs instance when a pod is created. That instance will listen over an UNIX domain socket for new requests to
 create containers, and exec processes within them.
 
 In the future, conmon-rs may:

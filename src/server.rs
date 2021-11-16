@@ -91,7 +91,7 @@ async fn main() -> Result<(), Error> {
         let rt = runtime::Handle::current();
         rt.block_on(async {
             LocalSet::new()
-                .run_until(start_grpc_backend(server, shutdown_rx))
+                .run_until(start_backend(server, shutdown_rx))
                 .await
         })
     })
@@ -119,7 +119,7 @@ async fn start_sigterm_handler(socket: PathBuf, shutdown_tx: oneshot::Sender<()>
     Ok(())
 }
 
-async fn start_grpc_backend(
+async fn start_backend(
     server: ConmonServerImpl,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<(), Error> {
