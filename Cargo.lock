@@ -240,22 +240,15 @@ dependencies = [
 name = "conmon-rs-client"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-io",
  "async-net",
  "capnp",
  "capnp-rpc",
- "capnpc",
- "clap",
  "conmon-rs-common",
  "futures",
- "getset",
- "gettext-rs",
  "log",
  "serde",
- "simple_logger",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -263,7 +256,6 @@ name = "conmon-rs-common"
 version = "0.1.0"
 dependencies = [
  "capnp",
- "capnp-rpc",
  "capnpc",
 ]
 
@@ -272,11 +264,8 @@ name = "conmon-rs-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-io",
- "async-net",
  "capnp",
  "capnp-rpc",
- "capnpc",
  "clap",
  "conmon-rs-common",
  "futures",
