@@ -3,6 +3,7 @@ members = [
 	"conmon-rs/common",
 	"conmon-rs/client",
 	"conmon-rs/server",
+	"conmon-rs-tests",
 ]
 
 [profile.release]
@@ -10,6 +11,3 @@ lto = true
 opt-level = "z"
 codegen-units = 1
 
-[dev-dependencies]
-tempfile = "3.2.0"
-codegen-units = 1

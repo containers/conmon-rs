@@ -1,6 +1,6 @@
 use async_net::unix;
 use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
-use conmon_rs_common::conmon_capnp::conmon;
+use conmon_common::conmon_capnp::conmon;
 use futures::{AsyncReadExt, FutureExt};
 use std::os::unix::net::UnixStream;
 

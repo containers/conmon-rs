@@ -7,6 +7,7 @@ use nix::{
     unistd::Pid,
 };
 use std::fs::read_to_string;
+use std::{env, path::PathBuf};
 use tempfile::NamedTempFile;
 use tokio::{
     fs,
@@ -18,15 +19,15 @@ use tokio::{
 const MAX_RSS_KB: u32 = 3200;
 
 // We assume that the tests run in release mode
-const SERVER_BINARY: &str = "target/release/conmon-server";
-const CLIENT_BINARY: &str = "target/release/conmon-client";
+const SERVER_BINARY: &str = "conmon-server";
+const CLIENT_BINARY: &str = "conmon-client";
 
 #[tokio::test]
 async fn rss_verification() -> Result<()> {
     let pidfile = NamedTempFile::new()?;
     let pidfile_arg = format!("--conmon-pidfile={}", pidfile.path().display());
     // Start the server
-    let mut server = Command::new(SERVER_BINARY)
+    let mut server = Command::new(server_binary())
         .arg("--runtime=/tmp")
         .arg(pidfile_arg)
         .spawn()?;
@@ -43,7 +44,7 @@ async fn rss_verification() -> Result<()> {
 
     // Wait for the server up and running
     for i in 1..101 {
-        let status = Command::new(CLIENT_BINARY).status().await?;
+        let status = Command::new(client_binary()).status().await?;
         if status.success() {
             break;
         }
@@ -79,4 +80,32 @@ async fn rss_verification() -> Result<()> {
     assert!(rss <= MAX_RSS_KB);
 
     Ok(())
+}
+
+/// Returns the directory where the binaries are saved. This
+/// was taken from the Cargo project, see
+/// https://github.com/rust-lang/cargo/blob/7fa132c7272fb9faca365c1d350e8e3c4c0d45e9/tests/cargotest/support/mod.rs#L316-L333
+fn cargo_dir() -> PathBuf {
+    env::var_os("CARGO_BIN_PATH")
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::current_exe().ok().map(|mut path| {
+                path.pop();
+                if path.ends_with("deps") {
+                    path.pop();
+                }
+                path
+            })
+        })
+        .unwrap_or_else(|| panic!("could not find CARGO_BIN_PATH directory"))
+}
+
+fn server_binary() -> PathBuf {
+    let binary_dir = cargo_dir();
+    binary_dir.join(SERVER_BINARY)
+}
+
+fn client_binary() -> PathBuf {
+    let binary_dir = cargo_dir();
+    binary_dir.join(CLIENT_BINARY)
 }
