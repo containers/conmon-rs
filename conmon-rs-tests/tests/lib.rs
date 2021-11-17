@@ -73,7 +73,7 @@ async fn rss_verification() -> Result<()> {
     kill(Pid::from_raw(pid as i32), SIGINT)?;
 
     // Verify the results
-    assert!(rss_res != "");
+    assert!(!rss_res.is_empty());
     println!("Got VmRSS: {} KB", rss_res);
 
     let rss = rss_res.parse::<u32>()?;
