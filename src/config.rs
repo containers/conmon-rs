@@ -1,11 +1,11 @@
 //! Configuration related structures
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use clap::{crate_version, Parser};
 use getset::{CopyGetters, Getters, Setters};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::{env, path::PathBuf};
-use tokio::fs;
 
 macro_rules! prefix {
     () => {
@@ -74,20 +74,16 @@ impl Default for Config {
 
 impl Config {
     /// Validate the configuration integrity.
-    pub async fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if !self.runtime().exists() {
             bail!("runtime path '{}' does not exist", self.runtime().display())
         }
 
         if self.socket().exists() {
-            fs::remove_file(self.socket())
-                .await
-                .context("remove existing socket file")?;
+            fs::remove_file(self.socket())?;
         }
         if let Some(parent) = self.socket().parent() {
-            fs::create_dir_all(parent)
-                .await
-                .context("ensure parent socket dir")?;
+            fs::create_dir_all(parent)?;
         }
 
         Ok(())
