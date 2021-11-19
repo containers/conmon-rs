@@ -9,6 +9,7 @@ interface Conmon {
 
     struct CreateContainerRequest {
         id @0 :Text;
+        bundlePath @1 :Text;
     }
 
     struct CreateContainerResponse {

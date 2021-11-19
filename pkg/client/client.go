@@ -102,7 +102,7 @@ func (c *ConmonClient) Version(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	client := proto.Conmon{Client: conn.Bootstrap(context.Background())}
+	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
 
 	future, free := client.Version(ctx, nil)
 	defer free()
@@ -117,6 +117,47 @@ func (c *ConmonClient) Version(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return response.Version()
+}
+
+type CreateContainerConfig struct {
+	ID              string
+	BundlePath      string
+	PreCommandOpts  []string
+	PostCommandOpts []string
+}
+
+func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainerConfig) (uint32, error) {
+	conn, err := c.newRPCConn()
+	if err != nil {
+		return 0, err
+	}
+	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
+
+	future, free := client.CreateContainer(ctx, func(p proto.Conmon_createContainer_Params) error {
+		req, err := p.NewRequest()
+		if err != nil {
+			return err
+		}
+		if err := req.SetId(cfg.ID); err != nil {
+			return err
+		}
+		if err := req.SetBundlePath(cfg.BundlePath); err != nil {
+			return err
+		}
+		return p.SetRequest(req)
+	})
+	defer free()
+
+	result, err := future.Struct()
+	if err != nil {
+		return 0, err
+	}
+
+	response, err := result.Response()
+	if err != nil {
+		return 0, err
+	}
+	return response.ContainerPid(), nil
 }
 
 // TODO FIXME test only?
