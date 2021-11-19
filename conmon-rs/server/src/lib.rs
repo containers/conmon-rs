@@ -67,7 +67,7 @@ impl Server {
     }
 
     fn init_self(&self) -> Result<()> {
-        init::unset_locale();
+        init::unset_locale()?;
         // While we could configure this, standard practice has it as -1000,
         // so it may be YAGNI to add configuration.
         init::set_oom("-1000")?;
