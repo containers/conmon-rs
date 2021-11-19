@@ -3,7 +3,6 @@ members = [
 	"conmon-rs/common",
 	"conmon-rs/client",
 	"conmon-rs/server",
-	"conmon-rs-tests",
 ]
 
 [profile.release]
