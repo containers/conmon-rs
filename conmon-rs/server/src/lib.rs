@@ -61,8 +61,8 @@ impl Server {
         }
 
         // Use the single threaded runtime to save rss memory.
-        let rt = runtime::Builder::new_current_thread().enable_io().build()?;
-        rt.block_on(self.spawn_tasks())?;
+        let mt = runtime::Builder::new_multi_thread().enable_all().build()?;
+        mt.block_on(self.spawn_tasks())?;
         Ok(())
     }
 
