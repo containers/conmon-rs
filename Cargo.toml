@@ -1,41 +1,13 @@
-[package]
-name = "conmon-rs"
-version = "0.1.0"
-edition = "2021"
-
-[[bin]] # Bin to run the ConmonServer server
-name = "conmon-server"
-path = "src/server.rs"
-
-[[bin]]
-name = "conmon-client"
-path = "src/client.rs"
-
-[dependencies]
-anyhow = "1.0.45"
-async-io = "1.6.0"
-async-net = "1.6.1"
-capnp = "0.14.3"
-capnp-rpc = "0.14.1"
-clap = { git = "https://github.com/clap-rs/clap", features = ["wrap_help"] }
-futures = "0.3.17"
-getset = "0.1.1"
-gettext-rs = "0.7.0"
-log = { version = "0.4.14", features = ["serde", "std"] }
-nix = "0.23.0"
-serde = { version = "1.0.130", features = ["derive"] }
-simple_logger = "1.13.0"
-tokio = { version = "1.14.0", features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
-tokio-util = { version = "0.6.9", features = ["compat"] }
-
-[build-dependencies]
-capnp = "0.14.3"
-capnpc = "0.14.4"
+[workspace]
+members = [
+	"conmon-rs/common",
+	"conmon-rs/client",
+	"conmon-rs/server",
+	"conmon-rs-tests",
+]
 
 [profile.release]
 lto = true
 opt-level = "z"
 codegen-units = 1
 
-[dev-dependencies]
-tempfile = "3.2.0"

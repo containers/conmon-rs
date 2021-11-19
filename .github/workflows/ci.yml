@@ -138,11 +138,13 @@ jobs:
       - name: Select Toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          toolchain: nightly
           override: true
           components: rustfmt
+      - name: Build binaries
+        run: cargo build --release
       - name: Integration tests
         uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --test integration --release -- --nocapture
+          args: -p conmon-rs-tests --test integration --release -- --nocapture

@@ -237,16 +237,51 @@ dependencies = [
 ]
 
 [[package]]
-name = "conmon-rs"
+name = "conmon-client"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-io",
  "async-net",
  "capnp",
  "capnp-rpc",
+ "conmon-common",
+ "futures",
+ "log",
+ "serde",
+ "tokio",
+]
+
+[[package]]
+name = "conmon-common"
+version = "0.1.0"
+dependencies = [
+ "capnp",
  "capnpc",
+]
+
+[[package]]
+name = "conmon-rs-tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "conmon-common",
+ "futures",
+ "log",
+ "nix",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "conmon-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "capnp",
+ "capnp-rpc",
  "clap",
+ "conmon-common",
  "futures",
  "getset",
  "gettext-rs",
@@ -254,7 +289,6 @@ dependencies = [
  "nix",
  "serde",
  "simple_logger",
- "tempfile",
  "tokio",
  "tokio-util",
 ]

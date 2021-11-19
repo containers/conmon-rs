@@ -10,7 +10,7 @@ lint:
 unit:
 	cargo test --bins --no-fail-fast
 
-integration:
+integration: release
 	cargo test --test integration --release -- --nocapture
 
 clean:

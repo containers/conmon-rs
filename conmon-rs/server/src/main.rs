@@ -2,7 +2,7 @@ use anyhow::{Context, Error, Result};
 use capnp::capability::Promise;
 use capnp_rpc::{rpc_twoparty_capnp::Side, twoparty, RpcSystem};
 use clap::crate_version;
-use conmon_capnp::conmon;
+use conmon_common::conmon_capnp::conmon;
 use futures::{AsyncReadExt, FutureExt};
 use getset::{Getters, MutGetters};
 use log::{debug, info};
@@ -26,10 +26,6 @@ mod config;
 mod init;
 
 const VERSION: &str = crate_version!();
-
-pub mod conmon_capnp {
-    include!(concat!(env!("OUT_DIR"), "/proto/conmon_capnp.rs"));
-}
 
 #[derive(Debug, Default, Getters, MutGetters)]
 pub struct ConmonServerImpl {
