@@ -1,3 +1,4 @@
+use crate::init::{DefaultInit, Init};
 use anyhow::{Context, Result};
 use capnp_rpc::{rpc_twoparty_capnp::Side, twoparty, RpcSystem};
 use conmon_common::conmon_capnp::conmon;
@@ -67,10 +68,11 @@ impl Server {
     }
 
     fn init_self(&self) -> Result<()> {
-        init::unset_locale()?;
+        let init = Init::<DefaultInit>::default();
+        init.unset_locale()?;
         // While we could configure this, standard practice has it as -1000,
         // so it may be YAGNI to add configuration.
-        init::set_oom("-1000")?;
+        init.set_oom_score("-1000")?;
         Ok(())
     }
 
