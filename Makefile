@@ -14,7 +14,7 @@ unit:
 	cargo test --bins --no-fail-fast
 
 integration: default
-	CONMON_BINARY="$(MAKEFILE_PATH)target/debug/conmon-server" RUNTIME_BINARY="$(RUNTIME_PATH)" go test pkg/client/*
+	CONMON_BINARY="$(MAKEFILE_PATH)target/debug/conmon-server" RUNTIME_BINARY="$(RUNTIME_PATH)" go test -v pkg/client/*
 
 clean:
 	rm -rf target/
