@@ -16,7 +16,23 @@ will spawn a conmon-rs instance when a pod is created. That instance will listen
 create containers, and exec processes within them.
 
 In the future, conmon-rs may:
+
 - Be extended to mirror the functionality for each runtime operation.
-	- Thus reducing the amount of exec calls that must happen in the container engine, and reducing the amount of memory it uses.
+  - Thus reducing the amount of exec calls that must happen in the container engine, and reducing the amount of memory it uses.
 - Be in charge of configuring the namespaces for the pod
-	- Taking over functionality that [pinns](https://github.com/cri-o/cri-o/tree/main/pinns) has historically done.
+  - Taking over functionality that [pinns](https://github.com/cri-o/cri-o/tree/main/pinns) has historically done.
+
+## Goals
+
+- [ ] Single conmon per pod (post MVP/stretch)
+- [ ] Keeping RSS under 3-4 MB
+- [ ] Support exec without respawning a new conmon
+- [ ] API with RPC to make it extensible (should support golang clients)
+- [ ] Maybe act as pid namespace init?
+- [ ] Join network namespace to solve running hooks inside the pod context
+- [ ] Use pidfds (it doesn't support getting exit code today, though)
+- [ ] Use io_uring
+- [ ] Plugin support for seccomp notification
+- [ ] Logging rate limiting (double buffer?)
+- [ ] Stats
+- [ ] IPv6 port forwarding
