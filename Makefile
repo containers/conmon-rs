@@ -13,8 +13,8 @@ lint:
 unit:
 	cargo test --bins --no-fail-fast
 
-integration: default
-	CONMON_BINARY="$(MAKEFILE_PATH)target/debug/conmon-server" RUNTIME_BINARY="$(RUNTIME_PATH)" go test -v pkg/client/*
+integration: release # It needs to be release so we correctly test the RSS usage
+	CONMON_BINARY="$(MAKEFILE_PATH)target/release/conmon-server" RUNTIME_BINARY="$(RUNTIME_PATH)" go test -v pkg/client/*
 
 clean:
 	rm -rf target/
