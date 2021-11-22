@@ -22,6 +22,7 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 use twoparty::VatNetwork;
 
 mod config;
+mod cri_logger;
 mod init;
 mod rpc;
 
