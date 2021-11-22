@@ -21,4 +21,4 @@ simple_logger = "1.13.0"
 tokio = { version = "1.14.0", features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
 tokio-util = { version = "0.6.9", features = ["compat"] }
 nix = "0.23.0"
-libc = "0.2.107"
+libc = "0.2.108"
