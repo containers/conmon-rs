@@ -31,6 +31,7 @@ type ConmonServerConfig struct {
 	ConmonPIDFile    string
 	Runtime          string
 	Socket           string
+	RuntimeRoot      string
 	Stdin            io.Reader
 	Stdout           io.WriteCloser
 	Stderr           io.WriteCloser
@@ -120,10 +121,8 @@ func (c *ConmonClient) Version(ctx context.Context) (string, error) {
 }
 
 type CreateContainerConfig struct {
-	ID              string
-	BundlePath      string
-	PreCommandOpts  []string
-	PostCommandOpts []string
+	ID         string
+	BundlePath string
 }
 
 func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainerConfig) (uint32, error) {
@@ -201,6 +200,9 @@ func (c *ConmonServerConfig) ToArgs() (string, []string, error) {
 			return "", args, fmt.Errorf("unix socket path %q is too long", c.Socket)
 		}
 		args = append(args, "--socket", c.Socket)
+	}
+	if c.RuntimeRoot != "" {
+		args = append(args, "--runtime-root", c.RuntimeRoot)
 	}
 	return entrypoint, args, nil
 }
