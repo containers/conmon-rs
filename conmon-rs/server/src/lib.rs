@@ -10,9 +10,10 @@ use getset::{Getters, MutGetters};
 use log::{debug, info};
 use nix::{
     libc::_exit,
+    sys::signal::Signal,
     unistd::{fork, ForkResult},
 };
-use std::{fs::File, io::Write, path::Path};
+use std::{fs::File, io::Write, path::Path, sync::Arc};
 use tokio::{
     fs,
     net::UnixListener,
@@ -24,6 +25,7 @@ use tokio::{
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use twoparty::VatNetwork;
 
+mod child_reaper;
 mod config;
 mod console;
 mod cri_logger;
@@ -35,6 +37,9 @@ pub struct Server {
     #[doc = "The main conmon configuration."]
     #[getset(get, get_mut)]
     config: config::Config,
+
+    #[getset(get, get_mut)]
+    reaper: Arc<child_reaper::ChildReaper>,
 }
 
 impl Server {
@@ -97,7 +102,12 @@ impl Server {
     async fn spawn_tasks(self) -> Result<()> {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let socket = self.config().socket().to_path_buf();
-        tokio::spawn(Self::start_sigterm_handler(socket, shutdown_tx));
+        tokio::spawn(Self::start_signal_handler(
+            Arc::clone(self.reaper()),
+            socket,
+            shutdown_tx,
+        ));
+        Arc::clone(self.reaper()).init_reaper()?;
 
         task::spawn_blocking(move || {
             let rt = runtime::Handle::current();
@@ -110,27 +120,38 @@ impl Server {
         .await?
     }
 
-    async fn start_sigterm_handler<T: AsRef<Path>>(
+    async fn start_signal_handler<T: AsRef<Path>>(
+        reaper: Arc<child_reaper::ChildReaper>,
         socket: T,
         shutdown_tx: oneshot::Sender<()>,
     ) -> Result<()> {
         let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigint = signal(SignalKind::interrupt())?;
+        let handled_sig: Signal;
 
         tokio::select! {
             _ = sigterm.recv() => {
                 info!("Received SIGTERM");
+                handled_sig = Signal::SIGTERM;
             }
             _ = sigint.recv() => {
                 info!("Received SIGINT");
+                handled_sig = Signal::SIGINT;
             }
         };
 
         let _ = shutdown_tx.send(());
+
+        // TODO FIXME Ideally we would drop after socket file is removed,
+        // but the removal is taking longer than 10 seconds, indicating someone
+        // is keeping it open...
+        reaper.kill_grandchildren(handled_sig)?;
+
         debug!("Removing socket file {}", socket.as_ref().display());
         fs::remove_file(socket)
             .await
             .context("remove existing socket file")?;
+
         Ok(())
     }
 
