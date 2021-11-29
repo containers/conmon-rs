@@ -56,6 +56,16 @@ pub struct Config {
 
     #[get = "pub"]
     #[clap(
+        env(concat!(prefix!(), "RUNTIME_ROOT")),
+        long("runtime-root"),
+        short('r'),
+        value_name("RUNTIME_ROOT")
+    )]
+    /// Path of the OCI runtime to use to operate on the containers.
+    runtime_root: Option<PathBuf>,
+
+    #[get = "pub"]
+    #[clap(
         env(concat!(prefix!(), "SOCKET")),
         long("socket"),
         short('s'),
@@ -77,6 +87,14 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         if !self.runtime().exists() {
             bail!("runtime path '{}' does not exist", self.runtime().display())
+        }
+
+        if let Some(rr) = self.runtime_root() {
+            if !rr.exists() {
+                fs::create_dir_all(rr)?;
+            } else if !rr.is_dir() {
+                bail!("runtime root '{}' does not exist", rr.display())
+            }
         }
 
         if self.socket().exists() {

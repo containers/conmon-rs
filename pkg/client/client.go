@@ -31,6 +31,7 @@ type ConmonServerConfig struct {
 	ConmonPIDFile    string
 	Runtime          string
 	Socket           string
+	RuntimeRoot      string
 	Stdin            io.Reader
 	Stdout           io.WriteCloser
 	Stderr           io.WriteCloser
@@ -102,7 +103,7 @@ func (c *ConmonClient) Version(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	client := proto.Conmon{Client: conn.Bootstrap(context.Background())}
+	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
 
 	future, free := client.Version(ctx, nil)
 	defer free()
@@ -117,6 +118,45 @@ func (c *ConmonClient) Version(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return response.Version()
+}
+
+type CreateContainerConfig struct {
+	ID         string
+	BundlePath string
+}
+
+func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainerConfig) (uint32, error) {
+	conn, err := c.newRPCConn()
+	if err != nil {
+		return 0, err
+	}
+	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
+
+	future, free := client.CreateContainer(ctx, func(p proto.Conmon_createContainer_Params) error {
+		req, err := p.NewRequest()
+		if err != nil {
+			return err
+		}
+		if err := req.SetId(cfg.ID); err != nil {
+			return err
+		}
+		if err := req.SetBundlePath(cfg.BundlePath); err != nil {
+			return err
+		}
+		return p.SetRequest(req)
+	})
+	defer free()
+
+	result, err := future.Struct()
+	if err != nil {
+		return 0, err
+	}
+
+	response, err := result.Response()
+	if err != nil {
+		return 0, err
+	}
+	return response.ContainerPid(), nil
 }
 
 // TODO FIXME test only?
@@ -160,6 +200,9 @@ func (c *ConmonServerConfig) ToArgs() (string, []string, error) {
 			return "", args, fmt.Errorf("unix socket path %q is too long", c.Socket)
 		}
 		args = append(args, "--socket", c.Socket)
+	}
+	if c.RuntimeRoot != "" {
+		args = append(args, "--runtime-root", c.RuntimeRoot)
 	}
 	return entrypoint, args, nil
 }

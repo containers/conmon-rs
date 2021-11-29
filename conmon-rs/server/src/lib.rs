@@ -149,4 +149,25 @@ impl Server {
             task::spawn_local(Box::pin(rpc_system.map(|_| ())));
         }
     }
+    fn generate_runtime_args(
+        &self,
+        params: &conmon::CreateContainerParams,
+    ) -> capnp::Result<Vec<String>> {
+        let req = params.get()?.get_request()?;
+        let id = req.get_id()?.to_string();
+        let bundle_path = req.get_bundle_path()?.to_string();
+        let mut args = vec![];
+        let runtime_root = self.config().runtime_root();
+        if let Some(rr) = runtime_root {
+            args.push(format!("--root={}", rr.display()));
+        }
+        args.extend(vec![
+            "create".to_string(),
+            "--bundle".to_string(),
+            bundle_path,
+            id,
+        ]);
+        debug!("Runtime args {:?}", args);
+        Ok(args)
+    }
 }
