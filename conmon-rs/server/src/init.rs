@@ -76,9 +76,7 @@ mod tests {
     use tempfile::tempfile;
 
     fn new_sut(mock: MockInitImpl) -> Init<MockInitImpl> {
-        let mut sut = Init::<MockInitImpl>::default();
-        sut.imp = mock;
-        sut
+        Init::<MockInitImpl> { imp: mock }
     }
 
     #[test]
