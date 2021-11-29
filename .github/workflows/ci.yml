@@ -74,7 +74,7 @@ jobs:
           override: true
           components: clippy, rustfmt
       - name: Clippy Lint
-        run: cargo clippy --all -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
   lint-rustfmt:
     runs-on: ubuntu-latest
