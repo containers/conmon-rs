@@ -123,6 +123,7 @@ func (c *ConmonClient) Version(ctx context.Context) (string, error) {
 type CreateContainerConfig struct {
 	ID         string
 	BundlePath string
+	Terminal   bool
 }
 
 func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainerConfig) (uint32, error) {
@@ -143,6 +144,7 @@ func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainer
 		if err := req.SetBundlePath(cfg.BundlePath); err != nil {
 			return err
 		}
+		req.SetTerminal(cfg.Terminal)
 		return p.SetRequest(req)
 	})
 	defer free()
