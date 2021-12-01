@@ -48,7 +48,7 @@ impl Console {
         let (connected_tx, connected_rx) = mpsc::channel();
 
         thread::spawn(move || Self::listen(&path_clone, fd_clone, ready_tx, connected_tx));
-        ready_rx.recv().context("wait for ready to be listener")?;
+        ready_rx.recv().context("wait for listener to be ready")?;
 
         Ok(Self {
             path,
