@@ -51,7 +51,7 @@ var _ = Describe("ConmonClient", func() {
 	)
 
 	var sut *client.ConmonClient
-	BeforeEach(func() {
+	createRuntimeConfig := func(terminal bool) {
 		tmpDir = MustTempDir("conmon-client")
 		pidFilePath = MustFileInTempDir(tmpDir, "pidfile")
 		socketPath = MustFileInTempDir(tmpDir, "socket")
@@ -72,9 +72,8 @@ var _ = Describe("ConmonClient", func() {
 		Expect(os.Link(busyboxDest, filepath.Join(tmpRootfs, "busybox"))).To(BeNil())
 
 		// Finally, create config.json.
-		Expect(generateRuntimeConfig(tmpDir, tmpRootfs)).To(BeNil())
-	})
-
+		Expect(generateRuntimeConfig(tmpDir, tmpRootfs, terminal)).To(BeNil())
+	}
 	JustAfterEach(func() {
 		if sut != nil {
 			pid := sut.PID()
@@ -94,13 +93,36 @@ var _ = Describe("ConmonClient", func() {
 			Expect(sut.Shutdown()).To(BeNil())
 		}
 	})
+
 	Describe("CreateContainer", func() {
 		It("Should create a simple container", func() {
+			createRuntimeConfig(false)
+
 			sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
 			Expect(WaitUntilServerUp(sut)).To(BeNil())
 			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 				ID:         ctrID,
 				BundlePath: tmpDir,
+				Terminal:   false,
+			})
+			Expect(err).To(BeNil())
+			Expect(pid).NotTo(Equal(0))
+			Eventually(func() error {
+				return rr.RunCommandCheckOutput(ctrID, "list")
+			}, time.Second*5).Should(BeNil())
+		})
+	})
+
+	Describe("CreateContainer with terminal", func() {
+		It("Should create a simple container", func() {
+			createRuntimeConfig(true)
+
+			sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
+			Expect(WaitUntilServerUp(sut)).To(BeNil())
+			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+				ID:         ctrID,
+				BundlePath: tmpDir,
+				Terminal:   true,
 			})
 			Expect(err).To(BeNil())
 			Expect(pid).NotTo(Equal(0))
@@ -232,13 +254,14 @@ type RuntimeRunner struct {
 	runtimeRoot string
 }
 
-func generateRuntimeConfig(bundlePath, rootfs string) error {
+func generateRuntimeConfig(bundlePath, rootfs string, terminal bool) error {
 	configPath := filepath.Join(bundlePath, "config.json")
 	g, err := generate.New("linux")
 	if err != nil {
 		return err
 	}
 	g.SetProcessCwd("/")
+	g.SetProcessTerminal(terminal)
 	g.SetProcessArgs([]string{"/busybox", "ls"})
 	g.SetRootPath(rootfs)
 	if unshare.IsRootless() {

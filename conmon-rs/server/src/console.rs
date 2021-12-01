@@ -1,7 +1,5 @@
 //! Console socket functionalities.
 
-#![allow(dead_code)] // TODO: remove me when actually used
-
 use anyhow::{bail, format_err, Context, Result};
 use getset::Getters;
 use log::{debug, error, trace};
@@ -11,8 +9,12 @@ use std::{
     io::ErrorKind,
     os::unix::{fs::PermissionsExt, io::RawFd},
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
-    thread::{self, JoinHandle},
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        Arc, RwLock,
+    },
+    thread,
+    time::Duration,
 };
 use tempfile::Builder;
 use tokio::{
@@ -23,32 +25,47 @@ use tokio::{
 };
 
 #[derive(Debug, Getters)]
-#[getset(get)]
 pub struct Console {
+    #[getset(get = "pub")]
     path: PathBuf,
-    handle: JoinHandle<Result<()>>,
+
+    connected_rx: Receiver<()>,
+
+    #[allow(dead_code)]
     fd: Arc<RwLock<Option<RawFd>>>,
 }
 
 impl Console {
     /// Setup a new console socket.
     pub fn new() -> Result<Self> {
+        debug!("Creating new console socket");
         let path = Self::temp_file_name("conmon-term-", ".sock")?;
         let fd = Arc::new(RwLock::new(None));
         let fd_clone = fd.clone();
         let path_clone = path.clone();
-        let handle = thread::spawn(move || Self::listen(&path_clone, fd_clone));
-        Ok(Self { path, handle, fd })
-    }
 
-    /// Returns true if the console socket is successfully connected.
-    pub fn is_connected(&self) -> bool {
-        self.fd().read().map(|fd| fd.is_some()).unwrap_or_else(|e| {
-            error!("Unable to retrieve fd lock: {}", e);
-            false
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (connected_tx, connected_rx) = mpsc::channel();
+
+        thread::spawn(move || Self::listen(&path_clone, fd_clone, ready_tx, connected_tx));
+        ready_rx.recv().context("wait for ready to be listener")?;
+
+        Ok(Self {
+            path,
+            fd,
+            connected_rx,
         })
     }
 
+    /// Waits for the socket client to be connected.
+    pub fn wait_connected(&self) -> Result<()> {
+        debug!("Waiting for console socket connection");
+        self.connected_rx
+            .recv_timeout(Duration::from_secs(60))
+            .context("receive connected channel")
+    }
+
+    #[allow(dead_code)]
     /// Create window resize control FIFO.
     pub fn setup_fifo() -> Result<()> {
         // TODO: implement me
@@ -68,7 +85,12 @@ impl Console {
         Ok(path)
     }
 
-    fn listen(path: &Path, fd_state: Arc<RwLock<Option<RawFd>>>) -> Result<()> {
+    fn listen(
+        path: &Path,
+        fd_state: Arc<RwLock<Option<RawFd>>>,
+        ready_tx: Sender<()>,
+        connected_tx: Sender<()>,
+    ) -> Result<()> {
         Runtime::new()?.block_on(async move {
             let listener = UnixListener::bind(&path)?;
             debug!("Listening console socket on {}", &path.display());
@@ -78,10 +100,14 @@ impl Console {
             perms.set_mode(0o700);
             fs::set_permissions(&path, perms).await?;
 
+            ready_tx
+                .send(())
+                .map_err(|_| format_err!("unable to send ready message"))?;
+
             let stream = listener.accept().await?.0;
             debug!("Got console socket stream: {:?}", stream);
 
-            Self::handle_fd_receive(stream, path, fd_state).await
+            Self::handle_fd_receive(stream, path, fd_state, connected_tx).await
         })
     }
 
@@ -89,6 +115,7 @@ impl Console {
         mut stream: UnixStream,
         path: &Path,
         fd_state: Arc<RwLock<Option<RawFd>>>,
+        connected_tx: Sender<()>,
     ) -> Result<()> {
         loop {
             if !stream.ready(Interest::READABLE).await?.is_readable() {
@@ -104,7 +131,7 @@ impl Console {
                     debug!("Removing socket path {}", &path.display());
                     fs::remove_file(&path).await?;
 
-                    debug!("Shutting down stream");
+                    debug!("Shutting down receiver stream");
                     stream.shutdown().await?;
 
                     if fd_read == 0 {
@@ -134,7 +161,9 @@ impl Console {
                     // ioctl on a negative fd, and fail to resize the window.
                     // See: https://github.com/containers/conmon/blob/f263cf4/src/ctrl.c#L73
 
+                    connected_tx.send(()).context("send connected channel")?;
                     debug!("Shutting down listener thread");
+
                     return Ok(());
                 }
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
@@ -166,23 +195,13 @@ impl Drop for Console {
 mod tests {
     use super::*;
     use sendfd::SendWithFd;
-    use std::{os::unix::io::AsRawFd, time::Duration};
+    use std::os::unix::io::AsRawFd;
     use tokio::fs::File;
-
-    fn wait_for<F: Fn() -> bool>(x: F) -> Result<()> {
-        for _ in 1..100 {
-            if x() {
-                return Ok(());
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        bail!("failed to wait for condition")
-    }
 
     #[tokio::test]
     async fn new_success() -> Result<()> {
         let sut = Console::new()?;
-        wait_for(|| sut.path().exists())?;
+        assert!(sut.path().exists());
 
         let file = File::open("/dev/pts/ptmx").await?;
         let fd = file.as_raw_fd();
@@ -199,8 +218,8 @@ mod tests {
             }
         }
 
-        wait_for(|| !sut.path().exists())?;
-        wait_for(|| sut.is_connected())?;
+        sut.wait_connected()?;
+        assert!(!sut.path().exists());
 
         Ok(())
     }

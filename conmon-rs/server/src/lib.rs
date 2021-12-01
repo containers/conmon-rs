@@ -1,4 +1,7 @@
-use crate::init::{DefaultInit, Init};
+use crate::{
+    console::Console,
+    init::{DefaultInit, Init},
+};
 use anyhow::{Context, Result};
 use capnp_rpc::{rpc_twoparty_capnp::Side, twoparty, RpcSystem};
 use conmon_common::conmon_capnp::conmon;
@@ -151,9 +154,12 @@ impl Server {
             task::spawn_local(Box::pin(rpc_system.map(|_| ())));
         }
     }
+
+    /// Generate the OCI runtime CLI arguments from the provided parameters.
     fn generate_runtime_args(
         &self,
         params: &conmon::CreateContainerParams,
+        maybe_console: &Option<Console>,
     ) -> capnp::Result<Vec<String>> {
         let req = params.get()?.get_request()?;
         let id = req.get_id()?.to_string();
@@ -167,9 +173,12 @@ impl Server {
             "create".to_string(),
             "--bundle".to_string(),
             bundle_path,
-            id,
         ]);
-        debug!("Runtime args {:?}", args);
+        if let Some(console) = maybe_console {
+            args.push(format!("--console-socket={}", console.path().display()));
+        }
+        args.push(id);
+        debug!("Runtime args {:?}", args.join(" "));
         Ok(args)
     }
 }

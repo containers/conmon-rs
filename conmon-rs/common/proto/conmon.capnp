@@ -10,6 +10,7 @@ interface Conmon {
     struct CreateContainerRequest {
         id @0 :Text;
         bundlePath @1 :Text;
+        terminal @2 :Bool;
     }
 
     struct CreateContainerResponse {

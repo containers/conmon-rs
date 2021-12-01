@@ -1,10 +1,10 @@
-use crate::Server;
-use capnp::capability::Promise;
-use capnp::Error;
+use crate::{console::Console, Server};
+use anyhow::{bail, Context};
+use capnp::{capability::Promise, Error};
 use capnp_rpc::pry;
 use clap::crate_version;
 use conmon_common::conmon_capnp::conmon;
-use log::debug;
+use log::{debug, error};
 use tokio::process::Command;
 
 const VERSION: &str = crate_version!();
@@ -30,7 +30,14 @@ impl conmon::Server for Server {
             "Got a create container request for id {}",
             pry!(req.get_id())
         );
-        let args = pry!(self.generate_runtime_args(&params));
+
+        let maybe_console = if req.get_terminal() {
+            pry!(Console::new().map_err(|e| Error::failed(format!("{:#}", e)))).into()
+        } else {
+            None
+        };
+
+        let args = pry!(self.generate_runtime_args(&params, &maybe_console));
 
         let mut child = pry!(Command::new(self.config().runtime()).args(args).spawn());
 
@@ -41,8 +48,19 @@ impl conmon::Server for Server {
         let id = pry!(req.get_id()).to_string();
         tokio::spawn(async move {
             match child.wait().await {
-                Ok(status) => debug!("status for container ID {} is {}", id, status),
-                Err(e) => debug!("failed to spawn runtime process {}", e),
+                Ok(status) => {
+                    debug!("Status for container ID {} is {}", id, status);
+                    if let Some(console) = maybe_console {
+                        console
+                            .wait_connected()
+                            .context("wait for console socket connection")?;
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    error!("Failed to spawn runtime process {}", e);
+                    bail!(e)
+                }
             }
         });
         results.get().init_response().set_container_pid(pid);
