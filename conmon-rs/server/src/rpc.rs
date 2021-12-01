@@ -1,11 +1,12 @@
 use crate::{console::Console, Server};
-use anyhow::{bail, Context};
+use anyhow::Context;
 use capnp::{capability::Promise, Error};
 use capnp_rpc::pry;
 use clap::crate_version;
 use conmon_common::conmon_capnp::conmon;
-use log::{debug, error};
-use tokio::process::Command;
+use log::debug;
+use std::fs;
+use std::path::PathBuf;
 
 const VERSION: &str = crate_version!();
 
@@ -43,33 +44,34 @@ impl conmon::Server for Server {
             None
         };
 
-        let args = pry!(self.generate_runtime_args(&params, &maybe_console));
+        let pidfile = pry!(pidfile_from_params(&params));
 
-        let mut child = pry!(Command::new(self.config().runtime()).args(args).spawn());
+        let args = pry_err!(self.generate_runtime_args(&params, &maybe_console, &pidfile));
 
-        let pid = pry!(child
-            .id()
-            .ok_or_else(|| Error::failed("Child of container creation had none id".into())));
+        let mut child = pry!(std::process::Command::new(self.config().runtime())
+            .args(args)
+            .spawn());
 
         let id = pry!(req.get_id()).to_string();
-        tokio::spawn(async move {
-            match child.wait().await {
-                Ok(status) => {
-                    debug!("Status for container ID {} is {}", id, status);
-                    if let Some(console) = maybe_console {
-                        console
-                            .wait_connected()
-                            .context("wait for console socket connection")?;
-                    }
-                    Ok(())
-                }
-                Err(e) => {
-                    error!("Failed to spawn runtime process {}", e);
-                    bail!(e)
-                }
-            }
-        });
+        let status = pry!(child.wait());
+        debug!("Status for container ID {} is {}", id, status);
+        if let Some(console) = maybe_console {
+            pry_err!(console
+                .wait_connected()
+                .context("wait for console socket connection"));
+        }
+
+        let pid = pry_err!(pry!(fs::read_to_string(pidfile)).parse::<u32>());
+
         results.get().init_response().set_container_pid(pid);
         Promise::ok(())
     }
+}
+
+fn pidfile_from_params(params: &conmon::CreateContainerParams) -> capnp::Result<PathBuf> {
+    let mut pidfile_pathbuf = PathBuf::from(params.get()?.get_request()?.get_bundle_path()?);
+    pidfile_pathbuf.push("pidfile");
+
+    debug!("pidfile is {}", pidfile_pathbuf.display());
+    Ok(pidfile_pathbuf)
 }
