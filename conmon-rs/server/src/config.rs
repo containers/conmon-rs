@@ -58,7 +58,6 @@ pub struct Config {
     #[clap(
         env(concat!(prefix!(), "RUNTIME_ROOT")),
         long("runtime-root"),
-        short('r'),
         value_name("RUNTIME_ROOT")
     )]
     /// Path of the OCI runtime to use to operate on the containers.
