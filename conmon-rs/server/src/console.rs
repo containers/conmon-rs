@@ -1,5 +1,6 @@
 //! Console socket functionalities.
 
+use crate::iostreams::IOStreams;
 use anyhow::{bail, format_err, Context, Result};
 use getset::Getters;
 use log::{debug, error, trace};
@@ -9,10 +10,8 @@ use std::{
     io::ErrorKind,
     os::unix::{fs::PermissionsExt, io::RawFd},
     path::{Path, PathBuf},
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        Arc, RwLock,
-    },
+    str,
+    sync::mpsc::{self, Receiver, Sender},
     thread,
     time::Duration,
 };
@@ -30,9 +29,6 @@ pub struct Console {
     path: PathBuf,
 
     connected_rx: Receiver<()>,
-
-    #[allow(dead_code)]
-    fd: Arc<RwLock<Option<RawFd>>>,
 }
 
 impl Console {
@@ -40,21 +36,15 @@ impl Console {
     pub fn new() -> Result<Self> {
         debug!("Creating new console socket");
         let path = Self::temp_file_name("conmon-term-", ".sock")?;
-        let fd = Arc::new(RwLock::new(None));
-        let fd_clone = fd.clone();
         let path_clone = path.clone();
 
         let (ready_tx, ready_rx) = mpsc::channel();
         let (connected_tx, connected_rx) = mpsc::channel();
 
-        thread::spawn(move || Self::listen(&path_clone, fd_clone, ready_tx, connected_tx));
+        thread::spawn(move || Self::listen(&path_clone, ready_tx, connected_tx));
         ready_rx.recv().context("wait for listener to be ready")?;
 
-        Ok(Self {
-            path,
-            fd,
-            connected_rx,
-        })
+        Ok(Self { path, connected_rx })
     }
 
     /// Waits for the socket client to be connected.
@@ -85,12 +75,7 @@ impl Console {
         Ok(path)
     }
 
-    fn listen(
-        path: &Path,
-        fd_state: Arc<RwLock<Option<RawFd>>>,
-        ready_tx: Sender<()>,
-        connected_tx: Sender<()>,
-    ) -> Result<()> {
+    fn listen(path: &Path, ready_tx: Sender<()>, connected_tx: Sender<()>) -> Result<()> {
         Runtime::new()?.block_on(async move {
             let listener = UnixListener::bind(&path)?;
             debug!("Listening console socket on {}", &path.display());
@@ -107,14 +92,13 @@ impl Console {
             let stream = listener.accept().await?.0;
             debug!("Got console socket stream: {:?}", stream);
 
-            Self::handle_fd_receive(stream, path, fd_state, connected_tx).await
+            Self::handle_fd_receive(stream, path, connected_tx).await
         })
     }
 
     async fn handle_fd_receive(
         mut stream: UnixStream,
         path: &Path,
-        fd_state: Arc<RwLock<Option<RawFd>>>,
         connected_tx: Sender<()>,
     ) -> Result<()> {
         loop {
@@ -147,10 +131,7 @@ impl Console {
                     term.output_flags |= OutputFlags::ONLCR;
                     termios::tcsetattr(fd, SetArg::TCSANOW, &term)?;
 
-                    debug!("Setting internal file descriptor state");
-                    *fd_state
-                        .write()
-                        .map_err(|e| format_err!("locking fd state: {}", e))? = Some(fd);
+                    IOStreams::from_raw_fd(fd)?.start()?;
 
                     // TODO: Now that we have a fd to the tty, make sure we handle any pending
                     // data that was already buffered.
@@ -194,23 +175,22 @@ impl Drop for Console {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nix::pty;
     use sendfd::SendWithFd;
-    use std::os::unix::io::AsRawFd;
-    use tokio::fs::File;
+    use std::os::unix::io::FromRawFd;
 
     #[tokio::test]
     async fn new_success() -> Result<()> {
         let sut = Console::new()?;
         assert!(sut.path().exists());
 
-        let file = File::open("/dev/pts/ptmx").await?;
-        let fd = file.as_raw_fd();
+        let res = pty::openpty(None, None)?;
 
         let stream = UnixStream::connect(sut.path()).await?;
         loop {
             let ready = stream.ready(Interest::WRITABLE).await?;
             if ready.is_writable() {
-                match stream.send_with_fd(b"test", &[fd]) {
+                match stream.send_with_fd(b"test", &[res.master]) {
                     Ok(_) => break,
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
                     Err(e) => bail!(e),
@@ -220,6 +200,10 @@ mod tests {
 
         sut.wait_connected()?;
         assert!(!sut.path().exists());
+
+        // Write to the slave
+        let mut file = unsafe { fs::File::from_raw_fd(res.slave) };
+        file.write(b"test").await?;
 
         Ok(())
     }
