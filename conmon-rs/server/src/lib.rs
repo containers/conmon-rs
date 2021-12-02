@@ -156,11 +156,12 @@ impl Server {
     }
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
-    fn generate_runtime_args(
+    fn generate_runtime_args<T: AsRef<Path>>(
         &self,
         params: &conmon::CreateContainerParams,
         maybe_console: &Option<Console>,
-    ) -> capnp::Result<Vec<String>> {
+        pidfile: T,
+    ) -> Result<Vec<String>> {
         let req = params.get()?.get_request()?;
         let id = req.get_id()?.to_string();
         let bundle_path = req.get_bundle_path()?.to_string();
@@ -169,11 +170,15 @@ impl Server {
         if let Some(rr) = runtime_root {
             args.push(format!("--root={}", rr.display()));
         }
+
         args.extend(vec![
             "create".to_string(),
             "--bundle".to_string(),
             bundle_path,
+            "--pid-file".to_string(),
+            pidfile.as_ref().display().to_string(),
         ]);
+
         if let Some(console) = maybe_console {
             args.push(format!("--console-socket={}", console.path().display()));
         }
