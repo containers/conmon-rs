@@ -103,6 +103,7 @@ func (c *ConmonClient) Version(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	defer conn.Close()
 	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
 
 	future, free := client.Version(ctx, nil)
@@ -131,6 +132,7 @@ func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainer
 	if err != nil {
 		return 0, err
 	}
+	defer conn.Close()
 	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
 
 	future, free := client.CreateContainer(ctx, func(p proto.Conmon_createContainer_Params) error {
