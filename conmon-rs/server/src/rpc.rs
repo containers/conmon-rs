@@ -9,6 +9,12 @@ use tokio::process::Command;
 
 const VERSION: &str = crate_version!();
 
+macro_rules! pry_err {
+    ($x:expr) => {
+        pry!($x.map_err(|e| Error::failed(format!("{:#}", e))))
+    };
+}
+
 impl conmon::Server for Server {
     fn version(
         &mut self,
@@ -32,7 +38,7 @@ impl conmon::Server for Server {
         );
 
         let maybe_console = if req.get_terminal() {
-            pry!(Console::new().map_err(|e| Error::failed(format!("{:#}", e)))).into()
+            pry_err!(Console::new()).into()
         } else {
             None
         };
