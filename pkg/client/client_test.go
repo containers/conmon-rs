@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -139,12 +140,45 @@ var _ = Describe("ConmonClient", func() {
 				}, time.Second*5).Should(BeNil())
 
 				Expect(rr.RunCommand("start", ctrID)).To(BeNil())
-				f, err := os.Open(exitPath)
+				Eventually(func() error {
+					f, err := os.Open(exitPath)
+					if err != nil {
+						return err
+					}
+					defer f.Close()
+					b, err := ioutil.ReadAll(f)
+					if err != nil {
+						return err
+					}
+					if string(b) != "0" {
+						return errors.New("invalid exit status")
+					}
+					return nil
+				}, time.Second*5).Should(BeNil())
+			})
+			It("should kill created children if being killed", func() {
+				createRuntimeConfig(terminal)
+
+				exitPath := MustFileInTempDir(tmpDir, "exit")
+				sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
+				Expect(WaitUntilServerUp(sut)).To(BeNil())
+				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+					ID:         ctrID,
+					BundlePath: tmpDir,
+					ExitPaths:  []string{exitPath},
+					Terminal:   terminal,
+				})
 				Expect(err).To(BeNil())
-				defer f.Close()
-				b, err := ioutil.ReadAll(f)
-				Expect(err).To(BeNil())
-				Expect(string(b)).To(Equal("0"))
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput(ctrID, "list")
+				}, time.Second*5).Should(BeNil())
+
+				Expect(sut.Shutdown()).To(BeNil())
+				sut = nil
+
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput("stopped", "list")
+				}, time.Second*5).Should(BeNil())
 			})
 		}
 	})
