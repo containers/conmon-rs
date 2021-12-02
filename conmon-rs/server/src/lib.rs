@@ -66,6 +66,10 @@ impl Server {
             ForkResult::Child => (),
         }
 
+        // now that we've forked, set self to childreaper
+        if let Err(errno) = prctl::set_child_subreaper(true) {
+            return Err(anyhow::Error::new(std::io::Error::from_raw_os_error(errno)));
+        }
         // Use the single threaded runtime to save rss memory.
         let rt = runtime::Builder::new_current_thread().enable_io().build()?;
         rt.block_on(self.spawn_tasks())?;
