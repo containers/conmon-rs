@@ -13,17 +13,33 @@ use std::{collections::HashMap, fs::File, io::Write, sync::Arc, sync::Mutex};
 impl ChildReaper {
     pub fn init_reaper(&self) -> Result<()> {
         let grandchildren = Arc::clone(&self.grandchildren);
+        let wait_lock = Arc::clone(&self.wait_lock);
         thread::spawn(move || {
             loop {
+                // To prevent an error: "No child processes (os error 10)" when spawning new runtime processes,
+                // we don't call waitpid until the runtime process has finished
+                // Inspired by
+                // https://github.com/kata-containers/kata-containers/blob/828a304883a4/src/agent/src/signal.rs#L27
+                let wait_status = {
+                    let _lock = wait_lock.lock();
+                    waitpid(Pid::from_raw(-1), None)
+                };
+
                 let grandchildren = Arc::clone(&grandchildren);
-                match waitpid(Pid::from_raw(-1), None) {
+                match wait_status {
                     Ok(status) => {
                         if let WaitStatus::Exited(grandchild_pid, exit_status) = status {
-                            // Immediately spawn a thread to reduce risk of dropping
-                            // a SIGCHLD.
+                            let grandchildren = Arc::clone(&grandchildren);
                             thread::spawn(move || {
-                                if let Err(e) = Self::forget_grandchild(grandchildren, grandchild_pid, exit_status) {
-                                    error!("Failed to reap grandchild for pid {}: {}", grandchild_pid, e);
+                                if let Err(e) = Self::forget_grandchild(
+                                    grandchildren,
+                                    grandchild_pid,
+                                    exit_status,
+                                ) {
+                                    error!(
+                                        "Failed to reap grandchild for pid {}: {}",
+                                        grandchild_pid, e
+                                    );
                                 }
                             });
                         }
@@ -43,9 +59,35 @@ impl ChildReaper {
         Ok(())
     }
 
+    pub fn create_child<P, I, S>(&self, cmd: P, args: I) -> Result<std::process::ExitStatus>
+    where
+        P: AsRef<std::ffi::OsStr>,
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut cmd = std::process::Command::new(cmd);
+        cmd.args(args);
+
+        // To prevent an error: "No child processes (os error 10)",
+        // we prevent our reaper thread from calling waitpid until this child has completed.
+        // Inspired by
+        // https://github.com/kata-containers/kata-containers/blob/828a304883a4/src/agent/src/signal.rs#L27
+        let wait_lock = Arc::clone(&self.wait_lock);
+        let _lock = wait_lock
+            .lock()
+            .map_err(|e| format_err!("lock waitlock: {}", e))?;
+
+        cmd.spawn()
+            .map_err(|e| format_err!("spawn child process: {}", e))?
+            .wait()
+            .map_err(|e| format_err!("wait for child process: {}", e))
+    }
+
     pub fn watch_grandchild(&self, id: String, pid: i32, exit_paths: Vec<PathBuf>) -> Result<()> {
         let locked_grandchildren = Arc::clone(&self.grandchildren);
-        let mut map = locked_grandchildren.lock().map_err(|e| format_err!("lock grandchildren: {}", e))?;
+        let mut map = locked_grandchildren
+            .lock()
+            .map_err(|e| format_err!("lock grandchildren: {}", e))?;
 
         let reapable_grandchild = ReapableChild { id, exit_paths };
         if let Some(old) = map.insert(pid, reapable_grandchild) {
@@ -61,7 +103,9 @@ impl ChildReaper {
     ) -> Result<()> {
         debug!("caught signal for pid {}", grandchild_pid);
 
-        let mut map = locked_map.lock().map_err(|e| format_err!("lock grandchildren: {}", e))?;
+        let mut map = locked_map
+            .lock()
+            .map_err(|e| format_err!("lock grandchildren: {}", e))?;
         let grandchild = match map.remove(&(i32::from(grandchild_pid))) {
             Some(c) => c,
             None => {
@@ -84,7 +128,11 @@ impl ChildReaper {
     }
 
     pub fn kill_grandchildren(&self, s: Signal) -> Result<()> {
-        for (pid, kc) in Arc::clone(&self.grandchildren).lock().map_err(|e| format_err!("lock grandchildren: {}", e))?.iter() {
+        for (pid, kc) in Arc::clone(&self.grandchildren)
+            .lock()
+            .map_err(|e| format_err!("lock grandchildren: {}", e))?
+            .iter()
+        {
             debug!("killing pid {} for container {}", pid, kc.id);
             kill(Pid::from_raw(*pid), s)?;
         }
@@ -95,6 +143,7 @@ impl ChildReaper {
 #[derive(Debug, Default)]
 pub struct ChildReaper {
     grandchildren: Arc<Mutex<HashMap<i32, ReapableChild>>>,
+    wait_lock: Arc<Mutex<bool>>,
 }
 
 #[derive(Debug, Getters)]

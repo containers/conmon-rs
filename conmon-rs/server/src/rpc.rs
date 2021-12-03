@@ -5,8 +5,7 @@ use capnp_rpc::pry;
 use clap::crate_version;
 use conmon_common::conmon_capnp::conmon;
 use log::debug;
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf, sync::Arc};
 
 const VERSION: &str = crate_version!();
 
@@ -48,13 +47,10 @@ impl conmon::Server for Server {
 
         let args = pry_err!(self.generate_runtime_args(&params, &maybe_console, &pidfile));
 
-        let mut grandchild = pry!(std::process::Command::new(self.config().runtime())
-            .args(args)
-            .spawn());
+        let child_reaper = Arc::clone(self.reaper());
+        let status = pry_err!(child_reaper.create_child(self.config().runtime(), args));
 
         let id = pry!(req.get_id()).to_string();
-
-        let status = pry!(grandchild.wait());
         debug!("Status for container ID {} is {}", id, status);
         if let Some(console) = maybe_console {
             pry_err!(console
@@ -65,7 +61,7 @@ impl conmon::Server for Server {
         let pid = pry_err!(pry!(fs::read_to_string(pidfile)).parse::<i32>());
         let exit_paths = pry!(path_vec_from_text_list(pry!(req.get_exit_paths())));
 
-        pry_err!(self.reaper().watch_grandchild(id, pid, exit_paths));
+        pry_err!(child_reaper.watch_grandchild(id, pid, exit_paths));
 
         // TODO FIXME why convert?
         results.get().init_response().set_container_pid(pid as u32);
