@@ -36,6 +36,16 @@ pub struct Config {
 
     #[get = "pub"]
     #[clap(
+        env(concat!(prefix!(), "LOG_FILE")),
+        long("log-file"),
+        short('f'),
+        value_name("PATH")
+    )]
+    /// The logging file of the conmon server.
+    log_file: Option<PathBuf>,
+
+    #[get = "pub"]
+    #[clap(
         env(concat!(prefix!(), "PIDFILE")),
         long("conmon-pidfile"),
         short('P'),

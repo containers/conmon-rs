@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	maxRSSKB       = 3200
+	maxRSSKB       = 3300
 	busyboxSource  = "https://busybox.net/downloads/binaries/1.31.0-i686-uclibc/busybox"
 	busyboxDestDir = "/tmp/conmon-test-images"
 )

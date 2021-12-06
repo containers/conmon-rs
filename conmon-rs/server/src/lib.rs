@@ -8,6 +8,11 @@ use conmon_common::conmon_capnp::conmon;
 use futures::{AsyncReadExt, FutureExt};
 use getset::{Getters, MutGetters};
 use log::{debug, info};
+use log4rs::{
+    append::file::FileAppender,
+    config::{Appender, Config, Root},
+    encode::pattern::PatternEncoder,
+};
 use nix::{
     libc::_exit,
     unistd::{fork, ForkResult},
@@ -82,10 +87,22 @@ impl Server {
     }
 
     fn init_logging(&self) -> Result<()> {
-        if let Some(level) = self.config().log_level().to_level() {
-            simple_logger::init_with_level(level).context("init logger")?;
-            info!("Set log level to {}", level);
+        match (self.config().log_file(), self.config().log_level()) {
+            (Some(file), level) => {
+                let logfile = FileAppender::builder()
+                    .encoder(Box::new(PatternEncoder::new("{d} {l} [{M}:{L}] {m}\n")))
+                    .build(file)?;
+
+                let config = Config::builder()
+                    .appender(Appender::builder().build("logfile", Box::new(logfile)))
+                    .build(Root::builder().appender("logfile").build(level))?;
+
+                log4rs::init_config(config).context("init logger")?;
+                println!("Logging to file {}", file.display());
+            }
+            _ => println!("Logging disabled"),
         }
+
         Ok(())
     }
 
