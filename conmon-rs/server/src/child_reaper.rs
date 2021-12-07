@@ -25,7 +25,6 @@ impl ChildReaper {
                     waitpid(Pid::from_raw(-1), None)
                 };
 
-                let grandchildren = Arc::clone(&grandchildren);
                 match wait_status {
                     Ok(status) => {
                         if let WaitStatus::Exited(grandchild_pid, exit_status) = status {
