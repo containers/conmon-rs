@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -95,41 +96,91 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	Describe("CreateContainer", func() {
-		It("Should create a simple container", func() {
-			createRuntimeConfig(false)
+		for _, terminal := range []bool{true, false} {
+			terminal := terminal
+			testName := "should create a simple container"
+			if terminal {
+				testName += " with terminal"
+			}
+			It(testName, func() {
+				createRuntimeConfig(terminal)
 
-			sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
-			Expect(WaitUntilServerUp(sut)).To(BeNil())
-			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
-				ID:         ctrID,
-				BundlePath: tmpDir,
-				Terminal:   false,
+				sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
+				Expect(WaitUntilServerUp(sut)).To(BeNil())
+				pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+					ID:         ctrID,
+					BundlePath: tmpDir,
+					Terminal:   terminal,
+				})
+				Expect(err).To(BeNil())
+				Expect(pid).NotTo(Equal(0))
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput(ctrID, "list")
+				}, time.Second*5).Should(BeNil())
 			})
-			Expect(err).To(BeNil())
-			Expect(pid).NotTo(Equal(0))
-			Eventually(func() error {
-				return rr.RunCommandCheckOutput(ctrID, "list")
-			}, time.Second*5).Should(BeNil())
-		})
-	})
+			testName = "should write exit file"
+			if terminal {
+				testName += " with terminal"
+			}
+			It("should write exit file", func() {
+				createRuntimeConfig(terminal)
 
-	Describe("CreateContainer with terminal", func() {
-		It("Should create a simple container", func() {
-			createRuntimeConfig(true)
+				exitPath := MustFileInTempDir(tmpDir, "exit")
+				sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
+				Expect(WaitUntilServerUp(sut)).To(BeNil())
+				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+					ID:         ctrID,
+					BundlePath: tmpDir,
+					ExitPaths:  []string{exitPath},
+					Terminal:   terminal,
+				})
+				Expect(err).To(BeNil())
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput(ctrID, "list")
+				}, time.Second*5).Should(BeNil())
 
-			sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
-			Expect(WaitUntilServerUp(sut)).To(BeNil())
-			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
-				ID:         ctrID,
-				BundlePath: tmpDir,
-				Terminal:   true,
+				Expect(rr.RunCommand("start", ctrID)).To(BeNil())
+				Eventually(func() error {
+					f, err := os.Open(exitPath)
+					if err != nil {
+						return err
+					}
+					defer f.Close()
+					b, err := ioutil.ReadAll(f)
+					if err != nil {
+						return err
+					}
+					if string(b) != "0" {
+						return errors.New("invalid exit status")
+					}
+					return nil
+				}, time.Second*5).Should(BeNil())
 			})
-			Expect(err).To(BeNil())
-			Expect(pid).NotTo(Equal(0))
-			Eventually(func() error {
-				return rr.RunCommandCheckOutput(ctrID, "list")
-			}, time.Second*5).Should(BeNil())
-		})
+			It("should kill created children if being killed", func() {
+				createRuntimeConfig(terminal)
+
+				exitPath := MustFileInTempDir(tmpDir, "exit")
+				sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
+				Expect(WaitUntilServerUp(sut)).To(BeNil())
+				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+					ID:         ctrID,
+					BundlePath: tmpDir,
+					ExitPaths:  []string{exitPath},
+					Terminal:   terminal,
+				})
+				Expect(err).To(BeNil())
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput(ctrID, "list")
+				}, time.Second*5).Should(BeNil())
+
+				Expect(sut.Shutdown()).To(BeNil())
+				sut = nil
+
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput("stopped", "list")
+				}, time.Second*5).Should(BeNil())
+			})
+		}
 	})
 })
 

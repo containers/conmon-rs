@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"capnproto.org/go/capnp/v3"
 	"capnproto.org/go/capnp/v3/rpc"
 	"github.com/containers/conmon-rs/internal/proto"
 )
@@ -103,6 +104,7 @@ func (c *ConmonClient) Version(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	defer conn.Close()
 	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
 
 	future, free := client.Version(ctx, nil)
@@ -124,6 +126,7 @@ type CreateContainerConfig struct {
 	ID         string
 	BundlePath string
 	Terminal   bool
+	ExitPaths  []string
 }
 
 func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainerConfig) (uint32, error) {
@@ -131,6 +134,7 @@ func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainer
 	if err != nil {
 		return 0, err
 	}
+	defer conn.Close()
 	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
 
 	future, free := client.CreateContainer(ctx, func(p proto.Conmon_createContainer_Params) error {
@@ -145,6 +149,9 @@ func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainer
 			return err
 		}
 		req.SetTerminal(cfg.Terminal)
+		if err := stringSliceToTextList(cfg.ExitPaths, req.NewExitPaths); err != nil {
+			return err
+		}
 		return p.SetRequest(req)
 	})
 	defer free()
@@ -159,6 +166,23 @@ func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainer
 		return 0, err
 	}
 	return response.ContainerPid(), nil
+}
+
+func stringSliceToTextList(src []string, newFunc func(int32) (capnp.TextList, error)) error {
+	l := int32(len(src))
+	if l == 0 {
+		return nil
+	}
+	list, err := newFunc(l)
+	if err != nil {
+		return err
+	}
+	for i := 0; i < len(src); i++ {
+		if err := list.Set(i, src[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // TODO FIXME test only?
