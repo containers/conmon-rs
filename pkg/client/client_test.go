@@ -27,11 +27,7 @@ import (
 	"github.com/opencontainers/runtime-tools/generate"
 )
 
-const (
-	maxRSSKB       = 3200
-	busyboxSource  = "https://busybox.net/downloads/binaries/1.31.0-i686-uclibc/busybox"
-	busyboxDestDir = "/tmp/conmon-test-images"
-)
+const maxRSSKB = 3200
 
 var (
 	busyboxDest = filepath.Join(busyboxDestDir, "busybox")
@@ -286,7 +282,8 @@ func downloadFile(url string, filepath string) error {
 	defer out.Close()
 
 	// Get the data
-	resp, err := http.Get(url)
+	client := http.Client{Timeout: time.Minute}
+	resp, err := client.Get(url)
 	if err != nil {
 		return err
 	}
