@@ -6,6 +6,7 @@ use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::{env, path::PathBuf};
+use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 
 macro_rules! prefix {
     () => {
@@ -33,6 +34,18 @@ pub struct Config {
     )]
     /// The logging level of the conmon server.
     log_level: LevelFilter,
+
+    #[get_copy = "pub"]
+    #[clap(
+        default_value(LogDriver::Stdout.into()),
+        env(concat!(prefix!(), "LOG_DRIVER")),
+        long("log-driver"),
+        short('d'),
+        possible_values(LogDriver::iter().map(|x| x.into()).collect::<Vec<&str>>()),
+        value_name("DRIVER")
+    )]
+    /// The logging driver used by the conmon server.
+    log_driver: LogDriver,
 
     #[get = "pub"]
     #[clap(
@@ -73,6 +86,29 @@ pub struct Config {
     )]
     /// Path of the listening socket for the server.
     socket: PathBuf,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Deserialize,
+    EnumIter,
+    EnumString,
+    Eq,
+    IntoStaticStr,
+    Hash,
+    PartialEq,
+    Serialize,
+)]
+#[strum(serialize_all = "lowercase")]
+/// Available log drivers.
+pub enum LogDriver {
+    /// Log to stdout
+    Stdout,
+
+    /// Use systemd journald as log driver
+    Systemd,
 }
 
 impl Default for Config {
