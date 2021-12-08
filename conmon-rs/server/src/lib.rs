@@ -1,4 +1,5 @@
 use crate::{
+    config::{Config, LogDriver},
     console::Console,
     init::{DefaultInit, Init},
 };
@@ -36,7 +37,7 @@ mod rpc;
 pub struct Server {
     #[doc = "The main conmon configuration."]
     #[getset(get, get_mut)]
-    config: config::Config,
+    config: Config,
 
     #[getset(get, get_mut)]
     reaper: Arc<child_reaper::ChildReaper>,
@@ -91,10 +92,18 @@ impl Server {
     }
 
     fn init_logging(&self) -> Result<()> {
-        if let Some(level) = self.config().log_level().to_level() {
-            simple_logger::init_with_level(level).context("init logger")?;
-            info!("Set log level to {}", level);
+        match self.config().log_driver() {
+            LogDriver::Stdout => {
+                simple_logger::init().context("init stdout logger")?;
+                info!("Using stdout logger");
+            }
+            LogDriver::Systemd => {
+                systemd_journal_logger::init().context("init journal logger")?;
+                info!("Using systemd logger");
+            }
         }
+        log::set_max_level(self.config().log_level());
+        info!("Set log level to: {}", self.config().log_level());
         Ok(())
     }
 
