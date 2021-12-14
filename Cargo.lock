@@ -196,12 +196,26 @@ source = "git+https://github.com/clap-rs/clap#05cf230ac10d9c95ceb7dcc1ae3c779889
 dependencies = [
  "atty",
  "bitflags",
+ "clap_derive",
  "indexmap",
+ "lazy_static",
  "os_str_bytes",
  "strsim",
  "termcolor",
  "terminal_size",
  "textwrap",
+]
+
+[[package]]
+name = "clap_derive"
+version = "3.0.0-rc.4"
+source = "git+https://github.com/clap-rs/clap#05cf230ac10d9c95ceb7dcc1ae3c77988963a340"
+dependencies = [
+ "heck",
+ "proc-macro-error",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
