@@ -1016,9 +1016,9 @@ dependencies = [
 
 [[package]]
 name = "simple_logger"
-version = "1.15.0"
+version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "205596cf77a15774e5601c5ef759f4211ac381c0855a1f1d5e24a46f60f93e9a"
+checksum = "12413e3c006deb4f16b9f43192d419c462e21134d0a4e63532fbd050f546a561"
 dependencies = [
  "atty",
  "colored",
