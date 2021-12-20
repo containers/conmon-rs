@@ -14,7 +14,7 @@ capnp-rpc = "0.14.1"
 chrono = "0.4.19"
 conmon-common = { path = "../common" }
 clap = { git = "https://github.com/clap-rs/clap", features = ["cargo", "derive", "env", "wrap_help"] }
-futures = "0.3.18"
+futures = "0.3.19"
 getset = "0.1.2"
 log = { version = "0.4.14", features = ["serde", "std"] }
 serde = { version = "1.0.132", features = ["derive"] }
