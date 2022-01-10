@@ -24,7 +24,7 @@ tokio-util = { version = "0.6.9", features = ["compat"] }
 nix = "0.23.1"
 libc = "0.2.112"
 memchr = "2.4.1"
-tempfile = "3.2.0"
+tempfile = "3.3.0"
 sendfd = { version = "0.4.0", features = ["tokio"] }
 prctl = "1.0.0"
 strum = { version = "0.23.0", features = ["derive"] }
