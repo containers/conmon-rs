@@ -1,4 +1,4 @@
-use crate::{console::Console, iostreams::IOStreams, Server};
+use crate::{child::Child, console::Console, iostreams::IOStreams, Server};
 use anyhow::Context;
 use capnp::{capability::Promise, Error};
 use capnp_rpc::pry;
@@ -45,9 +45,7 @@ impl conmon::Server for Server {
         };
 
         let pidfile = pry!(pidfile_from_params(&params));
-
         let args = pry_err!(self.generate_runtime_args(&params, &maybe_console, &pidfile));
-
         let child_reaper = Arc::clone(self.reaper());
         let status = pry_err!(child_reaper.create_child(self.config().runtime(), args));
 
@@ -61,8 +59,11 @@ impl conmon::Server for Server {
 
         let pid = pry_err!(pry!(fs::read_to_string(pidfile)).parse::<i32>());
         let exit_paths = pry!(path_vec_from_text_list(pry!(req.get_exit_paths())));
+        let child = Child::new(id, pid, exit_paths);
+        pry_err!(child_reaper.watch_grandchild(&child));
 
-        pry_err!(child_reaper.watch_grandchild(id, pid, exit_paths));
+        // register child with server
+        self.children.insert(child.id.clone(), child);
 
         // TODO FIXME why convert?
         results.get().init_response().set_container_pid(pid as u32);
