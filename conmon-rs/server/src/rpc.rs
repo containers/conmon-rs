@@ -1,4 +1,4 @@
-use crate::{console::Console, Server};
+use crate::{console::Console, iostreams::IOStreams, Server};
 use anyhow::Context;
 use capnp::{capability::Promise, Error};
 use capnp_rpc::pry;
@@ -40,6 +40,7 @@ impl conmon::Server for Server {
         let maybe_console = if req.get_terminal() {
             pry_err!(Console::new()).into()
         } else {
+            pry_err!(pry_err!(IOStreams::new()).start());
             None
         };
 

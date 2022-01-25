@@ -31,6 +31,7 @@ mod config;
 mod console;
 mod cri_logger;
 mod init;
+mod iostreams;
 mod rpc;
 
 #[derive(Debug, Default, Getters, MutGetters)]
