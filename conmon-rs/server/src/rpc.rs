@@ -79,10 +79,5 @@ fn pidfile_from_params(params: &conmon::CreateContainerParams) -> capnp::Result<
 }
 
 fn path_vec_from_text_list(tl: capnp::text_list::Reader) -> Result<Vec<PathBuf>, capnp::Error> {
-    let mut v: Vec<PathBuf> = vec![];
-    for t in tl {
-        let t_str = t?.to_string();
-        v.push(PathBuf::from(t_str));
-    }
-    Ok(v)
+    tl.iter().map(|r| r.map(PathBuf::from)).collect()
 }
