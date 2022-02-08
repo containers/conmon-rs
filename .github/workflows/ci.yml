@@ -32,6 +32,25 @@ jobs:
           components: rustfmt
       - run: cargo build
 
+  release-static:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Setup Cache
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-static-${{ hashFiles('**/Cargo.lock') }}
+      - run: make release-static
+      - uses: actions/upload-artifact@v2
+        with:
+          name: conmon
+          path: target/x86_64-unknown-linux-musl/release/conmon-server
+
   doc:
     runs-on: ubuntu-latest
     steps:
