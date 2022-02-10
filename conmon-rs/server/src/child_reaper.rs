@@ -1,5 +1,6 @@
 //! Child process reaping and management.
 
+use crate::child::Child;
 use anyhow::{bail, format_err, Result};
 use getset::Getters;
 use log::{debug, error};
@@ -82,14 +83,14 @@ impl ChildReaper {
             .map_err(|e| format_err!("wait for child process: {}", e))
     }
 
-    pub fn watch_grandchild(&self, id: String, pid: i32, exit_paths: Vec<PathBuf>) -> Result<()> {
+    pub fn watch_grandchild(&self, child: &Child) -> Result<()> {
         let locked_grandchildren = Arc::clone(&self.grandchildren);
         let mut map = locked_grandchildren
             .lock()
             .map_err(|e| format_err!("lock grandchildren: {}", e))?;
 
-        let reapable_grandchild = ReapableChild { id, exit_paths };
-        if let Some(old) = map.insert(pid, reapable_grandchild) {
+        let reapable_grandchild = ReapableChild::from_child(child);
+        if let Some(old) = map.insert(child.pid, reapable_grandchild) {
             bail!("Repeat PID for container {} found", old.id);
         }
         Ok(())
@@ -151,6 +152,15 @@ pub struct ReapableChild {
     id: String,
     #[getset(get)]
     exit_paths: Vec<PathBuf>,
+}
+
+impl ReapableChild {
+    pub fn from_child(child: &Child) -> Self {
+        Self {
+            id: child.id.clone(),
+            exit_paths: child.exit_paths.clone(),
+        }
+    }
 }
 
 fn write_to_exit_paths(code: i32, paths: Vec<PathBuf>) -> Result<()> {

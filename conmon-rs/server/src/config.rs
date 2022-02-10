@@ -86,6 +86,15 @@ pub struct Config {
     )]
     /// Path of the listening socket for the server.
     socket: PathBuf,
+
+    #[get = "pub"]
+    #[clap(
+        env(concat!(prefix!(), "SKIP_FORK")),
+        long("skip-fork"),
+        value_name("SKIP_FORK")
+    )]
+    /// Do not fork if true
+    skip_fork: bool,
 }
 
 #[derive(

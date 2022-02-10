@@ -14,7 +14,7 @@ use nix::{
     sys::signal::Signal,
     unistd::{fork, ForkResult},
 };
-use std::{fs::File, io::Write, path::Path, sync::Arc};
+use std::{collections::HashMap, fs::File, io::Write, path::Path, sync::Arc};
 use tokio::{
     fs,
     net::UnixListener,
@@ -26,6 +26,7 @@ use tokio::{
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use twoparty::VatNetwork;
 
+mod child;
 mod child_reaper;
 mod config;
 mod console;
@@ -42,6 +43,9 @@ pub struct Server {
 
     #[getset(get, get_mut)]
     reaper: Arc<child_reaper::ChildReaper>,
+
+    #[getset(get, get_mut)]
+    children: HashMap<String, child::Child>,
 }
 
 impl Server {
@@ -62,15 +66,17 @@ impl Server {
         // We also have to treat the parent as the child (as described in [1]) to ensure we don't
         // interrupt the child's execution.
         // 1: https://docs.rs/nix/0.23.0/nix/unistd/fn.fork.html#safety
-        match unsafe { fork()? } {
-            ForkResult::Parent { child, .. } => {
-                if let Some(path) = &self.config().conmon_pidfile() {
-                    let child_str = format!("{}", child);
-                    File::create(path)?.write_all(child_str.as_bytes())?;
+        if !self.config().skip_fork() {
+            match unsafe { fork()? } {
+                ForkResult::Parent { child, .. } => {
+                    if let Some(path) = &self.config().conmon_pidfile() {
+                        let child_str = format!("{}", child);
+                        File::create(path)?.write_all(child_str.as_bytes())?;
+                    }
+                    unsafe { _exit(0) };
                 }
-                unsafe { _exit(0) };
+                ForkResult::Child => (),
             }
-            ForkResult::Child => (),
         }
 
         // now that we've forked, set self to childreaper
@@ -206,7 +212,7 @@ impl Server {
             args.push(format!("--root={}", rr.display()));
         }
 
-        args.extend(vec![
+        args.extend([
             "create".to_string(),
             "--bundle".to_string(),
             bundle_path,
