@@ -17,7 +17,7 @@ macro_rules! prefix {
 #[derive(CopyGetters, Debug, Deserialize, Eq, Getters, Parser, PartialEq, Serialize, Setters)]
 #[serde(rename_all = "kebab-case")]
 #[clap(
-    after_help("More info at: https://github.com/containers/conmon"),
+    after_help("More info at: https://github.com/containers/conmon-rs"),
     version(crate_version!()),
 )]
 
