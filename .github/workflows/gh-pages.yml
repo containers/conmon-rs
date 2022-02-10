@@ -12,7 +12,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v2
       - run: .github/install-deps
-      - name: Select Nighly Toolchain
+      - name: Select Nightly Toolchain
         uses: actions-rs/toolchain@v1
         with:
           toolchain: nightly

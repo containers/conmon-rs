@@ -14,7 +14,7 @@ use nix::{
     sys::signal::Signal,
     unistd::{fork, ForkResult},
 };
-use std::{collections::HashMap, fs::File, io::Write, path::Path, sync::Arc};
+use std::{collections::HashMap, fs::File, io::Write, path::Path, process, sync::Arc};
 use tokio::{
     fs,
     net::UnixListener,
@@ -52,6 +52,12 @@ impl Server {
     /// Create a new Server instance.
     pub fn new() -> Result<Self> {
         let server = Self::default();
+
+        if server.config().version() {
+            server.config().print_version();
+            process::exit(0);
+        }
+
         server.init_logging().context("set log verbosity")?;
         server.config().validate().context("validate config")?;
 

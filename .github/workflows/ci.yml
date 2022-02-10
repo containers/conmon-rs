@@ -7,7 +7,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   GO_VERSION: '1.17'
-  ACTION_MSRV_TOOLCHAIN: 1.54.0
+  ACTION_MSRV_TOOLCHAIN: 1.58.1
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,7 +23,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
-      - name: Select Nighly Toolchain
+      - name: Select Toolchain
         uses: actions-rs/toolchain@v1
         with:
           toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN']  }}
@@ -46,6 +46,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-static-${{ hashFiles('**/Cargo.lock') }}
       - run: make release-static
+      - run: target/x86_64-unknown-linux-musl/release/conmon-server -v
       - uses: actions/upload-artifact@v2
         with:
           name: conmon
@@ -65,7 +66,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
-      - name: Select Nighly Toolchain
+      - name: Select Toolchain
         uses: actions-rs/toolchain@v1
         with:
           toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN']  }}
@@ -89,7 +90,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
-      - name: Select Nighly Toolchain
+      - name: Select Toolchain
         uses: actions-rs/toolchain@v1
         with:
           toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN']  }}
@@ -104,7 +105,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v2
-      - name: Select Nighly Toolchain
+      - name: Select Toolchain
         uses: actions-rs/toolchain@v1
         with:
           toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN']  }}
@@ -120,7 +121,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v2
       - run: .github/install-deps
-      - name: Select Nighly Toolchain
+      - name: Select Nightly Toolchain
         uses: actions-rs/toolchain@v1
         with:
           toolchain: nightly
@@ -169,7 +170,7 @@ jobs:
             /tmp/conmon-test-images
           key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/files_test.go') }}
       - run: .github/install-deps
-      - name: Select Toolchain
+      - name: Select Nightly Toolchain
         uses: actions-rs/toolchain@v1
         with:
           toolchain: nightly
