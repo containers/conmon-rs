@@ -29,6 +29,10 @@ sendfd = { version = "0.4.1", features = ["tokio"] }
 prctl = "1.0.0"
 strum = { version = "0.23.0", features = ["derive"] }
 systemd-journal-logger = "0.5.0"
+shadow-rs = "0.8.1"
+
+[build-dependencies]
+shadow-rs = "0.8.1"
 
 [dev-dependencies]
 mockall = "0.11.0"

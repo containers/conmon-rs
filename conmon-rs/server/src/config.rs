@@ -1,12 +1,14 @@
 //! Configuration related structures
 use anyhow::{bail, Result};
-use clap::{crate_version, Parser};
+use clap::{AppSettings, Parser};
 use getset::{CopyGetters, Getters, Setters};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::{env, path::PathBuf};
+use shadow_rs::shadow;
+use std::{fs, path::PathBuf};
 use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
+
+shadow!(build);
 
 macro_rules! prefix {
     () => {
@@ -18,11 +20,16 @@ macro_rules! prefix {
 #[serde(rename_all = "kebab-case")]
 #[clap(
     after_help("More info at: https://github.com/containers/conmon-rs"),
-    version(crate_version!()),
+    global_setting(AppSettings::NoAutoVersion)
 )]
 
 /// An OCI container runtime monitor.
 pub struct Config {
+    #[get_copy = "pub"]
+    #[clap(long("version"), short('v'))]
+    /// Show version information.
+    version: bool,
+
     #[get_copy = "pub"]
     #[clap(
         default_value("info"),
@@ -59,6 +66,7 @@ pub struct Config {
 
     #[get = "pub"]
     #[clap(
+        default_value_if("version", None, Some("")),
         env(concat!(prefix!(), "RUNTIME")),
         long("runtime"),
         short('r'),
@@ -149,5 +157,21 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    /// Show more verbose version information and exit the program.
+    pub fn print_version(&self) {
+        println!("version: {}", build::PKG_VERSION);
+        println!(
+            "tag: {}",
+            if build::TAG.is_empty() {
+                "none"
+            } else {
+                build::TAG
+            }
+        );
+        println!("commit: {}", build::COMMIT_HASH);
+        println!("build: {}", build::BUILD_TIME);
+        println!("{}", build::RUST_VERSION);
     }
 }
