@@ -244,31 +244,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "conmon-client"
-version = "0.1.0"
-dependencies = [
- "async-io",
- "async-net",
- "capnp",
- "capnp-rpc",
- "conmon-common",
- "futures",
- "log",
- "serde",
- "tokio",
-]
-
-[[package]]
-name = "conmon-common"
-version = "0.1.0"
-dependencies = [
- "capnp",
- "capnpc",
-]
-
-[[package]]
-name = "conmon-server"
-version = "0.1.0"
+name = "conmon"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "capnp",
@@ -293,6 +270,29 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "conmon-client"
+version = "0.1.0"
+dependencies = [
+ "async-io",
+ "async-net",
+ "capnp",
+ "capnp-rpc",
+ "conmon-common",
+ "futures",
+ "log",
+ "serde",
+ "tokio",
+]
+
+[[package]]
+name = "conmon-common"
+version = "0.1.0"
+dependencies = [
+ "capnp",
+ "capnpc",
 ]
 
 [[package]]
@@ -1099,7 +1099,7 @@ dependencies = [
  "atty",
  "colored",
  "log",
- "time 0.3.6",
+ "time 0.3.7",
  "winapi",
 ]
 
@@ -1255,9 +1255,9 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.6"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8d54b9298e05179c335de2b9645d061255bcd5155f843b3e328d2cfe0a5b413"
+checksum = "004cbc98f30fa233c61a38bc77e96a9106e65c88f2d3bef182ae952027e5753d"
 dependencies = [
  "itoa",
  "libc",

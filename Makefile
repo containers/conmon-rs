@@ -1,7 +1,7 @@
 MAKEFILE_PATH := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 RUNTIME_PATH ?= "/usr/bin/runc"
 PROTO_PATH ?= "conmon-rs/common/proto"
-BINARY := conmon-server
+BINARY := conmon
 
 default:
 	cargo build

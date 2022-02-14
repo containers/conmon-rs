@@ -46,11 +46,11 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-static-${{ hashFiles('**/Cargo.lock') }}
       - run: make release-static
-      - run: target/x86_64-unknown-linux-musl/release/conmon-server -v
+      - run: target/x86_64-unknown-linux-musl/release/conmon -v
       - uses: actions/upload-artifact@v2
         with:
           name: conmon
-          path: target/x86_64-unknown-linux-musl/release/conmon-server
+          path: target/x86_64-unknown-linux-musl/release/conmon
 
   doc:
     runs-on: ubuntu-latest

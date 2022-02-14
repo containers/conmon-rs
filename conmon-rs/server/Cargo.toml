@@ -1,10 +1,10 @@
 [package]
-name = "conmon-server"
-version = "0.1.0"
+name = "conmon"
+version = "3.0.0-dev"
 edition = "2018"
 
 [[bin]]
-name = "conmon-server"
+name = "conmon"
 path = "src/main.rs"
 
 [dependencies]
