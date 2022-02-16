@@ -1,6 +1,6 @@
 //! Configuration related structures
 use anyhow::{bail, Result};
-use clap::{AppSettings, Parser};
+use clap::{crate_name, AppSettings, Parser};
 use getset::{CopyGetters, Getters, Setters};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
@@ -161,7 +161,7 @@ impl Config {
 
     /// Show more verbose version information and exit the program.
     pub fn print_version(&self) {
-        println!("version: {}", build::PKG_VERSION);
+        println!("{} version: {}", crate_name!(), build::PKG_VERSION);
         println!(
             "tag: {}",
             if build::TAG.is_empty() {
