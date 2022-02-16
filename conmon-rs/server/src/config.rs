@@ -1,14 +1,11 @@
 //! Configuration related structures
 use anyhow::{bail, Result};
-use clap::{crate_name, AppSettings, Parser};
+use clap::{AppSettings, Parser};
 use getset::{CopyGetters, Getters, Setters};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
-use shadow_rs::shadow;
 use std::{fs, path::PathBuf};
 use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
-
-shadow!(build);
 
 macro_rules! prefix {
     () => {
@@ -157,21 +154,5 @@ impl Config {
         }
 
         Ok(())
-    }
-
-    /// Show more verbose version information and exit the program.
-    pub fn print_version(&self) {
-        println!("{} version: {}", crate_name!(), build::PKG_VERSION);
-        println!(
-            "tag: {}",
-            if build::TAG.is_empty() {
-                "none"
-            } else {
-                build::TAG
-            }
-        );
-        println!("commit: {}", build::COMMIT_HASH);
-        println!("build: {}", build::BUILD_TIME);
-        println!("{}", build::RUST_VERSION);
     }
 }

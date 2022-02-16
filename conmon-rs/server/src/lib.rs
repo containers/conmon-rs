@@ -26,6 +26,8 @@ use tokio::{
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use twoparty::VatNetwork;
 
+pub use version::Version;
+
 mod child;
 mod child_reaper;
 mod config;
@@ -34,6 +36,7 @@ mod cri_logger;
 mod init;
 mod iostreams;
 mod rpc;
+mod version;
 
 #[derive(Debug, Default, Getters, MutGetters)]
 pub struct Server {
@@ -54,7 +57,7 @@ impl Server {
         let server = Self::default();
 
         if server.config().version() {
-            server.config().print_version();
+            Version::new().print();
             process::exit(0);
         }
 
