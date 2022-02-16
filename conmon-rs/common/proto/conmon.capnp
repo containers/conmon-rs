@@ -3,6 +3,10 @@
 interface Conmon {
     struct VersionResponse {
         version @0 :Text;
+        tag @1: Text;
+        commit @2: Text;
+        buildDate @3: Text;
+        rustVersion @4: Text;
     }
 
     version @0 () -> (response: VersionResponse);

@@ -1,13 +1,10 @@
-use crate::{child::Child, console::Console, iostreams::IOStreams, Server};
+use crate::{child::Child, console::Console, iostreams::IOStreams, version::Version, Server};
 use anyhow::Context;
 use capnp::{capability::Promise, Error};
 use capnp_rpc::pry;
-use clap::crate_version;
 use conmon_common::conmon_capnp::conmon;
 use log::debug;
 use std::{fs, path::PathBuf, sync::Arc};
-
-const VERSION: &str = crate_version!();
 
 macro_rules! pry_err {
     ($x:expr) => {
@@ -21,8 +18,14 @@ impl conmon::Server for Server {
         _: conmon::VersionParams,
         mut results: conmon::VersionResults,
     ) -> Promise<(), capnp::Error> {
-        debug!("Got a request");
-        results.get().init_response().set_version(VERSION);
+        debug!("Got a version request");
+        let mut response = results.get().init_response();
+        let version = Version::new();
+        response.set_version(version.version());
+        response.set_tag(version.tag());
+        response.set_commit(version.commit());
+        response.set_build_date(version.build_date());
+        response.set_rust_version(version.rust_version());
         Promise::ok(())
     }
 
