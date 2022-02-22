@@ -69,7 +69,7 @@ impl ChildReaper {
         let cleanup_grandchildren = locked_grandchildren.clone();
         let pid = child.pid;
         tokio::task::spawn(async move {
-            killed_channel.await.expect("no error on channel");
+            killed_channel.await.expect("error on channel");
             if let Err(e) = Self::forget_grandchild(&cleanup_grandchildren, pid) {
                 error!("error forgetting grandchild {}", e);
             }
@@ -129,6 +129,8 @@ impl ReapableChild {
                     }
                 }
                 Err(err) => {
+                    // TODO perhaps writing to the exit file anyway?
+                    // TODO maybe retry the waitpid?
                     if err != nix::errno::Errno::ECHILD {
                         error!("caught error in reading for sigchld {}", err);
                     }

@@ -166,6 +166,68 @@ func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainer
 	return response.ContainerPid(), nil
 }
 
+type ExecContainerResult struct {
+	ExitCode int32
+	Stdout   string
+	Stderr   string
+}
+
+func (c *ConmonClient) ExecSyncContainer(ctx context.Context, id string, command []string, timeout int32) (*ExecContainerResult, error) {
+	conn, err := c.newRPCConn()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
+	future, free := client.ExecSyncContainer(ctx, func(p proto.Conmon_execSyncContainer_Params) error {
+		req, err := p.NewRequest()
+		if err != nil {
+			return err
+		}
+		if err := req.SetId(id); err != nil {
+			return err
+		}
+		req.SetTimeout(timeout)
+		if err := stringSliceToTextList(command, req.NewCommand); err != nil {
+			return err
+		}
+		if err := p.SetRequest(req); err != nil {
+			return err
+		}
+		return nil
+	})
+	defer free()
+
+	result, err := future.Struct()
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := result.Response()
+	if err != nil {
+		return nil, err
+	}
+
+	stdout, err := resp.Stdout()
+	if err != nil {
+		return nil, err
+	}
+
+	stderr, err := resp.Stderr()
+	if err != nil {
+		return nil, err
+	}
+
+	execContainerResult := &ExecContainerResult{
+		ExitCode: resp.ExitCode(),
+		Stdout:   stdout,
+		Stderr:   stderr,
+	}
+
+	return execContainerResult, nil
+}
+
 func stringSliceToTextList(src []string, newFunc func(int32) (capnp.TextList, error)) error {
 	l := int32(len(src))
 	if l == 0 {
@@ -207,7 +269,7 @@ func (c *ConmonServerConfig) ToArgs() (string, []string, error) {
 		entrypoint = path
 	}
 	if c.Runtime == "" {
-		return "", args, errors.New("Runtime must be specified")
+		return "", args, errors.New("runtime must be specified")
 	}
 	args = append(args, "--runtime", c.Runtime)
 

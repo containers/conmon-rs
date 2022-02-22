@@ -48,7 +48,7 @@ var _ = Describe("ConmonClient", func() {
 	)
 
 	var sut *client.ConmonClient
-	createRuntimeConfig := func(terminal bool) {
+	createRuntimeConfigWithProcessArgs := func(terminal bool, processArgs []string) {
 		tmpDir = MustTempDir("conmon-client")
 		pidFilePath = MustFileInTempDir(tmpDir, "pidfile")
 		socketPath = MustFileInTempDir(tmpDir, "socket")
@@ -69,8 +69,12 @@ var _ = Describe("ConmonClient", func() {
 		Expect(os.Link(busyboxDest, filepath.Join(tmpRootfs, "busybox"))).To(BeNil())
 
 		// Finally, create config.json.
-		Expect(generateRuntimeConfig(tmpDir, tmpRootfs, terminal)).To(BeNil())
+		Expect(generateRuntimeConfigWithProcessArgs(tmpDir, tmpRootfs, terminal, processArgs)).To(BeNil())
 	}
+	createRuntimeConfig := func(terminal bool) {
+		createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "ls"})
+	}
+
 	JustAfterEach(func() {
 		if sut != nil {
 			pid := sut.PID()
@@ -177,6 +181,106 @@ var _ = Describe("ConmonClient", func() {
 				}, time.Second*5).Should(BeNil())
 			})
 		}
+	})
+
+	Describe("ExecSyncContainer", func() {
+		It("should succeeed with stdout", func() {
+			terminal := false
+			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
+
+			sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
+			Expect(WaitUntilServerUp(sut)).To(BeNil())
+			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+				ID:         ctrID,
+				BundlePath: tmpDir,
+				Terminal:   terminal,
+			})
+			Expect(err).To(BeNil())
+			Expect(pid).NotTo(Equal(0))
+			Eventually(func() error {
+				return rr.RunCommandCheckOutput(ctrID, "list")
+			}, time.Second*5).Should(BeNil())
+
+			// Start the container
+			Expect(rr.RunCommand("start", ctrID)).To(BeNil())
+
+			// Wait for container to be running
+			Eventually(func() error {
+				return rr.RunCommandCheckOutput("running", "list")
+			}, time.Second*10).Should(BeNil())
+
+			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "echo", "hello", "world"}, -1)
+			Expect(err).To(BeNil())
+			Expect(result.ExitCode).To(Equal(int32(0)))
+			Expect(result.Stdout, "hello world")
+			Expect(result.Stderr, "")
+		})
+
+		It("should succeeed with stderr", func() {
+			terminal := false
+			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
+
+			sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
+			Expect(WaitUntilServerUp(sut)).To(BeNil())
+			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+				ID:         ctrID,
+				BundlePath: tmpDir,
+				Terminal:   terminal,
+			})
+			Expect(err).To(BeNil())
+			Expect(pid).NotTo(Equal(0))
+			Eventually(func() error {
+				return rr.RunCommandCheckOutput(ctrID, "list")
+			}, time.Second*5).Should(BeNil())
+
+			// Start the container
+			Expect(rr.RunCommand("start", ctrID)).To(BeNil())
+
+			// Wait for container to be running
+			Eventually(func() error {
+				return rr.RunCommandCheckOutput("running", "list")
+			}, time.Second*10).Should(BeNil())
+
+			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "echo", "hello", "world", ">>", "/dev/stderr"}, -1)
+			Expect(err).To(BeNil())
+			Expect(result.ExitCode).To(Equal(int32(0)))
+			Expect(result.Stdout, "")
+			Expect(result.Stderr, "hello world")
+		})
+
+		It("should timeout", func() {
+			terminal := false
+			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
+
+			sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
+			Expect(WaitUntilServerUp(sut)).To(BeNil())
+			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+				ID:         ctrID,
+				BundlePath: tmpDir,
+				Terminal:   terminal,
+			})
+			Expect(err).To(BeNil())
+			Expect(pid).NotTo(Equal(0))
+			Eventually(func() error {
+				return rr.RunCommandCheckOutput(ctrID, "list")
+			}, time.Second*5).Should(BeNil())
+
+			// Start the container
+			Expect(rr.RunCommand("start", ctrID)).To(BeNil())
+
+			// Wait for container to be running
+			Eventually(func() error {
+				return rr.RunCommandCheckOutput("running", "list")
+			}, time.Second*10).Should(BeNil())
+
+			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "sleep", "10"}, 3)
+
+			Expect(err).To(BeNil())
+			Expect(result.ExitCode).To(Equal(int32(0)))
+			Expect(result.Stdout, "")
+			Expect(result.Stderr, "")
+
+		})
 	})
 })
 
@@ -302,7 +406,7 @@ type RuntimeRunner struct {
 	runtimeRoot string
 }
 
-func generateRuntimeConfig(bundlePath, rootfs string, terminal bool) error {
+func generateRuntimeConfigWithProcessArgs(bundlePath, rootfs string, terminal bool, processArgs []string) error {
 	configPath := filepath.Join(bundlePath, "config.json")
 	g, err := generate.New("linux")
 	if err != nil {
@@ -310,7 +414,7 @@ func generateRuntimeConfig(bundlePath, rootfs string, terminal bool) error {
 	}
 	g.SetProcessCwd("/")
 	g.SetProcessTerminal(terminal)
-	g.SetProcessArgs([]string{"/busybox", "ls"})
+	g.SetProcessArgs(processArgs)
 	g.SetRootPath(rootfs)
 	if unshare.IsRootless() {
 		specconv.ToRootless(g.Config)
