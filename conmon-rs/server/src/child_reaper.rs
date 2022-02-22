@@ -1,169 +1,148 @@
 //! Child process reaping and management.
-
 use crate::child::Child;
-use anyhow::{bail, format_err, Result};
-use getset::Getters;
+use crate::console::Console;
+use anyhow::{format_err, Context, Result};
 use log::{debug, error};
+use multimap::MultiMap;
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::Pid;
 use std::path::PathBuf;
-use std::thread;
-use std::{collections::HashMap, fs::File, io::Write, sync::Arc, sync::Mutex};
+use std::sync::Mutex;
+use std::{fs::File, io::Write, sync::Arc};
+
+#[derive(Debug, Default)]
+pub struct ChildReaper {
+    grandchildren: Arc<Mutex<MultiMap<String, ReapableChild>>>,
+}
 
 impl ChildReaper {
-    pub fn init_reaper(&self) -> Result<()> {
-        let grandchildren = Arc::clone(&self.grandchildren);
-        let wait_lock = Arc::clone(&self.wait_lock);
-        thread::spawn(move || {
-            loop {
-                // To prevent an error: "No child processes (os error 10)" when spawning new runtime processes,
-                // we don't call waitpid until the runtime process has finished
-                // Inspired by
-                // https://github.com/kata-containers/kata-containers/blob/828a304883a4/src/agent/src/signal.rs#L27
-                let wait_status = {
-                    let _lock = wait_lock.lock();
-                    waitpid(Pid::from_raw(-1), None)
-                };
-
-                match wait_status {
-                    Ok(status) => {
-                        if let WaitStatus::Exited(grandchild_pid, exit_status) = status {
-                            let grandchildren = Arc::clone(&grandchildren);
-                            thread::spawn(move || {
-                                if let Err(e) = Self::forget_grandchild(
-                                    grandchildren,
-                                    grandchild_pid,
-                                    exit_status,
-                                ) {
-                                    error!(
-                                        "Failed to reap grandchild for pid {}: {}",
-                                        grandchild_pid, e
-                                    );
-                                }
-                            });
-                        }
-                    }
-
-                    Err(err) => {
-                        // TODO FIXME this busy loops right now while there are no grandchildren.
-                        // There should be a broadcast mechanism so we only run this loop
-                        // while there are grandchildren
-                        if err != nix::errno::Errno::ECHILD {
-                            error!("caught error in reading for sigchld {}", err);
-                        }
-                    }
-                }
-            }
-        });
-        Ok(())
+    pub fn get(&self, id: String) -> Result<ReapableChild> {
+        let locked_grandchildren = Arc::clone(&self.grandchildren);
+        let lock = locked_grandchildren.lock().unwrap();
+        let r = lock.get(&id).context("")?.clone();
+        drop(lock);
+        Ok(r)
     }
 
-    pub fn create_child<P, I, S>(&self, cmd: P, args: I) -> Result<std::process::ExitStatus>
+    pub async fn create_child<P, I, S>(
+        &self,
+        cmd: P,
+        args: I,
+        console: Option<Console>,
+        pidfile: PathBuf,
+    ) -> Result<i32>
     where
         P: AsRef<std::ffi::OsStr>,
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
-        let mut cmd = std::process::Command::new(cmd);
+        let mut cmd = tokio::process::Command::new(cmd);
         cmd.args(args);
-
-        // To prevent an error: "No child processes (os error 10)",
-        // we prevent our reaper thread from calling waitpid until this child has completed.
-        // Inspired by
-        // https://github.com/kata-containers/kata-containers/blob/828a304883a4/src/agent/src/signal.rs#L27
-        let wait_lock = Arc::clone(&self.wait_lock);
-        let _lock = wait_lock
-            .lock()
-            .map_err(|e| format_err!("lock waitlock: {}", e))?;
-
         cmd.spawn()
-            .map_err(|e| format_err!("spawn child process: {}", e))?
+            .context("spawn child process: {}")?
             .wait()
-            .map_err(|e| format_err!("wait for child process: {}", e))
+            .await?;
+
+        if let Some(console) = console {
+            let _ = console
+                .wait_connected()
+                .context("wait for console socket connection");
+        }
+
+        let grandchild_pid = tokio::fs::read_to_string(pidfile)
+            .await?
+            .parse::<i32>()
+            .context("grandchild pid parse error")?;
+
+        Ok(grandchild_pid)
     }
 
-    pub fn watch_grandchild(&self, child: &Child) -> Result<()> {
+    pub fn watch_grandchild(&self, child: Child) -> Result<()> {
         let locked_grandchildren = Arc::clone(&self.grandchildren);
         let mut map = locked_grandchildren
             .lock()
             .map_err(|e| format_err!("lock grandchildren: {}", e))?;
-
-        let reapable_grandchild = ReapableChild::from_child(child);
-        if let Some(old) = map.insert(child.pid, reapable_grandchild) {
-            bail!("Repeat PID for container {} found", old.id);
-        }
+        let reapable_grandchild = ReapableChild::from_child(&child);
+        let killed_channel = reapable_grandchild.watch();
+        map.insert(child.id, reapable_grandchild);
+        let cleanup_grandchildren = locked_grandchildren.clone();
+        let pid = child.pid;
+        tokio::task::spawn(async move {
+            killed_channel.await.expect("no error on channel");
+            if let Err(e) = Self::forget_grandchild(&cleanup_grandchildren, pid) {
+                error!("error forgetting grandchild {}", e);
+            }
+        });
         Ok(())
     }
 
     fn forget_grandchild(
-        locked_map: Arc<Mutex<HashMap<i32, ReapableChild>>>,
-        grandchild_pid: Pid,
-        exit_status: i32,
+        locked_grandchildren: &Arc<Mutex<MultiMap<String, ReapableChild>>>,
+        grandchild_pid: i32,
     ) -> Result<()> {
-        debug!("caught signal for pid {}", grandchild_pid);
-
-        let mut map = locked_map
+        let mut map = locked_grandchildren
             .lock()
             .map_err(|e| format_err!("lock grandchildren: {}", e))?;
-        let grandchild = match map.remove(&(i32::from(grandchild_pid))) {
-            Some(c) => c,
-            None => {
-                // If we have an unregistered PID, then there's nothing to do.
-                return Ok(());
-            }
-        };
-
-        debug!(
-            "PID {} associated with container {} exited with {}",
-            grandchild_pid, grandchild.id, exit_status
-        );
-        if let Err(e) = write_to_exit_paths(exit_status, grandchild.exit_paths) {
-            error!(
-                "failed to write to exit paths process for id {} :{}",
-                grandchild.id, e
-            );
-        }
+        map.retain(|_, v| v.pid == grandchild_pid);
         Ok(())
     }
 
     pub fn kill_grandchildren(&self, s: Signal) -> Result<()> {
-        for (pid, kc) in Arc::clone(&self.grandchildren)
+        for (_, grandchild) in Arc::clone(&self.grandchildren)
             .lock()
             .map_err(|e| format_err!("lock grandchildren: {}", e))?
             .iter()
         {
-            debug!("killing pid {} for container {}", pid, kc.id);
-            kill(Pid::from_raw(*pid), s)?;
+            debug!("killing pid {}", grandchild.pid);
+            kill(Pid::from_raw(grandchild.pid), s)?;
         }
         Ok(())
     }
 }
 
-#[derive(Debug, Default)]
-pub struct ChildReaper {
-    grandchildren: Arc<Mutex<HashMap<i32, ReapableChild>>>,
-    wait_lock: Arc<Mutex<bool>>,
-}
-
-#[derive(Debug, Getters)]
+#[derive(Default, Debug, Clone)]
 pub struct ReapableChild {
-    #[getset(get)]
-    id: String,
-    #[getset(get)]
-    exit_paths: Vec<PathBuf>,
+    pub exit_paths: Vec<PathBuf>,
+    pub pid: i32,
 }
 
 impl ReapableChild {
     pub fn from_child(child: &Child) -> Self {
         Self {
-            id: child.id.clone(),
+            pid: child.pid,
             exit_paths: child.exit_paths.clone(),
         }
     }
+
+    fn watch(&self) -> tokio::sync::oneshot::Receiver<()> {
+        let exit_paths = self.exit_paths.clone();
+        let pid = self.pid;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        tokio::task::spawn_blocking(move || {
+            let wait_status = waitpid(Pid::from_raw(pid), None);
+            match wait_status {
+                Ok(status) => {
+                    if let WaitStatus::Exited(_, exit_status) = status {
+                        let _ = write_to_exit_paths(exit_status, &exit_paths);
+                    }
+                }
+                Err(err) => {
+                    if err != nix::errno::Errno::ECHILD {
+                        error!("caught error in reading for sigchld {}", err);
+                    }
+                }
+            };
+            if tx.send(()).is_err() {
+                error!("the receiver dropped the watch")
+            }
+        });
+        rx
+    }
 }
 
-fn write_to_exit_paths(code: i32, paths: Vec<PathBuf>) -> Result<()> {
+fn write_to_exit_paths(code: i32, paths: &[PathBuf]) -> Result<()> {
     let code_str = format!("{}", code);
     for path in paths {
         debug!("writing exit code {} to {}", code, path.display());
