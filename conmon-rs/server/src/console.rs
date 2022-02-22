@@ -63,7 +63,7 @@ impl Console {
     }
 
     /// Generate a the temp file name without creating the file.
-    fn temp_file_name(prefix: &str, suffix: &str) -> Result<PathBuf> {
+    pub fn temp_file_name(prefix: &str, suffix: &str) -> Result<PathBuf> {
         let file = Builder::new()
             .prefix(prefix)
             .suffix(suffix)
@@ -203,7 +203,7 @@ mod tests {
 
         // Write to the slave
         let mut file = unsafe { fs::File::from_raw_fd(res.slave) };
-        file.write(b"test").await?;
+        let _ = file.write(b"test").await?;
 
         Ok(())
     }
