@@ -27,7 +27,7 @@ memchr = "2.4.1"
 tempfile = "3.3.0"
 sendfd = { version = "0.4.1", features = ["tokio"] }
 prctl = "1.0.0"
-strum = { version = "0.23.0", features = ["derive"] }
+strum = { version = "0.24.0", features = ["derive"] }
 systemd-journal-logger = "0.5.0"
 shadow-rs = "0.8.1"
 
