@@ -240,7 +240,7 @@ impl Server {
     fn generate_exec_sync_args(
         &self,
         pidfile: &Path,
-        console: &Option<Console>,
+        console: Option<&Console>,
         params: &conmon::ExecSyncContainerParams,
     ) -> Result<Vec<String>> {
         let req = params.get()?.get_request()?;

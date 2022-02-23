@@ -1,6 +1,5 @@
 //! Child process reaping and management.
-use crate::child::Child;
-use crate::console::Console;
+use crate::{child::Child, console::Console};
 use anyhow::{format_err, Context, Result};
 use log::{debug, error};
 use multimap::MultiMap;
@@ -16,10 +15,16 @@ pub struct ChildReaper {
     grandchildren: Arc<Mutex<MultiMap<String, ReapableChild>>>,
 }
 
+macro_rules! lock {
+    ($x:expr) => {
+        $x.lock().map_err(|e| format_err!("{:#}", e))?
+    };
+}
+
 impl ChildReaper {
     pub fn get(&self, id: String) -> Result<ReapableChild> {
         let locked_grandchildren = Arc::clone(&self.grandchildren);
-        let lock = locked_grandchildren.lock().unwrap();
+        let lock = lock!(locked_grandchildren);
         let r = lock.get(&id).context("")?.clone();
         drop(lock);
         Ok(r)
@@ -60,9 +65,7 @@ impl ChildReaper {
 
     pub fn watch_grandchild(&self, child: Child) -> Result<()> {
         let locked_grandchildren = Arc::clone(&self.grandchildren);
-        let mut map = locked_grandchildren
-            .lock()
-            .map_err(|e| format_err!("lock grandchildren: {}", e))?;
+        let mut map = lock!(locked_grandchildren);
         let reapable_grandchild = ReapableChild::from_child(&child);
         let killed_channel = reapable_grandchild.watch();
         map.insert(child.id, reapable_grandchild);
@@ -81,19 +84,14 @@ impl ChildReaper {
         locked_grandchildren: &Arc<Mutex<MultiMap<String, ReapableChild>>>,
         grandchild_pid: i32,
     ) -> Result<()> {
-        let mut map = locked_grandchildren
-            .lock()
-            .map_err(|e| format_err!("lock grandchildren: {}", e))?;
+        let mut map = lock!(locked_grandchildren);
         map.retain(|_, v| v.pid == grandchild_pid);
         Ok(())
     }
 
     pub fn kill_grandchildren(&self, s: Signal) -> Result<()> {
-        for (_, grandchild) in Arc::clone(&self.grandchildren)
-            .lock()
-            .map_err(|e| format_err!("lock grandchildren: {}", e))?
-            .iter()
-        {
+        let locked_grandchildren = Arc::clone(&self.grandchildren);
+        for (_, grandchild) in lock!(locked_grandchildren).iter() {
             debug!("killing pid {}", grandchild.pid);
             kill(Pid::from_raw(grandchild.pid), s)?;
         }
