@@ -51,7 +51,7 @@ impl conmon::Server for Server {
         let child_reaper = Arc::clone(self.reaper());
         let args = pry_err!(self.generate_runtime_args(&params, &maybe_console, &pidfile));
         let runtime = self.config().runtime().clone();
-        let id = req.get_id().unwrap().to_string();
+        let id = pry_err!(req.get_id()).to_string();
         let exit_paths = pry!(path_vec_from_text_list(pry!(req.get_exit_paths())));
 
         Promise::from_future(async move {
@@ -81,12 +81,10 @@ impl conmon::Server for Server {
         let req = pry!(pry!(params.get()).get_request());
         let id = pry!(req.get_id()).to_string();
         let timeout = req.get_timeout();
-        let pidfile = crate::console::Console::temp_file_name("exec_sync", "pid").unwrap();
+        let pidfile = pry_err!(Console::temp_file_name("exec_sync", "pid"));
 
-        let console = Some(Console::new().unwrap());
-        let args = self
-            .generate_exec_sync_args(&pidfile, &console, &params)
-            .unwrap();
+        let console = Some(pry_err!(Console::new()));
+        let args = pry_err!(self.generate_exec_sync_args(&pidfile, console.as_ref(), &params));
         let runtime = self.config.runtime().clone();
 
         debug!(
