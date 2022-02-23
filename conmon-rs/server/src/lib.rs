@@ -14,7 +14,7 @@ use nix::{
     sys::signal::Signal,
     unistd::{fork, ForkResult},
 };
-use std::{collections::HashMap, fs::File, io::Write, path::Path, process, sync::Arc};
+use std::{fs::File, io::Write, path::Path, process, sync::Arc};
 use tokio::{
     fs,
     net::UnixListener,
@@ -46,9 +46,6 @@ pub struct Server {
 
     #[getset(get, get_mut)]
     reaper: Arc<child_reaper::ChildReaper>,
-
-    #[getset(get, get_mut)]
-    children: HashMap<String, child::Child>,
 }
 
 impl Server {
@@ -93,7 +90,10 @@ impl Server {
             return Err(anyhow::Error::new(std::io::Error::from_raw_os_error(errno)));
         }
         // Use the single threaded runtime to save rss memory.
-        let rt = runtime::Builder::new_current_thread().enable_io().build()?;
+        let rt = runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()?;
         rt.block_on(self.spawn_tasks())?;
         Ok(())
     }
@@ -132,7 +132,6 @@ impl Server {
             socket,
             shutdown_tx,
         ));
-        Arc::clone(self.reaper()).init_reaper()?;
 
         task::spawn_blocking(move || {
             let rt = runtime::Handle::current();
@@ -206,11 +205,11 @@ impl Server {
     }
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
-    fn generate_runtime_args<T: AsRef<Path>>(
+    fn generate_runtime_args(
         &self,
         params: &conmon::CreateContainerParams,
         maybe_console: &Option<Console>,
-        pidfile: T,
+        pidfile: &Path,
     ) -> Result<Vec<String>> {
         let req = params.get()?.get_request()?;
         let id = req.get_id()?.to_string();
@@ -226,7 +225,7 @@ impl Server {
             "--bundle".to_string(),
             bundle_path,
             "--pid-file".to_string(),
-            pidfile.as_ref().display().to_string(),
+            pidfile.display().to_string(),
         ]);
 
         if let Some(console) = maybe_console {
@@ -234,6 +233,38 @@ impl Server {
         }
         args.push(id);
         debug!("Runtime args {:?}", args.join(" "));
+        Ok(args)
+    }
+
+    /// Generate the OCI runtime CLI arguments from the provided parameters.
+    fn generate_exec_sync_args(
+        &self,
+        pidfile: &Path,
+        console: &Option<Console>,
+        params: &conmon::ExecSyncContainerParams,
+    ) -> Result<Vec<String>> {
+        let req = params.get()?.get_request()?;
+        let id = req.get_id()?.to_string();
+        let command = req.get_command()?;
+        let runtime_root = self.config().runtime_root();
+
+        let mut args = vec![];
+        if let Some(rr) = runtime_root {
+            args.push(format!("--root={}", rr.display()));
+        }
+        args.push("exec".to_string());
+        args.push("-d".to_string());
+        if let Some(console) = console {
+            args.push(format!("--console-socket={}", console.path().display()));
+            args.push("--tty".to_string());
+        }
+        args.push(format!("--pid-file={}", pidfile.display()));
+        args.push(id);
+        for value in command.iter() {
+            args.push(value?.to_string());
+        }
+
+        debug!("Exec args {:?}", args.join(" "));
         Ok(args)
     }
 }

@@ -1,10 +1,10 @@
 use crate::{child::Child, console::Console, iostreams::IOStreams, version::Version, Server};
-use anyhow::Context;
 use capnp::{capability::Promise, Error};
 use capnp_rpc::pry;
 use conmon_common::conmon_capnp::conmon;
 use log::debug;
-use std::{fs, path::PathBuf, sync::Arc};
+use std::io::{Error as IOError, ErrorKind};
+use std::{path::PathBuf, sync::Arc};
 
 macro_rules! pry_err {
     ($x:expr) => {
@@ -48,29 +48,84 @@ impl conmon::Server for Server {
         };
 
         let pidfile = pry!(pidfile_from_params(&params));
-        let args = pry_err!(self.generate_runtime_args(&params, &maybe_console, &pidfile));
         let child_reaper = Arc::clone(self.reaper());
-        let status = pry_err!(child_reaper.create_child(self.config().runtime(), args));
-
-        let id = pry!(req.get_id()).to_string();
-        debug!("Status for container ID {} is {}", id, status);
-        if let Some(console) = maybe_console {
-            pry_err!(console
-                .wait_connected()
-                .context("wait for console socket connection"));
-        }
-
-        let pid = pry_err!(pry!(fs::read_to_string(pidfile)).parse::<i32>());
+        let args = pry_err!(self.generate_runtime_args(&params, &maybe_console, &pidfile));
+        let runtime = self.config().runtime().clone();
+        let id = req.get_id().unwrap().to_string();
         let exit_paths = pry!(path_vec_from_text_list(pry!(req.get_exit_paths())));
-        let child = Child::new(id, pid, exit_paths);
-        pry_err!(child_reaper.watch_grandchild(&child));
 
-        // register child with server
-        self.children.insert(child.id.clone(), child);
+        Promise::from_future(async move {
+            let grandchild_pid = child_reaper
+                .create_child(runtime, args, maybe_console, pidfile)
+                .await
+                .map_err(|e| IOError::new(ErrorKind::Other, format!("Error {}", e)))?;
 
-        // TODO FIXME why convert?
-        results.get().init_response().set_container_pid(pid as u32);
-        Promise::ok(())
+            // register grandchild with server
+            let child = Child::new(id, grandchild_pid, exit_paths);
+            let _ = child_reaper.watch_grandchild(child);
+
+            // TODO FIXME why convert?
+            results
+                .get()
+                .init_response()
+                .set_container_pid(grandchild_pid as u32);
+            Ok(())
+        })
+    }
+
+    fn exec_sync_container(
+        &mut self,
+        params: conmon::ExecSyncContainerParams,
+        mut results: conmon::ExecSyncContainerResults,
+    ) -> Promise<(), capnp::Error> {
+        let req = pry!(pry!(params.get()).get_request());
+        let id = pry!(req.get_id()).to_string();
+        let timeout = req.get_timeout();
+        let pidfile = crate::console::Console::temp_file_name("exec_sync", "pid").unwrap();
+
+        let console = Some(Console::new().unwrap());
+        let args = self
+            .generate_exec_sync_args(&pidfile, &console, &params)
+            .unwrap();
+        let runtime = self.config.runtime().clone();
+
+        debug!(
+            "Got exec sync container request for id {} with timeout {} : {}",
+            id,
+            timeout,
+            args.join(" ")
+        );
+
+        let child_reaper = Arc::clone(self.reaper());
+        let child = if let Ok(c) = child_reaper.get(id.clone()) {
+            c
+        } else {
+            let mut resp = results.get().init_response();
+            resp.set_exit_code(-1);
+            return Promise::ok(());
+        };
+
+        Promise::from_future(async move {
+            match child_reaper
+                .create_child(&runtime, &args, console, pidfile)
+                .await
+            {
+                Ok(grandchild_pid) => {
+                    let mut resp = results.get().init_response();
+                    // register grandchild with server
+                    let child = Child::new(id, grandchild_pid, child.exit_paths);
+                    let _ = child_reaper.watch_grandchild(child);
+                    // TODO return the grandchild exit code
+                    // TODO return the stdout and stderr of the child
+                    resp.set_exit_code(0);
+                }
+                Err(_) => {
+                    let mut resp = results.get().init_response();
+                    resp.set_exit_code(-2);
+                }
+            }
+            Ok(())
+        })
     }
 }
 

@@ -47,6 +47,22 @@ func (c Conmon) CreateContainer(ctx context.Context, params func(Conmon_createCo
 	ans, release := c.Client.SendCall(ctx, s)
 	return Conmon_createContainer_Results_Future{Future: ans.Future()}, release
 }
+func (c Conmon) ExecSyncContainer(ctx context.Context, params func(Conmon_execSyncContainer_Params) error) (Conmon_execSyncContainer_Results_Future, capnp.ReleaseFunc) {
+	s := capnp.Send{
+		Method: capnp.Method{
+			InterfaceID:   0xb737e899dd6633f1,
+			MethodID:      2,
+			InterfaceName: "conmon-rs/common/proto/conmon.capnp:Conmon",
+			MethodName:    "execSyncContainer",
+		},
+	}
+	if params != nil {
+		s.ArgsSize = capnp.ObjectSize{DataSize: 0, PointerCount: 1}
+		s.PlaceArgs = func(s capnp.Struct) error { return params(Conmon_execSyncContainer_Params{Struct: s}) }
+	}
+	ans, release := c.Client.SendCall(ctx, s)
+	return Conmon_execSyncContainer_Results_Future{Future: ans.Future()}, release
+}
 
 func (c Conmon) AddRef() Conmon {
 	return Conmon{
@@ -63,6 +79,8 @@ type Conmon_Server interface {
 	Version(context.Context, Conmon_version) error
 
 	CreateContainer(context.Context, Conmon_createContainer) error
+
+	ExecSyncContainer(context.Context, Conmon_execSyncContainer) error
 }
 
 // Conmon_NewServer creates a new Server from an implementation of Conmon_Server.
@@ -81,7 +99,7 @@ func Conmon_ServerToClient(s Conmon_Server, policy *server.Policy) Conmon {
 // This can be used to create a more complicated Server.
 func Conmon_Methods(methods []server.Method, s Conmon_Server) []server.Method {
 	if cap(methods) == 0 {
-		methods = make([]server.Method, 0, 2)
+		methods = make([]server.Method, 0, 3)
 	}
 
 	methods = append(methods, server.Method{
@@ -105,6 +123,18 @@ func Conmon_Methods(methods []server.Method, s Conmon_Server) []server.Method {
 		},
 		Impl: func(ctx context.Context, call *server.Call) error {
 			return s.CreateContainer(ctx, Conmon_createContainer{call})
+		},
+	})
+
+	methods = append(methods, server.Method{
+		Method: capnp.Method{
+			InterfaceID:   0xb737e899dd6633f1,
+			MethodID:      2,
+			InterfaceName: "conmon-rs/common/proto/conmon.capnp:Conmon",
+			MethodName:    "execSyncContainer",
+		},
+		Impl: func(ctx context.Context, call *server.Call) error {
+			return s.ExecSyncContainer(ctx, Conmon_execSyncContainer{call})
 		},
 	})
 
@@ -143,6 +173,23 @@ func (c Conmon_createContainer) Args() Conmon_createContainer_Params {
 func (c Conmon_createContainer) AllocResults() (Conmon_createContainer_Results, error) {
 	r, err := c.Call.AllocResults(capnp.ObjectSize{DataSize: 0, PointerCount: 1})
 	return Conmon_createContainer_Results{Struct: r}, err
+}
+
+// Conmon_execSyncContainer holds the state for a server call to Conmon.execSyncContainer.
+// See server.Call for documentation.
+type Conmon_execSyncContainer struct {
+	*server.Call
+}
+
+// Args returns the call's arguments.
+func (c Conmon_execSyncContainer) Args() Conmon_execSyncContainer_Params {
+	return Conmon_execSyncContainer_Params{Struct: c.Call.Args()}
+}
+
+// AllocResults allocates the results struct.
+func (c Conmon_execSyncContainer) AllocResults() (Conmon_execSyncContainer_Results, error) {
+	r, err := c.Call.AllocResults(capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_execSyncContainer_Results{Struct: r}, err
 }
 
 type Conmon_VersionResponse struct{ capnp.Struct }
@@ -476,6 +523,210 @@ func (p Conmon_CreateContainerResponse_Future) Struct() (Conmon_CreateContainerR
 	return Conmon_CreateContainerResponse{s}, err
 }
 
+type Conmon_ExecSyncContainerRequest struct{ capnp.Struct }
+
+// Conmon_ExecSyncContainerRequest_TypeID is the unique identifier for the type Conmon_ExecSyncContainerRequest.
+const Conmon_ExecSyncContainerRequest_TypeID = 0xf41122f890a371a6
+
+func NewConmon_ExecSyncContainerRequest(s *capnp.Segment) (Conmon_ExecSyncContainerRequest, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2})
+	return Conmon_ExecSyncContainerRequest{st}, err
+}
+
+func NewRootConmon_ExecSyncContainerRequest(s *capnp.Segment) (Conmon_ExecSyncContainerRequest, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2})
+	return Conmon_ExecSyncContainerRequest{st}, err
+}
+
+func ReadRootConmon_ExecSyncContainerRequest(msg *capnp.Message) (Conmon_ExecSyncContainerRequest, error) {
+	root, err := msg.Root()
+	return Conmon_ExecSyncContainerRequest{root.Struct()}, err
+}
+
+func (s Conmon_ExecSyncContainerRequest) String() string {
+	str, _ := text.Marshal(0xf41122f890a371a6, s.Struct)
+	return str
+}
+
+func (s Conmon_ExecSyncContainerRequest) Id() (string, error) {
+	p, err := s.Struct.Ptr(0)
+	return p.Text(), err
+}
+
+func (s Conmon_ExecSyncContainerRequest) HasId() bool {
+	return s.Struct.HasPtr(0)
+}
+
+func (s Conmon_ExecSyncContainerRequest) IdBytes() ([]byte, error) {
+	p, err := s.Struct.Ptr(0)
+	return p.TextBytes(), err
+}
+
+func (s Conmon_ExecSyncContainerRequest) SetId(v string) error {
+	return s.Struct.SetText(0, v)
+}
+
+func (s Conmon_ExecSyncContainerRequest) Timeout() int32 {
+	return int32(s.Struct.Uint32(0))
+}
+
+func (s Conmon_ExecSyncContainerRequest) SetTimeout(v int32) {
+	s.Struct.SetUint32(0, uint32(v))
+}
+
+func (s Conmon_ExecSyncContainerRequest) Command() (capnp.TextList, error) {
+	p, err := s.Struct.Ptr(1)
+	return capnp.TextList{List: p.List()}, err
+}
+
+func (s Conmon_ExecSyncContainerRequest) HasCommand() bool {
+	return s.Struct.HasPtr(1)
+}
+
+func (s Conmon_ExecSyncContainerRequest) SetCommand(v capnp.TextList) error {
+	return s.Struct.SetPtr(1, v.List.ToPtr())
+}
+
+// NewCommand sets the command field to a newly
+// allocated capnp.TextList, preferring placement in s's segment.
+func (s Conmon_ExecSyncContainerRequest) NewCommand(n int32) (capnp.TextList, error) {
+	l, err := capnp.NewTextList(s.Struct.Segment(), n)
+	if err != nil {
+		return capnp.TextList{}, err
+	}
+	err = s.Struct.SetPtr(1, l.List.ToPtr())
+	return l, err
+}
+
+// Conmon_ExecSyncContainerRequest_List is a list of Conmon_ExecSyncContainerRequest.
+type Conmon_ExecSyncContainerRequest_List struct{ capnp.List }
+
+// NewConmon_ExecSyncContainerRequest creates a new list of Conmon_ExecSyncContainerRequest.
+func NewConmon_ExecSyncContainerRequest_List(s *capnp.Segment, sz int32) (Conmon_ExecSyncContainerRequest_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2}, sz)
+	return Conmon_ExecSyncContainerRequest_List{l}, err
+}
+
+func (s Conmon_ExecSyncContainerRequest_List) At(i int) Conmon_ExecSyncContainerRequest {
+	return Conmon_ExecSyncContainerRequest{s.List.Struct(i)}
+}
+
+func (s Conmon_ExecSyncContainerRequest_List) Set(i int, v Conmon_ExecSyncContainerRequest) error {
+	return s.List.SetStruct(i, v.Struct)
+}
+
+func (s Conmon_ExecSyncContainerRequest_List) String() string {
+	str, _ := text.MarshalList(0xf41122f890a371a6, s.List)
+	return str
+}
+
+// Conmon_ExecSyncContainerRequest_Future is a wrapper for a Conmon_ExecSyncContainerRequest promised by a client call.
+type Conmon_ExecSyncContainerRequest_Future struct{ *capnp.Future }
+
+func (p Conmon_ExecSyncContainerRequest_Future) Struct() (Conmon_ExecSyncContainerRequest, error) {
+	s, err := p.Future.Struct()
+	return Conmon_ExecSyncContainerRequest{s}, err
+}
+
+type Conmon_ExecSyncContainerResponse struct{ capnp.Struct }
+
+// Conmon_ExecSyncContainerResponse_TypeID is the unique identifier for the type Conmon_ExecSyncContainerResponse.
+const Conmon_ExecSyncContainerResponse_TypeID = 0xd9d61d1d803c85fc
+
+func NewConmon_ExecSyncContainerResponse(s *capnp.Segment) (Conmon_ExecSyncContainerResponse, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2})
+	return Conmon_ExecSyncContainerResponse{st}, err
+}
+
+func NewRootConmon_ExecSyncContainerResponse(s *capnp.Segment) (Conmon_ExecSyncContainerResponse, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2})
+	return Conmon_ExecSyncContainerResponse{st}, err
+}
+
+func ReadRootConmon_ExecSyncContainerResponse(msg *capnp.Message) (Conmon_ExecSyncContainerResponse, error) {
+	root, err := msg.Root()
+	return Conmon_ExecSyncContainerResponse{root.Struct()}, err
+}
+
+func (s Conmon_ExecSyncContainerResponse) String() string {
+	str, _ := text.Marshal(0xd9d61d1d803c85fc, s.Struct)
+	return str
+}
+
+func (s Conmon_ExecSyncContainerResponse) ExitCode() int32 {
+	return int32(s.Struct.Uint32(0))
+}
+
+func (s Conmon_ExecSyncContainerResponse) SetExitCode(v int32) {
+	s.Struct.SetUint32(0, uint32(v))
+}
+
+func (s Conmon_ExecSyncContainerResponse) Stdout() (string, error) {
+	p, err := s.Struct.Ptr(0)
+	return p.Text(), err
+}
+
+func (s Conmon_ExecSyncContainerResponse) HasStdout() bool {
+	return s.Struct.HasPtr(0)
+}
+
+func (s Conmon_ExecSyncContainerResponse) StdoutBytes() ([]byte, error) {
+	p, err := s.Struct.Ptr(0)
+	return p.TextBytes(), err
+}
+
+func (s Conmon_ExecSyncContainerResponse) SetStdout(v string) error {
+	return s.Struct.SetText(0, v)
+}
+
+func (s Conmon_ExecSyncContainerResponse) Stderr() (string, error) {
+	p, err := s.Struct.Ptr(1)
+	return p.Text(), err
+}
+
+func (s Conmon_ExecSyncContainerResponse) HasStderr() bool {
+	return s.Struct.HasPtr(1)
+}
+
+func (s Conmon_ExecSyncContainerResponse) StderrBytes() ([]byte, error) {
+	p, err := s.Struct.Ptr(1)
+	return p.TextBytes(), err
+}
+
+func (s Conmon_ExecSyncContainerResponse) SetStderr(v string) error {
+	return s.Struct.SetText(1, v)
+}
+
+// Conmon_ExecSyncContainerResponse_List is a list of Conmon_ExecSyncContainerResponse.
+type Conmon_ExecSyncContainerResponse_List struct{ capnp.List }
+
+// NewConmon_ExecSyncContainerResponse creates a new list of Conmon_ExecSyncContainerResponse.
+func NewConmon_ExecSyncContainerResponse_List(s *capnp.Segment, sz int32) (Conmon_ExecSyncContainerResponse_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2}, sz)
+	return Conmon_ExecSyncContainerResponse_List{l}, err
+}
+
+func (s Conmon_ExecSyncContainerResponse_List) At(i int) Conmon_ExecSyncContainerResponse {
+	return Conmon_ExecSyncContainerResponse{s.List.Struct(i)}
+}
+
+func (s Conmon_ExecSyncContainerResponse_List) Set(i int, v Conmon_ExecSyncContainerResponse) error {
+	return s.List.SetStruct(i, v.Struct)
+}
+
+func (s Conmon_ExecSyncContainerResponse_List) String() string {
+	str, _ := text.MarshalList(0xd9d61d1d803c85fc, s.List)
+	return str
+}
+
+// Conmon_ExecSyncContainerResponse_Future is a wrapper for a Conmon_ExecSyncContainerResponse promised by a client call.
+type Conmon_ExecSyncContainerResponse_Future struct{ *capnp.Future }
+
+func (p Conmon_ExecSyncContainerResponse_Future) Struct() (Conmon_ExecSyncContainerResponse, error) {
+	s, err := p.Future.Struct()
+	return Conmon_ExecSyncContainerResponse{s}, err
+}
+
 type Conmon_version_Params struct{ capnp.Struct }
 
 // Conmon_version_Params_TypeID is the unique identifier for the type Conmon_version_Params.
@@ -780,64 +1031,253 @@ func (p Conmon_createContainer_Results_Future) Response() Conmon_CreateContainer
 	return Conmon_CreateContainerResponse_Future{Future: p.Future.Field(0, nil)}
 }
 
-const schema_ffaaf7385bc4adad = "x\xda\xa4T\xcf\x8b\x1cE\x18}\xaf\xaa;3\x87\xd9" +
-	"8\x95\x9e\x80\xce% +\x1e\x96dv\xddCd\x10" +
-	"f\xcd\x0aAE\x98\x9a\x83\x87(\x81\xde\x996\xdba" +
-	"\xa6{\xec\xee1+\x1a\xa2A1\x01\xc1\x08\x09\x92\xa0" +
-	"\x7f@\xc4\\\xfd\xb1\x07\x0f\xb2\x07Q\x11\x14<\xb8\xa0" +
-	"\x97U\xd6\x93 \x0a\xba\x1el\xa9\x99\xe9\x99v/\xee" +
-	"fo\xcd\xd7_\xbd\xf7\xbd\xf7\xbd\xaa\xf9\xcf\xb9$\x16" +
-	"\xec\x07-@\xcf\xdb\x87\xd2\xdf\x16\x9f\xfb\xe1\xe6/'" +
-	"?\x82\x9a\x95\xe9\x9d;\x1b\xcf<\xfc\xe7\xfb)\xc0\xc5" +
-	"\x1d\x9e\xa13#N\x02\xce\xa3\xe2\x0d\xe7\x86(\x00\xe9" +
-	"\x17\x1f\xde\xae\xff\xbdua\x1dz\x8e\x9c\x9e\xb5e\x01" +
-	"X\xbc(\x8e\x08\xe7=\xd3\xe7\xdc\x14\xdb`\xba\xfd\xd3" +
-	"?\xe7\xcf\xf5k_A\xcd\x11\xb0L\xcfU\xf9-a" +
-	"\xa5\x7f\x1d\xfd\xf4\x9d\xea#\xeb_\x8f\xfe\xd8\x1c\x1e\x97" +
-	"U\x01:7d\x03Lo\xcd]\xe8\x9f]\xa9\xff\xb8" +
-	"\x8bh\x88\xf1\x89\xac\x0a\xe7{C\xe9|7l\x9e\x7f" +
-	"\xe9\xf4\xed\xb3\xbe\xb3\x95G\xdb\x91\x9b\x04\x9d\x19\xcb4" +
-	"|\xf3\xeb\xb1\x0f\xbe\xfc\xf9\xc9\xdfMCnj\xdb4" +
-	".X\x9bt\x9e\x1a\x02?n\x1d#\x98~|\xeb\xfa" +
-	"[\x1b\x0f\x9d\xfe#\x0f\xe7\xdaG\xccp/\xda\x0d\x1c" +
-	"O\xdba\xd0\x0b\x83\xe3\x91\x15\xd7\xdaa\xaf\x17\x06\xb5" +
-	"~\x14&amT?\xd1v\xfbA\xbf\xbe\x1c\x06=" +
-	"\x19\x06\xba\xc4<\xbf\xba<\xf5P\xa9\xf5\xa9Nu\xf4" +
-	"\xb3\xf4i/\x8a\xfd0hI/\xee\x87A\xeca9" +
-	"\xf2\xdc\xc4[\x0e\x83\xc4\xf5\x03/j5\xbc\xe7\x07^" +
-	"\x9c\xa4Y]d?\xb2\x03\xba(m`b<3g" +
-	"\xd4\xc2)\x08\xf5@\x81Su\xccv\xa0\xee\xbb\x0c\xa1" +
-	"T\xe1\xd2\x0b#\xfa%\xa6\xed1>\xc7\xf8Xb\x93" +
-	"\x9c\xe8.\xfc\x9f\xee08\xb1{\xf4\xe1\xe4L\x9a\xa4" +
-	".K\x0b\xb0\x08(\xb7\x0a\xe8g%\xf5\xaa\xa0\"+" +
-	"4E\xef\x0c\xa0;\x92\xba/HQ\xa1\x00T\xef\x09" +
-	"@w%\xf5\x9a\xa0\x92\xa2B\x09\xa8A\x0b\xd0\x89\xa4" +
-	"\xbe&(\xfd\x0eK\x10,\x81\xe9\xca \xe8t\xbd\xa6" +
-	"\x0b\x99\xacN\x8a\x89\x17\xf5\xfc\xc0\xed\x02 !h\x16" +
-	"\xed\xad\xf9I\xd3MV\xc1\x98\x87\xc1\xa6\xe4\xb0\xfd0" +
-	"\xa6R\x0f\xedA\xea\xd8\xb7\xd9\xa6\x1b\xb9=\xc6\xfb\xb2" +
-	"\xa9\xfd_\x9bf[^<\xe8\xca$\xd6\xd6\xc4\xa4\x19" +
-	"\xa3\xbd$\xa9\xef\x15L\xa3l\xd3\x00\xcb\xd3\xf4\x80," +
-	"\xe3\x80\x0b2\xc02\xf6\xcc\x86r\xe4\xe7s\xe4\xedq" +
-	"3\xee\x89\x9a~\x87E\x08\x16\xef\xd2\xab\xfd\xe9\x9c\xdc" +
-	"\x9f]:\xf7\xc2\x98]\xaa\xbc\xbe\xca\x84\xf4\xe2)@" +
-	"\xafI\xea\xd7r\x09|\xf5~@\xbf,\xa9\xaf\x08*" +
-	"1\x8e\xe0\xebu@\xbf\"\xa9\xdf4\x11\x94\xa3\x08^" +
-	"5\x11\xbc\"\xa9\xaf\x0b*\xcb\xaa\xd0\x02\xd4\xdb+\x80" +
-	"\xbe&\xa9\xdf\x15\xcc.U\x96\xc3B\xe2\x9e\xcb\xbe\x1b" +
-	"fv?\xc9\xe5\xd6\xefv\x1es\x13\xd0\x9b\xd4\xa2A" +
-	"\x9c\x18\x05(\xe4@\x0e\x94\xb0qJ\xf3\xc6\x1b\x0f\x8a" +
-	"\x92\xba\"x)\x1a=1,O\xdf\xa9\x91\xe9\xff\x06" +
-	"\x00\x00\xff\xff\xa5\x83\xd3\xdf"
+type Conmon_execSyncContainer_Params struct{ capnp.Struct }
+
+// Conmon_execSyncContainer_Params_TypeID is the unique identifier for the type Conmon_execSyncContainer_Params.
+const Conmon_execSyncContainer_Params_TypeID = 0x83479da67279e173
+
+func NewConmon_execSyncContainer_Params(s *capnp.Segment) (Conmon_execSyncContainer_Params, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_execSyncContainer_Params{st}, err
+}
+
+func NewRootConmon_execSyncContainer_Params(s *capnp.Segment) (Conmon_execSyncContainer_Params, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_execSyncContainer_Params{st}, err
+}
+
+func ReadRootConmon_execSyncContainer_Params(msg *capnp.Message) (Conmon_execSyncContainer_Params, error) {
+	root, err := msg.Root()
+	return Conmon_execSyncContainer_Params{root.Struct()}, err
+}
+
+func (s Conmon_execSyncContainer_Params) String() string {
+	str, _ := text.Marshal(0x83479da67279e173, s.Struct)
+	return str
+}
+
+func (s Conmon_execSyncContainer_Params) Request() (Conmon_ExecSyncContainerRequest, error) {
+	p, err := s.Struct.Ptr(0)
+	return Conmon_ExecSyncContainerRequest{Struct: p.Struct()}, err
+}
+
+func (s Conmon_execSyncContainer_Params) HasRequest() bool {
+	return s.Struct.HasPtr(0)
+}
+
+func (s Conmon_execSyncContainer_Params) SetRequest(v Conmon_ExecSyncContainerRequest) error {
+	return s.Struct.SetPtr(0, v.Struct.ToPtr())
+}
+
+// NewRequest sets the request field to a newly
+// allocated Conmon_ExecSyncContainerRequest struct, preferring placement in s's segment.
+func (s Conmon_execSyncContainer_Params) NewRequest() (Conmon_ExecSyncContainerRequest, error) {
+	ss, err := NewConmon_ExecSyncContainerRequest(s.Struct.Segment())
+	if err != nil {
+		return Conmon_ExecSyncContainerRequest{}, err
+	}
+	err = s.Struct.SetPtr(0, ss.Struct.ToPtr())
+	return ss, err
+}
+
+// Conmon_execSyncContainer_Params_List is a list of Conmon_execSyncContainer_Params.
+type Conmon_execSyncContainer_Params_List struct{ capnp.List }
+
+// NewConmon_execSyncContainer_Params creates a new list of Conmon_execSyncContainer_Params.
+func NewConmon_execSyncContainer_Params_List(s *capnp.Segment, sz int32) (Conmon_execSyncContainer_Params_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1}, sz)
+	return Conmon_execSyncContainer_Params_List{l}, err
+}
+
+func (s Conmon_execSyncContainer_Params_List) At(i int) Conmon_execSyncContainer_Params {
+	return Conmon_execSyncContainer_Params{s.List.Struct(i)}
+}
+
+func (s Conmon_execSyncContainer_Params_List) Set(i int, v Conmon_execSyncContainer_Params) error {
+	return s.List.SetStruct(i, v.Struct)
+}
+
+func (s Conmon_execSyncContainer_Params_List) String() string {
+	str, _ := text.MarshalList(0x83479da67279e173, s.List)
+	return str
+}
+
+// Conmon_execSyncContainer_Params_Future is a wrapper for a Conmon_execSyncContainer_Params promised by a client call.
+type Conmon_execSyncContainer_Params_Future struct{ *capnp.Future }
+
+func (p Conmon_execSyncContainer_Params_Future) Struct() (Conmon_execSyncContainer_Params, error) {
+	s, err := p.Future.Struct()
+	return Conmon_execSyncContainer_Params{s}, err
+}
+
+func (p Conmon_execSyncContainer_Params_Future) Request() Conmon_ExecSyncContainerRequest_Future {
+	return Conmon_ExecSyncContainerRequest_Future{Future: p.Future.Field(0, nil)}
+}
+
+type Conmon_execSyncContainer_Results struct{ capnp.Struct }
+
+// Conmon_execSyncContainer_Results_TypeID is the unique identifier for the type Conmon_execSyncContainer_Results.
+const Conmon_execSyncContainer_Results_TypeID = 0xf8e86a5c0baa01bc
+
+func NewConmon_execSyncContainer_Results(s *capnp.Segment) (Conmon_execSyncContainer_Results, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_execSyncContainer_Results{st}, err
+}
+
+func NewRootConmon_execSyncContainer_Results(s *capnp.Segment) (Conmon_execSyncContainer_Results, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_execSyncContainer_Results{st}, err
+}
+
+func ReadRootConmon_execSyncContainer_Results(msg *capnp.Message) (Conmon_execSyncContainer_Results, error) {
+	root, err := msg.Root()
+	return Conmon_execSyncContainer_Results{root.Struct()}, err
+}
+
+func (s Conmon_execSyncContainer_Results) String() string {
+	str, _ := text.Marshal(0xf8e86a5c0baa01bc, s.Struct)
+	return str
+}
+
+func (s Conmon_execSyncContainer_Results) Response() (Conmon_ExecSyncContainerResponse, error) {
+	p, err := s.Struct.Ptr(0)
+	return Conmon_ExecSyncContainerResponse{Struct: p.Struct()}, err
+}
+
+func (s Conmon_execSyncContainer_Results) HasResponse() bool {
+	return s.Struct.HasPtr(0)
+}
+
+func (s Conmon_execSyncContainer_Results) SetResponse(v Conmon_ExecSyncContainerResponse) error {
+	return s.Struct.SetPtr(0, v.Struct.ToPtr())
+}
+
+// NewResponse sets the response field to a newly
+// allocated Conmon_ExecSyncContainerResponse struct, preferring placement in s's segment.
+func (s Conmon_execSyncContainer_Results) NewResponse() (Conmon_ExecSyncContainerResponse, error) {
+	ss, err := NewConmon_ExecSyncContainerResponse(s.Struct.Segment())
+	if err != nil {
+		return Conmon_ExecSyncContainerResponse{}, err
+	}
+	err = s.Struct.SetPtr(0, ss.Struct.ToPtr())
+	return ss, err
+}
+
+// Conmon_execSyncContainer_Results_List is a list of Conmon_execSyncContainer_Results.
+type Conmon_execSyncContainer_Results_List struct{ capnp.List }
+
+// NewConmon_execSyncContainer_Results creates a new list of Conmon_execSyncContainer_Results.
+func NewConmon_execSyncContainer_Results_List(s *capnp.Segment, sz int32) (Conmon_execSyncContainer_Results_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1}, sz)
+	return Conmon_execSyncContainer_Results_List{l}, err
+}
+
+func (s Conmon_execSyncContainer_Results_List) At(i int) Conmon_execSyncContainer_Results {
+	return Conmon_execSyncContainer_Results{s.List.Struct(i)}
+}
+
+func (s Conmon_execSyncContainer_Results_List) Set(i int, v Conmon_execSyncContainer_Results) error {
+	return s.List.SetStruct(i, v.Struct)
+}
+
+func (s Conmon_execSyncContainer_Results_List) String() string {
+	str, _ := text.MarshalList(0xf8e86a5c0baa01bc, s.List)
+	return str
+}
+
+// Conmon_execSyncContainer_Results_Future is a wrapper for a Conmon_execSyncContainer_Results promised by a client call.
+type Conmon_execSyncContainer_Results_Future struct{ *capnp.Future }
+
+func (p Conmon_execSyncContainer_Results_Future) Struct() (Conmon_execSyncContainer_Results, error) {
+	s, err := p.Future.Struct()
+	return Conmon_execSyncContainer_Results{s}, err
+}
+
+func (p Conmon_execSyncContainer_Results_Future) Response() Conmon_ExecSyncContainerResponse_Future {
+	return Conmon_ExecSyncContainerResponse_Future{Future: p.Future.Field(0, nil)}
+}
+
+const schema_ffaaf7385bc4adad = "x\xda\xa4U_h\x1c\xd5\x17>\xdf\xbd3;\x0b\xbf" +
+	"\xb4\xcdt\xf6\x07\x12\x08%!y\xb0\xa1\xa61\x0fj" +
+	"\xa8dI\x1ab\xb5\x81\xbd\xab\xf8\xa7\xd6\xc2dwl" +
+	"6\xec\xcelffm\x8a\x96\xb4\xd5b\x05\xc1(\x05" +
+	"\xb1\xe8\x93PH\xb1\xf8\"\xfe\x09\"(-B\x15\xa1" +
+	"\x05\x85\x16\"\x84Z\xda'A\xac\x18E\x1c\xb9;;" +
+	"\xb3\x93\xb5\xd2$}\x9b\xb9\xf7\xdc\xfb\x9ds\xbe\xef;" +
+	"w\xe7G,\xcb\x06\xd4WU\"\x91US\x81\xb7|" +
+	"\xd8=\xf3\xde\xf8\xcb\xa4\xf7\x81H\x85F4\xb8\xc0\xba" +
+	"\x19\xc1\xf8\x92\x0d\x13\x82_\x06\x9f_z\xe7\xe6\x03\x9f" +
+	"\x90\xde\xc3\x83s\xe7\xce?\xfb\xe0\xefg\x03\"\x0c." +
+	"\xb3}0~cO\x11\x19\xcf\xf0\xaf\x8d%\xae\x11\x05" +
+	"\x17?^\x18\xfa\xf3\xda\xa1E\x12}H\x9cU\xe5\xe6" +
+	"\xe0\x05\xbe\x95\x19\xd7\xe5\xa7\xb1\xcco\x10\x82\x1b?\xfd" +
+	"=}\xb0\xda\xffm\x08\xae\xc8\x98K\xcae\x90\x12\xac" +
+	"\xfc\xff\x8b\xb7;v-~\x97L\xeb\x82\xd2!\xd3Z" +
+	"RdZ\x7f\x9d\xd8u\xb4\xb3\xf3\x87+\xad@LF" +
+	"B\xdd\xce\x8c.U\x02u\xaa\x1f\x12\x82\xd3}\x87\xaa" +
+	"\x07&\x87~l\x89\xae#~\xa6v0\xe3J=\xf8" +
+	"{U^\xbd\xf3\xc5\xf1\x85\x03%\xe3Z\x12\xfb\x0f\xf5" +
+	"*\x08\xc6\xa6\x94\x0c\xb8\xf4\xf3\xb6\x0f\xbe\xb9\xfe\xd8\xaf" +
+	"2 \x01-\xaf\x18\x1cH]\x851\x91\x92\x9f{R" +
+	"\xdb@\x08\xce\xcc\xbc?\xbf\xd2\xad\xdf\xbam\xa6\xa6\xd6" +
+	"\xcd\x8cc\x9a\x04?\xa2\xc9L?=}\xea\x8d\xf3\xf7" +
+	"\x8f\xdfJ\x82\xf7\xa6\xb7\xca\xc2\x1fNK\xf0\xcfq\xf6" +
+	"\x7f\xfb\xa7o\xae$\x03\x9eKo\x97\x01\xb5\xf40\xed" +
+	"\x08\x0a\x8e]q\xec\x1d\xae\xe6\xf5\x17\x9cJ\xc5\xb1\xfb" +
+	"\xab\xae\xe3;\xfd\xe1\xfa}\x05\xb3jW\x87F\xc3\x1f" +
+	"k\xd6*<~\xd8.\x8c:\xb6o\x96l\xcb\xed\xc9" +
+	"\x99\xaefV<\xa1p\x85H\x01\x91\xbei\x84H\xa4" +
+	"9D\x86a\xce\xb5fj\x96\xe7\xa3\xbdY\x16\x01\xed" +
+	"\x84\x18V\xb9\x13,wl\x91A\xb2\x8b]\xc7\x9b\xba" +
+	"\xd1\xbb\x16\x9bl\xe9\xbd_5q\xf4{/6Y\xd7" +
+	"\x07.\x07OZ\xaeWr\xec<\xb7\xbc\xaac{\x16" +
+	"\x8d\xba\x96\xe9[q-\xf9\xe10\xd9 ZW\xa3\x8d" +
+	"\xe8\xc0Xk\xf9\xf9\xf0\x04Q\x10m\xb1\xc4^\xfd\x14" +
+	",\xd1\xc6U\xa2X\xbc\x88\xf4\xa2\x8b\x11b\xfa\x98\x86" +
+	"&\x8b\x88t\xac?t\x9c\x98>\xa0\x81\xc5\x8eC\xc4" +
+	"\xa4\xde\xfb\x161\xbdK\x9b{!,(\x8b\xa0\xd0\xc8" +
+	"\x18\x0dl\xca\"\x88\xb8B\x94\x11\xdc,r\xc0\xba\x08" +
+	"omQ\xbd^\xf89@\xb4\xc7\x8c\x9b\x1dDb?" +
+	"\x87\x98b\xd0\x81\x0c\xe4\xa2\xb5\x8fH\x149D\x95\x01" +
+	",\x03F\xa4W\x1e%\x12e\x0e1\xcb\xa0s\x96\x01" +
+	"'\xd2ky\"\xe1s\x88y\x06^*\xa2\x8d\x18\xda" +
+	"\x08\xc1d\xcd.\x96\xad\x9cI\xdc\x9f\x8a\x17}\xcb\xad" +
+	"\x94l\xb3LRF\xc4 \x0dc\xcd\x96\xfc\x9c\xe9O" +
+	"\x11<l&\xe48\xea\xe1\x9b\x13\"K\xad\xa1\xd4F" +
+	"7\xa5\xa2\xcd\x0a\xbcu\xb5\xa9\xb0\xbaM=y\xcb\xab" +
+	"\x95\xb9\xbf\xca\x16\xb2\xf66\x0eq\x0fC\xe0F\x8a\"" +
+	"B{S\xbf-\xd6X\x0b\xf2m$\xe9U\xb7\xc8\xbb" +
+	"%Gm1\xfc\x98\x84\xdf\xcd!r\x0c\x11E\x13C" +
+	"D\xe2\x11\x0e\xf1\x04\x83\xce\x10r$\xe4\xe2^\x0e\xf1" +
+	"4\x0b[;\xea\x14\xeby*\xc4\xa0\x10\x86=\xbf\xe8" +
+	"\xd4\xfc\x88\x11\xf9k\xb9nL\xd0]\x89K6\x85\x87" +
+	"\x99'\x1a7\x9dh\\\xa1\x11L[\xdc\\\xa9\x884" +
+	"1\xa47\xc8\xf3\xfa8\x8a\xa7O\x0bGkA\x8c\x06" +
+	"O\xb2\xbeL\x0czD\xce\xcbY\x0e\xf1J\xc2=\xc7" +
+	"\xba\x89\xc4K\x1c\xe2\xa4\xa4\xa6a\x9f\x13\x92\x9a\xa3\x1c" +
+	"\xe2ui\x1f\x1e\xda\xe75i\x9f\x93\x1c\xe2\x14\x83\xae" +
+	"(\x19(D\xfa\x9b\x93Db\x9eC\xbc\xcb\x10\x8d\x89" +
+	"\x88\"\xcd7\x0f\xc6\xec\xc9\xdcK~\xc2s\xa5rq" +
+	"\xb7\xe9\x13\xacx\xcd\xady\xbe\xac\x80\xb4\xc4%w\xab" +
+	"\xd1\x99\x9afy~\x8bD\xe5\x18\xc9r\x88\xbdM\x89" +
+	"\xee\x19i\xca6\x96\xe8\xc4HC\xb7\xc5U\x13c\xce" +
+	"/U,)\xcd\x86R\xe7db\xa6]\xfc\xaf\xa1\xb0" +
+	"\x11c7\x86\xc3\x9d\x9f\xbb\xf8\x81\xda\x80\xa7\xff\xfd\xca" +
+	"\xe6-oK\xad\xbcV\xad\xc6\xaf^\x88\xfdO\x00\x00" +
+	"\x00\xff\xff\xf4<\xd9\x11"
 
 func init() {
 	schemas.Register(schema_ffaaf7385bc4adad,
+		0x83479da67279e173,
 		0xb737e899dd6633f1,
 		0xba77e3fa3aa9b6ca,
 		0xcc2f70676afee4e7,
 		0xceba3c1a97be15f8,
+		0xd9d61d1d803c85fc,
 		0xde3a625e70772b9a,
 		0xe313695ea9477b30,
 		0xf34be5cbac1feed1,
-		0xf44732c48f949ab8)
+		0xf41122f890a371a6,
+		0xf44732c48f949ab8,
+		0xf8e86a5c0baa01bc)
 }

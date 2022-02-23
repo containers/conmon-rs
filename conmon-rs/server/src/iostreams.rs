@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn new_success() -> Result<()> {
         let sut = IOStreams::new()?;
-        assert!(!sut.stdin.is_some());
+        assert!(sut.stdin.is_none());
         Ok(())
     }
 
