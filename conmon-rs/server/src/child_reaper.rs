@@ -1,14 +1,17 @@
 //! Child process reaping and management.
 use crate::{child::Child, console::Console};
 use anyhow::{format_err, Context, Result};
+use libc::pid_t;
 use log::{debug, error};
 use multimap::MultiMap;
-use nix::sys::signal::{kill, Signal};
-use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::Pid;
-use std::path::PathBuf;
-use std::sync::Mutex;
-use std::{fs::File, io::Write, sync::Arc};
+use nix::{
+    sys::{
+        signal::{kill, Signal},
+        wait::{waitpid, WaitStatus},
+    },
+    unistd::Pid,
+};
+use std::{fs::File, io::Write, path::PathBuf, sync::Arc, sync::Mutex};
 
 #[derive(Debug, Default)]
 pub struct ChildReaper {
@@ -36,7 +39,7 @@ impl ChildReaper {
         args: I,
         console: Option<Console>,
         pidfile: PathBuf,
-    ) -> Result<i32>
+    ) -> Result<u32>
     where
         P: AsRef<std::ffi::OsStr>,
         I: IntoIterator<Item = S>,
@@ -57,7 +60,7 @@ impl ChildReaper {
 
         let grandchild_pid = tokio::fs::read_to_string(pidfile)
             .await?
-            .parse::<i32>()
+            .parse::<u32>()
             .context("grandchild pid parse error")?;
 
         Ok(grandchild_pid)
@@ -82,7 +85,7 @@ impl ChildReaper {
 
     fn forget_grandchild(
         locked_grandchildren: &Arc<Mutex<MultiMap<String, ReapableChild>>>,
-        grandchild_pid: i32,
+        grandchild_pid: u32,
     ) -> Result<()> {
         let mut map = lock!(locked_grandchildren);
         map.retain(|_, v| v.pid == grandchild_pid);
@@ -93,7 +96,7 @@ impl ChildReaper {
         let locked_grandchildren = Arc::clone(&self.grandchildren);
         for (_, grandchild) in lock!(locked_grandchildren).iter() {
             debug!("killing pid {}", grandchild.pid);
-            kill(Pid::from_raw(grandchild.pid), s)?;
+            kill(Pid::from_raw(grandchild.pid as pid_t), s)?;
         }
         Ok(())
     }
@@ -102,7 +105,7 @@ impl ChildReaper {
 #[derive(Default, Debug, Clone)]
 pub struct ReapableChild {
     pub exit_paths: Vec<PathBuf>,
-    pub pid: i32,
+    pub pid: u32,
 }
 
 impl ReapableChild {
@@ -119,7 +122,7 @@ impl ReapableChild {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         tokio::task::spawn_blocking(move || {
-            let wait_status = waitpid(Pid::from_raw(pid), None);
+            let wait_status = waitpid(Pid::from_raw(pid as pid_t), None);
             match wait_status {
                 Ok(status) => {
                     if let WaitStatus::Exited(_, exit_status) = status {
