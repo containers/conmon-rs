@@ -168,11 +168,11 @@ func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainer
 
 type ExecContainerResult struct {
 	ExitCode int32
-	Stdout   string
-	Stderr   string
+	Stdout   []byte
+	Stderr   []byte
 }
 
-func (c *ConmonClient) ExecSyncContainer(ctx context.Context, id string, command []string, timeout int32) (*ExecContainerResult, error) {
+func (c *ConmonClient) ExecSyncContainer(ctx context.Context, id string, command []string, timeoutSec uint64) (*ExecContainerResult, error) {
 	conn, err := c.newRPCConn()
 	if err != nil {
 		return nil, err
@@ -188,7 +188,7 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, id string, command
 		if err := req.SetId(id); err != nil {
 			return err
 		}
-		req.SetTimeout(timeout)
+		req.SetTimeoutSec(timeoutSec)
 		if err := stringSliceToTextList(command, req.NewCommand); err != nil {
 			return err
 		}

@@ -37,7 +37,7 @@ impl ChildReaper {
         &self,
         cmd: P,
         args: I,
-        console: Option<Console>,
+        console: Option<&Console>,
         pidfile: PathBuf,
     ) -> Result<u32>
     where

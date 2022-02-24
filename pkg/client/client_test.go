@@ -184,7 +184,7 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	Describe("ExecSyncContainer", func() {
-		It("should succeeed with stdout", func() {
+		It("should succeeed without timeout", func() {
 			terminal := false
 			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
@@ -209,14 +209,15 @@ var _ = Describe("ConmonClient", func() {
 				return rr.RunCommandCheckOutput("running", "list")
 			}, time.Second*10).Should(BeNil())
 
-			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "echo", "hello", "world"}, -1)
+			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "echo", "-n", "hello", "world"}, 0)
+
 			Expect(err).To(BeNil())
-			Expect(result.ExitCode).To(Equal(int32(0)))
-			Expect(result.Stdout, "hello world")
-			Expect(result.Stderr, "")
+			Expect(result.ExitCode).To(BeEquivalentTo(0))
+			Expect(result.Stdout).To(BeEquivalentTo("hello world"))
+			Expect(result.Stderr).To(BeEmpty())
 		})
 
-		It("should succeeed with stderr", func() {
+		It("should succeeed with timeout", func() {
 			terminal := false
 			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
@@ -241,11 +242,12 @@ var _ = Describe("ConmonClient", func() {
 				return rr.RunCommandCheckOutput("running", "list")
 			}, time.Second*10).Should(BeNil())
 
-			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "echo", "hello", "world", ">>", "/dev/stderr"}, -1)
+			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "echo", "-n", "hello", "world"}, 10)
+
 			Expect(err).To(BeNil())
-			Expect(result.ExitCode).To(Equal(int32(0)))
-			Expect(result.Stdout, "")
-			Expect(result.Stderr, "hello world")
+			Expect(result.ExitCode).To(BeEquivalentTo(0))
+			Expect(result.Stdout).To(BeEquivalentTo("hello world"))
+			Expect(result.Stderr).To(BeEmpty())
 		})
 
 		It("should timeout", func() {
@@ -275,11 +277,8 @@ var _ = Describe("ConmonClient", func() {
 
 			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "sleep", "10"}, 3)
 
-			Expect(err).To(BeNil())
-			Expect(result.ExitCode).To(Equal(int32(0)))
-			Expect(result.Stdout, "")
-			Expect(result.Stderr, "")
-
+			Expect(err).NotTo(BeNil())
+			Expect(result).To(BeNil())
 		})
 	})
 })
