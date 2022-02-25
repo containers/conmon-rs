@@ -64,11 +64,10 @@ impl conmon::Server for Server {
             let child = Child::new(id, grandchild_pid, exit_paths);
             let _ = child_reaper.watch_grandchild(child);
 
-            // TODO FIXME why convert?
             results
                 .get()
                 .init_response()
-                .set_container_pid(grandchild_pid as u32);
+                .set_container_pid(grandchild_pid);
             Ok(())
         })
     }
