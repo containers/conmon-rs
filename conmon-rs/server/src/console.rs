@@ -1,15 +1,18 @@
 //! Console socket functionalities.
 
-use crate::iostreams::IOStreams;
+use crate::stream::Stream;
 use anyhow::{bail, format_err, Context, Result};
 use getset::Getters;
 use log::{debug, error, trace};
-use nix::sys::termios::{self, OutputFlags, SetArg};
+use nix::{
+    errno::Errno,
+    sys::termios::{self, OutputFlags, SetArg},
+};
 use sendfd::RecvWithFd;
 use std::{
-    io::ErrorKind,
+    io::{BufReader, ErrorKind, Read},
     os::unix::{fs::PermissionsExt, io::RawFd},
-    path::{Path, PathBuf},
+    path::PathBuf,
     str,
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -29,6 +32,30 @@ pub struct Console {
     path: PathBuf,
 
     connected_rx: Receiver<()>,
+
+    #[getset(get = "pub")]
+    message_rx: Receiver<Message>,
+}
+
+#[derive(Debug, Getters)]
+struct Config {
+    #[get]
+    path: PathBuf,
+
+    #[get]
+    ready_tx: Sender<()>,
+
+    #[get]
+    connected_tx: Sender<()>,
+
+    #[get]
+    message_tx: Sender<Message>,
+}
+
+#[derive(Debug)]
+pub enum Message {
+    Data(Vec<u8>),
+    Done,
 }
 
 impl Console {
@@ -40,11 +67,23 @@ impl Console {
 
         let (ready_tx, ready_rx) = mpsc::channel();
         let (connected_tx, connected_rx) = mpsc::channel();
+        let (message_tx, message_rx) = mpsc::channel();
 
-        thread::spawn(move || Self::listen(&path_clone, ready_tx, connected_tx));
+        thread::spawn(move || {
+            Self::listen(Config {
+                path: path_clone,
+                ready_tx,
+                connected_tx,
+                message_tx,
+            })
+        });
         ready_rx.recv().context("wait for listener to be ready")?;
 
-        Ok(Self { path, connected_rx })
+        Ok(Self {
+            path,
+            connected_rx,
+            message_rx,
+        })
     }
 
     /// Waits for the socket client to be connected.
@@ -75,32 +114,29 @@ impl Console {
         Ok(path)
     }
 
-    fn listen(path: &Path, ready_tx: Sender<()>, connected_tx: Sender<()>) -> Result<()> {
+    fn listen(config: Config) -> Result<()> {
         Runtime::new()?.block_on(async move {
-            let listener = UnixListener::bind(&path)?;
-            debug!("Listening console socket on {}", &path.display());
+            let listener = UnixListener::bind(config.path())?;
+            debug!("Listening console socket on {}", config.path().display());
 
             // Update the permissions
-            let mut perms = fs::metadata(&path).await?.permissions();
+            let mut perms = fs::metadata(config.path()).await?.permissions();
             perms.set_mode(0o700);
-            fs::set_permissions(&path, perms).await?;
+            fs::set_permissions(config.path(), perms).await?;
 
-            ready_tx
+            config
+                .ready_tx()
                 .send(())
                 .map_err(|_| format_err!("unable to send ready message"))?;
 
             let stream = listener.accept().await?.0;
             debug!("Got console socket stream: {:?}", stream);
 
-            Self::handle_fd_receive(stream, path, connected_tx).await
+            Self::handle_fd_receive(stream, config).await
         })
     }
 
-    async fn handle_fd_receive(
-        mut stream: UnixStream,
-        path: &Path,
-        connected_tx: Sender<()>,
-    ) -> Result<()> {
+    async fn handle_fd_receive(mut stream: UnixStream, config: Config) -> Result<()> {
         loop {
             if !stream.ready(Interest::READABLE).await?.is_readable() {
                 continue;
@@ -112,8 +148,8 @@ impl Console {
             match stream.recv_with_fd(&mut data_buffer, &mut fd_buffer) {
                 Ok((_, fd_read)) => {
                     // Allow only one single read
-                    debug!("Removing socket path {}", &path.display());
-                    fs::remove_file(&path).await?;
+                    debug!("Removing socket path {}", config.path().display());
+                    fs::remove_file(config.path()).await?;
 
                     debug!("Shutting down receiver stream");
                     stream.shutdown().await?;
@@ -131,7 +167,8 @@ impl Console {
                     term.output_flags |= OutputFlags::ONLCR;
                     termios::tcsetattr(fd, SetArg::TCSANOW, &term)?;
 
-                    IOStreams::from_raw_fd(fd)?.start()?;
+                    let message_tx = config.message_tx().clone();
+                    thread::spawn(move || Self::read_loop(fd, message_tx));
 
                     // TODO: Now that we have a fd to the tty, make sure we handle any pending
                     // data that was already buffered.
@@ -142,7 +179,10 @@ impl Console {
                     // ioctl on a negative fd, and fail to resize the window.
                     // See: https://github.com/containers/conmon/blob/f263cf4/src/ctrl.c#L73
 
-                    connected_tx.send(()).context("send connected channel")?;
+                    config
+                        .connected_tx()
+                        .send(())
+                        .context("send connected channel")?;
                     debug!("Shutting down listener thread");
 
                     return Ok(());
@@ -155,6 +195,37 @@ impl Console {
                     error!("Unable to receive data: {}", e);
                     return Err(e.into());
                 }
+            }
+        }
+    }
+
+    fn read_loop(fd: RawFd, message_tx: Sender<Message>) -> Result<()> {
+        debug!("Start reading from file descriptor");
+
+        let stream = Stream::from(fd);
+        let mut reader = BufReader::new(stream);
+        let mut buf = vec![0; 1024];
+
+        loop {
+            match reader.read(&mut buf) {
+                Ok(n) if n > 0 => {
+                    debug!("Read {} bytes", n);
+
+                    message_tx
+                        .send(Message::Data((&buf[..n]).into()))
+                        .context("send data message")?;
+                }
+                Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
+                    Errno::EIO => {
+                        debug!("Stopping console read loop");
+                        message_tx
+                            .send(Message::Done)
+                            .context("send done message")?;
+                        return Ok(());
+                    }
+                    _ => error!("Unable to read from file descriptor: {}", e),
+                },
+                _ => {}
             }
         }
     }

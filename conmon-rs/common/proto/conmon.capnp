@@ -5,10 +5,10 @@ interface Conmon {
     # Version
     struct VersionResponse {
         version @0 :Text;
-        tag @1: Text;
-        commit @2: Text;
-        buildDate @3: Text;
-        rustVersion @4: Text;
+        tag @1 :Text;
+        commit @2 :Text;
+        buildDate @3 :Text;
+        rustVersion @4 :Text;
     }
 
     version @0 () -> (response: VersionResponse);
@@ -32,14 +32,14 @@ interface Conmon {
     # ExecSync
     struct ExecSyncContainerRequest {
         id @0 :Text;
-        timeout  @1 :Int32;
+        timeoutSec @1 :UInt64;
         command @2 :List(Text);
     }
 
     struct ExecSyncContainerResponse {
         exitCode @0 :Int32;
-        stdout @1 :Text;
-        stderr @2 :Text;
+        stdout @1 :Data;
+        stderr @2 :Data;
     }
 
     execSyncContainer @2 (request: ExecSyncContainerRequest) -> (response: ExecSyncContainerResponse);

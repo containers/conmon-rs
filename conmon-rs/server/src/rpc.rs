@@ -1,14 +1,30 @@
-use crate::{child::Child, console::Console, iostreams::IOStreams, version::Version, Server};
+use crate::{
+    child::Child,
+    console::{Console, Message},
+    iostreams::IOStreams,
+    version::Version,
+    Server,
+};
 use capnp::{capability::Promise, Error};
 use capnp_rpc::pry;
 use conmon_common::conmon_capnp::conmon;
-use log::debug;
-use std::io::{Error as IOError, ErrorKind};
-use std::{path::PathBuf, sync::Arc};
+use log::{debug, error};
+use std::{
+    io::{Error as IOError, ErrorKind},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 macro_rules! pry_err {
     ($x:expr) => {
-        pry!($x.map_err(|e| Error::failed(format!("{:#}", e))))
+        pry!(capnp_err!($x))
+    };
+}
+
+macro_rules! capnp_err {
+    ($x:expr) => {
+        $x.map_err(|e| Error::failed(format!("{:#}", e)))
     };
 }
 
@@ -56,7 +72,7 @@ impl conmon::Server for Server {
 
         Promise::from_future(async move {
             let grandchild_pid = child_reaper
-                .create_child(runtime, args, maybe_console, pidfile)
+                .create_child(runtime, args, maybe_console.as_ref(), pidfile)
                 .await
                 .map_err(|e| IOError::new(ErrorKind::Other, format!("Error {}", e)))?;
 
@@ -79,19 +95,17 @@ impl conmon::Server for Server {
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
         let id = pry!(req.get_id()).to_string();
-        let timeout = req.get_timeout();
+        let timeout = req.get_timeout_sec();
         let pidfile = pry_err!(Console::temp_file_name("exec_sync", "pid"));
 
-        let console = Some(pry_err!(Console::new()));
-        let args = pry_err!(self.generate_exec_sync_args(&pidfile, console.as_ref(), &params));
-        let runtime = self.config.runtime().clone();
-
         debug!(
-            "Got exec sync container request for id {} with timeout {} : {}",
-            id,
-            timeout,
-            args.join(" ")
+            "Got exec sync container request for id {} with timeout {}",
+            id, timeout,
         );
+
+        let console = pry_err!(Console::new());
+        let args = pry_err!(self.generate_exec_sync_args(&pidfile, Some(&console), &params));
+        let runtime = self.config.runtime().clone();
 
         let child_reaper = Arc::clone(self.reaper());
         let child = if let Ok(c) = child_reaper.get(id.clone()) {
@@ -104,19 +118,38 @@ impl conmon::Server for Server {
 
         Promise::from_future(async move {
             match child_reaper
-                .create_child(&runtime, &args, console, pidfile)
+                .create_child(&runtime, &args, Some(&console), pidfile)
                 .await
             {
                 Ok(grandchild_pid) => {
                     let mut resp = results.get().init_response();
                     // register grandchild with server
                     let child = Child::new(id, grandchild_pid, child.exit_paths);
-                    let _ = child_reaper.watch_grandchild(child);
+                    capnp_err!(child_reaper.watch_grandchild(child))?;
+
                     // TODO return the grandchild exit code
-                    // TODO return the stdout and stderr of the child
+
+                    let mut stdio = vec![];
+                    loop {
+                        let msg = if timeout > 0 {
+                            capnp_err!(console
+                                .message_rx()
+                                .recv_timeout(Duration::from_secs(timeout)))?
+                        } else {
+                            capnp_err!(console.message_rx().recv())?
+                        };
+
+                        match msg {
+                            Message::Data(s) => stdio.extend(s),
+                            Message::Done => break,
+                        }
+                    }
+
+                    resp.set_stdout(&stdio);
                     resp.set_exit_code(0);
                 }
-                Err(_) => {
+                Err(e) => {
+                    error!("Unable to create child: {:#}", e);
                     let mut resp = results.get().init_response();
                     resp.set_exit_code(-2);
                 }

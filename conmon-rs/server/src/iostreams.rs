@@ -1,5 +1,6 @@
 //! Pseudo terminal implementation.
 
+use crate::stream::Stream;
 use anyhow::{Context, Result};
 use getset::{CopyGetters, Setters};
 use log::{debug, error};
@@ -10,7 +11,7 @@ use nix::{
 };
 use std::{
     fs::OpenOptions,
-    io::{self, BufReader, Read, Write},
+    io::{BufReader, Read},
     os::unix::io::{IntoRawFd, RawFd},
     str, thread,
 };
@@ -21,31 +22,6 @@ pub struct IOStreams {
     stdin: Option<Stream>,
     stderr: Stream,
     stdout: Stream,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Stream(RawFd);
-
-impl From<RawFd> for Stream {
-    fn from(fd: RawFd) -> Self {
-        Stream(fd)
-    }
-}
-
-impl Read for Stream {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        unistd::read(self.0, buf).map_err(io::Error::from)
-    }
-}
-
-impl Write for Stream {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        unistd::write(self.0, buf).map_err(io::Error::from)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 impl IOStreams {
@@ -70,6 +46,7 @@ impl IOStreams {
         })
     }
 
+    #[allow(unused)]
     /// Create a IOStreams from a single raw file descriptor.
     pub fn from_raw_fd(fd: RawFd) -> Result<Self> {
         debug!("Creating IO streams from raw file descriptor");
@@ -126,22 +103,11 @@ impl IOStreams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempfile;
 
     #[test]
     fn new_success() -> Result<()> {
         let sut = IOStreams::new()?;
         assert!(sut.stdin.is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn from_raw_fd_success_without_stdin() -> Result<()> {
-        let fd = tempfile()?.into_raw_fd();
-        let sut = IOStreams::from_raw_fd(fd)?;
-        assert_eq!(sut.stdin.context("stdin not set")?.0, fd);
-        assert!(sut.stderr.0 != fd);
-
         Ok(())
     }
 }
