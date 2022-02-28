@@ -10,6 +10,7 @@ use futures::{AsyncReadExt, FutureExt};
 use getset::{Getters, MutGetters};
 use log::{debug, info};
 use nix::{
+    errno,
     libc::_exit,
     sys::signal::Signal,
     unistd::{fork, ForkResult},
@@ -86,9 +87,10 @@ impl Server {
         }
 
         // now that we've forked, set self to childreaper
-        if let Err(errno) = prctl::set_child_subreaper(true) {
-            return Err(anyhow::Error::new(std::io::Error::from_raw_os_error(errno)));
-        }
+        prctl::set_child_subreaper(true)
+            .map_err(errno::from_i32)
+            .context("set child subreaper")?;
+
         // Use the single threaded runtime to save rss memory.
         let rt = runtime::Builder::new_current_thread()
             .enable_io()
