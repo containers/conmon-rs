@@ -1,9 +1,10 @@
 //! Child process reaping and management.
 use crate::{child::Child, console::Console};
-use anyhow::{format_err, Context, Result};
+use anyhow::{bail, format_err, Context, Result};
 use libc::pid_t;
-use log::{debug, error};
+use log::debug;
 use multimap::MultiMap;
+use nix::errno::Errno;
 use nix::{
     sys::{
         signal::{kill, Signal},
@@ -12,6 +13,12 @@ use nix::{
     unistd::Pid,
 };
 use std::{fs::File, io::Write, path::PathBuf, sync::Arc, sync::Mutex};
+use tokio::{
+    fs,
+    process::Command,
+    sync::oneshot::{self, Receiver, Sender},
+    task,
+};
 
 #[derive(Debug, Default)]
 pub struct ChildReaper {
@@ -45,7 +52,7 @@ impl ChildReaper {
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
-        let mut cmd = tokio::process::Command::new(cmd);
+        let mut cmd = Command::new(cmd);
         cmd.args(args);
         cmd.spawn()
             .context("spawn child process: {}")?
@@ -58,7 +65,7 @@ impl ChildReaper {
                 .context("wait for console socket connection");
         }
 
-        let grandchild_pid = tokio::fs::read_to_string(pidfile)
+        let grandchild_pid = fs::read_to_string(pidfile)
             .await?
             .parse::<u32>()
             .context("grandchild pid parse error")?;
@@ -66,21 +73,23 @@ impl ChildReaper {
         Ok(grandchild_pid)
     }
 
-    pub fn watch_grandchild(&self, child: Child) -> Result<()> {
+    pub fn watch_grandchild(&self, child: Child) -> Result<Receiver<i32>> {
         let locked_grandchildren = Arc::clone(&self.grandchildren);
         let mut map = lock!(locked_grandchildren);
         let reapable_grandchild = ReapableChild::from_child(&child);
-        let killed_channel = reapable_grandchild.watch();
+
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let killed_channel = reapable_grandchild.watch(exit_tx);
+
         map.insert(child.id, reapable_grandchild);
         let cleanup_grandchildren = locked_grandchildren.clone();
         let pid = child.pid;
-        tokio::task::spawn(async move {
-            killed_channel.await.expect("error on channel");
-            if let Err(e) = Self::forget_grandchild(&cleanup_grandchildren, pid) {
-                error!("error forgetting grandchild {}", e);
-            }
+
+        task::spawn(async move {
+            killed_channel.await?;
+            Self::forget_grandchild(&cleanup_grandchildren, pid)
         });
-        Ok(())
+        Ok(exit_rx)
     }
 
     fn forget_grandchild(
@@ -116,40 +125,46 @@ impl ReapableChild {
         }
     }
 
-    fn watch(&self) -> tokio::sync::oneshot::Receiver<()> {
+    fn watch(&self, exit_tx: Sender<i32>) -> Receiver<()> {
         let exit_paths = self.exit_paths.clone();
         let pid = self.pid;
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
 
-        tokio::task::spawn_blocking(move || {
+        task::spawn_blocking(move || {
             let wait_status = waitpid(Pid::from_raw(pid as pid_t), None);
             match wait_status {
                 Ok(status) => {
-                    if let WaitStatus::Exited(_, exit_status) = status {
-                        let _ = write_to_exit_paths(exit_status, &exit_paths);
+                    if let WaitStatus::Exited(_, exit_code) = status {
+                        Self::write_to_exit_paths(exit_code, &exit_paths)?;
+
+                        debug!("Sending exit code to channel: {}", exit_code);
+                        if exit_tx.send(exit_code).is_err() {
+                            bail!("unable to send exit status")
+                        }
                     }
                 }
                 Err(err) => {
                     // TODO perhaps writing to the exit file anyway?
                     // TODO maybe retry the waitpid?
-                    if err != nix::errno::Errno::ECHILD {
-                        error!("caught error in reading for sigchld {}", err);
+                    if err != Errno::ECHILD {
+                        bail!("caught error in reading for sigchld {}", err);
                     }
                 }
             };
             if tx.send(()).is_err() {
-                error!("the receiver dropped the watch")
+                bail!("the receiver dropped the watch")
             }
+            Ok(())
         });
         rx
     }
-}
 
-fn write_to_exit_paths(code: i32, paths: &[PathBuf]) -> Result<()> {
-    let code_str = format!("{}", code);
-    for path in paths {
-        debug!("writing exit code {} to {}", code, path.display());
-        File::create(path)?.write_all(code_str.as_bytes())?;
+    fn write_to_exit_paths(code: i32, paths: &[PathBuf]) -> Result<()> {
+        let code_str = format!("{}", code);
+        for path in paths {
+            debug!("Writing exit code {} to {}", code, path.display());
+            File::create(path)?.write_all(code_str.as_bytes())?;
+        }
+        Ok(())
     }
-    Ok(())
 }

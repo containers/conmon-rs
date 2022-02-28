@@ -85,8 +85,8 @@ var _ = Describe("ConmonClient", func() {
 			fmt.Println("VmRSS for server is", rss)
 			Expect(rss).To(BeNumerically("<", maxRSSKB))
 		}
-
 	})
+
 	AfterEach(func() {
 		Expect(rr.RunCommand("delete", "-f", ctrID)).To(BeNil())
 		Expect(os.RemoveAll(tmpDir)).To(BeNil())
@@ -247,6 +247,39 @@ var _ = Describe("ConmonClient", func() {
 			Expect(err).To(BeNil())
 			Expect(result.ExitCode).To(BeEquivalentTo(0))
 			Expect(result.Stdout).To(BeEquivalentTo("hello world"))
+			Expect(result.Stderr).To(BeEmpty())
+		})
+
+		It("should set the correct exit code", func() {
+			terminal := false
+			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
+
+			sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
+			Expect(WaitUntilServerUp(sut)).To(BeNil())
+			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+				ID:         ctrID,
+				BundlePath: tmpDir,
+				Terminal:   terminal,
+			})
+			Expect(err).To(BeNil())
+			Expect(pid).NotTo(Equal(0))
+			Eventually(func() error {
+				return rr.RunCommandCheckOutput(ctrID, "list")
+			}, time.Second*5).Should(BeNil())
+
+			// Start the container
+			Expect(rr.RunCommand("start", ctrID)).To(BeNil())
+
+			// Wait for container to be running
+			Eventually(func() error {
+				return rr.RunCommandCheckOutput("running", "list")
+			}, time.Second*10).Should(BeNil())
+
+			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "invalid"}, 0)
+
+			Expect(err).To(BeNil())
+			Expect(result.ExitCode).To(BeEquivalentTo(127))
+			Expect(result.Stdout).To(BeEquivalentTo("invalid: applet not found\r\n"))
 			Expect(result.Stderr).To(BeEmpty())
 		})
 
