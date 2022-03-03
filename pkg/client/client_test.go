@@ -122,7 +122,7 @@ var _ = Describe("ConmonClient", func() {
 			if terminal {
 				testName += " with terminal"
 			}
-			It("should write exit file", func() {
+			It(testName, func() {
 				createRuntimeConfig(terminal)
 
 				exitPath := MustFileInTempDir(tmpDir, "exit")

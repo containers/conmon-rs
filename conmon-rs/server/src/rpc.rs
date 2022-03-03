@@ -9,12 +9,7 @@ use capnp::{capability::Promise, Error};
 use capnp_rpc::pry;
 use conmon_common::conmon_capnp::conmon;
 use log::{debug, error};
-use std::{
-    io::{Error as IOError, ErrorKind},
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 macro_rules! pry_err {
     ($x:expr) => {
@@ -71,10 +66,11 @@ impl conmon::Server for Server {
         let exit_paths = pry!(path_vec_from_text_list(pry!(req.get_exit_paths())));
 
         Promise::from_future(async move {
-            let grandchild_pid = child_reaper
-                .create_child(runtime, args, maybe_console.as_ref(), pidfile)
-                .await
-                .map_err(|e| IOError::new(ErrorKind::Other, format!("Error {}", e)))?;
+            let grandchild_pid = capnp_err!(
+                child_reaper
+                    .create_child(runtime, args, maybe_console.as_ref(), pidfile)
+                    .await
+            )?;
 
             // register grandchild with server
             let child = Child::new(id, grandchild_pid, exit_paths);
@@ -161,7 +157,7 @@ fn pidfile_from_params(params: &conmon::CreateContainerParams) -> capnp::Result<
     let mut pidfile_pathbuf = PathBuf::from(params.get()?.get_request()?.get_bundle_path()?);
     pidfile_pathbuf.push("pidfile");
 
-    debug!("pidfile is {}", pidfile_pathbuf.display());
+    debug!("PID file is {}", pidfile_pathbuf.display());
     Ok(pidfile_pathbuf)
 }
 
