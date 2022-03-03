@@ -3,7 +3,7 @@ use crate::{
     console::Console,
     init::{DefaultInit, Init},
 };
-use anyhow::{Context, Result};
+use anyhow::{format_err, Context, Result};
 use capnp_rpc::{rpc_twoparty_capnp::Side, twoparty, RpcSystem};
 use conmon_common::conmon_capnp::conmon;
 use futures::{AsyncReadExt, FutureExt};
@@ -167,7 +167,9 @@ impl Server {
             }
         };
 
-        let _ = shutdown_tx.send(());
+        shutdown_tx
+            .send(())
+            .map_err(|_| format_err!("unable to send shutdown message"))?;
 
         // TODO FIXME Ideally we would drop after socket file is removed,
         // but the removal is taking longer than 10 seconds, indicating someone

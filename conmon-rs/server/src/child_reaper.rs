@@ -60,9 +60,9 @@ impl ChildReaper {
             .await?;
 
         if let Some(console) = console {
-            let _ = console
+            console
                 .wait_connected()
-                .context("wait for console socket connection");
+                .context("wait for console socket connection")?;
         }
 
         let grandchild_pid = fs::read_to_string(pidfile)
