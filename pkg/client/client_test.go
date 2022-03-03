@@ -27,7 +27,7 @@ import (
 	"github.com/opencontainers/runtime-tools/generate"
 )
 
-const maxRSSKB = 3200
+const maxRSSKB = 3300
 
 var (
 	busyboxDest = filepath.Join(busyboxDestDir, "busybox")
