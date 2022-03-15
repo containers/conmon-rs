@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,7 +56,7 @@ var _ = Describe("ConmonClient", func() {
 		}
 
 		// Save busy box binary if we don't have it.
-		Expect(cacheBusyBox()).To(BeNil())
+		Expect(copyBusyBox()).To(BeNil())
 
 		// generate container ID.
 		ctrID = stringid.GenerateNonCryptoID()
@@ -389,14 +388,14 @@ func vmRSSGivenPID(pid uint32) uint32 {
 	return uint32(rssU64)
 }
 
-func cacheBusyBox() error {
+func copyBusyBox() error {
 	if _, err := os.Stat(busyboxDest); err == nil {
 		return nil
 	}
 	if err := os.MkdirAll(busyboxDestDir, 0755); err != nil && !os.IsExist(err) {
 		return err
 	}
-	if err := downloadFile(busyboxSource, busyboxDest); err != nil {
+	if err := copyFile(busyboxSource, busyboxDest); err != nil {
 		return err
 	}
 	if err := os.Chmod(busyboxDest, 0777); err != nil {
@@ -405,33 +404,22 @@ func cacheBusyBox() error {
 	return nil
 }
 
-// source: https://progolang.com/how-to-download-files-in-go/
-// downloadFile will download a url and store it in local filepath.
-// It writes to the destination file as it downloads it, without
-// loading the entire file into memory.
-func downloadFile(url string, filepath string) error {
-	// Create the file
-	out, err := os.Create(filepath)
+// copyFile copies a file between two paths.
+func copyFile(src string, dst string) error {
+	source, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer source.Close()
 
-	// Get the data
-	client := http.Client{Timeout: time.Minute}
-	resp, err := client.Get(url)
+	destination, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer destination.Close()
 
-	// Write the body to file
-	_, err = io.Copy(out, resp.Body)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	_, err = io.Copy(destination, source)
+	return err
 }
 
 type RuntimeRunner struct {

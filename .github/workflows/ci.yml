@@ -163,12 +163,6 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: ${{ runner.os }}-cargo-test-integration-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/go.sum') }}
-      - name: Setup Testfiles Cache
-        uses: actions/cache@v2
-        with:
-          path: |
-            /tmp/conmon-test-images
-          key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/files_test.go') }}
       - run: .github/install-deps
       - name: Select Nightly Toolchain
         uses: actions-rs/toolchain@v1
