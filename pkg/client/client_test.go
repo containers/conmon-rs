@@ -43,15 +43,13 @@ func TestConmonClient(t *testing.T) {
 
 var _ = Describe("ConmonClient", func() {
 	var (
-		tmpDir, pidFilePath, socketPath, tmpRootfs, ctrID string
-		rr                                                *RuntimeRunner
+		tmpDir, tmpRootfs, ctrID string
+		rr                       *RuntimeRunner
 	)
 
 	var sut *client.ConmonClient
 	createRuntimeConfigWithProcessArgs := func(terminal bool, processArgs []string) {
 		tmpDir = MustTempDir("conmon-client")
-		pidFilePath = MustFileInTempDir(tmpDir, "pidfile")
-		socketPath = MustFileInTempDir(tmpDir, "socket")
 		rr = &RuntimeRunner{
 			runtimeRoot: MustDirInTempDir(tmpDir, "root"),
 		}
@@ -105,7 +103,7 @@ var _ = Describe("ConmonClient", func() {
 			It(testName, func() {
 				createRuntimeConfig(terminal)
 
-				sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
+				sut = configGivenEnv(tmpDir, rr.runtimeRoot)
 				Expect(WaitUntilServerUp(sut)).To(BeNil())
 				pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
@@ -126,7 +124,7 @@ var _ = Describe("ConmonClient", func() {
 				createRuntimeConfig(terminal)
 
 				exitPath := MustFileInTempDir(tmpDir, "exit")
-				sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
+				sut = configGivenEnv(tmpDir, rr.runtimeRoot)
 				Expect(WaitUntilServerUp(sut)).To(BeNil())
 				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
@@ -160,7 +158,7 @@ var _ = Describe("ConmonClient", func() {
 				createRuntimeConfig(terminal)
 
 				exitPath := MustFileInTempDir(tmpDir, "exit")
-				sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
+				sut = configGivenEnv(tmpDir, rr.runtimeRoot)
 				Expect(WaitUntilServerUp(sut)).To(BeNil())
 				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
@@ -188,7 +186,7 @@ var _ = Describe("ConmonClient", func() {
 			terminal := false
 			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
-			sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
+			sut = configGivenEnv(tmpDir, rr.runtimeRoot)
 			Expect(WaitUntilServerUp(sut)).To(BeNil())
 			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 				ID:         ctrID,
@@ -221,7 +219,7 @@ var _ = Describe("ConmonClient", func() {
 			terminal := false
 			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
-			sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
+			sut = configGivenEnv(tmpDir, rr.runtimeRoot)
 			Expect(WaitUntilServerUp(sut)).To(BeNil())
 			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 				ID:         ctrID,
@@ -254,7 +252,7 @@ var _ = Describe("ConmonClient", func() {
 			terminal := false
 			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
-			sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
+			sut = configGivenEnv(tmpDir, rr.runtimeRoot)
 			Expect(WaitUntilServerUp(sut)).To(BeNil())
 			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 				ID:         ctrID,
@@ -287,7 +285,7 @@ var _ = Describe("ConmonClient", func() {
 			terminal := false
 			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
-			sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
+			sut = configGivenEnv(tmpDir, rr.runtimeRoot)
 			Expect(WaitUntilServerUp(sut)).To(BeNil())
 			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 				ID:         ctrID,
@@ -348,11 +346,10 @@ func WaitUntilServerUp(sut *client.ConmonClient) error {
 	return err
 }
 
-func configGivenEnv(socketPath, pidFilePath, runtimeRoot string) *client.ConmonClient {
+func configGivenEnv(serverRun, runtimeRoot string) *client.ConmonClient {
 	sut, err := client.New(&client.ConmonServerConfig{
-		ConmonPIDFile:    pidFilePath,
 		Runtime:          runtimePath,
-		Socket:           socketPath,
+		ServerRunDir:     serverRun,
 		ConmonServerPath: conmonPath,
 		Stdin:            os.Stdin,
 		Stdout:           os.Stdout,
