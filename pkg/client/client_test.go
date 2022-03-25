@@ -104,7 +104,6 @@ var _ = Describe("ConmonClient", func() {
 				createRuntimeConfig(terminal)
 
 				sut = configGivenEnv(tmpDir, rr.runtimeRoot)
-				Expect(WaitUntilServerUp(sut)).To(BeNil())
 				pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
@@ -125,7 +124,6 @@ var _ = Describe("ConmonClient", func() {
 
 				exitPath := MustFileInTempDir(tmpDir, "exit")
 				sut = configGivenEnv(tmpDir, rr.runtimeRoot)
-				Expect(WaitUntilServerUp(sut)).To(BeNil())
 				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
@@ -159,7 +157,6 @@ var _ = Describe("ConmonClient", func() {
 
 				exitPath := MustFileInTempDir(tmpDir, "exit")
 				sut = configGivenEnv(tmpDir, rr.runtimeRoot)
-				Expect(WaitUntilServerUp(sut)).To(BeNil())
 				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
@@ -187,7 +184,6 @@ var _ = Describe("ConmonClient", func() {
 			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
 			sut = configGivenEnv(tmpDir, rr.runtimeRoot)
-			Expect(WaitUntilServerUp(sut)).To(BeNil())
 			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 				ID:         ctrID,
 				BundlePath: tmpDir,
@@ -220,7 +216,6 @@ var _ = Describe("ConmonClient", func() {
 			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
 			sut = configGivenEnv(tmpDir, rr.runtimeRoot)
-			Expect(WaitUntilServerUp(sut)).To(BeNil())
 			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 				ID:         ctrID,
 				BundlePath: tmpDir,
@@ -253,7 +248,6 @@ var _ = Describe("ConmonClient", func() {
 			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
 			sut = configGivenEnv(tmpDir, rr.runtimeRoot)
-			Expect(WaitUntilServerUp(sut)).To(BeNil())
 			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 				ID:         ctrID,
 				BundlePath: tmpDir,
@@ -286,7 +280,6 @@ var _ = Describe("ConmonClient", func() {
 			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
 			sut = configGivenEnv(tmpDir, rr.runtimeRoot)
-			Expect(WaitUntilServerUp(sut)).To(BeNil())
 			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 				ID:         ctrID,
 				BundlePath: tmpDir,
@@ -332,18 +325,6 @@ func MustFileInTempDir(parent, name string) string {
 	f.Close()
 	Expect(err).To(BeNil())
 	return file
-}
-
-func WaitUntilServerUp(sut *client.ConmonClient) error {
-	var err error
-	for i := 0; i < 100; i++ {
-		_, err = sut.Version(context.Background())
-		if err == nil {
-			break
-		}
-		time.Sleep(1 * time.Millisecond)
-	}
-	return err
 }
 
 func configGivenEnv(serverRun, runtimeRoot string) *client.ConmonClient {

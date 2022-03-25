@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 
 	"capnproto.org/go/capnp/v3"
 	"capnproto.org/go/capnp/v3/rpc"
@@ -58,6 +59,9 @@ func New(config *ConmonServerConfig) (_ *ConmonClient, retErr error) {
 			cl.Shutdown()
 		}
 	}()
+	if err := cl.waitUntilServerUp(); err != nil {
+		return nil, err
+	}
 	if err := os.Remove(cl.pidFile()); err != nil {
 		return nil, err
 	}
@@ -138,6 +142,18 @@ func pidGivenFile(file string) (uint32, error) {
 		return 0, fmt.Errorf("parsing pid: %w", err)
 	}
 	return uint32(pidU64), nil
+}
+
+func (c *ConmonClient) waitUntilServerUp() error {
+	var err error
+	for i := 0; i < 100; i++ {
+		_, err = c.Version(context.Background())
+		if err == nil {
+			break
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+	return err
 }
 
 func (c *ConmonClient) newRPCConn() (*rpc.Conn, error) {
