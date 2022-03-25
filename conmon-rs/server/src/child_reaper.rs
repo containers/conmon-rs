@@ -16,7 +16,7 @@ use std::{fs::File, io::Write, path::PathBuf, sync::Arc, sync::Mutex};
 use tokio::{
     fs,
     process::Command,
-    sync::oneshot::{self, Receiver, Sender},
+    sync::broadcast::{self, Receiver, Sender},
     task,
 };
 
@@ -78,15 +78,14 @@ impl ChildReaper {
         let mut map = lock!(locked_grandchildren);
         let reapable_grandchild = ReapableChild::from_child(&child);
 
-        let (exit_tx, exit_rx) = oneshot::channel();
-        let killed_channel = reapable_grandchild.watch(exit_tx);
+        let (exit_tx, exit_rx) = reapable_grandchild.watch();
 
         map.insert(child.id, reapable_grandchild);
         let cleanup_grandchildren = locked_grandchildren.clone();
         let pid = child.pid;
 
         task::spawn(async move {
-            killed_channel.await?;
+            exit_tx.subscribe().recv().await?;
             Self::forget_grandchild(&cleanup_grandchildren, pid)
         });
         Ok(exit_rx)
@@ -125,22 +124,23 @@ impl ReapableChild {
         }
     }
 
-    fn watch(&self, exit_tx: Sender<i32>) -> Receiver<()> {
+    fn watch(&self) -> (Sender<i32>, Receiver<i32>) {
         let exit_paths = self.exit_paths.clone();
         let pid = self.pid;
-        let (tx, rx) = oneshot::channel();
+        // Only one exit code will be written.
+        let (exit_tx, exit_rx) = broadcast::channel(1);
+        let tx_clone = exit_tx.clone();
 
         task::spawn_blocking(move || {
             let wait_status = waitpid(Pid::from_raw(pid as pid_t), None);
             match wait_status {
                 Ok(status) => {
                     if let WaitStatus::Exited(_, exit_code) = status {
-                        Self::write_to_exit_paths(exit_code, &exit_paths)?;
-
                         debug!("Sending exit code to channel: {}", exit_code);
-                        if exit_tx.send(exit_code).is_err() {
+                        if tx_clone.send(exit_code).is_err() {
                             bail!("unable to send exit status")
                         }
+                        Self::write_to_exit_paths(exit_code, &exit_paths)?;
                     }
                 }
                 Err(err) => {
@@ -149,14 +149,14 @@ impl ReapableChild {
                     if err != Errno::ECHILD {
                         bail!("caught error in reading for sigchld {}", err);
                     }
+                    if tx_clone.send(-3).is_err() {
+                        bail!("unable to send exit status")
+                    }
                 }
             };
-            if tx.send(()).is_err() {
-                bail!("the receiver dropped the watch")
-            }
             Ok(())
         });
-        rx
+        (exit_tx, exit_rx)
     }
 
     fn write_to_exit_paths(code: i32, paths: &[PathBuf]) -> Result<()> {
