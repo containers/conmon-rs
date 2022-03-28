@@ -348,11 +348,11 @@ func configGivenEnv(serverRun, runtimeRoot string) *client.ConmonClient {
 		Runtime:          runtimePath,
 		ServerRunDir:     serverRun,
 		ConmonServerPath: conmonPath,
-		Stdin:            os.Stdin,
 		Stdout:           os.Stdout,
 		Stderr:           os.Stderr,
 		RuntimeRoot:      runtimeRoot,
 		LogLevel:         "debug",
+		LogDriver:        "stdout",
 	})
 	Expect(err).To(BeNil())
 	Expect(sut).NotTo(BeNil())

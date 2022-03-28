@@ -31,7 +31,7 @@ type ConmonServerConfig struct {
 	Runtime          string
 	RuntimeRoot      string
 	ServerRunDir     string
-	Stdin            io.Reader
+	LogDriver        string
 	Stdout           io.WriteCloser
 	Stderr           io.WriteCloser
 }
@@ -84,14 +84,15 @@ func (c *ConmonClient) StartServer(config *ConmonServerConfig) error {
 		return err
 	}
 	cmd := exec.Command(entrypoint, args...)
-	if config.Stdin != nil {
-		cmd.Stdin = os.Stdin
-	}
-	if config.Stdout != nil {
+	if config.LogDriver == LogDriverStdout {
 		cmd.Stdout = os.Stdout
-	}
-	if config.Stderr != nil {
 		cmd.Stderr = os.Stderr
+		if config.Stdout != nil {
+			cmd.Stdout = config.Stdout
+		}
+		if config.Stderr != nil {
+			cmd.Stderr = config.Stderr
+		}
 	}
 	return cmd.Run()
 }
@@ -122,6 +123,9 @@ func (c *ConmonClient) toArgs(config *ConmonServerConfig) (string, []string, err
 	// TODO FIXME do validation?
 	if config.LogLevel != "" {
 		args = append(args, "--log-level", config.LogLevel)
+	}
+	if config.LogDriver != "" {
+		args = append(args, "--log-driver", config.LogDriver)
 	}
 	args = append(args, "--conmon-pidfile", c.pidFile())
 
