@@ -235,9 +235,10 @@ func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainer
 }
 
 type ExecSyncConfig struct {
-	ID      string
-	Command []string
-	Timeout uint64
+	ID       string
+	Command  []string
+	Timeout  uint64
+	Terminal bool
 }
 
 type ExecContainerResult struct {
@@ -266,6 +267,7 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 		if err := stringSliceToTextList(cfg.Command, req.NewCommand); err != nil {
 			return err
 		}
+		req.SetTerminal(cfg.Terminal)
 		if err := p.SetRequest(req); err != nil {
 			return err
 		}
