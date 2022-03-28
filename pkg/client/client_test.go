@@ -203,7 +203,11 @@ var _ = Describe("ConmonClient", func() {
 				return rr.RunCommandCheckOutput("running", "list")
 			}, time.Second*10).Should(BeNil())
 
-			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "echo", "-n", "hello", "world"}, 0)
+			result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+				ID:      ctrID,
+				Command: []string{"/busybox", "echo", "-n", "hello", "world"},
+				Timeout: 0,
+			})
 
 			Expect(err).To(BeNil())
 			Expect(result.ExitCode).To(BeEquivalentTo(0))
@@ -235,7 +239,11 @@ var _ = Describe("ConmonClient", func() {
 				return rr.RunCommandCheckOutput("running", "list")
 			}, time.Second*10).Should(BeNil())
 
-			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "echo", "-n", "hello", "world"}, 10)
+			result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+				ID:      ctrID,
+				Command: []string{"/busybox", "echo", "-n", "hello", "world"},
+				Timeout: 10,
+			})
 
 			Expect(err).To(BeNil())
 			Expect(result.ExitCode).To(BeEquivalentTo(0))
@@ -267,7 +275,11 @@ var _ = Describe("ConmonClient", func() {
 				return rr.RunCommandCheckOutput("running", "list")
 			}, time.Second*10).Should(BeNil())
 
-			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "invalid"}, 0)
+			result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+				ID:      ctrID,
+				Command: []string{"/busybox", "invalid"},
+				Timeout: 0,
+			})
 
 			Expect(err).To(BeNil())
 			Expect(result.ExitCode).To(BeEquivalentTo(127))
@@ -299,7 +311,11 @@ var _ = Describe("ConmonClient", func() {
 				return rr.RunCommandCheckOutput("running", "list")
 			}, time.Second*10).Should(BeNil())
 
-			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "sleep", "10"}, 3)
+			result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+				ID:      ctrID,
+				Command: []string{"/busybox", "sleep", "10"},
+				Timeout: 3,
+			})
 
 			Expect(err).NotTo(BeNil())
 			Expect(result).To(BeNil())

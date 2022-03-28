@@ -234,13 +234,19 @@ func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainer
 	return response.ContainerPid(), nil
 }
 
+type ExecSyncConfig struct {
+	ID      string
+	Command []string
+	Timeout uint64
+}
+
 type ExecContainerResult struct {
 	ExitCode int32
 	Stdout   []byte
 	Stderr   []byte
 }
 
-func (c *ConmonClient) ExecSyncContainer(ctx context.Context, id string, command []string, timeoutSec uint64) (*ExecContainerResult, error) {
+func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfig) (*ExecContainerResult, error) {
 	conn, err := c.newRPCConn()
 	if err != nil {
 		return nil, err
@@ -253,11 +259,11 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, id string, command
 		if err != nil {
 			return err
 		}
-		if err := req.SetId(id); err != nil {
+		if err := req.SetId(cfg.ID); err != nil {
 			return err
 		}
-		req.SetTimeoutSec(timeoutSec)
-		if err := stringSliceToTextList(command, req.NewCommand); err != nil {
+		req.SetTimeoutSec(cfg.Timeout)
+		if err := stringSliceToTextList(cfg.Command, req.NewCommand); err != nil {
 			return err
 		}
 		if err := p.SetRequest(req); err != nil {
