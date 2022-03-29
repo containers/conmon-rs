@@ -43,15 +43,13 @@ func TestConmonClient(t *testing.T) {
 
 var _ = Describe("ConmonClient", func() {
 	var (
-		tmpDir, pidFilePath, socketPath, tmpRootfs, ctrID string
-		rr                                                *RuntimeRunner
+		tmpDir, tmpRootfs, ctrID string
+		rr                       *RuntimeRunner
 	)
 
 	var sut *client.ConmonClient
 	createRuntimeConfigWithProcessArgs := func(terminal bool, processArgs []string) {
 		tmpDir = MustTempDir("conmon-client")
-		pidFilePath = MustFileInTempDir(tmpDir, "pidfile")
-		socketPath = MustFileInTempDir(tmpDir, "socket")
 		rr = &RuntimeRunner{
 			runtimeRoot: MustDirInTempDir(tmpDir, "root"),
 		}
@@ -105,8 +103,7 @@ var _ = Describe("ConmonClient", func() {
 			It(testName, func() {
 				createRuntimeConfig(terminal)
 
-				sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
-				Expect(WaitUntilServerUp(sut)).To(BeNil())
+				sut = configGivenEnv(tmpDir, rr.runtimeRoot)
 				pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
@@ -126,8 +123,7 @@ var _ = Describe("ConmonClient", func() {
 				createRuntimeConfig(terminal)
 
 				exitPath := MustFileInTempDir(tmpDir, "exit")
-				sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
-				Expect(WaitUntilServerUp(sut)).To(BeNil())
+				sut = configGivenEnv(tmpDir, rr.runtimeRoot)
 				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
@@ -160,8 +156,7 @@ var _ = Describe("ConmonClient", func() {
 				createRuntimeConfig(terminal)
 
 				exitPath := MustFileInTempDir(tmpDir, "exit")
-				sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
-				Expect(WaitUntilServerUp(sut)).To(BeNil())
+				sut = configGivenEnv(tmpDir, rr.runtimeRoot)
 				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
@@ -188,8 +183,7 @@ var _ = Describe("ConmonClient", func() {
 			terminal := false
 			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
-			sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
-			Expect(WaitUntilServerUp(sut)).To(BeNil())
+			sut = configGivenEnv(tmpDir, rr.runtimeRoot)
 			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 				ID:         ctrID,
 				BundlePath: tmpDir,
@@ -209,7 +203,11 @@ var _ = Describe("ConmonClient", func() {
 				return rr.RunCommandCheckOutput("running", "list")
 			}, time.Second*10).Should(BeNil())
 
-			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "echo", "-n", "hello", "world"}, 0)
+			result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+				ID:      ctrID,
+				Command: []string{"/busybox", "echo", "-n", "hello", "world"},
+				Timeout: 0,
+			})
 
 			Expect(err).To(BeNil())
 			Expect(result.ExitCode).To(BeEquivalentTo(0))
@@ -221,8 +219,7 @@ var _ = Describe("ConmonClient", func() {
 			terminal := false
 			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
-			sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
-			Expect(WaitUntilServerUp(sut)).To(BeNil())
+			sut = configGivenEnv(tmpDir, rr.runtimeRoot)
 			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 				ID:         ctrID,
 				BundlePath: tmpDir,
@@ -242,7 +239,11 @@ var _ = Describe("ConmonClient", func() {
 				return rr.RunCommandCheckOutput("running", "list")
 			}, time.Second*10).Should(BeNil())
 
-			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "echo", "-n", "hello", "world"}, 10)
+			result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+				ID:      ctrID,
+				Command: []string{"/busybox", "echo", "-n", "hello", "world"},
+				Timeout: 10,
+			})
 
 			Expect(err).To(BeNil())
 			Expect(result.ExitCode).To(BeEquivalentTo(0))
@@ -254,8 +255,7 @@ var _ = Describe("ConmonClient", func() {
 			terminal := false
 			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
-			sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
-			Expect(WaitUntilServerUp(sut)).To(BeNil())
+			sut = configGivenEnv(tmpDir, rr.runtimeRoot)
 			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 				ID:         ctrID,
 				BundlePath: tmpDir,
@@ -275,7 +275,11 @@ var _ = Describe("ConmonClient", func() {
 				return rr.RunCommandCheckOutput("running", "list")
 			}, time.Second*10).Should(BeNil())
 
-			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "invalid"}, 0)
+			result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+				ID:      ctrID,
+				Command: []string{"/busybox", "invalid"},
+				Timeout: 0,
+			})
 
 			Expect(err).To(BeNil())
 			Expect(result.ExitCode).To(BeEquivalentTo(127))
@@ -287,8 +291,7 @@ var _ = Describe("ConmonClient", func() {
 			terminal := false
 			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
-			sut = configGivenEnv(socketPath, pidFilePath, rr.runtimeRoot)
-			Expect(WaitUntilServerUp(sut)).To(BeNil())
+			sut = configGivenEnv(tmpDir, rr.runtimeRoot)
 			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 				ID:         ctrID,
 				BundlePath: tmpDir,
@@ -308,7 +311,11 @@ var _ = Describe("ConmonClient", func() {
 				return rr.RunCommandCheckOutput("running", "list")
 			}, time.Second*10).Should(BeNil())
 
-			result, err := sut.ExecSyncContainer(context.Background(), ctrID, []string{"/busybox", "sleep", "10"}, 3)
+			result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+				ID:      ctrID,
+				Command: []string{"/busybox", "sleep", "10"},
+				Timeout: 3,
+			})
 
 			Expect(err).NotTo(BeNil())
 			Expect(result).To(BeNil())
@@ -336,29 +343,16 @@ func MustFileInTempDir(parent, name string) string {
 	return file
 }
 
-func WaitUntilServerUp(sut *client.ConmonClient) error {
-	var err error
-	for i := 0; i < 100; i++ {
-		_, err = sut.Version(context.Background())
-		if err == nil {
-			break
-		}
-		time.Sleep(1 * time.Millisecond)
-	}
-	return err
-}
-
-func configGivenEnv(socketPath, pidFilePath, runtimeRoot string) *client.ConmonClient {
+func configGivenEnv(serverRun, runtimeRoot string) *client.ConmonClient {
 	sut, err := client.New(&client.ConmonServerConfig{
-		ConmonPIDFile:    pidFilePath,
 		Runtime:          runtimePath,
-		Socket:           socketPath,
+		ServerRunDir:     serverRun,
 		ConmonServerPath: conmonPath,
-		Stdin:            os.Stdin,
 		Stdout:           os.Stdout,
 		Stderr:           os.Stderr,
 		RuntimeRoot:      runtimeRoot,
 		LogLevel:         "debug",
+		LogDriver:        "stdout",
 	})
 	Expect(err).To(BeNil())
 	Expect(sut).NotTo(BeNil())

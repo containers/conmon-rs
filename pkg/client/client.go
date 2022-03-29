@@ -2,15 +2,16 @@ package client
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 
 	"capnproto.org/go/capnp/v3"
 	"capnproto.org/go/capnp/v3/rpc"
@@ -20,48 +21,36 @@ import (
 const binaryName = "conmon"
 
 type ConmonClient struct {
-	conmonPID uint32
-	socket    string
+	serverPID uint32
+	runDir    string
 }
 
 type ConmonServerConfig struct {
 	ConmonServerPath string
 	LogLevel         string
-	ConmonPIDFile    string
 	Runtime          string
-	Socket           string
 	RuntimeRoot      string
-	Stdin            io.Reader
+	ServerRunDir     string
+	LogDriver        string
 	Stdout           io.WriteCloser
 	Stderr           io.WriteCloser
 }
 
 func New(config *ConmonServerConfig) (_ *ConmonClient, retErr error) {
-	entrypoint, args, err := config.ToArgs()
+	cl, err := config.ToClient()
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(entrypoint, args...)
-	if config.Stdin != nil {
-		cmd.Stdin = os.Stdin
-	}
-	if config.Stdout != nil {
-		cmd.Stdout = os.Stdout
-	}
-	if config.Stderr != nil {
-		cmd.Stderr = os.Stderr
-	}
-	if err := cmd.Run(); err != nil {
+	if err := cl.StartServer(config); err != nil {
 		return nil, err
 	}
-	pid, err := pidGivenFile(config.ConmonPIDFile)
+
+	pid, err := pidGivenFile(cl.pidFile())
 	if err != nil {
 		return nil, err
 	}
-	cl := &ConmonClient{
-		conmonPID: pid,
-		socket:    config.Socket,
-	}
+
+	cl.serverPID = pid
 
 	// Cleanup the background server process
 	// if we fail any of the next steps
@@ -70,28 +59,111 @@ func New(config *ConmonServerConfig) (_ *ConmonClient, retErr error) {
 			cl.Shutdown()
 		}
 	}()
-	if err := os.Remove(config.ConmonPIDFile); err != nil {
+	if err := cl.waitUntilServerUp(); err != nil {
+		return nil, err
+	}
+	if err := os.Remove(cl.pidFile()); err != nil {
 		return nil, err
 	}
 	return cl, nil
 }
 
+func (c *ConmonServerConfig) ToClient() (*ConmonClient, error) {
+	if err := os.MkdirAll(c.ServerRunDir, 0o755); err != nil && !os.IsExist(err) {
+		return nil, fmt.Errorf("couldn't create run dir %s", c.ServerRunDir)
+	}
+
+	return &ConmonClient{
+		runDir: c.ServerRunDir,
+	}, nil
+}
+
+func (c *ConmonClient) StartServer(config *ConmonServerConfig) error {
+	entrypoint, args, err := c.toArgs(config)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(entrypoint, args...)
+	if config.LogDriver == LogDriverStdout {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if config.Stdout != nil {
+			cmd.Stdout = config.Stdout
+		}
+		if config.Stderr != nil {
+			cmd.Stderr = config.Stderr
+		}
+	}
+	return cmd.Run()
+}
+
+func (c *ConmonClient) toArgs(config *ConmonServerConfig) (string, []string, error) {
+	const maxUnixSocketPathSize = len(syscall.RawSockaddrUnix{}.Path)
+	args := make([]string, 0)
+	if c == nil {
+		return "", args, nil
+	}
+	entrypoint := config.ConmonServerPath
+	if entrypoint == "" {
+		path, err := exec.LookPath(binaryName)
+		if err != nil {
+			return "", args, fmt.Errorf("finding path: %w", err)
+		}
+		entrypoint = path
+	}
+	if config.Runtime == "" {
+		return "", args, fmt.Errorf("runtime must be specified")
+	}
+	args = append(args, "--runtime", config.Runtime)
+
+	if config.RuntimeRoot != "" {
+		args = append(args, "--runtime-root", config.RuntimeRoot)
+	}
+
+	// TODO FIXME do validation?
+	if config.LogLevel != "" {
+		args = append(args, "--log-level", config.LogLevel)
+	}
+	if config.LogDriver != "" {
+		args = append(args, "--log-driver", config.LogDriver)
+	}
+	args = append(args, "--conmon-pidfile", c.pidFile())
+
+	if len(c.socket()) > maxUnixSocketPathSize {
+		return "", args, fmt.Errorf("unix socket path %q is too long", c.socket())
+	}
+	args = append(args, "--socket", c.socket())
+	return entrypoint, args, nil
+}
+
 func pidGivenFile(file string) (uint32, error) {
 	pidBytes, err := ioutil.ReadFile(file)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("reading pid bytes: %w", err)
 	}
 	pidU64, err := strconv.ParseUint(string(pidBytes), 10, 32)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("parsing pid: %w", err)
 	}
 	return uint32(pidU64), nil
 }
 
+func (c *ConmonClient) waitUntilServerUp() error {
+	var err error
+	for i := 0; i < 100; i++ {
+		_, err = c.Version(context.Background())
+		if err == nil {
+			break
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+	return err
+}
+
 func (c *ConmonClient) newRPCConn() (*rpc.Conn, error) {
-	socketConn, err := net.Dial("unix", c.socket)
+	socketConn, err := net.Dial("unix", c.socket())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("new RPC conn: %w", err)
 	}
 
 	return rpc.NewConn(rpc.NewStreamTransport(socketConn), nil), nil
@@ -166,13 +238,20 @@ func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainer
 	return response.ContainerPid(), nil
 }
 
+type ExecSyncConfig struct {
+	ID       string
+	Command  []string
+	Timeout  uint64
+	Terminal bool
+}
+
 type ExecContainerResult struct {
 	ExitCode int32
 	Stdout   []byte
 	Stderr   []byte
 }
 
-func (c *ConmonClient) ExecSyncContainer(ctx context.Context, id string, command []string, timeoutSec uint64) (*ExecContainerResult, error) {
+func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfig) (*ExecContainerResult, error) {
 	conn, err := c.newRPCConn()
 	if err != nil {
 		return nil, err
@@ -185,13 +264,14 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, id string, command
 		if err != nil {
 			return err
 		}
-		if err := req.SetId(id); err != nil {
+		if err := req.SetId(cfg.ID); err != nil {
 			return err
 		}
-		req.SetTimeoutSec(timeoutSec)
-		if err := stringSliceToTextList(command, req.NewCommand); err != nil {
+		req.SetTimeoutSec(cfg.Timeout)
+		if err := stringSliceToTextList(cfg.Command, req.NewCommand); err != nil {
 			return err
 		}
+		req.SetTerminal(cfg.Terminal)
 		if err := p.SetRequest(req); err != nil {
 			return err
 		}
@@ -247,48 +327,17 @@ func stringSliceToTextList(src []string, newFunc func(int32) (capnp.TextList, er
 
 // TODO FIXME test only?
 func (c *ConmonClient) PID() uint32 {
-	return c.conmonPID
+	return c.serverPID
 }
 
 func (c *ConmonClient) Shutdown() error {
-	return syscall.Kill(int(c.conmonPID), syscall.SIGINT)
+	return syscall.Kill(int(c.serverPID), syscall.SIGINT)
 }
 
-func (c *ConmonServerConfig) ToArgs() (string, []string, error) {
-	const maxUnixSocketPathSize = len(syscall.RawSockaddrUnix{}.Path)
-	args := make([]string, 0)
-	if c == nil {
-		return "", args, nil
-	}
-	entrypoint := c.ConmonServerPath
-	if entrypoint == "" {
-		path, err := exec.LookPath(binaryName)
-		if err != nil {
-			return "", args, err
-		}
-		entrypoint = path
-	}
-	if c.Runtime == "" {
-		return "", args, errors.New("runtime must be specified")
-	}
-	args = append(args, "--runtime", c.Runtime)
+func (c *ConmonClient) socket() string {
+	return filepath.Join(c.runDir, "conmon.sock")
+}
 
-	// TODO FIXME do validation?
-	if c.LogLevel != "" {
-		args = append(args, "--log-level", c.LogLevel)
-	}
-	// TODO FIXME probably fail otherwise we leak processes
-	if c.ConmonPIDFile != "" {
-		args = append(args, "--conmon-pidfile", c.ConmonPIDFile)
-	}
-	if c.Socket != "" {
-		if len(c.Socket) > maxUnixSocketPathSize {
-			return "", args, fmt.Errorf("unix socket path %q is too long", c.Socket)
-		}
-		args = append(args, "--socket", c.Socket)
-	}
-	if c.RuntimeRoot != "" {
-		args = append(args, "--runtime-root", c.RuntimeRoot)
-	}
-	return entrypoint, args, nil
+func (c *ConmonClient) pidFile() string {
+	return filepath.Join(c.runDir, "pidfile")
 }

@@ -121,7 +121,8 @@ impl conmon::Server for Server {
                     let mut resp = results.get().init_response();
                     // register grandchild with server
                     let child = Child::new(id, grandchild_pid, child.exit_paths);
-                    let exit_tx = capnp_err!(child_reaper.watch_grandchild(child))?;
+
+                    let mut exit_tx = capnp_err!(child_reaper.watch_grandchild(child))?;
 
                     let mut stdio = vec![];
                     loop {
@@ -140,7 +141,7 @@ impl conmon::Server for Server {
                     }
 
                     resp.set_stdout(&stdio);
-                    resp.set_exit_code(capnp_err!(exit_tx.await)?);
+                    resp.set_exit_code(capnp_err!(exit_tx.recv().await)?);
                 }
                 Err(e) => {
                     error!("Unable to create child: {:#}", e);
