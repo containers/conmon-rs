@@ -1,8 +1,8 @@
 //! Child process reaping and management.
 use crate::{child::Child, console::Console};
-use anyhow::{bail, format_err, Context, Result};
+use anyhow::{format_err, Context, Result};
 use libc::pid_t;
-use log::debug;
+use log::{debug, error};
 use multimap::MultiMap;
 use nix::errno::Errno;
 use nix::{
@@ -103,7 +103,7 @@ impl ChildReaper {
     pub fn kill_grandchildren(&self, s: Signal) -> Result<()> {
         let locked_grandchildren = Arc::clone(&self.grandchildren);
         for (_, grandchild) in lock!(locked_grandchildren).iter() {
-            debug!("killing pid {}", grandchild.pid);
+            debug!("Killing pid {}", grandchild.pid);
             Self::kill_grandchild(grandchild.pid, s)?;
         }
         Ok(())
@@ -135,34 +135,45 @@ impl ReapableChild {
         let pid = self.pid;
         // Only one exit code will be written.
         let (exit_tx, exit_rx) = broadcast::channel(1);
-        let tx_clone = exit_tx.clone();
+        let exit_tx_clone = exit_tx.clone();
 
         task::spawn_blocking(move || {
-            let wait_status = waitpid(Pid::from_raw(pid as pid_t), None);
-            match wait_status {
-                Ok(status) => {
-                    if let WaitStatus::Exited(_, exit_code) = status {
-                        debug!("Sending exit code to channel: {}", exit_code);
-                        if tx_clone.send(exit_code).is_err() {
-                            bail!("unable to send exit status")
-                        }
-                        Self::write_to_exit_paths(exit_code, &exit_paths)?;
-                    }
-                }
-                Err(err) => {
-                    // TODO perhaps writing to the exit file anyway?
-                    // TODO maybe retry the waitpid?
-                    if err != Errno::ECHILD {
-                        bail!("caught error in reading for sigchld {}", err);
-                    }
-                    if tx_clone.send(-3).is_err() {
-                        bail!("unable to send exit status")
-                    }
-                }
-            };
-            Ok(())
+            let exit_code = Self::wait_for_exit_code(pid);
+            debug!("Sending exit code to channel: {}", exit_code);
+            if exit_tx_clone.send(exit_code).is_err() {
+                error!("Unable to send exit status");
+            }
+            Self::write_to_exit_paths(exit_code, &exit_paths).context("write exit paths")
         });
         (exit_tx, exit_rx)
+    }
+
+    fn wait_for_exit_code(pid: u32) -> i32 {
+        const FAILED_EXIT_CODE: i32 = -3;
+        for i in 1..10 {
+            match waitpid(Pid::from_raw(pid as pid_t), None) {
+                Ok(status) => {
+                    if let WaitStatus::Exited(_, exit_code) = status {
+                        return exit_code;
+                    }
+                    error!(
+                        "Unable to get exit code because of unsupported wait status: {:?}",
+                        status
+                    );
+                    return FAILED_EXIT_CODE;
+                }
+                Err(err) if err == Errno::EINTR => {
+                    debug!("Failed to wait for pid on EINTR, retrying ({})", i);
+                    continue;
+                }
+                Err(err) => {
+                    error!("Unable to waitpid: {}", err);
+                    return FAILED_EXIT_CODE;
+                }
+            };
+        }
+        error!("Timed out in waitpid");
+        FAILED_EXIT_CODE
     }
 
     fn write_to_exit_paths(code: i32, paths: &[PathBuf]) -> Result<()> {
