@@ -7,7 +7,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   GO_VERSION: '1.17'
-  ACTION_MSRV_TOOLCHAIN: 1.58.1
+  ACTION_MSRV_TOOLCHAIN: 1.59.0
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -173,7 +173,8 @@ jobs:
       - name: Select Nightly Toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly
+          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN']  }}
+          default: true
           override: true
           components: rustfmt
       - name: Integration tests
