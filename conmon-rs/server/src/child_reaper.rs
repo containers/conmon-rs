@@ -104,8 +104,14 @@ impl ChildReaper {
         let locked_grandchildren = Arc::clone(&self.grandchildren);
         for (_, grandchild) in lock!(locked_grandchildren).iter() {
             debug!("killing pid {}", grandchild.pid);
-            kill(Pid::from_raw(grandchild.pid as pid_t), s)?;
+            Self::kill_grandchild(grandchild.pid, s)?;
         }
+        Ok(())
+    }
+
+    pub fn kill_grandchild(pid: u32, s: Signal) -> Result<()> {
+        // TODO: kill process group (at least for exec case)
+        kill(Pid::from_raw(pid as pid_t), s)?;
         Ok(())
     }
 }

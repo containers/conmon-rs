@@ -1,5 +1,6 @@
 use crate::{
     child::Child,
+    child_reaper::ChildReaper,
     console::{Console, Message},
     iostreams::IOStreams,
     version::Version,
@@ -9,6 +10,8 @@ use capnp::{capability::Promise, Error};
 use capnp_rpc::pry;
 use conmon_common::conmon_capnp::conmon;
 use log::{debug, error};
+use nix::sys::signal::Signal;
+use std::sync::mpsc::RecvTimeoutError;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 macro_rules! pry_err {
@@ -125,11 +128,25 @@ impl conmon::Server for Server {
                     let mut exit_tx = capnp_err!(child_reaper.watch_grandchild(child))?;
 
                     let mut stdio = vec![];
+                    let mut timed_out = false;
                     loop {
                         let msg = if timeout > 0 {
-                            capnp_err!(console
+                            match console
                                 .message_rx()
-                                .recv_timeout(Duration::from_secs(timeout)))?
+                                .recv_timeout(Duration::from_secs(timeout))
+                            {
+                                Ok(msg) => msg,
+                                Err(e) => {
+                                    if let RecvTimeoutError::Timeout = e {
+                                        timed_out = true;
+                                        capnp_err!(ChildReaper::kill_grandchild(
+                                            grandchild_pid,
+                                            Signal::SIGKILL
+                                        ))?;
+                                    }
+                                    Message::Done
+                                }
+                            }
                         } else {
                             capnp_err!(console.message_rx().recv())?
                         };
@@ -140,8 +157,11 @@ impl conmon::Server for Server {
                         }
                     }
 
-                    resp.set_stdout(&stdio);
-                    resp.set_exit_code(capnp_err!(exit_tx.recv().await)?);
+                    resp.set_timed_out(timed_out);
+                    if !timed_out {
+                        resp.set_stdout(&stdio);
+                        resp.set_exit_code(capnp_err!(exit_tx.recv().await)?);
+                    }
                 }
                 Err(e) => {
                     error!("Unable to create child: {:#}", e);

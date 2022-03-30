@@ -249,6 +249,7 @@ type ExecContainerResult struct {
 	ExitCode int32
 	Stdout   []byte
 	Stderr   []byte
+	TimedOut bool
 }
 
 func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfig) (*ExecContainerResult, error) {
@@ -303,6 +304,7 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 		ExitCode: resp.ExitCode(),
 		Stdout:   stdout,
 		Stderr:   stderr,
+		TimedOut: resp.TimedOut(),
 	}
 
 	return execContainerResult, nil

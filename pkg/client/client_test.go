@@ -317,8 +317,9 @@ var _ = Describe("ConmonClient", func() {
 				Timeout: 3,
 			})
 
-			Expect(err).NotTo(BeNil())
-			Expect(result).To(BeNil())
+			Expect(err).To(BeNil())
+			Expect(result).NotTo(BeNil())
+			Expect(result.TimedOut).To(Equal(true))
 		})
 	})
 })
