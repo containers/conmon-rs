@@ -156,6 +156,9 @@ impl ReapableChild {
                     if let WaitStatus::Exited(_, exit_code) = status {
                         return exit_code;
                     }
+                    if let WaitStatus::Signaled(_, sig, _) = status {
+                        return (sig as i32) + 128;
+                    }
                     error!(
                         "Unable to get exit code because of unsupported wait status: {:?}",
                         status
