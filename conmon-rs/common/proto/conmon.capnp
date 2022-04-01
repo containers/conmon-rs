@@ -41,6 +41,7 @@ interface Conmon {
         exitCode @0 :Int32;
         stdout @1 :Data;
         stderr @2 :Data;
+        timedOut @3 :Bool;
     }
 
     execSyncContainer @2 (request: ExecSyncContainerRequest) -> (response: ExecSyncContainerResponse);
