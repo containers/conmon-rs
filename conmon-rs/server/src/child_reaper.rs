@@ -10,7 +10,7 @@ use nix::{
         signal::{kill, Signal},
         wait::{waitpid, WaitStatus},
     },
-    unistd::Pid,
+    unistd::{getpgid, Pid},
 };
 use std::{fs::File, io::Write, path::PathBuf, sync::Arc, sync::Mutex};
 use tokio::{
@@ -110,8 +110,21 @@ impl ChildReaper {
     }
 
     pub fn kill_grandchild(pid: u32, s: Signal) -> Result<()> {
-        // TODO: kill process group (at least for exec case)
-        kill(Pid::from_raw(pid as pid_t), s)?;
+        let pid = Pid::from_raw(pid as pid_t);
+        if let Ok(pgid) = getpgid(Some(pid)) {
+            // If process_group is 1, we will end up calling
+            // kill(-1), which kills everything conmon is allowed to.
+            let pgid = i32::from(pgid);
+            if pgid > 1 {
+                match kill(Pid::from_raw(-pgid), s) {
+                    Ok(()) => return Ok(()),
+                    Err(e) => {
+                        error!("Failed to get pgid, falling back to killing pid {}", e);
+                    }
+                }
+            }
+        }
+        kill(pid, s)?;
         Ok(())
     }
 }
