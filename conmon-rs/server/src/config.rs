@@ -53,16 +53,6 @@ pub struct Config {
 
     #[get = "pub"]
     #[clap(
-        env(concat!(prefix!(), "PIDFILE")),
-        long("conmon-pidfile"),
-        short('P'),
-        value_name("PIDFILE")
-    )]
-    /// PID file for the conmon server.
-    conmon_pidfile: Option<PathBuf>,
-
-    #[get = "pub"]
-    #[clap(
         default_value_if("version", None, Some("")),
         env(concat!(prefix!(), "RUNTIME")),
         long("runtime"),
@@ -74,23 +64,22 @@ pub struct Config {
 
     #[get = "pub"]
     #[clap(
+        default_value_if("version", None, Some("")),
+        env(concat!(prefix!(), "RUNTIME_DIR")),
+        long("runtime-dir"),
+        value_name("RUNTIME_DIR")
+    )]
+    /// Path of the directory for conmonrs to hold files at runtime.
+    runtime_dir: PathBuf,
+
+    #[get = "pub"]
+    #[clap(
         env(concat!(prefix!(), "RUNTIME_ROOT")),
         long("runtime-root"),
         value_name("RUNTIME_ROOT")
     )]
     /// Path of the OCI runtime to use to operate on the containers.
     runtime_root: Option<PathBuf>,
-
-    #[get = "pub"]
-    #[clap(
-        env(concat!(prefix!(), "SOCKET")),
-        long("socket"),
-        short('s'),
-        default_value("conmon.sock"),
-        value_name("SOCKET")
-    )]
-    /// Path of the listening socket for the server.
-    socket: PathBuf,
 
     #[get = "pub"]
     #[clap(
@@ -131,11 +120,19 @@ impl Default for Config {
     }
 }
 
+// Sync with `pkg/client/client.go`
+const SOCKET: &str = "conmon.sock";
+const PIDFILE: &str = "pidfile";
+
 impl Config {
     /// Validate the configuration integrity.
     pub fn validate(&self) -> Result<()> {
         if !self.runtime().exists() {
             bail!("runtime path '{}' does not exist", self.runtime().display())
+        }
+
+        if !self.runtime_dir().exists() {
+            fs::create_dir_all(self.runtime_dir())?;
         }
 
         if let Some(rr) = self.runtime_root() {
@@ -154,5 +151,11 @@ impl Config {
         }
 
         Ok(())
+    }
+    pub fn socket(&self) -> PathBuf {
+        self.runtime_dir().join(SOCKET)
+    }
+    pub fn conmon_pidfile(&self) -> PathBuf {
+        self.runtime_dir().join(PIDFILE)
     }
 }

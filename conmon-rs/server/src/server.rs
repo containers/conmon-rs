@@ -66,10 +66,9 @@ impl Server {
         if !self.config().skip_fork() {
             match unsafe { fork()? } {
                 ForkResult::Parent { child, .. } => {
-                    if let Some(path) = &self.config().conmon_pidfile() {
-                        let child_str = format!("{}", child);
-                        File::create(path)?.write_all(child_str.as_bytes())?;
-                    }
+                    let child_str = format!("{}", child);
+                    File::create(self.config().conmon_pidfile())?
+                        .write_all(child_str.as_bytes())?;
                     unsafe { _exit(0) };
                 }
                 ForkResult::Child => (),
