@@ -101,6 +101,8 @@ impl conmon::Server for Server {
         let req = pry!(pry!(params.get()).get_request());
         let id = pry!(req.get_id()).to_string();
         let timeout = req.get_timeout_sec();
+        // TODO FIXME: add defer style removal--possibly with a macro or creating a special type
+        // that can be dropped?
         let pidfile = pry_err!(Terminal::temp_file_name(
             self.config().runtime_dir(),
             "exec_sync",
