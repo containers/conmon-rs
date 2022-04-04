@@ -50,7 +50,7 @@ jobs:
       - uses: actions/upload-artifact@v2
         with:
           name: conmon
-          path: target/x86_64-unknown-linux-musl/release/conmon
+          path: target/x86_64-unknown-linux-musl/release/conmonrs
 
   doc:
     runs-on: ubuntu-latest

@@ -18,7 +18,7 @@ import (
 	"github.com/containers/conmon-rs/internal/proto"
 )
 
-const binaryName = "conmon"
+const binaryName = "conmonrs"
 
 type ConmonClient struct {
 	serverPID uint32
