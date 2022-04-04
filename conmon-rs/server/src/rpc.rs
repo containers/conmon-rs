@@ -11,8 +11,11 @@ use capnp_rpc::pry;
 use conmon_common::conmon_capnp::conmon;
 use log::{debug, error};
 use nix::sys::signal::Signal;
-use std::sync::mpsc::RecvTimeoutError;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{mpsc::RecvTimeoutError, Arc},
+    time::Duration,
+};
 
 macro_rules! pry_err {
     ($x:expr) => {
@@ -61,12 +64,18 @@ impl conmon::Server for Server {
             None
         };
 
-        let pidfile = pry!(pidfile_from_params(&params));
+        let bundle_path = PathBuf::from(pry!(req.get_bundle_path()));
+        let pidfile = bundle_path.join("pidfile");
+        debug!("PID file is {}", pidfile.display());
+
         let child_reaper = Arc::clone(self.reaper());
         let args = pry_err!(self.generate_runtime_args(&params, &maybe_console, &pidfile));
         let runtime = self.config().runtime().clone();
         let id = pry_err!(req.get_id()).to_string();
-        let exit_paths = pry!(path_vec_from_text_list(pry!(req.get_exit_paths())));
+        let exit_paths = pry!(pry!(req.get_exit_paths())
+            .iter()
+            .map(|r| r.map(PathBuf::from))
+            .collect());
 
         Promise::from_future(async move {
             let grandchild_pid = capnp_err!(
@@ -172,16 +181,4 @@ impl conmon::Server for Server {
             Ok(())
         })
     }
-}
-
-fn pidfile_from_params(params: &conmon::CreateContainerParams) -> capnp::Result<PathBuf> {
-    let mut pidfile_pathbuf = PathBuf::from(params.get()?.get_request()?.get_bundle_path()?);
-    pidfile_pathbuf.push("pidfile");
-
-    debug!("PID file is {}", pidfile_pathbuf.display());
-    Ok(pidfile_pathbuf)
-}
-
-fn path_vec_from_text_list(tl: capnp::text_list::Reader) -> Result<Vec<PathBuf>, capnp::Error> {
-    tl.iter().map(|r| r.map(PathBuf::from)).collect()
 }
