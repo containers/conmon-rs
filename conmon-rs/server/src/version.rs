@@ -1,6 +1,5 @@
 //! Generic version information for conmon
 
-use clap::crate_name;
 use getset::CopyGetters;
 use shadow_rs::shadow;
 
@@ -40,7 +39,7 @@ impl Version {
 
     /// Print the version information to stdout.
     pub fn print(&self) {
-        println!("{} version {}", crate_name!(), build::PKG_VERSION);
+        println!("version: {}", build::PKG_VERSION);
         println!(
             "tag: {}",
             if build::TAG.is_empty() {
