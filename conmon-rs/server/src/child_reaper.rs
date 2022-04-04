@@ -1,6 +1,7 @@
 //! Child process reaping and management.
-use crate::{child::Child, console::Console};
+use crate::{child::Child, container_io::ContainerIO};
 use anyhow::{format_err, Context, Result};
+use crossbeam_channel::Sender as CrossbeamSender;
 use libc::pid_t;
 use log::{debug, error};
 use multimap::MultiMap;
@@ -44,7 +45,7 @@ impl ChildReaper {
         &self,
         cmd: P,
         args: I,
-        console: Option<&Console>,
+        container_io: &ContainerIO,
         pidfile: PathBuf,
     ) -> Result<u32>
     where
@@ -59,10 +60,10 @@ impl ChildReaper {
             .wait()
             .await?;
 
-        if let Some(console) = console {
-            console
+        if let ContainerIO::Terminal(terminal) = container_io {
+            terminal
                 .wait_connected()
-                .context("wait for console socket connection")?;
+                .context("wait for terminal socket connection")?;
         }
 
         let grandchild_pid = fs::read_to_string(pidfile)
@@ -73,7 +74,11 @@ impl ChildReaper {
         Ok(grandchild_pid)
     }
 
-    pub fn watch_grandchild(&self, child: Child) -> Result<Receiver<i32>> {
+    pub fn watch_grandchild(
+        &self,
+        child: Child,
+        stop_tx: Option<CrossbeamSender<()>>,
+    ) -> Result<Receiver<i32>> {
         let locked_grandchildren = Arc::clone(&self.grandchildren);
         let mut map = lock!(locked_grandchildren);
         let reapable_grandchild = ReapableChild::from_child(&child);
@@ -86,6 +91,9 @@ impl ChildReaper {
 
         task::spawn(async move {
             exit_tx.subscribe().recv().await?;
+            if let Some(stop_tx) = stop_tx {
+                stop_tx.send(()).context("send message to stop channel")?;
+            }
             Self::forget_grandchild(&cleanup_grandchildren, pid)
         });
         Ok(exit_rx)

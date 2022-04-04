@@ -1,8 +1,8 @@
 use crate::{
     child::Child,
     child_reaper::ChildReaper,
-    console::{Console, Message},
-    iostreams::IOStreams,
+    container_io::{ContainerIO, Message},
+    terminal::Terminal,
     version::Version,
     Server,
 };
@@ -57,19 +57,12 @@ impl conmon::Server for Server {
             pry!(req.get_id())
         );
 
-        let maybe_console = if req.get_terminal() {
-            pry_err!(Console::new()).into()
-        } else {
-            pry_err!(pry_err!(IOStreams::new()).start());
-            None
-        };
-
+        let container_io = pry_err!(ContainerIO::new(req.get_terminal()));
         let bundle_path = PathBuf::from(pry!(req.get_bundle_path()));
         let pidfile = bundle_path.join("pidfile");
         debug!("PID file is {}", pidfile.display());
-
         let child_reaper = Arc::clone(self.reaper());
-        let args = pry_err!(self.generate_runtime_args(&params, &maybe_console, &pidfile));
+        let args = pry_err!(self.generate_runtime_args(&params, &container_io, &pidfile));
         let runtime = self.config().runtime().clone();
         let id = pry_err!(req.get_id()).to_string();
         let exit_paths = pry!(pry!(req.get_exit_paths())
@@ -80,13 +73,14 @@ impl conmon::Server for Server {
         Promise::from_future(async move {
             let grandchild_pid = capnp_err!(
                 child_reaper
-                    .create_child(runtime, args, maybe_console.as_ref(), pidfile)
+                    .create_child(runtime, args, &container_io, pidfile)
                     .await
             )?;
 
             // register grandchild with server
             let child = Child::new(id, grandchild_pid, exit_paths);
-            capnp_err!(child_reaper.watch_grandchild(child))?;
+            let stop_tx = container_io.stop_tx();
+            capnp_err!(child_reaper.watch_grandchild(child, stop_tx))?;
 
             results
                 .get()
@@ -104,15 +98,15 @@ impl conmon::Server for Server {
         let req = pry!(pry!(params.get()).get_request());
         let id = pry!(req.get_id()).to_string();
         let timeout = req.get_timeout_sec();
-        let pidfile = pry_err!(Console::temp_file_name("exec_sync", "pid"));
+        let pidfile = pry_err!(Terminal::temp_file_name("exec_sync", "pid"));
 
         debug!(
             "Got exec sync container request for id {} with timeout {}",
             id, timeout,
         );
 
-        let console = pry_err!(Console::new());
-        let args = pry_err!(self.generate_exec_sync_args(&pidfile, Some(&console), &params));
+        let container_io = pry_err!(ContainerIO::new(req.get_terminal()));
+        let args = pry_err!(self.generate_exec_sync_args(&pidfile, &container_io, &params));
         let runtime = self.config.runtime().clone();
 
         let child_reaper = Arc::clone(self.reaper());
@@ -126,7 +120,7 @@ impl conmon::Server for Server {
 
         Promise::from_future(async move {
             match child_reaper
-                .create_child(&runtime, &args, Some(&console), pidfile)
+                .create_child(&runtime, &args, &container_io, pidfile)
                 .await
             {
                 Ok(grandchild_pid) => {
@@ -134,14 +128,15 @@ impl conmon::Server for Server {
                     // register grandchild with server
                     let child = Child::new(id, grandchild_pid, child.exit_paths);
 
-                    let mut exit_tx = capnp_err!(child_reaper.watch_grandchild(child))?;
+                    let stop_tx = container_io.stop_tx();
+                    let mut exit_tx = capnp_err!(child_reaper.watch_grandchild(child, stop_tx))?;
 
                     let mut stdio = vec![];
                     let mut timed_out = false;
                     loop {
                         let msg = if timeout > 0 {
-                            match console
-                                .message_rx()
+                            match container_io
+                                .receiver()
                                 .recv_timeout(Duration::from_secs(timeout))
                             {
                                 Ok(msg) => msg,
@@ -157,7 +152,7 @@ impl conmon::Server for Server {
                                 }
                             }
                         } else {
-                            capnp_err!(console.message_rx().recv())?
+                            capnp_err!(container_io.receiver().recv())?
                         };
 
                         match msg {

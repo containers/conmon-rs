@@ -27,7 +27,10 @@ import (
 	"github.com/opencontainers/runtime-tools/generate"
 )
 
-const maxRSSKB = 3300
+const (
+	maxRSSKB         = 200
+	timeoutUnlimited = 0
+)
 
 var (
 	busyboxDest = filepath.Join(busyboxDestDir, "busybox")
@@ -95,7 +98,6 @@ var _ = Describe("ConmonClient", func() {
 
 	Describe("CreateContainer", func() {
 		for _, terminal := range []bool{true, false} {
-			terminal := terminal
 			testName := "should create a simple container"
 			if terminal {
 				testName += " with terminal"
@@ -103,7 +105,7 @@ var _ = Describe("ConmonClient", func() {
 			It(testName, func() {
 				createRuntimeConfig(terminal)
 
-				sut = configGivenEnv(tmpDir, rr.runtimeRoot)
+				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
 				pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
@@ -123,7 +125,7 @@ var _ = Describe("ConmonClient", func() {
 				createRuntimeConfig(terminal)
 
 				exitPath := MustFileInTempDir(tmpDir, "exit")
-				sut = configGivenEnv(tmpDir, rr.runtimeRoot)
+				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
 				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
@@ -156,7 +158,7 @@ var _ = Describe("ConmonClient", func() {
 				createRuntimeConfig(terminal)
 
 				exitPath := MustFileInTempDir(tmpDir, "exit")
-				sut = configGivenEnv(tmpDir, rr.runtimeRoot)
+				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
 				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
@@ -179,148 +181,155 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	Describe("ExecSyncContainer", func() {
-		It("should succeeed without timeout", func() {
-			terminal := false
-			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
+		for _, terminal := range []bool{true, false} {
+			It("should succeeed without timeout", func() {
+				createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
-			sut = configGivenEnv(tmpDir, rr.runtimeRoot)
-			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
-				ID:         ctrID,
-				BundlePath: tmpDir,
-				Terminal:   terminal,
-			})
-			Expect(err).To(BeNil())
-			Expect(pid).NotTo(Equal(0))
-			Eventually(func() error {
-				return rr.RunCommandCheckOutput(ctrID, "list")
-			}, time.Second*5).Should(BeNil())
+				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
+				pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+					ID:         ctrID,
+					BundlePath: tmpDir,
+					Terminal:   terminal,
+				})
+				Expect(err).To(BeNil())
+				Expect(pid).NotTo(Equal(0))
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput(ctrID, "list")
+				}, time.Second*5).Should(BeNil())
 
-			// Start the container
-			Expect(rr.RunCommand("start", ctrID)).To(BeNil())
+				// Start the container
+				Expect(rr.RunCommand("start", ctrID)).To(BeNil())
 
-			// Wait for container to be running
-			Eventually(func() error {
-				return rr.RunCommandCheckOutput("running", "list")
-			}, time.Second*10).Should(BeNil())
+				// Wait for container to be running
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput("running", "list")
+				}, time.Second*10).Should(BeNil())
 
-			result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
-				ID:      ctrID,
-				Command: []string{"/busybox", "echo", "-n", "hello", "world"},
-				Timeout: 0,
-			})
+				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+					ID:       ctrID,
+					Command:  []string{"/busybox", "echo", "-n", "hello", "world"},
+					Timeout:  timeoutUnlimited,
+					Terminal: terminal,
+				})
 
-			Expect(err).To(BeNil())
-			Expect(result.ExitCode).To(BeEquivalentTo(0))
-			Expect(result.Stdout).To(BeEquivalentTo("hello world"))
-			Expect(result.Stderr).To(BeEmpty())
-		})
-
-		It("should succeeed with timeout", func() {
-			terminal := false
-			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
-
-			sut = configGivenEnv(tmpDir, rr.runtimeRoot)
-			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
-				ID:         ctrID,
-				BundlePath: tmpDir,
-				Terminal:   terminal,
-			})
-			Expect(err).To(BeNil())
-			Expect(pid).NotTo(Equal(0))
-			Eventually(func() error {
-				return rr.RunCommandCheckOutput(ctrID, "list")
-			}, time.Second*5).Should(BeNil())
-
-			// Start the container
-			Expect(rr.RunCommand("start", ctrID)).To(BeNil())
-
-			// Wait for container to be running
-			Eventually(func() error {
-				return rr.RunCommandCheckOutput("running", "list")
-			}, time.Second*10).Should(BeNil())
-
-			result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
-				ID:      ctrID,
-				Command: []string{"/busybox", "echo", "-n", "hello", "world"},
-				Timeout: 10,
+				Expect(err).To(BeNil())
+				Expect(result.ExitCode).To(BeEquivalentTo(0))
+				Expect(result.Stdout).To(BeEquivalentTo("hello world"))
+				Expect(result.Stderr).To(BeEmpty())
 			})
 
-			Expect(err).To(BeNil())
-			Expect(result.ExitCode).To(BeEquivalentTo(0))
-			Expect(result.Stdout).To(BeEquivalentTo("hello world"))
-			Expect(result.Stderr).To(BeEmpty())
-		})
+			It("should succeeed with timeout", func() {
+				createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
-		It("should set the correct exit code", func() {
-			terminal := false
-			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
+				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
+				pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+					ID:         ctrID,
+					BundlePath: tmpDir,
+					Terminal:   terminal,
+				})
+				Expect(err).To(BeNil())
+				Expect(pid).NotTo(Equal(0))
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput(ctrID, "list")
+				}, time.Second*5).Should(BeNil())
 
-			sut = configGivenEnv(tmpDir, rr.runtimeRoot)
-			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
-				ID:         ctrID,
-				BundlePath: tmpDir,
-				Terminal:   terminal,
-			})
-			Expect(err).To(BeNil())
-			Expect(pid).NotTo(Equal(0))
-			Eventually(func() error {
-				return rr.RunCommandCheckOutput(ctrID, "list")
-			}, time.Second*5).Should(BeNil())
+				// Start the container
+				Expect(rr.RunCommand("start", ctrID)).To(BeNil())
 
-			// Start the container
-			Expect(rr.RunCommand("start", ctrID)).To(BeNil())
+				// Wait for container to be running
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput("running", "list")
+				}, time.Second*10).Should(BeNil())
 
-			// Wait for container to be running
-			Eventually(func() error {
-				return rr.RunCommandCheckOutput("running", "list")
-			}, time.Second*10).Should(BeNil())
+				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+					ID:       ctrID,
+					Command:  []string{"/busybox", "echo", "-n", "hello", "world"},
+					Timeout:  10,
+					Terminal: terminal,
+				})
 
-			result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
-				ID:      ctrID,
-				Command: []string{"/busybox", "invalid"},
-				Timeout: 0,
-			})
-
-			Expect(err).To(BeNil())
-			Expect(result.ExitCode).To(BeEquivalentTo(127))
-			Expect(result.Stdout).To(BeEquivalentTo("invalid: applet not found\r\n"))
-			Expect(result.Stderr).To(BeEmpty())
-		})
-
-		It("should timeout", func() {
-			terminal := false
-			createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
-
-			sut = configGivenEnv(tmpDir, rr.runtimeRoot)
-			pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
-				ID:         ctrID,
-				BundlePath: tmpDir,
-				Terminal:   terminal,
-			})
-			Expect(err).To(BeNil())
-			Expect(pid).NotTo(Equal(0))
-			Eventually(func() error {
-				return rr.RunCommandCheckOutput(ctrID, "list")
-			}, time.Second*5).Should(BeNil())
-
-			// Start the container
-			Expect(rr.RunCommand("start", ctrID)).To(BeNil())
-
-			// Wait for container to be running
-			Eventually(func() error {
-				return rr.RunCommandCheckOutput("running", "list")
-			}, time.Second*10).Should(BeNil())
-
-			result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
-				ID:      ctrID,
-				Command: []string{"/busybox", "sleep", "10"},
-				Timeout: 3,
+				Expect(err).To(BeNil())
+				Expect(result.ExitCode).To(BeEquivalentTo(0))
+				Expect(result.Stdout).To(BeEquivalentTo("hello world"))
+				Expect(result.Stderr).To(BeEmpty())
 			})
 
-			Expect(err).To(BeNil())
-			Expect(result).NotTo(BeNil())
-			Expect(result.TimedOut).To(Equal(true))
-		})
+			It("should set the correct exit code", func() {
+				createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
+
+				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
+				pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+					ID:         ctrID,
+					BundlePath: tmpDir,
+					Terminal:   terminal,
+				})
+				Expect(err).To(BeNil())
+				Expect(pid).NotTo(Equal(0))
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput(ctrID, "list")
+				}, time.Second*5).Should(BeNil())
+
+				// Start the container
+				Expect(rr.RunCommand("start", ctrID)).To(BeNil())
+
+				// Wait for container to be running
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput("running", "list")
+				}, time.Second*10).Should(BeNil())
+
+				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+					ID:       ctrID,
+					Command:  []string{"/busybox", "invalid"},
+					Timeout:  timeoutUnlimited,
+					Terminal: terminal,
+				})
+
+				Expect(err).To(BeNil())
+				Expect(result.ExitCode).To(BeEquivalentTo(127))
+				expectedStr := "invalid: applet not found"
+				if terminal {
+					expectedStr += "\r"
+				}
+				expectedStr += "\n"
+				Expect(result.Stdout).To(BeEquivalentTo(expectedStr))
+				Expect(result.Stderr).To(BeEmpty())
+			})
+
+			It("should timeout", func() {
+				createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
+
+				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
+				pid, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+					ID:         ctrID,
+					BundlePath: tmpDir,
+					Terminal:   terminal,
+				})
+				Expect(err).To(BeNil())
+				Expect(pid).NotTo(Equal(0))
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput(ctrID, "list")
+				}, time.Second*5).Should(BeNil())
+
+				// Start the container
+				Expect(rr.RunCommand("start", ctrID)).To(BeNil())
+
+				// Wait for container to be running
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput("running", "list")
+				}, time.Second*10).Should(BeNil())
+
+				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+					ID:       ctrID,
+					Command:  []string{"/busybox", "sleep", "10"},
+					Timeout:  3,
+					Terminal: terminal,
+				})
+
+				Expect(err).To(BeNil())
+				Expect(result).NotTo(BeNil())
+				Expect(result.TimedOut).To(Equal(true))
+			})
+		}
 	})
 })
 
@@ -344,7 +353,11 @@ func MustFileInTempDir(parent, name string) string {
 	return file
 }
 
-func configGivenEnv(serverRun, runtimeRoot string) *client.ConmonClient {
+func configGivenEnv(serverRun, runtimeRoot string, terminal bool) *client.ConmonClient {
+	logDriver := "systemd"
+	if terminal {
+		logDriver = "stdout"
+	}
 	sut, err := client.New(&client.ConmonServerConfig{
 		Runtime:          runtimePath,
 		ServerRunDir:     serverRun,
@@ -353,7 +366,7 @@ func configGivenEnv(serverRun, runtimeRoot string) *client.ConmonClient {
 		Stderr:           os.Stderr,
 		RuntimeRoot:      runtimeRoot,
 		LogLevel:         "debug",
-		LogDriver:        "stdout",
+		LogDriver:        logDriver,
 	})
 	Expect(err).To(BeNil())
 	Expect(sut).NotTo(BeNil())

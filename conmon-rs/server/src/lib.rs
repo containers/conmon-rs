@@ -1,6 +1,6 @@
 use crate::{
     config::{Config, LogDriver},
-    console::Console,
+    container_io::ContainerIO,
     init::{DefaultInit, Init},
 };
 use anyhow::{format_err, Context, Result};
@@ -32,12 +32,13 @@ pub use version::Version;
 mod child;
 mod child_reaper;
 mod config;
-mod console;
+mod container_io;
 mod cri_logger;
 mod init;
-mod iostreams;
 mod rpc;
 mod stream;
+mod streams;
+mod terminal;
 mod version;
 
 #[derive(Debug, Default, Getters, MutGetters)]
@@ -213,7 +214,7 @@ impl Server {
     fn generate_runtime_args(
         &self,
         params: &conmon::CreateContainerParams,
-        maybe_console: &Option<Console>,
+        container_io: &ContainerIO,
         pidfile: &Path,
     ) -> Result<Vec<String>> {
         let req = params.get()?.get_request()?;
@@ -233,8 +234,8 @@ impl Server {
             pidfile.display().to_string(),
         ]);
 
-        if let Some(console) = maybe_console {
-            args.push(format!("--console-socket={}", console.path().display()));
+        if let ContainerIO::Terminal(terminal) = container_io {
+            args.push(format!("--console-socket={}", terminal.path().display()));
         }
         args.push(id);
         debug!("Runtime args {:?}", args.join(" "));
@@ -245,7 +246,7 @@ impl Server {
     fn generate_exec_sync_args(
         &self,
         pidfile: &Path,
-        console: Option<&Console>,
+        container_io: &ContainerIO,
         params: &conmon::ExecSyncContainerParams,
     ) -> Result<Vec<String>> {
         let req = params.get()?.get_request()?;
@@ -259,8 +260,8 @@ impl Server {
         }
         args.push("exec".to_string());
         args.push("-d".to_string());
-        if let Some(console) = console {
-            args.push(format!("--console-socket={}", console.path().display()));
+        if let ContainerIO::Terminal(terminal) = container_io {
+            args.push(format!("--console-socket={}", terminal.path().display()));
             args.push("--tty".to_string());
         }
         args.push(format!("--pid-file={}", pidfile.display()));
