@@ -170,12 +170,5 @@ jobs:
             /tmp/conmon-test-images
           key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/files_test.go') }}
       - run: .github/install-deps
-      - name: Select Nightly Toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN']  }}
-          default: true
-          override: true
-          components: rustfmt
       - name: Integration tests
         run: RUNTIME_PATH="/usr/sbin/runc" make integration

@@ -1,6 +1,6 @@
-//! Console socket functionalities.
+//! Terminal console functionalities.
 
-use crate::stream::Stream;
+use crate::{container_io::Message, stream::Stream};
 use anyhow::{bail, format_err, Context, Result};
 use getset::Getters;
 use log::{debug, error, trace};
@@ -27,7 +27,7 @@ use tokio::{
 };
 
 #[derive(Debug, Getters)]
-pub struct Console {
+pub struct Terminal {
     #[getset(get = "pub")]
     path: PathBuf,
 
@@ -52,16 +52,10 @@ struct Config {
     message_tx: Sender<Message>,
 }
 
-#[derive(Debug)]
-pub enum Message {
-    Data(Vec<u8>),
-    Done,
-}
-
-impl Console {
-    /// Setup a new console socket.
+impl Terminal {
+    /// Setup a new terminal instance.
     pub fn new() -> Result<Self> {
-        debug!("Creating new console socket");
+        debug!("Creating new terminal");
         let path = Self::temp_file_name("conmon-term-", ".sock")?;
         let path_clone = path.clone();
 
@@ -88,7 +82,7 @@ impl Console {
 
     /// Waits for the socket client to be connected.
     pub fn wait_connected(&self) -> Result<()> {
-        debug!("Waiting for console socket connection");
+        debug!("Waiting for terminal socket connection");
         self.connected_rx
             .recv_timeout(Duration::from_secs(60))
             .context("receive connected channel")
@@ -117,7 +111,7 @@ impl Console {
     fn listen(config: Config) -> Result<()> {
         Runtime::new()?.block_on(async move {
             let listener = UnixListener::bind(config.path())?;
-            debug!("Listening console socket on {}", config.path().display());
+            debug!("Listening terminal socket on {}", config.path().display());
 
             // Update the permissions
             let mut perms = fs::metadata(config.path()).await?.permissions();
@@ -130,7 +124,7 @@ impl Console {
                 .map_err(|_| format_err!("unable to send ready message"))?;
 
             let stream = listener.accept().await?.0;
-            debug!("Got console socket stream: {:?}", stream);
+            debug!("Got terminal socket stream: {:?}", stream);
 
             Self::handle_fd_receive(stream, config).await
         })
@@ -159,7 +153,7 @@ impl Console {
                         bail!("got no file descriptor");
                     }
 
-                    debug!("Received console file descriptor");
+                    debug!("Received terminal file descriptor");
                     let fd = fd_buffer[0];
 
                     debug!("Changing terminal settings");
@@ -217,7 +211,7 @@ impl Console {
                 }
                 Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
                     Errno::EIO => {
-                        debug!("Stopping console read loop");
+                        debug!("Stopping terminal read loop");
                         message_tx
                             .send(Message::Done)
                             .context("send done message")?;
@@ -231,7 +225,7 @@ impl Console {
     }
 }
 
-impl Drop for Console {
+impl Drop for Terminal {
     fn drop(&mut self) {
         if let Err(e) = std::fs::remove_file(self.path()) {
             trace!(
@@ -252,7 +246,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_success() -> Result<()> {
-        let sut = Console::new()?;
+        let sut = Terminal::new()?;
         assert!(sut.path().exists());
 
         let res = pty::openpty(None, None)?;
