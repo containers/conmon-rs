@@ -2,9 +2,9 @@ use crate::{
     child::Child,
     child_reaper::ChildReaper,
     container_io::{ContainerIO, Message},
+    server::Server,
     terminal::Terminal,
     version::Version,
-    Server,
 };
 use capnp::{capability::Promise, Error};
 use capnp_rpc::pry;
@@ -107,7 +107,7 @@ impl conmon::Server for Server {
 
         let container_io = pry_err!(ContainerIO::new(req.get_terminal()));
         let args = pry_err!(self.generate_exec_sync_args(&pidfile, &container_io, &params));
-        let runtime = self.config.runtime().clone();
+        let runtime = self.config().runtime().clone();
 
         let child_reaper = Arc::clone(self.reaper());
         let child = if let Ok(c) = child_reaper.get(id.clone()) {
