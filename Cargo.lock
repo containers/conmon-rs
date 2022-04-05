@@ -275,7 +275,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "conmon-client"
+name = "conmon-common"
+version = "0.1.0"
+dependencies = [
+ "capnp",
+ "capnpc",
+]
+
+[[package]]
+name = "conmonrs-cli"
 version = "0.1.0"
 dependencies = [
  "async-io",
@@ -287,14 +295,6 @@ dependencies = [
  "log",
  "serde",
  "tokio",
-]
-
-[[package]]
-name = "conmon-common"
-version = "0.1.0"
-dependencies = [
- "capnp",
- "capnpc",
 ]
 
 [[package]]
