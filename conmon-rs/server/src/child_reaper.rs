@@ -85,9 +85,9 @@ impl ChildReaper {
 
         let (exit_tx, exit_rx) = reapable_grandchild.watch();
 
-        map.insert(child.id, reapable_grandchild);
+        map.insert(child.id().clone(), reapable_grandchild);
         let cleanup_grandchildren = locked_grandchildren.clone();
-        let pid = child.pid;
+        let pid = child.pid();
 
         task::spawn(async move {
             exit_tx.subscribe().recv().await?;
@@ -140,14 +140,14 @@ impl ChildReaper {
 #[derive(Default, Debug, Clone)]
 pub struct ReapableChild {
     pub exit_paths: Vec<PathBuf>,
-    pub pid: u32,
+    pid: u32,
 }
 
 impl ReapableChild {
     pub fn from_child(child: &Child) -> Self {
         Self {
-            pid: child.pid,
-            exit_paths: child.exit_paths.clone(),
+            pid: child.pid(),
+            exit_paths: child.exit_paths().clone(),
         }
     }
 

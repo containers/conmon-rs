@@ -1,10 +1,16 @@
+use getset::{CopyGetters, Getters};
 use std::path::PathBuf;
 
-#[derive(Debug)]
+#[derive(Debug, CopyGetters, Getters)]
 pub struct Child {
-    pub id: String,
-    pub pid: u32,
-    pub exit_paths: Vec<PathBuf>,
+    #[getset(get = "pub")]
+    id: String,
+
+    #[getset(get_copy = "pub")]
+    pid: u32,
+
+    #[getset(get = "pub")]
+    exit_paths: Vec<PathBuf>,
 }
 
 impl Child {
