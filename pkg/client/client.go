@@ -199,10 +199,14 @@ type CreateContainerConfig struct {
 	ExitPaths  []string
 }
 
-func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainerConfig) (uint32, error) {
+type CreateContainerResponse struct {
+	PID uint32
+}
+
+func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainerConfig) (*CreateContainerResponse, error) {
 	conn, err := c.newRPCConn()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer conn.Close()
 	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
@@ -228,14 +232,16 @@ func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainer
 
 	result, err := future.Struct()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	response, err := result.Response()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return response.ContainerPid(), nil
+	return &CreateContainerResponse{
+		PID: response.ContainerPid(),
+	}, nil
 }
 
 type ExecSyncConfig struct {
@@ -342,4 +348,44 @@ func (c *ConmonClient) socket() string {
 
 func (c *ConmonClient) pidFile() string {
 	return filepath.Join(c.runDir, "pidfile")
+}
+
+type AttachConfig struct {
+	ID         string
+	SocketPath string
+}
+
+func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) error {
+	conn, err := c.newRPCConn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
+	future, free := client.AttachContainer(ctx, func(p proto.Conmon_attachContainer_Params) error {
+		req, err := p.NewRequest()
+		if err != nil {
+			return err
+		}
+		if err := req.SetId(cfg.ID); err != nil {
+			return err
+		}
+		if err := req.SetSocketPath(cfg.SocketPath); err != nil {
+			return err
+		}
+		return nil
+	})
+	defer free()
+
+	result, err := future.Struct()
+	if err != nil {
+		return err
+	}
+
+	if _, err := result.Response(); err != nil {
+		return err
+	}
+
+	return nil
 }

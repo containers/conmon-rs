@@ -1,7 +1,8 @@
 //! Child process reaping and management.
-use crate::{child::Child, container_io::ContainerIO};
+use crate::{attach::Attach, child::Child, container_io::ContainerIO};
 use anyhow::{format_err, Context, Result};
 use crossbeam_channel::Sender as CrossbeamSender;
+use getset::{CopyGetters, Getters, Setters};
 use libc::pid_t;
 use log::{debug, error};
 use multimap::MultiMap;
@@ -33,10 +34,10 @@ macro_rules! lock {
 }
 
 impl ChildReaper {
-    pub fn get(&self, id: String) -> Result<ReapableChild> {
+    pub fn get(&self, id: &str) -> Result<ReapableChild> {
         let locked_grandchildren = Arc::clone(&self.grandchildren);
         let lock = lock!(locked_grandchildren);
-        let r = lock.get(&id).context("")?.clone();
+        let r = lock.get(id).context("child not available")?.clone();
         drop(lock);
         Ok(r)
     }
@@ -137,10 +138,16 @@ impl ChildReaper {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Clone, CopyGetters, Debug, Default, Getters, Setters)]
 pub struct ReapableChild {
-    pub exit_paths: Vec<PathBuf>,
+    #[getset(get)]
+    exit_paths: Vec<PathBuf>,
+
+    #[getset(get_copy)]
     pid: u32,
+
+    #[getset(set = "pub")]
+    attach: Option<Attach>,
 }
 
 impl ReapableChild {
@@ -148,12 +155,13 @@ impl ReapableChild {
         Self {
             pid: child.pid(),
             exit_paths: child.exit_paths().clone(),
+            attach: None,
         }
     }
 
     fn watch(&self) -> (Sender<i32>, Receiver<i32>) {
-        let exit_paths = self.exit_paths.clone();
-        let pid = self.pid;
+        let exit_paths = self.exit_paths().clone();
+        let pid = self.pid();
         // Only one exit code will be written.
         let (exit_tx, exit_rx) = broadcast::channel(1);
         let exit_tx_clone = exit_tx.clone();

@@ -1,4 +1,5 @@
 use crate::{
+    attach::Attach,
     child::Child,
     child_reaper::ChildReaper,
     container_io::{ContainerIO, Message},
@@ -6,13 +7,14 @@ use crate::{
     terminal::Terminal,
     version::Version,
 };
+use anyhow::Context;
 use capnp::{capability::Promise, Error};
 use capnp_rpc::pry;
 use conmon_common::conmon_capnp::conmon;
 use log::{debug, error};
 use nix::sys::signal::Signal;
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{mpsc::RecvTimeoutError, Arc},
     time::Duration,
 };
@@ -52,19 +54,17 @@ impl conmon::Server for Server {
         mut results: conmon::CreateContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
-        debug!(
-            "Got a create container request for id {}",
-            pry!(req.get_id())
-        );
+        let id = pry!(req.get_id()).to_string();
+        debug!("Got a create container request for id {}", id);
 
         let container_io = pry_err!(ContainerIO::new(req.get_terminal()));
         let bundle_path = PathBuf::from(pry!(req.get_bundle_path()));
         let pidfile = bundle_path.join("pidfile");
         debug!("PID file is {}", pidfile.display());
+
         let child_reaper = Arc::clone(self.reaper());
         let args = pry_err!(self.generate_runtime_args(&params, &container_io, &pidfile));
         let runtime = self.config().runtime().clone();
-        let id = pry_err!(req.get_id()).to_string();
         let exit_paths = pry!(pry!(req.get_exit_paths())
             .iter()
             .map(|r| r.map(PathBuf::from))
@@ -113,7 +113,7 @@ impl conmon::Server for Server {
 
         // Verify the original container is still running
         // TODO: Do we need to do this while caller does?
-        let _ = if let Ok(c) = child_reaper.get(id.clone()) {
+        let _ = if let Ok(c) = child_reaper.get(&id) {
             c
         } else {
             let mut resp = results.get().init_response();
@@ -178,5 +178,31 @@ impl conmon::Server for Server {
             }
             Ok(())
         })
+    }
+
+    fn attach_container(
+        &mut self,
+        params: conmon::AttachContainerParams,
+        _: conmon::AttachContainerResults,
+    ) -> Promise<(), capnp::Error> {
+        let req = pry!(pry!(params.get()).get_request());
+        let container_id = pry_err!(req.get_id());
+        debug!(
+            "Got a attach container request for container id {}",
+            container_id
+        );
+
+        let exec_session_id = pry_err!(req.get_exec_session_id());
+        if !exec_session_id.is_empty() {
+            debug!("Using exec session id {}", exec_session_id);
+        }
+
+        let socket_path = Path::new(pry!(req.get_socket_path()));
+        let attach = pry_err!(Attach::new(socket_path).context("create attach endpoint"));
+
+        let mut child = pry_err!(self.reaper().get(container_id));
+        child.set_attach(attach.into());
+
+        Promise::ok(())
     }
 }
