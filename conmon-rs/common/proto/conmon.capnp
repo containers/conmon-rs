@@ -45,4 +45,17 @@ interface Conmon {
     }
 
     execSyncContainer @2 (request: ExecSyncContainerRequest) -> (response: ExecSyncContainerResponse);
+
+    ###############################################
+    # Attach
+    struct AttachRequest {
+        id @0 :Text;
+        socketPath @1 :Text;
+        execSessionId @2 :Text;
+    }
+
+    struct AttachResponse {
+    }
+
+    attachContainer @3 (request: AttachRequest) -> (response: AttachResponse);
 }

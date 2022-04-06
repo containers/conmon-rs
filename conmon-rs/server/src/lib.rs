@@ -1,6 +1,7 @@
 pub use server::Server;
 pub use version::Version;
 
+mod attach;
 mod child;
 mod child_reaper;
 mod config;
