@@ -110,7 +110,10 @@ impl conmon::Server for Server {
         let runtime = self.config().runtime().clone();
 
         let child_reaper = Arc::clone(self.reaper());
-        let child = if let Ok(c) = child_reaper.get(id.clone()) {
+
+        // Verify the original container is still running
+        // TODO: Do we need to do this while caller does?
+        let _ = if let Ok(c) = child_reaper.get(id.clone()) {
             c
         } else {
             let mut resp = results.get().init_response();
@@ -126,7 +129,7 @@ impl conmon::Server for Server {
                 Ok(grandchild_pid) => {
                     let mut resp = results.get().init_response();
                     // register grandchild with server
-                    let child = Child::new(id, grandchild_pid, child.exit_paths);
+                    let child = Child::new(id, grandchild_pid, vec![]);
 
                     let stop_tx = container_io.stop_tx();
                     let mut exit_tx = capnp_err!(child_reaper.watch_grandchild(child, stop_tx))?;
