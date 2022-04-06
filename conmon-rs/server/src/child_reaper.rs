@@ -1,6 +1,6 @@
 //! Child process reaping and management.
 use crate::{attach::Attach, child::Child, container_io::ContainerIO};
-use anyhow::{format_err, Context, Result};
+use anyhow::{anyhow, format_err, Context, Result};
 use crossbeam_channel::Sender as CrossbeamSender;
 use getset::{CopyGetters, Getters, Setters};
 use libc::pid_t;
@@ -56,7 +56,8 @@ impl ChildReaper {
     {
         let mut cmd = Command::new(cmd);
         cmd.args(args);
-        cmd.spawn()
+        let status = cmd
+            .spawn()
             .context("spawn child process: {}")?
             .wait()
             .await?;
@@ -67,8 +68,19 @@ impl ChildReaper {
                 .context("wait for terminal socket connection")?;
         }
 
+        if !status.success() {
+            let code_str = match status.code() {
+                Some(code) => format!("Child command exited with status: {}", code),
+                None => "Child command exited with signal".to_string(),
+            };
+            // TODO Eventually, we'll need to read the stderr from the command
+            // to get the actual message runc returned.
+            return Err(anyhow!(code_str));
+        }
+
         let grandchild_pid = fs::read_to_string(pidfile)
-            .await?
+            .await
+            .context("grandchild pid read error")?
             .parse::<u32>()
             .context("grandchild pid parse error")?;
 
