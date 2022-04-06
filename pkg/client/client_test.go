@@ -185,6 +185,19 @@ var _ = Describe("ConmonClient", func() {
 					return rr.RunCommandCheckOutput("stopped", "list")
 				}, time.Second*5).Should(BeNil())
 			})
+			It("should return error if invalid command", func() {
+				createRuntimeConfigWithProcessArgs(terminal, []string{"invalid"})
+
+				exitPath := MustFileInTempDir(tmpDir, "exit")
+				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
+				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+					ID:         ctrID,
+					BundlePath: tmpDir,
+					ExitPaths:  []string{exitPath},
+					Terminal:   terminal,
+				})
+				Expect(err).NotTo(BeNil())
+			})
 		}
 	})
 
