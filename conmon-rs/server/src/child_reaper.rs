@@ -1,7 +1,6 @@
 //! Child process reaping and management.
 use crate::{attach::Attach, child::Child, container_io::ContainerIO};
 use anyhow::{anyhow, format_err, Context, Result};
-use crossbeam_channel::Sender as CrossbeamSender;
 use getset::{CopyGetters, Getters, Setters};
 use libc::pid_t;
 use log::{debug, error};
@@ -90,7 +89,7 @@ impl ChildReaper {
     pub fn watch_grandchild(
         &self,
         child: Child,
-        stop_tx: Option<CrossbeamSender<()>>,
+        stop_tx: Option<Sender<()>>,
     ) -> Result<Receiver<i32>> {
         let locked_grandchildren = Arc::clone(&self.grandchildren);
         let mut map = lock!(locked_grandchildren);

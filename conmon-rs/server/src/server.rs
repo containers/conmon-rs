@@ -80,11 +80,13 @@ impl Server {
             .context("set child subreaper")?;
 
         // Use the single threaded runtime to save rss memory.
-        Builder::new_current_thread()
+        let rt = Builder::new_current_thread()
             .enable_io()
             .enable_time()
-            .build()?
-            .block_on(self.spawn_tasks())
+            .build()?;
+        rt.block_on(self.spawn_tasks())?;
+        rt.shutdown_background();
+        Ok(())
     }
 
     fn init_self(&self) -> Result<()> {
