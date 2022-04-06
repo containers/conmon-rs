@@ -32,10 +32,17 @@ lint:
 unit:
 	cargo test --bins --no-fail-fast
 
-integration: release-static # It needs to be release so we correctly test the RSS usage
+integration: release # It needs to be release so we correctly test the RSS usage
+	export CONMON_BINARY="$(MAKEFILE_PATH)target/release/$(BINARY)" && \
+	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
+	export MAX_RSS_KB=3400 && \
+	go test pkg/client/* -v -ginkgo.v
+
+integration-static: release-static # It needs to be release so we correctly test the RSS usage
 	export CONMON_BINARY="$(MAKEFILE_PATH)target/x86_64-unknown-linux-musl/release/$(BINARY)" && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
 	go test pkg/client/* -v -ginkgo.v
+
 
 clean:
 	rm -rf target/

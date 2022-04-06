@@ -29,7 +29,6 @@ import (
 )
 
 const (
-	maxRSSKB         = 220
 	timeoutUnlimited = 0
 )
 
@@ -37,10 +36,18 @@ var (
 	busyboxDest = filepath.Join(busyboxDestDir, "busybox")
 	runtimePath = os.Getenv("RUNTIME_BINARY")
 	conmonPath  = os.Getenv("CONMON_BINARY")
+	maxRSSKB    = 220
 )
 
 // TestConmonClient runs the created specs
 func TestConmonClient(t *testing.T) {
+	if rssStr := os.Getenv("MAX_RSS_KB"); rssStr != "" {
+		rssInt, err := strconv.Atoi(rssStr)
+		if err != nil {
+			t.Error(err)
+		}
+		maxRSSKB = rssInt
+	}
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "ConmonClient")
 }

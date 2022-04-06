@@ -171,4 +171,4 @@ jobs:
           key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/files_test.go') }}
       - run: .github/install-deps
       - name: Integration tests
-        run: RUNTIME_PATH="/usr/sbin/runc" make integration
+        run: RUNTIME_PATH="/usr/sbin/runc" make integration-static
