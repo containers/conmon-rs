@@ -36,7 +36,7 @@ var (
 	busyboxDest = filepath.Join(busyboxDestDir, "busybox")
 	runtimePath = os.Getenv("RUNTIME_BINARY")
 	conmonPath  = os.Getenv("CONMON_BINARY")
-	maxRSSKB    = 220
+	maxRSSKB    = 230
 )
 
 // TestConmonClient runs the created specs
