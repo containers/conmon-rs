@@ -1,7 +1,7 @@
-use crate::{streams::Streams, terminal::Terminal};
+use crate::{cri_logger::CriLogger, streams::Streams, terminal::Terminal};
 use anyhow::{Context, Result};
 use crossbeam_channel::Sender;
-use std::sync::mpsc::Receiver;
+use std::{path::Path, sync::mpsc::Receiver};
 
 /// A generic abstraction over various container input-output types
 pub enum ContainerIO {
@@ -23,11 +23,14 @@ impl From<Streams> for ContainerIO {
 
 impl ContainerIO {
     /// Create a new container IO instance.
-    pub fn new(terminal: bool) -> Result<Self> {
+    pub async fn new<T: AsRef<Path>>(terminal: bool, log_path: T) -> Result<Self> {
+        let logger = CriLogger::from(&log_path, None)
+            .await
+            .context("create CRI logger")?;
         Ok(if terminal {
-            Terminal::new().context("create new terminal")?.into()
+            Terminal::new(logger).context("create new terminal")?.into()
         } else {
-            Streams::new().context("create new streams")?.into()
+            Streams::new(logger).context("create new streams")?.into()
         })
     }
 

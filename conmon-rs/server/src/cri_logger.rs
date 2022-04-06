@@ -1,7 +1,5 @@
 //! File logging functionalities.
 
-#![allow(dead_code)] // TODO: remove me when actually used
-
 use anyhow::{Context, Result};
 use chrono::offset::Local;
 use getset::{CopyGetters, Getters, MutGetters, Setters};
@@ -52,12 +50,14 @@ impl CriLogger {
         })
     }
 
-    /// Write the contents of the provided reader into the file logger. Ensure to manually call
+    /// Write the contents of the provided bytes into the file logger. Ensure to manually call
     /// `flush` if you need the written log data on disk.
-    pub async fn write<T>(&mut self, pipe: Pipe, reader: &mut BufReader<T>) -> Result<()>
+    pub async fn write<T>(&mut self, pipe: Pipe, bytes: &mut T) -> Result<()>
     where
         T: AsyncBufRead + Unpin,
     {
+        let mut reader = BufReader::new(bytes);
+
         // Get the RFC3339 timestmap
         let timestamp = Local::now().to_rfc3339();
         let min_log_len = timestamp
@@ -69,7 +69,7 @@ impl CriLogger {
         loop {
             // Read the line
             let mut line_buf = Vec::with_capacity(min_log_len);
-            let (read, partial) = Self::read_line(reader, &mut line_buf).await?;
+            let (read, partial) = Self::read_line(&mut reader, &mut line_buf).await?;
 
             if read == 0 {
                 break;
@@ -139,6 +139,7 @@ impl CriLogger {
 
     /// Open the provided path with the default options.
     async fn open<T: AsRef<Path>>(path: T) -> Result<BufWriter<File>> {
+        debug!("Using log path: {}", path.as_ref().display());
         Ok(BufWriter::new(
             OpenOptions::new()
                 .create(true)
@@ -148,7 +149,7 @@ impl CriLogger {
                 .mode(0o600)
                 .open(&path)
                 .await
-                .context("open log file path")?,
+                .context(format!("open log file path '{}'", path.as_ref().display()))?,
         ))
     }
 
@@ -184,13 +185,13 @@ mod tests {
     #[tokio::test]
     async fn write_stdout_success() -> Result<()> {
         let buffer = "this is a line\nand another line\n";
-        let mut reader = BufReader::new(buffer.as_bytes());
+        let mut bytes = buffer.as_bytes();
 
         let file = NamedTempFile::new()?;
         let path = file.path();
         let mut sut = CriLogger::from(path, None).await?;
 
-        sut.write(Pipe::StdOut, &mut reader).await?;
+        sut.write(Pipe::StdOut, &mut bytes).await?;
         sut.flush().await?;
 
         let res = fs::read_to_string(path)?;
@@ -205,15 +206,15 @@ mod tests {
     #[tokio::test]
     async fn write_stdout_stderr_success() -> Result<()> {
         let buffer = "a\nb\nc\n";
-        let mut reader1 = BufReader::new(buffer.as_bytes());
-        let mut reader2 = BufReader::new(buffer.as_bytes());
+        let mut bytes1 = buffer.as_bytes();
+        let mut bytes2 = buffer.as_bytes();
 
         let file = NamedTempFile::new()?;
         let path = file.path();
         let mut sut = CriLogger::from(path, None).await?;
 
-        sut.write(Pipe::StdOut, &mut reader1).await?;
-        sut.write(Pipe::StdErr, &mut reader2).await?;
+        sut.write(Pipe::StdOut, &mut bytes1).await?;
+        sut.write(Pipe::StdErr, &mut bytes2).await?;
         sut.flush().await?;
 
         let res = fs::read_to_string(path)?;
@@ -229,13 +230,13 @@ mod tests {
     #[tokio::test]
     async fn write_reopen() -> Result<()> {
         let buffer = "a\nb\nc\nd\ne\nf\n";
-        let mut reader = BufReader::new(buffer.as_bytes());
+        let mut bytes = buffer.as_bytes();
 
         let file = NamedTempFile::new()?;
         let path = file.path();
         let mut sut = CriLogger::from(path, Some(150)).await?;
 
-        sut.write(Pipe::StdOut, &mut reader).await?;
+        sut.write(Pipe::StdOut, &mut bytes).await?;
         sut.flush().await?;
 
         let res = fs::read_to_string(path)?;

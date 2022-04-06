@@ -17,7 +17,13 @@ use nix::{
     sys::signal::Signal,
     unistd::{fork, ForkResult},
 };
-use std::{fs::File, io::Write, path::Path, process, sync::Arc};
+use std::{
+    fs::File,
+    io::Write,
+    path::{Path, PathBuf},
+    process,
+    sync::Arc,
+};
 use tokio::{
     fs,
     net::UnixListener,
@@ -200,7 +206,7 @@ impl Server {
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
     pub fn generate_runtime_args(
-        &self,
+        runtime_root: Option<PathBuf>,
         params: &conmon::CreateContainerParams,
         container_io: &ContainerIO,
         pidfile: &Path,
@@ -209,7 +215,6 @@ impl Server {
         let id = req.get_id()?.to_string();
         let bundle_path = req.get_bundle_path()?.to_string();
         let mut args = vec![];
-        let runtime_root = self.config().runtime_root();
         if let Some(rr) = runtime_root {
             args.push(format!("--root={}", rr.display()));
         }
@@ -232,7 +237,7 @@ impl Server {
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
     pub fn generate_exec_sync_args(
-        &self,
+        runtime_root: Option<PathBuf>,
         pidfile: &Path,
         container_io: &ContainerIO,
         params: &conmon::ExecSyncContainerParams,
@@ -240,7 +245,6 @@ impl Server {
         let req = params.get()?.get_request()?;
         let id = req.get_id()?.to_string();
         let command = req.get_command()?;
-        let runtime_root = self.config().runtime_root();
 
         let mut args = vec![];
         if let Some(rr) = runtime_root {

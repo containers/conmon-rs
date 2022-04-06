@@ -1,6 +1,6 @@
 //! Pseudo terminal implementation.
 
-use crate::{container_io::Message, stream::Stream};
+use crate::{container_io::Message, cri_logger::CriLogger, stream::Stream};
 use anyhow::{Context, Result};
 use crossbeam_channel::{unbounded, Receiver as CrossbeamReceiver, Sender as CrossbeamSender};
 use getset::Getters;
@@ -31,7 +31,7 @@ pub struct Streams {
 
 impl Streams {
     /// Create a new Streams instance.
-    pub fn new() -> Result<Self> {
+    pub fn new(logger: CriLogger) -> Result<Self> {
         debug!("Creating new IO streams");
         Self::disconnect_std_streams().context("disconnect standard streams")?;
 

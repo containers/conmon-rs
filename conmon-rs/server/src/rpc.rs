@@ -57,28 +57,41 @@ impl conmon::Server for Server {
         let id = pry!(req.get_id()).to_string();
         debug!("Got a create container request for id {}", id);
 
-        let container_io = pry_err!(ContainerIO::new(req.get_terminal()));
+        let log_path = PathBuf::from(pry!(req.get_log_path()));
+        let terminal = req.get_terminal();
         let bundle_path = PathBuf::from(pry!(req.get_bundle_path()));
         let pidfile = bundle_path.join("pidfile");
         debug!("PID file is {}", pidfile.display());
 
         let child_reaper = Arc::clone(self.reaper());
-        let args = pry_err!(self.generate_runtime_args(&params, &container_io, &pidfile));
         let runtime = self.config().runtime().clone();
+        let runtime_root = self.config().runtime_root().clone();
+        let id = pry_err!(req.get_id()).to_string();
         let exit_paths = pry!(pry!(req.get_exit_paths())
             .iter()
             .map(|r| r.map(PathBuf::from))
             .collect());
 
         Promise::from_future(async move {
+            let container_io = capnp_err!(ContainerIO::new(terminal, &log_path)
+                .await
+                .context("create container IO"))?;
+
+            let args = capnp_err!(Self::generate_runtime_args(
+                runtime_root,
+                &params,
+                &container_io,
+                &pidfile
+            ))?;
+
             let grandchild_pid = capnp_err!(
                 child_reaper
-                    .create_child(runtime, args, &container_io, pidfile)
+                    .create_child(runtime, &args, &container_io, pidfile)
                     .await
             )?;
 
             // register grandchild with server
-            let child = Child::new(id, grandchild_pid, exit_paths);
+            let child = Child::new(id, grandchild_pid, exit_paths, log_path);
             let stop_tx = container_io.stop_tx();
             capnp_err!(child_reaper.watch_grandchild(child, stop_tx))?;
 
@@ -86,6 +99,7 @@ impl conmon::Server for Server {
                 .get()
                 .init_response()
                 .set_container_pid(grandchild_pid);
+
             Ok(())
         })
     }
@@ -105,23 +119,35 @@ impl conmon::Server for Server {
             id, timeout,
         );
 
-        let container_io = pry_err!(ContainerIO::new(req.get_terminal()));
-        let args = pry_err!(self.generate_exec_sync_args(&pidfile, &container_io, &params));
+        let terminal = req.get_terminal();
         let runtime = self.config().runtime().clone();
+        let runtime_root = self.config().runtime_root().clone();
 
         let child_reaper = Arc::clone(self.reaper());
 
         // Verify the original container is still running
         // TODO: Do we need to do this while caller does?
-        let _ = if let Ok(c) = child_reaper.get(&id) {
+        let reapable_child = if let Ok(c) = child_reaper.get(&id) {
             c
         } else {
-            let mut resp = results.get().init_response();
-            resp.set_exit_code(-1);
+            results.get().init_response().set_exit_code(-1);
             return Promise::ok(());
         };
 
         Promise::from_future(async move {
+            // TODO: where to get the log path
+            let log_path = reapable_child.log_path().clone();
+            let container_io = capnp_err!(ContainerIO::new(terminal, &log_path)
+                .await
+                .context("create container IO"))?;
+
+            let args = capnp_err!(Self::generate_exec_sync_args(
+                runtime_root,
+                &pidfile,
+                &container_io,
+                &params
+            ))?;
+
             match child_reaper
                 .create_child(&runtime, &args, &container_io, pidfile)
                 .await
@@ -129,7 +155,7 @@ impl conmon::Server for Server {
                 Ok(grandchild_pid) => {
                     let mut resp = results.get().init_response();
                     // register grandchild with server
-                    let child = Child::new(id, grandchild_pid, vec![]);
+                    let child = Child::new(id, grandchild_pid, vec![], log_path);
 
                     let stop_tx = container_io.stop_tx();
                     let mut exit_tx = capnp_err!(child_reaper.watch_grandchild(child, stop_tx))?;
@@ -172,8 +198,7 @@ impl conmon::Server for Server {
                 }
                 Err(e) => {
                     error!("Unable to create child: {:#}", e);
-                    let mut resp = results.get().init_response();
-                    resp.set_exit_code(-2);
+                    results.get().init_response().set_exit_code(-2);
                 }
             }
             Ok(())

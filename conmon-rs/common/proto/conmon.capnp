@@ -20,6 +20,7 @@ interface Conmon {
         bundlePath @1 :Text;
         terminal @2 :Bool;
         exitPaths @3 :List(Text);
+        logPath @4 :Text;
     }
 
     struct CreateContainerResponse {

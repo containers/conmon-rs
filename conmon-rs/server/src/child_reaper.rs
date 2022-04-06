@@ -14,7 +14,7 @@ use nix::{
     },
     unistd::{getpgid, Pid},
 };
-use std::{fs::File, io::Write, path::PathBuf, sync::Arc, sync::Mutex};
+use std::{ffi::OsStr, fs::File, io::Write, path::PathBuf, sync::Arc, sync::Mutex};
 use tokio::{
     fs,
     process::Command,
@@ -50,9 +50,9 @@ impl ChildReaper {
         pidfile: PathBuf,
     ) -> Result<u32>
     where
-        P: AsRef<std::ffi::OsStr>,
+        P: AsRef<OsStr>,
         I: IntoIterator<Item = S>,
-        S: AsRef<std::ffi::OsStr>,
+        S: AsRef<OsStr>,
     {
         let mut cmd = Command::new(cmd);
         cmd.args(args);
@@ -160,6 +160,9 @@ pub struct ReapableChild {
 
     #[getset(set = "pub")]
     attach: Option<Attach>,
+
+    #[getset(get = "pub")]
+    log_path: PathBuf,
 }
 
 impl ReapableChild {
@@ -168,6 +171,7 @@ impl ReapableChild {
             pid: child.pid(),
             exit_paths: child.exit_paths().clone(),
             attach: None,
+            log_path: child.log_path().clone(),
         }
     }
 

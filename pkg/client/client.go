@@ -197,6 +197,7 @@ type CreateContainerConfig struct {
 	BundlePath string
 	Terminal   bool
 	ExitPaths  []string
+	LogPath    string
 }
 
 type CreateContainerResponse struct {
@@ -224,6 +225,9 @@ func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainer
 		}
 		req.SetTerminal(cfg.Terminal)
 		if err := stringSliceToTextList(cfg.ExitPaths, req.NewExitPaths); err != nil {
+			return err
+		}
+		if err := req.SetLogPath(cfg.LogPath); err != nil {
 			return err
 		}
 		return p.SetRequest(req)
