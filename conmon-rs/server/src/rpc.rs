@@ -57,7 +57,10 @@ impl conmon::Server for Server {
         let id = pry!(req.get_id()).to_string();
         debug!("Got a create container request for id {}", id);
 
-        let container_io = pry_err!(ContainerIO::new(req.get_terminal()));
+        let container_io = pry_err!(ContainerIO::new(
+            self.config().runtime_dir(),
+            req.get_terminal()
+        ));
         let bundle_path = PathBuf::from(pry!(req.get_bundle_path()));
         let pidfile = bundle_path.join("pidfile");
         debug!("PID file is {}", pidfile.display());
@@ -98,17 +101,25 @@ impl conmon::Server for Server {
         let req = pry!(pry!(params.get()).get_request());
         let id = pry!(req.get_id()).to_string();
         let timeout = req.get_timeout_sec();
-        let pidfile = pry_err!(Terminal::temp_file_name("exec_sync", "pid"));
+        // TODO FIXME: add defer style removal--possibly with a macro or creating a special type
+        // that can be dropped?
+        let pidfile = pry_err!(Terminal::temp_file_name(
+            self.config().runtime_dir(),
+            "exec_sync",
+            "pid"
+        ));
 
         debug!(
             "Got exec sync container request for id {} with timeout {}",
             id, timeout,
         );
 
-        let container_io = pry_err!(ContainerIO::new(req.get_terminal()));
+        let container_io = pry_err!(ContainerIO::new(
+            self.config().runtime_dir(),
+            req.get_terminal()
+        ));
         let args = pry_err!(self.generate_exec_sync_args(&pidfile, &container_io, &params));
         let runtime = self.config().runtime().clone();
-
         let child_reaper = Arc::clone(self.reaper());
 
         // Verify the original container is still running

@@ -18,7 +18,11 @@ import (
 	"github.com/containers/conmon-rs/internal/proto"
 )
 
-const binaryName = "conmonrs"
+const (
+	binaryName  = "conmonrs"
+	socketName  = "conmon.sock"
+	pidFileName = "pidfile"
+)
 
 type ConmonClient struct {
 	serverPID uint32
@@ -116,6 +120,11 @@ func (c *ConmonClient) toArgs(config *ConmonServerConfig) (string, []string, err
 	}
 	args = append(args, "--runtime", config.Runtime)
 
+	if config.ServerRunDir == "" {
+		return "", args, fmt.Errorf("RunDir must be specified")
+	}
+	args = append(args, "--runtime-dir", config.ServerRunDir)
+
 	if config.RuntimeRoot != "" {
 		args = append(args, "--runtime-root", config.RuntimeRoot)
 	}
@@ -127,12 +136,10 @@ func (c *ConmonClient) toArgs(config *ConmonServerConfig) (string, []string, err
 	if config.LogDriver != "" {
 		args = append(args, "--log-driver", config.LogDriver)
 	}
-	args = append(args, "--conmon-pidfile", c.pidFile())
 
 	if len(c.socket()) > maxUnixSocketPathSize {
 		return "", args, fmt.Errorf("unix socket path %q is too long", c.socket())
 	}
-	args = append(args, "--socket", c.socket())
 	return entrypoint, args, nil
 }
 
@@ -343,11 +350,11 @@ func (c *ConmonClient) Shutdown() error {
 }
 
 func (c *ConmonClient) socket() string {
-	return filepath.Join(c.runDir, "conmon.sock")
+	return filepath.Join(c.runDir, socketName)
 }
 
 func (c *ConmonClient) pidFile() string {
-	return filepath.Join(c.runDir, "pidfile")
+	return filepath.Join(c.runDir, pidFileName)
 }
 
 type AttachConfig struct {

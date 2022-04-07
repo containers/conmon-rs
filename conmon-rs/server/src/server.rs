@@ -66,10 +66,9 @@ impl Server {
         if !self.config().skip_fork() {
             match unsafe { fork()? } {
                 ForkResult::Parent { child, .. } => {
-                    if let Some(path) = &self.config().conmon_pidfile() {
-                        let child_str = format!("{}", child);
-                        File::create(path)?.write_all(child_str.as_bytes())?;
-                    }
+                    let child_str = format!("{}", child);
+                    File::create(self.config().conmon_pidfile())?
+                        .write_all(child_str.as_bytes())?;
                     unsafe { _exit(0) };
                 }
                 ForkResult::Child => (),
@@ -116,7 +115,7 @@ impl Server {
     /// Spwans all required tokio tasks.
     async fn spawn_tasks(self) -> Result<()> {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let socket = self.config().socket().to_path_buf();
+        let socket = self.config().socket();
         tokio::spawn(Self::start_signal_handler(
             Arc::clone(self.reaper()),
             socket,

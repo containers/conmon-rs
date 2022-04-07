@@ -12,7 +12,7 @@ use sendfd::RecvWithFd;
 use std::{
     io::{BufReader, ErrorKind, Read},
     os::unix::{fs::PermissionsExt, io::RawFd},
-    path::PathBuf,
+    path::{Path, PathBuf},
     str,
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -54,9 +54,9 @@ struct Config {
 
 impl Terminal {
     /// Setup a new terminal instance.
-    pub fn new() -> Result<Self> {
+    pub fn new(runtime_dir: &Path) -> Result<Self> {
         debug!("Creating new terminal");
-        let path = Self::temp_file_name("conmon-term-", ".sock")?;
+        let path = Self::temp_file_name(runtime_dir, "conmon-term-", ".sock")?;
         let path_clone = path.clone();
 
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -96,12 +96,12 @@ impl Terminal {
     }
 
     /// Generate a the temp file name without creating the file.
-    pub fn temp_file_name(prefix: &str, suffix: &str) -> Result<PathBuf> {
+    pub fn temp_file_name(directory: &Path, prefix: &str, suffix: &str) -> Result<PathBuf> {
         let file = Builder::new()
             .prefix(prefix)
             .suffix(suffix)
             .rand_bytes(7)
-            .tempfile()
+            .tempfile_in(directory)
             .context("create tempfile")?;
         let path: PathBuf = file.path().into();
         drop(file);
@@ -246,7 +246,8 @@ mod tests {
 
     #[tokio::test]
     async fn new_success() -> Result<()> {
-        let sut = Terminal::new()?;
+        let dir = tempfile::tempdir()?;
+        let sut = Terminal::new(dir.path())?;
         assert!(sut.path().exists());
 
         let res = pty::openpty(None, None)?;
