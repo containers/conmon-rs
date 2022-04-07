@@ -102,7 +102,7 @@ impl ChildReaper {
         let cleanup_grandchildren = locked_grandchildren.clone();
         let pid = child.pid();
 
-        task::spawn(async move {
+        task::spawn_local(async move {
             exit_tx.subscribe().recv().await?;
             if let Some(stop_tx) = stop_tx {
                 stop_tx.send(()).context("send message to stop channel")?;
