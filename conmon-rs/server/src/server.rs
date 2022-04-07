@@ -21,7 +21,7 @@ use std::{fs::File, io::Write, path::Path, process, sync::Arc};
 use tokio::{
     fs,
     net::UnixListener,
-    runtime,
+    runtime::{Builder, Handle},
     signal::unix::{signal, SignalKind},
     sync::oneshot,
     task::{self, LocalSet},
@@ -82,12 +82,11 @@ impl Server {
             .context("set child subreaper")?;
 
         // Use the single threaded runtime to save rss memory.
-        let rt = runtime::Builder::new_current_thread()
+        Builder::new_current_thread()
             .enable_io()
             .enable_time()
-            .build()?;
-        rt.block_on(self.spawn_tasks())?;
-        Ok(())
+            .build()?
+            .block_on(self.spawn_tasks())
     }
 
     fn init_self(&self) -> Result<()> {
@@ -95,8 +94,7 @@ impl Server {
         init.unset_locale()?;
         // While we could configure this, standard practice has it as -1000,
         // so it may be YAGNI to add configuration.
-        init.set_oom_score("-1000")?;
-        Ok(())
+        init.set_oom_score("-1000")
     }
 
     fn init_logging(&self) -> Result<()> {
@@ -126,8 +124,7 @@ impl Server {
         ));
 
         task::spawn_blocking(move || {
-            let rt = runtime::Handle::current();
-            rt.block_on(async {
+            Handle::current().block_on(async {
                 LocalSet::new()
                     .run_until(self.start_backend(shutdown_rx))
                     .await
@@ -168,9 +165,7 @@ impl Server {
         debug!("Removing socket file {}", socket.as_ref().display());
         fs::remove_file(socket)
             .await
-            .context("remove existing socket file")?;
-
-        Ok(())
+            .context("remove existing socket file")
     }
 
     async fn start_backend(self, mut shutdown_rx: oneshot::Receiver<()>) -> Result<()> {
