@@ -15,7 +15,6 @@ use std::{
     path::PathBuf,
     str,
     sync::mpsc::{self, Receiver, Sender},
-    thread,
     time::Duration,
 };
 use tempfile::Builder;
@@ -23,7 +22,7 @@ use tokio::{
     fs,
     io::{AsyncWriteExt, Interest},
     net::{UnixListener, UnixStream},
-    runtime::Runtime,
+    task,
 };
 
 #[derive(Debug, Getters)]
@@ -63,13 +62,14 @@ impl Terminal {
         let (connected_tx, connected_rx) = mpsc::channel();
         let (message_tx, message_rx) = mpsc::channel();
 
-        thread::spawn(move || {
+        task::spawn(async move {
             Self::listen(Config {
                 path: path_clone,
                 ready_tx,
                 connected_tx,
                 message_tx,
             })
+            .await
         });
         ready_rx.recv().context("wait for listener to be ready")?;
 
@@ -88,13 +88,6 @@ impl Terminal {
             .context("receive connected channel")
     }
 
-    #[allow(dead_code)]
-    /// Create window resize control FIFO.
-    pub fn setup_fifo() -> Result<()> {
-        // TODO: implement me
-        unimplemented!();
-    }
-
     /// Generate a the temp file name without creating the file.
     pub fn temp_file_name(prefix: &str, suffix: &str) -> Result<PathBuf> {
         let file = Builder::new()
@@ -108,26 +101,25 @@ impl Terminal {
         Ok(path)
     }
 
-    fn listen(config: Config) -> Result<()> {
-        Runtime::new()?.block_on(async move {
-            let listener = UnixListener::bind(config.path())?;
-            debug!("Listening terminal socket on {}", config.path().display());
+    async fn listen(config: Config) -> Result<()> {
+        let path = config.path();
+        debug!("Listening terminal socket on {}", path.display());
+        let listener = UnixListener::bind(path)?;
 
-            // Update the permissions
-            let mut perms = fs::metadata(config.path()).await?.permissions();
-            perms.set_mode(0o700);
-            fs::set_permissions(config.path(), perms).await?;
+        // Update the permissions
+        let mut perms = fs::metadata(path).await?.permissions();
+        perms.set_mode(0o700);
+        fs::set_permissions(path, perms).await?;
 
-            config
-                .ready_tx()
-                .send(())
-                .map_err(|_| format_err!("unable to send ready message"))?;
+        config
+            .ready_tx()
+            .send(())
+            .map_err(|_| format_err!("unable to send ready message"))?;
 
-            let stream = listener.accept().await?.0;
-            debug!("Got terminal socket stream: {:?}", stream);
+        let stream = listener.accept().await?.0;
+        debug!("Got terminal socket stream: {:?}", stream);
 
-            Self::handle_fd_receive(stream, config).await
-        })
+        Self::handle_fd_receive(stream, config).await
     }
 
     async fn handle_fd_receive(mut stream: UnixStream, config: Config) -> Result<()> {
@@ -142,8 +134,9 @@ impl Terminal {
             match stream.recv_with_fd(&mut data_buffer, &mut fd_buffer) {
                 Ok((_, fd_read)) => {
                     // Allow only one single read
-                    debug!("Removing socket path {}", config.path().display());
-                    fs::remove_file(config.path()).await?;
+                    let path = config.path();
+                    debug!("Removing socket path {}", path.display());
+                    fs::remove_file(path).await?;
 
                     debug!("Shutting down receiver stream");
                     stream.shutdown().await?;
@@ -162,7 +155,7 @@ impl Terminal {
                     termios::tcsetattr(fd, SetArg::TCSANOW, &term)?;
 
                     let message_tx = config.message_tx().clone();
-                    thread::spawn(move || Self::read_loop(fd, message_tx));
+                    task::spawn_blocking(move || Self::read_loop(fd, message_tx));
 
                     // TODO: Now that we have a fd to the tty, make sure we handle any pending
                     // data that was already buffered.
