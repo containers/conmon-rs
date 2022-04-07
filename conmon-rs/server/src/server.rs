@@ -20,7 +20,6 @@ use nix::{
 use std::{fs::File, io::Write, path::Path, process, sync::Arc};
 use tokio::{
     fs,
-    net::UnixListener,
     runtime::{Builder, Handle},
     signal::unix::{signal, SignalKind},
     sync::oneshot,
@@ -168,7 +167,7 @@ impl Server {
     }
 
     async fn start_backend(self, mut shutdown_rx: oneshot::Receiver<()>) -> Result<()> {
-        let listener = UnixListener::bind(&self.config().socket()).context("bind server socket")?;
+        let listener = crate::listener::bind_long_path(&self.config().socket())?;
         let client: conmon::Client = capnp_rpc::new_client(self);
 
         loop {

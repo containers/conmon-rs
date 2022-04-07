@@ -146,9 +146,6 @@ impl Config {
         if self.socket().exists() {
             fs::remove_file(self.socket())?;
         }
-        if let Some(parent) = self.socket().parent() {
-            fs::create_dir_all(parent)?;
-        }
 
         Ok(())
     }

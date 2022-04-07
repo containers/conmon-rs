@@ -21,7 +21,7 @@ use tempfile::Builder;
 use tokio::{
     fs,
     io::{AsyncWriteExt, Interest},
-    net::{UnixListener, UnixStream},
+    net::UnixStream,
     task,
 };
 
@@ -104,7 +104,7 @@ impl Terminal {
     async fn listen(config: Config) -> Result<()> {
         let path = config.path();
         debug!("Listening terminal socket on {}", path.display());
-        let listener = UnixListener::bind(path)?;
+        let listener = crate::listener::bind_long_path(path)?;
 
         // Update the permissions
         let mut perms = fs::metadata(path).await?.permissions();

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -204,6 +203,22 @@ var _ = Describe("ConmonClient", func() {
 					Terminal:   terminal,
 				})
 				Expect(err).NotTo(BeNil())
+			})
+			It("should handle long run dir", func() {
+				serverRunDir := MustDirInTempDir(tmpDir, "thisisareallylongdirithasmanycharactersinthepathsosuperduperlongannoyinglylong")
+				createRuntimeConfig(terminal)
+
+				sut = configGivenEnv(serverRunDir, rr.runtimeRoot, terminal)
+				resp, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+					ID:         ctrID,
+					BundlePath: tmpDir,
+					Terminal:   terminal,
+				})
+				Expect(err).To(BeNil())
+				Expect(resp.PID).NotTo(Equal(0))
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput(ctrID, "list")
+				}, time.Second*5).Should(BeNil())
 			})
 		}
 	})
@@ -593,10 +608,7 @@ func (rr *RuntimeRunner) runtimeRootArgs() []string {
 }
 
 func testAttachSocketConnection(socketPath string) error {
-	const sockSeqPacket = "unixpacket"
-	conn, err := net.DialUnix(sockSeqPacket, nil, &net.UnixAddr{
-		Name: socketPath, Net: sockSeqPacket,
-	})
+	conn, err := client.DialLongSocket("unixpacket", socketPath)
 	if err != nil {
 		return err
 	}
