@@ -1,7 +1,7 @@
 use crate::{streams::Streams, terminal::Terminal};
 use anyhow::{Context, Result};
 use crossbeam_channel::Sender;
-use std::{path::Path, sync::mpsc::Receiver};
+use std::sync::mpsc::Receiver;
 
 /// A generic abstraction over various container input-output types
 pub enum ContainerIO {
@@ -23,11 +23,9 @@ impl From<Streams> for ContainerIO {
 
 impl ContainerIO {
     /// Create a new container IO instance.
-    pub fn new(runtime_dir: &Path, terminal: bool) -> Result<Self> {
+    pub fn new(terminal: bool) -> Result<Self> {
         Ok(if terminal {
-            Terminal::new(runtime_dir)
-                .context("create new terminal")?
-                .into()
+            Terminal::new().context("create new terminal")?.into()
         } else {
             Streams::new().context("create new streams")?.into()
         })

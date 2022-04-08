@@ -137,9 +137,6 @@ func (c *ConmonClient) toArgs(config *ConmonServerConfig) (string, []string, err
 		args = append(args, "--log-driver", config.LogDriver)
 	}
 
-	if len(c.socket()) > maxUnixSocketPathSize {
-		return "", args, fmt.Errorf("unix socket path %q is too long", c.socket())
-	}
 	return entrypoint, args, nil
 }
 
@@ -168,12 +165,33 @@ func (c *ConmonClient) waitUntilServerUp() error {
 }
 
 func (c *ConmonClient) newRPCConn() (*rpc.Conn, error) {
-	socketConn, err := net.Dial("unix", c.socket())
+	socketConn, err := DialLongSocket("unix", c.socket())
 	if err != nil {
-		return nil, fmt.Errorf("new RPC conn: %w", err)
+		return nil, err
 	}
-
 	return rpc.NewConn(rpc.NewStreamTransport(socketConn), nil), nil
+}
+
+// DialLongSocket is a wrapper around net.DialUnix.
+// Its purpose is to allow for an arbitrarily long socket.
+// It does so by opening the parent directory of path, and using the
+// `/proc/self/fd` entry of that parent (which is a symlink to the actual parent)
+// to construct the path to the socket.
+// It assumes a valid path, as well as a file name that doesn't exceed the unix max socket length.
+func DialLongSocket(network, path string) (net.Conn, error) {
+	parent := filepath.Dir(path)
+	f, err := os.Open(parent)
+	if err != nil {
+		return nil, fmt.Errorf("open socket parent: %w", err)
+	}
+	defer f.Close()
+
+	socketName := filepath.Base(path)
+
+	socketPath := filepath.Join("/proc/self/fd", strconv.Itoa(int(f.Fd())), socketName)
+	return net.DialUnix(network, nil, &net.UnixAddr{
+		Name: socketPath, Net: network,
+	})
 }
 
 func (c *ConmonClient) Version(ctx context.Context) (string, error) {
@@ -349,12 +367,12 @@ func (c *ConmonClient) Shutdown() error {
 	return syscall.Kill(int(c.serverPID), syscall.SIGINT)
 }
 
-func (c *ConmonClient) socket() string {
-	return filepath.Join(c.runDir, socketName)
-}
-
 func (c *ConmonClient) pidFile() string {
 	return filepath.Join(c.runDir, pidFileName)
+}
+
+func (c *ConmonClient) socket() string {
+	return filepath.Join(c.runDir, socketName)
 }
 
 type AttachConfig struct {
