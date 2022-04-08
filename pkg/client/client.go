@@ -88,6 +88,11 @@ func (c *ConmonClient) StartServer(config *ConmonServerConfig) error {
 		return err
 	}
 	cmd := exec.Command(entrypoint, args...)
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
 	if config.LogDriver == LogDriverStdout {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
