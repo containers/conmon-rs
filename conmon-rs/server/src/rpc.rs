@@ -143,7 +143,7 @@ impl conmon::Server for Server {
                     let child = Child::new(id, grandchild_pid, vec![], logger);
 
                     let stop_tx = container_io.stop_tx();
-                    let mut exit_tx = capnp_err!(child_reaper.watch_grandchild(child, stop_tx))?;
+                    let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child, stop_tx))?;
 
                     let mut stdio = vec![];
                     let mut timed_out = false;
@@ -178,7 +178,7 @@ impl conmon::Server for Server {
                     resp.set_timed_out(timed_out);
                     if !timed_out {
                         resp.set_stdout(&stdio);
-                        resp.set_exit_code(capnp_err!(exit_tx.recv().await)?);
+                        resp.set_exit_code(capnp_err!(exit_rx.recv().await)?);
                     }
                 }
                 Err(e) => {
