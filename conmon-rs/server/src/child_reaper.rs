@@ -1,5 +1,5 @@
 //! Child process reaping and management.
-use crate::{attach::Attach, child::Child, container_io::ContainerIO};
+use crate::{attach::Attach, child::Child, container_io::ContainerIO, cri_logger::SharedCriLogger};
 use anyhow::{anyhow, format_err, Context, Result};
 use getset::{CopyGetters, Getters, Setters};
 use libc::pid_t;
@@ -13,7 +13,13 @@ use nix::{
     },
     unistd::{getpgid, Pid},
 };
-use std::{fs::File, io::Write, path::PathBuf, sync::Arc, sync::Mutex};
+use std::{
+    ffi::OsStr,
+    fs::File,
+    io::Write,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use tokio::{
     fs,
     process::Command,
@@ -49,9 +55,9 @@ impl ChildReaper {
         pidfile: PathBuf,
     ) -> Result<u32>
     where
-        P: AsRef<std::ffi::OsStr>,
+        P: AsRef<OsStr>,
         I: IntoIterator<Item = S>,
-        S: AsRef<std::ffi::OsStr>,
+        S: AsRef<OsStr>,
     {
         let mut cmd = Command::new(cmd);
         cmd.args(args);
@@ -149,7 +155,7 @@ impl ChildReaper {
     }
 }
 
-#[derive(Clone, CopyGetters, Debug, Default, Getters, Setters)]
+#[derive(Clone, CopyGetters, Debug, Getters, Setters)]
 pub struct ReapableChild {
     #[getset(get)]
     exit_paths: Vec<PathBuf>,
@@ -159,6 +165,9 @@ pub struct ReapableChild {
 
     #[getset(set = "pub")]
     attach: Option<Attach>,
+
+    #[getset(get = "pub")]
+    cri_logger: SharedCriLogger,
 }
 
 impl ReapableChild {
@@ -167,6 +176,7 @@ impl ReapableChild {
             pid: child.pid(),
             exit_paths: child.exit_paths().clone(),
             attach: None,
+            cri_logger: child.cri_logger().clone(),
         }
     }
 

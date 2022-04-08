@@ -1,6 +1,9 @@
 //! Pseudo terminal implementation.
 
-use crate::container_io::Message;
+use crate::{
+    container_io::Message,
+    cri_logger::{Pipe, SharedCriLogger},
+};
 use anyhow::{format_err, Context, Result};
 use getset::Getters;
 use log::{debug, error, trace};
@@ -35,7 +38,7 @@ pub struct Streams {
 
 impl Streams {
     /// Create a new Streams instance.
-    pub fn new() -> Result<Self> {
+    pub fn new(cri_logger: SharedCriLogger) -> Result<Self> {
         debug!("Creating new IO streams");
         Self::disconnect_std_streams().context("disconnect standard streams")?;
 
@@ -57,6 +60,7 @@ impl Streams {
 
         task::spawn(async move {
             Self::read_loop(
+                cri_logger,
                 message_tx,
                 stop_rx_stdout,
                 stop_rx_stderr,
@@ -85,6 +89,7 @@ impl Streams {
     }
 
     fn read_loop(
+        logger: SharedCriLogger,
         message_tx: Sender<Message>,
         stop_rx_stdout: broadcast::Receiver<()>,
         stop_rx_stderr: broadcast::Receiver<()>,
@@ -94,16 +99,33 @@ impl Streams {
         debug!("Start reading from IO streams");
 
         let message_tx_stdout = message_tx.clone();
+        let logger_clone = logger.clone();
 
         task::spawn(async move {
-            Self::read_loop_single_stream(message_tx_stdout, stop_rx_stdout, stdout).await
+            Self::read_loop_single_stream(
+                logger,
+                Pipe::StdOut,
+                message_tx_stdout,
+                stop_rx_stdout,
+                stdout,
+            )
+            .await
         });
         task::spawn(async move {
-            Self::read_loop_single_stream(message_tx, stop_rx_stderr, stderr).await
+            Self::read_loop_single_stream(
+                logger_clone,
+                Pipe::StdErr,
+                message_tx,
+                stop_rx_stderr,
+                stderr,
+            )
+            .await
         });
     }
 
     async fn read_loop_single_stream(
+        logger: SharedCriLogger,
+        pipe: Pipe,
         message_tx: Sender<Message>,
         mut stop_rx: broadcast::Receiver<()>,
         fd: RawFd,
@@ -113,7 +135,7 @@ impl Streams {
         let message_tx_clone = message_tx.clone();
         let (thread_shutdown_tx, thread_shutdown_rx) = oneshot::channel();
         task::spawn(async move {
-            Self::run_buffer_loop(message_tx_clone, fd, thread_shutdown_rx).await
+            Self::run_buffer_loop(logger, pipe, message_tx_clone, fd, thread_shutdown_rx).await
         });
 
         stop_rx
@@ -128,10 +150,12 @@ impl Streams {
     }
 
     async fn run_buffer_loop(
+        logger: SharedCriLogger,
+        pipe: Pipe,
         message_tx: Sender<Message>,
         fd: RawFd,
         mut thread_shutdown_rx: oneshot::Receiver<()>,
-    ) {
+    ) -> Result<()> {
         let stream = unsafe { File::from_raw_fd(fd) };
         let mut reader = BufReader::new(stream);
         let mut buf = vec![0; 1024];
@@ -140,7 +164,15 @@ impl Streams {
                 res = reader.read(&mut buf) => match res {
                     Ok(n) if n > 0 => {
                         debug!("Read {} bytes", n);
-                        if let Err(e) = message_tx.send(Message::Data((&buf[..n]).into())) {
+                        let data = &buf[..n];
+
+                        let mut locked_logger = logger.write().await;
+                        locked_logger
+                            .write(pipe, data)
+                            .await
+                            .context("write to log file")?;
+
+                        if let Err(e) = message_tx.send(Message::Data(data.into())) {
                             error!("Unable to send data through message channel: {}", e);
                         }
                     }
@@ -149,7 +181,7 @@ impl Streams {
                 },
                 _ = &mut thread_shutdown_rx => {
                     debug!("Shutting down io streams thread");
-                    return
+                    return Ok(())
                 }
             }
         }

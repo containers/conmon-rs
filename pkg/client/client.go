@@ -222,6 +222,7 @@ type CreateContainerConfig struct {
 	BundlePath string
 	Terminal   bool
 	ExitPaths  []string
+	LogPath    string
 }
 
 type CreateContainerResponse struct {
@@ -249,6 +250,9 @@ func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainer
 		}
 		req.SetTerminal(cfg.Terminal)
 		if err := stringSliceToTextList(cfg.ExitPaths, req.NewExitPaths); err != nil {
+			return err
+		}
+		if err := req.SetLogPath(cfg.LogPath); err != nil {
 			return err
 		}
 		return p.SetRequest(req)
@@ -400,6 +404,42 @@ func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) e
 			return err
 		}
 		return nil
+	})
+	defer free()
+
+	result, err := future.Struct()
+	if err != nil {
+		return err
+	}
+
+	if _, err := result.Response(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+type ReopenLogContainerConfig struct {
+	ID string
+}
+
+func (c *ConmonClient) ReopenLogContainer(ctx context.Context, cfg *ReopenLogContainerConfig) error {
+	conn, err := c.newRPCConn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
+
+	future, free := client.ReopenLogContainer(ctx, func(p proto.Conmon_reopenLogContainer_Params) error {
+		req, err := p.NewRequest()
+		if err != nil {
+			return err
+		}
+		if err := req.SetId(cfg.ID); err != nil {
+			return err
+		}
+		return p.SetRequest(req)
 	})
 	defer free()
 

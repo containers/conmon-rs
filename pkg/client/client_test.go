@@ -83,6 +83,12 @@ var _ = Describe("ConmonClient", func() {
 		createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "ls"})
 	}
 
+	containerLogContents := func(path string) string {
+		logContents, err := os.ReadFile(path)
+		Expect(err).To(BeNil())
+		return string(logContents)
+	}
+
 	JustAfterEach(func() {
 		if sut != nil {
 			pid := sut.PID()
@@ -113,11 +119,13 @@ var _ = Describe("ConmonClient", func() {
 			It(testName, func() {
 				createRuntimeConfig(terminal)
 
+				logPath := MustFileInTempDir(tmpDir, "log")
 				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
 				resp, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					Terminal:   terminal,
+					LogPath:    logPath,
 				})
 				Expect(err).To(BeNil())
 				Expect(resp.PID).NotTo(Equal(0))
@@ -134,12 +142,14 @@ var _ = Describe("ConmonClient", func() {
 				createRuntimeConfig(terminal)
 
 				exitPath := MustFileInTempDir(tmpDir, "exit")
+				logPath := MustFileInTempDir(tmpDir, "log")
 				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
 				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					ExitPaths:  []string{exitPath},
 					Terminal:   terminal,
+					LogPath:    logPath,
 				})
 				Expect(err).To(BeNil())
 				Eventually(func() error {
@@ -172,12 +182,14 @@ var _ = Describe("ConmonClient", func() {
 				createRuntimeConfig(terminal)
 
 				exitPath := MustFileInTempDir(tmpDir, "exit")
+				logPath := MustFileInTempDir(tmpDir, "log")
 				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
 				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					ExitPaths:  []string{exitPath},
 					Terminal:   terminal,
+					LogPath:    logPath,
 				})
 				Expect(err).To(BeNil())
 				Eventually(func() error {
@@ -195,12 +207,14 @@ var _ = Describe("ConmonClient", func() {
 				createRuntimeConfigWithProcessArgs(terminal, []string{"invalid"})
 
 				exitPath := MustFileInTempDir(tmpDir, "exit")
+				logPath := MustFileInTempDir(tmpDir, "log")
 				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
 				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					ExitPaths:  []string{exitPath},
 					Terminal:   terminal,
+					LogPath:    logPath,
 				})
 				Expect(err).NotTo(BeNil())
 			})
@@ -208,11 +222,13 @@ var _ = Describe("ConmonClient", func() {
 				serverRunDir := MustDirInTempDir(tmpDir, "thisisareallylongdirithasmanycharactersinthepathsosuperduperlongannoyinglylong")
 				createRuntimeConfig(terminal)
 
+				logPath := MustFileInTempDir(tmpDir, "log")
 				sut = configGivenEnv(serverRunDir, rr.runtimeRoot, terminal)
 				resp, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					Terminal:   terminal,
+					LogPath:    logPath,
 				})
 				Expect(err).To(BeNil())
 				Expect(resp.PID).NotTo(Equal(0))
@@ -233,11 +249,13 @@ var _ = Describe("ConmonClient", func() {
 			It(testName, func() {
 				createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
+				logPath := MustFileInTempDir(tmpDir, "log")
 				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
 				resp, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					Terminal:   terminal,
+					LogPath:    logPath,
 				})
 				Expect(err).To(BeNil())
 				Expect(resp.PID).NotTo(Equal(0))
@@ -264,6 +282,17 @@ var _ = Describe("ConmonClient", func() {
 				Expect(result.ExitCode).To(BeEquivalentTo(0))
 				Expect(result.Stdout).To(BeEquivalentTo("hello world"))
 				Expect(result.Stderr).To(BeEmpty())
+
+				// Log testing
+				logs := containerLogContents(logPath)
+				Expect(logs).To(ContainSubstring("stdout P hello world\n"))
+
+				sut.ReopenLogContainer(context.Background(), &client.ReopenLogContainerConfig{
+					ID: ctrID,
+				})
+				logs = containerLogContents(logPath)
+				Expect(logs).To(BeEmpty())
+
 			})
 
 			testName = "should succeeed with timeout"
@@ -273,11 +302,13 @@ var _ = Describe("ConmonClient", func() {
 			It(testName, func() {
 				createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
+				logPath := MustFileInTempDir(tmpDir, "log")
 				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
 				resp, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					Terminal:   terminal,
+					LogPath:    logPath,
 				})
 				Expect(err).To(BeNil())
 				Expect(resp.PID).NotTo(Equal(0))
@@ -313,11 +344,13 @@ var _ = Describe("ConmonClient", func() {
 			It(testName, func() {
 				createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
+				logPath := MustFileInTempDir(tmpDir, "log")
 				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
 				resp, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					Terminal:   terminal,
+					LogPath:    logPath,
 				})
 				Expect(err).To(BeNil())
 				Expect(resp.PID).NotTo(Equal(0))
@@ -358,11 +391,13 @@ var _ = Describe("ConmonClient", func() {
 			It(testName, func() {
 				createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
+				logPath := MustFileInTempDir(tmpDir, "log")
 				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
 				resp, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					Terminal:   terminal,
+					LogPath:    logPath,
 				})
 				Expect(err).To(BeNil())
 				Expect(resp.PID).NotTo(Equal(0))
@@ -402,11 +437,13 @@ var _ = Describe("ConmonClient", func() {
 			It(testName, func() {
 				createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
 
+				logPath := MustFileInTempDir(tmpDir, "log")
 				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
 				resp, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					Terminal:   terminal,
+					LogPath:    logPath,
 				})
 				Expect(err).To(BeNil())
 				Expect(resp.PID).NotTo(Equal(0))
