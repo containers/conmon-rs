@@ -1,6 +1,9 @@
 //! Terminal console functionalities.
 
-use crate::{container_io::Message, stream::Stream};
+use crate::{
+    container_io::Message,
+    cri_logger::{Pipe, SharedCriLogger},
+};
 use anyhow::{bail, format_err, Context, Result};
 use getset::Getters;
 use log::{debug, error, trace};
@@ -10,8 +13,11 @@ use nix::{
 };
 use sendfd::RecvWithFd;
 use std::{
-    io::{BufReader, ErrorKind, Read},
-    os::unix::{fs::PermissionsExt, io::RawFd},
+    io::ErrorKind,
+    os::unix::{
+        fs::PermissionsExt,
+        io::{FromRawFd, RawFd},
+    },
     path::{Path, PathBuf},
     str,
     sync::mpsc::{self, Receiver, Sender},
@@ -19,8 +25,8 @@ use std::{
 };
 use tempfile::Builder;
 use tokio::{
-    fs,
-    io::{AsyncWriteExt, Interest},
+    fs::{self, File},
+    io::{AsyncReadExt, AsyncWriteExt, BufReader, Interest},
     net::UnixStream,
     task,
 };
@@ -53,7 +59,7 @@ struct Config {
 
 impl Terminal {
     /// Setup a new terminal instance.
-    pub fn new() -> Result<Self> {
+    pub fn new(cri_logger: SharedCriLogger) -> Result<Self> {
         debug!("Creating new terminal");
         let path = Self::temp_file_name(None, "conmon-term-", ".sock")?;
         let path_clone = path.clone();
@@ -63,12 +69,15 @@ impl Terminal {
         let (message_tx, message_rx) = mpsc::channel();
 
         task::spawn(async move {
-            Self::listen(Config {
-                path: path_clone,
-                ready_tx,
-                connected_tx,
-                message_tx,
-            })
+            Self::listen(
+                Config {
+                    path: path_clone,
+                    ready_tx,
+                    connected_tx,
+                    message_tx,
+                },
+                cri_logger,
+            )
             .await
         });
         ready_rx.recv().context("wait for listener to be ready")?;
@@ -103,7 +112,7 @@ impl Terminal {
         Ok(path)
     }
 
-    async fn listen(config: Config) -> Result<()> {
+    async fn listen(config: Config, logger: SharedCriLogger) -> Result<()> {
         let path = config.path();
         debug!("Listening terminal socket on {}", path.display());
         let listener = crate::listener::bind_long_path(path)?;
@@ -121,10 +130,14 @@ impl Terminal {
         let stream = listener.accept().await?.0;
         debug!("Got terminal socket stream: {:?}", stream);
 
-        Self::handle_fd_receive(stream, config).await
+        Self::handle_fd_receive(stream, config, logger).await
     }
 
-    async fn handle_fd_receive(mut stream: UnixStream, config: Config) -> Result<()> {
+    async fn handle_fd_receive(
+        mut stream: UnixStream,
+        config: Config,
+        logger: SharedCriLogger,
+    ) -> Result<()> {
         loop {
             if !stream.ready(Interest::READABLE).await?.is_readable() {
                 continue;
@@ -156,8 +169,7 @@ impl Terminal {
                     term.output_flags |= OutputFlags::ONLCR;
                     termios::tcsetattr(fd, SetArg::TCSANOW, &term)?;
 
-                    let message_tx = config.message_tx().clone();
-                    task::spawn_blocking(move || Self::read_loop(fd, message_tx));
+                    task::spawn(async move { Self::read_loop(fd, config, logger).await });
 
                     // TODO: Now that we have a fd to the tty, make sure we handle any pending
                     // data that was already buffered.
@@ -168,12 +180,7 @@ impl Terminal {
                     // ioctl on a negative fd, and fail to resize the window.
                     // See: https://github.com/containers/conmon/blob/f263cf4/src/ctrl.c#L73
 
-                    config
-                        .connected_tx()
-                        .send(())
-                        .context("send connected channel")?;
                     debug!("Shutting down listener thread");
-
                     return Ok(());
                 }
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
@@ -188,26 +195,39 @@ impl Terminal {
         }
     }
 
-    fn read_loop(fd: RawFd, message_tx: Sender<Message>) -> Result<()> {
+    async fn read_loop(fd: RawFd, config: Config, logger: SharedCriLogger) -> Result<()> {
         debug!("Start reading from file descriptor");
 
-        let stream = Stream::from(fd);
+        let stream = unsafe { File::from_raw_fd(fd) };
         let mut reader = BufReader::new(stream);
         let mut buf = vec![0; 1024];
 
+        config
+            .connected_tx()
+            .send(())
+            .context("send connected channel")?;
         loop {
-            match reader.read(&mut buf) {
+            match reader.read(&mut buf).await {
                 Ok(n) if n > 0 => {
                     debug!("Read {} bytes", n);
+                    let data = &buf[..n];
 
-                    message_tx
-                        .send(Message::Data((&buf[..n]).into()))
+                    let mut locked_logger = logger.write().await;
+                    locked_logger
+                        .write(Pipe::StdOut, data)
+                        .await
+                        .context("write to log file")?;
+
+                    config
+                        .message_tx
+                        .send(Message::Data(data.into()))
                         .context("send data message")?;
                 }
                 Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
                     Errno::EIO => {
                         debug!("Stopping terminal read loop");
-                        message_tx
+                        config
+                            .message_tx
                             .send(Message::Done)
                             .context("send done message")?;
                         return Ok(());
@@ -235,13 +255,21 @@ impl Drop for Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cri_logger::CriLogger;
     use nix::pty;
     use sendfd::SendWithFd;
     use std::os::unix::io::FromRawFd;
+    use tempfile::NamedTempFile;
 
     #[tokio::test]
     async fn new_success() -> Result<()> {
-        let sut = Terminal::new()?;
+        let file = NamedTempFile::new()?;
+        let path = file.path();
+        let cri_logger = CriLogger::new(path, None)?;
+        let mut logger = cri_logger.write().await;
+        logger.init().await?;
+
+        let sut = Terminal::new(cri_logger.clone())?;
         assert!(sut.path().exists());
 
         let res = pty::openpty(None, None)?;

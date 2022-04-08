@@ -3,6 +3,7 @@ use crate::{
     child::Child,
     child_reaper::ChildReaper,
     container_io::{ContainerIO, Message},
+    cri_logger::CriLogger,
     server::Server,
     terminal::Terminal,
     version::Version,
@@ -15,7 +16,7 @@ use log::{debug, error};
 use nix::sys::signal::Signal;
 use std::{
     path::{Path, PathBuf},
-    sync::{mpsc::RecvTimeoutError, Arc},
+    sync::mpsc::RecvTimeoutError,
     time::Duration,
 };
 
@@ -57,12 +58,15 @@ impl conmon::Server for Server {
         let id = pry!(req.get_id()).to_string();
         debug!("Got a create container request for id {}", id);
 
-        let container_io = pry_err!(ContainerIO::new(req.get_terminal()));
+        let log_path = pry!(req.get_log_path());
+        let cri_logger = pry_err!(CriLogger::new(log_path, None));
+
+        let container_io = pry_err!(ContainerIO::new(req.get_terminal(), cri_logger.clone()));
         let bundle_path = PathBuf::from(pry!(req.get_bundle_path()));
         let pidfile = bundle_path.join("pidfile");
         debug!("PID file is {}", pidfile.display());
 
-        let child_reaper = Arc::clone(self.reaper());
+        let child_reaper = self.reaper().clone();
         let args = pry_err!(self.generate_runtime_args(&params, &container_io, &pidfile));
         let runtime = self.config().runtime().clone();
         let exit_paths = pry!(pry!(req.get_exit_paths())
@@ -71,6 +75,8 @@ impl conmon::Server for Server {
             .collect());
 
         Promise::from_future(async move {
+            capnp_err!(cri_logger.write().await.init().await)?;
+
             let grandchild_pid = capnp_err!(
                 child_reaper
                     .create_child(runtime, args, &container_io, pidfile)
@@ -78,7 +84,7 @@ impl conmon::Server for Server {
             )?;
 
             // register grandchild with server
-            let child = Child::new(id, grandchild_pid, exit_paths);
+            let child = Child::new(id, grandchild_pid, exit_paths, cri_logger);
             let stop_tx = container_io.stop_tx();
             capnp_err!(child_reaper.watch_grandchild(child, stop_tx))?;
 
@@ -111,20 +117,21 @@ impl conmon::Server for Server {
             id, timeout,
         );
 
-        let container_io = pry_err!(ContainerIO::new(req.get_terminal()));
-        let args = pry_err!(self.generate_exec_sync_args(&pidfile, &container_io, &params));
         let runtime = self.config().runtime().clone();
-        let child_reaper = Arc::clone(self.reaper());
+        let child_reaper = self.reaper().clone();
 
         // Verify the original container is still running
         // TODO: Do we need to do this while caller does?
-        let _ = if let Ok(c) = child_reaper.get(&id) {
+        let reapable_child = if let Ok(c) = child_reaper.get(&id) {
             c
         } else {
             let mut resp = results.get().init_response();
             resp.set_exit_code(-1);
             return Promise::ok(());
         };
+        let cri_logger = reapable_child.cri_logger().clone();
+        let container_io = pry_err!(ContainerIO::new(req.get_terminal(), cri_logger.clone()));
+        let args = pry_err!(self.generate_exec_sync_args(&pidfile, &container_io, &params));
 
         Promise::from_future(async move {
             match child_reaper
@@ -134,7 +141,7 @@ impl conmon::Server for Server {
                 Ok(grandchild_pid) => {
                     let mut resp = results.get().init_response();
                     // register grandchild with server
-                    let child = Child::new(id, grandchild_pid, vec![]);
+                    let child = Child::new(id, grandchild_pid, vec![], cri_logger);
 
                     let stop_tx = container_io.stop_tx();
                     let mut exit_tx = capnp_err!(child_reaper.watch_grandchild(child, stop_tx))?;
@@ -209,5 +216,25 @@ impl conmon::Server for Server {
         child.set_attach(attach.into());
 
         Promise::ok(())
+    }
+
+    fn reopen_log_container(
+        &mut self,
+        params: conmon::ReopenLogContainerParams,
+        _: conmon::ReopenLogContainerResults,
+    ) -> Promise<(), capnp::Error> {
+        let req = pry!(pry!(params.get()).get_request());
+        let container_id = pry_err!(req.get_id());
+        debug!(
+            "Got a reopen container log request for container id {}",
+            container_id
+        );
+
+        let child = pry_err!(self.reaper().get(container_id));
+
+        Promise::from_future(async move {
+            capnp_err!(child.cri_logger().write().await.reopen().await)?;
+            Ok(())
+        })
     }
 }

@@ -1,31 +1,33 @@
 //! File logging functionalities.
 
-#![allow(dead_code)] // TODO: remove me when actually used
-
 use anyhow::{Context, Result};
 use chrono::offset::Local;
-use getset::{CopyGetters, Getters, MutGetters, Setters};
+use getset::{CopyGetters, Getters, Setters};
 use log::{debug, trace};
 use memchr::memchr;
 use std::{
     marker::Unpin,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
+    sync::RwLock,
 };
 
-#[derive(Debug, CopyGetters, Getters, MutGetters, Setters)]
+pub type SharedCriLogger = Arc<RwLock<CriLogger>>;
+
+#[derive(Debug, CopyGetters, Getters, Setters)]
 /// The main structure used for container log handling.
 pub struct CriLogger {
     #[getset(get)]
     /// Path to the file on disk.
     path: PathBuf,
 
-    #[getset(get, get_mut, set)]
+    #[getset(set)]
     /// Open file handle of the `path`.
-    file: BufWriter<File>,
+    file: Option<BufWriter<File>>,
 
     #[getset(get_copy)]
     /// Maximum allowed log size in bytes.
@@ -43,21 +45,31 @@ pub enum Pipe {
 }
 
 impl CriLogger {
+    const ERR_UNINITIALIZED: &'static str = "logger not initialized";
+
     /// Create a new file logger instance.
-    pub async fn from<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> Result<Self> {
-        Ok(Self {
+    pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> Result<SharedCriLogger> {
+        Ok(Arc::new(RwLock::new(Self {
             path: path.as_ref().into(),
-            file: Self::open(&path).await?,
+            file: None,
             max_log_size,
-        })
+        })))
     }
 
-    /// Write the contents of the provided reader into the file logger. Ensure to manually call
-    /// `flush` if you need the written log data on disk.
-    pub async fn write<T>(&mut self, pipe: Pipe, reader: &mut BufReader<T>) -> Result<()>
+    /// Asynchronously initialize the CRI logger.
+    pub async fn init(&mut self) -> Result<()> {
+        debug!("Initializing CRI logger in path {}", self.path().display());
+        self.set_file(Self::open(self.path()).await?.into());
+        Ok(())
+    }
+
+    /// Write the contents of the provided reader into the file logger.
+    pub async fn write<T>(&mut self, pipe: Pipe, bytes: T) -> Result<()>
     where
         T: AsyncBufRead + Unpin,
     {
+        let mut reader = BufReader::new(bytes);
+
         // Get the RFC3339 timestmap
         let timestamp = Local::now().to_rfc3339();
         let min_log_len = timestamp
@@ -69,7 +81,7 @@ impl CriLogger {
         loop {
             // Read the line
             let mut line_buf = Vec::with_capacity(min_log_len);
-            let (read, partial) = Self::read_line(reader, &mut line_buf).await?;
+            let (read, partial) = Self::read_line(&mut reader, &mut line_buf).await?;
 
             if read == 0 {
                 break;
@@ -94,47 +106,57 @@ impl CriLogger {
             }
 
             // Write the timestmap
-            self.file_mut().write_all(timestamp.as_bytes()).await?;
+            let file = self.file.as_mut().context(Self::ERR_UNINITIALIZED)?;
+            file.write_all(timestamp.as_bytes()).await?;
 
             // Add the pipe name
             match pipe {
-                Pipe::StdOut => self.file_mut().write_all(b" stdout ").await,
-                Pipe::StdErr => self.file_mut().write_all(b" stderr ").await,
+                Pipe::StdOut => file.write_all(b" stdout ").await,
+                Pipe::StdErr => file.write_all(b" stderr ").await,
             }?;
 
             // Output log tag for partial or newline
             if partial {
-                self.file_mut().write_all(b"P ").await?;
+                file.write_all(b"P ").await?;
             } else {
-                self.file_mut().write_all(b"F ").await?;
+                file.write_all(b"F ").await?;
             }
 
             // Output the actual contents
-            self.file_mut().write_all(&line_buf).await?;
+            file.write_all(&line_buf).await?;
 
             // Output a newline for partial
             if partial {
-                self.file_mut().write_all(b"\n").await?;
+                file.write_all(b"\n").await?;
             }
 
             bytes_written += bytes_to_be_written;
             trace!("Wrote log line of length {}", bytes_to_be_written);
         }
 
-        Ok(())
+        self.flush().await
     }
 
     /// Reopen the container log file.
     pub async fn reopen(&mut self) -> Result<()> {
         debug!("Reopen container log {}", self.path().display());
-        self.file().get_ref().sync_all().await?;
-        self.set_file(Self::open(self.path()).await?);
-        Ok(())
+        self.file
+            .as_mut()
+            .context(Self::ERR_UNINITIALIZED)?
+            .get_ref()
+            .sync_all()
+            .await?;
+        self.init().await
     }
 
     /// Ensures that all content is written to disk.
     pub async fn flush(&mut self) -> Result<()> {
-        self.file_mut().flush().await.context("flush file writer")
+        self.file
+            .as_mut()
+            .context(Self::ERR_UNINITIALIZED)?
+            .flush()
+            .await
+            .context("flush file writer")
     }
 
     /// Open the provided path with the default options.
@@ -148,7 +170,7 @@ impl CriLogger {
                 .mode(0o600)
                 .open(&path)
                 .await
-                .context("open log file path")?,
+                .context(format!("open log file path '{}'", path.as_ref().display()))?,
         ))
     }
 
@@ -184,14 +206,15 @@ mod tests {
     #[tokio::test]
     async fn write_stdout_success() -> Result<()> {
         let buffer = "this is a line\nand another line\n";
-        let mut reader = BufReader::new(buffer.as_bytes());
+        let bytes = buffer.as_bytes();
 
         let file = NamedTempFile::new()?;
         let path = file.path();
-        let mut sut = CriLogger::from(path, None).await?;
+        let logger = CriLogger::new(path, None)?;
+        let mut sut = logger.write().await;
+        sut.init().await?;
 
-        sut.write(Pipe::StdOut, &mut reader).await?;
-        sut.flush().await?;
+        sut.write(Pipe::StdOut, bytes).await?;
 
         let res = fs::read_to_string(path)?;
         assert!(res.contains(" stdout F this is a line"));
@@ -205,16 +228,17 @@ mod tests {
     #[tokio::test]
     async fn write_stdout_stderr_success() -> Result<()> {
         let buffer = "a\nb\nc\n";
-        let mut reader1 = BufReader::new(buffer.as_bytes());
-        let mut reader2 = BufReader::new(buffer.as_bytes());
+        let bytes1 = buffer.as_bytes();
+        let bytes2 = buffer.as_bytes();
 
         let file = NamedTempFile::new()?;
         let path = file.path();
-        let mut sut = CriLogger::from(path, None).await?;
+        let logger = CriLogger::new(path, None)?;
+        let mut sut = logger.write().await;
+        sut.init().await?;
 
-        sut.write(Pipe::StdOut, &mut reader1).await?;
-        sut.write(Pipe::StdErr, &mut reader2).await?;
-        sut.flush().await?;
+        sut.write(Pipe::StdOut, bytes1).await?;
+        sut.write(Pipe::StdErr, bytes2).await?;
 
         let res = fs::read_to_string(path)?;
         assert!(res.contains(" stdout F a"));
@@ -229,14 +253,15 @@ mod tests {
     #[tokio::test]
     async fn write_reopen() -> Result<()> {
         let buffer = "a\nb\nc\nd\ne\nf\n";
-        let mut reader = BufReader::new(buffer.as_bytes());
+        let bytes = buffer.as_bytes();
 
         let file = NamedTempFile::new()?;
         let path = file.path();
-        let mut sut = CriLogger::from(path, Some(150)).await?;
+        let logger = CriLogger::new(path, Some(150))?;
+        let mut sut = logger.write().await;
+        sut.init().await?;
 
-        sut.write(Pipe::StdOut, &mut reader).await?;
-        sut.flush().await?;
+        sut.write(Pipe::StdOut, bytes).await?;
 
         let res = fs::read_to_string(path)?;
         assert!(!res.contains(" stdout F a"));
@@ -249,8 +274,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn from_failure() {
-        let res = CriLogger::from("/file/does/not/exist", None).await;
-        assert!(res.is_err())
+    async fn init_failure() -> Result<()> {
+        let logger = CriLogger::new("/file/does/not/exist", None)?;
+        let mut sut = logger.write().await;
+        assert!(sut.init().await.is_err());
+        Ok(())
     }
 }

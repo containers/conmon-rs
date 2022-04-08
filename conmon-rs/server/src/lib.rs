@@ -11,7 +11,6 @@ mod init;
 mod listener;
 mod rpc;
 mod server;
-mod stream;
 mod streams;
 mod terminal;
 mod version;
