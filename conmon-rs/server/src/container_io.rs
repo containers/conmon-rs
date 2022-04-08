@@ -1,7 +1,7 @@
 use crate::{streams::Streams, terminal::Terminal};
 use anyhow::{Context, Result};
-use crossbeam_channel::Sender;
 use std::sync::mpsc::Receiver;
+use tokio::sync::broadcast::Sender;
 
 /// A generic abstraction over various container input-output types
 pub enum ContainerIO {

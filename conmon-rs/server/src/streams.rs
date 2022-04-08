@@ -1,8 +1,7 @@
 //! Pseudo terminal implementation.
 
-use crate::{container_io::Message, stream::Stream};
-use anyhow::{Context, Result};
-use crossbeam_channel::{unbounded, Receiver as CrossbeamReceiver, Sender as CrossbeamSender};
+use crate::container_io::Message;
+use anyhow::{format_err, Context, Result};
 use getset::Getters;
 use log::{debug, error, trace};
 use nix::{
@@ -12,11 +11,16 @@ use nix::{
 };
 use std::{
     fs::OpenOptions,
-    io::{BufReader, Read},
-    os::unix::io::IntoRawFd,
+    os::unix::io::{FromRawFd, IntoRawFd, RawFd},
     str,
     sync::mpsc::{self, Receiver, Sender},
-    thread,
+};
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, BufReader},
+    select,
+    sync::{broadcast, oneshot},
+    task,
 };
 
 #[derive(Debug, Getters)]
@@ -26,7 +30,7 @@ pub struct Streams {
     message_rx: Receiver<Message>,
 
     #[getset(get = "pub")]
-    stop_tx: CrossbeamSender<()>,
+    stop_tx: broadcast::Sender<()>,
 }
 
 impl Streams {
@@ -48,11 +52,18 @@ impl Streams {
         stat::fchmod(libc::STDERR_FILENO, mode).context("chmod stderr")?;
 
         let (message_tx, message_rx) = mpsc::channel();
-        let (stop_tx, stop_rx) = unbounded();
+        let (stop_tx, stop_rx_stdout) = broadcast::channel(1);
+        let stop_rx_stderr = stop_tx.subscribe();
 
-        let stdout = stdout_fd_read.into();
-        let stderr = stderr_fd_read.into();
-        thread::spawn(move || Self::read_loop(message_tx, stop_rx, stdout, stderr));
+        task::spawn(async move {
+            Self::read_loop(
+                message_tx,
+                stop_rx_stdout,
+                stop_rx_stderr,
+                stdout_fd_read,
+                stderr_fd_read,
+            )
+        });
 
         Ok(Self {
             message_rx,
@@ -75,52 +86,72 @@ impl Streams {
 
     fn read_loop(
         message_tx: Sender<Message>,
-        stop_rx: CrossbeamReceiver<()>,
-        stdout: Stream,
-        stderr: Stream,
+        stop_rx_stdout: broadcast::Receiver<()>,
+        stop_rx_stderr: broadcast::Receiver<()>,
+        stdout: RawFd,
+        stderr: RawFd,
     ) {
         debug!("Start reading from IO streams");
 
         let message_tx_stdout = message_tx.clone();
-        let stop_rx_clone = stop_rx.clone();
 
-        thread::spawn(move || {
-            Self::read_loop_single_stream(message_tx_stdout, stop_rx_clone, stdout)
+        task::spawn(async move {
+            Self::read_loop_single_stream(message_tx_stdout, stop_rx_stdout, stdout).await
         });
-        thread::spawn(move || Self::read_loop_single_stream(message_tx, stop_rx, stderr));
+        task::spawn(async move {
+            Self::read_loop_single_stream(message_tx, stop_rx_stderr, stderr).await
+        });
     }
 
-    fn read_loop_single_stream(
+    async fn read_loop_single_stream(
         message_tx: Sender<Message>,
-        stop_rx: CrossbeamReceiver<()>,
-        stream: Stream,
+        mut stop_rx: broadcast::Receiver<()>,
+        fd: RawFd,
     ) -> Result<()> {
-        trace!("Start reading from single stream: {:?}", stream);
+        trace!("Start reading from single fd: {:?}", fd);
 
         let message_tx_clone = message_tx.clone();
-        thread::spawn(move || {
-            let mut reader = BufReader::new(stream);
-            let mut buf = vec![0; 1024];
-            loop {
-                match reader.read(&mut buf) {
+        let (thread_shutdown_tx, thread_shutdown_rx) = oneshot::channel();
+        task::spawn(async move {
+            Self::run_buffer_loop(message_tx_clone, fd, thread_shutdown_rx).await
+        });
+
+        stop_rx
+            .recv()
+            .await
+            .context("unable to wait for stop channel")?;
+        debug!("Received IO stream stop signal");
+        thread_shutdown_tx
+            .send(())
+            .map_err(|_| format_err!("unable to send thread shutdown message"))?;
+        message_tx.send(Message::Done).context("send done message")
+    }
+
+    async fn run_buffer_loop(
+        message_tx: Sender<Message>,
+        fd: RawFd,
+        mut thread_shutdown_rx: oneshot::Receiver<()>,
+    ) {
+        let stream = unsafe { File::from_raw_fd(fd) };
+        let mut reader = BufReader::new(stream);
+        let mut buf = vec![0; 1024];
+        loop {
+            select! {
+                res = reader.read(&mut buf) => match res {
                     Ok(n) if n > 0 => {
                         debug!("Read {} bytes", n);
-                        if let Err(e) = message_tx_clone.send(Message::Data((&buf[..n]).into())) {
+                        if let Err(e) = message_tx.send(Message::Data((&buf[..n]).into())) {
                             error!("Unable to send data through message channel: {}", e);
                         }
                     }
-                    Err(e) => error!("Unable to read from io stream: {}", e),
+                    Err(e) => error!("Unable to read from io fd: {}", e),
                     _ => {}
+                },
+                _ = &mut thread_shutdown_rx => {
+                    debug!("Shutting down io streams thread");
+                    return
                 }
             }
-        });
-
-        stop_rx.recv().context("unable to wait for stop channel")?;
-        debug!("Received IO stream stop signal");
-        message_tx
-            .send(Message::Done)
-            .context("send done message")?;
-
-        Ok(())
+        }
     }
 }
