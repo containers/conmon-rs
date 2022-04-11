@@ -1,5 +1,6 @@
 //! File logging functionalities.
 
+use crate::container_log::Pipe;
 use anyhow::{Context, Result};
 use chrono::offset::Local;
 use getset::{CopyGetters, Getters, Setters};
@@ -8,15 +9,11 @@ use memchr::memchr;
 use std::{
     marker::Unpin,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
-    sync::RwLock,
 };
-
-pub type SharedCriLogger = Arc<RwLock<CriLogger>>;
 
 #[derive(Debug, CopyGetters, Getters, Setters)]
 /// The main structure used for container log handling.
@@ -34,26 +31,16 @@ pub struct CriLogger {
     max_log_size: Option<usize>,
 }
 
-#[derive(Clone, Copy, Debug)]
-/// Available pipe types.
-pub enum Pipe {
-    /// Standard output.
-    StdOut,
-
-    /// Standard error.
-    StdErr,
-}
-
 impl CriLogger {
     const ERR_UNINITIALIZED: &'static str = "logger not initialized";
 
     /// Create a new file logger instance.
-    pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> Result<SharedCriLogger> {
-        Ok(Arc::new(RwLock::new(Self {
+    pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> Result<CriLogger> {
+        Ok(Self {
             path: path.as_ref().into(),
             file: None,
             max_log_size,
-        })))
+        })
     }
 
     /// Asynchronously initialize the CRI logger.
@@ -210,8 +197,7 @@ mod tests {
 
         let file = NamedTempFile::new()?;
         let path = file.path();
-        let logger = CriLogger::new(path, None)?;
-        let mut sut = logger.write().await;
+        let mut sut = CriLogger::new(path, None)?;
         sut.init().await?;
 
         sut.write(Pipe::StdOut, bytes).await?;
@@ -233,8 +219,7 @@ mod tests {
 
         let file = NamedTempFile::new()?;
         let path = file.path();
-        let logger = CriLogger::new(path, None)?;
-        let mut sut = logger.write().await;
+        let mut sut = CriLogger::new(path, None)?;
         sut.init().await?;
 
         sut.write(Pipe::StdOut, bytes1).await?;
@@ -257,8 +242,7 @@ mod tests {
 
         let file = NamedTempFile::new()?;
         let path = file.path();
-        let logger = CriLogger::new(path, Some(150))?;
-        let mut sut = logger.write().await;
+        let mut sut = CriLogger::new(path, Some(150))?;
         sut.init().await?;
 
         sut.write(Pipe::StdOut, bytes).await?;
@@ -275,8 +259,7 @@ mod tests {
 
     #[tokio::test]
     async fn init_failure() -> Result<()> {
-        let logger = CriLogger::new("/file/does/not/exist", None)?;
-        let mut sut = logger.write().await;
+        let mut sut = CriLogger::new("/file/does/not/exist", None)?;
         assert!(sut.init().await.is_err());
         Ok(())
     }

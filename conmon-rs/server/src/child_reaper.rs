@@ -1,5 +1,7 @@
 //! Child process reaping and management.
-use crate::{attach::Attach, child::Child, container_io::ContainerIO, cri_logger::SharedCriLogger};
+use crate::{
+    attach::Attach, child::Child, container_io::ContainerIO, container_log::SharedContainerLog,
+};
 use anyhow::{anyhow, format_err, Context, Result};
 use getset::{CopyGetters, Getters, Setters};
 use libc::pid_t;
@@ -167,7 +169,7 @@ pub struct ReapableChild {
     attach: Option<Attach>,
 
     #[getset(get = "pub")]
-    cri_logger: SharedCriLogger,
+    logger: SharedContainerLog,
 }
 
 impl ReapableChild {
@@ -176,7 +178,7 @@ impl ReapableChild {
             pid: child.pid(),
             exit_paths: child.exit_paths().clone(),
             attach: None,
-            cri_logger: child.cri_logger().clone(),
+            logger: child.logger().clone(),
         }
     }
 

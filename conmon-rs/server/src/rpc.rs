@@ -3,7 +3,7 @@ use crate::{
     child::Child,
     child_reaper::ChildReaper,
     container_io::{ContainerIO, Message},
-    cri_logger::CriLogger,
+    container_log::ContainerLog,
     server::Server,
     terminal::Terminal,
     version::Version,
@@ -58,14 +58,9 @@ impl conmon::Server for Server {
         let id = pry!(req.get_id()).to_string();
         debug!("Got a create container request for id {}", id);
 
-        let log_path = pry!(pry_err!(pry!(req.get_log_drivers())
-            .iter()
-            .next()
-            .context("no log driver provided"))
-        .get_path());
-        let cri_logger = pry_err!(CriLogger::new(log_path, None));
-
-        let container_io = pry_err!(ContainerIO::new(req.get_terminal(), cri_logger.clone()));
+        let log_drivers = pry!(req.get_log_drivers());
+        let container_log = pry_err!(ContainerLog::from(log_drivers));
+        let container_io = pry_err!(ContainerIO::new(req.get_terminal(), container_log.clone()));
         let bundle_path = PathBuf::from(pry!(req.get_bundle_path()));
         let pidfile = bundle_path.join("pidfile");
         debug!("PID file is {}", pidfile.display());
@@ -79,7 +74,7 @@ impl conmon::Server for Server {
             .collect());
 
         Promise::from_future(async move {
-            capnp_err!(cri_logger.write().await.init().await)?;
+            capnp_err!(container_log.write().await.init().await)?;
 
             let grandchild_pid = capnp_err!(
                 child_reaper
@@ -88,7 +83,7 @@ impl conmon::Server for Server {
             )?;
 
             // register grandchild with server
-            let child = Child::new(id, grandchild_pid, exit_paths, cri_logger);
+            let child = Child::new(id, grandchild_pid, exit_paths, container_log);
             let stop_tx = container_io.stop_tx();
             capnp_err!(child_reaper.watch_grandchild(child, stop_tx))?;
 
@@ -133,8 +128,8 @@ impl conmon::Server for Server {
             resp.set_exit_code(-1);
             return Promise::ok(());
         };
-        let cri_logger = reapable_child.cri_logger().clone();
-        let container_io = pry_err!(ContainerIO::new(req.get_terminal(), cri_logger.clone()));
+        let logger = reapable_child.logger().clone();
+        let container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger.clone()));
         let args = pry_err!(self.generate_exec_sync_args(&pidfile, &container_io, &params));
 
         Promise::from_future(async move {
@@ -145,7 +140,7 @@ impl conmon::Server for Server {
                 Ok(grandchild_pid) => {
                     let mut resp = results.get().init_response();
                     // register grandchild with server
-                    let child = Child::new(id, grandchild_pid, vec![], cri_logger);
+                    let child = Child::new(id, grandchild_pid, vec![], logger);
 
                     let stop_tx = container_io.stop_tx();
                     let mut exit_tx = capnp_err!(child_reaper.watch_grandchild(child, stop_tx))?;
@@ -237,7 +232,7 @@ impl conmon::Server for Server {
         let child = pry_err!(self.reaper().get(container_id));
 
         Promise::from_future(async move {
-            capnp_err!(child.cri_logger().write().await.reopen().await)?;
+            capnp_err!(child.logger().write().await.reopen().await)?;
             Ok(())
         })
     }

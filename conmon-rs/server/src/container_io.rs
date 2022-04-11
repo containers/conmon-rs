@@ -1,4 +1,4 @@
-use crate::{cri_logger::SharedCriLogger, streams::Streams, terminal::Terminal};
+use crate::{container_log::SharedContainerLog, streams::Streams, terminal::Terminal};
 use anyhow::{Context, Result};
 use std::sync::mpsc::Receiver;
 use tokio::sync::broadcast::Sender;
@@ -23,15 +23,11 @@ impl From<Streams> for ContainerIO {
 
 impl ContainerIO {
     /// Create a new container IO instance.
-    pub fn new(terminal: bool, cri_logger: SharedCriLogger) -> Result<Self> {
+    pub fn new(terminal: bool, logger: SharedContainerLog) -> Result<Self> {
         Ok(if terminal {
-            Terminal::new(cri_logger)
-                .context("create new terminal")?
-                .into()
+            Terminal::new(logger).context("create new terminal")?.into()
         } else {
-            Streams::new(cri_logger)
-                .context("create new streams")?
-                .into()
+            Streams::new(logger).context("create new streams")?.into()
         })
     }
 
