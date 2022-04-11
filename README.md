@@ -3,7 +3,7 @@
 [![ci](https://github.com/containers/conmon-rs/workflows/ci/badge.svg)](https://github.com/containers/conmon-rs/actions)
 [![gh-pages](https://github.com/containers/conmon-rs/workflows/gh-pages/badge.svg)](https://github.com/containers/conmon-rs/actions)
 [![codecov](https://codecov.io/gh/containers/conmon-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/containers/conmon-rs)
-[![dependencies](https://deps.rs/repo/github/containers/oci-spec-rs/status.svg)](https://deps.rs/repo/github/containers/oci-spec-rs)
+[![dependencies](https://deps.rs/repo/github/containers/conmon-rs/status.svg)](https://deps.rs/repo/github/containers/conmon-rs)
 [![docs](https://img.shields.io/badge/docs-main-blue.svg)](https://containers.github.io/conmon-rs/conmon/index.html)
 
 A pod level OCI container runtime monitor.
