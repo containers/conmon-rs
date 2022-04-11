@@ -58,7 +58,11 @@ impl conmon::Server for Server {
         let id = pry!(req.get_id()).to_string();
         debug!("Got a create container request for id {}", id);
 
-        let log_path = pry!(req.get_log_path());
+        let log_path = pry!(pry_err!(pry!(req.get_log_drivers())
+            .iter()
+            .next()
+            .context("no log driver provided"))
+        .get_path());
         let cri_logger = pry_err!(CriLogger::new(log_path, None));
 
         let container_io = pry_err!(ContainerIO::new(req.get_terminal(), cri_logger.clone()));
