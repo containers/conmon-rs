@@ -1,8 +1,9 @@
 //! Terminal console functionalities.
 
 use crate::{
-    container_io::{ContainerIO, Message},
-    container_log::{Pipe, SharedContainerLog},
+    attach::SharedContainerAttach,
+    container_io::{ContainerIO, Message, Pipe},
+    container_log::SharedContainerLog,
 };
 use anyhow::{bail, format_err, Context, Result};
 use getset::{Getters, MutGetters};
@@ -54,7 +55,7 @@ struct Config {
 
 impl Terminal {
     /// Setup a new terminal instance.
-    pub fn new(logger: SharedContainerLog) -> Result<Self> {
+    pub fn new(logger: SharedContainerLog, attach: SharedContainerAttach) -> Result<Self> {
         debug!("Creating new terminal");
         let path = Self::temp_file_name(None, "conmon-term-", ".sock")?;
         let path_clone = path.clone();
@@ -72,6 +73,7 @@ impl Terminal {
                     message_tx,
                 },
                 logger,
+                attach,
             )
             .await
         });
@@ -107,7 +109,11 @@ impl Terminal {
         Ok(path)
     }
 
-    async fn listen(config: Config, logger: SharedContainerLog) -> Result<()> {
+    async fn listen(
+        config: Config,
+        logger: SharedContainerLog,
+        attach: SharedContainerAttach,
+    ) -> Result<()> {
         let path = config.path();
         debug!("Listening terminal socket on {}", path.display());
         let listener = crate::listener::bind_long_path(path)?;
@@ -125,13 +131,14 @@ impl Terminal {
         let stream = listener.accept().await?.0;
         debug!("Got terminal socket stream: {:?}", stream);
 
-        Self::handle_fd_receive(stream, config, logger).await
+        Self::handle_fd_receive(stream, config, logger, attach).await
     }
 
     async fn handle_fd_receive(
         mut stream: UnixStream,
         config: Config,
         logger: SharedContainerLog,
+        attach: SharedContainerAttach,
     ) -> Result<()> {
         loop {
             if !stream.ready(Interest::READABLE).await?.is_readable() {
@@ -164,13 +171,23 @@ impl Terminal {
                     term.output_flags |= OutputFlags::ONLCR;
                     termios::tcsetattr(fd, SetArg::TCSANOW, &term)?;
 
+                    let attach_clone = attach.clone();
                     task::spawn(async move {
                         config
                             .connected_tx()
                             .send(())
                             .context("send connected channel")?;
-                        ContainerIO::read_loop(fd, Pipe::StdOut, logger, config.message_tx).await
+                        ContainerIO::read_loop(
+                            fd,
+                            Pipe::StdOut,
+                            logger,
+                            config.message_tx,
+                            attach_clone,
+                        )
+                        .await
                     });
+
+                    task::spawn(async move { ContainerIO::read_loop_stdin(fd, attach).await });
 
                     // TODO: Now that we have a fd to the tty, make sure we handle any pending
                     // data that was already buffered.
@@ -212,7 +229,7 @@ impl Drop for Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::container_log::ContainerLog;
+    use crate::{attach::SharedContainerAttach, container_log::ContainerLog};
     use nix::pty;
     use sendfd::SendWithFd;
     use std::os::unix::io::FromRawFd;
@@ -220,8 +237,9 @@ mod tests {
     #[tokio::test]
     async fn new_success() -> Result<()> {
         let logger = ContainerLog::new();
+        let attach = SharedContainerAttach::default();
 
-        let sut = Terminal::new(logger)?;
+        let sut = Terminal::new(logger, attach)?;
         assert!(sut.path().exists());
 
         let res = pty::openpty(None, None)?;

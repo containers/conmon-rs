@@ -1,4 +1,4 @@
-use crate::cri_logger::CriLogger;
+use crate::{container_io::Pipe, cri_logger::CriLogger};
 use anyhow::Result;
 use capnp::struct_list::Reader;
 use conmon_common::conmon_capnp::conmon::log_driver::{Owned, Type};
@@ -16,16 +16,6 @@ pub struct ContainerLog {
 #[derive(Debug)]
 enum LogDriver {
     ContainerRuntimeInterface(CriLogger),
-}
-
-#[derive(Clone, Copy, Debug)]
-/// Available pipe types.
-pub enum Pipe {
-    /// Standard output.
-    StdOut,
-
-    /// Standard error.
-    StdErr,
 }
 
 impl ContainerLog {

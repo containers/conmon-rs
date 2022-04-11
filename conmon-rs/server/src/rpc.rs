@@ -1,6 +1,11 @@
 use crate::{
-    attach::Attach, child::Child, container_io::ContainerIO, container_log::ContainerLog,
-    server::Server, terminal::Terminal, version::Version,
+    attach::{Attach, SharedContainerAttach},
+    child::Child,
+    container_io::ContainerIO,
+    container_log::ContainerLog,
+    server::Server,
+    terminal::Terminal,
+    version::Version,
 };
 use anyhow::Context;
 use capnp::{capability::Promise, Error};
@@ -54,7 +59,12 @@ impl conmon::Server for Server {
 
         let log_drivers = pry!(req.get_log_drivers());
         let container_log = pry_err!(ContainerLog::from(log_drivers));
-        let container_io = pry_err!(ContainerIO::new(req.get_terminal(), container_log.clone()));
+        let attach = SharedContainerAttach::default();
+        let container_io = pry_err!(ContainerIO::new(
+            req.get_terminal(),
+            container_log.clone(),
+            attach.clone()
+        ));
         let bundle_path = PathBuf::from(pry!(req.get_bundle_path()));
         let pidfile = bundle_path.join("pidfile");
         debug!("PID file is {}", pidfile.display());
@@ -77,7 +87,7 @@ impl conmon::Server for Server {
             )?;
 
             // register grandchild with server
-            let child = Child::new(id, grandchild_pid, exit_paths, container_log, None);
+            let child = Child::new(id, grandchild_pid, exit_paths, container_log, None, attach);
             capnp_err!(child_reaper.watch_grandchild(child))?;
 
             results
@@ -113,7 +123,12 @@ impl conmon::Server for Server {
         let child_reaper = self.reaper().clone();
 
         let logger = ContainerLog::new();
-        let mut container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger.clone()));
+        let attach = SharedContainerAttach::default();
+        let mut container_io = pry_err!(ContainerIO::new(
+            req.get_terminal(),
+            logger.clone(),
+            attach.clone()
+        ));
         let args = pry_err!(self.generate_exec_sync_args(&pidfile, &container_io, &params));
 
         Promise::from_future(async move {
@@ -129,7 +144,8 @@ impl conmon::Server for Server {
                     };
                     let mut resp = results.get().init_response();
                     // register grandchild with server
-                    let child = Child::new(id, grandchild_pid, vec![], logger, time_to_timeout);
+                    let child =
+                        Child::new(id, grandchild_pid, vec![], logger, time_to_timeout, attach);
 
                     let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child))?;
 
@@ -173,11 +189,12 @@ impl conmon::Server for Server {
 
         let socket_path = Path::new(pry!(req.get_socket_path()));
         let attach = pry_err!(Attach::new(socket_path).context("create attach endpoint"));
+        let child = pry_err!(self.reaper().get(container_id));
 
-        let mut child = pry_err!(self.reaper().get(container_id));
-        child.set_attach(attach.into());
-
-        Promise::ok(())
+        Promise::from_future(async move {
+            child.attach().add(attach).await;
+            Ok(())
+        })
     }
 
     fn reopen_log_container(

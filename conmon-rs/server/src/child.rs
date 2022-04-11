@@ -1,4 +1,4 @@
-use crate::container_log::SharedContainerLog;
+use crate::{attach::SharedContainerAttach, container_log::SharedContainerLog};
 use getset::{CopyGetters, Getters};
 use std::path::PathBuf;
 
@@ -18,6 +18,9 @@ pub struct Child {
 
     #[getset(get = "pub")]
     timeout: Option<tokio::time::Instant>,
+
+    #[getset(get = "pub")]
+    attach: SharedContainerAttach,
 }
 
 impl Child {
@@ -27,6 +30,7 @@ impl Child {
         exit_paths: Vec<PathBuf>,
         logger: SharedContainerLog,
         timeout: Option<tokio::time::Instant>,
+        attach: SharedContainerAttach,
     ) -> Self {
         Self {
             id,
@@ -34,6 +38,7 @@ impl Child {
             exit_paths,
             logger,
             timeout,
+            attach,
         }
     }
 }

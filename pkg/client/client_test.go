@@ -237,7 +237,7 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	Describe("Attach", func() {
-		for _, terminal := range []bool{true, false} {
+		for _, terminal := range []bool{true} {
 			terminal := terminal
 			It(testName("should succeed", terminal), func() {
 				tr = newTestRunner()
@@ -254,8 +254,7 @@ var _ = Describe("ConmonClient", func() {
 				})
 				Expect(err).To(BeNil())
 
-				err = testAttachSocketConnection(socketPath)
-				Expect(err).To(BeNil())
+				testAttachSocketConnection(socketPath)
 			})
 		}
 	})
