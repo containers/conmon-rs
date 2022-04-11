@@ -2,7 +2,7 @@
 
 use crate::{
     container_io::Message,
-    cri_logger::{Pipe, SharedCriLogger},
+    container_log::{Pipe, SharedContainerLog},
 };
 use anyhow::{bail, format_err, Context, Result};
 use getset::Getters;
@@ -59,7 +59,7 @@ struct Config {
 
 impl Terminal {
     /// Setup a new terminal instance.
-    pub fn new(cri_logger: SharedCriLogger) -> Result<Self> {
+    pub fn new(logger: SharedContainerLog) -> Result<Self> {
         debug!("Creating new terminal");
         let path = Self::temp_file_name(None, "conmon-term-", ".sock")?;
         let path_clone = path.clone();
@@ -76,7 +76,7 @@ impl Terminal {
                     connected_tx,
                     message_tx,
                 },
-                cri_logger,
+                logger,
             )
             .await
         });
@@ -112,7 +112,7 @@ impl Terminal {
         Ok(path)
     }
 
-    async fn listen(config: Config, logger: SharedCriLogger) -> Result<()> {
+    async fn listen(config: Config, logger: SharedContainerLog) -> Result<()> {
         let path = config.path();
         debug!("Listening terminal socket on {}", path.display());
         let listener = crate::listener::bind_long_path(path)?;
@@ -136,7 +136,7 @@ impl Terminal {
     async fn handle_fd_receive(
         mut stream: UnixStream,
         config: Config,
-        logger: SharedCriLogger,
+        logger: SharedContainerLog,
     ) -> Result<()> {
         loop {
             if !stream.ready(Interest::READABLE).await?.is_readable() {
@@ -195,7 +195,7 @@ impl Terminal {
         }
     }
 
-    async fn read_loop(fd: RawFd, config: Config, logger: SharedCriLogger) -> Result<()> {
+    async fn read_loop(fd: RawFd, config: Config, logger: SharedContainerLog) -> Result<()> {
         debug!("Start reading from file descriptor");
 
         let stream = unsafe { File::from_raw_fd(fd) };
@@ -255,21 +255,17 @@ impl Drop for Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cri_logger::CriLogger;
+    use crate::container_log::ContainerLog;
     use nix::pty;
     use sendfd::SendWithFd;
-    use std::os::unix::io::FromRawFd;
-    use tempfile::NamedTempFile;
+    use std::{os::unix::io::FromRawFd, sync::Arc};
+    use tokio::sync::RwLock;
 
     #[tokio::test]
     async fn new_success() -> Result<()> {
-        let file = NamedTempFile::new()?;
-        let path = file.path();
-        let cri_logger = CriLogger::new(path, None)?;
-        let mut logger = cri_logger.write().await;
-        logger.init().await?;
+        let logger = Arc::new(RwLock::new(ContainerLog::default()));
 
-        let sut = Terminal::new(cri_logger.clone())?;
+        let sut = Terminal::new(logger)?;
         assert!(sut.path().exists());
 
         let res = pty::openpty(None, None)?;

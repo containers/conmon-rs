@@ -2,7 +2,7 @@
 
 use crate::{
     container_io::Message,
-    cri_logger::{Pipe, SharedCriLogger},
+    container_log::{Pipe, SharedContainerLog},
 };
 use anyhow::{format_err, Context, Result};
 use getset::Getters;
@@ -38,7 +38,7 @@ pub struct Streams {
 
 impl Streams {
     /// Create a new Streams instance.
-    pub fn new(cri_logger: SharedCriLogger) -> Result<Self> {
+    pub fn new(logger: SharedContainerLog) -> Result<Self> {
         debug!("Creating new IO streams");
         Self::disconnect_std_streams().context("disconnect standard streams")?;
 
@@ -60,7 +60,7 @@ impl Streams {
 
         task::spawn(async move {
             Self::read_loop(
-                cri_logger,
+                logger,
                 message_tx,
                 stop_rx_stdout,
                 stop_rx_stderr,
@@ -89,7 +89,7 @@ impl Streams {
     }
 
     fn read_loop(
-        logger: SharedCriLogger,
+        logger: SharedContainerLog,
         message_tx: Sender<Message>,
         stop_rx_stdout: broadcast::Receiver<()>,
         stop_rx_stderr: broadcast::Receiver<()>,
@@ -124,7 +124,7 @@ impl Streams {
     }
 
     async fn read_loop_single_stream(
-        logger: SharedCriLogger,
+        logger: SharedContainerLog,
         pipe: Pipe,
         message_tx: Sender<Message>,
         mut stop_rx: broadcast::Receiver<()>,
@@ -150,7 +150,7 @@ impl Streams {
     }
 
     async fn run_buffer_loop(
-        logger: SharedCriLogger,
+        logger: SharedContainerLog,
         pipe: Pipe,
         message_tx: Sender<Message>,
         fd: RawFd,

@@ -1,4 +1,4 @@
-use crate::cri_logger::SharedCriLogger;
+use crate::container_log::SharedContainerLog;
 use getset::{CopyGetters, Getters};
 use std::path::PathBuf;
 
@@ -14,21 +14,16 @@ pub struct Child {
     exit_paths: Vec<PathBuf>,
 
     #[getset(get = "pub")]
-    cri_logger: SharedCriLogger,
+    logger: SharedContainerLog,
 }
 
 impl Child {
-    pub fn new(
-        id: String,
-        pid: u32,
-        exit_paths: Vec<PathBuf>,
-        cri_logger: SharedCriLogger,
-    ) -> Self {
+    pub fn new(id: String, pid: u32, exit_paths: Vec<PathBuf>, logger: SharedContainerLog) -> Self {
         Self {
             id,
             pid,
             exit_paths,
-            cri_logger,
+            logger,
         }
     }
 }
