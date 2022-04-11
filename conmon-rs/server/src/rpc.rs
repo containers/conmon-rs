@@ -119,16 +119,7 @@ impl conmon::Server for Server {
         let runtime = self.config().runtime().clone();
         let child_reaper = self.reaper().clone();
 
-        // Verify the original container is still running
-        // TODO: Do we need to do this while caller does?
-        let reapable_child = if let Ok(c) = child_reaper.get(&id) {
-            c
-        } else {
-            let mut resp = results.get().init_response();
-            resp.set_exit_code(-1);
-            return Promise::ok(());
-        };
-        let logger = reapable_child.logger().clone();
+        let logger = pry_err!(ContainerLog::new());
         let container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger.clone()));
         let args = pry_err!(self.generate_exec_sync_args(&pidfile, &container_io, &params));
 
