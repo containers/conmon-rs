@@ -20,7 +20,17 @@ interface Conmon {
         bundlePath @1 :Text;
         terminal @2 :Bool;
         exitPaths @3 :List(Text);
-        logPath @4 :Text;
+        logDrivers @4 :List(LogDriver);
+    }
+
+    struct LogDriver {
+        type @0 :Type;
+        path @1 :Text;
+
+        enum Type {
+            # The CRI logger, requires `path` to be set.
+            containerRuntimeInterface @0;
+        }
     }
 
     struct CreateContainerResponse {

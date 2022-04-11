@@ -222,8 +222,19 @@ type CreateContainerConfig struct {
 	BundlePath string
 	Terminal   bool
 	ExitPaths  []string
-	LogPath    string
+	LogDrivers []LogDriver
 }
+
+type LogDriver struct {
+	Type LogDriverType
+	Path string
+}
+
+type LogDriverType int
+
+const (
+	LogDriverTypeContainerRuntimeInterface LogDriverType = iota
+)
 
 type CreateContainerResponse struct {
 	PID uint32
@@ -252,9 +263,11 @@ func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainer
 		if err := stringSliceToTextList(cfg.ExitPaths, req.NewExitPaths); err != nil {
 			return err
 		}
-		if err := req.SetLogPath(cfg.LogPath); err != nil {
+
+		if err := c.initLogDrivers(&req, cfg.LogDrivers); err != nil {
 			return err
 		}
+
 		return p.SetRequest(req)
 	})
 	defer free()
@@ -359,6 +372,24 @@ func stringSliceToTextList(src []string, newFunc func(int32) (capnp.TextList, er
 			return err
 		}
 	}
+	return nil
+}
+
+func (c *ConmonClient) initLogDrivers(req *proto.Conmon_CreateContainerRequest, logDrivers []LogDriver) error {
+	newLogDrivers, err := req.NewLogDrivers(int32(len(logDrivers)))
+	if err != nil {
+		return err
+	}
+	for i, logDriver := range logDrivers {
+		n := newLogDrivers.At(i)
+		switch logDriver.Type {
+		case LogDriverTypeContainerRuntimeInterface:
+			n.SetType(proto.Conmon_LogDriver_Type_containerRuntimeInterface)
+		}
+		n.SetPath(logDriver.Path)
+
+	}
+
 	return nil
 }
 

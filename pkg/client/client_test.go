@@ -125,7 +125,10 @@ var _ = Describe("ConmonClient", func() {
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					Terminal:   terminal,
-					LogPath:    logPath,
+					LogDrivers: []client.LogDriver{{
+						Type: client.LogDriverTypeContainerRuntimeInterface,
+						Path: logPath,
+					}},
 				})
 				Expect(err).To(BeNil())
 				Expect(resp.PID).NotTo(Equal(0))
@@ -149,7 +152,10 @@ var _ = Describe("ConmonClient", func() {
 					BundlePath: tmpDir,
 					ExitPaths:  []string{exitPath},
 					Terminal:   terminal,
-					LogPath:    logPath,
+					LogDrivers: []client.LogDriver{{
+						Type: client.LogDriverTypeContainerRuntimeInterface,
+						Path: logPath,
+					}},
 				})
 				Expect(err).To(BeNil())
 				Eventually(func() error {
@@ -189,7 +195,10 @@ var _ = Describe("ConmonClient", func() {
 					BundlePath: tmpDir,
 					ExitPaths:  []string{exitPath},
 					Terminal:   terminal,
-					LogPath:    logPath,
+					LogDrivers: []client.LogDriver{{
+						Type: client.LogDriverTypeContainerRuntimeInterface,
+						Path: logPath,
+					}},
 				})
 				Expect(err).To(BeNil())
 				Eventually(func() error {
@@ -214,7 +223,10 @@ var _ = Describe("ConmonClient", func() {
 					BundlePath: tmpDir,
 					ExitPaths:  []string{exitPath},
 					Terminal:   terminal,
-					LogPath:    logPath,
+					LogDrivers: []client.LogDriver{{
+						Type: client.LogDriverTypeContainerRuntimeInterface,
+						Path: logPath,
+					}},
 				})
 				Expect(err).NotTo(BeNil())
 			})
@@ -228,7 +240,10 @@ var _ = Describe("ConmonClient", func() {
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					Terminal:   terminal,
-					LogPath:    logPath,
+					LogDrivers: []client.LogDriver{{
+						Type: client.LogDriverTypeContainerRuntimeInterface,
+						Path: logPath,
+					}},
 				})
 				Expect(err).To(BeNil())
 				Expect(resp.PID).NotTo(Equal(0))
@@ -255,7 +270,10 @@ var _ = Describe("ConmonClient", func() {
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					Terminal:   terminal,
-					LogPath:    logPath,
+					LogDrivers: []client.LogDriver{{
+						Type: client.LogDriverTypeContainerRuntimeInterface,
+						Path: logPath,
+					}},
 				})
 				Expect(err).To(BeNil())
 				Expect(resp.PID).NotTo(Equal(0))
@@ -308,7 +326,10 @@ var _ = Describe("ConmonClient", func() {
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					Terminal:   terminal,
-					LogPath:    logPath,
+					LogDrivers: []client.LogDriver{{
+						Type: client.LogDriverTypeContainerRuntimeInterface,
+						Path: logPath,
+					}},
 				})
 				Expect(err).To(BeNil())
 				Expect(resp.PID).NotTo(Equal(0))
@@ -350,7 +371,10 @@ var _ = Describe("ConmonClient", func() {
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					Terminal:   terminal,
-					LogPath:    logPath,
+					LogDrivers: []client.LogDriver{{
+						Type: client.LogDriverTypeContainerRuntimeInterface,
+						Path: logPath,
+					}},
 				})
 				Expect(err).To(BeNil())
 				Expect(resp.PID).NotTo(Equal(0))
@@ -397,7 +421,10 @@ var _ = Describe("ConmonClient", func() {
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					Terminal:   terminal,
-					LogPath:    logPath,
+					LogDrivers: []client.LogDriver{{
+						Type: client.LogDriverTypeContainerRuntimeInterface,
+						Path: logPath,
+					}},
 				})
 				Expect(err).To(BeNil())
 				Expect(resp.PID).NotTo(Equal(0))
@@ -443,7 +470,10 @@ var _ = Describe("ConmonClient", func() {
 					ID:         ctrID,
 					BundlePath: tmpDir,
 					Terminal:   terminal,
-					LogPath:    logPath,
+					LogDrivers: []client.LogDriver{{
+						Type: client.LogDriverTypeContainerRuntimeInterface,
+						Path: logPath,
+					}},
 				})
 				Expect(err).To(BeNil())
 				Expect(resp.PID).NotTo(Equal(0))
