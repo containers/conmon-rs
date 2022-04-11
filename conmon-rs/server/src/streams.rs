@@ -5,32 +5,29 @@ use crate::{
     container_log::{Pipe, SharedContainerLog},
 };
 use anyhow::{format_err, Context, Result};
-use getset::Getters;
+use getset::{Getters, MutGetters};
 use log::{debug, error, trace};
-use std::{
-    os::unix::io::{FromRawFd, AsRawFd, RawFd},
-    sync::mpsc::{self, Receiver, Sender},
-};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, BufReader},
-    process::{ChildStdout, ChildStderr},
+    process::{ChildStderr, ChildStdout},
     select,
-    sync::{broadcast, oneshot},
+    sync::{broadcast, mpsc, oneshot},
     task,
 };
 
-#[derive(Debug, Getters)]
+#[derive(Debug, Getters, MutGetters)]
 #[getset(get)]
 pub struct Streams {
     #[getset(get = "pub")]
     logger: SharedContainerLog,
 
-    #[getset(get = "pub")]
-    message_rx: Receiver<Message>,
+    #[getset(get = "pub", get_mut = "pub")]
+    message_rx: mpsc::UnboundedReceiver<Message>,
 
     #[getset(get = "pub")]
-    message_tx: Sender<Message>,
+    message_tx: mpsc::UnboundedSender<Message>,
 
     #[getset(get = "pub")]
     stop_tx: broadcast::Sender<()>,
@@ -44,7 +41,7 @@ impl Streams {
     pub fn new(logger: SharedContainerLog) -> Result<Self> {
         debug!("Creating new IO streams");
 
-        let (message_tx, message_rx) = mpsc::channel();
+        let (message_tx, message_rx) = mpsc::unbounded_channel();
         let (stop_tx, stop_rx) = broadcast::channel(1);
 
         Ok(Self {
@@ -95,7 +92,7 @@ impl Streams {
     async fn read_loop_single_stream(
         logger: SharedContainerLog,
         pipe: Pipe,
-        message_tx: Sender<Message>,
+        message_tx: mpsc::UnboundedSender<Message>,
         mut stop_rx: broadcast::Receiver<()>,
         fd: RawFd,
     ) -> Result<()> {
@@ -121,7 +118,7 @@ impl Streams {
     async fn run_buffer_loop(
         logger: SharedContainerLog,
         pipe: Pipe,
-        message_tx: Sender<Message>,
+        message_tx: mpsc::UnboundedSender<Message>,
         fd: RawFd,
         mut thread_shutdown_rx: oneshot::Receiver<()>,
     ) -> Result<()> {
@@ -134,7 +131,6 @@ impl Streams {
                     Ok(n) if n > 0 => {
                         debug!("Read {} bytes", n);
                         let data = &buf[..n];
-                        debug!("got data {:?}", std::str::from_utf8(data));
 
                         let mut locked_logger = logger.write().await;
                         locked_logger
@@ -156,9 +152,10 @@ impl Streams {
                 },
                 _ = &mut thread_shutdown_rx => {
                     debug!("Shutting down io streams thread");
-                    return Ok(())
+                    break;
                 }
             }
         }
+        Ok(())
     }
 }

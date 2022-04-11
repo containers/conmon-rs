@@ -5,7 +5,7 @@ use crate::{
     container_log::{Pipe, SharedContainerLog},
 };
 use anyhow::{bail, format_err, Context, Result};
-use getset::Getters;
+use getset::{Getters, MutGetters};
 use log::{debug, error, trace};
 use nix::{
     errno::Errno,
@@ -20,7 +20,7 @@ use std::{
     },
     path::{Path, PathBuf},
     str,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::{Receiver, Sender},
     time::Duration,
 };
 use tempfile::Builder;
@@ -28,18 +28,19 @@ use tokio::{
     fs::{self, File},
     io::{AsyncReadExt, AsyncWriteExt, BufReader, Interest},
     net::UnixStream,
+    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task,
 };
 
-#[derive(Debug, Getters)]
+#[derive(Debug, Getters, MutGetters)]
 pub struct Terminal {
     #[getset(get = "pub")]
     path: PathBuf,
 
     connected_rx: Receiver<()>,
 
-    #[getset(get = "pub")]
-    message_rx: Receiver<Message>,
+    #[getset(get = "pub", get_mut = "pub")]
+    message_rx: UnboundedReceiver<Message>,
 }
 
 #[derive(Debug, Getters)]
@@ -54,7 +55,7 @@ struct Config {
     connected_tx: Sender<()>,
 
     #[get]
-    message_tx: Sender<Message>,
+    message_tx: UnboundedSender<Message>,
 }
 
 impl Terminal {
@@ -64,9 +65,9 @@ impl Terminal {
         let path = Self::temp_file_name(None, "conmon-term-", ".sock")?;
         let path_clone = path.clone();
 
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let (connected_tx, connected_rx) = mpsc::channel();
-        let (message_tx, message_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (connected_tx, connected_rx) = std::sync::mpsc::channel();
+        let (message_tx, message_rx) = mpsc::unbounded_channel();
 
         task::spawn(async move {
             Self::listen(

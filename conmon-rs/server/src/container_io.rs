@@ -1,7 +1,6 @@
 use crate::{container_log::SharedContainerLog, streams::Streams, terminal::Terminal};
 use anyhow::{Context, Result};
-use std::sync::mpsc::Receiver;
-use tokio::sync::broadcast::Sender;
+use tokio::sync::{broadcast::Sender, mpsc::UnboundedReceiver};
 
 /// A generic abstraction over various container input-output types
 pub enum ContainerIO {
@@ -32,10 +31,10 @@ impl ContainerIO {
     }
 
     /// Return the message receiver for the underlying type.
-    pub fn receiver(&self) -> &Receiver<Message> {
+    pub fn receiver(&mut self) -> &mut UnboundedReceiver<Message> {
         match self {
-            ContainerIO::Terminal(t) => t.message_rx(),
-            ContainerIO::Streams(s) => s.message_rx(),
+            ContainerIO::Terminal(t) => t.message_rx_mut(),
+            ContainerIO::Streams(s) => s.message_rx_mut(),
         }
     }
 

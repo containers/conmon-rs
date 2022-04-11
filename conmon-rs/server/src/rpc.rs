@@ -16,9 +16,9 @@ use log::{debug, error};
 use nix::sys::signal::Signal;
 use std::{
     path::{Path, PathBuf},
-    sync::mpsc::RecvTimeoutError,
     time::Duration,
 };
+use tokio::time;
 
 macro_rules! pry_err {
     ($x:expr) => {
@@ -120,7 +120,7 @@ impl conmon::Server for Server {
         let child_reaper = self.reaper().clone();
 
         let logger = pry_err!(ContainerLog::new());
-        let container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger.clone()));
+        let mut container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger.clone()));
         let args = pry_err!(self.generate_exec_sync_args(&pidfile, &container_io, &params));
 
         Promise::from_future(async move {
@@ -133,31 +133,34 @@ impl conmon::Server for Server {
                     // register grandchild with server
                     let child = Child::new(id, grandchild_pid, vec![], logger);
 
+                    let time_to_timeout = time::Instant::now() + Duration::from_secs(timeout);
+
                     let stop_tx = container_io.stop_tx();
                     let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child, stop_tx))?;
 
                     let mut stdio = vec![];
                     let mut timed_out = false;
                     loop {
+                        let receiver = container_io.receiver();
                         let msg = if timeout > 0 {
-                            match container_io
-                                .receiver()
-                                .recv_timeout(Duration::from_secs(timeout))
-                            {
-                                Ok(msg) => msg,
-                                Err(e) => {
-                                    if let RecvTimeoutError::Timeout = e {
-                                        timed_out = true;
-                                        capnp_err!(ChildReaper::kill_grandchild(
-                                            grandchild_pid,
-                                            Signal::SIGKILL
-                                        ))?;
-                                    }
+                            match time::timeout_at(time_to_timeout, receiver.recv()).await {
+                                Ok(Some(msg)) => msg,
+                                Err(_) => {
+                                    timed_out = true;
+                                    capnp_err!(ChildReaper::kill_grandchild(
+                                        grandchild_pid,
+                                        Signal::SIGKILL
+                                    ))?;
+
                                     Message::Done
                                 }
+                                Ok(None) => unreachable!(),
                             }
                         } else {
-                            capnp_err!(container_io.receiver().recv())?
+                            match receiver.recv().await {
+                                Some(msg) => msg,
+                                None => Message::Done,
+                            }
                         };
 
                         match msg {
