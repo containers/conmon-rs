@@ -1,10 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use log::{debug, error};
 use nix::sys::socket::{
     bind, listen, socket, AddressFamily, SockAddr, SockFlag, SockType, UnixAddr,
 };
 use std::{
-    fs::remove_file,
     io::{BufReader, BufWriter, Read, Write},
     os::unix::{
         fs::PermissionsExt,
@@ -25,7 +24,10 @@ impl Attach {
         debug!("Creating attach socket: {}", socket_path.display());
 
         if socket_path.exists() {
-            remove_file(&socket_path).context("remove existing socket file")?;
+            bail!(
+                "Attach socket path already exists: {}",
+                socket_path.display()
+            )
         }
 
         let fd = socket(
