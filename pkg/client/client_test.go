@@ -681,23 +681,6 @@ func testAttachSocketConnection(socketPath string) error {
 	}
 	defer conn.Close()
 
-	outputStream := io.WriteCloser(os.Stdout)
-	errorStream := io.WriteCloser(os.Stderr)
-
-	receiveStdout := make(chan error)
-	go func() {
-		receiveStdout <- redirectResponseToOutputStreams(outputStream, errorStream, conn)
-		close(receiveStdout)
-	}()
-	if err := <-receiveStdout; err != nil {
-		return err
-	}
-
-	return nil
-
-}
-
-func redirectResponseToOutputStreams(outputStream, errorStream io.WriteCloser, conn io.Reader) (err error) {
 	const (
 		attachPipeStdout = 2
 		attachPipeStderr = 3
@@ -707,42 +690,24 @@ func redirectResponseToOutputStreams(outputStream, errorStream io.WriteCloser, c
 	buf := make([]byte, 0, bufSize)
 
 	for i := 0; i < 2; i++ {
+		// Stdout/stderr test
 		n, err := io.ReadFull(reader, buf[:cap(buf)])
+		Expect(err).To(BeNil())
+		Expect(n).To(Equal(bufSize))
 		buf = buf[:n]
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			if err != io.ErrUnexpectedEOF {
-				fmt.Fprintln(os.Stderr, err)
-				break
-			}
-		}
 
-		fmt.Printf("Read %v bytes\n", n)
-		if n > 0 {
-			var dst io.Writer
-			switch buf[0] {
-			case attachPipeStdout:
-				dst = outputStream
-			case attachPipeStderr:
-				dst = errorStream
-			default:
-				return fmt.Errorf("got unexpected attach type %+d", buf[0])
-			}
-			if dst != nil {
-				nw, ew := dst.Write(buf[1:n])
-				if ew != nil {
-					err = ew
-					break
-				}
-				if n != nw+1 {
-					err = io.ErrShortWrite
-					break
-				}
-			}
+		res := string(buf[1:bytes.IndexByte(buf, 0)])
+		switch buf[0] {
+		case attachPipeStdout:
+			Expect(res).To(Equal("Hello stdout!"))
+
+		case attachPipeStderr:
+			Expect(res).To(Equal("Hello stderr!"))
+
+		default:
+			Fail("Unknown attach pipe")
 		}
 	}
 
-	return err
+	return nil
 }

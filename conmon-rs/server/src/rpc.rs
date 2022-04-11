@@ -214,10 +214,8 @@ impl conmon::Server for Server {
         }
 
         let socket_path = Path::new(pry!(req.get_socket_path()));
-        let attach = pry_err!(Attach::new(socket_path).context("create attach endpoint"));
-
-        let mut child = pry_err!(self.reaper().get(container_id));
-        child.set_attach(attach.into());
+        let _attach = pry_err!(Attach::new(socket_path).context("create attach endpoint"));
+        let mut _child = pry_err!(self.reaper().get(container_id));
 
         Promise::ok(())
     }
