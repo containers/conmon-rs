@@ -1,6 +1,6 @@
 use crate::{container_log::SharedContainerLog, streams::Streams, terminal::Terminal};
 use anyhow::{Context, Result};
-use tokio::sync::{broadcast::Sender, mpsc::UnboundedReceiver};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 /// A generic abstraction over various container input-output types
 pub enum ContainerIO {
@@ -35,14 +35,6 @@ impl ContainerIO {
         match self {
             ContainerIO::Terminal(t) => t.message_rx_mut(),
             ContainerIO::Streams(s) => s.message_rx_mut(),
-        }
-    }
-
-    /// Returns the stop channel if available.
-    pub fn stop_tx(&self) -> Option<Sender<()>> {
-        match self {
-            ContainerIO::Terminal(_) => None,
-            ContainerIO::Streams(i) => i.stop_tx().clone().into(),
         }
     }
 }

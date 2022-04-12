@@ -84,8 +84,7 @@ impl conmon::Server for Server {
 
             // register grandchild with server
             let child = Child::new(id, grandchild_pid, exit_paths, container_log);
-            let stop_tx = container_io.stop_tx();
-            capnp_err!(child_reaper.watch_grandchild(child, stop_tx))?;
+            capnp_err!(child_reaper.watch_grandchild(child))?;
 
             results
                 .get()
@@ -135,8 +134,7 @@ impl conmon::Server for Server {
 
                     let time_to_timeout = time::Instant::now() + Duration::from_secs(timeout);
 
-                    let stop_tx = container_io.stop_tx();
-                    let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child, stop_tx))?;
+                    let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child))?;
 
                     let mut stdio = vec![];
                     let mut timed_out = false;

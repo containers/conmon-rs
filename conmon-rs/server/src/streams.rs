@@ -4,16 +4,16 @@ use crate::{
     container_io::Message,
     container_log::{Pipe, SharedContainerLog},
 };
-use anyhow::{format_err, Context, Result};
+use anyhow::{Context, Result};
 use getset::{Getters, MutGetters};
-use log::{debug, error, trace};
+use log::{debug, error};
+use nix::errno::Errno;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, BufReader},
     process::{ChildStderr, ChildStdout},
-    select,
-    sync::{broadcast, mpsc, oneshot},
+    sync::mpsc,
     task,
 };
 
@@ -28,12 +28,6 @@ pub struct Streams {
 
     #[getset(get = "pub")]
     message_tx: mpsc::UnboundedSender<Message>,
-
-    #[getset(get = "pub")]
-    stop_tx: broadcast::Sender<()>,
-
-    #[getset(get = "pub")]
-    stop_rx: broadcast::Receiver<()>,
 }
 
 impl Streams {
@@ -42,14 +36,11 @@ impl Streams {
         debug!("Creating new IO streams");
 
         let (message_tx, message_rx) = mpsc::unbounded_channel();
-        let (stop_tx, stop_rx) = broadcast::channel(1);
 
         Ok(Self {
             logger,
             message_rx,
             message_tx,
-            stop_tx,
-            stop_rx,
         })
     }
 
@@ -57,105 +48,78 @@ impl Streams {
         debug!("Start reading from IO streams");
         let logger = self.logger().clone();
         let message_tx = self.message_tx().clone();
-        let stop_rx = self.stop_tx().subscribe();
 
         if let Some(stdout) = stdout {
             task::spawn(async move {
-                Self::read_loop_single_stream(
-                    logger,
-                    Pipe::StdOut,
-                    message_tx,
-                    stop_rx,
-                    stdout.as_raw_fd(),
-                )
-                .await
+                Self::read_loop(stdout.as_raw_fd(), Pipe::StdOut, logger, message_tx).await
             });
         }
 
         let logger = self.logger().clone();
         let message_tx = self.message_tx().clone();
-        let stop_rx = self.stop_tx().subscribe();
         if let Some(stderr) = stderr {
             task::spawn(async move {
-                Self::read_loop_single_stream(
-                    logger,
-                    Pipe::StdErr,
-                    message_tx,
-                    stop_rx,
-                    stderr.as_raw_fd(),
-                )
-                .await
+                Self::read_loop(stderr.as_raw_fd(), Pipe::StdErr, logger, message_tx).await
             });
         }
     }
 
-    async fn read_loop_single_stream(
-        logger: SharedContainerLog,
-        pipe: Pipe,
-        message_tx: mpsc::UnboundedSender<Message>,
-        mut stop_rx: broadcast::Receiver<()>,
+    pub async fn read_loop(
         fd: RawFd,
-    ) -> Result<()> {
-        trace!("Start reading from single fd: {:?}", fd);
-
-        let message_tx_clone = message_tx.clone();
-        let (thread_shutdown_tx, thread_shutdown_rx) = oneshot::channel();
-        task::spawn(async move {
-            Self::run_buffer_loop(logger, pipe, message_tx_clone, fd, thread_shutdown_rx).await
-        });
-
-        stop_rx
-            .recv()
-            .await
-            .context("unable to wait for stop channel")?;
-        debug!("Received IO stream stop signal");
-        thread_shutdown_tx
-            .send(())
-            .map_err(|_| format_err!("unable to send thread shutdown message"))?;
-        message_tx.send(Message::Done).context("send done message")
-    }
-
-    async fn run_buffer_loop(
-        logger: SharedContainerLog,
         pipe: Pipe,
+        logger: SharedContainerLog,
         message_tx: mpsc::UnboundedSender<Message>,
-        fd: RawFd,
-        mut thread_shutdown_rx: oneshot::Receiver<()>,
     ) -> Result<()> {
         let stream = unsafe { File::from_raw_fd(fd) };
-        let mut reader = BufReader::with_capacity(1024, stream);
+        let mut reader = BufReader::new(stream);
         let mut buf = vec![0; 1024];
         loop {
-            select! {
-                res = reader.read(&mut buf) => match res {
-                    Ok(n) if n > 0 => {
-                        debug!("Read {} bytes", n);
-                        let data = &buf[..n];
+            match reader.read(&mut buf).await {
+                Ok(n) if n > 0 => {
+                    debug!("Read {} bytes", n);
+                    let data = &buf[..n];
 
-                        let mut locked_logger = logger.write().await;
-                        locked_logger
-                            .write(pipe, data)
-                            .await
-                            .context("write to log file")?;
+                    let mut locked_logger = logger.write().await;
+                    locked_logger
+                        .write(pipe, data)
+                        .await
+                        .context("write to log file")?;
 
-                        if let Err(e) = message_tx.send(Message::Data(data.into())) {
-                            debug!("Unable to send data through message channel: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            continue;
-                        }
-                        error!("Unable to read from io fd: {}", e);
-                    }
-                    _ => {}
-                },
-                _ = &mut thread_shutdown_rx => {
-                    debug!("Shutting down io streams thread");
-                    break;
+                    message_tx
+                        .send(Message::Data(data.into()))
+                        .context("send data message")?;
                 }
+                Ok(n) if n == 0 => {
+                    debug!("No more to read");
+
+                    message_tx
+                        .send(Message::Done)
+                        .context("send done message")?;
+                    return Ok(());
+                }
+                Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
+                    Errno::EIO => {
+                        debug!("Stopping read loop");
+
+                        message_tx
+                            .send(Message::Done)
+                            .context("send done message")?;
+                        return Ok(());
+                    }
+                    Errno::EBADF => {
+                        return Err(Errno::EBADFD.into());
+                    }
+                    Errno::EAGAIN => {
+                        continue;
+                    }
+                    _ => error!(
+                        "Unable to read from file descriptor: {} {}",
+                        e,
+                        e.raw_os_error().context("get OS error")?
+                    ),
+                },
+                _ => {}
             }
         }
-        Ok(())
     }
 }

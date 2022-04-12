@@ -3,21 +3,16 @@
 use crate::{
     container_io::Message,
     container_log::{Pipe, SharedContainerLog},
+    streams::Streams,
 };
 use anyhow::{bail, format_err, Context, Result};
 use getset::{Getters, MutGetters};
 use log::{debug, error, trace};
-use nix::{
-    errno::Errno,
-    sys::termios::{self, OutputFlags, SetArg},
-};
+use nix::sys::termios::{self, OutputFlags, SetArg};
 use sendfd::RecvWithFd;
 use std::{
     io::ErrorKind,
-    os::unix::{
-        fs::PermissionsExt,
-        io::{FromRawFd, RawFd},
-    },
+    os::unix::{fs::PermissionsExt, io::RawFd},
     path::{Path, PathBuf},
     str,
     sync::mpsc::{Receiver, Sender},
@@ -25,8 +20,8 @@ use std::{
 };
 use tempfile::Builder;
 use tokio::{
-    fs::{self, File},
-    io::{AsyncReadExt, AsyncWriteExt, BufReader, Interest},
+    fs,
+    io::{AsyncWriteExt, Interest},
     net::UnixStream,
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task,
@@ -170,7 +165,13 @@ impl Terminal {
                     term.output_flags |= OutputFlags::ONLCR;
                     termios::tcsetattr(fd, SetArg::TCSANOW, &term)?;
 
-                    task::spawn(async move { Self::read_loop(fd, config, logger).await });
+                    task::spawn(async move {
+                        config
+                            .connected_tx()
+                            .send(())
+                            .context("send connected channel")?;
+                        Streams::read_loop(fd, Pipe::StdOut, logger, config.message_tx).await
+                    });
 
                     // TODO: Now that we have a fd to the tty, make sure we handle any pending
                     // data that was already buffered.
@@ -192,50 +193,6 @@ impl Terminal {
                     error!("Unable to receive data: {}", e);
                     return Err(e.into());
                 }
-            }
-        }
-    }
-
-    async fn read_loop(fd: RawFd, config: Config, logger: SharedContainerLog) -> Result<()> {
-        debug!("Start reading from file descriptor");
-
-        let stream = unsafe { File::from_raw_fd(fd) };
-        let mut reader = BufReader::new(stream);
-        let mut buf = vec![0; 1024];
-
-        config
-            .connected_tx()
-            .send(())
-            .context("send connected channel")?;
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(n) if n > 0 => {
-                    debug!("Read {} bytes", n);
-                    let data = &buf[..n];
-
-                    let mut locked_logger = logger.write().await;
-                    locked_logger
-                        .write(Pipe::StdOut, data)
-                        .await
-                        .context("write to log file")?;
-
-                    config
-                        .message_tx
-                        .send(Message::Data(data.into()))
-                        .context("send data message")?;
-                }
-                Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
-                    Errno::EIO => {
-                        debug!("Stopping terminal read loop");
-                        config
-                            .message_tx
-                            .send(Message::Done)
-                            .context("send done message")?;
-                        return Ok(());
-                    }
-                    _ => error!("Unable to read from file descriptor: {}", e),
-                },
-                _ => {}
             }
         }
     }
