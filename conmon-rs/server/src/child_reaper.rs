@@ -94,11 +94,12 @@ impl ChildReaper {
             return Err(anyhow!(code_str));
         }
 
+        let pidfile = pidfile.as_path();
         let grandchild_pid = fs::read_to_string(pidfile)
             .await
-            .context("grandchild pid read error")?
+            .context(format!("grandchild pid read error {}", pidfile.display()))?
             .parse::<u32>()
-            .context("grandchild pid parse error")?;
+            .context(format!("grandchild pid parse error {}", pidfile.display()))?;
 
         Ok(grandchild_pid)
     }
