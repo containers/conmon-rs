@@ -129,7 +129,7 @@ impl Streams {
             select! {
                 res = reader.read(&mut buf) => match res {
                     Ok(n) if n > 0 => {
-                        debug!("Read {} bytes", n);
+                        debug!("Read {} bytes from {}", n, fd);
                         let data = &buf[..n];
 
                         let mut locked_logger = logger.write().await;
@@ -141,6 +141,12 @@ impl Streams {
                         if let Err(e) = message_tx.send(Message::Data(data.into())) {
                             debug!("Unable to send data through message channel: {}", e);
                         }
+                    }
+                    Ok(n) if n == 0 => {
+                        if let Err(e) = message_tx.send(Message::Done) {
+                            debug!("Unable to send data through message channel: {}", e);
+                        }
+                        break;
                     }
                     Err(e) => {
                         if e.kind() == std::io::ErrorKind::WouldBlock {

@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ var (
 	busyboxDest = filepath.Join(busyboxDestDir, "busybox")
 	runtimePath = os.Getenv("RUNTIME_BINARY")
 	conmonPath  = os.Getenv("CONMON_BINARY")
-	maxRSSKB    = 230
+	maxRSSKB    = 4096
 )
 
 // TestConmonClient runs the created specs
@@ -450,6 +451,57 @@ var _ = Describe("ConmonClient", func() {
 				Expect(err).To(BeNil())
 				Expect(result).NotTo(BeNil())
 				Expect(result.TimedOut).To(Equal(true))
+			})
+
+			testName = "should handle many requests"
+			if terminal {
+				testName += " with terminal"
+			}
+			FIt(testName, func() {
+				createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "30"})
+
+				logPath := MustFileInTempDir(tmpDir, "log")
+				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
+				resp, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+					ID:         ctrID,
+					BundlePath: tmpDir,
+					Terminal:   terminal,
+					LogDrivers: []client.LogDriver{{
+						Type: client.LogDriverTypeContainerRuntimeInterface,
+						Path: logPath,
+					}},
+				})
+				Expect(err).To(BeNil())
+				Expect(resp.PID).NotTo(Equal(0))
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput(ctrID, "list")
+				}, time.Second*5).Should(BeNil())
+
+				// Start the container
+				Expect(rr.RunCommand("start", ctrID)).To(BeNil())
+
+				// Wait for container to be running
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput("running", "list")
+				}, time.Second*10).Should(BeNil())
+
+				var wg sync.WaitGroup
+				for i := 0; i < 10; i++ {
+					wg.Add(1)
+					go func(i int) {
+						defer wg.Done()
+						result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+							ID:       ctrID,
+							Command:  []string{"/busybox", "echo", "-n", "hello", "world"},
+							Terminal: terminal,
+							Timeout:  timeoutUnlimited,
+						})
+						Expect(err).To(BeNil())
+						Expect(result).NotTo(BeNil())
+						fmt.Println("done with", i)
+					}(i)
+				}
+				wg.Wait()
 			})
 		}
 	})
