@@ -28,10 +28,12 @@ pub enum Pipe {
 }
 
 impl ContainerLog {
-    pub fn new() -> Result<SharedContainerLog> {
-        let drivers = vec![];
-        Ok(Arc::new(RwLock::new(Self { drivers })))
+    /// Create a new default SharedContainerLog.
+    pub fn new() -> SharedContainerLog {
+        Arc::new(RwLock::new(Self::default()))
     }
+
+    /// Create a new SharedContainerLog from an capnp owned reader.
     pub fn from(reader: Reader<Owned>) -> Result<SharedContainerLog> {
         let drivers = reader
             .iter()

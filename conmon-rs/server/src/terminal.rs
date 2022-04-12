@@ -259,12 +259,11 @@ mod tests {
     use crate::container_log::ContainerLog;
     use nix::pty;
     use sendfd::SendWithFd;
-    use std::{os::unix::io::FromRawFd, sync::Arc};
-    use tokio::sync::RwLock;
+    use std::os::unix::io::FromRawFd;
 
     #[tokio::test]
     async fn new_success() -> Result<()> {
-        let logger = Arc::new(RwLock::new(ContainerLog::default()));
+        let logger = ContainerLog::new();
 
         let sut = Terminal::new(logger)?;
         assert!(sut.path().exists());
