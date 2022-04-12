@@ -257,7 +257,7 @@ var _ = Describe("ConmonClient", func() {
 	Describe("ExecSyncContainer", func() {
 		for _, terminal := range []bool{false} {
 			terminal := terminal
-			testName := "should succeeed without timeout"
+			testName := "should succeed without timeout"
 			if terminal {
 				testName += " with terminal"
 			}
@@ -301,19 +301,15 @@ var _ = Describe("ConmonClient", func() {
 				Expect(result.Stdout).To(BeEquivalentTo("hello world"))
 				Expect(result.Stderr).To(BeEmpty())
 
-				// Log testing
-				logs := containerLogContents(logPath)
-				Expect(logs).To(ContainSubstring("stdout P hello world\n"))
-
 				sut.ReopenLogContainer(context.Background(), &client.ReopenLogContainerConfig{
 					ID: ctrID,
 				})
-				logs = containerLogContents(logPath)
+				logs := containerLogContents(logPath)
 				Expect(logs).To(BeEmpty())
 
 			})
 
-			testName = "should succeeed with timeout"
+			testName = "should succeed with timeout"
 			if terminal {
 				testName += " with terminal"
 			}
