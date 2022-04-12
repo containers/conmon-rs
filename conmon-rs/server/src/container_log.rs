@@ -1,7 +1,8 @@
 use crate::cri_logger::CriLogger;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use capnp::struct_list::Reader;
 use conmon_common::conmon_capnp::conmon::log_driver::{Owned, Type};
+use futures::future::join_all;
 use std::sync::Arc;
 use tokio::{io::AsyncBufRead, sync::RwLock};
 
@@ -50,25 +51,33 @@ impl ContainerLog {
 
     /// Asynchronously initialize all loggers.
     pub async fn init(&mut self) -> Result<()> {
-        for logger in self.drivers.iter_mut() {
-            match logger {
-                LogDriver::ContainerRuntimeInterface(ref mut cri_logger) => {
-                    cri_logger.init().await.context("init CRI logger")?
-                }
-            }
-        }
+        join_all(
+            self.drivers
+                .iter_mut()
+                .map(|x| match x {
+                    LogDriver::ContainerRuntimeInterface(ref mut cri_logger) => cri_logger.init(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
         Ok(())
     }
 
     /// Reopen the container logs.
     pub async fn reopen(&mut self) -> Result<()> {
-        for logger in self.drivers.iter_mut() {
-            match logger {
-                LogDriver::ContainerRuntimeInterface(ref mut cri_logger) => {
-                    cri_logger.reopen().await.context("reopen CRI logs")?
-                }
-            }
-        }
+        join_all(
+            self.drivers
+                .iter_mut()
+                .map(|x| match x {
+                    LogDriver::ContainerRuntimeInterface(ref mut cri_logger) => cri_logger.reopen(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
         Ok(())
     }
 
@@ -77,14 +86,19 @@ impl ContainerLog {
     where
         T: AsyncBufRead + Unpin + Copy,
     {
-        for logger in self.drivers.iter_mut() {
-            match logger {
-                LogDriver::ContainerRuntimeInterface(ref mut cri_logger) => cri_logger
-                    .write(pipe, bytes)
-                    .await
-                    .context("write CRI logs")?,
-            }
-        }
+        join_all(
+            self.drivers
+                .iter_mut()
+                .map(|x| match x {
+                    LogDriver::ContainerRuntimeInterface(ref mut cri_logger) => {
+                        cri_logger.write(pipe, bytes)
+                    }
+                })
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
         Ok(())
     }
 }
