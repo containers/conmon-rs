@@ -1,5 +1,7 @@
 //! Child process reaping and management.
-use crate::{attach::Attach, child::Child, container_io::ContainerIO, cri_logger::SharedCriLogger};
+use crate::{
+    attach::Attach, child::Child, container_io::ContainerIO, container_log::SharedContainerLog,
+};
 use anyhow::{anyhow, format_err, Context, Result};
 use getset::{CopyGetters, Getters, Setters};
 use libc::pid_t;
@@ -18,6 +20,7 @@ use std::{
     fs::File,
     io::Write,
     path::PathBuf,
+    process::Stdio,
     sync::{Arc, Mutex},
 };
 use tokio::{
@@ -61,17 +64,25 @@ impl ChildReaper {
     {
         let mut cmd = Command::new(cmd);
         cmd.args(args);
-        let status = cmd
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
-            .context("spawn child process: {}")?
-            .wait()
-            .await?;
+            .context("spawn child process: {}")?;
 
-        if let ContainerIO::Terminal(terminal) = container_io {
-            terminal
-                .wait_connected()
-                .context("wait for terminal socket connection")?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        match container_io {
+            ContainerIO::Terminal(terminal) => {
+                terminal
+                    .wait_connected()
+                    .context("wait for terminal socket connection")?;
+            }
+            ContainerIO::Streams(streams) => {
+                streams.handle_stdio_receive(stdout, stderr);
+            }
         }
+        let status = child.wait().await?;
 
         if !status.success() {
             let code_str = match status.code() {
@@ -167,7 +178,7 @@ pub struct ReapableChild {
     attach: Option<Attach>,
 
     #[getset(get = "pub")]
-    cri_logger: SharedCriLogger,
+    logger: SharedContainerLog,
 }
 
 impl ReapableChild {
@@ -176,7 +187,7 @@ impl ReapableChild {
             pid: child.pid(),
             exit_paths: child.exit_paths().clone(),
             attach: None,
-            cri_logger: child.cri_logger().clone(),
+            logger: child.logger().clone(),
         }
     }
 
@@ -187,7 +198,7 @@ impl ReapableChild {
         let (exit_tx, exit_rx) = broadcast::channel(1);
         let exit_tx_clone = exit_tx.clone();
 
-        task::spawn_blocking(move || {
+        task::spawn(async move {
             let exit_code = Self::wait_for_exit_code(pid);
             debug!("Sending exit code to channel: {}", exit_code);
             if exit_tx_clone.send(exit_code).is_err() {

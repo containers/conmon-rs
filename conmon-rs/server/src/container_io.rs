@@ -1,7 +1,6 @@
-use crate::{cri_logger::SharedCriLogger, streams::Streams, terminal::Terminal};
+use crate::{container_log::SharedContainerLog, streams::Streams, terminal::Terminal};
 use anyhow::{Context, Result};
-use std::sync::mpsc::Receiver;
-use tokio::sync::broadcast::Sender;
+use tokio::sync::{broadcast::Sender, mpsc::UnboundedReceiver};
 
 /// A generic abstraction over various container input-output types
 pub enum ContainerIO {
@@ -23,23 +22,19 @@ impl From<Streams> for ContainerIO {
 
 impl ContainerIO {
     /// Create a new container IO instance.
-    pub fn new(terminal: bool, cri_logger: SharedCriLogger) -> Result<Self> {
+    pub fn new(terminal: bool, logger: SharedContainerLog) -> Result<Self> {
         Ok(if terminal {
-            Terminal::new(cri_logger)
-                .context("create new terminal")?
-                .into()
+            Terminal::new(logger).context("create new terminal")?.into()
         } else {
-            Streams::new(cri_logger)
-                .context("create new streams")?
-                .into()
+            Streams::new(logger).context("create new streams")?.into()
         })
     }
 
     /// Return the message receiver for the underlying type.
-    pub fn receiver(&self) -> &Receiver<Message> {
+    pub fn receiver(&mut self) -> &mut UnboundedReceiver<Message> {
         match self {
-            ContainerIO::Terminal(t) => t.message_rx(),
-            ContainerIO::Streams(s) => s.message_rx(),
+            ContainerIO::Terminal(t) => t.message_rx_mut(),
+            ContainerIO::Streams(s) => s.message_rx_mut(),
         }
     }
 

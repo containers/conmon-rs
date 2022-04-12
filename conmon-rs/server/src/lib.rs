@@ -6,6 +6,7 @@ mod child;
 mod child_reaper;
 mod config;
 mod container_io;
+mod container_log;
 mod cri_logger;
 mod init;
 mod listener;
