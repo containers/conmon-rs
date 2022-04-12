@@ -509,14 +509,17 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	Describe("Attach", func() {
-		for _, terminal := range []bool{true, false} {
+		for _, terminal := range []bool{true} {
 			terminal := terminal
 			testName := "should succeeed"
 			if terminal {
 				testName += " with terminal"
 			}
 			It(testName, func() {
-				createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
+				createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "sh"},
+				)
 
 				logPath := MustFileInTempDir(tmpDir, "log")
 				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
@@ -735,7 +738,7 @@ func testAttachSocketConnection(socketPath string) error {
 	}
 	defer conn.Close()
 
-	_, err = conn.Write([]byte("Hello world\n"))
+	_, err = conn.Write([]byte("echo Hello world"))
 	Expect(err).To(BeNil())
 
 	return nil

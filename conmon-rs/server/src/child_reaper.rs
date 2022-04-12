@@ -1,9 +1,11 @@
 //! Child process reaping and management.
 use crate::{
-    attach::Attach, child::Child, container_io::ContainerIO, container_log::SharedContainerLog,
+    child::Child,
+    container_io::{ContainerIO, SharedContainerIO},
+    container_log::SharedContainerLog,
 };
 use anyhow::{anyhow, format_err, Context, Result};
-use getset::{CopyGetters, Getters, Setters};
+use getset::{CopyGetters, Getters};
 use libc::pid_t;
 use log::{debug, error};
 use multimap::MultiMap;
@@ -54,7 +56,7 @@ impl ChildReaper {
         &self,
         cmd: P,
         args: I,
-        container_io: &ContainerIO,
+        container_io: &mut ContainerIO,
         pidfile: PathBuf,
     ) -> Result<u32>
     where
@@ -76,6 +78,7 @@ impl ChildReaper {
             ContainerIO::Terminal(terminal) => {
                 terminal
                     .wait_connected()
+                    .await
                     .context("wait for terminal socket connection")?;
             }
             ContainerIO::Streams(streams) => {
@@ -166,7 +169,7 @@ impl ChildReaper {
     }
 }
 
-#[derive(Clone, CopyGetters, Debug, Getters, Setters)]
+#[derive(Clone, CopyGetters, Debug, Getters)]
 pub struct ReapableChild {
     #[getset(get)]
     exit_paths: Vec<PathBuf>,
@@ -174,11 +177,11 @@ pub struct ReapableChild {
     #[getset(get_copy)]
     pid: u32,
 
-    #[getset(set = "pub")]
-    attach: Option<Attach>,
-
     #[getset(get = "pub")]
     logger: SharedContainerLog,
+
+    #[getset(get = "pub")]
+    io: SharedContainerIO,
 }
 
 impl ReapableChild {
@@ -186,8 +189,8 @@ impl ReapableChild {
         Self {
             pid: child.pid(),
             exit_paths: child.exit_paths().clone(),
-            attach: None,
             logger: child.logger().clone(),
+            io: child.io().clone(),
         }
     }
 

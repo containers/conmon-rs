@@ -17,7 +17,13 @@ use nix::{
     sys::signal::Signal,
     unistd::{fork, ForkResult},
 };
-use std::{fs::File, io::Write, path::Path, process, sync::Arc};
+use std::{
+    fs::File,
+    io::Write,
+    path::{Path, PathBuf},
+    process,
+    sync::Arc,
+};
 use tokio::{
     fs,
     runtime::{Builder, Handle},
@@ -195,16 +201,13 @@ impl Server {
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
     pub fn generate_runtime_args(
-        &self,
-        params: &conmon::CreateContainerParams,
+        id: &str,
+        bundle_path: PathBuf,
+        runtime_root: Option<PathBuf>,
         container_io: &ContainerIO,
         pidfile: &Path,
     ) -> Result<Vec<String>> {
-        let req = params.get()?.get_request()?;
-        let id = req.get_id()?.to_string();
-        let bundle_path = req.get_bundle_path()?.to_string();
         let mut args = vec![];
-        let runtime_root = self.config().runtime_root();
         if let Some(rr) = runtime_root {
             args.push(format!("--root={}", rr.display()));
         }
@@ -212,7 +215,7 @@ impl Server {
         args.extend([
             "create".to_string(),
             "--bundle".to_string(),
-            bundle_path,
+            bundle_path.display().to_string(),
             "--pid-file".to_string(),
             pidfile.display().to_string(),
         ]);
@@ -220,22 +223,21 @@ impl Server {
         if let ContainerIO::Terminal(terminal) = container_io {
             args.push(format!("--console-socket={}", terminal.path().display()));
         }
-        args.push(id);
+        args.push(id.to_string());
         debug!("Runtime args {:?}", args.join(" "));
         Ok(args)
     }
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
     pub fn generate_exec_sync_args(
-        &self,
         pidfile: &Path,
+        runtime_root: Option<PathBuf>,
         container_io: &ContainerIO,
         params: &conmon::ExecSyncContainerParams,
     ) -> Result<Vec<String>> {
         let req = params.get()?.get_request()?;
         let id = req.get_id()?.to_string();
         let command = req.get_command()?;
-        let runtime_root = self.config().runtime_root();
 
         let mut args = vec![];
         if let Some(rr) = runtime_root {

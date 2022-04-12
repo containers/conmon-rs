@@ -1,7 +1,13 @@
-use crate::{container_log::SharedContainerLog, streams::Streams, terminal::Terminal};
+use crate::{
+    attach::Attach, container_log::SharedContainerLog, streams::Streams, terminal::Terminal,
+};
 use anyhow::{Context, Result};
-use tokio::sync::{broadcast::Sender, mpsc::UnboundedReceiver};
+use std::sync::Arc;
+use tokio::sync::{broadcast::Sender, mpsc::UnboundedReceiver, RwLock};
 
+pub type SharedContainerIO = Arc<RwLock<ContainerIO>>;
+
+#[derive(Debug)]
 /// A generic abstraction over various container input-output types
 pub enum ContainerIO {
     Terminal(Terminal),
@@ -22,12 +28,20 @@ impl From<Streams> for ContainerIO {
 
 impl ContainerIO {
     /// Create a new container IO instance.
-    pub fn new(terminal: bool, logger: SharedContainerLog) -> Result<Self> {
+    pub async fn new(terminal: bool, logger: SharedContainerLog) -> Result<Self> {
         Ok(if terminal {
-            Terminal::new(logger).context("create new terminal")?.into()
+            Terminal::new(logger)
+                .await
+                .context("create new terminal")?
+                .into()
         } else {
             Streams::new(logger).context("create new streams")?.into()
         })
+    }
+
+    /// Builds a shared reference from the current ContainerIO.
+    pub fn to_shared(self) -> SharedContainerIO {
+        Arc::new(RwLock::new(self))
     }
 
     /// Return the message receiver for the underlying type.
@@ -44,6 +58,18 @@ impl ContainerIO {
             ContainerIO::Terminal(_) => None,
             ContainerIO::Streams(i) => i.stop_tx().clone().into(),
         }
+    }
+
+    pub fn attach(&mut self, attach: Attach) -> Result<()> {
+        match self {
+            ContainerIO::Terminal(t) => {
+                let stdin = attach.stdin().subscribe();
+                let stdout = attach.stdout().clone();
+                t.attach_tx().send((stdin, stdout))?;
+            }
+            ContainerIO::Streams(_i) => {} // TODO: let it work for streams
+        }
+        Ok(())
     }
 }
 

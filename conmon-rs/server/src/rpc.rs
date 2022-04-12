@@ -60,31 +60,42 @@ impl conmon::Server for Server {
 
         let log_drivers = pry!(req.get_log_drivers());
         let container_log = pry_err!(ContainerLog::from(log_drivers));
-        let container_io = pry_err!(ContainerIO::new(req.get_terminal(), container_log.clone()));
         let bundle_path = PathBuf::from(pry!(req.get_bundle_path()));
         let pidfile = bundle_path.join("pidfile");
         debug!("PID file is {}", pidfile.display());
 
         let child_reaper = self.reaper().clone();
-        let args = pry_err!(self.generate_runtime_args(&params, &container_io, &pidfile));
         let runtime = self.config().runtime().clone();
         let exit_paths = pry!(pry!(req.get_exit_paths())
             .iter()
             .map(|r| r.map(PathBuf::from))
             .collect());
+        let runtime_root = self.config().runtime_root().clone();
+        let terminal = req.get_terminal();
 
         Promise::from_future(async move {
+            let mut container_io =
+                capnp_err!(ContainerIO::new(terminal, container_log.clone()).await)?;
+            let args = capnp_err!(Self::generate_runtime_args(
+                &id,
+                bundle_path,
+                runtime_root,
+                &container_io,
+                &pidfile
+            ))?;
+
             capnp_err!(container_log.write().await.init().await)?;
 
             let grandchild_pid = capnp_err!(
                 child_reaper
-                    .create_child(runtime, args, &container_io, pidfile)
+                    .create_child(runtime, args, &mut container_io, pidfile)
                     .await
             )?;
 
             // register grandchild with server
-            let child = Child::new(id, grandchild_pid, exit_paths, container_log);
             let stop_tx = container_io.stop_tx();
+            let io = container_io.to_shared();
+            let child = Child::new(id, grandchild_pid, exit_paths, container_log, io);
             capnp_err!(child_reaper.watch_grandchild(child, stop_tx))?;
 
             results
@@ -117,31 +128,43 @@ impl conmon::Server for Server {
         );
 
         let runtime = self.config().runtime().clone();
+        let runtime_root = self.config().runtime_root().clone();
         let child_reaper = self.reaper().clone();
 
         let logger = pry_err!(ContainerLog::new());
-        let mut container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger.clone()));
-        let args = pry_err!(self.generate_exec_sync_args(&pidfile, &container_io, &params));
+        let terminal = req.get_terminal();
 
         Promise::from_future(async move {
+            let mut container_io = capnp_err!(ContainerIO::new(terminal, logger.clone()).await)?;
+            let args = capnp_err!(Self::generate_exec_sync_args(
+                &pidfile,
+                runtime_root,
+                &container_io,
+                &params
+            ))?;
+
             match child_reaper
-                .create_child(&runtime, &args, &container_io, pidfile)
+                .create_child(&runtime, &args, &mut container_io, pidfile)
                 .await
             {
                 Ok(grandchild_pid) => {
                     let mut resp = results.get().init_response();
+
+                    let stop_tx = container_io.stop_tx();
+                    let io = container_io.to_shared();
+
                     // register grandchild with server
-                    let child = Child::new(id, grandchild_pid, vec![], logger);
+                    let child = Child::new(id, grandchild_pid, vec![], logger, io.clone());
 
                     let time_to_timeout = time::Instant::now() + Duration::from_secs(timeout);
 
-                    let stop_tx = container_io.stop_tx();
                     let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child, stop_tx))?;
 
                     let mut stdio = vec![];
                     let mut timed_out = false;
                     loop {
-                        let receiver = container_io.receiver();
+                        let mut io_write = io.write().await;
+                        let receiver = io_write.receiver();
                         let msg = if timeout > 0 {
                             match time::timeout_at(time_to_timeout, receiver.recv()).await {
                                 Ok(Some(msg)) => msg,
@@ -204,11 +227,13 @@ impl conmon::Server for Server {
 
         let socket_path = Path::new(pry!(req.get_socket_path()));
         let attach = pry_err!(Attach::new(socket_path).context("create attach endpoint"));
+        let child = pry_err!(self.reaper().get(container_id));
 
-        let mut child = pry_err!(self.reaper().get(container_id));
-        child.set_attach(attach.into());
-
-        Promise::ok(())
+        Promise::from_future(async move {
+            let mut container_io = child.io().write().await;
+            capnp_err!(container_io.attach(attach))?;
+            Ok(())
+        })
     }
 
     fn reopen_log_container(

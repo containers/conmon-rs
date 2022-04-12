@@ -20,15 +20,18 @@ use std::{
     },
     path::{Path, PathBuf},
     str,
-    sync::mpsc::{Receiver, Sender},
-    time::Duration,
 };
 use tempfile::Builder;
 use tokio::{
     fs::{self, File},
     io::{AsyncReadExt, AsyncWriteExt, BufReader, Interest},
     net::UnixStream,
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    select,
+    sync::{
+        broadcast,
+        mpsc::{self, UnboundedReceiver, UnboundedSender},
+        oneshot::{self, Sender},
+    },
     task,
 };
 
@@ -37,64 +40,54 @@ pub struct Terminal {
     #[getset(get = "pub")]
     path: PathBuf,
 
-    connected_rx: Receiver<()>,
+    connected_rx: UnboundedReceiver<()>,
 
     #[getset(get = "pub", get_mut = "pub")]
     message_rx: UnboundedReceiver<Message>,
-}
 
-#[derive(Debug, Getters)]
-struct Config {
-    #[get]
-    path: PathBuf,
-
-    #[get]
-    ready_tx: Sender<()>,
-
-    #[get]
-    connected_tx: Sender<()>,
-
-    #[get]
-    message_tx: UnboundedSender<Message>,
+    #[getset(get = "pub")]
+    attach_tx: UnboundedSender<(broadcast::Receiver<String>, broadcast::Sender<Vec<u8>>)>,
 }
 
 impl Terminal {
     /// Setup a new terminal instance.
-    pub fn new(logger: SharedContainerLog) -> Result<Self> {
+    pub async fn new(logger: SharedContainerLog) -> Result<Self> {
         debug!("Creating new terminal");
         let path = Self::temp_file_name(None, "conmon-term-", ".sock")?;
         let path_clone = path.clone();
 
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let (connected_tx, connected_rx) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (connected_tx, connected_rx) = mpsc::unbounded_channel();
         let (message_tx, message_rx) = mpsc::unbounded_channel();
+        let (attach_tx, attach_rx) = mpsc::unbounded_channel();
 
         task::spawn(async move {
             Self::listen(
-                Config {
-                    path: path_clone,
-                    ready_tx,
-                    connected_tx,
-                    message_tx,
-                },
+                path_clone,
+                ready_tx,
+                connected_tx,
+                message_tx,
+                attach_rx,
                 logger,
             )
             .await
         });
-        ready_rx.recv().context("wait for listener to be ready")?;
+        ready_rx.await.context("wait for listener to be ready")?;
 
         Ok(Self {
             path,
             connected_rx,
             message_rx,
+            attach_tx,
         })
     }
 
     /// Waits for the socket client to be connected.
-    pub fn wait_connected(&self) -> Result<()> {
+    pub async fn wait_connected(&mut self) -> Result<()> {
         debug!("Waiting for terminal socket connection");
         self.connected_rx
-            .recv_timeout(Duration::from_secs(60))
+            .recv()
+            .await
             .context("receive connected channel")
     }
 
@@ -113,30 +106,38 @@ impl Terminal {
         Ok(path)
     }
 
-    async fn listen(config: Config, logger: SharedContainerLog) -> Result<()> {
-        let path = config.path();
+    async fn listen(
+        path: PathBuf,
+        ready_tx: Sender<()>,
+        connected_tx: UnboundedSender<()>,
+        message_tx: UnboundedSender<Message>,
+        attach_rx: UnboundedReceiver<(broadcast::Receiver<String>, broadcast::Sender<Vec<u8>>)>,
+        logger: SharedContainerLog,
+    ) -> Result<()> {
         debug!("Listening terminal socket on {}", path.display());
-        let listener = crate::listener::bind_long_path(path)?;
+        let listener = crate::listener::bind_long_path(&path)?;
 
         // Update the permissions
-        let mut perms = fs::metadata(path).await?.permissions();
+        let mut perms = fs::metadata(&path).await?.permissions();
         perms.set_mode(0o700);
-        fs::set_permissions(path, perms).await?;
+        fs::set_permissions(&path, perms).await?;
 
-        config
-            .ready_tx()
+        ready_tx
             .send(())
             .map_err(|_| format_err!("unable to send ready message"))?;
 
         let stream = listener.accept().await?.0;
         debug!("Got terminal socket stream: {:?}", stream);
 
-        Self::handle_fd_receive(stream, config, logger).await
+        Self::handle_fd_receive(stream, path, connected_tx, message_tx, attach_rx, logger).await
     }
 
     async fn handle_fd_receive(
         mut stream: UnixStream,
-        config: Config,
+        path: PathBuf,
+        connected_tx: UnboundedSender<()>,
+        message_tx: UnboundedSender<Message>,
+        attach_rx: UnboundedReceiver<(broadcast::Receiver<String>, broadcast::Sender<Vec<u8>>)>,
         logger: SharedContainerLog,
     ) -> Result<()> {
         loop {
@@ -150,7 +151,6 @@ impl Terminal {
             match stream.recv_with_fd(&mut data_buffer, &mut fd_buffer) {
                 Ok((_, fd_read)) => {
                     // Allow only one single read
-                    let path = config.path();
                     debug!("Removing socket path {}", path.display());
                     fs::remove_file(path).await?;
 
@@ -170,7 +170,9 @@ impl Terminal {
                     term.output_flags |= OutputFlags::ONLCR;
                     termios::tcsetattr(fd, SetArg::TCSANOW, &term)?;
 
-                    task::spawn(async move { Self::read_loop(fd, config, logger).await });
+                    task::spawn(async move {
+                        Self::read_loop(fd, connected_tx, message_tx, attach_rx, logger).await
+                    });
 
                     // TODO: Now that we have a fd to the tty, make sure we handle any pending
                     // data that was already buffered.
@@ -196,47 +198,74 @@ impl Terminal {
         }
     }
 
-    async fn read_loop(fd: RawFd, config: Config, logger: SharedContainerLog) -> Result<()> {
+    async fn read_loop(
+        fd: RawFd,
+        connected_tx: UnboundedSender<()>,
+        message_tx: UnboundedSender<Message>,
+        mut attach_rx: UnboundedReceiver<(broadcast::Receiver<String>, broadcast::Sender<Vec<u8>>)>,
+        logger: SharedContainerLog,
+    ) -> Result<()> {
         debug!("Start reading from file descriptor");
 
-        let stream = unsafe { File::from_raw_fd(fd) };
-        let mut reader = BufReader::new(stream);
+        let file = unsafe { File::from_raw_fd(fd) };
+        let mut reader = BufReader::new(file);
+        let mut writer = unsafe { File::from_raw_fd(fd) };
         let mut buf = vec![0; 1024];
 
-        config
-            .connected_tx()
+        connected_tx
             .send(())
-            .context("send connected channel")?;
+            .map_err(|_| format_err!("unable to send connected message"))?;
+
+        let mut attach_stdout = None;
+        let mut attach_stdin: Option<broadcast::Receiver<String>> = None;
+
         loop {
-            match reader.read(&mut buf).await {
-                Ok(n) if n > 0 => {
-                    debug!("Read {} bytes", n);
-                    let data = &buf[..n];
-
-                    let mut locked_logger = logger.write().await;
-                    locked_logger
-                        .write(Pipe::StdOut, data)
-                        .await
-                        .context("write to log file")?;
-
-                    config
-                        .message_tx
-                        .send(Message::Data(data.into()))
-                        .context("send data message")?;
-                }
-                Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
-                    Errno::EIO => {
-                        debug!("Stopping terminal read loop");
-                        config
-                            .message_tx
-                            .send(Message::Done)
-                            .context("send done message")?;
-                        return Ok(());
-                    }
-                    _ => error!("Unable to read from file descriptor: {}", e),
-                },
-                _ => {}
+            if let Some(stdin) = attach_stdin.as_mut() {
+                let data = stdin.recv().await?;
+                writer.write_all(data.as_bytes()).await?;
+                // TODO: make this work correctly in parallel
+                attach_stdin = None;
             }
+            select! {
+                res = attach_rx.recv() => if let Some((new_stdin, new_stdout)) = res {
+                    debug!("Got new attach to terminal");
+                    attach_stdin = new_stdin.into();
+                    attach_stdout = new_stdout.into();
+                },
+                res = reader.read(&mut buf) => {
+                    match res {
+                        Ok(n) if n > 0 => {
+                            debug!("Read {} bytes", n);
+                            let data = &buf[..n];
+
+                            let mut locked_logger = logger.write().await;
+                            locked_logger
+                                .write(Pipe::StdOut, data)
+                                .await
+                                .context("write to log file")?;
+
+                            if let Some(stdout) = attach_stdout.as_ref() {
+                                stdout.send(data.to_vec())?;
+                            }
+
+                            message_tx
+                                .send(Message::Data(data.into()))
+                                .context("send data message")?;
+                        }
+                        Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
+                            Errno::EIO => {
+                                debug!("Stopping terminal read loop");
+                                message_tx
+                                    .send(Message::Done)
+                                    .context("send done message")?;
+                                return Ok(());
+                            }
+                            _ => error!("Unable to read from file descriptor: {}", e),
+                        },
+                        _ => {}
+                    }
+                },
+            };
         }
     }
 }
@@ -266,7 +295,7 @@ mod tests {
     async fn new_success() -> Result<()> {
         let logger = Arc::new(RwLock::new(ContainerLog::default()));
 
-        let sut = Terminal::new(logger)?;
+        let mut sut = Terminal::new(logger).await?;
         assert!(sut.path().exists());
 
         let res = pty::openpty(None, None)?;
@@ -283,7 +312,7 @@ mod tests {
             }
         }
 
-        sut.wait_connected()?;
+        sut.wait_connected().await?;
         assert!(!sut.path().exists());
 
         // Write to the slave

@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use getset::Getters;
 use log::{debug, error};
 use nix::sys::socket::{
     bind, listen, socket, AddressFamily, SockAddr, SockFlag, SockType, UnixAddr,
@@ -19,9 +20,18 @@ use tokio::{
     task,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Getters)]
 /// Attach handles the attach socket IO of a container.
-pub struct Attach;
+pub struct Attach {
+    #[getset(get = "pub")]
+    stdin: Sender<String>,
+
+    #[getset(get = "pub")]
+    stdout: Sender<Vec<u8>>,
+
+    #[getset(get = "pub")]
+    stderr: Sender<Vec<u8>>,
+}
 
 impl Attach {
     /// Create a a new attach instance.
@@ -53,13 +63,20 @@ impl Attach {
         listen(fd, 10).context("listen on socket fd")?;
 
         const BROADCAST_CAPACITY: usize = 64;
-        // TODO: The receivers have to be passed to the container_io module and handled there.
-        let (stdin_tx, _stdin_rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let (stdout_tx, _stdout_rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let (stderr_tx, _stderr_rx) = broadcast::channel(BROADCAST_CAPACITY);
-        task::spawn(async move { Self::start_listening(fd, stdin_tx, stdout_tx, stderr_tx).await });
+        let (stdin_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let (stdout_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let (stderr_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let (stdin_clone, stdout_clone, stderr_clone) =
+            (stdin_tx.clone(), stdout_tx.clone(), stderr_tx.clone());
+        task::spawn(async move {
+            Self::start_listening(fd, stdin_clone, stdout_clone, stderr_clone).await
+        });
 
-        Ok(Self {})
+        Ok(Self {
+            stdin: stdin_tx,
+            stdout: stdout_tx,
+            stderr: stderr_tx,
+        })
     }
 
     async fn start_listening(
