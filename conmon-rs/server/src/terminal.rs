@@ -1,9 +1,8 @@
 //! Terminal console functionalities.
 
 use crate::{
-    container_io::Message,
+    container_io::{ContainerIO, Message},
     container_log::{Pipe, SharedContainerLog},
-    streams::Streams,
 };
 use anyhow::{bail, format_err, Context, Result};
 use getset::{Getters, MutGetters};
@@ -170,7 +169,7 @@ impl Terminal {
                             .connected_tx()
                             .send(())
                             .context("send connected channel")?;
-                        Streams::read_loop(fd, Pipe::StdOut, logger, config.message_tx).await
+                        ContainerIO::read_loop(fd, Pipe::StdOut, logger, config.message_tx).await
                     });
 
                     // TODO: Now that we have a fd to the tty, make sure we handle any pending

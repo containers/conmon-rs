@@ -1,17 +1,14 @@
 //! Pseudo terminal implementation.
 
 use crate::{
-    container_io::Message,
+    container_io::{ContainerIO, Message},
     container_log::{Pipe, SharedContainerLog},
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use getset::{Getters, MutGetters};
-use log::{debug, error};
-use nix::errno::Errno;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use log::debug;
+use std::os::unix::io::AsRawFd;
 use tokio::{
-    fs::File,
-    io::{AsyncReadExt, BufReader},
     process::{ChildStderr, ChildStdout},
     sync::mpsc,
     task,
@@ -60,7 +57,7 @@ impl Streams {
 
         if let Some(stdout) = stdout {
             task::spawn(async move {
-                Self::read_loop(stdout.as_raw_fd(), Pipe::StdOut, logger, message_tx).await
+                ContainerIO::read_loop(stdout.as_raw_fd(), Pipe::StdOut, logger, message_tx).await
             });
         }
 
@@ -68,67 +65,8 @@ impl Streams {
         let message_tx = self.message_tx_stderr().clone();
         if let Some(stderr) = stderr {
             task::spawn(async move {
-                Self::read_loop(stderr.as_raw_fd(), Pipe::StdErr, logger, message_tx).await
+                ContainerIO::read_loop(stderr.as_raw_fd(), Pipe::StdErr, logger, message_tx).await
             });
-        }
-    }
-
-    pub async fn read_loop(
-        fd: RawFd,
-        pipe: Pipe,
-        logger: SharedContainerLog,
-        message_tx: mpsc::UnboundedSender<Message>,
-    ) -> Result<()> {
-        let stream = unsafe { File::from_raw_fd(fd) };
-        let mut reader = BufReader::new(stream);
-        let mut buf = vec![0; 1024];
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(n) if n > 0 => {
-                    debug!("Read {} bytes", n);
-                    let data = &buf[..n];
-
-                    let mut locked_logger = logger.write().await;
-                    locked_logger
-                        .write(pipe, data)
-                        .await
-                        .context("write to log file")?;
-
-                    message_tx
-                        .send(Message::Data(data.into()))
-                        .context("send data message")?;
-                }
-                Ok(n) if n == 0 => {
-                    debug!("No more to read");
-
-                    message_tx
-                        .send(Message::Done)
-                        .context("send done message")?;
-                    return Ok(());
-                }
-                Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
-                    Errno::EIO => {
-                        debug!("Stopping read loop");
-
-                        message_tx
-                            .send(Message::Done)
-                            .context("send done message")?;
-                        return Ok(());
-                    }
-                    Errno::EBADF => {
-                        return Err(Errno::EBADFD.into());
-                    }
-                    Errno::EAGAIN => {
-                        continue;
-                    }
-                    _ => error!(
-                        "Unable to read from file descriptor: {} {}",
-                        e,
-                        e.raw_os_error().context("get OS error")?
-                    ),
-                },
-                _ => {}
-            }
         }
     }
 }

@@ -1,6 +1,21 @@
-use crate::{container_log::SharedContainerLog, streams::Streams, terminal::Terminal};
+use crate::{
+    container_log::{Pipe, SharedContainerLog},
+    streams::Streams,
+    terminal::Terminal,
+};
 use anyhow::{Context, Result};
-use tokio::{sync::mpsc::UnboundedReceiver, time};
+use log::{debug, error};
+use tokio::{
+    sync::mpsc::{UnboundedReceiver, UnboundedSender},
+    time,
+};
+
+use nix::errno::Errno;
+use std::os::unix::io::{FromRawFd, RawFd};
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, BufReader},
+};
 
 /// A generic abstraction over various container input-output types
 pub enum ContainerIO {
@@ -82,6 +97,65 @@ impl ContainerIO {
             }
         }
         (stdio, timed_out)
+    }
+
+    pub async fn read_loop(
+        fd: RawFd,
+        pipe: Pipe,
+        logger: SharedContainerLog,
+        message_tx: UnboundedSender<Message>,
+    ) -> Result<()> {
+        let stream = unsafe { File::from_raw_fd(fd) };
+        let mut reader = BufReader::new(stream);
+        let mut buf = vec![0; 1024];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(n) if n > 0 => {
+                    debug!("Read {} bytes", n);
+                    let data = &buf[..n];
+
+                    let mut locked_logger = logger.write().await;
+                    locked_logger
+                        .write(pipe, data)
+                        .await
+                        .context("write to log file")?;
+
+                    message_tx
+                        .send(Message::Data(data.into()))
+                        .context("send data message")?;
+                }
+                Ok(n) if n == 0 => {
+                    debug!("No more to read");
+
+                    message_tx
+                        .send(Message::Done)
+                        .context("send done message")?;
+                    return Ok(());
+                }
+                Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
+                    Errno::EIO => {
+                        debug!("Stopping read loop");
+
+                        message_tx
+                            .send(Message::Done)
+                            .context("send done message")?;
+                        return Ok(());
+                    }
+                    Errno::EBADF => {
+                        return Err(Errno::EBADFD.into());
+                    }
+                    Errno::EAGAIN => {
+                        continue;
+                    }
+                    _ => error!(
+                        "Unable to read from file descriptor: {} {}",
+                        e,
+                        e.raw_os_error().context("get OS error")?
+                    ),
+                },
+                _ => {}
+            }
+        }
     }
 }
 
