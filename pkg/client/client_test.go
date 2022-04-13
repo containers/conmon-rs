@@ -255,7 +255,7 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	Describe("ExecSyncContainer", func() {
-		for _, terminal := range []bool{false} {
+		for _, terminal := range []bool{true, false} {
 			terminal := terminal
 			testName := "should succeed without timeout"
 			if terminal {
