@@ -1,12 +1,6 @@
 use crate::{
-    attach::Attach,
-    child::Child,
-    child_reaper::ChildReaper,
-    container_io::{ContainerIO, Message},
-    container_log::ContainerLog,
-    server::Server,
-    terminal::Terminal,
-    version::Version,
+    attach::Attach, child::Child, child_reaper::ChildReaper, container_io::ContainerIO,
+    container_log::ContainerLog, server::Server, terminal::Terminal, version::Version,
 };
 use anyhow::Context;
 use capnp::{capability::Promise, Error};
@@ -18,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use tokio::time;
+use tokio::time::Instant;
 
 macro_rules! pry_err {
     ($x:expr) => {
@@ -128,50 +122,29 @@ impl conmon::Server for Server {
                 .await
             {
                 Ok(grandchild_pid) => {
+                    let time_to_timeout = if timeout > 0 {
+                        Some(Instant::now() + Duration::from_secs(timeout))
+                    } else {
+                        None
+                    };
                     let mut resp = results.get().init_response();
                     // register grandchild with server
                     let child = Child::new(id, grandchild_pid, vec![], logger);
 
-                    let time_to_timeout = time::Instant::now() + Duration::from_secs(timeout);
-
                     let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child))?;
 
-                    let mut stdio = vec![];
-                    let mut timed_out = false;
-                    loop {
-                        let receiver = container_io.receiver();
-                        let msg = if timeout > 0 {
-                            match time::timeout_at(time_to_timeout, receiver.recv()).await {
-                                Ok(Some(msg)) => msg,
-                                Err(_) => {
-                                    timed_out = true;
-                                    capnp_err!(ChildReaper::kill_grandchild(
-                                        grandchild_pid,
-                                        Signal::SIGKILL
-                                    ))?;
-
-                                    Message::Done
-                                }
-                                Ok(None) => unreachable!(),
-                            }
-                        } else {
-                            match receiver.recv().await {
-                                Some(msg) => msg,
-                                None => Message::Done,
-                            }
-                        };
-
-                        match msg {
-                            Message::Data(s) => stdio.extend(s),
-                            Message::Done => break,
-                        }
+                    let (stdout, stderr, timed_out) =
+                        container_io.read_all_with_timeout(time_to_timeout).await;
+                    if timed_out {
+                        capnp_err!(ChildReaper::kill_grandchild(
+                            grandchild_pid,
+                            Signal::SIGKILL
+                        ))?;
+                        resp.set_timed_out(timed_out);
                     }
-
-                    resp.set_timed_out(timed_out);
-                    if !timed_out {
-                        resp.set_stdout(&stdio);
-                        resp.set_exit_code(capnp_err!(exit_rx.recv().await)?);
-                    }
+                    resp.set_stdout(&stdout);
+                    resp.set_stderr(&stderr);
+                    resp.set_exit_code(capnp_err!(exit_rx.recv().await)?);
                 }
                 Err(e) => {
                     error!("Unable to create child: {:#}", e);

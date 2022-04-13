@@ -79,7 +79,6 @@ impl Server {
             .map_err(errno::from_i32)
             .context("set child subreaper")?;
 
-        // Use the single threaded runtime to save rss memory.
         let rt = Builder::new_multi_thread()
             .enable_io()
             .enable_time()

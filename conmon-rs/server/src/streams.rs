@@ -23,11 +23,17 @@ pub struct Streams {
     #[getset(get = "pub")]
     logger: SharedContainerLog,
 
-    #[getset(get = "pub", get_mut = "pub")]
-    message_rx: mpsc::UnboundedReceiver<Message>,
+    #[getset(get = "pub")]
+    pub message_rx_stdout: mpsc::UnboundedReceiver<Message>,
 
     #[getset(get = "pub")]
-    message_tx: mpsc::UnboundedSender<Message>,
+    message_tx_stdout: mpsc::UnboundedSender<Message>,
+
+    #[getset(get = "pub")]
+    pub message_rx_stderr: mpsc::UnboundedReceiver<Message>,
+
+    #[getset(get = "pub")]
+    message_tx_stderr: mpsc::UnboundedSender<Message>,
 }
 
 impl Streams {
@@ -35,19 +41,22 @@ impl Streams {
     pub fn new(logger: SharedContainerLog) -> Result<Self> {
         debug!("Creating new IO streams");
 
-        let (message_tx, message_rx) = mpsc::unbounded_channel();
+        let (message_tx_stdout, message_rx_stdout) = mpsc::unbounded_channel();
+        let (message_tx_stderr, message_rx_stderr) = mpsc::unbounded_channel();
 
         Ok(Self {
             logger,
-            message_rx,
-            message_tx,
+            message_rx_stdout,
+            message_tx_stdout,
+            message_rx_stderr,
+            message_tx_stderr,
         })
     }
 
     pub fn handle_stdio_receive(&self, stdout: Option<ChildStdout>, stderr: Option<ChildStderr>) {
         debug!("Start reading from IO streams");
         let logger = self.logger().clone();
-        let message_tx = self.message_tx().clone();
+        let message_tx = self.message_tx_stdout().clone();
 
         if let Some(stdout) = stdout {
             task::spawn(async move {
@@ -56,7 +65,7 @@ impl Streams {
         }
 
         let logger = self.logger().clone();
-        let message_tx = self.message_tx().clone();
+        let message_tx = self.message_tx_stderr().clone();
         if let Some(stderr) = stderr {
             task::spawn(async move {
                 Self::read_loop(stderr.as_raw_fd(), Pipe::StdErr, logger, message_tx).await
