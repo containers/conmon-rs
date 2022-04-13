@@ -92,6 +92,7 @@ var _ = Describe("ConmonClient", func() {
 
 	JustAfterEach(func() {
 		if sut != nil {
+			time.Sleep(5 * time.Second)
 			pid := sut.PID()
 			Expect(pid).To(BeNumerically(">", 0))
 			rss := vmRSSGivenPID(pid)
