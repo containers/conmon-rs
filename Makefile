@@ -18,7 +18,7 @@ release-static:
 		-v "$(shell pwd)":/volume \
 		-v ~/.cargo/registry:/root/.cargo/registry \
 		-v ~/.cargo/git:/root/.cargo/git \
-		clux/muslrust:stable \
+		clux/muslrust:nightly \
 		bash -c "\
 			apt-get update && \
 			apt-get install -y capnproto && \
