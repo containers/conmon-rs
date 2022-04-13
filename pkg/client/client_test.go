@@ -400,8 +400,13 @@ var _ = Describe("ConmonClient", func() {
 					expectedStr += "\r"
 				}
 				expectedStr += "\n"
-				Expect(result.Stdout).To(BeEquivalentTo(expectedStr))
-				Expect(result.Stderr).To(BeEmpty())
+				if terminal {
+					Expect(result.Stdout).To(BeEquivalentTo(expectedStr))
+					Expect(result.Stderr).To(BeEmpty())
+				} else {
+					Expect(result.Stdout).To(BeEmpty())
+					Expect(result.Stderr).To(BeEquivalentTo(expectedStr))
+				}
 			})
 
 			testName = "should timeout"
