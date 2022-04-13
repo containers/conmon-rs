@@ -255,7 +255,7 @@ var _ = Describe("ConmonClient", func() {
 		}
 	})
 
-	Describe("ExecSync Stress", func() {
+	FDescribe("ExecSync Stress", func() {
 		for _, terminal := range []bool{true, false} {
 			terminal := terminal
 			testName := "should handle many requests"
@@ -294,15 +294,17 @@ var _ = Describe("ConmonClient", func() {
 				for i := 0; i < 10; i++ {
 					wg.Add(1)
 					go func(i int) {
+						defer GinkgoRecover()
 						defer wg.Done()
 						result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
 							ID:       ctrID,
-							Command:  []string{"/busybox", "echo", "-n", "hello", "world"},
+							Command:  []string{"/busybox", "echo", "-n", "hello", "world", fmt.Sprintf("%d", i)},
 							Terminal: terminal,
 							Timeout:  timeoutUnlimited,
 						})
 						Expect(err).To(BeNil())
 						Expect(result).NotTo(BeNil())
+						Expect(result).To(Equal(fmt.Sprintf("hello world %d", i)))
 						fmt.Println("done with", i, string(result.Stdout))
 					}(i)
 				}
