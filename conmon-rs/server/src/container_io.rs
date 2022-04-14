@@ -47,7 +47,7 @@ impl ContainerIO {
 
     pub async fn read_all_with_timeout(
         &mut self,
-        time_to_timeout: Option<time::Instant>,
+        time_to_timeout: Option<tokio::time::Instant>,
     ) -> (Vec<u8>, Vec<u8>, bool) {
         match self {
             ContainerIO::Terminal(t) => {
@@ -111,7 +111,7 @@ impl ContainerIO {
         loop {
             match reader.read(&mut buf).await {
                 Ok(n) if n > 0 => {
-                    debug!("Read {} bytes", n);
+                    debug!("fd:{}:read {} bytes", fd, n);
                     let data = &buf[..n];
 
                     let mut locked_logger = logger.write().await;
@@ -125,7 +125,7 @@ impl ContainerIO {
                         .context("send data message")?;
                 }
                 Ok(n) if n == 0 => {
-                    debug!("No more to read");
+                    debug!("fd:{}:No more to read", fd);
 
                     message_tx
                         .send(Message::Done)

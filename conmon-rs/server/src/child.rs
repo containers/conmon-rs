@@ -15,15 +15,25 @@ pub struct Child {
 
     #[getset(get = "pub")]
     logger: SharedContainerLog,
+
+    #[getset(get = "pub")]
+    timeout: Option<tokio::time::Instant>,
 }
 
 impl Child {
-    pub fn new(id: String, pid: u32, exit_paths: Vec<PathBuf>, logger: SharedContainerLog) -> Self {
+    pub fn new(
+        id: String,
+        pid: u32,
+        exit_paths: Vec<PathBuf>,
+        logger: SharedContainerLog,
+        timeout: Option<tokio::time::Instant>,
+    ) -> Self {
         Self {
             id,
             pid,
             exit_paths,
             logger,
+            timeout,
         }
     }
 }

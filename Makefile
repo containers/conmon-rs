@@ -3,6 +3,9 @@ RUNTIME_PATH ?= "/usr/bin/runc"
 PROTO_PATH ?= "conmon-rs/common/proto"
 BINARY := conmonrs
 CONTAINER_RUNTIME ?= $(if $(shell which podman 2>/dev/null),podman,docker)
+BUILD_DIR ?= .build
+GOTOOLS_GOPATH ?= $(BUILD_DIR)/gotools
+GOTOOLS_BINDIR ?= $(GOTOOLS_GOPATH)/bin
 
 default:
 	cargo build
@@ -32,17 +35,20 @@ lint:
 unit:
 	cargo test --bins --no-fail-fast
 
-integration: release # It needs to be release so we correctly test the RSS usage
+integration: .install.ginkgo release # It needs to be release so we correctly test the RSS usage
 	export CONMON_BINARY="$(MAKEFILE_PATH)target/release/$(BINARY)" && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
-	export MAX_RSS_KB=3900 && \
-	go test pkg/client/* -v -ginkgo.v
+	export MAX_RSS_KB=10240 && \
+	"$(GOTOOLS_BINDIR)/ginkgo" -v -r pkg/client
 
-integration-static: release-static # It needs to be release so we correctly test the RSS usage
+integration-static: .install.ginkgo release-static # It needs to be release so we correctly test the RSS usage
 	export CONMON_BINARY="$(MAKEFILE_PATH)target/x86_64-unknown-linux-musl/release/$(BINARY)" && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
-	go test pkg/client/* -v -ginkgo.v
+	export MAX_RSS_KB=10240 && \
+	$(GOTOOLS_BINDIR)/ginkgo -v -r pkg/client
 
+.install.ginkgo:
+	GOBIN=$(abspath $(GOTOOLS_BINDIR)) go install github.com/onsi/ginkgo/v2/ginkgo@latest
 
 clean:
 	rm -rf target/

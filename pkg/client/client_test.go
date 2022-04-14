@@ -211,7 +211,7 @@ var _ = Describe("ConmonClient", func() {
 
 				Eventually(func() error {
 					return rr.RunCommandCheckOutput("stopped", "list")
-				}, time.Second*5).Should(BeNil())
+				}, time.Second*10).Should(BeNil())
 			})
 			It("should return error if invalid command", func() {
 				createRuntimeConfigWithProcessArgs(terminal, []string{"invalid"})
@@ -255,7 +255,7 @@ var _ = Describe("ConmonClient", func() {
 		}
 	})
 
-	FDescribe("ExecSync Stress", func() {
+	Describe("ExecSync Stress", func() {
 		for _, terminal := range []bool{true, false} {
 			terminal := terminal
 			testName := "should handle many requests"
@@ -304,7 +304,7 @@ var _ = Describe("ConmonClient", func() {
 						})
 						Expect(err).To(BeNil())
 						Expect(result).NotTo(BeNil())
-						Expect(result).To(Equal(fmt.Sprintf("hello world %d", i)))
+						Expect(string(result.Stdout)).To(Equal(fmt.Sprintf("hello world %d", i)))
 						fmt.Println("done with", i, string(result.Stdout))
 					}(i)
 				}
@@ -473,7 +473,7 @@ var _ = Describe("ConmonClient", func() {
 				testName += " with terminal"
 			}
 			It(testName, func() {
-				createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
+				createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "20"})
 
 				logPath := MustFileInTempDir(tmpDir, "log")
 				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
@@ -490,7 +490,7 @@ var _ = Describe("ConmonClient", func() {
 				Expect(resp.PID).NotTo(Equal(0))
 				Eventually(func() error {
 					return rr.RunCommandCheckOutput(ctrID, "list")
-				}, time.Second*5).Should(BeNil())
+				}, time.Second*10).Should(BeNil())
 
 				// Start the container
 				Expect(rr.RunCommand("start", ctrID)).To(BeNil())
@@ -502,7 +502,7 @@ var _ = Describe("ConmonClient", func() {
 
 				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
 					ID:       ctrID,
-					Command:  []string{"/busybox", "sleep", "10"},
+					Command:  []string{"/busybox", "sleep", "5"},
 					Timeout:  3,
 					Terminal: terminal,
 				})
@@ -746,6 +746,7 @@ func testAttachSocketConnection(socketPath string) error {
 
 	receiveStdout := make(chan error)
 	go func() {
+		defer GinkgoRecover()
 		receiveStdout <- redirectResponseToOutputStreams(outputStream, errorStream, conn)
 		close(receiveStdout)
 	}()
