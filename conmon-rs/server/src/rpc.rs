@@ -39,6 +39,7 @@ impl conmon::Server for Server {
         response.set_commit(version.commit());
         response.set_build_date(version.build_date());
         response.set_rust_version(version.rust_version());
+        response.set_process_id(std::process::id());
         Promise::ok(())
     }
 

@@ -9,6 +9,7 @@ interface Conmon {
         commit @2 :Text;
         buildDate @3 :Text;
         rustVersion @4 :Text;
+        processId @5 :UInt32;
     }
 
     version @0 () -> (response: VersionResponse);

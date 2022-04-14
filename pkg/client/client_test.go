@@ -35,6 +35,15 @@ var _ = Describe("ConmonClient", func() {
 			Expect(sut.Shutdown()).To(BeNil())
 		}
 	})
+	Describe("New", func() {
+		It("should restore from running server", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+			sut2 := tr.configGivenEnv()
+			Expect(sut2.PID()).To(Equal(sut.PID()))
+		})
+	})
 
 	Describe("CreateContainer", func() {
 		for _, terminal := range []bool{true, false} {
