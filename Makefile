@@ -35,7 +35,7 @@ unit:
 integration: release # It needs to be release so we correctly test the RSS usage
 	export CONMON_BINARY="$(MAKEFILE_PATH)target/release/$(BINARY)" && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
-	export MAX_RSS_KB=3400 && \
+	export MAX_RSS_KB=3900 && \
 	go test pkg/client/* -v -ginkgo.v
 
 integration-static: release-static # It needs to be release so we correctly test the RSS usage

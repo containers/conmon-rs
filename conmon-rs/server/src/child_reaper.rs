@@ -94,20 +94,17 @@ impl ChildReaper {
             return Err(anyhow!(code_str));
         }
 
+        let pidfile = pidfile.as_path();
         let grandchild_pid = fs::read_to_string(pidfile)
             .await
-            .context("grandchild pid read error")?
+            .context(format!("grandchild pid read error {}", pidfile.display()))?
             .parse::<u32>()
-            .context("grandchild pid parse error")?;
+            .context(format!("grandchild pid parse error {}", pidfile.display()))?;
 
         Ok(grandchild_pid)
     }
 
-    pub fn watch_grandchild(
-        &self,
-        child: Child,
-        stop_tx: Option<Sender<()>>,
-    ) -> Result<Receiver<i32>> {
+    pub fn watch_grandchild(&self, child: Child) -> Result<Receiver<i32>> {
         let locked_grandchildren = Arc::clone(&self.grandchildren);
         let mut map = lock!(locked_grandchildren);
         let reapable_grandchild = ReapableChild::from_child(&child);
@@ -120,9 +117,6 @@ impl ChildReaper {
 
         task::spawn(async move {
             exit_tx.subscribe().recv().await?;
-            if let Some(stop_tx) = stop_tx {
-                stop_tx.send(()).context("send message to stop channel")?;
-            }
             Self::forget_grandchild(&cleanup_grandchildren, pid)
         });
         Ok(exit_rx)

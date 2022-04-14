@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -254,10 +255,68 @@ var _ = Describe("ConmonClient", func() {
 		}
 	})
 
-	Describe("ExecSyncContainer", func() {
-		for _, terminal := range []bool{false} {
+	FDescribe("ExecSync Stress", func() {
+		for _, terminal := range []bool{true, false} {
 			terminal := terminal
-			testName := "should succeeed without timeout"
+			testName := "should handle many requests"
+			if terminal {
+				testName += " with terminal"
+			}
+			It(testName, func() {
+				createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "30"})
+
+				logPath := MustFileInTempDir(tmpDir, "log")
+				sut = configGivenEnv(tmpDir, rr.runtimeRoot, terminal)
+				resp, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+					ID:         ctrID,
+					BundlePath: tmpDir,
+					Terminal:   terminal,
+					LogDrivers: []client.LogDriver{{
+						Type: client.LogDriverTypeContainerRuntimeInterface,
+						Path: logPath,
+					}},
+				})
+				Expect(err).To(BeNil())
+				Expect(resp.PID).NotTo(Equal(0))
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput(ctrID, "list")
+				}, time.Second*5).Should(BeNil())
+
+				// Start the container
+				Expect(rr.RunCommand("start", ctrID)).To(BeNil())
+
+				// Wait for container to be running
+				Eventually(func() error {
+					return rr.RunCommandCheckOutput("running", "list")
+				}, time.Second*10).Should(BeNil())
+
+				var wg sync.WaitGroup
+				for i := 0; i < 10; i++ {
+					wg.Add(1)
+					go func(i int) {
+						defer GinkgoRecover()
+						defer wg.Done()
+						result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+							ID:       ctrID,
+							Command:  []string{"/busybox", "echo", "-n", "hello", "world", fmt.Sprintf("%d", i)},
+							Terminal: terminal,
+							Timeout:  timeoutUnlimited,
+						})
+						Expect(err).To(BeNil())
+						Expect(result).NotTo(BeNil())
+						Expect(result).To(Equal(fmt.Sprintf("hello world %d", i)))
+						fmt.Println("done with", i, string(result.Stdout))
+					}(i)
+				}
+				wg.Wait()
+			})
+		}
+	})
+
+	Describe("ExecSyncContainer", func() {
+		for _, terminal := range []bool{true, false} {
+			terminal := terminal
+			testName := "should succeed without timeout"
 			if terminal {
 				testName += " with terminal"
 			}
@@ -301,19 +360,15 @@ var _ = Describe("ConmonClient", func() {
 				Expect(result.Stdout).To(BeEquivalentTo("hello world"))
 				Expect(result.Stderr).To(BeEmpty())
 
-				// Log testing
-				logs := containerLogContents(logPath)
-				Expect(logs).To(ContainSubstring("stdout P hello world\n"))
-
 				sut.ReopenLogContainer(context.Background(), &client.ReopenLogContainerConfig{
 					ID: ctrID,
 				})
-				logs = containerLogContents(logPath)
+				logs := containerLogContents(logPath)
 				Expect(logs).To(BeEmpty())
 
 			})
 
-			testName = "should succeeed with timeout"
+			testName = "should succeed with timeout"
 			if terminal {
 				testName += " with terminal"
 			}
@@ -404,8 +459,13 @@ var _ = Describe("ConmonClient", func() {
 					expectedStr += "\r"
 				}
 				expectedStr += "\n"
-				Expect(result.Stdout).To(BeEquivalentTo(expectedStr))
-				Expect(result.Stderr).To(BeEmpty())
+				if terminal {
+					Expect(result.Stdout).To(BeEquivalentTo(expectedStr))
+					Expect(result.Stderr).To(BeEmpty())
+				} else {
+					Expect(result.Stdout).To(BeEmpty())
+					Expect(result.Stderr).To(BeEquivalentTo(expectedStr))
+				}
 			})
 
 			testName = "should timeout"
