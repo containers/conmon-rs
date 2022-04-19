@@ -307,76 +307,40 @@ func testName(testName string, terminal bool) string {
 	return testName
 }
 
-func testAttachSocketConnection(socketPath string) error {
+func testAttachSocketConnection(socketPath string) {
 	conn, err := client.DialLongSocket("unixpacket", socketPath)
-	if err != nil {
-		return err
-	}
+	Expect(err).To(BeNil())
 	defer conn.Close()
 
-	outputStream := io.WriteCloser(os.Stdout)
-	errorStream := io.WriteCloser(os.Stderr)
-
-	receiveStdout := make(chan error)
+	// This second connection should be cleaned-up automatically
 	go func() {
-		defer GinkgoRecover()
-		receiveStdout <- redirectResponseToOutputStreams(outputStream, errorStream, conn)
-		close(receiveStdout)
+		conn, err := client.DialLongSocket("unixpacket", socketPath)
+		if err != nil {
+			panic(err)
+		}
+		conn.Close()
 	}()
-	if err := <-receiveStdout; err != nil {
-		return err
-	}
 
-	return nil
+	// Stdin
+	_, err = conn.Write([]byte("Hello world"))
+	Expect(err).To(BeNil())
 
-}
-
-func redirectResponseToOutputStreams(outputStream, errorStream io.WriteCloser, conn io.Reader) (err error) {
 	const (
 		attachPipeStdout = 2
-		attachPipeStderr = 3
 		bufSize          = 8192
 	)
+
 	reader := bufio.NewReader(conn)
 	buf := make([]byte, 0, bufSize)
 
-	for i := 0; i < 2; i++ {
-		n, err := io.ReadFull(reader, buf[:cap(buf)])
-		buf = buf[:n]
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			if err != io.ErrUnexpectedEOF {
-				fmt.Fprintln(os.Stderr, err)
-				break
-			}
-		}
+	// Stdout test
+	n, err := io.ReadFull(reader, buf[:cap(buf)])
+	Expect(err).To(BeNil())
+	Expect(n).To(Equal(bufSize))
+	buf = buf[:n]
 
-		fmt.Printf("Read %v bytes\n", n)
-		if n > 0 {
-			var dst io.Writer
-			switch buf[0] {
-			case attachPipeStdout:
-				dst = outputStream
-			case attachPipeStderr:
-				dst = errorStream
-			default:
-				return fmt.Errorf("got unexpected attach type %+d", buf[0])
-			}
-			if dst != nil {
-				nw, ew := dst.Write(buf[1:n])
-				if ew != nil {
-					err = ew
-					break
-				}
-				if n != nw+1 {
-					err = io.ErrShortWrite
-					break
-				}
-			}
-		}
-	}
+	Expect(buf[0]).To(BeEquivalentTo(attachPipeStdout))
 
-	return err
+	res := string(buf[1:bytes.IndexByte(buf, 0)])
+	Expect(res).To(Equal("Hello world"))
 }

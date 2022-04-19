@@ -1,26 +1,41 @@
 use crate::{
-    container_log::{Pipe, SharedContainerLog},
-    streams::Streams,
+    attach::SharedContainerAttach, container_log::SharedContainerLog, streams::Streams,
     terminal::Terminal,
 };
 use anyhow::{Context, Result};
 use log::{debug, error};
-use tokio::{
-    sync::mpsc::{UnboundedReceiver, UnboundedSender},
-    time,
-};
-
 use nix::errno::Errno;
 use std::os::unix::io::{FromRawFd, RawFd};
+use strum::AsRefStr;
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, BufReader},
+    io::{AsyncReadExt, AsyncWriteExt, BufReader},
+    sync::mpsc::{UnboundedReceiver, UnboundedSender},
+    time,
 };
 
 /// A generic abstraction over various container input-output types
 pub enum ContainerIO {
     Terminal(Terminal),
     Streams(Streams),
+}
+
+/// A message to be sent through the ContainerIO.
+#[derive(Debug)]
+pub enum Message {
+    Data(Vec<u8>),
+    Done,
+}
+
+#[derive(AsRefStr, Clone, Copy, Debug)]
+#[strum(serialize_all = "lowercase")]
+/// Available pipe types.
+pub enum Pipe {
+    /// Standard output.
+    StdOut,
+
+    /// Standard error.
+    StdErr,
 }
 
 impl From<Terminal> for ContainerIO {
@@ -37,11 +52,19 @@ impl From<Streams> for ContainerIO {
 
 impl ContainerIO {
     /// Create a new container IO instance.
-    pub fn new(terminal: bool, logger: SharedContainerLog) -> Result<Self> {
+    pub fn new(
+        terminal: bool,
+        logger: SharedContainerLog,
+        attach: SharedContainerAttach,
+    ) -> Result<Self> {
         Ok(if terminal {
-            Terminal::new(logger).context("create new terminal")?.into()
+            Terminal::new(logger, attach)
+                .context("create new terminal")?
+                .into()
         } else {
-            Streams::new(logger).context("create new streams")?.into()
+            Streams::new(logger, attach)
+                .context("create new streams")?
+                .into()
         })
     }
 
@@ -104,10 +127,12 @@ impl ContainerIO {
         pipe: Pipe,
         logger: SharedContainerLog,
         message_tx: UnboundedSender<Message>,
+        attach: SharedContainerAttach,
     ) -> Result<()> {
         let stream = unsafe { File::from_raw_fd(fd) };
         let mut reader = BufReader::new(stream);
         let mut buf = vec![0; 1024];
+
         loop {
             match reader.read(&mut buf).await {
                 Ok(n) if n > 0 => {
@@ -119,6 +144,11 @@ impl ContainerIO {
                         .write(pipe, data)
                         .await
                         .context("write to log file")?;
+
+                    attach
+                        .write(pipe, data)
+                        .await
+                        .context("write to attach endpoints")?;
 
                     message_tx
                         .send(Message::Data(data.into()))
@@ -157,11 +187,20 @@ impl ContainerIO {
             }
         }
     }
-}
 
-/// A message to be sent through the ContainerIO.
-#[derive(Debug)]
-pub enum Message {
-    Data(Vec<u8>),
-    Done,
+    pub async fn read_loop_stdin(fd: RawFd, attach: SharedContainerAttach) -> Result<()> {
+        let mut writer = unsafe { File::from_raw_fd(fd) };
+        loop {
+            if let Some(data) = attach
+                .try_read()
+                .await
+                .context("read from stdin attach endpoints")?
+            {
+                writer
+                    .write_all(&data)
+                    .await
+                    .context("write attach stdin to stream")?;
+            }
+        }
+    }
 }

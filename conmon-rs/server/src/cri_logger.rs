@@ -1,6 +1,6 @@
 //! File logging functionalities.
 
-use crate::container_log::Pipe;
+use crate::container_io::Pipe;
 use anyhow::{Context, Result};
 use chrono::offset::Local;
 use getset::{CopyGetters, Getters, Setters};
