@@ -45,6 +45,11 @@ func New(config *ConmonServerConfig) (_ *ConmonClient, retErr error) {
 	if err != nil {
 		return nil, err
 	}
+	// Check if the process has already started, and inherit that process instead.
+	if p, err := cl.processIDFromServer(context.Background()); err == nil {
+		cl.serverPID = p
+		return cl, nil
+	}
 	if err := cl.StartServer(config); err != nil {
 		return nil, err
 	}
@@ -220,6 +225,29 @@ func (c *ConmonClient) Version(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return response.Version()
+}
+
+func (c *ConmonClient) processIDFromServer(ctx context.Context) (uint32, error) {
+	conn, err := c.newRPCConn()
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
+
+	future, free := client.Version(ctx, nil)
+	defer free()
+
+	result, err := future.Struct()
+	if err != nil {
+		return 0, err
+	}
+
+	response, err := result.Response()
+	if err != nil {
+		return 0, err
+	}
+	return response.ProcessId(), nil
 }
 
 type CreateContainerConfig struct {
