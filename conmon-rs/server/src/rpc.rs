@@ -1,5 +1,5 @@
 use crate::{
-    attach::{Attach, SharedContainerAttach},
+    attach::Attach,
     child::Child,
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
@@ -59,12 +59,8 @@ impl conmon::Server for Server {
 
         let log_drivers = pry!(req.get_log_drivers());
         let container_log = pry_err!(ContainerLog::from(log_drivers));
-        let attach = SharedContainerAttach::default();
-        let mut container_io = pry_err!(ContainerIO::new(
-            req.get_terminal(),
-            container_log.clone(),
-            attach.clone()
-        ));
+        let mut container_io =
+            pry_err!(ContainerIO::new(req.get_terminal(), container_log.clone()));
         let bundle_path = PathBuf::from(pry!(req.get_bundle_path()));
         let pidfile = bundle_path.join("pidfile");
         debug!("PID file is {}", pidfile.display());
@@ -88,15 +84,7 @@ impl conmon::Server for Server {
 
             // register grandchild with server
             let io = SharedContainerIO::new(container_io);
-            let child = Child::new(
-                id,
-                grandchild_pid,
-                exit_paths,
-                container_log,
-                None,
-                attach,
-                io,
-            );
+            let child = Child::new(id, grandchild_pid, exit_paths, None, io);
             capnp_err!(child_reaper.watch_grandchild(child))?;
 
             results
@@ -132,12 +120,7 @@ impl conmon::Server for Server {
         let child_reaper = self.reaper().clone();
 
         let logger = ContainerLog::new();
-        let attach = SharedContainerAttach::default();
-        let mut container_io = pry_err!(ContainerIO::new(
-            req.get_terminal(),
-            logger.clone(),
-            attach.clone()
-        ));
+        let mut container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger));
         let args = pry_err!(self.generate_exec_sync_args(&pidfile, &container_io, &params));
 
         Promise::from_future(async move {
@@ -155,15 +138,7 @@ impl conmon::Server for Server {
                     // register grandchild with server
                     let io = SharedContainerIO::new(container_io);
                     let io_clone = io.clone();
-                    let child = Child::new(
-                        id,
-                        grandchild_pid,
-                        vec![],
-                        logger,
-                        time_to_timeout,
-                        attach,
-                        io_clone,
-                    );
+                    let child = Child::new(id, grandchild_pid, vec![], time_to_timeout, io_clone);
 
                     let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child))?;
 
@@ -210,7 +185,7 @@ impl conmon::Server for Server {
         let child = pry_err!(self.reaper().get(container_id));
 
         Promise::from_future(async move {
-            child.attach().add(attach).await;
+            child.io().attach().await.add(attach).await;
             Ok(())
         })
     }
@@ -229,7 +204,9 @@ impl conmon::Server for Server {
 
         let child = pry_err!(self.reaper().get(container_id));
 
-        Promise::from_future(async move { capnp_err!(child.logger().write().await.reopen().await) })
+        Promise::from_future(async move {
+            capnp_err!(child.io().logger().await.write().await.reopen().await)
+        })
     }
 
     fn set_window_size_container(
