@@ -6,36 +6,39 @@ use crate::{
     container_log::SharedContainerLog,
 };
 use anyhow::{bail, format_err, Context, Result};
-use getset::{Getters, MutGetters};
+use getset::{Getters, MutGetters, Setters};
+use libc::{self, winsize, TIOCSWINSZ};
 use log::{debug, error, trace};
 use nix::sys::termios::{self, OutputFlags, SetArg};
 use sendfd::RecvWithFd;
 use std::{
-    io::ErrorKind,
+    io::{Error as IOError, ErrorKind},
     os::unix::{fs::PermissionsExt, io::RawFd},
     path::{Path, PathBuf},
     str,
-    sync::mpsc::{Receiver, Sender},
-    time::Duration,
+    sync::mpsc::Sender as StdSender,
 };
 use tempfile::Builder;
 use tokio::{
     fs,
     io::{AsyncWriteExt, Interest},
     net::UnixStream,
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
     task,
 };
 
-#[derive(Debug, Getters, MutGetters)]
+#[derive(Debug, Getters, MutGetters, Setters)]
 pub struct Terminal {
     #[getset(get = "pub")]
     path: PathBuf,
 
-    connected_rx: Receiver<()>,
+    connected_rx: Receiver<RawFd>,
 
     #[getset(get = "pub", get_mut = "pub")]
     message_rx: UnboundedReceiver<Message>,
+
+    #[getset(get, set)]
+    tty: Option<RawFd>,
 }
 
 #[derive(Debug, Getters)]
@@ -44,10 +47,10 @@ struct Config {
     path: PathBuf,
 
     #[get]
-    ready_tx: Sender<()>,
+    ready_tx: StdSender<()>,
 
     #[get]
-    connected_tx: Sender<()>,
+    connected_tx: Sender<RawFd>,
 
     #[get]
     message_tx: UnboundedSender<Message>,
@@ -61,11 +64,11 @@ impl Terminal {
         let path_clone = path.clone();
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let (connected_tx, connected_rx) = std::sync::mpsc::channel();
+        let (connected_tx, connected_rx) = mpsc::channel(1);
         let (message_tx, message_rx) = mpsc::unbounded_channel();
 
         task::spawn(async move {
-            Self::listen(
+            if let Err(e) = Self::listen(
                 Config {
                     path: path_clone,
                     ready_tx,
@@ -76,6 +79,9 @@ impl Terminal {
                 attach,
             )
             .await
+            {
+                error!("Unable to listen on terminal: {:#}", e);
+            };
         });
         ready_rx.recv().context("wait for listener to be ready")?;
 
@@ -83,15 +89,41 @@ impl Terminal {
             path,
             connected_rx,
             message_rx,
+            tty: None,
         })
     }
 
     /// Waits for the socket client to be connected.
-    pub fn wait_connected(&self) -> Result<()> {
+    pub async fn wait_connected(&mut self) -> Result<()> {
         debug!("Waiting for terminal socket connection");
-        self.connected_rx
-            .recv_timeout(Duration::from_secs(60))
-            .context("receive connected channel")
+        let fd = self
+            .connected_rx
+            .recv()
+            .await
+            .context("receive connected channel")?;
+        self.set_tty(fd.into());
+        Ok(())
+    }
+
+    /// Resize the terminal width and height.
+    pub fn resize(&self, width: u16, height: u16) -> Result<()> {
+        debug!("Resizing terminal to width {} and height {}", width, height);
+        let ws = winsize {
+            ws_row: height,
+            ws_col: width,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        match unsafe {
+            libc::ioctl(
+                self.tty().context("terminal not connected")?,
+                TIOCSWINSZ,
+                &ws,
+            )
+        } {
+            0 => Ok(()),
+            _ => Err(IOError::last_os_error().into()),
+        }
     }
 
     /// Generate a the temp file name without creating the file.
@@ -174,10 +206,11 @@ impl Terminal {
                     let attach_clone = attach.clone();
                     task::spawn(async move {
                         config
-                            .connected_tx()
-                            .send(())
+                            .connected_tx
+                            .send(fd)
+                            .await
                             .context("send connected channel")?;
-                        ContainerIO::read_loop(
+                        if let Err(e) = ContainerIO::read_loop(
                             fd,
                             Pipe::StdOut,
                             logger,
@@ -185,18 +218,17 @@ impl Terminal {
                             attach_clone,
                         )
                         .await
+                        {
+                            error!("Stdout read loop failure: {:#}", e)
+                        }
+                        Ok::<_, anyhow::Error>(())
                     });
 
-                    task::spawn(async move { ContainerIO::read_loop_stdin(fd, attach).await });
-
-                    // TODO: Now that we have a fd to the tty, make sure we handle any pending
-                    // data that was already buffered.
-                    // See: https://github.com/containers/conmon/blob/f263cf4/src/ctrl.c#L68
-
-                    // TODO: Now that we've set mainfd_stdout, we can register the
-                    // ctrl_winsz_cb if we didn't set it here, we'd risk attempting to run
-                    // ioctl on a negative fd, and fail to resize the window.
-                    // See: https://github.com/containers/conmon/blob/f263cf4/src/ctrl.c#L73
+                    task::spawn(async move {
+                        if let Err(e) = ContainerIO::read_loop_stdin(fd, attach).await {
+                            error!("Stdin read loop failure: {:#}", e);
+                        }
+                    });
 
                     debug!("Shutting down listener thread");
                     return Ok(());
@@ -239,7 +271,7 @@ mod tests {
         let logger = ContainerLog::new();
         let attach = SharedContainerAttach::default();
 
-        let sut = Terminal::new(logger, attach)?;
+        let mut sut = Terminal::new(logger, attach)?;
         assert!(sut.path().exists());
 
         let res = pty::openpty(None, None)?;
@@ -256,7 +288,7 @@ mod tests {
             }
         }
 
-        sut.wait_connected()?;
+        sut.wait_connected().await?;
         assert!(!sut.path().exists());
 
         // Write to the slave

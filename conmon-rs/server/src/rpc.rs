@@ -1,7 +1,7 @@
 use crate::{
     attach::{Attach, SharedContainerAttach},
     child::Child,
-    container_io::ContainerIO,
+    container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     server::Server,
     terminal::Terminal,
@@ -60,7 +60,7 @@ impl conmon::Server for Server {
         let log_drivers = pry!(req.get_log_drivers());
         let container_log = pry_err!(ContainerLog::from(log_drivers));
         let attach = SharedContainerAttach::default();
-        let container_io = pry_err!(ContainerIO::new(
+        let mut container_io = pry_err!(ContainerIO::new(
             req.get_terminal(),
             container_log.clone(),
             attach.clone()
@@ -82,12 +82,21 @@ impl conmon::Server for Server {
 
             let grandchild_pid = capnp_err!(
                 child_reaper
-                    .create_child(runtime, args, &container_io, pidfile)
+                    .create_child(runtime, args, &mut container_io, pidfile)
                     .await
             )?;
 
             // register grandchild with server
-            let child = Child::new(id, grandchild_pid, exit_paths, container_log, None, attach);
+            let io = SharedContainerIO::new(container_io);
+            let child = Child::new(
+                id,
+                grandchild_pid,
+                exit_paths,
+                container_log,
+                None,
+                attach,
+                io,
+            );
             capnp_err!(child_reaper.watch_grandchild(child))?;
 
             results
@@ -133,7 +142,7 @@ impl conmon::Server for Server {
 
         Promise::from_future(async move {
             match child_reaper
-                .create_child(&runtime, &args, &container_io, pidfile)
+                .create_child(&runtime, &args, &mut container_io, pidfile)
                 .await
             {
                 Ok(grandchild_pid) => {
@@ -144,13 +153,22 @@ impl conmon::Server for Server {
                     };
                     let mut resp = results.get().init_response();
                     // register grandchild with server
-                    let child =
-                        Child::new(id, grandchild_pid, vec![], logger, time_to_timeout, attach);
+                    let io = SharedContainerIO::new(container_io);
+                    let io_clone = io.clone();
+                    let child = Child::new(
+                        id,
+                        grandchild_pid,
+                        vec![],
+                        logger,
+                        time_to_timeout,
+                        attach,
+                        io_clone,
+                    );
 
                     let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child))?;
 
                     let (stdout, stderr, timed_out) =
-                        container_io.read_all_with_timeout(time_to_timeout).await;
+                        io.read_all_with_timeout(time_to_timeout).await;
 
                     let exit_data = capnp_err!(exit_rx.recv().await)?;
                     resp.set_stdout(&stdout);
@@ -211,9 +229,26 @@ impl conmon::Server for Server {
 
         let child = pry_err!(self.reaper().get(container_id));
 
-        Promise::from_future(async move {
-            capnp_err!(child.logger().write().await.reopen().await)?;
-            Ok(())
-        })
+        Promise::from_future(async move { capnp_err!(child.logger().write().await.reopen().await) })
+    }
+
+    fn set_window_size_container(
+        &mut self,
+        params: conmon::SetWindowSizeContainerParams,
+        _: conmon::SetWindowSizeContainerResults,
+    ) -> Promise<(), capnp::Error> {
+        let req = pry!(pry!(params.get()).get_request());
+        let container_id = pry_err!(req.get_id());
+
+        debug!(
+            "Got a set window size container request for container id {}",
+            container_id,
+        );
+
+        let child = pry_err!(self.reaper().get(container_id));
+        let width = req.get_width();
+        let height = req.get_height();
+
+        Promise::from_future(async move { capnp_err!(child.io().resize(width, height).await) })
     }
 }

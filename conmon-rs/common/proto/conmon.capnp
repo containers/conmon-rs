@@ -81,4 +81,17 @@ interface Conmon {
     }
 
     reopenLogContainer @4 (request: ReopenLogRequest) -> (response: ReopenLogResponse);
+
+    ###############################################
+    # SetWindowSize
+    struct SetWindowSizeRequest {
+        id @0 :Text; # container identifier
+        width @1 :UInt16; # columns in characters
+        height @2 :UInt16; # rows in characters
+    }
+
+    struct SetWindowSizeResponse {
+    }
+
+    setWindowSizeContainer @5 (request: SetWindowSizeRequest) -> (response: SetWindowSizeResponse);
 }
