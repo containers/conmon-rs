@@ -1,7 +1,7 @@
 use crate::{
     child_reaper::ChildReaper,
     config::{Config, LogDriver},
-    container_io::ContainerIO,
+    container_io::{ContainerIO, ContainerIOType},
     init::{DefaultInit, Init},
     version::Version,
 };
@@ -216,7 +216,7 @@ impl Server {
             pidfile.display().to_string(),
         ]);
 
-        if let ContainerIO::Terminal(terminal) = container_io {
+        if let ContainerIOType::Terminal(terminal) = container_io.typ() {
             args.push(format!("--console-socket={}", terminal.path().display()));
         }
         args.push(id);
@@ -242,7 +242,7 @@ impl Server {
         }
         args.push("exec".to_string());
         args.push("-d".to_string());
-        if let ContainerIO::Terminal(terminal) = container_io {
+        if let ContainerIOType::Terminal(terminal) = container_io.typ() {
             args.push(format!("--console-socket={}", terminal.path().display()));
             args.push("--tty".to_string());
         }

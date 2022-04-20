@@ -3,6 +3,7 @@ use crate::{
     terminal::Terminal,
 };
 use anyhow::{bail, Context, Result};
+use getset::{Getters, MutGetters};
 use log::{debug, error};
 use nix::errno::Errno;
 use std::{
@@ -37,19 +38,41 @@ impl SharedContainerIO {
         self.0.write().await.read_all_with_timeout(timeout).await
     }
 
-    // Resize the shared container IO to the provided with and height.
-    // Errors in case of no terminal containers.
+    /// Resize the shared container IO to the provided with and height.
+    /// Errors in case of no terminal containers.
     pub async fn resize(&self, width: u16, height: u16) -> Result<()> {
-        match &*self.0.read().await {
-            ContainerIO::Terminal(t) => t.resize(width, height).context("resize terminal"),
-            ContainerIO::Streams(_) => bail!("container has no terminal"),
+        match &*self.0.read().await.typ() {
+            ContainerIOType::Terminal(t) => t.resize(width, height).context("resize terminal"),
+            ContainerIOType::Streams(_) => bail!("container has no terminal"),
         }
     }
+
+    /// Retrieve the underlying SharedContainerLog instance.
+    pub async fn logger(&self) -> SharedContainerLog {
+        self.0.read().await.logger().clone()
+    }
+
+    /// Retrieve the underlying SharedContainerAttach instance.
+    pub async fn attach(&self) -> SharedContainerAttach {
+        self.0.read().await.attach().clone()
+    }
+}
+
+#[derive(Debug, Getters, MutGetters)]
+pub struct ContainerIO {
+    #[getset(get = "pub", get_mut = "pub")]
+    typ: ContainerIOType,
+
+    #[getset(get = "pub")]
+    logger: SharedContainerLog,
+
+    #[getset(get = "pub")]
+    attach: SharedContainerAttach,
 }
 
 #[derive(Debug)]
 /// A generic abstraction over various container input-output types
-pub enum ContainerIO {
+pub enum ContainerIOType {
     Terminal(Terminal),
     Streams(Streams),
 }
@@ -72,13 +95,13 @@ pub enum Pipe {
     StdErr,
 }
 
-impl From<Terminal> for ContainerIO {
+impl From<Terminal> for ContainerIOType {
     fn from(c: Terminal) -> Self {
         Self::Terminal(c)
     }
 }
 
-impl From<Streams> for ContainerIO {
+impl From<Streams> for ContainerIOType {
     fn from(i: Streams) -> Self {
         Self::Streams(i)
     }
@@ -86,19 +109,23 @@ impl From<Streams> for ContainerIO {
 
 impl ContainerIO {
     /// Create a new container IO instance.
-    pub fn new(
-        terminal: bool,
-        logger: SharedContainerLog,
-        attach: SharedContainerAttach,
-    ) -> Result<Self> {
-        Ok(if terminal {
-            Terminal::new(logger, attach)
+    pub fn new(terminal: bool, logger: SharedContainerLog) -> Result<Self> {
+        let logger_clone = logger.clone();
+        let attach = SharedContainerAttach::default();
+        let attach_clone = attach.clone();
+        let typ = if terminal {
+            Terminal::new(logger_clone, attach_clone)
                 .context("create new terminal")?
                 .into()
         } else {
-            Streams::new(logger, attach)
+            Streams::new(logger_clone, attach_clone)
                 .context("create new streams")?
                 .into()
+        };
+        Ok(Self {
+            typ,
+            logger,
+            attach,
         })
     }
 
@@ -106,13 +133,13 @@ impl ContainerIO {
         &mut self,
         time_to_timeout: Option<Instant>,
     ) -> (Vec<u8>, Vec<u8>, bool) {
-        match self {
-            ContainerIO::Terminal(t) => {
+        match self.typ_mut() {
+            ContainerIOType::Terminal(t) => {
                 let (stdout, timed_out) =
                     Self::read_stream_with_timeout(time_to_timeout, t.message_rx_mut()).await;
                 (stdout, vec![], timed_out)
             }
-            ContainerIO::Streams(s) => {
+            ContainerIOType::Streams(s) => {
                 let stdout_rx = &mut s.message_rx_stdout;
                 let stderr_rx = &mut s.message_rx_stderr;
                 let (stdout, stderr) = tokio::join!(

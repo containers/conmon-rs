@@ -1,9 +1,7 @@
 //! Child process reaping and management.
 use crate::{
-    attach::SharedContainerAttach,
     child::Child,
-    container_io::{ContainerIO, SharedContainerIO},
-    container_log::SharedContainerLog,
+    container_io::{ContainerIO, ContainerIOType, SharedContainerIO},
 };
 use anyhow::{anyhow, format_err, Context, Result};
 use getset::{CopyGetters, Getters, Setters};
@@ -80,14 +78,14 @@ impl ChildReaper {
         let stderr = child.stderr.take();
         let stdin = child.stdin.take();
 
-        match container_io {
-            ContainerIO::Terminal(ref mut terminal) => {
+        match container_io.typ_mut() {
+            ContainerIOType::Terminal(ref mut terminal) => {
                 terminal
                     .wait_connected()
                     .await
                     .context("wait for terminal socket connection")?;
             }
-            ContainerIO::Streams(streams) => {
+            ContainerIOType::Streams(streams) => {
                 streams.handle_stdio_receive(stdin, stdout, stderr);
             }
         }
@@ -183,12 +181,6 @@ pub struct ReapableChild {
     io: SharedContainerIO,
 
     #[getset(get = "pub")]
-    attach: SharedContainerAttach,
-
-    #[getset(get = "pub")]
-    logger: SharedContainerLog,
-
-    #[getset(get = "pub")]
     timeout: Option<Instant>,
 }
 
@@ -207,8 +199,6 @@ impl ReapableChild {
             exit_paths: child.exit_paths().clone(),
             pid: child.pid(),
             io: child.io().clone(),
-            attach: child.attach().clone(),
-            logger: child.logger().clone(),
             timeout: *child.timeout(),
         }
     }
