@@ -77,6 +77,7 @@ var _ = Describe("ConmonClient", func() {
 					return tr.rr.RunCommandCheckOutput("stopped", "list")
 				}, time.Second*10).Should(BeNil())
 			})
+
 			It(testName("should return error if invalid command", terminal), func() {
 				tr = newTestRunner()
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"invalid"})
@@ -92,12 +93,34 @@ var _ = Describe("ConmonClient", func() {
 				})
 				Expect(err).NotTo(BeNil())
 			})
+
 			It(testName("should handle long run dir", terminal), func() {
 				tr = newTestRunner()
 				tr.tmpDir = MustDirInTempDir(tr.tmpDir, "thisisareallylongdirithasmanycharactersinthepathsosuperduperlongannoyinglylong")
 				tr.createRuntimeConfig(terminal)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
+			})
+
+			It(testName("should succeed/error to set the window size", terminal), func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfig(terminal)
+				sut = tr.configGivenEnv()
+				tr.createContainer(sut, terminal)
+
+				err := sut.SetWindowSizeContainer(
+					context.Background(),
+					&client.SetWindowSizeContainerConfig{
+						ID:     tr.ctrID,
+						Width:  10,
+						Height: 20,
+					},
+				)
+				if terminal {
+					Expect(err).To(BeNil())
+				} else {
+					Expect(err).NotTo(BeNil())
+				}
 			})
 		}
 	})

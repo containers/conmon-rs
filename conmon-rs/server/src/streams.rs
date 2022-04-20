@@ -7,7 +7,7 @@ use crate::{
 };
 use anyhow::Result;
 use getset::{Getters, MutGetters};
-use log::debug;
+use log::{debug, error};
 use std::os::unix::io::AsRawFd;
 use tokio::{
     process::{ChildStderr, ChildStdin, ChildStdout},
@@ -67,16 +67,27 @@ impl Streams {
         let message_tx = self.message_tx_stdout().clone();
 
         if let Some(stdin) = stdin {
-            task::spawn(
-                async move { ContainerIO::read_loop_stdin(stdin.as_raw_fd(), attach).await },
-            );
+            task::spawn(async move {
+                if let Err(e) = ContainerIO::read_loop_stdin(stdin.as_raw_fd(), attach).await {
+                    error!("Stdin read loop failure: {:#}", e);
+                }
+            });
         }
 
         let attach = self.attach().clone();
         if let Some(stdout) = stdout {
             task::spawn(async move {
-                ContainerIO::read_loop(stdout.as_raw_fd(), Pipe::StdOut, logger, message_tx, attach)
-                    .await
+                if let Err(e) = ContainerIO::read_loop(
+                    stdout.as_raw_fd(),
+                    Pipe::StdOut,
+                    logger,
+                    message_tx,
+                    attach,
+                )
+                .await
+                {
+                    error!("Stdout read loop failure: {:#}", e);
+                }
             });
         }
 
@@ -85,8 +96,17 @@ impl Streams {
         let message_tx = self.message_tx_stderr().clone();
         if let Some(stderr) = stderr {
             task::spawn(async move {
-                ContainerIO::read_loop(stderr.as_raw_fd(), Pipe::StdErr, logger, message_tx, attach)
-                    .await
+                if let Err(e) = ContainerIO::read_loop(
+                    stderr.as_raw_fd(),
+                    Pipe::StdErr,
+                    logger,
+                    message_tx,
+                    attach,
+                )
+                .await
+                {
+                    error!("Stderr read loop failure: {:#}", e);
+                }
             });
         }
     }

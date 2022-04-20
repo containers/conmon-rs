@@ -112,7 +112,11 @@ impl Attach {
 
         let clients = Arc::new(RwLock::new(vec![]));
         let clients_clone = clients.clone();
-        task::spawn(async move { Self::start_listening(fd, clients_clone).await });
+        task::spawn(async move {
+            if let Err(e) = Self::start_listening(fd, clients_clone).await {
+                error!("Attach failure: {:#}", e);
+            }
+        });
 
         Ok(Self {
             clients,

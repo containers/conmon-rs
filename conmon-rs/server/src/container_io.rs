@@ -2,18 +2,52 @@ use crate::{
     attach::SharedContainerAttach, container_log::SharedContainerLog, streams::Streams,
     terminal::Terminal,
 };
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use log::{debug, error};
 use nix::errno::Errno;
-use std::os::unix::io::{FromRawFd, RawFd};
+use std::{
+    os::unix::io::{FromRawFd, RawFd},
+    sync::Arc,
+};
 use strum::AsRefStr;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
-    sync::mpsc::{UnboundedReceiver, UnboundedSender},
-    time,
+    sync::{
+        mpsc::{UnboundedReceiver, UnboundedSender},
+        RwLock,
+    },
+    time::{self, Instant},
 };
 
+/// A shared container IO abstraction.
+#[derive(Debug, Clone)]
+pub struct SharedContainerIO(Arc<RwLock<ContainerIO>>);
+
+impl SharedContainerIO {
+    /// Create a new SharedContainerIO instance from the provided ContainerIO.
+    pub fn new(io: ContainerIO) -> Self {
+        Self(Arc::new(RwLock::new(io)))
+    }
+
+    pub async fn read_all_with_timeout(
+        &self,
+        timeout: Option<Instant>,
+    ) -> (Vec<u8>, Vec<u8>, bool) {
+        self.0.write().await.read_all_with_timeout(timeout).await
+    }
+
+    // Resize the shared container IO to the provided with and height.
+    // Errors in case of no terminal containers.
+    pub async fn resize(&self, width: u16, height: u16) -> Result<()> {
+        match &*self.0.read().await {
+            ContainerIO::Terminal(t) => t.resize(width, height).context("resize terminal"),
+            ContainerIO::Streams(_) => bail!("container has no terminal"),
+        }
+    }
+}
+
+#[derive(Debug)]
 /// A generic abstraction over various container input-output types
 pub enum ContainerIO {
     Terminal(Terminal),
@@ -70,7 +104,7 @@ impl ContainerIO {
 
     pub async fn read_all_with_timeout(
         &mut self,
-        time_to_timeout: Option<tokio::time::Instant>,
+        time_to_timeout: Option<Instant>,
     ) -> (Vec<u8>, Vec<u8>, bool) {
         match self {
             ContainerIO::Terminal(t) => {
@@ -92,7 +126,7 @@ impl ContainerIO {
     }
 
     async fn read_stream_with_timeout(
-        time_to_timeout: Option<time::Instant>,
+        time_to_timeout: Option<Instant>,
         receiver: &mut UnboundedReceiver<Message>,
     ) -> (Vec<u8>, bool) {
         let mut stdio = vec![];

@@ -1,6 +1,8 @@
 //! Child process reaping and management.
 use crate::{
-    attach::SharedContainerAttach, child::Child, container_io::ContainerIO,
+    attach::SharedContainerAttach,
+    child::Child,
+    container_io::{ContainerIO, SharedContainerIO},
     container_log::SharedContainerLog,
 };
 use anyhow::{anyhow, format_err, Context, Result};
@@ -30,6 +32,7 @@ use tokio::{
     process::Command,
     sync::broadcast::{self, Receiver, Sender},
     task,
+    time::{self, Instant},
 };
 
 #[derive(Debug, Default)]
@@ -56,7 +59,7 @@ impl ChildReaper {
         &self,
         cmd: P,
         args: I,
-        container_io: &ContainerIO,
+        container_io: &mut ContainerIO,
         pidfile: PathBuf,
     ) -> Result<u32>
     where
@@ -78,9 +81,10 @@ impl ChildReaper {
         let stdin = child.stdin.take();
 
         match container_io {
-            ContainerIO::Terminal(terminal) => {
+            ContainerIO::Terminal(ref mut terminal) => {
                 terminal
                     .wait_connected()
+                    .await
                     .context("wait for terminal socket connection")?;
             }
             ContainerIO::Streams(streams) => {
@@ -162,7 +166,7 @@ pub fn kill_grandchild(pid: u32, s: Signal) -> Result<()> {
         }
     }
     if let Err(e) = kill(pid, s) {
-        debug!("failed killing pid {} with error {}", pid, e);
+        debug!("Failed killing pid {} with error {}", pid, e);
     }
     Ok(())
 }
@@ -176,13 +180,16 @@ pub struct ReapableChild {
     pid: u32,
 
     #[getset(get = "pub")]
+    io: SharedContainerIO,
+
+    #[getset(get = "pub")]
     attach: SharedContainerAttach,
 
     #[getset(get = "pub")]
     logger: SharedContainerLog,
 
     #[getset(get = "pub")]
-    timeout: Option<tokio::time::Instant>,
+    timeout: Option<Instant>,
 }
 
 #[derive(Clone, CopyGetters, Debug, Getters, Setters)]
@@ -197,8 +204,9 @@ pub struct ExitChannelData {
 impl ReapableChild {
     pub fn from_child(child: &Child) -> Self {
         Self {
-            pid: child.pid(),
             exit_paths: child.exit_paths().clone(),
+            pid: child.pid(),
+            io: child.io().clone(),
             attach: child.attach().clone(),
             logger: child.logger().clone(),
             timeout: *child.timeout(),
@@ -218,7 +226,7 @@ impl ReapableChild {
             let mut timed_out = false;
             let wait_for_exit_code = task::spawn_blocking(move || Self::wait_for_exit_code(pid));
             if let Some(timeout) = timeout {
-                match tokio::time::timeout_at(timeout, wait_for_exit_code).await {
+                match time::timeout_at(timeout, wait_for_exit_code).await {
                     Ok(status) => match status {
                         Ok(code) => exit_code = code,
                         Err(err) => {
