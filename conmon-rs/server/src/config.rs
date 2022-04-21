@@ -1,10 +1,13 @@
 //! Configuration related structures
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{AppSettings, Parser};
 use getset::{CopyGetters, Getters, Setters};
-use log::LevelFilter;
+use log::{debug, LevelFilter};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 
 macro_rules! prefix {
@@ -53,7 +56,7 @@ pub struct Config {
 
     #[get = "pub"]
     #[clap(
-        default_value_if("version", None, Some("")),
+        default_value(DEFAULT_RUNTIME),
         env(concat!(prefix!(), "RUNTIME")),
         long("runtime"),
         short('r'),
@@ -124,9 +127,19 @@ impl Default for Config {
 const SOCKET: &str = "conmon.sock";
 const PIDFILE: &str = "pidfile";
 
+const DEFAULT_RUNTIME: &str = "runc";
+
 impl Config {
     /// Validate the configuration integrity.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&mut self) -> Result<()> {
+        if self.runtime() == Path::new(DEFAULT_RUNTIME) {
+            self.runtime = Self::find_in_path(DEFAULT_RUNTIME).context(format!(
+                "find default runtime '{}' in $PATH",
+                DEFAULT_RUNTIME
+            ))?;
+            debug!("Using runtime: {}", self.runtime().display());
+        }
+
         if !self.runtime().exists() {
             bail!("runtime path '{}' does not exist", self.runtime().display())
         }
@@ -149,10 +162,28 @@ impl Config {
 
         Ok(())
     }
+
     pub fn socket(&self) -> PathBuf {
         self.runtime_dir().join(SOCKET)
     }
+
     pub fn conmon_pidfile(&self) -> PathBuf {
         self.runtime_dir().join(PIDFILE)
+    }
+
+    fn find_in_path<P>(name: P) -> Option<PathBuf>
+    where
+        P: AsRef<Path>,
+    {
+        env::var_os("PATH").and_then(|p| {
+            env::split_paths(&p).find_map(|dir| {
+                let path = dir.join(&name);
+                if path.is_file() {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+        })
     }
 }

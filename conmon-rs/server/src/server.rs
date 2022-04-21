@@ -9,7 +9,7 @@ use anyhow::{format_err, Context, Result};
 use capnp_rpc::{rpc_twoparty_capnp::Side, twoparty, RpcSystem};
 use conmon_common::conmon_capnp::conmon;
 use futures::{AsyncReadExt, FutureExt};
-use getset::Getters;
+use getset::{Getters, MutGetters};
 use log::{debug, info};
 use nix::{
     errno,
@@ -28,10 +28,10 @@ use tokio::{
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use twoparty::VatNetwork;
 
-#[derive(Debug, Default, Getters)]
+#[derive(Debug, Default, Getters, MutGetters)]
 pub struct Server {
     #[doc = "The main conmon configuration."]
-    #[getset(get = "pub")]
+    #[getset(get = "pub", get_mut)]
     config: Config,
 
     #[getset(get = "pub")]
@@ -41,7 +41,7 @@ pub struct Server {
 impl Server {
     /// Create a new Server instance.
     pub fn new() -> Result<Self> {
-        let server = Self::default();
+        let mut server = Self::default();
 
         if server.config().version() {
             Version::new().print();
@@ -49,7 +49,7 @@ impl Server {
         }
 
         server.init_logging().context("set log verbosity")?;
-        server.config().validate().context("validate config")?;
+        server.config_mut().validate().context("validate config")?;
 
         server.init_self()?;
         Ok(server)
