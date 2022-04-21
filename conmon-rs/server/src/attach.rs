@@ -1,9 +1,7 @@
 use crate::container_io::Pipe;
 use anyhow::{bail, Context, Result};
 use log::{debug, error};
-use nix::sys::socket::{
-    bind, listen, socket, AddressFamily, SockAddr, SockFlag, SockType, UnixAddr,
-};
+use nix::sys::socket::{bind, listen, socket, AddressFamily, SockFlag, SockType, UnixAddr};
 use std::{
     os::unix::{
         fs::PermissionsExt,
@@ -102,7 +100,7 @@ impl Attach {
         .context("bind socket")?;
 
         let addr = UnixAddr::new(socket_path).context("create socket addr")?;
-        bind(fd, &SockAddr::Unix(addr)).context("bind socket fd")?;
+        bind(fd, &addr).context("bind socket fd")?;
 
         let metadata = socket_path.metadata()?;
         let mut permissions = metadata.permissions();
