@@ -6,6 +6,7 @@ use crate::{
     version::Version,
 };
 use anyhow::{format_err, Context, Result};
+use capnp::text_list::Reader;
 use capnp_rpc::{rpc_twoparty_capnp::Side, twoparty, RpcSystem};
 use conmon_common::conmon_capnp::conmon;
 use futures::{AsyncReadExt, FutureExt};
@@ -195,23 +196,21 @@ impl Server {
     /// Generate the OCI runtime CLI arguments from the provided parameters.
     pub fn generate_runtime_args(
         &self,
-        params: &conmon::CreateContainerParams,
+        id: &str,
+        bundle_path: &Path,
         container_io: &ContainerIO,
         pidfile: &Path,
     ) -> Result<Vec<String>> {
-        let req = params.get()?.get_request()?;
-        let id = req.get_id()?.to_string();
-        let bundle_path = req.get_bundle_path()?.to_string();
         let mut args = vec![];
-        let runtime_root = self.config().runtime_root();
-        if let Some(rr) = runtime_root {
+
+        if let Some(rr) = self.config().runtime_root() {
             args.push(format!("--root={}", rr.display()));
         }
 
         args.extend([
             "create".to_string(),
             "--bundle".to_string(),
-            bundle_path,
+            bundle_path.display().to_string(),
             "--pid-file".to_string(),
             pidfile.display().to_string(),
         ]);
@@ -219,7 +218,7 @@ impl Server {
         if let ContainerIOType::Terminal(terminal) = container_io.typ() {
             args.push(format!("--console-socket={}", terminal.path().display()));
         }
-        args.push(id);
+        args.push(id.into());
         debug!("Runtime args {:?}", args.join(" "));
         Ok(args)
     }
@@ -227,27 +226,28 @@ impl Server {
     /// Generate the OCI runtime CLI arguments from the provided parameters.
     pub fn generate_exec_sync_args(
         &self,
+        id: &str,
         pidfile: &Path,
         container_io: &ContainerIO,
-        params: &conmon::ExecSyncContainerParams,
+        command: &Reader,
     ) -> Result<Vec<String>> {
-        let req = params.get()?.get_request()?;
-        let id = req.get_id()?.to_string();
-        let command = req.get_command()?;
-        let runtime_root = self.config().runtime_root();
-
         let mut args = vec![];
-        if let Some(rr) = runtime_root {
+
+        if let Some(rr) = self.config().runtime_root() {
             args.push(format!("--root={}", rr.display()));
         }
+
         args.push("exec".to_string());
         args.push("-d".to_string());
+
         if let ContainerIOType::Terminal(terminal) = container_io.typ() {
             args.push(format!("--console-socket={}", terminal.path().display()));
             args.push("--tty".to_string());
         }
+
         args.push(format!("--pid-file={}", pidfile.display()));
-        args.push(id);
+        args.push(id.into());
+
         for value in command.iter() {
             args.push(value?.to_string());
         }

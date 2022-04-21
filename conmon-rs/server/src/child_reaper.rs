@@ -21,7 +21,7 @@ use std::{
     ffi::OsStr,
     fs::File,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
 };
@@ -58,7 +58,7 @@ impl ChildReaper {
         cmd: P,
         args: I,
         container_io: &mut ContainerIO,
-        pidfile: PathBuf,
+        pidfile: &Path,
     ) -> Result<u32>
     where
         P: AsRef<OsStr>,
@@ -101,7 +101,6 @@ impl ChildReaper {
             return Err(anyhow!(code_str));
         }
 
-        let pidfile = pidfile.as_path();
         let grandchild_pid = fs::read_to_string(pidfile)
             .await
             .context(format!("grandchild pid read error {}", pidfile.display()))?
