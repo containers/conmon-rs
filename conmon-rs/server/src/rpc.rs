@@ -4,7 +4,6 @@ use crate::{
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     server::Server,
-    terminal::Terminal,
     version::Version,
 };
 use anyhow::Context;
@@ -61,12 +60,13 @@ impl conmon::Server for Server {
         let container_log = pry_err!(ContainerLog::from(log_drivers));
         let mut container_io =
             pry_err!(ContainerIO::new(req.get_terminal(), container_log.clone()));
-        let bundle_path = PathBuf::from(pry!(req.get_bundle_path()));
+
+        let bundle_path = Path::new(pry!(req.get_bundle_path()));
         let pidfile = bundle_path.join("pidfile");
         debug!("PID file is {}", pidfile.display());
 
         let child_reaper = self.reaper().clone();
-        let args = pry_err!(self.generate_runtime_args(&params, &container_io, &pidfile));
+        let args = pry_err!(self.generate_runtime_args(&id, bundle_path, &container_io, &pidfile));
         let runtime = self.config().runtime().clone();
         let exit_paths = pry!(pry!(req.get_exit_paths())
             .iter()
@@ -78,7 +78,7 @@ impl conmon::Server for Server {
 
             let grandchild_pid = capnp_err!(
                 child_reaper
-                    .create_child(runtime, args, &mut container_io, pidfile)
+                    .create_child(runtime, args, &mut container_io, &pidfile)
                     .await
             )?;
 
@@ -103,9 +103,8 @@ impl conmon::Server for Server {
         let req = pry!(pry!(params.get()).get_request());
         let id = pry!(req.get_id()).to_string();
         let timeout = req.get_timeout_sec();
-        // TODO FIXME: add defer style removal--possibly with a macro or creating a special type
-        // that can be dropped?
-        let pidfile = pry_err!(Terminal::temp_file_name(
+
+        let pidfile = pry_err!(ContainerIO::temp_file_name(
             Some(self.config().runtime_dir()),
             "exec_sync",
             "pid"
@@ -121,11 +120,13 @@ impl conmon::Server for Server {
 
         let logger = ContainerLog::new();
         let mut container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger));
-        let args = pry_err!(self.generate_exec_sync_args(&pidfile, &container_io, &params));
+
+        let command = pry!(req.get_command());
+        let args = pry_err!(self.generate_exec_sync_args(&id, &pidfile, &container_io, &command));
 
         Promise::from_future(async move {
             match child_reaper
-                .create_child(&runtime, &args, &mut container_io, pidfile)
+                .create_child(&runtime, &args, &mut container_io, &pidfile)
                 .await
             {
                 Ok(grandchild_pid) => {

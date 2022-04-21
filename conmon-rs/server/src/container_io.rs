@@ -8,9 +8,11 @@ use log::{debug, error};
 use nix::errno::Errno;
 use std::{
     os::unix::io::{FromRawFd, RawFd},
+    path::{Path, PathBuf},
     sync::Arc,
 };
 use strum::AsRefStr;
+use tempfile::Builder;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
@@ -127,6 +129,21 @@ impl ContainerIO {
             logger,
             attach,
         })
+    }
+
+    /// Generate a the temp file name without creating the file.
+    pub fn temp_file_name(directory: Option<&Path>, prefix: &str, suffix: &str) -> Result<PathBuf> {
+        let mut file = Builder::new();
+        file.prefix(prefix).suffix(suffix).rand_bytes(7);
+        let file = match directory {
+            Some(d) => file.tempfile_in(d),
+            None => file.tempfile(),
+        }
+        .context("create tempfile")?;
+
+        let path: PathBuf = file.path().into();
+        drop(file);
+        Ok(path)
     }
 
     pub async fn read_all_with_timeout(

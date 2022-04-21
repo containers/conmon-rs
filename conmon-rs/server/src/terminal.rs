@@ -14,11 +14,9 @@ use sendfd::RecvWithFd;
 use std::{
     io::{Error as IOError, ErrorKind},
     os::unix::{fs::PermissionsExt, io::RawFd},
-    path::{Path, PathBuf},
-    str,
+    path::PathBuf,
     sync::mpsc::Sender as StdSender,
 };
-use tempfile::Builder;
 use tokio::{
     fs,
     io::{AsyncWriteExt, Interest},
@@ -60,7 +58,7 @@ impl Terminal {
     /// Setup a new terminal instance.
     pub fn new(logger: SharedContainerLog, attach: SharedContainerAttach) -> Result<Self> {
         debug!("Creating new terminal");
-        let path = Self::temp_file_name(None, "conmon-term-", ".sock")?;
+        let path = ContainerIO::temp_file_name(None, "conmon-term-", ".sock")?;
         let path_clone = path.clone();
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -124,21 +122,6 @@ impl Terminal {
             0 => Ok(()),
             _ => Err(IOError::last_os_error().into()),
         }
-    }
-
-    /// Generate a the temp file name without creating the file.
-    pub fn temp_file_name(directory: Option<&Path>, prefix: &str, suffix: &str) -> Result<PathBuf> {
-        let mut file = Builder::new();
-        file.prefix(prefix).suffix(suffix).rand_bytes(7);
-        let file = match directory {
-            Some(d) => file.tempfile_in(d),
-            None => file.tempfile(),
-        }
-        .context("create tempfile")?;
-
-        let path: PathBuf = file.path().into();
-        drop(file);
-        Ok(path)
     }
 
     async fn listen(
