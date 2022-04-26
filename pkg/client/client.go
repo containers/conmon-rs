@@ -188,7 +188,7 @@ func (c *ConmonClient) newRPCConn() (*rpc.Conn, error) {
 // `/proc/self/fd` entry of that parent (which is a symlink to the actual parent)
 // to construct the path to the socket.
 // It assumes a valid path, as well as a file name that doesn't exceed the unix max socket length.
-func DialLongSocket(network, path string) (net.Conn, error) {
+func DialLongSocket(network, path string) (*net.UnixConn, error) {
 	parent := filepath.Dir(path)
 	f, err := os.Open(parent)
 	if err != nil {
