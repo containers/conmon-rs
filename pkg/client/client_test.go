@@ -3,6 +3,7 @@ package client_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -264,20 +265,34 @@ var _ = Describe("ConmonClient", func() {
 			terminal := terminal
 			It(testName("should succeed", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh"})
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer(sut)
 
+				stdin, stdinWrite := io.Pipe()
+				stdoutRead, stdout := io.Pipe()
+				stderrRead, stderr := io.Pipe()
 				// Attach to the container
 				socketPath := filepath.Join(tr.tmpDir, "attach")
-				err := sut.AttachContainer(context.Background(), &client.AttachConfig{
-					ID:         tr.ctrID,
-					SocketPath: socketPath,
-				})
-				Expect(err).To(BeNil())
+				go func() {
+					err := sut.AttachContainer(context.Background(), &client.AttachConfig{
+						ID:         tr.ctrID,
+						SocketPath: socketPath,
+						Tty:        terminal,
+						Streams: client.AttachStreams{
+							Stdin:        stdin,
+							Stdout:       stdout,
+							Stderr:       stderr,
+							AttachStdin:  true,
+							AttachStdout: true,
+							AttachStderr: true,
+						},
+					})
+					Expect(err).To(BeNil())
+				}()
 
-				testAttachSocketConnection(socketPath)
+				testAttach(stdinWrite, stdoutRead, stderrRead)
 			})
 		}
 	})

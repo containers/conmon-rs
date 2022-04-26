@@ -307,40 +307,34 @@ func testName(testName string, terminal bool) string {
 	return testName
 }
 
-func testAttachSocketConnection(socketPath string) {
-	conn, err := client.DialLongSocket("unixpacket", socketPath)
-	Expect(err).To(BeNil())
-	defer conn.Close()
-
-	// This second connection should be cleaned-up automatically
+func testAttach(stdinWrite io.Writer, stdoutRead io.Reader, stderrRead io.Reader) {
+	// Stdin
+	stdoutBuf := bufio.NewReader(stdoutRead)
+	stderrBuf := bufio.NewReader(stderrRead)
 	go func() {
-		conn, err := client.DialLongSocket("unixpacket", socketPath)
-		if err != nil {
-			panic(err)
-		}
-		conn.Close()
+		_, err := fmt.Fprintf(stdinWrite, "/busybox echo Hello world\r")
+		Expect(err).To(BeNil())
+
+		_, err = fmt.Fprintf(stdinWrite, "/busybox echo Hello world >&2\r")
+		Expect(err).To(BeNil())
 	}()
 
-	// Stdin
-	_, err = conn.Write([]byte("Hello world"))
-	Expect(err).To(BeNil())
+	go func() {
+		line, err := stdoutBuf.ReadString('\n')
+		Expect(err).To(BeNil())
+		fmt.Println(line)
 
-	const (
-		attachPipeStdout = 2
-		bufSize          = 8192
-	)
+		// Stdout test
+		line, err = stdoutBuf.ReadString('\n')
+		Expect(err).To(BeNil())
+		fmt.Println(line)
+		Expect(line).To(ContainSubstring("Hello world"))
+	}()
 
-	reader := bufio.NewReader(conn)
-	buf := make([]byte, 0, bufSize)
-
-	// Stdout test
-	n, err := io.ReadFull(reader, buf[:cap(buf)])
-	Expect(err).To(BeNil())
-	Expect(n).To(Equal(bufSize))
-	buf = buf[:n]
-
-	Expect(buf[0]).To(BeEquivalentTo(attachPipeStdout))
-
-	res := string(buf[1:bytes.IndexByte(buf, 0)])
-	Expect(res).To(Equal("Hello world"))
+	go func() {
+		line, err := stderrBuf.ReadString('\n')
+		Expect(err).To(BeNil())
+		fmt.Println(line)
+		Expect(line).To(ContainSubstring("Hello world"))
+	}()
 }
