@@ -443,46 +443,6 @@ func (c *ConmonClient) socket() string {
 	return filepath.Join(c.runDir, socketName)
 }
 
-type AttachConfig struct {
-	ID         string
-	SocketPath string
-}
-
-func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) error {
-	conn, err := c.newRPCConn()
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
-	future, free := client.AttachContainer(ctx, func(p proto.Conmon_attachContainer_Params) error {
-		req, err := p.NewRequest()
-		if err != nil {
-			return err
-		}
-		if err := req.SetId(cfg.ID); err != nil {
-			return err
-		}
-		if err := req.SetSocketPath(cfg.SocketPath); err != nil {
-			return err
-		}
-		return nil
-	})
-	defer free()
-
-	result, err := future.Struct()
-	if err != nil {
-		return err
-	}
-
-	if _, err := result.Response(); err != nil {
-		return err
-	}
-
-	return nil
-}
-
 type ReopenLogContainerConfig struct {
 	ID string
 }
@@ -503,46 +463,6 @@ func (c *ConmonClient) ReopenLogContainer(ctx context.Context, cfg *ReopenLogCon
 		if err := req.SetId(cfg.ID); err != nil {
 			return err
 		}
-		return p.SetRequest(req)
-	})
-	defer free()
-
-	result, err := future.Struct()
-	if err != nil {
-		return err
-	}
-
-	if _, err := result.Response(); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-type SetWindowSizeContainerConfig struct {
-	ID     string
-	Width  uint16
-	Height uint16
-}
-
-func (c *ConmonClient) SetWindowSizeContainer(ctx context.Context, cfg *SetWindowSizeContainerConfig) error {
-	conn, err := c.newRPCConn()
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
-
-	future, free := client.SetWindowSizeContainer(ctx, func(p proto.Conmon_setWindowSizeContainer_Params) error {
-		req, err := p.NewRequest()
-		if err != nil {
-			return err
-		}
-		if err := req.SetId(cfg.ID); err != nil {
-			return err
-		}
-		req.SetWidth(cfg.Width)
-		req.SetHeight(cfg.Height)
 		return p.SetRequest(req)
 	})
 	defer free()
