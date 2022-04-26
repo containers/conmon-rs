@@ -14,14 +14,11 @@ import (
 )
 
 const (
-	AttachPipeStdin  = 1
-	AttachPipeStdout = 2
-	AttachPipeStderr = 3
+	attachPacketBufSize = 8192
+	attachPipeStdin     = 1
+	attachPipeStdout    = 2
+	attachPipeStderr    = 3
 )
-
-type TerminalSize struct {
-	Width, Height uint16
-}
 
 type AttachStreams struct {
 	Stdin                                   io.Reader
@@ -30,13 +27,31 @@ type AttachStreams struct {
 }
 
 type AttachConfig struct {
-	ID, SocketPath, ExecSession   string
-	Tty, DetachStdin, Passthrough bool
-	Resize                        chan define.TerminalSize
-	AttachReady                   chan bool
-	Streams                       AttachStreams
-	StartFunc                     func() error
-	DetachKeys                    []byte
+	// ID of the container.
+	ID string
+	// Path of the attach socket.
+	SocketPath string
+	// ExecSession ID, if this is an attach for an Exec.
+	ExecSession string
+	// Whether a terminal was setup for the command this is attaching to.
+	Tty bool
+	// Whether stdout/stderr should continue to be processed after stdin is closed.
+	StopAfterStdinEOF bool
+	// Whether the output is passed through the caller's std streams, rather than
+	// ones created for the attach session.
+	Passthrough bool
+	// Channel of resize events.
+	Resize chan define.TerminalSize
+	// The standard streams for this attach session.
+	Streams AttachStreams
+	// A closure to be run before the streams are attached.
+	// This could be used to start a container.
+	PreAttachFunc func() error
+	// A closure to be run after the streams are attached.
+	// This could be used to notify callers the streams have been attached.
+	PostAttachFunc func() error
+	// The keys that indicate the attach session should be detached.
+	DetachKeys []byte
 }
 
 func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) error {
@@ -86,9 +101,8 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) error {
 		kubeutils.HandleResizing(cfg.Resize, func(size define.TerminalSize) {
 			logrus.Debugf("Got a resize event: %+v", size)
 			if err := c.SetWindowSizeContainer(ctx, &SetWindowSizeContainerConfig{
-				ID:     cfg.ID,
-				Width:  size.Width,
-				Height: size.Height,
+				ID:   cfg.ID,
+				Size: &size,
 			}); err != nil {
 				logrus.Debugf("Failed to write to control file to resize terminal: %v", err)
 			}
@@ -105,8 +119,8 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) error {
 		}()
 	}
 
-	if cfg.StartFunc != nil {
-		if err := cfg.StartFunc(); err != nil {
+	if cfg.PreAttachFunc != nil {
+		if err := cfg.PreAttachFunc(); err != nil {
 			return err
 		}
 	}
@@ -116,9 +130,13 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) error {
 	}
 
 	receiveStdoutError, stdinDone := setupStdioChannels(cfg, conn)
-	if cfg.AttachReady != nil {
-		cfg.AttachReady <- true
+
+	if cfg.PostAttachFunc != nil {
+		if err := cfg.PostAttachFunc(); err != nil {
+			return err
+		}
 	}
+
 	return readStdio(cfg, conn, receiveStdoutError, stdinDone)
 }
 func setupStdioChannels(cfg *AttachConfig, conn *net.UnixConn) (chan error, chan error) {
@@ -141,17 +159,17 @@ func setupStdioChannels(cfg *AttachConfig, conn *net.UnixConn) (chan error, chan
 
 func redirectResponseToOutputStreams(cfg *AttachConfig, conn io.Reader) error {
 	var err error
-	buf := make([]byte, 8192+1) /* Sync with conmon STDIO_BUF_SIZE */
+	buf := make([]byte, attachPacketBufSize+1) /* Sync with conmonrs ATTACH_PACKET_BUF_SIZE */
 	for {
 		nr, er := conn.Read(buf)
 		if nr > 0 {
 			var dst io.Writer
 			var doWrite bool
 			switch buf[0] {
-			case AttachPipeStdout:
+			case attachPipeStdout:
 				dst = cfg.Streams.Stdout
 				doWrite = cfg.Streams.AttachStdout
-			case AttachPipeStderr:
+			case attachPipeStderr:
 				dst = cfg.Streams.Stderr
 				doWrite = cfg.Streams.AttachStderr
 			default:
@@ -196,7 +214,7 @@ func readStdio(cfg *AttachConfig, conn *net.UnixConn, receiveStdoutError, stdinD
 		// as we receive EOF from the client. However, we should do
 		// this only when stdin is enabled. If there is no stdin
 		// enabled then we wait for output as usual.
-		if cfg.DetachStdin {
+		if cfg.StopAfterStdinEOF {
 			return nil
 		}
 		if err == define.ErrDetach {
