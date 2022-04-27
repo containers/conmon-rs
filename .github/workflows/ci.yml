@@ -47,7 +47,7 @@ jobs:
           key: ${{ runner.os }}-cargo-static-${{ hashFiles('**/Cargo.lock') }}
       - run: make release-static
       - run: target/x86_64-unknown-linux-musl/release/conmonrs -v
-      - uses: actions/upload-artifact@v2
+      - uses: actions/upload-artifact@v3
         with:
           name: conmonrs
           path: target/x86_64-unknown-linux-musl/release/conmonrs
@@ -155,6 +155,7 @@ jobs:
         uses: codecov/codecov-action@v2
 
   test-integration:
+    needs: release-static
     runs-on: ubuntu-latest
     steps:
       - uses: actions/setup-go@v2
@@ -178,6 +179,12 @@ jobs:
           path: |
             /tmp/conmon-test-images
           key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/files_test.go') }}
+      - run: rm -rf target/x86_64-unknown-linux-musl/release/conmonrs
+      - uses: actions/download-artifact@v3
+        with:
+          name: conmonrs
+          path: target/x86_64-unknown-linux-musl/release
+      - run: chmod +x target/x86_64-unknown-linux-musl/release/conmonrs
       - run: .github/install-deps
       - name: Integration tests
         run: RUNTIME_PATH="/usr/sbin/runc" make integration-static

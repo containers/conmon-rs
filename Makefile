@@ -41,10 +41,13 @@ integration: .install.ginkgo release # It needs to be release so we correctly te
 	export MAX_RSS_KB=10240 && \
 	"$(GOTOOLS_BINDIR)/ginkgo" -v -r pkg/client
 
-integration-static: .install.ginkgo release-static # It needs to be release so we correctly test the RSS usage
+integration-static: .install.ginkgo # It needs to be release so we correctly test the RSS usage
 	export CONMON_BINARY="$(MAKEFILE_PATH)target/x86_64-unknown-linux-musl/release/$(BINARY)" && \
+	if [ ! -f "$$CONMON_BINARY" ]; then \
+		$(MAKE) release-static; \
+	fi && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
-	export MAX_RSS_KB=10240 && \
+	export MAX_RSS_KB=2500 && \
 	$(GOTOOLS_BINDIR)/ginkgo -v -r pkg/client
 
 .install.ginkgo:
