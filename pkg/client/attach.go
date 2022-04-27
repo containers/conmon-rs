@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 
@@ -130,7 +131,6 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) error {
 	}
 
 	receiveStdoutError, stdinDone := setupStdioChannels(cfg, conn)
-
 	if cfg.PostAttachFunc != nil {
 		if err := cfg.PostAttachFunc(); err != nil {
 			return err
@@ -235,12 +235,15 @@ func readStdio(cfg *AttachConfig, conn *net.UnixConn, receiveStdoutError, stdinD
 }
 
 type SetWindowSizeContainerConfig struct {
-	ID     string
-	Width  uint16
-	Height uint16
+	ID   string
+	Size *define.TerminalSize
 }
 
 func (c *ConmonClient) SetWindowSizeContainer(ctx context.Context, cfg *SetWindowSizeContainerConfig) error {
+	if cfg.Size == nil {
+		return fmt.Errorf("Terminal size cannot be nil")
+	}
+
 	conn, err := c.newRPCConn()
 	if err != nil {
 		return err
@@ -256,8 +259,8 @@ func (c *ConmonClient) SetWindowSizeContainer(ctx context.Context, cfg *SetWindo
 		if err := req.SetId(cfg.ID); err != nil {
 			return err
 		}
-		req.SetWidth(cfg.Width)
-		req.SetHeight(cfg.Height)
+		req.SetWidth(cfg.Size.Width)
+		req.SetHeight(cfg.Size.Height)
 		return p.SetRequest(req)
 	})
 	defer free()

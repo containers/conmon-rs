@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/containers/conmon-rs/pkg/client"
+	"github.com/containers/podman/v3/libpod/define"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -112,9 +113,11 @@ var _ = Describe("ConmonClient", func() {
 				err := sut.SetWindowSizeContainer(
 					context.Background(),
 					&client.SetWindowSizeContainerConfig{
-						ID:     tr.ctrID,
-						Width:  10,
-						Height: 20,
+						ID: tr.ctrID,
+						Size: &define.TerminalSize{
+							Width:  10,
+							Height: 20,
+						},
 					},
 				)
 				if terminal {
