@@ -85,7 +85,11 @@ impl conmon::Server for Server {
         let child_reaper = self.reaper().clone();
         let args = pry_err!(self.generate_runtime_args(&id, bundle_path, &container_io, &pidfile));
         let runtime = self.config().runtime().clone();
-        let exit_paths = pry!(pry!(req.get_exit_paths())
+        let exit_paths: Vec<PathBuf> = pry!(pry!(req.get_exit_paths())
+            .iter()
+            .map(|r| r.map(PathBuf::from))
+            .collect());
+        let oom_exit_paths: Vec<PathBuf> = pry!(pry!(req.get_oom_exit_paths())
             .iter()
             .map(|r| r.map(PathBuf::from))
             .collect());
@@ -102,7 +106,7 @@ impl conmon::Server for Server {
 
                 // register grandchild with server
                 let io = SharedContainerIO::new(container_io);
-                let child = Child::new(id, grandchild_pid, exit_paths, None, io);
+                let child = Child::new(id, grandchild_pid, exit_paths, oom_exit_paths, None, io);
                 capnp_err!(child_reaper.watch_grandchild(child))?;
 
                 results
@@ -161,8 +165,14 @@ impl conmon::Server for Server {
                         // register grandchild with server
                         let io = SharedContainerIO::new(container_io);
                         let io_clone = io.clone();
-                        let child =
-                            Child::new(id, grandchild_pid, vec![], time_to_timeout, io_clone);
+                        let child = Child::new(
+                            id,
+                            grandchild_pid,
+                            vec![],
+                            vec![],
+                            time_to_timeout,
+                            io_clone,
+                        );
 
                         let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child))?;
 

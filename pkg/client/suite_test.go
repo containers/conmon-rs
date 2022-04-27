@@ -99,6 +99,10 @@ func (tr *testRunner) exitPath() string {
 	return filepath.Join(tr.tmpDir, "exit")
 }
 
+func (tr *testRunner) oomExitPath() string {
+	return filepath.Join(tr.tmpDir, "oom_exit")
+}
+
 func fileContents(path string) string {
 	contents, err := os.ReadFile(path)
 	Expect(err).To(BeNil())
@@ -108,10 +112,11 @@ func fileContents(path string) string {
 
 func (tr *testRunner) createContainer(sut *client.ConmonClient, terminal bool) {
 	resp, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
-		ID:         tr.ctrID,
-		BundlePath: tr.tmpDir,
-		Terminal:   terminal,
-		ExitPaths:  []string{tr.exitPath()},
+		ID:           tr.ctrID,
+		BundlePath:   tr.tmpDir,
+		Terminal:     terminal,
+		ExitPaths:    []string{tr.exitPath()},
+		OOMExitPaths: []string{tr.oomExitPath()},
 		LogDrivers: []client.LogDriver{{
 			Type: client.LogDriverTypeContainerRuntimeInterface,
 			Path: tr.logPath(),

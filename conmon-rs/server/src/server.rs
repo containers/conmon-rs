@@ -28,7 +28,7 @@ use tokio::{
     task::{self, LocalSet},
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 use tracing_subscriber::{filter::LevelFilter, prelude::*};
 use twoparty::VatNetwork;
 
@@ -39,8 +39,9 @@ pub struct Server {
     #[getset(get = "pub")]
     config: Config,
 
+    /// reaper instance
     #[getset(get = "pub(crate)")]
-    reaper: Arc<ChildReaper>,
+    pub reaper: Arc<ChildReaper>,
 }
 
 impl Server {
@@ -134,11 +135,8 @@ impl Server {
     async fn spawn_tasks(self) -> Result<()> {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let socket = self.config().socket();
-        tokio::spawn(Self::start_signal_handler(
-            self.reaper().clone(),
-            socket,
-            shutdown_tx,
-        ));
+        let reaper = self.reaper.clone();
+        task::spawn(Self::start_signal_handler(reaper, socket, shutdown_tx));
 
         task::spawn_blocking(move || {
             Handle::current().block_on(async {
@@ -177,7 +175,10 @@ impl Server {
         // TODO FIXME Ideally we would drop after socket file is removed,
         // but the removal is taking longer than 10 seconds, indicating someone
         // is keeping it open...
-        reaper.kill_grandchildren(handled_sig)?;
+        match reaper.kill_grandchildren(handled_sig) {
+            Ok(_) => (),
+            Err(e) => error!("could not kill grandchildren: {}", e),
+        }
 
         debug!("Removing socket file {}", socket.as_ref().display());
         fs::remove_file(socket)

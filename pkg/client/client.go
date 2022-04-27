@@ -484,6 +484,9 @@ func (c *ConmonClient) CreateContainer(
 		if err := stringSliceToTextList(cfg.OOMExitPaths, req.NewOomExitPaths); err != nil {
 			return fmt.Errorf("convert oom exit paths string slice to text list: %w", err)
 		}
+		if err := stringSliceToTextList(cfg.OOMExitPaths, req.NewOomExitPaths); err != nil {
+			return err
+		}
 
 		if err := c.initLogDrivers(&req, cfg.LogDrivers); err != nil {
 			return fmt.Errorf("init log drivers: %w", err)

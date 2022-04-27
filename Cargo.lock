@@ -253,18 +253,22 @@ dependencies = [
  "conmon-common",
  "futures",
  "getset",
+ "lazy_static",
  "libc",
  "memchr",
  "mockall",
  "multimap",
  "nix",
+ "notify",
  "prctl",
+ "regex",
  "sendfd",
  "serde",
  "shadow-rs",
  "strum",
  "tempfile",
  "tokio",
+ "tokio-eventfd",
  "tokio-util",
  "tracing",
  "tracing-journald",
@@ -316,6 +320,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-channel"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5aaa7bd5fb665c6864b5f963dd9097905c54125909c7aa94c9e18507cdbe6c53"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bf124c720b7686e3c2663cf54062ab0f68a88af2fb6a030e87e30bf721fcb38"
+dependencies = [
+ "cfg-if",
+ "lazy_static",
+]
+
+[[package]]
 name = "difflib"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -349,6 +373,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "filetime"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0408e2626025178a6a7f7ffc05a25bc47103229f19c113755de7bf63816290c"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "redox_syscall",
+ "winapi",
+]
+
+[[package]]
 name = "float-cmp"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -372,6 +408,15 @@ name = "fragile"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9d758e60b45e8d749c89c1b389ad8aee550f86aa12e2b9298b546dda7a82ab1"
+
+[[package]]
+name = "fsevent-sys"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76ee7a02da4d231650c7cea31349b889be2f45ddb3ef3032d2ec8185f6313fd2"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "futures"
@@ -502,9 +547,9 @@ dependencies = [
 
 [[package]]
 name = "git2"
-version = "0.14.2"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3826a6e0e2215d7a41c2bfc7c9244123969273f3476b939a226aac0ab56e9e3c"
+checksum = "5e77a14ffc6ba4ad5188d6cf428894c4fcfda725326b37558f35bb677e712cec"
 dependencies = [
  "bitflags",
  "libc",
@@ -556,6 +601,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "inotify"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8069d3ec154eb856955c1c0fbffefbf5f3c40a104ec912d4797314c1801abff"
+dependencies = [
+ "bitflags",
+ "inotify-sys",
+ "libc",
+]
+
+[[package]]
+name = "inotify-sys"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e05c02b5e89bff3b946cedeca278abc628fe811e604f027c45a8aa3cf793d0eb"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "instant"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -589,6 +654,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "kqueue"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d6112e8f37b59803ac47a42d14f1f3a59bbf72fc6857ffc5be455e28a691f8e"
+dependencies = [
+ "kqueue-sys",
+ "libc",
+]
+
+[[package]]
+name = "kqueue-sys"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8367585489f01bc55dd27404dcf56b95e6da061a256a666ab23be9ba96a2e587"
+dependencies = [
+ "bitflags",
+ "libc",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -602,9 +687,9 @@ checksum = "5916d2ae698f6de9bfb891ad7a8d65c09d232dc58cc4ac433c7da3b2fd84bc2b"
 
 [[package]]
 name = "libgit2-sys"
-version = "0.13.2+1.4.2"
+version = "0.13.3+1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a42de9a51a5c12e00fc0e4ca6bc2ea43582fc6418488e8f615e905d886f258b"
+checksum = "c24d36c3ac9b9996a2418d6bf428cc0bc5d1a814a84303fc60986088c5ed60de"
 dependencies = [
  "cc",
  "libc",
@@ -720,6 +805,24 @@ name = "normalize-line-endings"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
+
+[[package]]
+name = "notify"
+version = "5.0.0-pre.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "553f9844ad0b0824605c20fb55a661679782680410abfb1a8144c2e7e437e7a7"
+dependencies = [
+ "bitflags",
+ "crossbeam-channel",
+ "filetime",
+ "fsevent-sys",
+ "inotify",
+ "kqueue",
+ "libc",
+ "mio",
+ "walkdir",
+ "winapi",
+]
 
 [[package]]
 name = "num-integer"
@@ -965,6 +1068,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2cc38e8fa666e2de3c4aba7edeb5ffc5246c1c2ed0e3d17e560aeeba736b23f"
 
 [[package]]
+name = "same-file"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
+dependencies = [
+ "winapi-util",
+]
+
+[[package]]
 name = "sendfd"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1188,6 +1300,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-eventfd"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "435aa354af05ef661bac1f4fd46f1c635d7879bcf6c49303ce929e79bbd30f51"
+dependencies = [
+ "futures-lite",
+ "libc",
+ "tokio",
+]
+
+[[package]]
 name = "tokio-macros"
 version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1359,6 +1482,17 @@ name = "waker-fn"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d5b2c62b4012a3e1eca5a7e077d13b3bf498c4073e33ccd58626607748ceeca"
+
+[[package]]
+name = "walkdir"
+version = "2.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "808cf2735cd4b6866113f648b791c6adc5714537bc222d9347bb203386ffda56"
+dependencies = [
+ "same-file",
+ "winapi",
+ "winapi-util",
+]
 
 [[package]]
 name = "wasi"

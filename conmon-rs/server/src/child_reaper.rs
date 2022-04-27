@@ -2,13 +2,13 @@
 use crate::{
     child::Child,
     container_io::{ContainerIO, ContainerIOType, SharedContainerIO},
+    oom_watcher::OOMWatcher,
 };
 use anyhow::{anyhow, format_err, Context, Result};
 use getset::{CopyGetters, Getters, Setters};
 use libc::pid_t;
 use multimap::MultiMap;
 use nix::errno::Errno;
-use nix::sys::wait::WaitPidFlag;
 use nix::{
     sys::{
         signal::{kill, Signal},
@@ -18,19 +18,19 @@ use nix::{
 };
 use std::{
     ffi::OsStr,
-    fs::File,
-    io::Write,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
 };
 use tokio::{
-    fs,
+    fs::{self, File},
+    io::AsyncWriteExt,
     process::Command,
     sync::broadcast::{self, Receiver, Sender},
-    task,
+    task::{self, JoinHandle},
     time::{self, Instant},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, error, Instrument};
 
 #[derive(Debug, Default, Getters)]
@@ -114,7 +114,7 @@ impl ChildReaper {
     pub fn watch_grandchild(&self, child: Child) -> Result<Receiver<ExitChannelData>> {
         let locked_grandchildren = &self.grandchildren().clone();
         let mut map = lock!(locked_grandchildren);
-        let reapable_grandchild = ReapableChild::from_child(&child);
+        let mut reapable_grandchild = ReapableChild::from_child(&child);
 
         let (exit_tx, exit_rx) = reapable_grandchild.watch()?;
 
@@ -142,17 +142,19 @@ impl ChildReaper {
     }
 
     pub fn kill_grandchildren(&self, s: Signal) -> Result<()> {
-        let locked_grandchildren = &self.grandchildren().clone();
-        for (_, grandchild) in lock!(locked_grandchildren).iter() {
-            debug!("Killing pid {}", grandchild.pid);
-            kill_grandchild(grandchild.pid, s)?;
+        for (_, grandchild) in self.grandchildren.lock().unwrap().iter() {
+            debug!(grandchild.pid, "killing grandchild");
+            let _ = kill_grandchild(grandchild.pid, s);
+            futures::executor::block_on(async {
+                grandchild.close().await;
+            });
         }
         Ok(())
     }
 }
 
-pub fn kill_grandchild(pid: u32, s: Signal) -> Result<()> {
-    let pid = Pid::from_raw(pid as pid_t);
+pub fn kill_grandchild(raw_pid: u32, s: Signal) -> Result<()> {
+    let pid = Pid::from_raw(raw_pid as pid_t);
     if let Ok(pgid) = getpgid(Some(pid)) {
         // If process_group is 1, we will end up calling
         // kill(-1), which kills everything conmon is allowed to.
@@ -161,21 +163,29 @@ pub fn kill_grandchild(pid: u32, s: Signal) -> Result<()> {
             match kill(Pid::from_raw(-pgid), s) {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    error!("Failed to get pgid, falling back to killing pid {}", e);
+                    error!(
+                        raw_pid,
+                        "Failed to get pgid, falling back to killing pid {}", e
+                    );
                 }
             }
         }
     }
     if let Err(e) = kill(pid, s) {
-        debug!("Failed killing pid {} with error {}", pid, e);
+        debug!(raw_pid, "Failed killing pid with error {}", e);
     }
     Ok(())
 }
+
+type TaskHandle = Arc<Mutex<Option<Vec<JoinHandle<()>>>>>;
 
 #[derive(Clone, CopyGetters, Debug, Getters, Setters)]
 pub struct ReapableChild {
     #[getset(get)]
     exit_paths: Vec<PathBuf>,
+
+    #[getset(get)]
+    oom_exit_paths: Vec<PathBuf>,
 
     #[getset(get_copy)]
     pid: u32,
@@ -185,12 +195,20 @@ pub struct ReapableChild {
 
     #[getset(get = "pub")]
     timeout: Option<Instant>,
+
+    #[getset(get = "pub")]
+    token: CancellationToken,
+
+    task: Option<TaskHandle>,
 }
 
 #[derive(Clone, CopyGetters, Debug, Getters, Setters)]
 pub struct ExitChannelData {
     #[getset(get = "pub")]
     pub exit_code: i32,
+
+    #[getset(get = "pub")]
+    pub oomed: bool,
 
     #[getset(get = "pub")]
     pub timed_out: bool,
@@ -200,101 +218,141 @@ impl ReapableChild {
     pub fn from_child(child: &Child) -> Self {
         Self {
             exit_paths: child.exit_paths().clone(),
+            oom_exit_paths: child.oom_exit_paths().clone(),
             pid: child.pid(),
             io: child.io().clone(),
             timeout: *child.timeout(),
+            token: CancellationToken::new(),
+            task: None,
         }
     }
 
-    fn watch(&self) -> Result<(Sender<ExitChannelData>, Receiver<ExitChannelData>)> {
+    pub async fn close(&self) {
+        debug!("{}: grandchild close", self.pid);
+        self.token.cancel();
+        if let Some(t) = self.task.clone() {
+            for t in t.lock().unwrap().take().unwrap().into_iter() {
+                debug!("{}: grandchild await", self.pid);
+                let _ = t.await;
+            }
+        }
+    }
+
+    fn watch(&mut self) -> Result<(Sender<ExitChannelData>, Receiver<ExitChannelData>)> {
         let exit_paths = self.exit_paths().clone();
+        let oom_exit_paths = self.oom_exit_paths().clone();
         let pid = self.pid();
         // Only one exit code will be written.
         let (exit_tx, exit_rx) = broadcast::channel(1);
         let exit_tx_clone = exit_tx.clone();
         let timeout = *self.timeout();
+        let stop_token = self.token().clone();
 
-        task::spawn(
+        let task = task::spawn(
             async move {
-                let exit_code: i32;
+                let mut exit_code: i32 = -1;
+                let mut oomed = false;
                 let mut timed_out = false;
+                let (oom_tx, mut oom_rx) = tokio::sync::mpsc::channel(1);
+                let oom_watcher = OOMWatcher::new(&stop_token, pid, &oom_exit_paths, oom_tx).await;
                 let wait_for_exit_code =
-                    task::spawn_blocking(move || Self::wait_for_exit_code(pid));
+                    task::spawn_blocking(move || Self::wait_for_exit_code(&stop_token, pid));
+                let closure = async {
+                    let (code, oom) = tokio::join!(wait_for_exit_code, oom_rx.recv());
+                    if let Ok(code) = code {
+                        exit_code = code;
+                    }
+                    if let Some(event) = oom {
+                        oomed = event.oom;
+                    }
+                };
                 if let Some(timeout) = timeout {
-                    match time::timeout_at(timeout, wait_for_exit_code).await {
-                        Ok(status) => match status {
-                            Ok(code) => exit_code = code,
-                            Err(err) => {
-                                return Err(err);
-                            }
-                        },
-                        Err(_) => {
-                            timed_out = true;
-                            exit_code = -3;
-                            let _ = kill_grandchild(pid, Signal::SIGKILL);
-                        }
+                    if time::timeout_at(timeout, closure).await.is_err() {
+                        timed_out = true;
+                        exit_code = -3;
+                        let _ = kill_grandchild(pid, Signal::SIGKILL);
                     }
                 } else {
-                    match wait_for_exit_code.await {
-                        Ok(code) => exit_code = code,
-                        Err(_) => exit_code = -1,
-                    }
+                    closure.await;
                 }
-                debug!(
-                    "Sending exit code to channel for pid {} : {}",
-                    pid, exit_code
-                );
+                oom_watcher.stop().await;
                 let exit_channel_data = ExitChannelData {
                     exit_code,
+                    oomed,
                     timed_out,
                 };
+                debug!(
+                    pid,
+                    "sending exit struct to channel : {:?}", exit_channel_data
+                );
                 if exit_tx_clone.send(exit_channel_data).is_err() {
-                    error!("Unable to send exit status");
+                    debug!(pid, "Unable to send exit status");
                 }
-                let _ =
-                    Self::write_to_exit_paths(exit_code, &exit_paths).context("write exit paths");
-                Ok(())
+                debug!(pid, "write to exit paths");
+                if let Err(e) = Self::write_to_exit_paths(exit_code, &exit_paths).await {
+                    error!(pid, "could not write exit paths: {}", e);
+                }
             }
             .instrument(debug_span!("watch")),
         );
 
+        let tasks = Arc::new(Mutex::new(Some(Vec::new())));
+        tasks.lock().unwrap().as_mut().unwrap().push(task);
+        self.task = Some(tasks);
+
         Ok((exit_tx, exit_rx))
     }
 
-    fn wait_for_exit_code(pid: u32) -> i32 {
+    fn wait_for_exit_code(token: &CancellationToken, pid: u32) -> i32 {
         const FAILED_EXIT_CODE: i32 = -3;
         loop {
-            match waitpid(
-                Pid::from_raw(pid as pid_t),
-                Some(WaitPidFlag::WNOHANG | WaitPidFlag::__WALL),
-            ) {
+            match waitpid(Pid::from_raw(pid as pid_t), None) {
                 Ok(WaitStatus::Exited(_, exit_code)) => {
+                    debug!(pid, "Exited {}", exit_code);
+                    token.cancel();
                     return exit_code;
                 }
                 Ok(WaitStatus::Signaled(_, sig, _)) => {
+                    debug!(pid, "Signaled");
+                    token.cancel();
                     return (sig as i32) + 128;
                 }
                 Ok(_) => {
                     continue;
                 }
                 Err(Errno::EINTR) => {
-                    debug!("Failed to wait for pid on EINTR, retrying");
+                    debug!(pid, "Failed to wait for pid on EINTR, retrying");
                     continue;
                 }
                 Err(err) => {
-                    error!("Unable to waitpid on {}: {}", pid, err);
+                    error!(pid, "Unable to waitpid on {}", err);
+                    token.cancel();
                     return FAILED_EXIT_CODE;
                 }
             };
         }
     }
 
-    fn write_to_exit_paths(code: i32, paths: &[PathBuf]) -> Result<()> {
-        let code_str = format!("{}", code);
-        for path in paths {
-            debug!("Writing exit code {} to {}", code, path.display());
-            File::create(path)?.write_all(code_str.as_bytes())?;
+    async fn write_to_exit_paths(code: i32, paths: &[PathBuf]) -> Result<()> {
+        let paths = paths.to_owned();
+        let tasks: Vec<_> = paths
+            .into_iter()
+            .map(|path| {
+                tokio::spawn(async move {
+                    let code_str = format!("{}", code);
+                    if let Ok(mut fp) = File::create(&path).await {
+                        if let Err(e) = fp.write_all(code_str.as_bytes()).await {
+                            error!("could not write exit file to path {} {}", path.display(), e);
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for task in tasks {
+            task.await?;
         }
+
         Ok(())
     }
 }

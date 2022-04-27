@@ -77,7 +77,7 @@ var _ = Describe("ConmonClient", func() {
 
 				Eventually(func() error {
 					return tr.rr.RunCommandCheckOutput("stopped", "list")
-				}, time.Second*10).Should(BeNil())
+				}, time.Second*20).Should(BeNil())
 			})
 
 			It(testName("should return error if invalid command", terminal), func() {
@@ -282,6 +282,7 @@ var _ = Describe("ConmonClient", func() {
 				// Attach to the container
 				socketPath := filepath.Join(tr.tmpDir, "attach")
 				go func() {
+					defer GinkgoRecover()
 					err := sut.AttachContainer(context.Background(), &client.AttachConfig{
 						ID:         tr.ctrID,
 						SocketPath: socketPath,
