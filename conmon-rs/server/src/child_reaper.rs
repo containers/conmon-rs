@@ -33,8 +33,9 @@ use tokio::{
     time::{self, Instant},
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Getters)]
 pub struct ChildReaper {
+    #[getset(get)]
     grandchildren: Arc<Mutex<MultiMap<String, ReapableChild>>>,
 }
 
@@ -46,7 +47,7 @@ macro_rules! lock {
 
 impl ChildReaper {
     pub fn get(&self, id: &str) -> Result<ReapableChild> {
-        let locked_grandchildren = Arc::clone(&self.grandchildren);
+        let locked_grandchildren = &self.grandchildren().clone();
         let lock = lock!(locked_grandchildren);
         let r = lock.get(id).context("child not available")?.clone();
         drop(lock);
@@ -111,7 +112,7 @@ impl ChildReaper {
     }
 
     pub fn watch_grandchild(&self, child: Child) -> Result<Receiver<ExitChannelData>> {
-        let locked_grandchildren = Arc::clone(&self.grandchildren);
+        let locked_grandchildren = &self.grandchildren().clone();
         let mut map = lock!(locked_grandchildren);
         let reapable_grandchild = ReapableChild::from_child(&child);
 
@@ -138,7 +139,7 @@ impl ChildReaper {
     }
 
     pub fn kill_grandchildren(&self, s: Signal) -> Result<()> {
-        let locked_grandchildren = Arc::clone(&self.grandchildren);
+        let locked_grandchildren = &self.grandchildren().clone();
         for (_, grandchild) in lock!(locked_grandchildren).iter() {
             debug!("Killing pid {}", grandchild.pid);
             kill_grandchild(grandchild.pid, s)?;

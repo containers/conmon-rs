@@ -30,6 +30,7 @@ macro_rules! capnp_err {
 }
 
 impl conmon::Server for Server {
+    /// Retrieve version information from the server.
     fn version(
         &mut self,
         _: conmon::VersionParams,
@@ -47,6 +48,7 @@ impl conmon::Server for Server {
         Promise::ok(())
     }
 
+    /// Create a new container for the provided parameters.
     fn create_container(
         &mut self,
         params: conmon::CreateContainerParams,
@@ -95,6 +97,7 @@ impl conmon::Server for Server {
         })
     }
 
+    /// Execute a command in sync inside of a container.
     fn exec_sync_container(
         &mut self,
         params: conmon::ExecSyncContainerParams,
@@ -164,6 +167,7 @@ impl conmon::Server for Server {
         })
     }
 
+    /// Attach to a running container.
     fn attach_container(
         &mut self,
         params: conmon::AttachContainerParams,
@@ -210,6 +214,7 @@ impl conmon::Server for Server {
         })
     }
 
+    /// Adjust the window size of a container running inside of a terminal.
     fn set_window_size_container(
         &mut self,
         params: conmon::SetWindowSizeContainerParams,

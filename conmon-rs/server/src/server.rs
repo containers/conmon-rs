@@ -1,3 +1,5 @@
+#![deny(missing_docs)]
+
 use crate::{
     child_reaper::ChildReaper,
     config::{Config, LogDriver},
@@ -29,20 +31,24 @@ use tokio::{
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use twoparty::VatNetwork;
 
-#[derive(Debug, Default, Getters)]
+#[derive(Debug, Getters)]
+/// The main server structure.
 pub struct Server {
-    #[doc = "The main conmon configuration."]
+    #[doc = "The server configuration."]
     #[getset(get = "pub")]
     config: Config,
 
-    #[getset(get = "pub")]
+    #[getset(get = "pub(crate)")]
     reaper: Arc<ChildReaper>,
 }
 
 impl Server {
-    /// Create a new Server instance.
+    /// Create a new `Server` instance.
     pub fn new() -> Result<Self> {
-        let server = Self::default();
+        let server = Self {
+            config: Default::default(),
+            reaper: Default::default(),
+        };
 
         if server.config().version() {
             Version::new().print();
@@ -56,7 +62,7 @@ impl Server {
         Ok(server)
     }
 
-    /// Start the conmon server instance by consuming it.
+    /// Start the `Server` instance and consume it.
     pub fn start(self) -> Result<()> {
         // We need to fork as early as possible, especially before setting up tokio.
         // If we don't, the child will have a strange thread space and we're at risk of deadlocking.
@@ -118,7 +124,7 @@ impl Server {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let socket = self.config().socket();
         tokio::spawn(Self::start_signal_handler(
-            Arc::clone(self.reaper()),
+            self.reaper().clone(),
             socket,
             shutdown_tx,
         ));
@@ -194,7 +200,7 @@ impl Server {
     }
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
-    pub fn generate_runtime_args(
+    pub(crate) fn generate_runtime_args(
         &self,
         id: &str,
         bundle_path: &Path,
@@ -224,7 +230,7 @@ impl Server {
     }
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
-    pub fn generate_exec_sync_args(
+    pub(crate) fn generate_exec_sync_args(
         &self,
         id: &str,
         pidfile: &Path,
