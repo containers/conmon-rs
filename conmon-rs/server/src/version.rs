@@ -21,7 +21,7 @@ pub struct Version {
     /// The build date string.
     build_date: &'static str,
 
-    /// The used rust version.
+    /// The used Rust version.
     rust_version: &'static str,
 }
 

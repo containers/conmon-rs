@@ -52,8 +52,8 @@ func New(config *ConmonServerConfig) (_ *ConmonClient, retErr error) {
 		return nil, err
 	}
 	// Check if the process has already started, and inherit that process instead.
-	if p, err := cl.processIDFromServer(context.Background()); err == nil {
-		cl.serverPID = p
+	if resp, err := cl.Version(context.Background()); err == nil {
+		cl.serverPID = resp.ProcessID
 		return cl, nil
 	}
 	if err := cl.StartServer(config); err != nil {
@@ -173,8 +173,7 @@ func pidGivenFile(file string) (uint32, error) {
 	return uint32(pidU64), nil
 }
 
-func (c *ConmonClient) waitUntilServerUp() error {
-	var err error
+func (c *ConmonClient) waitUntilServerUp() (err error) {
 	for i := 0; i < 100; i++ {
 		_, err = c.Version(context.Background())
 		if err == nil {
@@ -215,33 +214,32 @@ func DialLongSocket(network, path string) (*net.UnixConn, error) {
 	})
 }
 
-func (c *ConmonClient) Version(ctx context.Context) (string, error) {
-	conn, err := c.newRPCConn()
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
+// VersionResponse is the response of the Version method.
+type VersionResponse struct {
+	// Version is the actual version string of the server.
+	Version string
 
-	future, free := client.Version(ctx, nil)
-	defer free()
+	// Tag is the git tag of the server, empty if no tag is available.
+	Tag string
 
-	result, err := future.Struct()
-	if err != nil {
-		return "", err
-	}
+	// Commit is git commit SHA of the build.
+	Commit string
 
-	response, err := result.Response()
-	if err != nil {
-		return "", err
-	}
-	return response.Version()
+	// BuildDate is the date of build.
+	BuildDate string
+
+	// RustVersion is the used Rust version.
+	RustVersion string
+
+	// ProcessID is the PID of the server.
+	ProcessID uint32
 }
 
-func (c *ConmonClient) processIDFromServer(ctx context.Context) (uint32, error) {
+// Version can be used to retrieve all available version information.
+func (c *ConmonClient) Version(ctx context.Context) (*VersionResponse, error) {
 	conn, err := c.newRPCConn()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer conn.Close()
 	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
@@ -251,14 +249,47 @@ func (c *ConmonClient) processIDFromServer(ctx context.Context) (uint32, error) 
 
 	result, err := future.Struct()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	response, err := result.Response()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return response.ProcessId(), nil
+
+	version, err := response.Version()
+	if err != nil {
+		return nil, err
+	}
+
+	tag, err := response.Tag()
+	if err != nil {
+		return nil, err
+	}
+
+	commit, err := response.Commit()
+	if err != nil {
+		return nil, err
+	}
+
+	buildDate, err := response.BuildDate()
+	if err != nil {
+		return nil, err
+	}
+
+	rustVersion, err := response.RustVersion()
+	if err != nil {
+		return nil, err
+	}
+
+	return &VersionResponse{
+		Version:     version,
+		Tag:         tag,
+		Commit:      commit,
+		BuildDate:   buildDate,
+		RustVersion: rustVersion,
+		ProcessID:   response.ProcessId(),
+	}, nil
 }
 
 type CreateContainerConfig struct {
