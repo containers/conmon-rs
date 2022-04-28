@@ -22,9 +22,22 @@ const (
 )
 
 type AttachStreams struct {
-	Stdin                                   io.Reader
-	Stdout, Stderr                          io.WriteCloser
-	AttachStdin, AttachStdout, AttachStderr bool
+	// Standard input stream, can be nil.
+	Stdin *In
+
+	// Standard output stream, can be nil.
+	Stdout *Out
+
+	// Standard error stream, can be nil.
+	Stderr *Out
+}
+
+type In struct {
+	io.Reader
+}
+
+type Out struct {
+	io.WriteCloser
 }
 
 type AttachConfig struct {
@@ -148,7 +161,7 @@ func setupStdioChannels(cfg *AttachConfig, conn *net.UnixConn) (chan error, chan
 	stdinDone := make(chan error)
 	go func() {
 		var err error
-		if cfg.Streams.AttachStdin {
+		if cfg.Streams.Stdin != nil {
 			_, err = utils.CopyDetachable(conn, cfg.Streams.Stdin, cfg.DetachKeys)
 		}
 		stdinDone <- err
@@ -168,10 +181,10 @@ func redirectResponseToOutputStreams(cfg *AttachConfig, conn io.Reader) error {
 			switch buf[0] {
 			case attachPipeStdout:
 				dst = cfg.Streams.Stdout
-				doWrite = cfg.Streams.AttachStdout
+				doWrite = cfg.Streams.Stdout != nil
 			case attachPipeStderr:
 				dst = cfg.Streams.Stderr
-				doWrite = cfg.Streams.AttachStderr
+				doWrite = cfg.Streams.Stderr != nil
 			default:
 				logrus.Infof("Received unexpected attach type %+d", buf[0])
 			}
@@ -227,7 +240,7 @@ func readStdio(cfg *AttachConfig, conn *net.UnixConn, receiveStdoutError, stdinD
 				logrus.Errorf("Unable to close conn: %v", connErr)
 			}
 		}
-		if cfg.Streams.AttachStdout || cfg.Streams.AttachStderr {
+		if cfg.Streams.Stdout != nil || cfg.Streams.Stderr != nil {
 			return <-receiveStdoutError
 		}
 	}

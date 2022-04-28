@@ -284,12 +284,9 @@ var _ = Describe("ConmonClient", func() {
 						SocketPath: socketPath,
 						Tty:        terminal,
 						Streams: client.AttachStreams{
-							Stdin:        stdin,
-							Stdout:       stdout,
-							Stderr:       stderr,
-							AttachStdin:  true,
-							AttachStdout: true,
-							AttachStderr: true,
+							Stdin:  &client.In{stdin},
+							Stdout: &client.Out{stdout},
+							Stderr: &client.Out{stderr},
 						},
 					})
 					Expect(err).To(BeNil())
