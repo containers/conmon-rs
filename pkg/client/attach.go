@@ -11,7 +11,6 @@ import (
 	"github.com/containers/podman/v3/pkg/kubeutils"
 	"github.com/containers/podman/v3/utils"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -97,15 +96,15 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) error {
 		err  error
 	)
 	if !cfg.Passthrough {
-		logrus.Debugf("Attaching to container %s", cfg.ID)
+		c.logger.Debugf("Attaching to container %s", cfg.ID)
 
 		kubeutils.HandleResizing(cfg.Resize, func(size define.TerminalSize) {
-			logrus.Debugf("Got a resize event: %+v", size)
+			c.logger.Debugf("Got a resize event: %+v", size)
 			if err := c.SetWindowSizeContainer(ctx, &SetWindowSizeContainerConfig{
 				ID:   cfg.ID,
 				Size: &size,
 			}); err != nil {
-				logrus.Debugf("Failed to write to control file to resize terminal: %v", err)
+				c.logger.Debugf("Failed to write to control file to resize terminal: %v", err)
 			}
 		})
 
@@ -115,7 +114,7 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) error {
 		}
 		defer func() {
 			if err := conn.Close(); err != nil {
-				logrus.Errorf("unable to close socket: %q", err)
+				c.logger.Errorf("unable to close socket: %q", err)
 			}
 		}()
 	}
@@ -130,19 +129,19 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) error {
 		return nil
 	}
 
-	receiveStdoutError, stdinDone := setupStdioChannels(cfg, conn)
+	receiveStdoutError, stdinDone := c.setupStdioChannels(cfg, conn)
 	if cfg.PostAttachFunc != nil {
 		if err := cfg.PostAttachFunc(); err != nil {
 			return err
 		}
 	}
 
-	return readStdio(cfg, conn, receiveStdoutError, stdinDone)
+	return c.readStdio(cfg, conn, receiveStdoutError, stdinDone)
 }
-func setupStdioChannels(cfg *AttachConfig, conn *net.UnixConn) (chan error, chan error) {
+func (c *ConmonClient) setupStdioChannels(cfg *AttachConfig, conn *net.UnixConn) (chan error, chan error) {
 	receiveStdoutError := make(chan error)
 	go func() {
-		receiveStdoutError <- redirectResponseToOutputStreams(cfg, conn)
+		receiveStdoutError <- c.redirectResponseToOutputStreams(cfg, conn)
 	}()
 
 	stdinDone := make(chan error)
@@ -157,8 +156,7 @@ func setupStdioChannels(cfg *AttachConfig, conn *net.UnixConn) (chan error, chan
 	return receiveStdoutError, stdinDone
 }
 
-func redirectResponseToOutputStreams(cfg *AttachConfig, conn io.Reader) error {
-	var err error
+func (c *ConmonClient) redirectResponseToOutputStreams(cfg *AttachConfig, conn io.Reader) (err error) {
 	buf := make([]byte, attachPacketBufSize+1) /* Sync with conmonrs ATTACH_PACKET_BUF_SIZE */
 	for {
 		nr, er := conn.Read(buf)
@@ -173,7 +171,7 @@ func redirectResponseToOutputStreams(cfg *AttachConfig, conn io.Reader) error {
 				dst = cfg.Streams.Stderr
 				doWrite = cfg.Streams.AttachStderr
 			default:
-				logrus.Infof("Received unexpected attach type %+d", buf[0])
+				c.logger.Infof("Received unexpected attach type %+d", buf[0])
 			}
 			if dst == nil {
 				return errors.New("output destination cannot be nil")
@@ -202,7 +200,7 @@ func redirectResponseToOutputStreams(cfg *AttachConfig, conn io.Reader) error {
 	return err
 }
 
-func readStdio(cfg *AttachConfig, conn *net.UnixConn, receiveStdoutError, stdinDone chan error) error {
+func (c *ConmonClient) readStdio(cfg *AttachConfig, conn *net.UnixConn, receiveStdoutError, stdinDone chan error) error {
 	var err error
 	select {
 	case err = <-receiveStdoutError:
@@ -224,7 +222,7 @@ func readStdio(cfg *AttachConfig, conn *net.UnixConn, receiveStdoutError, stdinD
 		if err == nil {
 			// copy stdin is done, close it
 			if connErr := conn.CloseWrite(); connErr != nil {
-				logrus.Errorf("Unable to close conn: %v", connErr)
+				c.logger.Errorf("Unable to close conn: %v", connErr)
 			}
 		}
 		if cfg.Streams.AttachStdout || cfg.Streams.AttachStderr {
