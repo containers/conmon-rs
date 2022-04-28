@@ -15,6 +15,8 @@ import (
 
 	"capnproto.org/go/capnp/v3"
 	"capnproto.org/go/capnp/v3/rpc"
+	"github.com/sirupsen/logrus"
+
 	"github.com/containers/conmon-rs/internal/proto"
 )
 
@@ -27,9 +29,13 @@ const (
 type ConmonClient struct {
 	serverPID uint32
 	runDir    string
+	logger    *logrus.Logger
 }
 
 type ConmonServerConfig struct {
+	// ClientLogger can be set to use a custom logger rather than the logrus.StandardLogger.
+	ClientLogger *logrus.Logger
+
 	ConmonServerPath string
 	LogLevel         string
 	Runtime          string
@@ -82,8 +88,13 @@ func (c *ConmonServerConfig) ToClient() (*ConmonClient, error) {
 		return nil, fmt.Errorf("couldn't create run dir %s", c.ServerRunDir)
 	}
 
+	if c.ClientLogger == nil {
+		c.ClientLogger = logrus.StandardLogger()
+	}
+
 	return &ConmonClient{
 		runDir: c.ServerRunDir,
+		logger: c.ClientLogger,
 	}, nil
 }
 
