@@ -3,12 +3,14 @@ package client_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/containers/conmon-rs/pkg/client"
+	"github.com/containers/podman/v3/libpod/define"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -111,9 +113,11 @@ var _ = Describe("ConmonClient", func() {
 				err := sut.SetWindowSizeContainer(
 					context.Background(),
 					&client.SetWindowSizeContainerConfig{
-						ID:     tr.ctrID,
-						Width:  10,
-						Height: 20,
+						ID: tr.ctrID,
+						Size: &define.TerminalSize{
+							Width:  10,
+							Height: 20,
+						},
 					},
 				)
 				if terminal {
@@ -264,20 +268,34 @@ var _ = Describe("ConmonClient", func() {
 			terminal := terminal
 			It(testName("should succeed", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh"})
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer(sut)
 
+				stdin, stdinWrite := io.Pipe()
+				stdoutRead, stdout := io.Pipe()
+				stderrRead, stderr := io.Pipe()
 				// Attach to the container
 				socketPath := filepath.Join(tr.tmpDir, "attach")
-				err := sut.AttachContainer(context.Background(), &client.AttachConfig{
-					ID:         tr.ctrID,
-					SocketPath: socketPath,
-				})
-				Expect(err).To(BeNil())
+				go func() {
+					err := sut.AttachContainer(context.Background(), &client.AttachConfig{
+						ID:         tr.ctrID,
+						SocketPath: socketPath,
+						Tty:        terminal,
+						Streams: client.AttachStreams{
+							Stdin:        stdin,
+							Stdout:       stdout,
+							Stderr:       stderr,
+							AttachStdin:  true,
+							AttachStdout: true,
+							AttachStderr: true,
+						},
+					})
+					Expect(err).To(BeNil())
+				}()
 
-				testAttachSocketConnection(socketPath)
+				testAttach(stdinWrite, stdoutRead, stderrRead)
 			})
 		}
 	})

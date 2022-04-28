@@ -41,7 +41,7 @@ pub struct Config {
 
     #[get_copy = "pub"]
     #[clap(
-        default_value(LogDriver::Stdout.into()),
+        default_value(LogDriver::Systemd.into()),
         env(concat!(prefix!(), "LOG_DRIVER")),
         long("log-driver"),
         short('d'),
