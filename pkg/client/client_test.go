@@ -264,7 +264,7 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	Describe("Attach", func() {
-		for _, terminal := range []bool{true} {
+		for _, terminal := range []bool{true, false} {
 			terminal := terminal
 			It(testName("should succeed", terminal), func() {
 				tr = newTestRunner()
