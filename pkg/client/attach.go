@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,12 +11,11 @@ import (
 	"github.com/containers/podman/v3/libpod/define"
 	"github.com/containers/podman/v3/pkg/kubeutils"
 	"github.com/containers/podman/v3/utils"
-	"github.com/pkg/errors"
 )
 
 const (
 	attachPacketBufSize = 8192
-	attachPipeStdin     = 1
+	attachPipeStdin     = 1 // nolint:deadcode,varcheck // Not used right now
 	attachPipeStdout    = 2
 	attachPipeStderr    = 3
 )
@@ -72,7 +72,11 @@ func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) e
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			c.logger.Errorf("Unable to close connection: %v", err)
+		}
+	}()
 
 	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
 	future, free := client.AttachContainer(ctx, func(p proto.Conmon_attachContainer_Params) error {
@@ -123,7 +127,7 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) error {
 
 		conn, err = DialLongSocket("unixpacket", cfg.SocketPath)
 		if err != nil {
-			return errors.Wrapf(err, "failed to connect to container's attach socket: %v", cfg.SocketPath)
+			return fmt.Errorf("failed to connect to container's attach socket: %v: %w", cfg.SocketPath, err)
 		}
 		defer func() {
 			if err := conn.Close(); err != nil {
@@ -151,13 +155,16 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) error {
 
 	return c.readStdio(cfg, conn, receiveStdoutError, stdinDone)
 }
-func (c *ConmonClient) setupStdioChannels(cfg *AttachConfig, conn *net.UnixConn) (chan error, chan error) {
-	receiveStdoutError := make(chan error)
+
+func (c *ConmonClient) setupStdioChannels(
+	cfg *AttachConfig, conn *net.UnixConn,
+) (receiveStdoutError, stdinDone chan error) {
+	receiveStdoutError = make(chan error)
 	go func() {
 		receiveStdoutError <- c.redirectResponseToOutputStreams(cfg, conn)
 	}()
 
-	stdinDone := make(chan error)
+	stdinDone = make(chan error)
 	go func() {
 		var err error
 		if cfg.Streams.Stdin != nil {
@@ -194,10 +201,12 @@ func (c *ConmonClient) redirectResponseToOutputStreams(cfg *AttachConfig, conn i
 				nw, ew := dst.Write(buf[1:nr])
 				if ew != nil {
 					err = ew
+
 					break
 				}
 				if nr != nw+1 {
 					err = io.ErrShortWrite
+
 					break
 				}
 			}
@@ -207,17 +216,24 @@ func (c *ConmonClient) redirectResponseToOutputStreams(cfg *AttachConfig, conn i
 		}
 		if er != nil {
 			err = er
+
 			break
 		}
 	}
+
 	return err
 }
 
-func (c *ConmonClient) readStdio(cfg *AttachConfig, conn *net.UnixConn, receiveStdoutError, stdinDone chan error) error {
+func (c *ConmonClient) readStdio(
+	cfg *AttachConfig, conn *net.UnixConn, receiveStdoutError, stdinDone chan error,
+) error {
 	var err error
 	select {
 	case err = <-receiveStdoutError:
-		conn.CloseWrite()
+		if closeErr := conn.CloseWrite(); closeErr != nil {
+			return fmt.Errorf("%v: %w", closeErr, err)
+		}
+
 		return err
 	case err = <-stdinDone:
 		// This particular case is for when we get a non-tty attach
@@ -228,8 +244,11 @@ func (c *ConmonClient) readStdio(cfg *AttachConfig, conn *net.UnixConn, receiveS
 		if cfg.StopAfterStdinEOF {
 			return nil
 		}
-		if err == define.ErrDetach {
-			conn.CloseWrite()
+		if errors.Is(err, define.ErrDetach) {
+			if closeErr := conn.CloseWrite(); closeErr != nil {
+				return fmt.Errorf("%v: %w", closeErr, err)
+			}
+
 			return err
 		}
 		if err == nil {
@@ -242,6 +261,7 @@ func (c *ConmonClient) readStdio(cfg *AttachConfig, conn *net.UnixConn, receiveS
 			return <-receiveStdoutError
 		}
 	}
+
 	return nil
 }
 
@@ -272,6 +292,7 @@ func (c *ConmonClient) SetWindowSizeContainer(ctx context.Context, cfg *SetWindo
 		}
 		req.SetWidth(cfg.Size.Width)
 		req.SetHeight(cfg.Size.Height)
+
 		return p.SetRequest(req)
 	})
 	defer free()

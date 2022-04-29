@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
@@ -15,9 +14,8 @@ import (
 
 	"capnproto.org/go/capnp/v3"
 	"capnproto.org/go/capnp/v3/rpc"
-	"github.com/sirupsen/logrus"
-
 	"github.com/containers/conmon-rs/internal/proto"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -54,6 +52,7 @@ func New(config *ConmonServerConfig) (_ *ConmonClient, retErr error) {
 	// Check if the process has already started, and inherit that process instead.
 	if resp, err := cl.Version(context.Background()); err == nil {
 		cl.serverPID = resp.ProcessID
+
 		return cl, nil
 	}
 	if err := cl.StartServer(config); err != nil {
@@ -71,7 +70,9 @@ func New(config *ConmonServerConfig) (_ *ConmonClient, retErr error) {
 	// if we fail any of the next steps
 	defer func() {
 		if retErr != nil {
-			cl.Shutdown()
+			if err := cl.Shutdown(); err != nil {
+				cl.logger.Errorf("Unable to shutdown server: %v", err)
+			}
 		}
 	}()
 	if err := cl.waitUntilServerUp(); err != nil {
@@ -80,6 +81,7 @@ func New(config *ConmonServerConfig) (_ *ConmonClient, retErr error) {
 	if err := os.Remove(cl.pidFile()); err != nil {
 		return nil, err
 	}
+
 	return cl, nil
 }
 
@@ -119,16 +121,16 @@ func (c *ConmonClient) StartServer(config *ConmonServerConfig) error {
 			cmd.Stderr = config.Stderr
 		}
 	}
+
 	return cmd.Run()
 }
 
-func (c *ConmonClient) toArgs(config *ConmonServerConfig) (string, []string, error) {
+func (c *ConmonClient) toArgs(config *ConmonServerConfig) (entrypoint string, args []string, err error) {
 	const maxUnixSocketPathSize = len(syscall.RawSockaddrUnix{}.Path)
-	args := make([]string, 0)
 	if c == nil {
 		return "", args, nil
 	}
-	entrypoint := config.ConmonServerPath
+	entrypoint = config.ConmonServerPath
 	if entrypoint == "" {
 		path, err := exec.LookPath(binaryName)
 		if err != nil {
@@ -162,7 +164,7 @@ func (c *ConmonClient) toArgs(config *ConmonServerConfig) (string, []string, err
 }
 
 func pidGivenFile(file string) (uint32, error) {
-	pidBytes, err := ioutil.ReadFile(file)
+	pidBytes, err := os.ReadFile(file)
 	if err != nil {
 		return 0, fmt.Errorf("reading pid bytes: %w", err)
 	}
@@ -170,6 +172,7 @@ func pidGivenFile(file string) (uint32, error) {
 	if err != nil {
 		return 0, fmt.Errorf("parsing pid: %w", err)
 	}
+
 	return uint32(pidU64), nil
 }
 
@@ -181,6 +184,7 @@ func (c *ConmonClient) waitUntilServerUp() (err error) {
 		}
 		time.Sleep(1 * time.Millisecond)
 	}
+
 	return err
 }
 
@@ -189,6 +193,7 @@ func (c *ConmonClient) newRPCConn() (*rpc.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return rpc.NewConn(rpc.NewStreamTransport(socketConn), nil), nil
 }
 
@@ -209,6 +214,7 @@ func DialLongSocket(network, path string) (*net.UnixConn, error) {
 	socketName := filepath.Base(path)
 
 	socketPath := filepath.Join("/proc/self/fd", strconv.Itoa(int(f.Fd())), socketName)
+
 	return net.DialUnix(network, nil, &net.UnixAddr{
 		Name: socketPath, Net: network,
 	})
@@ -315,7 +321,9 @@ type CreateContainerResponse struct {
 	PID uint32
 }
 
-func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainerConfig) (*CreateContainerResponse, error) {
+func (c *ConmonClient) CreateContainer(
+	ctx context.Context, cfg *CreateContainerConfig,
+) (*CreateContainerResponse, error) {
 	conn, err := c.newRPCConn()
 	if err != nil {
 		return nil, err
@@ -356,6 +364,7 @@ func (c *ConmonClient) CreateContainer(ctx context.Context, cfg *CreateContainer
 	if err != nil {
 		return nil, err
 	}
+
 	return &CreateContainerResponse{
 		PID: response.ContainerPid(),
 	}, nil
@@ -399,6 +408,7 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 		if err := p.SetRequest(req); err != nil {
 			return err
 		}
+
 		return nil
 	})
 	defer free()
@@ -447,6 +457,7 @@ func stringSliceToTextList(src []string, newFunc func(int32) (capnp.TextList, er
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -457,12 +468,12 @@ func (c *ConmonClient) initLogDrivers(req *proto.Conmon_CreateContainerRequest, 
 	}
 	for i, logDriver := range logDrivers {
 		n := newLogDrivers.At(i)
-		switch logDriver.Type {
-		case LogDriverTypeContainerRuntimeInterface:
+		if logDriver.Type == LogDriverTypeContainerRuntimeInterface {
 			n.SetType(proto.Conmon_LogDriver_Type_containerRuntimeInterface)
 		}
-		n.SetPath(logDriver.Path)
-
+		if err := n.SetPath(logDriver.Path); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -505,6 +516,7 @@ func (c *ConmonClient) ReopenLogContainer(ctx context.Context, cfg *ReopenLogCon
 		if err := req.SetId(cfg.ID); err != nil {
 			return err
 		}
+
 		return p.SetRequest(req)
 	})
 	defer free()

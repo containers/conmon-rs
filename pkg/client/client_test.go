@@ -63,7 +63,7 @@ var _ = Describe("ConmonClient", func() {
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer(sut)
-				Expect(string(fileContents(tr.exitPath()))).To(Equal("0"))
+				Expect(fileContents(tr.exitPath())).To(Equal("0"))
 			})
 
 			It(testName("should kill created children if being killed", terminal), func() {
@@ -98,7 +98,10 @@ var _ = Describe("ConmonClient", func() {
 
 			It(testName("should handle long run dir", terminal), func() {
 				tr = newTestRunner()
-				tr.tmpDir = MustDirInTempDir(tr.tmpDir, "thisisareallylongdirithasmanycharactersinthepathsosuperduperlongannoyinglylong")
+				tr.tmpDir = MustDirInTempDir(
+					tr.tmpDir,
+					"thisisareallylongdirithasmanycharactersinthepathsosuperduperlongannoyinglylong",
+				)
 				tr.createRuntimeConfig(terminal)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
@@ -184,12 +187,12 @@ var _ = Describe("ConmonClient", func() {
 				Expect(result.Stdout).To(BeEquivalentTo("hello world"))
 				Expect(result.Stderr).To(BeEmpty())
 
-				sut.ReopenLogContainer(context.Background(), &client.ReopenLogContainerConfig{
+				err = sut.ReopenLogContainer(context.Background(), &client.ReopenLogContainerConfig{
 					ID: tr.ctrID,
 				})
+				Expect(err).To(BeNil())
 				logs := fileContents(tr.logPath())
 				Expect(logs).To(BeEmpty())
-
 			})
 
 			It(testName("should succeed with timeout", terminal), func() {
