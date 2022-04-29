@@ -10,7 +10,6 @@ require (
 	github.com/onsi/gomega v1.19.0
 	github.com/opencontainers/runc v1.1.1
 	github.com/opencontainers/runtime-tools v0.9.0
-	github.com/pkg/errors v0.9.1
 	github.com/sirupsen/logrus v1.8.1
 )
 
@@ -34,6 +33,7 @@ require (
 	github.com/opencontainers/image-spec v1.0.2-0.20210819154149-5ad6f50d6283 // indirect
 	github.com/opencontainers/runtime-spec v1.0.3-0.20210326190908-1c3f411f0417 // indirect
 	github.com/opencontainers/selinux v1.10.0 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
 	github.com/seccomp/libseccomp-golang v0.9.2-0.20210429002308-3879420cc921 // indirect
 	github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 // indirect
 	github.com/ulikunitz/xz v0.5.10 // indirect

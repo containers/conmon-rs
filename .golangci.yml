@@ -1,0 +1,220 @@
+---
+run:
+  concurrency: 6
+  deadline: 5m
+issues:
+  exclude-rules:
+    - linters:
+        - goerr113
+      text: do not define dynamic errors, use wrapped static errors instead
+linters:
+  disable-all: true
+  enable:
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - containedctx
+    - contextcheck
+    - deadcode
+    - decorder
+    - depguard
+    - dogsled
+    - dupl
+    - durationcheck
+    - errcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - exhaustive
+    - exportloopref
+    - forcetypeassert
+    - funlen
+    - gci
+    - gochecknoinits
+    - gocognit
+    - goconst
+    - gocritic
+    - gocyclo
+    - godot
+    - godox
+    - goerr113
+    - gofmt
+    - gofumpt
+    - goheader
+    - goimports
+    - gomoddirectives
+    - gomodguard
+    - goprintffuncname
+    - gosimple
+    - govet
+    - grouper
+    - ifshort
+    - importas
+    - ineffassign
+    - ireturn
+    - lll
+    - maintidx
+    - makezero
+    - misspell
+    - nakedret
+    - nestif
+    - nilerr
+    - nilnil
+    - nlreturn
+    - noctx
+    - nolintlint
+    - prealloc
+    - predeclared
+    - promlinter
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - structcheck
+    - stylecheck
+    - tagliatelle
+    - tenv
+    - testpackage
+    - thelper
+    - tparallel
+    - typecheck
+    - unconvert
+    - unparam
+    - unused
+    - varcheck
+    - wastedassign
+    - whitespace
+    # - cyclop
+    # - exhaustivestruct
+    # - forbidigo
+    # - gochecknoglobals
+    # - gomnd
+    # - gosec
+    # - paralleltest
+    # - varnamelen
+    # - wrapcheck
+    # - wsl
+linters-settings:
+  gocognit:
+    min-complexity: 40
+  nestif:
+    min-complexity: 15
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+  godox:
+    keywords:
+      - BUG
+      - FIXME
+      - HACK
+  gocritic:
+    enabled-checks:
+      # Diagnostic
+      - appendAssign
+      - argOrder
+      - badCall
+      - badCond
+      - badLock
+      - badRegexp
+      - badSorting
+      - builtinShadowDecl
+      - caseOrder
+      - codegenComment
+      - commentedOutCode
+      - deferInLoop
+      - deprecatedComment
+      - dupArg
+      - dupBranchBody
+      - dupCase
+      - dupSubExpr
+      - dynamicFmtString
+      - emptyDecl
+      - evalOrder
+      - exitAfterDefer
+      - externalErrorReassign
+      - flagDeref
+      - flagName
+      - mapKey
+      - nilValReturn
+      - offBy1
+      - regexpPattern
+      - returnAfterHttpError
+      - sloppyReassign
+      - sloppyTypeAssert
+      - sortSlice
+      - sprintfQuotedString
+      - sqlQuery
+      - syncMapLoadAndDelete
+      - truncateCmp
+      - unnecessaryDefer
+      - weakCond
+      # - filepathJoin
+
+      # Performance
+      - appendCombine
+      - equalFold
+      - hugeParam
+      - indexAlloc
+      - preferDecodeRune
+      - preferFprint
+      - preferStringWriter
+      - preferWriteByte
+      - rangeExprCopy
+      - rangeValCopy
+      - sliceClear
+      - stringXbytes
+
+      # Style
+      - assignOp
+      - boolExprSimplify
+      - captLocal
+      - commentFormatting
+      - commentedOutImport
+      - defaultCaseOrder
+      - deferUnlambda
+      - docStub
+      - dupImport
+      - elseif
+      - emptyFallthrough
+      - emptyStringTest
+      - exposedSyncMutex
+      - hexLiteral
+      - httpNoBody
+      - ifElseChain
+      - ioutilDeprecated
+      - methodExprCall
+      - newDeref
+      - octalLiteral
+      - preferFilepathJoin
+      - redundantSprint
+      - regexpMust
+      - regexpSimplify
+      - ruleguard
+      - singleCaseSwitch
+      - sloppyLen
+      - stringConcatSimplify
+      - switchTrue
+      - timeExprSimplify
+      - tooManyResultsChecker
+      - typeAssertChain
+      - typeDefFirst
+      - typeSwitchVar
+      - underef
+      - unlabelStmt
+      - unlambda
+      - unslice
+      - valSwap
+      - whyNoLint
+      - wrapperFunc
+      - yodaStyleExpr
+
+      # Opinionated
+      - builtinShadow
+      - importShadow
+      - initClause
+      - nestingReduce
+      - paramTypeCombine
+      - ptrToRefParam
+      - typeUnparen
+      - unnamedResult
+      - unnecessaryBlock

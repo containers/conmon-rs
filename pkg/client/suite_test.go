@@ -37,7 +37,7 @@ var (
 	maxRSSKB    = 230
 )
 
-// TestConmonClient runs the created specs
+// TestConmonClient runs the created specs.
 func TestConmonClient(t *testing.T) {
 	if rssStr := os.Getenv("MAX_RSS_KB"); rssStr != "" {
 		rssInt, err := strconv.Atoi(rssStr)
@@ -101,6 +101,7 @@ func (tr *testRunner) exitPath() string {
 func fileContents(path string) string {
 	contents, err := os.ReadFile(path)
 	Expect(err).To(BeNil())
+
 	return string(contents)
 }
 
@@ -131,6 +132,7 @@ func (tr *testRunner) startContainer(sut *client.ConmonClient) {
 		if err := tr.rr.RunCommandCheckOutput("running", "list"); err == nil {
 			return nil
 		}
+
 		return tr.rr.RunCommandCheckOutput("stopped", "list")
 	}, time.Second*10).Should(BeNil())
 }
@@ -138,12 +140,14 @@ func (tr *testRunner) startContainer(sut *client.ConmonClient) {
 func MustTempDir(name string) string {
 	d, err := ioutil.TempDir(os.TempDir(), name)
 	Expect(err).To(BeNil())
+
 	return d
 }
 
 func MustDirInTempDir(parent, name string) string {
 	dir := filepath.Join(parent, name)
-	Expect(os.MkdirAll(dir, 0755)).To(BeNil())
+	Expect(os.MkdirAll(dir, 0o755)).To(BeNil())
+
 	return dir
 }
 
@@ -151,6 +155,7 @@ func MustFile(file string) string {
 	f, err := os.Create(file)
 	f.Close()
 	Expect(err).To(BeNil())
+
 	return file
 }
 
@@ -167,6 +172,7 @@ func (tr *testRunner) configGivenEnv() *client.ConmonClient {
 	})
 	Expect(err).To(BeNil())
 	Expect(sut).NotTo(BeNil())
+
 	return sut
 }
 
@@ -187,10 +193,12 @@ func vmRSSGivenPID(pid uint32) uint32 {
 		parts := strings.Fields(scanner.Text())
 		Expect(len(parts)).To(Equal(3))
 		rss = parts[1]
+
 		break
 	}
 	rssU64, err := strconv.ParseUint(rss, 10, 32)
 	Expect(err).To(BeNil())
+
 	return uint32(rssU64)
 }
 
@@ -198,33 +206,34 @@ func cacheBusyBox() error {
 	if _, err := os.Stat(busyboxDest); err == nil {
 		return nil
 	}
-	if err := os.MkdirAll(busyboxDestDir, 0755); err != nil && !os.IsExist(err) {
+	if err := os.MkdirAll(busyboxDestDir, 0o755); err != nil && !os.IsExist(err) {
 		return err
 	}
 	if err := downloadFile(busyboxSource, busyboxDest); err != nil {
 		return err
 	}
-	if err := os.Chmod(busyboxDest, 0777); err != nil {
+	if err := os.Chmod(busyboxDest, 0o777); err != nil {
 		return err
 	}
+
 	return nil
 }
 
 // source: https://progolang.com/how-to-download-files-in-go/
-// downloadFile will download a url and store it in local filepath.
+// downloadFile will download a url and store it in local path.
 // It writes to the destination file as it downloads it, without
 // loading the entire file into memory.
-func downloadFile(url string, filepath string) error {
+func downloadFile(url, path string) error {
 	// Create the file
-	out, err := os.Create(filepath)
+	out, err := os.Create(path)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
 
 	// Get the data
-	client := http.Client{Timeout: time.Minute}
-	resp, err := client.Get(url)
+	c := http.Client{Timeout: time.Minute}
+	resp, err := c.Get(url)
 	if err != nil {
 		return err
 	}
@@ -268,6 +277,7 @@ func (rr *RuntimeRunner) RunCommand(args ...string) error {
 	if stdoutString != "" {
 		fmt.Fprintf(GinkgoWriter, stdoutString+"\n")
 	}
+
 	return nil
 }
 
@@ -276,10 +286,14 @@ func (rr *RuntimeRunner) RunCommandCheckOutput(pattern string, args ...string) e
 	if err != nil {
 		return err
 	}
-	match, _ := regexp.MatchString(pattern, stdoutString)
+	match, err := regexp.MatchString(pattern, stdoutString)
+	if err != nil {
+		return err
+	}
 	if !match {
 		return fmt.Errorf("Expected %s to be a substr of %s", pattern, stdoutString)
 	}
+
 	return nil
 }
 
@@ -293,6 +307,7 @@ func (rr *RuntimeRunner) runCommand(args ...string) (string, error) {
 	if err := cmd.Run(); err != nil {
 		return "", err
 	}
+
 	return stdout.String(), nil
 }
 
@@ -304,10 +319,11 @@ func testName(testName string, terminal bool) string {
 	if terminal {
 		testName += " with terminal"
 	}
+
 	return testName
 }
 
-func testAttach(stdinWrite io.Writer, stdoutRead io.Reader, stderrRead io.Reader) {
+func testAttach(stdinWrite io.Writer, stdoutRead, stderrRead io.Reader) {
 	// Stdin
 	stdoutBuf := bufio.NewReader(stdoutRead)
 	stderrBuf := bufio.NewReader(stderrRead)
