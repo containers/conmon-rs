@@ -5,6 +5,7 @@
 [![codecov](https://codecov.io/gh/containers/conmon-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/containers/conmon-rs)
 [![dependencies](https://deps.rs/repo/github/containers/conmon-rs/status.svg)](https://deps.rs/repo/github/containers/conmon-rs)
 [![docs](https://img.shields.io/badge/docs-main-blue.svg)](https://containers.github.io/conmon-rs/conmon/index.html)
+[![go-docs](https://godoc.org/github.com/containers/conmon-rs?status.svg)](https://pkg.go.dev/github.com/containers/conmon-rs/pkg/client)
 
 A pod level OCI container runtime monitor.
 

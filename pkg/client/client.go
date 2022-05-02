@@ -25,6 +25,7 @@ const (
 	pidFileName = "pidfile"
 )
 
+// ConmonClient is the main client structure of this package.
 type ConmonClient struct {
 	serverPID uint32
 	runDir    string
@@ -86,8 +87,9 @@ func NewConmonServerConfig(
 	}
 }
 
-func New(config *ConmonServerConfig) (_ *ConmonClient, retErr error) {
-	cl, err := config.ToClient()
+// New creates a new conmon server, starts it and connects a new client to it.
+func New(config *ConmonServerConfig) (client *ConmonClient, retErr error) {
+	cl, err := config.toClient()
 	if err != nil {
 		return nil, fmt.Errorf("convert config to client: %w", err)
 	}
@@ -97,7 +99,7 @@ func New(config *ConmonServerConfig) (_ *ConmonClient, retErr error) {
 
 		return cl, nil
 	}
-	if err := cl.StartServer(config); err != nil {
+	if err := cl.startServer(config); err != nil {
 		return nil, fmt.Errorf("start server: %w", err)
 	}
 
@@ -127,7 +129,7 @@ func New(config *ConmonServerConfig) (_ *ConmonClient, retErr error) {
 	return cl, nil
 }
 
-func (c *ConmonServerConfig) ToClient() (*ConmonClient, error) {
+func (c *ConmonServerConfig) toClient() (*ConmonClient, error) {
 	const perm = 0o755
 	if err := os.MkdirAll(c.ServerRunDir, perm); err != nil && !os.IsExist(err) {
 		return nil, fmt.Errorf("couldn't create run dir %s", c.ServerRunDir)
@@ -143,7 +145,7 @@ func (c *ConmonServerConfig) ToClient() (*ConmonClient, error) {
 	}, nil
 }
 
-func (c *ConmonClient) StartServer(config *ConmonServerConfig) error {
+func (c *ConmonClient) startServer(config *ConmonServerConfig) error {
 	entrypoint, args, err := c.toArgs(config)
 	if err != nil {
 		return fmt.Errorf("convert config to args: %w", err)
@@ -387,29 +389,50 @@ func (c *ConmonClient) Version(ctx context.Context) (*VersionResponse, error) {
 	}, nil
 }
 
+// CreateContainerConfig is the configuration for calling the CreateContainer
+// method.
 type CreateContainerConfig struct {
-	ID         string
+	// ID is the container identifier.
+	ID string
+
+	// BundlePath is the path to the filesystem bundle.
 	BundlePath string
-	Terminal   bool
-	ExitPaths  []string
+
+	// Terminal indicates if a tty should be used or not.
+	Terminal bool
+
+	// ExitPaths is a slice of paths to write the exit statuses.
+	ExitPaths []string
+
+	// LogDrivers is a slice of selected log drivers.
 	LogDrivers []LogDriver
 }
 
+// LogDriver specifies a selected logging mechanism.
 type LogDriver struct {
+	// Type defines the log driver variant.
 	Type LogDriverType
+
+	// Path specifies the filesystem path of the log driver.
 	Path string
 }
 
+// LogDriverType specifies available log drivers.
 type LogDriverType int
 
 const (
+	// LogDriverTypeContainerRuntimeInterface is the Kubernetes CRI logger
+	// type.
 	LogDriverTypeContainerRuntimeInterface LogDriverType = iota
 )
 
+// CreateContainerResponse is the response of the CreateContainer method.
 type CreateContainerResponse struct {
+	// PID is the container process identifier.
 	PID uint32
 }
 
+// CreateContainer can be used to create a new running container instance.
 func (c *ConmonClient) CreateContainer(
 	ctx context.Context, cfg *CreateContainerConfig,
 ) (*CreateContainerResponse, error) {
@@ -463,20 +486,39 @@ func (c *ConmonClient) CreateContainer(
 	}, nil
 }
 
+// ExecSyncConfig is the configuration for calling the ExecSyncContainer
+// method.
 type ExecSyncConfig struct {
-	ID       string
-	Command  []string
-	Timeout  uint64
+	// ID is the container identifier.
+	ID string
+
+	// Command is a slice of command line arguments.
+	Command []string
+
+	// Timeout is the maximum time the command can run in seconds.
+	Timeout uint64
+
+	// Terminal specifies if a tty should be used.
 	Terminal bool
 }
 
+// ExecContainerResult is the result for calling the ExecSyncContainer method.
 type ExecContainerResult struct {
+	// ExitCode specifies the returned exit status.
 	ExitCode int32
-	Stdout   []byte
-	Stderr   []byte
+
+	// Stdout contains the stdout stream result.
+	Stdout []byte
+
+	// Stderr contains the stderr stream result.
+	Stderr []byte
+
+	// TimedOut is true if the command timed out.
 	TimedOut bool
 }
 
+// ExecSyncContainer can be used to execute a command within a running
+// container.
 func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfig) (*ExecContainerResult, error) {
 	conn, err := c.newRPCConn()
 	if err != nil {
@@ -572,11 +614,12 @@ func (c *ConmonClient) initLogDrivers(req *proto.Conmon_CreateContainerRequest, 
 	return nil
 }
 
-// TODO FIXME test only?
+// PID returns the server process ID.
 func (c *ConmonClient) PID() uint32 {
 	return c.serverPID
 }
 
+// Shutdown kill the server via SIGINT.
 func (c *ConmonClient) Shutdown() error {
 	if err := syscall.Kill(int(c.serverPID), syscall.SIGINT); err != nil {
 		return fmt.Errorf("kill server PID: %w", err)
@@ -593,10 +636,15 @@ func (c *ConmonClient) socket() string {
 	return filepath.Join(c.runDir, socketName)
 }
 
+// ReopenLogContainerConfig is the configuration for calling the
+// ReopenLogContainer method.
 type ReopenLogContainerConfig struct {
+	// ID is the container identifier.
 	ID string
 }
 
+// ReopenLogContainer can be used to rotate all configured container log
+// drivers.
 func (c *ConmonClient) ReopenLogContainer(ctx context.Context, cfg *ReopenLogContainerConfig) error {
 	conn, err := c.newRPCConn()
 	if err != nil {
