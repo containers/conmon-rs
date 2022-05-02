@@ -160,16 +160,9 @@ func MustFile(file string) string {
 }
 
 func (tr *testRunner) configGivenEnv() *client.ConmonClient {
-	sut, err := client.New(&client.ConmonServerConfig{
-		ServerRunDir:     tr.tmpDir,
-		RuntimeRoot:      tr.rr.runtimeRoot,
-		Runtime:          runtimePath,
-		ConmonServerPath: conmonPath,
-		Stdout:           os.Stdout,
-		Stderr:           os.Stderr,
-		LogLevel:         "debug",
-		LogDriver:        client.LogDriverStdout,
-	})
+	cfg := client.NewConmonServerConfig(runtimePath, tr.rr.runtimeRoot, tr.tmpDir)
+	cfg.ConmonServerPath = conmonPath
+	sut, err := client.New(cfg)
 	Expect(err).To(BeNil())
 	Expect(sut).NotTo(BeNil())
 

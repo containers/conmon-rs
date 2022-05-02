@@ -59,7 +59,7 @@ pub struct Config {
         short('r'),
         value_name("RUNTIME")
     )]
-    /// Path of the OCI runtime to use to operate on the containers.
+    /// Binary path of the OCI runtime to use to operate on the containers.
     runtime: PathBuf,
 
     #[get = "pub"]
@@ -78,7 +78,7 @@ pub struct Config {
         long("runtime-root"),
         value_name("RUNTIME_ROOT")
     )]
-    /// Path of the OCI runtime to use to operate on the containers.
+    /// Root directory used by the OCI runtime to operate on containers.
     runtime_root: Option<PathBuf>,
 
     #[get = "pub"]
