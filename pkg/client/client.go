@@ -30,18 +30,59 @@ type ConmonClient struct {
 	logger    *logrus.Logger
 }
 
+// ConmonServerConfig is the configuration for the conmon server instance.
 type ConmonServerConfig struct {
-	// ClientLogger can be set to use a custom logger rather than the logrus.StandardLogger.
+	// ClientLogger can be set to use a custom logger rather than the
+	// logrus.StandardLogger.
 	ClientLogger *logrus.Logger
 
+	// ConmonServerPath is the binary path to the conmon server.
 	ConmonServerPath string
-	LogLevel         string
-	Runtime          string
-	RuntimeRoot      string
-	ServerRunDir     string
-	LogDriver        string
-	Stdout           io.WriteCloser
-	Stderr           io.WriteCloser
+
+	// LogLevel of the server to be used.
+	// Can be "trace", "debug", "info", "warn", "error" or "off".
+	LogLevel string
+
+	// LogDriver is the possible server logging driver.
+	// Can be "stdout" or "systemd".
+	LogDriver string
+
+	// Runtime is the binary path of the OCI runtime to use to operate on the
+	// containers.
+	Runtime string
+
+	// RuntimeRoot is the root directory used by the OCI runtime to operate on
+	// containers.
+	RuntimeRoot string
+
+	// ServerRunDir is the path of the directory for the server to hold files
+	// at runtime.
+	ServerRunDir string
+
+	// Stdout is the standard output stream of the server when the log driver
+	// "stdout" is being used (can be nil).
+	Stdout io.WriteCloser
+
+	// Stderr is the standard error stream of the server when the log driver
+	// "stdout" is being used (can be nil).
+	Stderr io.WriteCloser
+}
+
+// NewConmonServerConfig creates a new ConmonServerConfig instance for the
+// required arguments. Optional arguments are pointing to their corresponding
+// default values.
+func NewConmonServerConfig(
+	runtime, runtimeRoot, serverRunDir string,
+) *ConmonServerConfig {
+	return &ConmonServerConfig{
+		LogLevel:     LogLevelDebug,
+		LogDriver:    LogDriverStdout,
+		Runtime:      runtime,
+		RuntimeRoot:  runtimeRoot,
+		ServerRunDir: serverRunDir,
+		Stdout:       os.Stdout,
+		Stderr:       os.Stderr,
+	}
 }
 
 func New(config *ConmonServerConfig) (_ *ConmonClient, retErr error) {
@@ -152,15 +193,47 @@ func (c *ConmonClient) toArgs(config *ConmonServerConfig) (entrypoint string, ar
 		args = append(args, "--runtime-root", config.RuntimeRoot)
 	}
 
-	// TODO FIXME do validation?
 	if config.LogLevel != "" {
+		if err := validateLogLevel(config.LogLevel); err != nil {
+			return "", args, err
+		}
 		args = append(args, "--log-level", config.LogLevel)
 	}
+
 	if config.LogDriver != "" {
+		if err := validateLogDriver(config.LogDriver); err != nil {
+			return "", args, err
+		}
 		args = append(args, "--log-driver", config.LogDriver)
 	}
 
 	return entrypoint, args, nil
+}
+
+func validateLogLevel(level string) error {
+	return validateStringSlice(
+		"log level",
+		level,
+		LogLevelTrace, LogLevelDebug, LogLevelInfo, LogLevelWarn, LogLevelError, LogLevelOff,
+	)
+}
+
+func validateLogDriver(driver string) error {
+	return validateStringSlice(
+		"log driver",
+		driver,
+		LogDriverStdout, LogDriverSystemd,
+	)
+}
+
+func validateStringSlice(typ, given string, possibleValues ...string) error {
+	for _, possibleValue := range possibleValues {
+		if given == possibleValue {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("%s %q is invalid", typ, given)
 }
 
 func pidGivenFile(file string) (uint32, error) {
