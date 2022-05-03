@@ -15,6 +15,7 @@ linters:
     - bodyclose
     - containedctx
     - contextcheck
+    - cyclop
     - deadcode
     - decorder
     - depguard
@@ -42,9 +43,11 @@ linters:
     - gofumpt
     - goheader
     - goimports
+    - gomnd
     - gomoddirectives
     - gomodguard
     - goprintffuncname
+    - gosec
     - gosimple
     - govet
     - grouper
@@ -84,19 +87,18 @@ linters:
     - varcheck
     - wastedassign
     - whitespace
-    # - cyclop
+    - wrapcheck
     # - exhaustivestruct
     # - forbidigo
     # - gochecknoglobals
-    # - gomnd
-    # - gosec
     # - paralleltest
     # - varnamelen
-    # - wrapcheck
     # - wsl
 linters-settings:
+  cyclop:
+    max-complexity: 15
   gocognit:
-    min-complexity: 40
+    min-complexity: 25
   nestif:
     min-complexity: 15
   errcheck:
@@ -132,6 +134,7 @@ linters-settings:
       - evalOrder
       - exitAfterDefer
       - externalErrorReassign
+      - filepathJoin
       - flagDeref
       - flagName
       - mapKey
@@ -148,7 +151,6 @@ linters-settings:
       - truncateCmp
       - unnecessaryDefer
       - weakCond
-      # - filepathJoin
 
       # Performance
       - appendCombine

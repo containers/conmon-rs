@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -88,7 +89,7 @@ func NewConmonServerConfig(
 func New(config *ConmonServerConfig) (_ *ConmonClient, retErr error) {
 	cl, err := config.ToClient()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("convert config to client: %w", err)
 	}
 	// Check if the process has already started, and inherit that process instead.
 	if resp, err := cl.Version(context.Background()); err == nil {
@@ -97,12 +98,12 @@ func New(config *ConmonServerConfig) (_ *ConmonClient, retErr error) {
 		return cl, nil
 	}
 	if err := cl.StartServer(config); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("start server: %w", err)
 	}
 
 	pid, err := pidGivenFile(cl.pidFile())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get pid from env: %w", err)
 	}
 
 	cl.serverPID = pid
@@ -117,17 +118,18 @@ func New(config *ConmonServerConfig) (_ *ConmonClient, retErr error) {
 		}
 	}()
 	if err := cl.waitUntilServerUp(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("wait until server is up: %w", err)
 	}
 	if err := os.Remove(cl.pidFile()); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("remove pid file: %w", err)
 	}
 
 	return cl, nil
 }
 
 func (c *ConmonServerConfig) ToClient() (*ConmonClient, error) {
-	if err := os.MkdirAll(c.ServerRunDir, 0o755); err != nil && !os.IsExist(err) {
+	const perm = 0o755
+	if err := os.MkdirAll(c.ServerRunDir, perm); err != nil && !os.IsExist(err) {
 		return nil, fmt.Errorf("couldn't create run dir %s", c.ServerRunDir)
 	}
 
@@ -144,7 +146,7 @@ func (c *ConmonServerConfig) ToClient() (*ConmonClient, error) {
 func (c *ConmonClient) StartServer(config *ConmonServerConfig) error {
 	entrypoint, args, err := c.toArgs(config)
 	if err != nil {
-		return err
+		return fmt.Errorf("convert config to args: %w", err)
 	}
 	cmd := exec.Command(entrypoint, args...)
 
@@ -163,7 +165,11 @@ func (c *ConmonClient) StartServer(config *ConmonServerConfig) error {
 		}
 	}
 
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("run server command: %w", err)
+	}
+
+	return nil
 }
 
 func (c *ConmonClient) toArgs(config *ConmonServerConfig) (entrypoint string, args []string, err error) {
@@ -180,12 +186,12 @@ func (c *ConmonClient) toArgs(config *ConmonServerConfig) (entrypoint string, ar
 		entrypoint = path
 	}
 	if config.Runtime == "" {
-		return "", args, fmt.Errorf("runtime must be specified")
+		return "", args, errors.New("runtime must be specified")
 	}
 	args = append(args, "--runtime", config.Runtime)
 
 	if config.ServerRunDir == "" {
-		return "", args, fmt.Errorf("RunDir must be specified")
+		return "", args, errors.New("RunDir must be specified")
 	}
 	args = append(args, "--runtime-dir", config.ServerRunDir)
 
@@ -195,14 +201,14 @@ func (c *ConmonClient) toArgs(config *ConmonServerConfig) (entrypoint string, ar
 
 	if config.LogLevel != "" {
 		if err := validateLogLevel(config.LogLevel); err != nil {
-			return "", args, err
+			return "", args, fmt.Errorf("validate log level: %w", err)
 		}
 		args = append(args, "--log-level", config.LogLevel)
 	}
 
 	if config.LogDriver != "" {
 		if err := validateLogDriver(config.LogDriver); err != nil {
-			return "", args, err
+			return "", args, fmt.Errorf("validate log driver: %w", err)
 		}
 		args = append(args, "--log-driver", config.LogDriver)
 	}
@@ -241,7 +247,11 @@ func pidGivenFile(file string) (uint32, error) {
 	if err != nil {
 		return 0, fmt.Errorf("reading pid bytes: %w", err)
 	}
-	pidU64, err := strconv.ParseUint(string(pidBytes), 10, 32)
+	const (
+		base    = 10
+		bitSize = 32
+	)
+	pidU64, err := strconv.ParseUint(string(pidBytes), base, bitSize)
 	if err != nil {
 		return 0, fmt.Errorf("parsing pid: %w", err)
 	}
@@ -264,7 +274,7 @@ func (c *ConmonClient) waitUntilServerUp() (err error) {
 func (c *ConmonClient) newRPCConn() (*rpc.Conn, error) {
 	socketConn, err := DialLongSocket("unix", c.socket())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dial long socket: %w", err)
 	}
 
 	return rpc.NewConn(rpc.NewStreamTransport(socketConn), nil), nil
@@ -286,11 +296,17 @@ func DialLongSocket(network, path string) (*net.UnixConn, error) {
 
 	socketName := filepath.Base(path)
 
-	socketPath := filepath.Join("/proc/self/fd", strconv.Itoa(int(f.Fd())), socketName)
+	const procSelfFDPath = "/proc/self/fd"
+	socketPath := filepath.Join(procSelfFDPath, strconv.Itoa(int(f.Fd())), socketName)
 
-	return net.DialUnix(network, nil, &net.UnixAddr{
+	conn, err := net.DialUnix(network, nil, &net.UnixAddr{
 		Name: socketPath, Net: network,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("dial unix socket: %w", err)
+	}
+
+	return conn, nil
 }
 
 // VersionResponse is the response of the Version method.
@@ -318,7 +334,7 @@ type VersionResponse struct {
 func (c *ConmonClient) Version(ctx context.Context) (*VersionResponse, error) {
 	conn, err := c.newRPCConn()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create RPC connection: %w", err)
 	}
 	defer conn.Close()
 	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
@@ -328,37 +344,37 @@ func (c *ConmonClient) Version(ctx context.Context) (*VersionResponse, error) {
 
 	result, err := future.Struct()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create result: %w", err)
 	}
 
 	response, err := result.Response()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("set response: %w", err)
 	}
 
 	version, err := response.Version()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("set version: %w", err)
 	}
 
 	tag, err := response.Tag()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("set tag: %w", err)
 	}
 
 	commit, err := response.Commit()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("set commit: %w", err)
 	}
 
 	buildDate, err := response.BuildDate()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("set build date: %w", err)
 	}
 
 	rustVersion, err := response.RustVersion()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("set rust version: %w", err)
 	}
 
 	return &VersionResponse{
@@ -399,7 +415,7 @@ func (c *ConmonClient) CreateContainer(
 ) (*CreateContainerResponse, error) {
 	conn, err := c.newRPCConn()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create RPC connection: %w", err)
 	}
 	defer conn.Close()
 	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
@@ -407,35 +423,39 @@ func (c *ConmonClient) CreateContainer(
 	future, free := client.CreateContainer(ctx, func(p proto.Conmon_createContainer_Params) error {
 		req, err := p.NewRequest()
 		if err != nil {
-			return err
+			return fmt.Errorf("create request: %w", err)
 		}
 		if err := req.SetId(cfg.ID); err != nil {
-			return err
+			return fmt.Errorf("set ID: %w", err)
 		}
 		if err := req.SetBundlePath(cfg.BundlePath); err != nil {
-			return err
+			return fmt.Errorf("set bundle path: %w", err)
 		}
 		req.SetTerminal(cfg.Terminal)
 		if err := stringSliceToTextList(cfg.ExitPaths, req.NewExitPaths); err != nil {
-			return err
+			return fmt.Errorf("convert string slice to text list: %w", err)
 		}
 
 		if err := c.initLogDrivers(&req, cfg.LogDrivers); err != nil {
-			return err
+			return fmt.Errorf("init log drivers: %w", err)
 		}
 
-		return p.SetRequest(req)
+		if err := p.SetRequest(req); err != nil {
+			return fmt.Errorf("set request: %w", err)
+		}
+
+		return nil
 	})
 	defer free()
 
 	result, err := future.Struct()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create result: %w", err)
 	}
 
 	response, err := result.Response()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("set response: %w", err)
 	}
 
 	return &CreateContainerResponse{
@@ -460,7 +480,7 @@ type ExecContainerResult struct {
 func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfig) (*ExecContainerResult, error) {
 	conn, err := c.newRPCConn()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create RPC connection: %w", err)
 	}
 	defer conn.Close()
 
@@ -468,10 +488,10 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 	future, free := client.ExecSyncContainer(ctx, func(p proto.Conmon_execSyncContainer_Params) error {
 		req, err := p.NewRequest()
 		if err != nil {
-			return err
+			return fmt.Errorf("create request: %w", err)
 		}
 		if err := req.SetId(cfg.ID); err != nil {
-			return err
+			return fmt.Errorf("set ID: %w", err)
 		}
 		req.SetTimeoutSec(cfg.Timeout)
 		if err := stringSliceToTextList(cfg.Command, req.NewCommand); err != nil {
@@ -479,7 +499,7 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 		}
 		req.SetTerminal(cfg.Terminal)
 		if err := p.SetRequest(req); err != nil {
-			return err
+			return fmt.Errorf("set request: %w", err)
 		}
 
 		return nil
@@ -488,22 +508,22 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 
 	result, err := future.Struct()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create result: %w", err)
 	}
 
 	resp, err := result.Response()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("set response: %w", err)
 	}
 
 	stdout, err := resp.Stdout()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get stdout: %w", err)
 	}
 
 	stderr, err := resp.Stderr()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get stderr: %w", err)
 	}
 
 	execContainerResult := &ExecContainerResult{
@@ -527,7 +547,7 @@ func stringSliceToTextList(src []string, newFunc func(int32) (capnp.TextList, er
 	}
 	for i := 0; i < len(src); i++ {
 		if err := list.Set(i, src[i]); err != nil {
-			return err
+			return fmt.Errorf("set list element: %w", err)
 		}
 	}
 
@@ -537,7 +557,7 @@ func stringSliceToTextList(src []string, newFunc func(int32) (capnp.TextList, er
 func (c *ConmonClient) initLogDrivers(req *proto.Conmon_CreateContainerRequest, logDrivers []LogDriver) error {
 	newLogDrivers, err := req.NewLogDrivers(int32(len(logDrivers)))
 	if err != nil {
-		return err
+		return fmt.Errorf("create log drivers: %w", err)
 	}
 	for i, logDriver := range logDrivers {
 		n := newLogDrivers.At(i)
@@ -545,7 +565,7 @@ func (c *ConmonClient) initLogDrivers(req *proto.Conmon_CreateContainerRequest, 
 			n.SetType(proto.Conmon_LogDriver_Type_containerRuntimeInterface)
 		}
 		if err := n.SetPath(logDriver.Path); err != nil {
-			return err
+			return fmt.Errorf("set log driver path: %w", err)
 		}
 	}
 
@@ -558,7 +578,11 @@ func (c *ConmonClient) PID() uint32 {
 }
 
 func (c *ConmonClient) Shutdown() error {
-	return syscall.Kill(int(c.serverPID), syscall.SIGINT)
+	if err := syscall.Kill(int(c.serverPID), syscall.SIGINT); err != nil {
+		return fmt.Errorf("kill server PID: %w", err)
+	}
+
+	return nil
 }
 
 func (c *ConmonClient) pidFile() string {
@@ -576,7 +600,7 @@ type ReopenLogContainerConfig struct {
 func (c *ConmonClient) ReopenLogContainer(ctx context.Context, cfg *ReopenLogContainerConfig) error {
 	conn, err := c.newRPCConn()
 	if err != nil {
-		return err
+		return fmt.Errorf("create RPC connection: %w", err)
 	}
 	defer conn.Close()
 	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
@@ -584,23 +608,28 @@ func (c *ConmonClient) ReopenLogContainer(ctx context.Context, cfg *ReopenLogCon
 	future, free := client.ReopenLogContainer(ctx, func(p proto.Conmon_reopenLogContainer_Params) error {
 		req, err := p.NewRequest()
 		if err != nil {
-			return err
-		}
-		if err := req.SetId(cfg.ID); err != nil {
-			return err
+			return fmt.Errorf("create request: %w", err)
 		}
 
-		return p.SetRequest(req)
+		if err := req.SetId(cfg.ID); err != nil {
+			return fmt.Errorf("set ID: %w", err)
+		}
+
+		if err := p.SetRequest(req); err != nil {
+			return fmt.Errorf("set request: %w", err)
+		}
+
+		return nil
 	})
 	defer free()
 
 	result, err := future.Struct()
 	if err != nil {
-		return err
+		return fmt.Errorf("create result: %w", err)
 	}
 
 	if _, err := result.Response(); err != nil {
-		return err
+		return fmt.Errorf("set response: %w", err)
 	}
 
 	return nil
