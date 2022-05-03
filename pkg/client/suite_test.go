@@ -170,7 +170,8 @@ func (tr *testRunner) configGivenEnv() *client.ConmonClient {
 }
 
 func vmRSSGivenPID(pid uint32) uint32 {
-	procEntry := filepath.Join("/proc", strconv.Itoa(int(pid)), "status")
+	const procPath = "/proc"
+	procEntry := filepath.Join(procPath, strconv.Itoa(int(pid)), "status")
 
 	f, err := os.Open(procEntry)
 	Expect(err).To(BeNil())
@@ -200,13 +201,13 @@ func cacheBusyBox() error {
 		return nil
 	}
 	if err := os.MkdirAll(busyboxDestDir, 0o755); err != nil && !os.IsExist(err) {
-		return err
+		return fmt.Errorf("create busybox dest dir: %w", err)
 	}
 	if err := downloadFile(busyboxSource, busyboxDest); err != nil {
-		return err
+		return fmt.Errorf("download busybox: %w", err)
 	}
 	if err := os.Chmod(busyboxDest, 0o777); err != nil {
-		return err
+		return fmt.Errorf("change busybox permissions: %w", err)
 	}
 
 	return nil
@@ -220,7 +221,7 @@ func downloadFile(url, path string) error {
 	// Create the file
 	out, err := os.Create(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("create path: %w", err)
 	}
 	defer out.Close()
 
@@ -228,14 +229,14 @@ func downloadFile(url, path string) error {
 	c := http.Client{Timeout: time.Minute}
 	resp, err := c.Get(url)
 	if err != nil {
-		return err
+		return fmt.Errorf("get URL: %w", err)
 	}
 	defer resp.Body.Close()
 
 	// Write the body to file
 	_, err = io.Copy(out, resp.Body)
 	if err != nil {
-		return err
+		return fmt.Errorf("copy response: %w", err)
 	}
 
 	return nil
@@ -249,7 +250,7 @@ func generateRuntimeConfigWithProcessArgs(bundlePath, rootfs string, terminal bo
 	configPath := filepath.Join(bundlePath, "config.json")
 	g, err := generate.New("linux")
 	if err != nil {
-		return err
+		return fmt.Errorf("create linux config: %w", err)
 	}
 	g.SetProcessCwd("/")
 	g.SetProcessTerminal(terminal)
@@ -259,7 +260,11 @@ func generateRuntimeConfigWithProcessArgs(bundlePath, rootfs string, terminal bo
 		specconv.ToRootless(g.Config)
 	}
 
-	return g.SaveToFile(configPath, generate.ExportOptions{})
+	if err := g.SaveToFile(configPath, generate.ExportOptions{}); err != nil {
+		return fmt.Errorf("save to file: %w", err)
+	}
+
+	return nil
 }
 
 func (rr *RuntimeRunner) RunCommand(args ...string) error {
@@ -281,10 +286,10 @@ func (rr *RuntimeRunner) RunCommandCheckOutput(pattern string, args ...string) e
 	}
 	match, err := regexp.MatchString(pattern, stdoutString)
 	if err != nil {
-		return err
+		return fmt.Errorf("match regex pattern: %w", err)
 	}
 	if !match {
-		return fmt.Errorf("Expected %s to be a substr of %s", pattern, stdoutString)
+		return fmt.Errorf("expected %s to be a substr of %s", pattern, stdoutString)
 	}
 
 	return nil
@@ -294,11 +299,12 @@ func (rr *RuntimeRunner) runCommand(args ...string) (string, error) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
+	// nolint:gosec // this is intentional
 	cmd := exec.Command(runtimePath, append(rr.runtimeRootArgs(), args...)...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", err
+		return "", fmt.Errorf("run command: %w", err)
 	}
 
 	return stdout.String(), nil

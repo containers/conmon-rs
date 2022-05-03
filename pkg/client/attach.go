@@ -70,7 +70,7 @@ type AttachConfig struct {
 func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) error {
 	conn, err := c.newRPCConn()
 	if err != nil {
-		return err
+		return fmt.Errorf("create RPC connection: %w", err)
 	}
 	defer func() {
 		if err := conn.Close(); err != nil {
@@ -82,14 +82,17 @@ func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) e
 	future, free := client.AttachContainer(ctx, func(p proto.Conmon_attachContainer_Params) error {
 		req, err := p.NewRequest()
 		if err != nil {
-			return err
+			return fmt.Errorf("create request: %w", err)
 		}
+
 		if err := req.SetId(cfg.ID); err != nil {
-			return err
+			return fmt.Errorf("set ID: %w", err)
 		}
+
 		if err := req.SetSocketPath(cfg.SocketPath); err != nil {
-			return err
+			return fmt.Errorf("set socket path: %w", err)
 		}
+
 		// TODO: add exec session
 		return nil
 	})
@@ -97,21 +100,22 @@ func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) e
 
 	result, err := future.Struct()
 	if err != nil {
-		return err
+		return fmt.Errorf("create result: %w", err)
 	}
 
 	if _, err := result.Response(); err != nil {
-		return err
+		return fmt.Errorf("set response: %w", err)
 	}
 
-	return c.attach(ctx, cfg)
+	if err := c.attach(ctx, cfg); err != nil {
+		return fmt.Errorf("run attach: %w", err)
+	}
+
+	return nil
 }
 
-func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) error {
-	var (
-		conn *net.UnixConn
-		err  error
-	)
+func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) (err error) {
+	var conn *net.UnixConn
 	if !cfg.Passthrough {
 		c.logger.Debugf("Attaching to container %s", cfg.ID)
 
@@ -138,7 +142,7 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) error {
 
 	if cfg.PreAttachFunc != nil {
 		if err := cfg.PreAttachFunc(); err != nil {
-			return err
+			return fmt.Errorf("run pre attach func: %w", err)
 		}
 	}
 
@@ -149,11 +153,15 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) error {
 	receiveStdoutError, stdinDone := c.setupStdioChannels(cfg, conn)
 	if cfg.PostAttachFunc != nil {
 		if err := cfg.PostAttachFunc(); err != nil {
-			return err
+			return fmt.Errorf("run post attach func: %w", err)
 		}
 	}
 
-	return c.readStdio(cfg, conn, receiveStdoutError, stdinDone)
+	if err := c.readStdio(cfg, conn, receiveStdoutError, stdinDone); err != nil {
+		return fmt.Errorf("read stdio: %w", err)
+	}
+
+	return nil
 }
 
 func (c *ConmonClient) setupStdioChannels(
@@ -221,7 +229,11 @@ func (c *ConmonClient) redirectResponseToOutputStreams(cfg *AttachConfig, conn i
 		}
 	}
 
-	return err
+	if err != nil {
+		return fmt.Errorf("redirect response to output streams: %w", err)
+	}
+
+	return nil
 }
 
 func (c *ConmonClient) readStdio(
@@ -234,7 +246,12 @@ func (c *ConmonClient) readStdio(
 			return fmt.Errorf("%v: %w", closeErr, err)
 		}
 
-		return err
+		if err != nil {
+			return fmt.Errorf("got stdout error: %w", err)
+		}
+
+		return nil
+
 	case err = <-stdinDone:
 		// This particular case is for when we get a non-tty attach
 		// with --leave-stdin-open=true. We want to return as soon
@@ -272,12 +289,12 @@ type SetWindowSizeContainerConfig struct {
 
 func (c *ConmonClient) SetWindowSizeContainer(ctx context.Context, cfg *SetWindowSizeContainerConfig) error {
 	if cfg.Size == nil {
-		return fmt.Errorf("Terminal size cannot be nil")
+		return errors.New("terminal size cannot be nil")
 	}
 
 	conn, err := c.newRPCConn()
 	if err != nil {
-		return err
+		return fmt.Errorf("create RPC connection: %w", err)
 	}
 	defer conn.Close()
 	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
@@ -285,25 +302,31 @@ func (c *ConmonClient) SetWindowSizeContainer(ctx context.Context, cfg *SetWindo
 	future, free := client.SetWindowSizeContainer(ctx, func(p proto.Conmon_setWindowSizeContainer_Params) error {
 		req, err := p.NewRequest()
 		if err != nil {
-			return err
+			return fmt.Errorf("create request: %w", err)
 		}
+
 		if err := req.SetId(cfg.ID); err != nil {
-			return err
+			return fmt.Errorf("set ID: %w", err)
 		}
+
 		req.SetWidth(cfg.Size.Width)
 		req.SetHeight(cfg.Size.Height)
 
-		return p.SetRequest(req)
+		if err := p.SetRequest(req); err != nil {
+			return fmt.Errorf("set request: %w", err)
+		}
+
+		return nil
 	})
 	defer free()
 
 	result, err := future.Struct()
 	if err != nil {
-		return err
+		return fmt.Errorf("create result: %w", err)
 	}
 
 	if _, err := result.Response(); err != nil {
-		return err
+		return fmt.Errorf("set response: %w", err)
 	}
 
 	return nil
