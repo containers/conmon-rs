@@ -5,7 +5,7 @@ go 1.18
 require (
 	capnproto.org/go/capnp/v3 v3.0.0-alpha.2
 	github.com/containers/podman/v3 v3.4.7
-	github.com/containers/storage v1.39.0
+	github.com/containers/storage v1.40.0
 	github.com/onsi/ginkgo/v2 v2.1.4
 	github.com/onsi/gomega v1.19.0
 	github.com/opencontainers/runc v1.1.1
@@ -26,13 +26,13 @@ require (
 	github.com/godbus/dbus/v5 v5.0.6 // indirect
 	github.com/hashicorp/errwrap v1.0.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
-	github.com/klauspost/compress v1.15.1 // indirect
+	github.com/klauspost/compress v1.15.2 // indirect
 	github.com/klauspost/pgzip v1.2.5 // indirect
-	github.com/moby/sys/mountinfo v0.6.0 // indirect
+	github.com/moby/sys/mountinfo v0.6.1 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.0.2-0.20210819154149-5ad6f50d6283 // indirect
 	github.com/opencontainers/runtime-spec v1.0.3-0.20210326190908-1c3f411f0417 // indirect
-	github.com/opencontainers/selinux v1.10.0 // indirect
+	github.com/opencontainers/selinux v1.10.1 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/seccomp/libseccomp-golang v0.9.2-0.20210429002308-3879420cc921 // indirect
 	github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 // indirect
