@@ -7,7 +7,7 @@ shadow!(build);
 
 #[derive(CopyGetters, Debug, Default, Eq, PartialEq)]
 #[getset(get_copy = "pub")]
-/// The version structure for conmon.
+/// The version structure.
 pub struct Version {
     /// The current crate version.
     version: &'static str,
