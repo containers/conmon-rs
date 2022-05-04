@@ -2,7 +2,6 @@
 use anyhow::{bail, Result};
 use clap::{AppSettings, Parser};
 use getset::{CopyGetters, Getters, Setters};
-use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
@@ -27,7 +26,7 @@ pub struct Config {
     /// Show version information.
     version: bool,
 
-    #[get_copy = "pub"]
+    #[get = "pub"]
     #[clap(
         default_value("info"),
         env(concat!(prefix!(), "LOG_LEVEL")),
@@ -37,7 +36,7 @@ pub struct Config {
         value_name("LEVEL")
     )]
     /// The logging level of the conmon server.
-    log_level: LevelFilter,
+    log_level: String,
 
     #[get_copy = "pub"]
     #[clap(

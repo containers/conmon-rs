@@ -4,7 +4,6 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use getset::{Getters, MutGetters};
-use log::{debug, error};
 use nix::errno::Errno;
 use std::{
     os::unix::io::{FromRawFd, RawFd},
@@ -22,6 +21,7 @@ use tokio::{
     },
     time::{self, Instant},
 };
+use tracing::{debug, error};
 
 /// A shared container IO abstraction.
 #[derive(Debug, Clone)]

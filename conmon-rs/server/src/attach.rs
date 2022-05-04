@@ -1,6 +1,5 @@
 use crate::{container_io::Pipe, listener};
 use anyhow::{bail, Context, Result};
-use log::{debug, error};
 use nix::sys::socket::{bind, listen, socket, AddressFamily, SockFlag, SockType, UnixAddr};
 use std::{
     os::unix::{
@@ -18,6 +17,7 @@ use tokio::{
     task,
     time::{timeout, Duration},
 };
+use tracing::{debug, debug_span, error, Instrument};
 
 #[derive(Debug, Clone, Default)]
 /// A shared container attach abstraction.
@@ -112,11 +112,14 @@ impl Attach {
 
         let clients = Arc::new(RwLock::new(vec![]));
         let clients_clone = clients.clone();
-        task::spawn(async move {
-            if let Err(e) = Self::start_listening(fd, clients_clone).await {
-                error!("Attach failure: {:#}", e);
+        task::spawn(
+            async move {
+                if let Err(e) = Self::start_listening(fd, clients_clone).await {
+                    error!("Attach failure: {:#}", e);
+                }
             }
-        });
+            .instrument(debug_span!("attach")),
+        );
 
         Ok(Self {
             clients,

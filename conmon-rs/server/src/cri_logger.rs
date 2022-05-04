@@ -4,7 +4,6 @@ use crate::container_io::Pipe;
 use anyhow::{Context, Result};
 use chrono::offset::Local;
 use getset::{CopyGetters, Getters, Setters};
-use log::{debug, trace};
 use memchr::memchr;
 use std::{
     marker::Unpin,
@@ -14,6 +13,7 @@ use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
 };
+use tracing::{debug, trace};
 
 #[derive(Debug, CopyGetters, Getters, Setters)]
 /// The main structure used for container log handling.

@@ -13,14 +13,13 @@ use capnp_rpc::{rpc_twoparty_capnp::Side, twoparty, RpcSystem};
 use conmon_common::conmon_capnp::conmon;
 use futures::{AsyncReadExt, FutureExt};
 use getset::Getters;
-use log::{debug, info};
 use nix::{
     errno,
     libc::_exit,
     sys::signal::Signal,
     unistd::{fork, ForkResult},
 };
-use std::{fs::File, io::Write, path::Path, process, sync::Arc};
+use std::{fs::File, io::Write, path::Path, process, str::FromStr, sync::Arc};
 use tokio::{
     fs,
     runtime::{Builder, Handle},
@@ -29,6 +28,8 @@ use tokio::{
     task::{self, LocalSet},
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
+use tracing::{debug, info};
+use tracing_subscriber::{filter::LevelFilter, prelude::*};
 use twoparty::VatNetwork;
 
 #[derive(Debug, Getters)]
@@ -104,17 +105,27 @@ impl Server {
     }
 
     fn init_logging(&self) -> Result<()> {
+        let level =
+            LevelFilter::from_str(self.config().log_level()).context("convert log level filter")?;
+        let registry = tracing_subscriber::registry();
+
         match self.config().log_driver() {
             LogDriver::Stdout => {
-                simple_logger::init().context("init stdout logger")?;
+                let layer = tracing_subscriber::fmt::layer()
+                    .with_target(true)
+                    .with_line_number(true)
+                    .with_filter(level);
+                registry.with(layer).init();
                 info!("Using stdout logger");
             }
             LogDriver::Systemd => {
-                systemd_journal_logger::init().context("init journal logger")?;
-                info!("Using systemd logger");
+                let layer = tracing_journald::layer()
+                    .context("unable to connect to journald")?
+                    .with_filter(level);
+                registry.with(layer).init();
+                info!("Using systemd/journald logger");
             }
         }
-        log::set_max_level(self.config().log_level());
         info!("Set log level to: {}", self.config().log_level());
         Ok(())
     }

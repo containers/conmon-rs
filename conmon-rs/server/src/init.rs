@@ -1,12 +1,12 @@
 use anyhow::{bail, Result};
 use libc::{c_char, c_int, setlocale, LC_ALL};
-use log::info;
 use std::{
     ffi::CString,
     fs::File,
     io::{self, ErrorKind, Write},
     path::Path,
 };
+use tracing::info;
 
 #[cfg(test)]
 use mockall::{automock, predicate::*};
