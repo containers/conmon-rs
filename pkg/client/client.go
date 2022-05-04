@@ -404,6 +404,9 @@ type CreateContainerConfig struct {
 	// ExitPaths is a slice of paths to write the exit statuses.
 	ExitPaths []string
 
+	// OOMExitPaths is a slice of files that should be created if the given container is OOM killed.
+	OOMExitPaths []string
+
 	// LogDrivers is a slice of selected log drivers.
 	LogDrivers []LogDriver
 }
@@ -457,6 +460,9 @@ func (c *ConmonClient) CreateContainer(
 		req.SetTerminal(cfg.Terminal)
 		if err := stringSliceToTextList(cfg.ExitPaths, req.NewExitPaths); err != nil {
 			return fmt.Errorf("convert string slice to text list: %w", err)
+		}
+		if err := stringSliceToTextList(cfg.OOMExitPaths, req.NewOomExitPaths); err != nil {
+			return err
 		}
 
 		if err := c.initLogDrivers(&req, cfg.LogDrivers); err != nil {
