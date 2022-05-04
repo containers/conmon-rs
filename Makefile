@@ -57,7 +57,7 @@ clean:
 	rm -rf target/
 
 update-proto:
-	go install capnproto.org/go/capnp/v3/capnpc-go@latest
+	go install capnproto.org/go/capnp/v3/capnpc-go@v3.0.0-alpha.1
 	cat $(PROTO_PATH)/go-patch >> $(PROTO_PATH)/conmon.capnp
 	capnp compile \
 		-I$$GOPATH/src/capnproto.org/go/capnp/std \
