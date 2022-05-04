@@ -20,6 +20,7 @@ const (
 	attachPipeStderr    = 3
 )
 
+// AttachStreams are the stdio streams for the AttachConfig.
 type AttachStreams struct {
 	// Standard input stream, can be nil.
 	Stdin *In
@@ -31,42 +32,58 @@ type AttachStreams struct {
 	Stderr *Out
 }
 
+// In defines an input stream.
 type In struct {
+	// Wraps an io.Reader
 	io.Reader
 }
 
+// Out defines an output stream.
 type Out struct {
+	// Wraps an io.WriteCloser
 	io.WriteCloser
 }
 
+// AttachConfig is the configuration for running the Attach method.
 type AttachConfig struct {
 	// ID of the container.
 	ID string
+
 	// Path of the attach socket.
 	SocketPath string
+
 	// ExecSession ID, if this is an attach for an Exec.
 	ExecSession string
+
 	// Whether a terminal was setup for the command this is attaching to.
 	Tty bool
+
 	// Whether stdout/stderr should continue to be processed after stdin is closed.
 	StopAfterStdinEOF bool
+
 	// Whether the output is passed through the caller's std streams, rather than
 	// ones created for the attach session.
 	Passthrough bool
+
 	// Channel of resize events.
 	Resize chan define.TerminalSize
+
 	// The standard streams for this attach session.
 	Streams AttachStreams
+
 	// A closure to be run before the streams are attached.
 	// This could be used to start a container.
 	PreAttachFunc func() error
+
 	// A closure to be run after the streams are attached.
 	// This could be used to notify callers the streams have been attached.
 	PostAttachFunc func() error
+
 	// The keys that indicate the attach session should be detached.
 	DetachKeys []byte
 }
 
+// AttachContainer can be used to attach to a running container.
 func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) error {
 	conn, err := c.newRPCConn()
 	if err != nil {
@@ -282,11 +299,16 @@ func (c *ConmonClient) readStdio(
 	return nil
 }
 
+// SetWindowSizeContainerConfig is the configuration for calling the SetWindowSizeContainer method.
 type SetWindowSizeContainerConfig struct {
-	ID   string
+	// ID specifies the container ID.
+	ID string
+
+	// Size is the new terminal size.
 	Size *define.TerminalSize
 }
 
+// SetWindowSizeContainer can be used to change the window size of a running container.
 func (c *ConmonClient) SetWindowSizeContainer(ctx context.Context, cfg *SetWindowSizeContainerConfig) error {
 	if cfg.Size == nil {
 		return errors.New("terminal size cannot be nil")
