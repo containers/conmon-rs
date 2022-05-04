@@ -195,6 +195,7 @@ impl conmon::Server for Server {
         })
     }
 
+    /// Rotate all log drivers for a running container.
     fn reopen_log_container(
         &mut self,
         params: conmon::ReopenLogContainerParams,
