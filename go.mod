@@ -4,8 +4,8 @@ go 1.18
 
 require (
 	capnproto.org/go/capnp/v3 v3.0.0-alpha.2
-	github.com/containers/podman/v3 v3.4.7
-	github.com/containers/storage v1.40.2
+	github.com/containers/podman/v3 v3.2.0-rc1.0.20211005134800-8bcc086b1b9d
+	github.com/containers/storage v1.40.0
 	github.com/onsi/ginkgo/v2 v2.1.4
 	github.com/onsi/gomega v1.19.0
 	github.com/opencontainers/runc v1.1.1
@@ -45,6 +45,6 @@ require (
 	golang.org/x/sys v0.0.0-20220319134239-a9b59b0215f8 // indirect
 	golang.org/x/text v0.3.7 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
-	k8s.io/apimachinery v0.22.1 // indirect
+	k8s.io/apimachinery v0.22.2 // indirect
 	k8s.io/klog/v2 v2.9.0 // indirect
 )
