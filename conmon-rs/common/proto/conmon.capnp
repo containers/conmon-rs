@@ -21,7 +21,8 @@ interface Conmon {
         bundlePath @1 :Text;
         terminal @2 :Bool;
         exitPaths @3 :List(Text);
-        logDrivers @4 :List(LogDriver);
+        oomExitPaths @4 :List(Text);
+        logDrivers @5 :List(LogDriver);
     }
 
     struct LogDriver {
