@@ -25,6 +25,13 @@ const (
 	pidFileName = "pidfile"
 )
 
+var (
+	errRuntimeUnspecified = errors.New("runtime must be specified")
+	errRunDirUnspecified  = errors.New("RunDir must be specified")
+	errInvalidValue       = errors.New("invalid value")
+	errRunDirNotCreated   = errors.New("could not create RunDir")
+)
+
 // ConmonClient is the main client structure of this package.
 type ConmonClient struct {
 	serverPID uint32
@@ -132,7 +139,7 @@ func New(config *ConmonServerConfig) (client *ConmonClient, retErr error) {
 func (c *ConmonServerConfig) toClient() (*ConmonClient, error) {
 	const perm = 0o755
 	if err := os.MkdirAll(c.ServerRunDir, perm); err != nil && !os.IsExist(err) {
-		return nil, fmt.Errorf("couldn't create run dir %s", c.ServerRunDir)
+		return nil, fmt.Errorf("%s: %w", c.ServerRunDir, errRunDirNotCreated)
 	}
 
 	if c.ClientLogger == nil {
@@ -188,12 +195,12 @@ func (c *ConmonClient) toArgs(config *ConmonServerConfig) (entrypoint string, ar
 		entrypoint = path
 	}
 	if config.Runtime == "" {
-		return "", args, errors.New("runtime must be specified")
+		return "", args, errRuntimeUnspecified
 	}
 	args = append(args, "--runtime", config.Runtime)
 
 	if config.ServerRunDir == "" {
-		return "", args, errors.New("RunDir must be specified")
+		return "", args, errRunDirUnspecified
 	}
 	args = append(args, "--runtime-dir", config.ServerRunDir)
 
@@ -241,7 +248,7 @@ func validateStringSlice(typ, given string, possibleValues ...string) error {
 		}
 	}
 
-	return fmt.Errorf("%s %q is invalid", typ, given)
+	return fmt.Errorf("%w: %s %q", errInvalidValue, typ, given)
 }
 
 func pidGivenFile(file string) (uint32, error) {
@@ -459,10 +466,10 @@ func (c *ConmonClient) CreateContainer(
 		}
 		req.SetTerminal(cfg.Terminal)
 		if err := stringSliceToTextList(cfg.ExitPaths, req.NewExitPaths); err != nil {
-			return fmt.Errorf("convert string slice to text list: %w", err)
+			return fmt.Errorf("convert exit paths string slice to text list: %w", err)
 		}
 		if err := stringSliceToTextList(cfg.OOMExitPaths, req.NewOomExitPaths); err != nil {
-			return err
+			return fmt.Errorf("convert oom exit paths string slice to text list: %w", err)
 		}
 
 		if err := c.initLogDrivers(&req, cfg.LogDrivers); err != nil {

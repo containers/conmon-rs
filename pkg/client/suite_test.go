@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -279,6 +280,8 @@ func (rr *RuntimeRunner) RunCommand(args ...string) error {
 	return nil
 }
 
+var errNoMatch = errors.New("regex does not match")
+
 func (rr *RuntimeRunner) RunCommandCheckOutput(pattern string, args ...string) error {
 	stdoutString, err := rr.runCommand(args...)
 	if err != nil {
@@ -289,7 +292,7 @@ func (rr *RuntimeRunner) RunCommandCheckOutput(pattern string, args ...string) e
 		return fmt.Errorf("match regex pattern: %w", err)
 	}
 	if !match {
-		return fmt.Errorf("expected %s to be a substr of %s", pattern, stdoutString)
+		return fmt.Errorf("expected %s to be a substr of %s: %w", pattern, stdoutString, errNoMatch)
 	}
 
 	return nil
