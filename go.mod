@@ -8,7 +8,7 @@ require (
 	github.com/containers/storage v1.37.0
 	github.com/onsi/ginkgo/v2 v2.1.4
 	github.com/onsi/gomega v1.19.0
-	github.com/opencontainers/runc v1.0.2
+	github.com/opencontainers/runc v1.0.3
 	github.com/opencontainers/runtime-tools v0.9.0
 	github.com/sirupsen/logrus v1.8.1
 )
