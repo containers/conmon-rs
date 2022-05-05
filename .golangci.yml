@@ -2,11 +2,6 @@
 run:
   concurrency: 6
   deadline: 5m
-issues:
-  exclude-rules:
-    - linters:
-        - goerr113
-      text: do not define dynamic errors, use wrapped static errors instead
 linters:
   disable-all: true
   enable:
@@ -85,6 +80,7 @@ linters:
     - unparam
     - unused
     - varcheck
+    - varnamelen
     - wastedassign
     - whitespace
     - wrapcheck
@@ -92,9 +88,10 @@ linters:
     # - forbidigo
     # - gochecknoglobals
     # - paralleltest
-    # - varnamelen
     # - wsl
 linters-settings:
+  varnamelen:
+    min-name-length: 1
   cyclop:
     max-complexity: 15
   gocognit:

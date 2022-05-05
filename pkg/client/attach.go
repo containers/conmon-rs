@@ -20,6 +20,11 @@ const (
 	attachPipeStderr    = 3
 )
 
+var (
+	errOutputDestNil   = errors.New("output destination cannot be nil")
+	errTerminalSizeNil = errors.New("terminal size cannot be nil")
+)
+
 // AttachStreams are the stdio streams for the AttachConfig.
 type AttachStreams struct {
 	// Standard input stream, can be nil.
@@ -219,7 +224,7 @@ func (c *ConmonClient) redirectResponseToOutputStreams(cfg *AttachConfig, conn i
 				c.logger.Infof("Received unexpected attach type %+d", buf[0])
 			}
 			if dst == nil {
-				return errors.New("output destination cannot be nil")
+				return errOutputDestNil
 			}
 
 			if doWrite {
@@ -311,7 +316,7 @@ type SetWindowSizeContainerConfig struct {
 // SetWindowSizeContainer can be used to change the window size of a running container.
 func (c *ConmonClient) SetWindowSizeContainer(ctx context.Context, cfg *SetWindowSizeContainerConfig) error {
 	if cfg.Size == nil {
-		return errors.New("terminal size cannot be nil")
+		return errTerminalSizeNil
 	}
 
 	conn, err := c.newRPCConn()
