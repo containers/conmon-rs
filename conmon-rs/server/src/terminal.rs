@@ -4,11 +4,11 @@ use crate::{
     attach::SharedContainerAttach,
     container_io::{ContainerIO, Message, Pipe},
     container_log::SharedContainerLog,
+    listener,
 };
 use anyhow::{bail, format_err, Context, Result};
 use getset::{Getters, MutGetters, Setters};
 use libc::{self, winsize, TIOCSWINSZ};
-use log::{debug, error, trace};
 use nix::sys::termios::{self, OutputFlags, SetArg};
 use sendfd::RecvWithFd;
 use std::{
@@ -24,6 +24,7 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
     task,
 };
+use tracing::{debug, debug_span, error, trace, Instrument};
 
 #[derive(Debug, Getters, MutGetters, Setters)]
 pub struct Terminal {
@@ -65,22 +66,25 @@ impl Terminal {
         let (connected_tx, connected_rx) = mpsc::channel(1);
         let (message_tx, message_rx) = mpsc::unbounded_channel();
 
-        task::spawn(async move {
-            if let Err(e) = Self::listen(
-                Config {
-                    path: path_clone,
-                    ready_tx,
-                    connected_tx,
-                    message_tx,
-                },
-                logger,
-                attach,
-            )
-            .await
-            {
-                error!("Unable to listen on terminal: {:#}", e);
-            };
-        });
+        task::spawn(
+            async move {
+                if let Err(e) = Self::listen(
+                    Config {
+                        path: path_clone,
+                        ready_tx,
+                        connected_tx,
+                        message_tx,
+                    },
+                    logger,
+                    attach,
+                )
+                .await
+                {
+                    error!("Unable to listen on terminal: {:#}", e);
+                };
+            }
+            .instrument(debug_span!("listen")),
+        );
         ready_rx.recv().context("wait for listener to be ready")?;
 
         Ok(Self {
@@ -131,7 +135,7 @@ impl Terminal {
     ) -> Result<()> {
         let path = config.path();
         debug!("Listening terminal socket on {}", path.display());
-        let listener = crate::listener::bind_long_path(path)?;
+        let listener = listener::bind_long_path(path)?;
 
         // Update the permissions
         let mut perms = fs::metadata(path).await?.permissions();
@@ -187,31 +191,37 @@ impl Terminal {
                     termios::tcsetattr(fd, SetArg::TCSANOW, &term)?;
 
                     let attach_clone = attach.clone();
-                    task::spawn(async move {
-                        config
-                            .connected_tx
-                            .send(fd)
+                    task::spawn(
+                        async move {
+                            config
+                                .connected_tx
+                                .send(fd)
+                                .await
+                                .context("send connected channel")?;
+                            if let Err(e) = ContainerIO::read_loop(
+                                fd,
+                                Pipe::StdOut,
+                                logger,
+                                config.message_tx,
+                                attach_clone,
+                            )
                             .await
-                            .context("send connected channel")?;
-                        if let Err(e) = ContainerIO::read_loop(
-                            fd,
-                            Pipe::StdOut,
-                            logger,
-                            config.message_tx,
-                            attach_clone,
-                        )
-                        .await
-                        {
-                            error!("Stdout read loop failure: {:#}", e)
+                            {
+                                error!("Stdout read loop failure: {:#}", e)
+                            }
+                            Ok::<_, anyhow::Error>(())
                         }
-                        Ok::<_, anyhow::Error>(())
-                    });
+                        .instrument(debug_span!("read_loop")),
+                    );
 
-                    task::spawn(async move {
-                        if let Err(e) = ContainerIO::read_loop_stdin(fd, attach).await {
-                            error!("Stdin read loop failure: {:#}", e);
+                    task::spawn(
+                        async move {
+                            if let Err(e) = ContainerIO::read_loop_stdin(fd, attach).await {
+                                error!("Stdin read loop failure: {:#}", e);
+                            }
                         }
-                    });
+                        .instrument(debug_span!("read_loop_stdin")),
+                    );
 
                     debug!("Shutting down listener thread");
                     return Ok(());

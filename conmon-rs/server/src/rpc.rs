@@ -10,12 +10,13 @@ use anyhow::Context;
 use capnp::{capability::Promise, Error};
 use capnp_rpc::pry;
 use conmon_common::conmon_capnp::conmon;
-use log::{debug, error};
 use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
 use tokio::time::Instant;
+use tracing::{debug, debug_span, error, Instrument};
+use uuid::Uuid;
 
 macro_rules! pry_err {
     ($x:expr) => {
@@ -26,6 +27,16 @@ macro_rules! pry_err {
 macro_rules! capnp_err {
     ($x:expr) => {
         $x.map_err(|e| Error::failed(format!("{:#}", e)))
+    };
+}
+
+macro_rules! new_root_span {
+    ($name:expr, $container_id:expr) => {
+        debug_span!(
+            $name,
+            container_id = $container_id,
+            uuid = Uuid::new_v4().to_string().as_str()
+        )
     };
 }
 
@@ -56,7 +67,11 @@ impl conmon::Server for Server {
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
         let id = pry!(req.get_id()).to_string();
-        debug!("Got a create container request for id {}", id);
+
+        let span = new_root_span!("create_container", id.as_str());
+        let _enter = span.enter();
+
+        debug!("Got a create container request");
 
         let log_drivers = pry!(req.get_log_drivers());
         let container_log = pry_err!(ContainerLog::from(log_drivers));
@@ -75,26 +90,29 @@ impl conmon::Server for Server {
             .map(|r| r.map(PathBuf::from))
             .collect());
 
-        Promise::from_future(async move {
-            capnp_err!(container_log.write().await.init().await)?;
+        Promise::from_future(
+            async move {
+                capnp_err!(container_log.write().await.init().await)?;
 
-            let grandchild_pid = capnp_err!(
-                child_reaper
-                    .create_child(runtime, args, &mut container_io, &pidfile)
-                    .await
-            )?;
+                let grandchild_pid = capnp_err!(
+                    child_reaper
+                        .create_child(runtime, args, &mut container_io, &pidfile)
+                        .await
+                )?;
 
-            // register grandchild with server
-            let io = SharedContainerIO::new(container_io);
-            let child = Child::new(id, grandchild_pid, exit_paths, None, io);
-            capnp_err!(child_reaper.watch_grandchild(child))?;
+                // register grandchild with server
+                let io = SharedContainerIO::new(container_io);
+                let child = Child::new(id, grandchild_pid, exit_paths, None, io);
+                capnp_err!(child_reaper.watch_grandchild(child))?;
 
-            results
-                .get()
-                .init_response()
-                .set_container_pid(grandchild_pid);
-            Ok(())
-        })
+                results
+                    .get()
+                    .init_response()
+                    .set_container_pid(grandchild_pid);
+                Ok(())
+            }
+            .instrument(debug_span!("promise")),
+        )
     }
 
     /// Execute a command in sync inside of a container.
@@ -113,10 +131,10 @@ impl conmon::Server for Server {
             "pid"
         ));
 
-        debug!(
-            "Got exec sync container request for id {} with timeout {}",
-            id, timeout,
-        );
+        let span = new_root_span!("exec_sync_container", id.as_str());
+        let _enter = span.enter();
+
+        debug!("Got exec sync container request with timeout {}", timeout);
 
         let runtime = self.config().runtime().clone();
         let child_reaper = self.reaper().clone();
@@ -127,44 +145,48 @@ impl conmon::Server for Server {
         let command = pry!(req.get_command());
         let args = pry_err!(self.generate_exec_sync_args(&id, &pidfile, &container_io, &command));
 
-        Promise::from_future(async move {
-            match child_reaper
-                .create_child(&runtime, &args, &mut container_io, &pidfile)
-                .await
-            {
-                Ok(grandchild_pid) => {
-                    let time_to_timeout = if timeout > 0 {
-                        Some(Instant::now() + Duration::from_secs(timeout))
-                    } else {
-                        None
-                    };
-                    let mut resp = results.get().init_response();
-                    // register grandchild with server
-                    let io = SharedContainerIO::new(container_io);
-                    let io_clone = io.clone();
-                    let child = Child::new(id, grandchild_pid, vec![], time_to_timeout, io_clone);
+        Promise::from_future(
+            async move {
+                match child_reaper
+                    .create_child(&runtime, &args, &mut container_io, &pidfile)
+                    .await
+                {
+                    Ok(grandchild_pid) => {
+                        let time_to_timeout = if timeout > 0 {
+                            Some(Instant::now() + Duration::from_secs(timeout))
+                        } else {
+                            None
+                        };
+                        let mut resp = results.get().init_response();
+                        // register grandchild with server
+                        let io = SharedContainerIO::new(container_io);
+                        let io_clone = io.clone();
+                        let child =
+                            Child::new(id, grandchild_pid, vec![], time_to_timeout, io_clone);
 
-                    let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child))?;
+                        let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child))?;
 
-                    let (stdout, stderr, timed_out) =
-                        io.read_all_with_timeout(time_to_timeout).await;
+                        let (stdout, stderr, timed_out) =
+                            io.read_all_with_timeout(time_to_timeout).await;
 
-                    let exit_data = capnp_err!(exit_rx.recv().await)?;
-                    resp.set_stdout(&stdout);
-                    resp.set_stderr(&stderr);
-                    resp.set_exit_code(*exit_data.exit_code());
-                    if timed_out || exit_data.timed_out {
-                        resp.set_timed_out(true);
+                        let exit_data = capnp_err!(exit_rx.recv().await)?;
+                        resp.set_stdout(&stdout);
+                        resp.set_stderr(&stderr);
+                        resp.set_exit_code(*exit_data.exit_code());
+                        if timed_out || exit_data.timed_out {
+                            resp.set_timed_out(true);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Unable to create child: {:#}", e);
+                        let mut resp = results.get().init_response();
+                        resp.set_exit_code(-2);
                     }
                 }
-                Err(e) => {
-                    error!("Unable to create child: {:#}", e);
-                    let mut resp = results.get().init_response();
-                    resp.set_exit_code(-2);
-                }
+                Ok(())
             }
-            Ok(())
-        })
+            .instrument(debug_span!("promise")),
+        )
     }
 
     /// Attach to a running container.
@@ -175,10 +197,11 @@ impl conmon::Server for Server {
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
         let container_id = pry_err!(req.get_id());
-        debug!(
-            "Got a attach container request for container id {}",
-            container_id
-        );
+
+        let span = new_root_span!("attach_container", container_id);
+        let _enter = span.enter();
+
+        debug!("Got a attach container request",);
 
         let exec_session_id = pry_err!(req.get_exec_session_id());
         if !exec_session_id.is_empty() {
@@ -189,10 +212,13 @@ impl conmon::Server for Server {
         let attach = pry_err!(Attach::new(socket_path).context("create attach endpoint"));
         let child = pry_err!(self.reaper().get(container_id));
 
-        Promise::from_future(async move {
-            child.io().attach().await.add(attach).await;
-            Ok(())
-        })
+        Promise::from_future(
+            async move {
+                child.io().attach().await.add(attach).await;
+                Ok(())
+            }
+            .instrument(debug_span!("promise")),
+        )
     }
 
     /// Rotate all log drivers for a running container.
@@ -203,16 +229,18 @@ impl conmon::Server for Server {
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
         let container_id = pry_err!(req.get_id());
-        debug!(
-            "Got a reopen container log request for container id {}",
-            container_id
-        );
+
+        let span = new_root_span!("reopen_log_container", container_id);
+        let _enter = span.enter();
+
+        debug!("Got a reopen container log request");
 
         let child = pry_err!(self.reaper().get(container_id));
 
-        Promise::from_future(async move {
-            capnp_err!(child.io().logger().await.write().await.reopen().await)
-        })
+        Promise::from_future(
+            async move { capnp_err!(child.io().logger().await.write().await.reopen().await) }
+                .instrument(debug_span!("promise")),
+        )
     }
 
     /// Adjust the window size of a container running inside of a terminal.
@@ -224,15 +252,18 @@ impl conmon::Server for Server {
         let req = pry!(pry!(params.get()).get_request());
         let container_id = pry_err!(req.get_id());
 
-        debug!(
-            "Got a set window size container request for container id {}",
-            container_id,
-        );
+        let span = new_root_span!("set_window_size_container", container_id);
+        let _enter = span.enter();
+
+        debug!("Got a set window size container request");
 
         let child = pry_err!(self.reaper().get(container_id));
         let width = req.get_width();
         let height = req.get_height();
 
-        Promise::from_future(async move { capnp_err!(child.io().resize(width, height).await) })
+        Promise::from_future(
+            async move { capnp_err!(child.io().resize(width, height).await) }
+                .instrument(debug_span!("promise")),
+        )
     }
 }

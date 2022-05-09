@@ -6,7 +6,6 @@ use crate::{
 use anyhow::{anyhow, format_err, Context, Result};
 use getset::{CopyGetters, Getters, Setters};
 use libc::pid_t;
-use log::{debug, error};
 use multimap::MultiMap;
 use nix::errno::Errno;
 use nix::sys::wait::WaitPidFlag;
@@ -32,6 +31,7 @@ use tokio::{
     task,
     time::{self, Instant},
 };
+use tracing::{debug, debug_span, error, Instrument};
 
 #[derive(Debug, Default, Getters)]
 pub struct ChildReaper {
@@ -122,10 +122,13 @@ impl ChildReaper {
         let cleanup_grandchildren = locked_grandchildren.clone();
         let pid = child.pid();
 
-        task::spawn(async move {
-            exit_tx.subscribe().recv().await?;
-            Self::forget_grandchild(&cleanup_grandchildren, pid)
-        });
+        task::spawn(
+            async move {
+                exit_tx.subscribe().recv().await?;
+                Self::forget_grandchild(&cleanup_grandchildren, pid)
+            }
+            .instrument(debug_span!("watch_grandchild")),
+        );
         Ok(exit_rx)
     }
 
@@ -211,44 +214,49 @@ impl ReapableChild {
         let exit_tx_clone = exit_tx.clone();
         let timeout = *self.timeout();
 
-        task::spawn(async move {
-            let exit_code: i32;
-            let mut timed_out = false;
-            let wait_for_exit_code = task::spawn_blocking(move || Self::wait_for_exit_code(pid));
-            if let Some(timeout) = timeout {
-                match time::timeout_at(timeout, wait_for_exit_code).await {
-                    Ok(status) => match status {
-                        Ok(code) => exit_code = code,
-                        Err(err) => {
-                            return Err(err);
+        task::spawn(
+            async move {
+                let exit_code: i32;
+                let mut timed_out = false;
+                let wait_for_exit_code =
+                    task::spawn_blocking(move || Self::wait_for_exit_code(pid));
+                if let Some(timeout) = timeout {
+                    match time::timeout_at(timeout, wait_for_exit_code).await {
+                        Ok(status) => match status {
+                            Ok(code) => exit_code = code,
+                            Err(err) => {
+                                return Err(err);
+                            }
+                        },
+                        Err(_) => {
+                            timed_out = true;
+                            exit_code = -3;
+                            let _ = kill_grandchild(pid, Signal::SIGKILL);
                         }
-                    },
-                    Err(_) => {
-                        timed_out = true;
-                        exit_code = -3;
-                        let _ = kill_grandchild(pid, Signal::SIGKILL);
+                    }
+                } else {
+                    match wait_for_exit_code.await {
+                        Ok(code) => exit_code = code,
+                        Err(_) => exit_code = -1,
                     }
                 }
-            } else {
-                match wait_for_exit_code.await {
-                    Ok(code) => exit_code = code,
-                    Err(_) => exit_code = -1,
+                debug!(
+                    "Sending exit code to channel for pid {} : {}",
+                    pid, exit_code
+                );
+                let exit_channel_data = ExitChannelData {
+                    exit_code,
+                    timed_out,
+                };
+                if exit_tx_clone.send(exit_channel_data).is_err() {
+                    error!("Unable to send exit status");
                 }
+                let _ =
+                    Self::write_to_exit_paths(exit_code, &exit_paths).context("write exit paths");
+                Ok(())
             }
-            debug!(
-                "Sending exit code to channel for pid {} : {}",
-                pid, exit_code
-            );
-            let exit_channel_data = ExitChannelData {
-                exit_code,
-                timed_out,
-            };
-            if exit_tx_clone.send(exit_channel_data).is_err() {
-                error!("Unable to send exit status");
-            }
-            let _ = Self::write_to_exit_paths(exit_code, &exit_paths).context("write exit paths");
-            Ok(())
-        });
+            .instrument(debug_span!("watch")),
+        );
 
         Ok((exit_tx, exit_rx))
     }
