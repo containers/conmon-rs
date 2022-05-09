@@ -41,6 +41,12 @@ jobs:
           version: v1.45.2
           only-new-issues: true
 
+  get-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - run: scripts/get
+
   release-static:
     runs-on: ubuntu-latest
     steps:

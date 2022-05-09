@@ -17,6 +17,25 @@ Instead of a container engine creating a conmon per container (as well as subseq
 will spawn a conmon-rs instance when a pod is created. That instance will listen over an UNIX domain socket for new requests to
 create containers, and exec processes within them.
 
+## Obtain the latest version
+
+We provide statically linked binaries for every successfully built commit on
+`main` via our [Google Cloud Storage Bucket][bucket]. Our provided [get
+script](scripts/get) can be used to download the latest version:
+
+```console
+> curl https://raw.githubusercontent.com/containers/conmon-rs/main/scripts/get | bash
+```
+
+It is also possible to select a specific git SHA or the output binary path by:
+
+```console
+> curl https://raw.githubusercontent.com/containers/conmon-rs/main/scripts/get | \
+    bash -s -- -t $GIT_SHA -o $OUTPUT_PATH
+```
+
+[bucket]: https://console.cloud.google.com/storage/browser/cri-o/conmon-rs
+
 ## Architecture
 
 The whole application consists of two main components:

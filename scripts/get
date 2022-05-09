@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE_URL=https://storage.googleapis.com/cri-o/conmon-rs
+COMMIT=
+OUTPUT=conmonrs
+
+usage() {
+    printf "Usage: %s [ -t SHA ] [ -h ]\n\n" "$(basename "$0")"
+    echo "Possible arguments:"
+    printf "  -o\tOutput path for the downloaded binary (defaults to './conmonrs')\n"
+    printf "  -t\tFull length SHA to be used (defaults to the latest available main)\n"
+    printf "  -h\tShow this help message\n"
+}
+
+parse_args() {
+    echo "Welcome to the conmon-rs install script!"
+
+    while getopts 'o:t:h' OPTION; do
+        case "$OPTION" in
+        o)
+            OUTPUT="$OPTARG"
+            echo "Using output path: $OUTPUT"
+            ;;
+        t)
+            COMMIT="$OPTARG"
+            echo "Using commit: $COMMIT"
+            ;;
+        h)
+            usage
+            exit 0
+            ;;
+        ?)
+            usage
+            exit 1
+            ;;
+        esac
+    done
+}
+
+verify_requirements() {
+    CMDS=(curl)
+    echo "Checking if all commands are available: ${CMDS[*]}"
+    for CMD in "${CMDS[@]}"; do
+        if ! command -v "$CMD" >/dev/null; then
+            echo "Command $CMD not available but required"
+            exit 1
+        fi
+    done
+}
+
+curl_retry() {
+    curl -sSfL --retry 5 --retry-delay 3 "$@"
+}
+
+download_binary() {
+    if [[ $COMMIT == "" ]]; then
+        COMMIT=$(curl_retry $BASE_URL/latest-main.txt)
+    fi
+
+    mkdir -p "$(dirname "$OUTPUT")"
+    curl_retry "$BASE_URL/$COMMIT/conmonrs" -o "$OUTPUT"
+    chmod +x "$OUTPUT"
+    printf "Installed binary into: %s\n\n" "$OUTPUT"
+    eval "$(realpath "$OUTPUT")" -v
+}
+
+parse_args "$@"
+verify_requirements
+download_binary
