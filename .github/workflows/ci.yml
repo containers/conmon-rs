@@ -69,6 +69,14 @@ jobs:
         with:
           path: target/x86_64-unknown-linux-musl/release/conmonrs
           destination: cri-o/conmon-rs/${{ github.sha }}
+      - run: .github/create-marker
+        if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
+      - uses: google-github-actions/upload-cloud-storage@v0
+        if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
+        with:
+          path: .
+          glob: latest-*.txt
+          destination: cri-o/conmon-rs
 
   doc:
     runs-on: ubuntu-latest
