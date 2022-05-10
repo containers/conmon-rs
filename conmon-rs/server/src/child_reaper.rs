@@ -142,11 +142,13 @@ impl ChildReaper {
     }
 
     pub fn kill_grandchildren(&self, s: Signal) -> Result<()> {
-        for (_, grandchild) in self.grandchildren.lock().unwrap().iter() {
+        for (_, grandchild) in lock!(self.grandchildren).iter() {
             debug!(grandchild.pid, "killing grandchild");
             let _ = kill_grandchild(grandchild.pid, s);
             futures::executor::block_on(async {
-                grandchild.close().await;
+                if let Err(e) = grandchild.close().await {
+                    error!("Unable to close grandchild: {}", e)
+                }
             });
         }
         Ok(())
@@ -227,15 +229,16 @@ impl ReapableChild {
         }
     }
 
-    pub async fn close(&self) {
+    pub async fn close(&self) -> Result<()> {
         debug!("{}: grandchild close", self.pid);
         self.token.cancel();
         if let Some(t) = self.task.clone() {
-            for t in t.lock().unwrap().take().unwrap().into_iter() {
+            for t in lock!(t).take().context("no tasks available")?.into_iter() {
                 debug!("{}: grandchild await", self.pid);
                 let _ = t.await;
             }
         }
+        Ok(())
     }
 
     fn watch(&mut self) -> Result<(Sender<ExitChannelData>, Receiver<ExitChannelData>)> {
@@ -297,7 +300,10 @@ impl ReapableChild {
         );
 
         let tasks = Arc::new(Mutex::new(Some(Vec::new())));
-        tasks.lock().unwrap().as_mut().unwrap().push(task);
+        lock!(tasks)
+            .as_mut()
+            .context("no tasks available")?
+            .push(task);
         self.task = Some(tasks);
 
         Ok((exit_tx, exit_rx))
