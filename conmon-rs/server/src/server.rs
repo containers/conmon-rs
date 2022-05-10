@@ -41,7 +41,7 @@ pub struct Server {
 
     /// reaper instance
     #[getset(get = "pub(crate)")]
-    pub reaper: Arc<ChildReaper>,
+    reaper: Arc<ChildReaper>,
 }
 
 impl Server {
