@@ -145,7 +145,9 @@ impl OOMWatcher {
 
         let watcher = notify::recommended_watcher(move |res: Result<Event, Error>| {
             futures::executor::block_on(async {
-                tx.send(res).await.unwrap();
+                if let Err(e) = tx.send(res).await {
+                    error!("Unable to send event result: {}", e)
+                }
             })
         })?;
 
@@ -292,7 +294,7 @@ impl OOMWatcher {
 
     async fn process_cgroup_subsystem_path_cgroup_v1(pid: u32, subsystem: &str) -> Result<PathBuf> {
         lazy_static! {
-            static ref RE: Regex = Regex::new(".*:(.*):/(.*)").unwrap();
+            static ref RE: Regex = Regex::new(".*:(.*):/(.*)").expect("could not compile regex");
         }
 
         let cgroup_path = format!("/proc/{}/cgroup", pid);
@@ -314,7 +316,7 @@ impl OOMWatcher {
 
     async fn process_cgroup_subsystem_path_cgroup_v2(pid: u32) -> Result<PathBuf> {
         lazy_static! {
-            static ref RE: Regex = Regex::new(".*:.*:/(.*)").unwrap();
+            static ref RE: Regex = Regex::new(".*:.*:/(.*)").expect("could not compile regex");
         }
 
         let fp = File::open(format!("/proc/{}/cgroup", pid)).await?;
