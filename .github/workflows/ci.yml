@@ -7,7 +7,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   GO_VERSION: '1.18'
-  ACTION_MSRV_TOOLCHAIN: 1.59.0
+  ACTION_MSRV_TOOLCHAIN: 1.60.0
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -209,5 +209,7 @@ jobs:
           path: target/x86_64-unknown-linux-musl/release
       - run: chmod +x target/x86_64-unknown-linux-musl/release/conmonrs
       - run: .github/install-deps
+      - name: create symlink
+        run: sudo ln -f -s $GOROOT/bin/* /usr/bin/
       - name: Integration tests
         run: RUNTIME_PATH="/usr/sbin/runc" make integration-static

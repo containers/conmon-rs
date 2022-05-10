@@ -29,8 +29,9 @@ release-static:
 			make release && \
 			strip -s target/x86_64-unknown-linux-musl/release/$(BINARY)"
 
-lint:
+lint: .install.golangci-lint
 	cargo fmt
+	$(GOTOOLS_BINDIR)/golangci-lint run
 
 unit:
 	cargo test --bins --no-fail-fast
@@ -39,7 +40,7 @@ integration: .install.ginkgo release # It needs to be release so we correctly te
 	export CONMON_BINARY="$(MAKEFILE_PATH)target/release/$(BINARY)" && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
 	export MAX_RSS_KB=10240 && \
-	"$(GOTOOLS_BINDIR)/ginkgo" -v -r pkg/client
+	sudo -E "$(GOTOOLS_BINDIR)/ginkgo" -v -r pkg/client
 
 integration-static: .install.ginkgo # It needs to be release so we correctly test the RSS usage
 	export CONMON_BINARY="$(MAKEFILE_PATH)target/x86_64-unknown-linux-musl/release/$(BINARY)" && \
@@ -47,11 +48,14 @@ integration-static: .install.ginkgo # It needs to be release so we correctly tes
 		$(MAKE) release-static; \
 	fi && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
-	export MAX_RSS_KB=2800 && \
-	$(GOTOOLS_BINDIR)/ginkgo -v -r pkg/client
+	export MAX_RSS_KB=3100 && \
+	sudo -E "$(GOTOOLS_BINDIR)/ginkgo" -v -r pkg/client
 
 .install.ginkgo:
 	GOBIN=$(abspath $(GOTOOLS_BINDIR)) go install github.com/onsi/ginkgo/v2/ginkgo@latest
+
+.install.golangci-lint:
+	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | BINDIR=$(abspath $(GOTOOLS_BINDIR)) sh -s v1.45.2
 
 clean:
 	rm -rf target/

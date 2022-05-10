@@ -10,6 +10,7 @@ mod container_log;
 mod cri_logger;
 mod init;
 mod listener;
+mod oom_watcher;
 mod rpc;
 mod server;
 mod streams;

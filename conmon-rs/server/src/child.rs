@@ -15,6 +15,9 @@ pub struct Child {
     exit_paths: Vec<PathBuf>,
 
     #[getset(get = "pub")]
+    oom_exit_paths: Vec<PathBuf>,
+
+    #[getset(get = "pub")]
     timeout: Option<Instant>,
 
     #[getset(get = "pub")]
@@ -26,6 +29,7 @@ impl Child {
         id: String,
         pid: u32,
         exit_paths: Vec<PathBuf>,
+        oom_exit_paths: Vec<PathBuf>,
         timeout: Option<Instant>,
         io: SharedContainerIO,
     ) -> Self {
@@ -33,6 +37,7 @@ impl Child {
             id,
             pid,
             exit_paths,
+            oom_exit_paths,
             timeout,
             io,
         }
