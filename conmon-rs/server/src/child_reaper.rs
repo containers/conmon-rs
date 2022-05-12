@@ -258,8 +258,12 @@ impl ReapableChild {
                 let mut timed_out = false;
                 let (oom_tx, mut oom_rx) = tokio::sync::mpsc::channel(1);
                 let oom_watcher = OOMWatcher::new(&stop_token, pid, &oom_exit_paths, oom_tx).await;
-                let wait_for_exit_code =
-                    task::spawn_blocking(move || Self::wait_for_exit_code(&stop_token, pid));
+
+                let span = debug_span!("wait_for_exit_code", pid);
+                let wait_for_exit_code = task::spawn_blocking(move || {
+                    let _enter = span.enter();
+                    Self::wait_for_exit_code(&stop_token, pid)
+                });
                 let closure = async {
                     let (code, oom) = tokio::join!(wait_for_exit_code, oom_rx.recv());
                     if let Ok(code) = code {
@@ -319,7 +323,7 @@ impl ReapableChild {
                     return exit_code;
                 }
                 Ok(WaitStatus::Signaled(_, sig, _)) => {
-                    debug!(pid, "Signaled");
+                    debug!("Signaled");
                     token.cancel();
                     return (sig as i32) + 128;
                 }
@@ -352,6 +356,7 @@ impl ReapableChild {
                         }
                     }
                 })
+                .instrument(debug_span!("tasks"))
             })
             .collect();
 

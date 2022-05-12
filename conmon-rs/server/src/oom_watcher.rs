@@ -11,7 +11,7 @@ use tokio::sync::mpsc::{channel, Receiver};
 use tokio::task::{self, JoinHandle};
 use tokio_eventfd::EventFd;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, debug_span, error};
+use tracing::{debug, debug_span, error, Instrument};
 
 #[cfg(any(all(target_os = "linux", target_env = "musl")))]
 pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as u64);
@@ -50,19 +50,22 @@ impl OOMWatcher {
         let token = token.clone();
         let task = {
             let stop = token.clone();
-            task::spawn(async move {
-                if let Err(e) = if *IS_CGROUP_V2 {
-                    Self::oom_handling_cgroup_v2(stop, pid, &exit_paths, tx)
-                        .await
-                        .context("setup cgroupv2 oom handling")
-                } else {
-                    Self::oom_handling_cgroup_v1(stop, pid, &exit_paths, tx)
-                        .await
-                        .context("setup cgroupv1 oom handling")
-                } {
-                    error!("Failed to watch OOM: {:#}", e)
+            task::spawn(
+                async move {
+                    if let Err(e) = if *IS_CGROUP_V2 {
+                        Self::oom_handling_cgroup_v2(stop, pid, &exit_paths, tx)
+                            .await
+                            .context("setup cgroupv2 oom handling")
+                    } else {
+                        Self::oom_handling_cgroup_v1(stop, pid, &exit_paths, tx)
+                            .await
+                            .context("setup cgroupv1 oom handling")
+                    } {
+                        error!("Failed to watch OOM: {:#}", e)
+                    }
                 }
-            })
+                .instrument(debug_span!("task")),
+            )
         };
         OOMWatcher { pid, token, task }
     }
@@ -70,7 +73,7 @@ impl OOMWatcher {
     pub async fn stop(self) {
         self.token.cancel();
         if let Err(err) = self.task.await {
-            error!("{}: stop failed: {}", self.pid, err);
+            error!(pid = self.pid, "Stop failed: {}", err);
         }
     }
 
@@ -87,7 +90,7 @@ impl OOMWatcher {
         let event_control_path = memory_cgroup_path.join("cgroup.event_control");
         let path = memory_cgroup_file_oom_path.to_str();
 
-        debug!(path, "enabled cgroup v1 oom handling");
+        debug!(path, "Setup cgroup v1 oom handling");
 
         let oom_cgroup_file = tokio::fs::OpenOptions::new()
             .write(true)
@@ -114,21 +117,22 @@ impl OOMWatcher {
             .context("writing control data")?;
         event_control.flush().await.context("flush control data")?;
 
-        debug!("successfully setup cgroup v1 oom detection");
+        debug!("Successfully setup cgroup v1 oom detection");
 
         let mut buffer = [0u8; 16];
         loop {
             tokio::select! {
                 _ = token.cancelled() => {
+                    debug!("Loop cancelled");
                     let _ = tx.try_send(OOMEvent{ oom: false });
                     break;
                 }
                 _ = oom_event_fd.read(&mut buffer) => {
-                    debug!("cgroup v1 oom event");
+                    debug!("Got oom event");
                     if let Err(e) = Self::write_oom_files(exit_paths).await {
-                        error!("error writing oom files: {}", e);
+                        error!("Writing oom files failed: {}", e);
                     } else {
-                        debug!("successfully wrote oom files");
+                        debug!("Successfully wrote oom files");
                     }
                     let _ = tx.try_send(OOMEvent{ oom: true });
                     break;
@@ -136,7 +140,7 @@ impl OOMWatcher {
             }
         }
 
-        debug!("done watching for ooms");
+        debug!("Done watching for ooms");
         Ok(())
     }
 
@@ -167,16 +171,15 @@ impl OOMWatcher {
         let mut last_counter: u64 = 0;
 
         let path = memory_events_file_path.to_str();
-        debug!(path, "settup up cgroup v2 handling");
+        debug!(path, "Setup cgroup v2 handling");
 
         let (mut watcher, mut rx) = Self::async_watcher()?;
         watcher.watch(&memory_events_file_path, RecursiveMode::NonRecursive)?;
 
         loop {
-            debug!("oom_handling_cgroup_v2 loop");
             tokio::select! {
                 _ = token.cancelled() => {
-                    debug!("oom_handling_cgroup_v2 loop cancelled");
+                    debug!("Loop cancelled");
                     match tx.try_send(OOMEvent{ oom: false }) {
                         Ok(_) => break,
                         Err(e) => error!("try_send failed: {}", e)
@@ -196,15 +199,15 @@ impl OOMWatcher {
                             if !event.kind.is_modify() {
                                 continue;
                             }
-                            debug!("found modify event");
+                            debug!("Found modify event");
                             match Self::check_for_oom(&memory_events_file_path, last_counter).await {
                                 Ok((counter, is_oom)) => {
                                     if !is_oom {
                                         continue;
                                     }
-                                    debug!(counter, "found oom event");
+                                    debug!(counter, "Found oom event");
                                     if let Err(e) = Self::write_oom_files(exit_paths).await {
-                                        error!("error writing oom files: {}", e);
+                                        error!("Writing oom files failed: {}", e);
                                     }
                                     last_counter = counter;
                                     match tx.try_send(OOMEvent{ oom: true }) {
@@ -213,7 +216,7 @@ impl OOMWatcher {
                                     };
                                 }
                                 Err(e) => {
-                                    error!(pid, "error checking for oom: {}", e);
+                                    error!("Checking for oom failed: {}", e);
                                     match tx.try_send(OOMEvent{ oom: false }) {
                                         Ok(_) => break,
                                         Err(e) => error!("try_send failed: {}", e)
@@ -222,7 +225,7 @@ impl OOMWatcher {
                             };
                         },
                         Err(e) => {
-                            debug!("watch error: {:?}", e);
+                            debug!("Watch error: {:#}", e);
                             match tx.try_send(OOMEvent{ oom: false }) {
                                 Ok(_) => break,
                                 Err(e) => error!("try_send failed: {}", e)
@@ -235,7 +238,7 @@ impl OOMWatcher {
         }
         watcher.unwatch(&memory_events_file_path)?;
 
-        debug!("done watching for ooms");
+        debug!("Done watching for ooms");
 
         Ok(())
     }
@@ -269,9 +272,10 @@ impl OOMWatcher {
             .map(|path| {
                 tokio::spawn(async move {
                     if let Err(e) = File::create(&path).await {
-                        error!("could not write oom file to {}: {}", path.display(), e);
+                        error!("Could not write oom file to {}: {}", path.display(), e);
                     }
                 })
+                .instrument(debug_span!("write_oom_file"))
             })
             .collect();
         for task in tasks {
@@ -298,7 +302,7 @@ impl OOMWatcher {
         }
 
         let cgroup_path = format!("/proc/{}/cgroup", pid);
-        debug!(pid, "using cgroup path : {}", cgroup_path);
+        debug!("Using cgroup path: {}", cgroup_path);
         let fp = File::open(cgroup_path).await?;
         let reader = BufReader::new(fp);
         let mut lines = reader.lines();
