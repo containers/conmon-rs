@@ -144,7 +144,7 @@ impl ChildReaper {
     pub fn kill_grandchildren(&self, s: Signal) -> Result<()> {
         for (_, grandchild) in lock!(self.grandchildren).iter() {
             debug!(grandchild.pid, "killing grandchild");
-            let _ = kill_grandchild(grandchild.pid, s);
+            kill_grandchild(grandchild.pid, s);
             futures::executor::block_on(async {
                 if let Err(e) = grandchild.close().await {
                     error!("Unable to close grandchild: {}", e)
@@ -155,28 +155,24 @@ impl ChildReaper {
     }
 }
 
-pub fn kill_grandchild(raw_pid: u32, s: Signal) -> Result<()> {
+pub fn kill_grandchild(raw_pid: u32, s: Signal) {
     let pid = Pid::from_raw(raw_pid as pid_t);
     if let Ok(pgid) = getpgid(Some(pid)) {
         // If process_group is 1, we will end up calling
         // kill(-1), which kills everything conmon is allowed to.
         let pgid = i32::from(pgid);
         if pgid > 1 {
-            match kill(Pid::from_raw(-pgid), s) {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    error!(
-                        raw_pid,
-                        "Failed to get pgid, falling back to killing pid {}", e
-                    );
-                }
+            if let Err(e) = kill(Pid::from_raw(-pgid), s) {
+                error!(
+                    raw_pid,
+                    "Failed to get pgid, falling back to killing pid {}", e
+                );
             }
         }
     }
     if let Err(e) = kill(pid, s) {
         debug!(raw_pid, "Failed killing pid with error {}", e);
     }
-    Ok(())
 }
 
 type TaskHandle = Arc<Mutex<Option<Vec<JoinHandle<()>>>>>;
@@ -235,7 +231,7 @@ impl ReapableChild {
         if let Some(t) = self.task.clone() {
             for t in lock!(t).take().context("no tasks available")?.into_iter() {
                 debug!("{}: grandchild await", self.pid);
-                let _ = t.await;
+                t.await?;
             }
         }
         Ok(())
@@ -273,7 +269,7 @@ impl ReapableChild {
                     if time::timeout_at(timeout, closure).await.is_err() {
                         timed_out = true;
                         exit_code = -3;
-                        let _ = kill_grandchild(pid, Signal::SIGKILL);
+                        kill_grandchild(pid, Signal::SIGKILL);
                     }
                 } else {
                     closure.await;
