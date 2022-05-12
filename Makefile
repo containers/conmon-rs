@@ -30,7 +30,8 @@ release-static:
 			strip -s target/x86_64-unknown-linux-musl/release/$(BINARY)"
 
 lint: .install.golangci-lint
-	cargo fmt
+	cargo fmt && git diff --exit-code
+	cargo clippy --all-targets -- -D warnings
 	$(GOTOOLS_BINDIR)/golangci-lint run
 
 unit:
