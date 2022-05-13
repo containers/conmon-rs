@@ -127,7 +127,7 @@ impl ChildReaper {
                 exit_tx.subscribe().recv().await?;
                 Self::forget_grandchild(&cleanup_grandchildren, pid)
             }
-            .instrument(debug_span!("watch_grandchild")),
+            .instrument(debug_span!("watch_grandchild", pid)),
         );
         Ok(exit_rx)
     }
@@ -143,13 +143,18 @@ impl ChildReaper {
 
     pub fn kill_grandchildren(&self, s: Signal) -> Result<()> {
         for (_, grandchild) in lock!(self.grandchildren).iter() {
-            debug!(grandchild.pid, "killing grandchild");
+            let span = debug_span!("kill_grandchildren", pid = grandchild.pid);
+            let _enter = span.enter();
+            debug!("Killing grandchild");
             kill_grandchild(grandchild.pid, s);
-            futures::executor::block_on(async {
-                if let Err(e) = grandchild.close().await {
-                    error!("Unable to close grandchild: {}", e)
+            futures::executor::block_on(
+                async {
+                    if let Err(e) = grandchild.close().await {
+                        error!("Unable to close grandchild: {}", e)
+                    }
                 }
-            });
+                .instrument(debug_span!("close", signal = s.as_str())),
+            );
         }
         Ok(())
     }
@@ -165,13 +170,13 @@ pub fn kill_grandchild(raw_pid: u32, s: Signal) {
             if let Err(e) = kill(Pid::from_raw(-pgid), s) {
                 error!(
                     raw_pid,
-                    "Failed to get pgid, falling back to killing pid {}", e
+                    "Failed to get pgid, falling back to killing pid: {}", e
                 );
             }
         }
     }
     if let Err(e) = kill(pid, s) {
-        debug!(raw_pid, "Failed killing pid with error {}", e);
+        debug!("Failed killing pid: {}", e);
     }
 }
 
@@ -226,11 +231,11 @@ impl ReapableChild {
     }
 
     pub async fn close(&self) -> Result<()> {
-        debug!("{}: grandchild close", self.pid);
+        debug!("Grandchild close");
         self.token.cancel();
         if let Some(t) = self.task.clone() {
             for t in lock!(t).take().context("no tasks available")?.into_iter() {
-                debug!("{}: grandchild await", self.pid);
+                debug!("Grandchild await");
                 t.await?;
             }
         }
@@ -255,11 +260,12 @@ impl ReapableChild {
                 let (oom_tx, mut oom_rx) = tokio::sync::mpsc::channel(1);
                 let oom_watcher = OOMWatcher::new(&stop_token, pid, &oom_exit_paths, oom_tx).await;
 
-                let span = debug_span!("wait_for_exit_code", pid);
+                let span = debug_span!("wait_for_exit_code");
                 let wait_for_exit_code = task::spawn_blocking(move || {
                     let _enter = span.enter();
                     Self::wait_for_exit_code(&stop_token, pid)
                 });
+
                 let closure = async {
                     let (code, oom) = tokio::join!(wait_for_exit_code, oom_rx.recv());
                     if let Ok(code) = code {
@@ -284,19 +290,23 @@ impl ReapableChild {
                     oomed,
                     timed_out,
                 };
-                debug!(
-                    pid,
-                    "sending exit struct to channel : {:?}", exit_channel_data
-                );
+                debug!("Sending exit struct to channel: {:?}", exit_channel_data);
                 if exit_tx_clone.send(exit_channel_data).is_err() {
-                    debug!(pid, "Unable to send exit status");
+                    debug!("Unable to send exit status");
                 }
-                debug!(pid, "write to exit paths");
+                debug!(
+                    "Write to exit paths: {}",
+                    exit_paths
+                        .iter()
+                        .map(|x| x.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
                 if let Err(e) = Self::write_to_exit_paths(exit_code, &exit_paths).await {
-                    error!(pid, "could not write exit paths: {}", e);
+                    error!(pid, "Could not write exit paths: {}", e);
                 }
             }
-            .instrument(debug_span!("watch")),
+            .instrument(debug_span!("watch", pid)),
         );
 
         let tasks = Arc::new(Mutex::new(Some(Vec::new())));
@@ -344,15 +354,24 @@ impl ReapableChild {
         let tasks: Vec<_> = paths
             .into_iter()
             .map(|path| {
-                tokio::spawn(async move {
-                    let code_str = format!("{}", code);
-                    if let Ok(mut fp) = File::create(&path).await {
-                        if let Err(e) = fp.write_all(code_str.as_bytes()).await {
-                            error!("could not write exit file to path {} {}", path.display(), e);
+                tokio::spawn(
+                    async move {
+                        let code_str = format!("{}", code);
+                        if let Ok(mut fp) = File::create(&path).await {
+                            if let Err(e) = fp.write_all(code_str.as_bytes()).await {
+                                error!(
+                                    "Could not write exit file to path {}: {}",
+                                    path.display(),
+                                    e
+                                );
+                            }
+                            if let Err(e) = fp.flush().await {
+                                error!("Unable to flush {}: {}", path.display(), e);
+                            }
                         }
                     }
-                })
-                .instrument(debug_span!("tasks"))
+                    .instrument(debug_span!("tasks")),
+                )
             })
             .collect();
 

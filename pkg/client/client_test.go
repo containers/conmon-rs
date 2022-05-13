@@ -11,8 +11,10 @@ import (
 
 	"github.com/containers/conmon-rs/pkg/client"
 	"github.com/containers/podman/v3/libpod/define"
+	"github.com/containers/storage/pkg/unshare"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/opencontainers/runtime-tools/generate"
 )
 
 var _ = Describe("ConmonClient", func() {
@@ -82,7 +84,7 @@ var _ = Describe("ConmonClient", func() {
 
 			It(testName("should return error if invalid command", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"invalid"})
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"invalid"}, nil)
 				sut = tr.configGivenEnv()
 				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
 					ID:         tr.ctrID,
@@ -129,6 +131,33 @@ var _ = Describe("ConmonClient", func() {
 					Expect(err).NotTo(BeNil())
 				}
 			})
+
+			It(testName("should catch out of memory (oom) events", terminal), func() {
+				if unshare.IsRootless() {
+					Skip("does not run rootless")
+				}
+
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "tail", "/dev/zero"},
+					func(g generate.Generator) {
+						g.SetLinuxResourcesMemoryLimit(1024 * 1024)
+					},
+				)
+				sut = tr.configGivenEnv()
+				tr.createContainer(sut, terminal)
+				tr.startContainer(sut)
+
+				for i := 0; i < 10; i++ {
+					if _, err := os.Stat(tr.oomExitPath()); err == nil {
+						break
+					}
+					fmt.Println("Waiting for OOM exit path to exist")
+					time.Sleep(time.Second)
+				}
+				Expect(fileContents(tr.oomExitPath())).To(BeEmpty())
+			})
 		}
 	})
 
@@ -137,7 +166,7 @@ var _ = Describe("ConmonClient", func() {
 			terminal := terminal
 			It(testName("should handle many requests", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "30"})
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "30"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer(sut)
@@ -170,7 +199,7 @@ var _ = Describe("ConmonClient", func() {
 			terminal := terminal
 			It(testName("should succeed without timeout", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer(sut)
@@ -197,7 +226,7 @@ var _ = Describe("ConmonClient", func() {
 
 			It(testName("should succeed with timeout", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer(sut)
@@ -217,7 +246,7 @@ var _ = Describe("ConmonClient", func() {
 
 			It(testName("should set the correct exit code", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"})
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer(sut)
@@ -247,7 +276,7 @@ var _ = Describe("ConmonClient", func() {
 
 			It(testName("should timeout", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "20"})
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "20"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer(sut)
@@ -271,7 +300,7 @@ var _ = Describe("ConmonClient", func() {
 			terminal := terminal
 			It(testName("should succeed", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh"})
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer(sut)
