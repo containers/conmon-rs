@@ -63,10 +63,12 @@ func newTestRunner() *testRunner {
 }
 
 func (tr *testRunner) createRuntimeConfig(terminal bool) {
-	tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "ls"})
+	tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "ls"}, nil)
 }
 
-func (tr *testRunner) createRuntimeConfigWithProcessArgs(terminal bool, processArgs []string) {
+func (tr *testRunner) createRuntimeConfigWithProcessArgs(
+	terminal bool, processArgs []string, changeSpec func(generate.Generator),
+) {
 	rr := &RuntimeRunner{
 		runtimeRoot: MustDirInTempDir(tr.tmpDir, "root"),
 	}
@@ -84,7 +86,9 @@ func (tr *testRunner) createRuntimeConfigWithProcessArgs(terminal bool, processA
 	Expect(os.Link(busyboxDest, filepath.Join(tmpRootfs, "busybox"))).To(BeNil())
 
 	// Finally, create config.json.
-	Expect(generateRuntimeConfigWithProcessArgs(tr.tmpDir, tmpRootfs, terminal, processArgs)).To(BeNil())
+	Expect(generateRuntimeConfigWithProcessArgs(
+		tr.tmpDir, tmpRootfs, terminal, processArgs, changeSpec,
+	)).To(BeNil())
 	tr.rr = rr
 	tr.ctrID = ctrID
 	tr.tmpRootfs = tmpRootfs
@@ -252,7 +256,13 @@ type RuntimeRunner struct {
 	runtimeRoot string
 }
 
-func generateRuntimeConfigWithProcessArgs(bundlePath, rootfs string, terminal bool, processArgs []string) error {
+func generateRuntimeConfigWithProcessArgs(
+	bundlePath,
+	rootfs string,
+	terminal bool,
+	processArgs []string,
+	changeSpec func(generate.Generator),
+) error {
 	configPath := filepath.Join(bundlePath, "config.json")
 	g, err := generate.New("linux")
 	if err != nil {
@@ -262,6 +272,9 @@ func generateRuntimeConfigWithProcessArgs(bundlePath, rootfs string, terminal bo
 	g.SetProcessTerminal(terminal)
 	g.SetProcessArgs(processArgs)
 	g.SetRootPath(rootfs)
+	if changeSpec != nil {
+		changeSpec(g)
+	}
 	if unshare.IsRootless() {
 		specconv.ToRootless(g.Config)
 	}

@@ -35,6 +35,7 @@ pub struct OOMWatcher {
     task: JoinHandle<()>,
 }
 
+#[derive(Debug)]
 pub struct OOMEvent {
     pub oom: bool,
 }
@@ -270,12 +271,15 @@ impl OOMWatcher {
         let tasks: Vec<_> = paths
             .into_iter()
             .map(|path| {
-                tokio::spawn(async move {
-                    if let Err(e) = File::create(&path).await {
-                        error!("Could not write oom file to {}: {}", path.display(), e);
+                tokio::spawn(
+                    async move {
+                        debug!("Writing OOM file: {}", path.display());
+                        if let Err(e) = File::create(&path).await {
+                            error!("Could not write oom file to {}: {}", path.display(), e);
+                        }
                     }
-                })
-                .instrument(debug_span!("write_oom_file"))
+                    .instrument(debug_span!("write_oom_file")),
+                )
             })
             .collect();
         for task in tasks {
