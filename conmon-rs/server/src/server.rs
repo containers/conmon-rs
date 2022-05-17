@@ -35,11 +35,11 @@ use twoparty::VatNetwork;
 #[derive(Debug, Getters)]
 /// The main server structure.
 pub struct Server {
-    #[doc = "The server configuration."]
-    #[getset(get = "pub")]
+    /// Server configuration.
+    #[getset(get = "pub(crate)")]
     config: Config,
 
-    /// reaper instance
+    /// Child reaper instance.
     #[getset(get = "pub(crate)")]
     reaper: Arc<ChildReaper>,
 }
