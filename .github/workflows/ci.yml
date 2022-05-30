@@ -210,6 +210,6 @@ jobs:
       - run: chmod +x target/x86_64-unknown-linux-musl/release/conmonrs
       - run: .github/install-deps
       - name: create symlink
-        run: sudo ln -f -s $GOROOT/bin/* /usr/bin/
+        run: sudo ln -f -s $(go env GOROOT)/bin/* /usr/bin/
       - name: Integration tests
         run: RUNTIME_PATH="/usr/sbin/runc" make integration-static
