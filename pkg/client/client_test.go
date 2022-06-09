@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/containers/conmon-rs/pkg/client"
-	"github.com/containers/podman/v3/libpod/define"
+	"github.com/containers/podman/v4/libpod/define"
 	"github.com/containers/storage/pkg/unshare"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"

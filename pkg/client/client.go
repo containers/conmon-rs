@@ -185,7 +185,6 @@ func (c *ConmonClient) startServer(config *ConmonServerConfig) error {
 }
 
 func (c *ConmonClient) toArgs(config *ConmonServerConfig) (entrypoint string, args []string, err error) {
-	const maxUnixSocketPathSize = len(syscall.RawSockaddrUnix{}.Path)
 	if c == nil {
 		return "", args, nil
 	}
