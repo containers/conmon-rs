@@ -34,6 +34,10 @@ It is also possible to select a specific git SHA or the output binary path by:
     bash -s -- -t $GIT_SHA -o $OUTPUT_PATH
 ```
 
+The script automatically verifies the created sigstore signatures if the local
+system has [`cosign`](https://github.com/sigstore/cosign) available in its
+`$PATH`.
+
 [bucket]: https://console.cloud.google.com/storage/browser/cri-o/conmon-rs
 
 ## Architecture

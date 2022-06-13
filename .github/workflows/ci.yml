@@ -52,6 +52,10 @@ jobs:
 
   release-static:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    env:
+      COSIGN_EXPERIMENTAL: 1
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -64,11 +68,22 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-static-${{ hashFiles('**/Cargo.lock') }}
       - run: make release-static
-      - run: target/x86_64-unknown-linux-musl/release/conmonrs -v
+      - run: |
+          mkdir ${{ github.sha }}
+          mv target/x86_64-unknown-linux-musl/release/conmonrs ${{ github.sha }}
+      - run: ./${{ github.sha }}/conmonrs -v
+      - uses: sigstore/cosign-installer@main
+      - name: Sign binary
+        if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
+        run: |
+          cd ${{ github.sha }}
+          cosign sign-blob conmonrs \
+            --output-signature conmonrs.sig \
+            --output-certificate conmonrs.cert
       - uses: actions/upload-artifact@v3
         with:
           name: conmonrs
-          path: target/x86_64-unknown-linux-musl/release/conmonrs
+          path: ${{ github.sha }}/*
       - uses: google-github-actions/auth@v0
         if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
         with:
@@ -76,8 +91,8 @@ jobs:
       - uses: google-github-actions/upload-cloud-storage@v0
         if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
         with:
-          path: target/x86_64-unknown-linux-musl/release/conmonrs
-          destination: cri-o/conmon-rs/${{ github.sha }}
+          path: ${{ github.sha }}
+          destination: cri-o/conmon-rs
       - run: .github/create-marker
         if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
       - uses: google-github-actions/upload-cloud-storage@v0

@@ -59,7 +59,28 @@ download_binary() {
     fi
 
     mkdir -p "$(dirname "$OUTPUT")"
-    curl_retry "$BASE_URL/$COMMIT/conmonrs" -o "$OUTPUT"
+
+    if command -v cosign2 >/dev/null; then
+        echo "Found cosign, verifying binary signature"
+        TMPDIR=$(mktemp -d)
+        trap 'rm -rf $TMPDIR' EXIT
+        pushd "$TMPDIR" >/dev/null
+
+        FILES=(conmonrs conmonrs.sig conmonrs.cert)
+        for FILE in "${FILES[@]}"; do
+            curl_retry "$BASE_URL/$COMMIT/$FILE" -o "$FILE"
+        done
+
+        COSIGN_EXPERIMENTAL=1 cosign verify-blob conmonrs \
+            --signature conmonrs.sig \
+            --certificate conmonrs.cert
+
+        popd >/dev/null
+        mv "$TMPDIR/conmonrs" "$OUTPUT"
+    else
+        curl_retry "$BASE_URL/$COMMIT/conmonrs" -o "$OUTPUT"
+    fi
+
     chmod +x "$OUTPUT"
     printf "Installed binary into: %s\n\n" "$OUTPUT"
     eval "$(realpath "$OUTPUT")" -v
