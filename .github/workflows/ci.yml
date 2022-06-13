@@ -48,6 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+      - uses: sigstore/cosign-installer@main
       - run: scripts/get
 
   release-static:

@@ -60,7 +60,7 @@ download_binary() {
 
     mkdir -p "$(dirname "$OUTPUT")"
 
-    if command -v cosign2 >/dev/null; then
+    if command -v cosign >/dev/null; then
         echo "Found cosign, verifying binary signature"
         TMPDIR=$(mktemp -d)
         trap 'rm -rf $TMPDIR' EXIT
