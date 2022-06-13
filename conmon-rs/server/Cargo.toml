@@ -25,7 +25,7 @@ memchr = "2.5.0"
 tempfile = "3.3.0"
 sendfd = { version = "0.4.1", features = ["tokio"] }
 prctl = "1.0.0"
-strum = { version = "0.24.0", features = ["derive"] }
+strum = { version = "0.24.1", features = ["derive"] }
 shadow-rs = "0.11.0"
 multimap = "0.8.3"
 tracing = "0.1.35"
