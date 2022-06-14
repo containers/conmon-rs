@@ -155,11 +155,6 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) (err error
 		if err != nil {
 			return fmt.Errorf("failed to connect to container's attach socket: %v: %w", cfg.SocketPath, err)
 		}
-		defer func() {
-			if err := conn.Close(); err != nil {
-				c.logger.Errorf("unable to close socket: %q", err)
-			}
-		}()
 	}
 
 	if cfg.PreAttachFunc != nil {
@@ -191,6 +186,11 @@ func (c *ConmonClient) setupStdioChannels(
 ) (receiveStdoutError, stdinDone chan error) {
 	receiveStdoutError = make(chan error)
 	go func() {
+		defer func() {
+			if err := conn.Close(); err != nil {
+				c.logger.Errorf("unable to close socket: %q", err)
+			}
+		}()
 		receiveStdoutError <- c.redirectResponseToOutputStreams(cfg, conn)
 	}()
 
@@ -295,9 +295,6 @@ func (c *ConmonClient) readStdio(
 			if connErr := conn.CloseWrite(); connErr != nil {
 				c.logger.Errorf("Unable to close conn: %v", connErr)
 			}
-		}
-		if cfg.Streams.Stdout != nil || cfg.Streams.Stderr != nil {
-			return <-receiveStdoutError
 		}
 	}
 
