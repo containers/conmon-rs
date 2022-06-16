@@ -4,7 +4,7 @@ go 1.18
 
 require (
 	capnproto.org/go/capnp/v3 v3.0.0-alpha.3
-	github.com/containers/podman/v4 v4.1.0
+	github.com/containers/podman/v4 v4.1.1
 	github.com/containers/storage v1.41.0
 	github.com/onsi/ginkgo/v2 v2.1.4
 	github.com/onsi/gomega v1.19.0
