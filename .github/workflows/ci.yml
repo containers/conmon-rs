@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - uses: sigstore/cosign-installer@v1
+      - uses: sigstore/cosign-installer@v2
       - run: scripts/get
 
   release-static:
@@ -73,7 +73,7 @@ jobs:
           mkdir ${{ github.sha }}
           mv target/x86_64-unknown-linux-musl/release/conmonrs ${{ github.sha }}
       - run: ./${{ github.sha }}/conmonrs -v
-      - uses: sigstore/cosign-installer@v1
+      - uses: sigstore/cosign-installer@v2
       - name: Sign binary
         if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
         run: |
