@@ -60,7 +60,7 @@ impl Server {
         server.init_logging().context("set log verbosity")?;
         server.config().validate().context("validate config")?;
 
-        server.init_self()?;
+        Self::init().context("init self")?;
         Ok(server)
     }
 
@@ -97,7 +97,7 @@ impl Server {
         Ok(())
     }
 
-    fn init_self(&self) -> Result<()> {
+    fn init() -> Result<()> {
         let init = Init::<DefaultInit>::default();
         init.unset_locale()?;
         // While we could configure this, standard practice has it as -1000,
@@ -116,14 +116,20 @@ impl Server {
                     .with_target(true)
                     .with_line_number(true)
                     .with_filter(level);
-                registry.with(layer).init();
+                registry
+                    .with(layer)
+                    .try_init()
+                    .context("init stdout fmt layer")?;
                 info!("Using stdout logger");
             }
             LogDriver::Systemd => {
                 let layer = tracing_journald::layer()
                     .context("unable to connect to journald")?
                     .with_filter(level);
-                registry.with(layer).init();
+                registry
+                    .with(layer)
+                    .try_init()
+                    .context("init journald layer")?;
                 info!("Using systemd/journald logger");
             }
         }
