@@ -56,7 +56,7 @@ integration-static: .install.ginkgo # It needs to be release so we correctly tes
 	GOBIN=$(abspath $(GOTOOLS_BINDIR)) go install github.com/onsi/ginkgo/v2/ginkgo@latest
 
 .install.golangci-lint:
-	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | BINDIR=$(abspath $(GOTOOLS_BINDIR)) sh -s v1.45.2
+	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | BINDIR=$(abspath $(GOTOOLS_BINDIR)) sh -s v1.46.2
 
 clean:
 	rm -rf target/
