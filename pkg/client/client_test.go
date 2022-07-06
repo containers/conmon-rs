@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containers/common/pkg/resize"
 	"github.com/containers/conmon-rs/pkg/client"
-	"github.com/containers/podman/v4/libpod/define"
 	"github.com/containers/storage/pkg/unshare"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -119,7 +119,7 @@ var _ = Describe("ConmonClient", func() {
 					context.Background(),
 					&client.SetWindowSizeContainerConfig{
 						ID: tr.ctrID,
-						Size: &define.TerminalSize{
+						Size: &resize.TerminalSize{
 							Width:  10,
 							Height: 20,
 						},

@@ -7,10 +7,9 @@ import (
 	"io"
 	"net"
 
+	"github.com/containers/common/pkg/resize"
+	"github.com/containers/common/pkg/util"
 	"github.com/containers/conmon-rs/internal/proto"
-	"github.com/containers/podman/v4/libpod/define"
-	"github.com/containers/podman/v4/pkg/kubeutils"
-	"github.com/containers/podman/v4/utils"
 )
 
 const (
@@ -71,7 +70,7 @@ type AttachConfig struct {
 	Passthrough bool
 
 	// Channel of resize events.
-	Resize chan define.TerminalSize
+	Resize chan resize.TerminalSize
 
 	// The standard streams for this attach session.
 	Streams AttachStreams
@@ -141,7 +140,7 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) (err error
 	if !cfg.Passthrough {
 		c.logger.Debugf("Attaching to container %s", cfg.ID)
 
-		kubeutils.HandleResizing(cfg.Resize, func(size define.TerminalSize) {
+		resize.HandleResizing(cfg.Resize, func(size resize.TerminalSize) {
 			c.logger.Debugf("Got a resize event: %+v", size)
 			if err := c.SetWindowSizeContainer(ctx, &SetWindowSizeContainerConfig{
 				ID:   cfg.ID,
@@ -198,7 +197,7 @@ func (c *ConmonClient) setupStdioChannels(
 	go func() {
 		var err error
 		if cfg.Streams.Stdin != nil {
-			_, err = utils.CopyDetachable(conn, cfg.Streams.Stdin, cfg.DetachKeys)
+			_, err = util.CopyDetachable(conn, cfg.Streams.Stdin, cfg.DetachKeys)
 		}
 		stdinDone <- err
 	}()
@@ -283,7 +282,7 @@ func (c *ConmonClient) readStdio(
 		if cfg.StopAfterStdinEOF {
 			return nil
 		}
-		if errors.Is(err, define.ErrDetach) {
+		if errors.Is(err, util.ErrDetach) {
 			if closeErr := conn.CloseWrite(); closeErr != nil {
 				return fmt.Errorf("%v: %w", closeErr, err)
 			}
@@ -310,7 +309,7 @@ type SetWindowSizeContainerConfig struct {
 	ID string
 
 	// Size is the new terminal size.
-	Size *define.TerminalSize
+	Size *resize.TerminalSize
 }
 
 // SetWindowSizeContainer can be used to change the window size of a running container.
