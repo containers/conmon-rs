@@ -43,7 +43,7 @@ impl SharedContainerIO {
     /// Resize the shared container IO to the provided with and height.
     /// Errors in case of no terminal containers.
     pub async fn resize(&self, width: u16, height: u16) -> Result<()> {
-        match &*self.0.read().await.typ() {
+        match self.0.read().await.typ() {
             ContainerIOType::Terminal(t) => t.resize(width, height).context("resize terminal"),
             ContainerIOType::Streams(_) => bail!("container has no terminal"),
         }
