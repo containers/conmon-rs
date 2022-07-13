@@ -70,6 +70,9 @@ impl SharedContainerAttach {
 /// The size of an attach packet.
 const ATTACH_PACKET_BUF_SIZE: usize = 8192;
 
+/// The packet indicating that we're done writing.
+const DONE_PACKET: &[u8; ATTACH_PACKET_BUF_SIZE] = &[0; ATTACH_PACKET_BUF_SIZE];
+
 type Clients = Arc<RwLock<Vec<UnixStream>>>;
 
 #[derive(Clone, Debug)]
@@ -179,7 +182,7 @@ impl Attach {
     where
         T: AsRef<[u8]>,
     {
-        let packets = buf
+        let mut packets = buf
             .as_ref()
             .chunks(ATTACH_PACKET_BUF_SIZE - 1)
             .map(|x| {
@@ -193,6 +196,7 @@ impl Attach {
                 y
             })
             .collect::<Vec<_>>();
+        packets.push(DONE_PACKET.to_vec());
 
         let mut cleanup_idxs = vec![];
         let mut clients = self.clients.write().await;
@@ -224,6 +228,7 @@ impl Attach {
                         }
                     }
                 }
+                debug!("Done writing all packets to client");
             }
         }
 
