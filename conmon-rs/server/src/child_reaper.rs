@@ -142,7 +142,9 @@ impl ChildReaper {
     }
 
     pub fn kill_grandchildren(&self, s: Signal) -> Result<()> {
-        for (_, grandchild) in lock!(self.grandchildren).iter() {
+        let grandchildren = lock!(self.grandchildren);
+        let grandchildren_iter = grandchildren.iter();
+        for (_, grandchild) in grandchildren_iter {
             let span = debug_span!("kill_grandchildren", pid = grandchild.pid);
             let _enter = span.enter();
             debug!("Killing grandchild");
@@ -234,7 +236,8 @@ impl ReapableChild {
         debug!("Grandchild close");
         self.token.cancel();
         if let Some(t) = self.task.clone() {
-            for t in lock!(t).take().context("no tasks available")?.into_iter() {
+            let tasks = lock!(t).take().context("no tasks available")?;
+            for t in tasks.into_iter() {
                 debug!("Grandchild await");
                 t.await?;
             }
