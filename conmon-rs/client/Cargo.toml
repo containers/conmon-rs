@@ -6,10 +6,10 @@ edition = "2018"
 [dependencies]
 async-io = "1.7.0"
 async-net = "1.6.1"
-capnp = "0.14.6"
+capnp = "0.14.7"
 capnp-rpc = "0.14.1"
 conmon-common = { path = "../common" }
 futures = "0.3.21"
 log = { version = "0.4.17", features = ["serde", "std"] }
-serde = { version = "1.0.138", features = ["derive"] }
+serde = { version = "1.0.139", features = ["derive"] }
 tokio = { version = "1.19.2", features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
