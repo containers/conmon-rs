@@ -11,7 +11,6 @@ path = "src/main.rs"
 anyhow = "1.0.58"
 capnp = "0.14.7"
 capnp-rpc = "0.14.1"
-chrono = "0.4.19"
 conmon-common = { path = "../common" }
 clap = { version = "3.1.17", features = ["cargo", "derive", "env", "wrap_help"] }
 futures = "0.3.21"
@@ -36,9 +35,11 @@ regex = "1.6.0"
 notify = "5.0.0-pre.15"
 tokio-eventfd = "0.2.0"
 lazy_static = "1.4.0"
+tz-rs = "0.6.11"
 
 [build-dependencies]
 shadow-rs = "0.14.0"
 
 [dev-dependencies]
 mockall = "0.11.1"
+time = { version = "0.3.11", features = ["parsing"] }
