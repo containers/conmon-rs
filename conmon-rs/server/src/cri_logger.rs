@@ -2,7 +2,6 @@
 
 use crate::container_io::Pipe;
 use anyhow::{Context, Result};
-use chrono::offset::Local;
 use getset::{CopyGetters, Getters, Setters};
 use memchr::memchr;
 use std::{
@@ -14,6 +13,7 @@ use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
 };
 use tracing::{debug, trace};
+use tz::{DateTime, TimeZone};
 
 #[derive(Debug, CopyGetters, Getters, Setters)]
 /// The main structure used for container log handling.
@@ -58,7 +58,10 @@ impl CriLogger {
         let mut reader = BufReader::new(bytes);
 
         // Get the RFC3339 timestmap
-        let timestamp = Local::now().to_rfc3339();
+        let local_tz = TimeZone::local().context("get local timezone")?;
+        let timestamp = DateTime::now(local_tz.as_ref())
+            .context("get local datetime")?
+            .to_string();
         let min_log_len = timestamp
             .len()
             .checked_add(10) // len of " stdout " + "P "
@@ -186,9 +189,9 @@ impl CriLogger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::DateTime;
     use std::fs;
     use tempfile::NamedTempFile;
+    use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
     #[tokio::test]
     async fn write_stdout_success() -> Result<()> {
@@ -206,8 +209,8 @@ mod tests {
         assert!(res.contains(" stdout F this is a line"));
         assert!(res.contains(" stdout F and another line"));
 
-        DateTime::parse_from_rfc3339(res.split_whitespace().next().context("no timestamp")?)
-            .context("unable to parse timestamp")?;
+        let timestamp = res.split_whitespace().next().context("no timestamp")?;
+        OffsetDateTime::parse(timestamp, &Rfc3339).context("unable to parse timestamp")?;
         Ok(())
     }
 
