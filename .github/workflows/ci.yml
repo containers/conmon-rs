@@ -199,6 +199,7 @@ jobs:
   test-integration:
     needs: release-static
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/setup-go@v3
         with:
@@ -232,3 +233,7 @@ jobs:
         run: sudo ln -f -s $(go env GOROOT)/bin/* /usr/bin/
       - name: Integration tests
         run: RUNTIME_PATH="/usr/sbin/runc" make integration-static
+      - name: Chown cache
+        run: |
+          sudo chown -R $(id -u):$(id -g) ~/go/pkg/mod
+          sudo chown -R $(id -u):$(id -g) ~/.cache/go-build

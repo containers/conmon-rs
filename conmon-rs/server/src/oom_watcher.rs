@@ -65,7 +65,7 @@ impl OOMWatcher {
                         error!("Failed to watch OOM: {:#}", e)
                     }
                 }
-                .instrument(debug_span!("task")),
+                .instrument(debug_span!("cgroup_handling")),
             )
         };
         OOMWatcher { pid, token, task }
@@ -73,8 +73,8 @@ impl OOMWatcher {
 
     pub async fn stop(self) {
         self.token.cancel();
-        if let Err(err) = self.task.await {
-            error!(pid = self.pid, "Stop failed: {}", err);
+        if let Err(e) = self.task.await {
+            error!(pid = self.pid, "Stop failed: {:#}", e);
         }
     }
 
@@ -131,7 +131,7 @@ impl OOMWatcher {
                 _ = oom_event_fd.read(&mut buffer) => {
                     debug!("Got oom event");
                     if let Err(e) = Self::write_oom_files(exit_paths).await {
-                        error!("Writing oom files failed: {}", e);
+                        error!("Writing oom files failed: {:#}", e);
                     } else {
                         debug!("Successfully wrote oom files");
                     }
@@ -151,7 +151,7 @@ impl OOMWatcher {
         let watcher = notify::recommended_watcher(move |res: Result<Event, Error>| {
             futures::executor::block_on(async {
                 if let Err(e) = tx.send(res).await {
-                    error!("Unable to send event result: {}", e)
+                    error!("Unable to send event result: {:#}", e)
                 }
             })
         })?;
@@ -183,7 +183,7 @@ impl OOMWatcher {
                     debug!("Loop cancelled");
                     match tx.try_send(OOMEvent{ oom: false }) {
                         Ok(_) => break,
-                        Err(e) => error!("try_send failed: {}", e)
+                        Err(e) => error!("try_send failed: {:#}", e)
                     };
                     break;
                 }
@@ -193,7 +193,7 @@ impl OOMWatcher {
                             if event.kind.is_remove() || event.kind.is_other() {
                                 match tx.try_send(OOMEvent{ oom: false }) {
                                     Ok(_) => break,
-                                    Err(e) => error!("try_send failed: {}", e)
+                                    Err(e) => error!("try_send failed: {:#}", e)
                                 };
                                 break
                             }
@@ -208,19 +208,19 @@ impl OOMWatcher {
                                     }
                                     debug!(counter, "Found oom event");
                                     if let Err(e) = Self::write_oom_files(exit_paths).await {
-                                        error!("Writing oom files failed: {}", e);
+                                        error!("Writing oom files failed: {:#}", e);
                                     }
                                     last_counter = counter;
                                     match tx.try_send(OOMEvent{ oom: true }) {
                                         Ok(_) => break,
-                                        Err(e) => error!("try_send failed: {}", e)
+                                        Err(e) => error!("try_send failed: {:#}", e)
                                     };
                                 }
                                 Err(e) => {
                                     error!("Checking for oom failed: {}", e);
                                     match tx.try_send(OOMEvent{ oom: false }) {
                                         Ok(_) => break,
-                                        Err(e) => error!("try_send failed: {}", e)
+                                        Err(e) => error!("try_send failed: {:#}", e)
                                     };
                                 }
                             };
@@ -229,7 +229,7 @@ impl OOMWatcher {
                             debug!("Watch error: {:#}", e);
                             match tx.try_send(OOMEvent{ oom: false }) {
                                 Ok(_) => break,
-                                Err(e) => error!("try_send failed: {}", e)
+                                Err(e) => error!("try_send failed: {:#}", e)
                             };
                             break;
                         },
@@ -275,7 +275,7 @@ impl OOMWatcher {
                     async move {
                         debug!("Writing OOM file: {}", path.display());
                         if let Err(e) = File::create(&path).await {
-                            error!("Could not write oom file to {}: {}", path.display(), e);
+                            error!("Could not write oom file to {}: {:#}", path.display(), e);
                         }
                     }
                     .instrument(debug_span!("write_oom_file")),
