@@ -28,7 +28,7 @@ use tokio::{
     task::{self, LocalSet},
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use tracing::{debug, error, info};
+use tracing::{debug, debug_span, info, Instrument};
 use tracing_subscriber::{filter::LevelFilter, prelude::*};
 use twoparty::VatNetwork;
 
@@ -142,14 +142,20 @@ impl Server {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let socket = self.config().socket();
         let reaper = self.reaper.clone();
-        task::spawn(Self::start_signal_handler(reaper, socket, shutdown_tx));
+        task::spawn(
+            Self::start_signal_handler(reaper, socket, shutdown_tx)
+                .instrument(debug_span!("signal_handler")),
+        );
 
         task::spawn_blocking(move || {
-            Handle::current().block_on(async {
-                LocalSet::new()
-                    .run_until(self.start_backend(shutdown_rx))
-                    .await
-            })
+            Handle::current().block_on(
+                async {
+                    LocalSet::new()
+                        .run_until(self.start_backend(shutdown_rx))
+                        .await
+                }
+                .instrument(debug_span!("backend")),
+            )
         })
         .await?
     }
@@ -174,17 +180,15 @@ impl Server {
             }
         };
 
+        debug!("Starting grandchildren cleanup task");
+        reaper
+            .kill_grandchildren(handled_sig)
+            .context("unable to kill grandchildren")?;
+
+        debug!("Sending shutdown message");
         shutdown_tx
             .send(())
             .map_err(|_| format_err!("unable to send shutdown message"))?;
-
-        // TODO FIXME Ideally we would drop after socket file is removed,
-        // but the removal is taking longer than 10 seconds, indicating someone
-        // is keeping it open...
-        match reaper.kill_grandchildren(handled_sig) {
-            Ok(_) => (),
-            Err(e) => error!("could not kill grandchildren: {}", e),
-        }
 
         debug!("Removing socket file {}", socket.as_ref().display());
         fs::remove_file(socket)
@@ -199,6 +203,7 @@ impl Server {
         loop {
             let stream = tokio::select! {
                 _ = &mut shutdown_rx => {
+                    debug!("Received shutdown message");
                     return Ok(())
                 }
                 stream = listener.accept() => {

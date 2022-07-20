@@ -34,10 +34,10 @@ var _ = Describe("ConmonClient", func() {
 
 	AfterEach(func() {
 		Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID)).To(BeNil())
-		Expect(os.RemoveAll(tr.tmpDir)).To(BeNil())
 		if sut != nil {
 			Expect(sut.Shutdown()).To(BeNil())
 		}
+		Expect(os.RemoveAll(tr.tmpDir)).To(BeNil())
 	})
 	Describe("New", func() {
 		It("should restore from running server", func() {

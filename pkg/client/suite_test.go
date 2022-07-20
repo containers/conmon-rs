@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"testing"
@@ -29,12 +30,13 @@ import (
 
 const (
 	timeoutUnlimited = 0
+	conmonBinaryKey  = "CONMON_BINARY"
 )
 
 var (
 	busyboxDest = filepath.Join(busyboxDestDir, "busybox")
 	runtimePath = os.Getenv("RUNTIME_BINARY")
-	conmonPath  = os.Getenv("CONMON_BINARY")
+	conmonPath  = os.Getenv(conmonBinaryKey)
 	maxRSSKB    = 230
 )
 
@@ -50,6 +52,25 @@ func TestConmonClient(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "ConmonClient")
 }
+
+var _ = AfterSuite(func() {
+	By("printing the goroutine stack for debugging purposes")
+	Expect(pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)).To(BeNil())
+
+	By("Verifying that no conmonrs processes are still running in the background")
+	cmd := exec.Command("ps", "aux")
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	Expect(cmd.Run()).To(BeNil())
+	scanner := bufio.NewScanner(strings.NewReader(stdout.String()))
+	for scanner.Scan() {
+		text := scanner.Text()
+		if strings.Contains(text, conmonBinaryKey) {
+			continue
+		}
+		Expect(text).NotTo(ContainSubstring(conmonPath))
+	}
+})
 
 type testRunner struct {
 	tmpDir, tmpRootfs, ctrID string

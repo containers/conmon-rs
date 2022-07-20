@@ -31,7 +31,7 @@ use tokio::{
     time::{self, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, debug_span, error, Instrument};
+use tracing::{debug, debug_span, error, warn, Instrument};
 
 #[derive(Debug, Default, Getters)]
 pub struct ChildReaper {
@@ -142,22 +142,25 @@ impl ChildReaper {
     }
 
     pub fn kill_grandchildren(&self, s: Signal) -> Result<()> {
+        debug!("Killing grandchildren");
         let grandchildren = lock!(self.grandchildren);
         let grandchildren_iter = grandchildren.iter();
         for (_, grandchild) in grandchildren_iter {
-            let span = debug_span!("kill_grandchildren", pid = grandchild.pid);
+            let span = debug_span!("kill_grandchild", pid = grandchild.pid);
             let _enter = span.enter();
-            debug!("Killing grandchild");
+            debug!("Killing single grandchild");
             kill_grandchild(grandchild.pid, s);
             futures::executor::block_on(
                 async {
                     if let Err(e) = grandchild.close().await {
-                        error!("Unable to close grandchild: {}", e)
+                        error!("Unable to close grandchild: {:#}", e)
                     }
                 }
                 .instrument(debug_span!("close", signal = s.as_str())),
             );
+            debug!("Done killing single grandchild");
         }
+        debug!("Done killing all grandchildren");
         Ok(())
     }
 }
@@ -172,13 +175,13 @@ pub fn kill_grandchild(raw_pid: u32, s: Signal) {
             if let Err(e) = kill(Pid::from_raw(-pgid), s) {
                 error!(
                     raw_pid,
-                    "Failed to get pgid, falling back to killing pid: {}", e
+                    "Failed to get pgid, falling back to killing pid: {:#}", e
                 );
             }
         }
     }
     if let Err(e) = kill(pid, s) {
-        debug!("Failed killing pid: {}", e);
+        debug!("Failed killing pid: {:#}", e);
     }
 }
 
@@ -233,15 +236,18 @@ impl ReapableChild {
     }
 
     pub async fn close(&self) -> Result<()> {
-        debug!("Grandchild close");
-        self.token.cancel();
+        debug!("Waiting for tasks to close");
         if let Some(t) = self.task.clone() {
             let tasks = lock!(t).take().context("no tasks available")?;
             for t in tasks.into_iter() {
-                debug!("Grandchild await");
-                t.await?;
+                debug!("Task await");
+                if let Err(e) = t.await {
+                    warn!("Unable to wait for task: {:#}", e)
+                }
+                debug!("Task finished");
             }
         }
+        debug!("All tasks done");
         Ok(())
     }
 
@@ -257,6 +263,7 @@ impl ReapableChild {
 
         let task = task::spawn(
             async move {
+                debug!("Running task");
                 let mut exit_code: i32 = -1;
                 let mut oomed = false;
                 let mut timed_out = false;
@@ -293,10 +300,6 @@ impl ReapableChild {
                     oomed,
                     timed_out,
                 };
-                debug!("Sending exit struct to channel: {:?}", exit_channel_data);
-                if exit_tx_clone.send(exit_channel_data).is_err() {
-                    debug!("Unable to send exit status");
-                }
                 debug!(
                     "Write to exit paths: {}",
                     exit_paths
@@ -306,8 +309,13 @@ impl ReapableChild {
                         .join(", ")
                 );
                 if let Err(e) = Self::write_to_exit_paths(exit_code, &exit_paths).await {
-                    error!(pid, "Could not write exit paths: {}", e);
+                    error!(pid, "Could not write exit paths: {:#}", e);
                 }
+                debug!("Sending exit struct to channel: {:?}", exit_channel_data);
+                if exit_tx_clone.send(exit_channel_data).is_err() {
+                    debug!("Unable to send exit status");
+                }
+                debug!("Task done");
             }
             .instrument(debug_span!("watch", pid)),
         );
@@ -323,11 +331,12 @@ impl ReapableChild {
     }
 
     fn wait_for_exit_code(token: &CancellationToken, pid: u32) -> i32 {
+        debug!("Waiting for exit code");
         const FAILED_EXIT_CODE: i32 = -3;
         loop {
             match waitpid(Pid::from_raw(pid as pid_t), None) {
                 Ok(WaitStatus::Exited(_, exit_code)) => {
-                    debug!(pid, "Exited {}", exit_code);
+                    debug!("Exited {}", exit_code);
                     token.cancel();
                     return exit_code;
                 }
@@ -340,11 +349,11 @@ impl ReapableChild {
                     continue;
                 }
                 Err(Errno::EINTR) => {
-                    debug!(pid, "Failed to wait for pid on EINTR, retrying");
+                    debug!("Failed to wait for pid on EINTR, retrying");
                     continue;
                 }
                 Err(err) => {
-                    error!(pid, "Unable to waitpid on {}", err);
+                    error!("Unable to waitpid on {:#}", err);
                     token.cancel();
                     return FAILED_EXIT_CODE;
                 }
@@ -356,24 +365,25 @@ impl ReapableChild {
         let paths = paths.to_owned();
         let tasks: Vec<_> = paths
             .into_iter()
-            .map(|path| {
+            .map(|path_buf| {
+                let path = path_buf.display().to_string();
                 tokio::spawn(
                     async move {
                         let code_str = format!("{}", code);
-                        if let Ok(mut fp) = File::create(&path).await {
+                        debug!("Creating exit file");
+                        if let Ok(mut fp) = File::create(&path_buf).await {
+                            debug!(code, "Writing exit code to file");
                             if let Err(e) = fp.write_all(code_str.as_bytes()).await {
-                                error!(
-                                    "Could not write exit file to path {}: {}",
-                                    path.display(),
-                                    e
-                                );
+                                error!("Could not write exit file to path: {:#}", e);
                             }
+                            debug!("Flushing file");
                             if let Err(e) = fp.flush().await {
-                                error!("Unable to flush {}: {}", path.display(), e);
+                                error!("Unable to flush {}: {:#}", path_buf.display(), e);
                             }
+                            debug!("Done writing exit file");
                         }
                     }
-                    .instrument(debug_span!("tasks")),
+                    .instrument(debug_span!("write_exit_path", path)),
                 )
             })
             .collect();
