@@ -26,8 +26,14 @@ interface Conmon {
     }
 
     struct LogDriver {
+        # The type of the log driver.
         type @0 :Type;
+
+        # The filesystem path of the log driver, if required.
         path @1 :Text;
+
+        # The maximum log size in bytes, 0 means unlimited.
+        maxSize @2 :UInt64;
 
         enum Type {
             # The CRI logger, requires `path` to be set.
