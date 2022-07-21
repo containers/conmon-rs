@@ -158,6 +158,23 @@ var _ = Describe("ConmonClient", func() {
 				}
 				Expect(fileContents(tr.oomExitPath())).To(BeEmpty())
 			})
+
+			It(testName("should reopen logs based on max size", terminal), func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "sh", "-c", "echo hello && echo world"},
+					nil,
+				)
+				sut = tr.configGivenEnv()
+				cfg := tr.defaultConfig(terminal)
+				cfg.LogDrivers[0].MaxSize = 50
+				tr.createContainerWithConfig(sut, cfg)
+				tr.startContainer(sut)
+
+				logs := fileContents(tr.logPath())
+				Expect(logs).NotTo(ContainSubstring("hello"))
+			})
 		}
 	})
 

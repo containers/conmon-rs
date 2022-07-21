@@ -438,6 +438,10 @@ type LogDriver struct {
 
 	// Path specifies the filesystem path of the log driver.
 	Path string
+
+	// MaxSize is the maximum amount of bytes to be written before rotation.
+	// 0 translates to an unlimited size.
+	MaxSize uint64
 }
 
 // LogDriverType specifies available log drivers.
@@ -638,6 +642,7 @@ func (c *ConmonClient) initLogDrivers(req *proto.Conmon_CreateContainerRequest, 
 		if err := n.SetPath(logDriver.Path); err != nil {
 			return fmt.Errorf("set log driver path: %w", err)
 		}
+		n.SetMaxSize(logDriver.MaxSize)
 	}
 
 	return nil

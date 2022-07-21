@@ -31,7 +31,14 @@ impl ContainerLog {
             .flat_map(|x| -> Result<_> {
                 Ok(match x.get_type()? {
                     Type::ContainerRuntimeInterface => {
-                        LogDriver::ContainerRuntimeInterface(CriLogger::new(x.get_path()?, None)?)
+                        LogDriver::ContainerRuntimeInterface(CriLogger::new(
+                            x.get_path()?,
+                            if x.get_max_size() > 0 {
+                                Some(x.get_max_size() as usize)
+                            } else {
+                                None
+                            },
+                        )?)
                     }
                 })
             })

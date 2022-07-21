@@ -135,8 +135,8 @@ func fileContents(path string) string {
 	return string(contents)
 }
 
-func (tr *testRunner) createContainer(sut *client.ConmonClient, terminal bool) {
-	resp, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+func (tr *testRunner) defaultConfig(terminal bool) *client.CreateContainerConfig {
+	return &client.CreateContainerConfig{
 		ID:           tr.ctrID,
 		BundlePath:   tr.tmpDir,
 		Terminal:     terminal,
@@ -146,7 +146,15 @@ func (tr *testRunner) createContainer(sut *client.ConmonClient, terminal bool) {
 			Type: client.LogDriverTypeContainerRuntimeInterface,
 			Path: tr.logPath(),
 		}},
-	})
+	}
+}
+
+func (tr *testRunner) createContainer(sut *client.ConmonClient, terminal bool) {
+	tr.createContainerWithConfig(sut, tr.defaultConfig(terminal))
+}
+
+func (tr *testRunner) createContainerWithConfig(sut *client.ConmonClient, cfg *client.CreateContainerConfig) {
+	resp, err := sut.CreateContainer(context.Background(), cfg)
 	Expect(err).To(BeNil())
 	Expect(resp.PID).NotTo(Equal(0))
 	Eventually(func() error {
