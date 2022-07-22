@@ -4,7 +4,7 @@ use crate::{
     container_io::{ContainerIO, ContainerIOType, SharedContainerIO},
     oom_watcher::OOMWatcher,
 };
-use anyhow::{anyhow, format_err, Context, Result};
+use anyhow::{bail, format_err, Context, Result};
 use getset::{CopyGetters, Getters, Setters};
 use libc::pid_t;
 use multimap::MultiMap;
@@ -18,8 +18,10 @@ use nix::{
 };
 use std::{
     ffi::OsStr,
+    fmt::Write,
     path::{Path, PathBuf},
     process::Stdio,
+    str,
     sync::{Arc, Mutex},
 };
 use tokio::{
@@ -75,10 +77,6 @@ impl ChildReaper {
             .spawn()
             .context("spawn child process: {}")?;
 
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let stdin = child.stdin.take();
-
         match container_io.typ_mut() {
             ContainerIOType::Terminal(ref mut terminal) => {
                 terminal
@@ -87,19 +85,32 @@ impl ChildReaper {
                     .context("wait for terminal socket connection")?;
             }
             ContainerIOType::Streams(streams) => {
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
+                let stdin = child.stdin.take();
                 streams.handle_stdio_receive(stdin, stdout, stderr);
             }
-        }
-        let status = child.wait().await?;
+        };
 
-        if !status.success() {
-            let code_str = match status.code() {
-                Some(code) => format!("Child command exited with status: {}", code),
-                None => "Child command exited with signal".to_string(),
+        let output = child.wait_with_output().await?;
+
+        if !output.status.success() {
+            const BASE_ERR: &str = "child command exited with";
+
+            let mut err_str = match output.status.code() {
+                Some(code) => format!("{}: {}", BASE_ERR, code),
+                None => format!("{} signal", BASE_ERR),
             };
-            // TODO Eventually, we'll need to read the stderr from the command
-            // to get the actual message runc returned.
-            return Err(anyhow!(code_str));
+
+            if !output.stderr.is_empty() {
+                write!(
+                    err_str,
+                    ": {}",
+                    str::from_utf8(&output.stderr).context("convert stderr to utf8")?,
+                )?;
+            }
+
+            bail!(err_str)
         }
 
         let grandchild_pid = fs::read_to_string(pidfile)
