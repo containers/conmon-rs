@@ -1,0 +1,3 @@
+(function() {var implementors = {};
+implementors["conmon_common"] = [{"text":"impl FromClientHook for <a class=\"struct\" href=\"conmon_common/conmon_capnp/conmon/struct.Client.html\" title=\"struct conmon_common::conmon_capnp::conmon::Client\">Client</a>","synthetic":false,"types":["conmon_common::conmon_capnp::conmon::Client"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

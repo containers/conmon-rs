@@ -1,0 +1,3 @@
+(function() {var implementors = {};
+implementors["conmon_common"] = [{"text":"impl FromU16 for <a class=\"enum\" href=\"conmon_common/conmon_capnp/conmon/log_driver/enum.Type.html\" title=\"enum conmon_common::conmon_capnp::conmon::log_driver::Type\">Type</a>","synthetic":false,"types":["conmon_common::conmon_capnp::conmon::log_driver::Type"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

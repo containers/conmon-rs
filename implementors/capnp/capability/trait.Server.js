@@ -1,0 +1,3 @@
+(function() {var implementors = {};
+implementors["conmon_common"] = [{"text":"impl&lt;_T:&nbsp;<a class=\"trait\" href=\"conmon_common/conmon_capnp/conmon/trait.Server.html\" title=\"trait conmon_common::conmon_capnp::conmon::Server\">Server</a>&gt; Server for <a class=\"struct\" href=\"conmon_common/conmon_capnp/conmon/struct.ServerDispatch.html\" title=\"struct conmon_common::conmon_capnp::conmon::ServerDispatch\">ServerDispatch</a>&lt;_T&gt;","synthetic":false,"types":["conmon_common::conmon_capnp::conmon::ServerDispatch"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()
