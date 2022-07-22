@@ -6,12 +6,13 @@ use crate::{
     server::Server,
     version::Version,
 };
-use anyhow::Context;
+use anyhow::{format_err, Context};
 use capnp::{capability::Promise, Error};
 use capnp_rpc::pry;
 use conmon_common::conmon_capnp::conmon;
 use std::{
     path::{Path, PathBuf},
+    str,
     time::Duration,
 };
 use tokio::time::Instant;
@@ -98,11 +99,22 @@ impl conmon::Server for Server {
             async move {
                 capnp_err!(container_log.write().await.init().await)?;
 
-                let grandchild_pid = capnp_err!(
-                    child_reaper
-                        .create_child(runtime, args, &mut container_io, &pidfile)
-                        .await
-                )?;
+                let grandchild_pid = capnp_err!(match child_reaper
+                    .create_child(runtime, args, &mut container_io, &pidfile)
+                    .await
+                {
+                    Err(e) => {
+                        // Attach the stderr output to the error message
+                        let (_, stderr, _) = container_io.read_all_with_timeout(None).await;
+                        if !stderr.is_empty() {
+                            let stderr_str = str::from_utf8(&stderr)?;
+                            Err(format_err!("{:#}: {}", e, stderr_str))
+                        } else {
+                            Err(e)
+                        }
+                    }
+                    res => res,
+                })?;
 
                 // register grandchild with server
                 let io = SharedContainerIO::new(container_io);
