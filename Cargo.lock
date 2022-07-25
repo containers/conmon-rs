@@ -603,9 +603,9 @@ dependencies = [
 
 [[package]]
 name = "iana-time-zone"
-version = "0.1.36"
+version = "0.1.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad24e30ddc723561b831fb3bfa1dd5e329285b2bba401ec473e5c53b74c8dec4"
+checksum = "97d0b780e72fefba5e04a8359137b0a5687a44cc893dbda904fcf8a93f2f07e7"
 dependencies = [
  "core-foundation",
  "js-sys",
@@ -1174,9 +1174,9 @@ dependencies = [
 
 [[package]]
 name = "shadow-rs"
-version = "0.16.0"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "700d9f534a341a3ed1322dd10cd04daefcb229bc09b44a83ee20873dfa03d292"
+checksum = "b2d399ad15b5c90d8e6461da75c751c77501598dd915d81a108401b252aaa99f"
 dependencies = [
  "const_format",
  "git2",
@@ -1492,9 +1492,9 @@ dependencies = [
 
 [[package]]
 name = "tzdb"
-version = "0.2.7"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02a29f1fbaa871320d9d6c81e19c650837a3959cf463472408c934c49af7df5f"
+checksum = "70cb9dbeb3119afb148b2737802ee3c6d5e9652ae92102562fc017f356ab0f68"
 dependencies = [
  "byte-slice-cast",
  "iana-time-zone",
