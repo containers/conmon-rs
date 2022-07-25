@@ -41,5 +41,5 @@ tz-rs = "0.6.11"
 shadow-rs = "0.16.1"
 
 [dev-dependencies]
-mockall = "0.11.1"
+mockall = "0.11.2"
 time = { version = "0.3.11", features = ["parsing"] }
