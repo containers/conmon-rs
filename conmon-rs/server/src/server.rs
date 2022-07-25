@@ -2,7 +2,7 @@
 
 use crate::{
     child_reaper::ChildReaper,
-    config::{Config, LogDriver},
+    config::{CgroupManager, Config, LogDriver},
     container_io::{ContainerIO, ContainerIOType},
     init::{DefaultInit, Init},
     version::Version,
@@ -219,6 +219,8 @@ impl Server {
         }
     }
 
+    const SYSTEMD_CGROUP_ARG: &'static str = "--systemd-cgroup";
+
     /// Generate the OCI runtime CLI arguments from the provided parameters.
     pub(crate) fn generate_runtime_args(
         &self,
@@ -231,6 +233,10 @@ impl Server {
 
         if let Some(rr) = self.config().runtime_root() {
             args.push(format!("--root={}", rr.display()));
+        }
+
+        if self.config().cgroup_manager() == CgroupManager::Systemd {
+            args.push(Self::SYSTEMD_CGROUP_ARG.into());
         }
 
         args.extend([
@@ -261,6 +267,10 @@ impl Server {
 
         if let Some(rr) = self.config().runtime_root() {
             args.push(format!("--root={}", rr.display()));
+        }
+
+        if self.config().cgroup_manager() == CgroupManager::Systemd {
+            args.push(Self::SYSTEMD_CGROUP_ARG.into());
         }
 
         args.push("exec".to_string());

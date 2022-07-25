@@ -27,11 +27,12 @@ const (
 )
 
 var (
-	errRuntimeUnspecified = errors.New("runtime must be specified")
-	errRunDirUnspecified  = errors.New("RunDir must be specified")
-	errInvalidValue       = errors.New("invalid value")
-	errRunDirNotCreated   = errors.New("could not create RunDir")
-	errTimeoutWaitForPid  = errors.New("timed out waiting for server PID to disappear")
+	errRuntimeUnspecified     = errors.New("runtime must be specified")
+	errRunDirUnspecified      = errors.New("RunDir must be specified")
+	errInvalidValue           = errors.New("invalid value")
+	errRunDirNotCreated       = errors.New("could not create RunDir")
+	errTimeoutWaitForPid      = errors.New("timed out waiting for server PID to disappear")
+	errUndefinedCgroupManager = errors.New("undefined cgroup manager")
 )
 
 // ConmonClient is the main client structure of this package.
@@ -77,7 +78,23 @@ type ConmonServerConfig struct {
 	// Stderr is the standard error stream of the server when the log driver
 	// "stdout" is being used (can be nil).
 	Stderr io.WriteCloser
+
+	// CgroupManager can be use to select the cgroup manager.
+	CgroupManager CgroupManager
 }
+
+// CgroupManager is the enum for all available cgroup managers.
+type CgroupManager int
+
+const (
+	// CgroupManagerSystemd specifies to use systemd to create and manage
+	// cgroups.
+	CgroupManagerSystemd CgroupManager = iota
+
+	// CgroupManagerCgroupfs specifies to use the cgroup filesystem to create
+	// and manage cgroups.
+	CgroupManagerCgroupfs
+)
 
 // NewConmonServerConfig creates a new ConmonServerConfig instance for the
 // required arguments. Optional arguments are pointing to their corresponding
@@ -223,6 +240,18 @@ func (c *ConmonClient) toArgs(config *ConmonServerConfig) (entrypoint string, ar
 			return "", args, fmt.Errorf("validate log driver: %w", err)
 		}
 		args = append(args, "--log-driver", config.LogDriver)
+	}
+
+	const cgroupManagerFlag = "--cgroup-manager"
+	switch config.CgroupManager {
+	case CgroupManagerSystemd:
+		args = append(args, cgroupManagerFlag, "systemd")
+
+	case CgroupManagerCgroupfs:
+		args = append(args, cgroupManagerFlag, "cgroupfs")
+
+	default:
+		return "", args, errUndefinedCgroupManager
 	}
 
 	return entrypoint, args, nil
