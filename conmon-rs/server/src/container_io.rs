@@ -19,7 +19,7 @@ use tokio::{
         mpsc::{UnboundedReceiver, UnboundedSender},
         RwLock,
     },
-    time::{self, Instant},
+    time::{self, Duration, Instant},
 };
 use tracing::{debug, error};
 
@@ -110,6 +110,8 @@ impl From<Streams> for ContainerIOType {
 }
 
 impl ContainerIO {
+    const DEFAULT_IO_INTERVAL: Duration = Duration::from_millis(100);
+
     /// Create a new container IO instance.
     pub fn new(terminal: bool, logger: SharedContainerLog) -> Result<Self> {
         let logger_clone = logger.clone();
@@ -210,8 +212,11 @@ impl ContainerIO {
         let stream = unsafe { File::from_raw_fd(fd) };
         let mut reader = BufReader::new(stream);
         let mut buf = vec![0; 1024];
+        let mut interval = time::interval(Self::DEFAULT_IO_INTERVAL);
 
         loop {
+            interval.tick().await;
+
             match reader.read(&mut buf).await {
                 Ok(n) if n > 0 => {
                     debug!("fd:{}:read {} bytes", fd, n);
@@ -268,7 +273,11 @@ impl ContainerIO {
 
     pub async fn read_loop_stdin(fd: RawFd, attach: SharedContainerAttach) -> Result<()> {
         let mut writer = unsafe { File::from_raw_fd(fd) };
+        let mut interval = time::interval(Self::DEFAULT_IO_INTERVAL);
+
         loop {
+            interval.tick().await;
+
             if let Some(data) = attach
                 .try_read()
                 .await
