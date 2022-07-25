@@ -80,7 +80,7 @@ pub struct Config {
     /// Root directory used by the OCI runtime to operate on containers.
     runtime_root: Option<PathBuf>,
 
-    #[get = "pub"]
+    #[get_copy = "pub"]
     #[clap(
         env(concat!(prefix!(), "SKIP_FORK")),
         long("skip-fork"),
