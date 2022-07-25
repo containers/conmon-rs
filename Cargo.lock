@@ -603,9 +603,9 @@ dependencies = [
 
 [[package]]
 name = "iana-time-zone"
-version = "0.1.36"
+version = "0.1.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad24e30ddc723561b831fb3bfa1dd5e329285b2bba401ec473e5c53b74c8dec4"
+checksum = "97d0b780e72fefba5e04a8359137b0a5687a44cc893dbda904fcf8a93f2f07e7"
 dependencies = [
  "core-foundation",
  "js-sys",
