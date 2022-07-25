@@ -101,7 +101,7 @@ linters-settings:
   cyclop:
     max-complexity: 15
   gocognit:
-    min-complexity: 25
+    min-complexity: 30
   nestif:
     min-complexity: 15
   errcheck:
