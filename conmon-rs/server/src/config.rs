@@ -88,6 +88,18 @@ pub struct Config {
     )]
     /// Do not fork if true
     skip_fork: bool,
+
+    #[get_copy = "pub"]
+    #[clap(
+        default_value(CgroupManager::Systemd.into()),
+        env(concat!(prefix!(), "CGROUP_MANAGER")),
+        long("cgroup-manager"),
+        short('c'),
+        possible_values(CgroupManager::iter().map(|x| x.into()).collect::<Vec<&str>>()),
+        value_name("MANAGER")
+    )]
+    /// Select the cgroup manager to be used
+    cgroup_manager: CgroupManager,
 }
 
 #[derive(
@@ -111,6 +123,29 @@ pub enum LogDriver {
 
     /// Use systemd journald as log driver
     Systemd,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Deserialize,
+    EnumIter,
+    EnumString,
+    Eq,
+    IntoStaticStr,
+    Hash,
+    PartialEq,
+    Serialize,
+)]
+#[strum(serialize_all = "lowercase")]
+/// Available cgroup managers.
+pub enum CgroupManager {
+    /// Use systemd to create and manage cgroups
+    Systemd,
+
+    /// Use the cgroup filesystem to create and manage cgroups
+    Cgroupfs,
 }
 
 impl Default for Config {
