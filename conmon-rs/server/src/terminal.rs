@@ -12,6 +12,7 @@ use libc::{self, winsize, TIOCSWINSZ};
 use nix::sys::termios::{self, OutputFlags, SetArg};
 use sendfd::RecvWithFd;
 use std::{
+    convert::TryFrom,
     io::{Error as IOError, ErrorKind},
     os::unix::{fs::PermissionsExt, io::RawFd},
     path::PathBuf,
@@ -24,6 +25,7 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
     task,
 };
+use tokio_fd::AsyncFd;
 use tracing::{debug, debug_span, error, trace, Instrument};
 
 #[derive(Debug, Getters, MutGetters, Setters)]
@@ -190,6 +192,8 @@ impl Terminal {
                     term.output_flags |= OutputFlags::ONLCR;
                     termios::tcsetattr(fd, SetArg::TCSANOW, &term)?;
 
+                    let stdio = AsyncFd::try_from(fd)?;
+
                     let attach_clone = attach.clone();
                     task::spawn(
                         async move {
@@ -199,7 +203,7 @@ impl Terminal {
                                 .await
                                 .context("send connected channel")?;
                             if let Err(e) = ContainerIO::read_loop(
-                                fd,
+                                stdio,
                                 Pipe::StdOut,
                                 logger,
                                 config.message_tx,

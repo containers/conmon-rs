@@ -81,14 +81,9 @@ impl Streams {
         if let Some(stdout) = stdout {
             task::spawn(
                 async move {
-                    if let Err(e) = ContainerIO::read_loop(
-                        stdout.as_raw_fd(),
-                        Pipe::StdOut,
-                        logger,
-                        message_tx,
-                        attach,
-                    )
-                    .await
+                    if let Err(e) =
+                        ContainerIO::read_loop(stdout, Pipe::StdOut, logger, message_tx, attach)
+                            .await
                     {
                         error!("Stdout read loop failure: {:#}", e);
                     }
@@ -103,14 +98,9 @@ impl Streams {
         if let Some(stderr) = stderr {
             task::spawn(
                 async move {
-                    if let Err(e) = ContainerIO::read_loop(
-                        stderr.as_raw_fd(),
-                        Pipe::StdErr,
-                        logger,
-                        message_tx,
-                        attach,
-                    )
-                    .await
+                    if let Err(e) =
+                        ContainerIO::read_loop(stderr, Pipe::StdErr, logger, message_tx, attach)
+                            .await
                     {
                         error!("Stderr read loop failure: {:#}", e);
                     }

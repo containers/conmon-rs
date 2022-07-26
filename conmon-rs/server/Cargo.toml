@@ -36,6 +36,7 @@ notify = "5.0.0-pre.15"
 tokio-eventfd = "0.2.0"
 lazy_static = "1.4.0"
 tz-rs = "0.6.11"
+tokio-fd = "0.3.0"
 
 [build-dependencies]
 shadow-rs = "0.16.1"

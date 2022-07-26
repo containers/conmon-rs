@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use getset::{Getters, MutGetters};
 use nix::errno::Errno;
 use std::{
+    marker::Unpin,
     os::unix::io::{FromRawFd, RawFd},
     path::{Path, PathBuf},
     sync::Arc,
@@ -14,7 +15,7 @@ use strum::AsRefStr;
 use tempfile::Builder;
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     sync::{
         mpsc::{UnboundedReceiver, UnboundedSender},
         RwLock,
@@ -202,24 +203,22 @@ impl ContainerIO {
         (stdio, timed_out)
     }
 
-    pub async fn read_loop(
-        fd: RawFd,
+    pub async fn read_loop<T>(
+        mut reader: T,
         pipe: Pipe,
         logger: SharedContainerLog,
         message_tx: UnboundedSender<Message>,
         attach: SharedContainerAttach,
-    ) -> Result<()> {
-        let stream = unsafe { File::from_raw_fd(fd) };
-        let mut reader = BufReader::new(stream);
+    ) -> Result<()>
+    where
+        T: AsyncRead + Unpin,
+    {
         let mut buf = vec![0; 1024];
-        let mut interval = time::interval(Self::DEFAULT_IO_INTERVAL);
 
         loop {
-            interval.tick().await;
-
             match reader.read(&mut buf).await {
                 Ok(n) if n > 0 => {
-                    debug!("fd:{}:read {} bytes", fd, n);
+                    debug!("Read {} bytes", n);
                     let data = &buf[..n];
 
                     let mut locked_logger = logger.write().await;
@@ -238,7 +237,7 @@ impl ContainerIO {
                         .context("send data message")?;
                 }
                 Ok(n) if n == 0 => {
-                    debug!("fd:{}:No more to read", fd);
+                    debug!("No more to read");
 
                     message_tx
                         .send(Message::Done)
