@@ -111,6 +111,7 @@ impl From<Streams> for ContainerIOType {
 
 impl ContainerIO {
     const DEFAULT_IO_INTERVAL: Duration = Duration::from_millis(100);
+    const MAX_STDIO_STREAM_SIZE: usize = 16 * 1024 * 1024;
 
     /// Create a new container IO instance.
     pub fn new(terminal: bool, logger: SharedContainerLog) -> Result<Self> {
@@ -195,7 +196,17 @@ impl ContainerIO {
             };
 
             match msg {
-                Message::Data(s) => stdio.extend(s),
+                Message::Data(data) => {
+                    if let Some(future_len) = stdio.len().checked_add(data.len()) {
+                        if future_len < Self::MAX_STDIO_STREAM_SIZE {
+                            stdio.extend(data)
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
                 Message::Done => break,
             }
         }
