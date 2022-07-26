@@ -66,7 +66,7 @@ impl CriLogger {
             .len()
             .checked_add(10) // len of " stdout " + "P "
             .context("min log line len exceeds usize")?;
-        let mut bytes_written = 0;
+        let mut bytes_written: usize = 0;
 
         loop {
             // Read the line
@@ -87,11 +87,20 @@ impl CriLogger {
                     "Verifying log size: max_log_size = {}, bytes_written = {}, bytes_to_be_written = {}", 
                     max_log_size, bytes_written, bytes_to_be_written,
                 );
-                if (bytes_written + bytes_to_be_written) > max_log_size {
-                    bytes_written = 0;
-                    self.reopen()
-                        .await
-                        .context("reopen logs because of exceeded size")?;
+                match bytes_written.checked_add(bytes_to_be_written) {
+                    Some(future_bytes) if future_bytes > max_log_size => {
+                        bytes_written = 0;
+                        self.reopen()
+                            .await
+                            .context("reopen logs because of exceeded size")?;
+                    }
+                    None => {
+                        bytes_written = 0;
+                        self.reopen()
+                            .await
+                            .context("reopen logs because of overflowing bytes_written")?;
+                    }
+                    _ => {}
                 }
             }
 
