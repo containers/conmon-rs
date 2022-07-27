@@ -29,6 +29,10 @@ pub struct CriLogger {
     #[getset(get_copy)]
     /// Maximum allowed log size in bytes.
     max_log_size: Option<usize>,
+
+    #[getset(get_copy, set)]
+    /// Current bytes written to the log file.
+    bytes_written: usize,
 }
 
 impl CriLogger {
@@ -40,6 +44,7 @@ impl CriLogger {
             path: path.as_ref().into(),
             file: None,
             max_log_size,
+            bytes_written: 0,
         })
     }
 
@@ -66,7 +71,6 @@ impl CriLogger {
             .len()
             .checked_add(10) // len of " stdout " + "P "
             .context("min log line len exceeds usize")?;
-        let mut bytes_written: usize = 0;
 
         loop {
             // Read the line
@@ -82,25 +86,28 @@ impl CriLogger {
                 bytes_to_be_written += 1; // the added newline
             }
 
+            let mut new_bytes_written = match self.bytes_written().checked_add(bytes_to_be_written)
+            {
+                Some(x) => x,
+                None => {
+                    self.reopen()
+                        .await
+                        .context("reopen logs because of overflowing bytes_written")?;
+                    0
+                }
+            };
+
             if let Some(max_log_size) = self.max_log_size() {
                 trace!(
-                    "Verifying log size: max_log_size = {}, bytes_written = {}, bytes_to_be_written = {}", 
-                    max_log_size, bytes_written, bytes_to_be_written,
+                    "Verifying log size: max_log_size = {}, bytes_written = {},  bytes_to_be_written = {}, new_bytes_written = {}", 
+                    max_log_size, self.bytes_written(),  bytes_to_be_written, new_bytes_written,
                 );
-                match bytes_written.checked_add(bytes_to_be_written) {
-                    Some(future_bytes) if future_bytes > max_log_size => {
-                        bytes_written = 0;
-                        self.reopen()
-                            .await
-                            .context("reopen logs because of exceeded size")?;
-                    }
-                    None => {
-                        bytes_written = 0;
-                        self.reopen()
-                            .await
-                            .context("reopen logs because of overflowing bytes_written")?;
-                    }
-                    _ => {}
+
+                if new_bytes_written > max_log_size {
+                    new_bytes_written = 0;
+                    self.reopen()
+                        .await
+                        .context("reopen logs because of exceeded size")?;
                 }
             }
 
@@ -129,7 +136,7 @@ impl CriLogger {
                 file.write_all(b"\n").await?;
             }
 
-            bytes_written += bytes_to_be_written;
+            self.set_bytes_written(new_bytes_written);
             trace!("Wrote log line of length {}", bytes_to_be_written);
         }
 
@@ -266,6 +273,25 @@ mod tests {
         assert!(res.contains(" stdout F d"));
         assert!(res.contains(" stdout F e"));
         assert!(res.contains(" stdout F f"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_multi_reopen() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let path = file.path();
+        let mut sut = CriLogger::new(path, Some(150))?;
+        sut.init().await?;
+
+        sut.write(Pipe::StdOut, "abcd\nabcd\nabcd\n".as_bytes())
+            .await?;
+        sut.write(Pipe::StdErr, "a\nb\nc\n".as_bytes()).await?;
+
+        let res = fs::read_to_string(path)?;
+        assert!(!res.contains(" stdout "));
+        assert!(res.contains(" stderr F a"));
+        assert!(res.contains(" stderr F b"));
+        assert!(res.contains(" stderr F c"));
         Ok(())
     }
 
