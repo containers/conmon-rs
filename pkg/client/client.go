@@ -113,6 +113,31 @@ func NewConmonServerConfig(
 	}
 }
 
+// FromLogrusLevel converts the logrus.Level to a conmon-rs server log level.
+func FromLogrusLevel(level logrus.Level) string {
+	switch level {
+	case logrus.PanicLevel, logrus.FatalLevel:
+		return LogLevelOff
+
+	case logrus.ErrorLevel:
+		return LogLevelError
+
+	case logrus.WarnLevel:
+		return LogLevelWarn
+
+	case logrus.InfoLevel:
+		return LogLevelInfo
+
+	case logrus.DebugLevel:
+		return LogLevelDebug
+
+	case logrus.TraceLevel:
+		return LogLevelTrace
+	}
+
+	return LogLevelDebug
+}
+
 // New creates a new conmon server, starts it and connects a new client to it.
 func New(config *ConmonServerConfig) (client *ConmonClient, retErr error) {
 	cl, err := config.toClient()
