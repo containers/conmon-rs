@@ -162,7 +162,7 @@ func (tr *testRunner) createContainerWithConfig(sut *client.ConmonClient, cfg *c
 	}, time.Second*5).Should(BeNil())
 }
 
-func (tr *testRunner) startContainer(sut *client.ConmonClient) {
+func (tr *testRunner) startContainer(*client.ConmonClient) {
 	// Start the container
 	Expect(tr.rr.RunCommand("start", tr.ctrID)).To(BeNil())
 
