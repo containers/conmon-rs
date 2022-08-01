@@ -12,6 +12,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "android_system_properties"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7ed72e1635e121ca3e79420540282af22da58be50de153d36f81ddc6b83aa9e"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "ansi_term"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -604,10 +613,11 @@ dependencies = [
 
 [[package]]
 name = "iana-time-zone"
-version = "0.1.38"
+version = "0.1.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98fdfea7b12f3f789d2240da9adcad7a7db080eba8056bbf2dba675681a3154f"
+checksum = "00c0d80ad9ca8d30ca648bf6cb1e3e3326d75071b76dbe143dd4a9cedcd58975"
 dependencies = [
+ "android_system_properties",
  "core-foundation",
  "js-sys",
  "wasm-bindgen",
@@ -1503,9 +1513,9 @@ dependencies = [
 
 [[package]]
 name = "tzdb"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70cb9dbeb3119afb148b2737802ee3c6d5e9652ae92102562fc017f356ab0f68"
+checksum = "40d7bf4256eb8619a918484f8cdbc03521e9243de4d077dbf2f06d2ea1749fce"
 dependencies = [
  "byte-slice-cast",
  "iana-time-zone",
