@@ -1,12 +1,11 @@
 use crate::{
-    attach::Attach,
     child::Child,
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     server::Server,
     version::Version,
 };
-use anyhow::{format_err, Context};
+use anyhow::format_err;
 use capnp::{capability::Promise, Error};
 use capnp_rpc::pry;
 use conmon_common::conmon_capnp::conmon;
@@ -230,16 +229,12 @@ impl conmon::Server for Server {
             debug!("Using exec session id {}", exec_session_id);
         }
 
-        let socket_path = Path::new(pry!(req.get_socket_path()));
-        let attach = pry_err!(Attach::new(socket_path).context("create attach endpoint"));
+        let socket_path = pry!(req.get_socket_path()).to_string();
         let child = pry_err!(self.reaper().get(container_id));
 
         Promise::from_future(
-            async move {
-                child.io().attach().await.add(attach).await;
-                Ok(())
-            }
-            .instrument(debug_span!("promise")),
+            async move { capnp_err!(child.io().attach().await.add(&socket_path).await) }
+                .instrument(debug_span!("promise")),
         )
     }
 

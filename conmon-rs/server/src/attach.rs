@@ -1,63 +1,104 @@
-use crate::{container_io::Pipe, listener};
+use crate::{
+    container_io::{Message, Pipe},
+    listener,
+};
 use anyhow::{bail, Context, Result};
-use nix::sys::socket::{bind, listen, socket, AddressFamily, SockFlag, SockType, UnixAddr};
+use nix::{
+    errno::Errno,
+    sys::socket::{bind, listen, socket, AddressFamily, SockFlag, SockType, UnixAddr},
+};
 use std::{
+    convert::From,
     os::unix::{
         fs::PermissionsExt,
         io::{FromRawFd, RawFd},
         net,
     },
     path::{Path, PathBuf},
-    sync::Arc,
 };
 use tokio::{
-    io::{ErrorKind, Interest, Ready},
-    net::{UnixListener, UnixStream},
-    sync::RwLock,
+    io::{AsyncReadExt, AsyncWriteExt, ErrorKind},
+    net::{
+        unix::{OwnedReadHalf, OwnedWriteHalf},
+        UnixListener,
+    },
+    sync::broadcast::{self, Receiver, Sender},
     task,
-    time::{timeout, Duration},
 };
 use tracing::{debug, debug_span, error, Instrument};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug)]
 /// A shared container attach abstraction.
-pub struct SharedContainerAttach(Arc<RwLock<Vec<Attach>>>);
+pub struct SharedContainerAttach {
+    endpoints: Vec<Attach>,
+    rx: Receiver<(Pipe, Message)>,
+    tx: Sender<(Pipe, Message)>,
+}
+
+impl Default for SharedContainerAttach {
+    fn default() -> Self {
+        let (tx, rx) = broadcast::channel(1000);
+        Self {
+            endpoints: vec![],
+            rx,
+            tx,
+        }
+    }
+}
+
+impl Clone for SharedContainerAttach {
+    fn clone(&self) -> Self {
+        let rx = self.tx.subscribe();
+        Self {
+            endpoints: self.endpoints.clone(),
+            rx,
+            tx: self.tx.clone(),
+        }
+    }
+}
 
 impl SharedContainerAttach {
     /// Add a new attach endpoint to this shared container attach instance.
-    pub async fn add(&self, attach: Attach) {
-        self.0.write().await.push(attach);
+    pub async fn add<T>(&mut self, socket_path: T) -> Result<()>
+    where
+        T: AsRef<Path>,
+        PathBuf: From<T>,
+    {
+        let attach = Attach::new(socket_path, self.tx.clone()).context("create attach endpoint")?;
+        self.endpoints.push(attach);
+        Ok(())
     }
 
-    /// Try to read from all attach endpoints standard input and return the first result.
-    pub async fn try_read(&self) -> Result<Option<Vec<u8>>> {
+    /// Read from all attach endpoints standard input and return the first result.
+    pub async fn read(&mut self) -> Result<Option<Vec<u8>>> {
         self.cleanup().await;
-        for attach in self.0.read().await.iter() {
-            if let Some(data) = attach.try_read().await? {
-                return Ok(data.into());
-            }
+        match self.rx.recv().await.context("receive attach message")? {
+            (_, Message::Data(data)) => Ok(data.into()),
+            _ => Ok(None),
         }
-        Ok(None)
     }
 
     /// Write a buffer to all attach endpoints.
-    pub async fn write<T>(&self, pipe: Pipe, buf: T) -> Result<()>
+    pub async fn write<T>(&mut self, pipe: Pipe, buf: T) -> Result<()>
     where
         T: AsRef<[u8]>,
     {
-        self.cleanup().await;
-        for attach in self.0.read().await.iter() {
-            attach
-                .write(pipe, &buf)
-                .await
-                .context("write to attach endpoint")?;
+        if self.endpoints.is_empty() {
+            return Ok(());
         }
+
+        self.cleanup().await;
+
+        self.tx
+            .send((pipe, Message::Data(buf.as_ref().into())))
+            .context("send data message to attach clients")?;
+
         Ok(())
     }
 
     /// Remove attach endpoints which do not exist any more.
-    async fn cleanup(&self) {
-        self.0.write().await.retain(|x| {
+    async fn cleanup(&mut self) {
+        self.endpoints.retain(|x| {
             let exists = x.path.exists();
             if !exists {
                 debug!("Cleanup attach endpoint: {}", x.path.display())
@@ -67,31 +108,30 @@ impl SharedContainerAttach {
     }
 }
 
-/// The size of an attach packet.
-const ATTACH_PACKET_BUF_SIZE: usize = 8192;
-
-/// The packet indicating that we're done writing.
-const DONE_PACKET: &[u8; ATTACH_PACKET_BUF_SIZE] = &[0; ATTACH_PACKET_BUF_SIZE];
-
-type Clients = Arc<RwLock<Vec<UnixStream>>>;
-
 #[derive(Clone, Debug)]
 /// Attach handles the attach socket IO of a container.
-pub struct Attach {
-    clients: Clients,
+struct Attach {
     path: PathBuf,
 }
 
 impl Attach {
-    /// Create a new attach instance.
-    pub fn new(socket_path: &Path) -> Result<Self> {
-        debug!("Creating attach socket: {}", socket_path.display());
+    /// The size of an attach packet.
+    const PACKET_BUF_SIZE: usize = 8192;
 
-        if socket_path.exists() {
-            bail!(
-                "Attach socket path already exists: {}",
-                socket_path.display()
-            )
+    /// The packet indicating that we're done writing.
+    const DONE_PACKET: &'static [u8; Self::PACKET_BUF_SIZE] = &[0; Self::PACKET_BUF_SIZE];
+
+    /// Create a new attach instance.
+    fn new<T>(socket_path: T, tx: Sender<(Pipe, Message)>) -> Result<Self>
+    where
+        T: AsRef<Path>,
+        PathBuf: From<T>,
+    {
+        let path = socket_path.as_ref();
+        debug!("Creating attach socket: {}", path.display());
+
+        if path.exists() {
+            bail!("Attach socket path already exists: {}", path.display())
         }
 
         let fd = socket(
@@ -103,21 +143,19 @@ impl Attach {
         .context("bind socket")?;
 
         // keep parent_fd in scope until the bind, or else the socket will not work
-        let (shortened_path, _parent_dir) = listener::shorten_socket_path(socket_path)?;
+        let (shortened_path, _parent_dir) = listener::shorten_socket_path(path)?;
         let addr = UnixAddr::new(&shortened_path).context("create socket addr")?;
         bind(fd, &addr).context("bind socket fd")?;
 
-        let metadata = socket_path.metadata()?;
+        let metadata = path.metadata()?;
         let mut permissions = metadata.permissions();
         permissions.set_mode(0o700);
 
         listen(fd, 10).context("listen on socket fd")?;
 
-        let clients = Arc::new(RwLock::new(vec![]));
-        let clients_clone = clients.clone();
         task::spawn(
             async move {
-                if let Err(e) = Self::start_listening(fd, clients_clone).await {
+                if let Err(e) = Self::start(fd, tx).await {
                     error!("Attach failure: {:#}", e);
                 }
             }
@@ -125,131 +163,127 @@ impl Attach {
         );
 
         Ok(Self {
-            clients,
             path: socket_path.into(),
         })
     }
 
-    async fn start_listening(fd: RawFd, clients: Clients) -> Result<()> {
+    async fn start(fd: RawFd, tx: Sender<(Pipe, Message)>) -> Result<()> {
         debug!("Start listening on attach socket");
         let listener = UnixListener::from_std(unsafe { net::UnixListener::from_raw_fd(fd) })?;
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     debug!("Got new attach stream connection");
-                    clients.write().await.push(stream);
+                    let (read, write) = stream.into_split();
+
+                    let tx_clone = tx.clone();
+                    task::spawn(
+                        async move {
+                            if let Err(e) = Self::read_loop(read, tx_clone).await {
+                                error!("Attach read loop failure: {:#}", e);
+                            }
+                        }
+                        .instrument(debug_span!("read_loop")),
+                    );
+
+                    let rx = tx.subscribe();
+                    task::spawn(
+                        async move {
+                            if let Err(e) = Self::write_loop(write, rx).await {
+                                error!("Attach write loop failure: {:#}", e);
+                            }
+                        }
+                        .instrument(debug_span!("write_loop")),
+                    );
                 }
                 Err(e) => error!("Unable to accept attach stream: {}", e),
             }
         }
     }
 
-    /// Try to read from all streams standard input and return the first result.
-    pub async fn try_read(&self) -> Result<Option<Vec<u8>>> {
-        for stream in self.clients.read().await.iter() {
-            let ready = if let Some(ready) =
-                Self::default_readiness_timeout(Interest::READABLE, stream).await?
-            {
-                ready
-            } else {
-                continue;
-            };
+    async fn read_loop(mut read_half: OwnedReadHalf, tx: Sender<(Pipe, Message)>) -> Result<()> {
+        loop {
+            let mut buf = vec![0; Self::PACKET_BUF_SIZE];
+            match read_half.read(&mut buf).await {
+                Ok(n) if n > 0 => {
+                    if let Some(first_zero_idx) = buf.iter().position(|&x| x == 0) {
+                        buf.resize(first_zero_idx, 0);
+                    }
+                    debug!("Read {} stdin bytes from client", buf.len());
+                    tx.send((Pipe::StdOut, Message::Data(buf)))
+                        .context("send data message")?;
+                }
+                Ok(n) if n == 0 => {
+                    debug!("Stopping read loop because no more data to read");
+                    tx.send((Pipe::StdOut, Message::Done))
+                        .context("send done message")?;
+                    return Ok(());
+                }
+                Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
+                    Errno::EIO => {
+                        debug!("Stopping read loop because of IO error");
+                        tx.send((Pipe::StdOut, Message::Done))
+                            .context("send done message")?;
+                        return Ok(());
+                    }
+                    Errno::EBADF => {
+                        tx.send((Pipe::StdOut, Message::Done))
+                            .context("send done message")?;
+                        return Err(Errno::EBADFD.into());
+                    }
+                    Errno::EAGAIN => {
+                        continue;
+                    }
+                    _ => error!(
+                        "Unable to read from file descriptor: {} {}",
+                        e,
+                        e.raw_os_error().context("get OS error")?
+                    ),
+                },
+                _ => {}
+            }
+        }
+    }
 
-            if ready.is_readable() {
-                let mut buf = vec![0; ATTACH_PACKET_BUF_SIZE];
-                match stream.try_read(&mut buf) {
-                    Ok(n) if n > 0 => {
-                        if let Some(first_zero_idx) = buf.iter().position(|&x| x == 0) {
-                            buf.resize(first_zero_idx, 0);
+    async fn write_loop(
+        mut write_half: OwnedWriteHalf,
+        mut rx: Receiver<(Pipe, Message)>,
+    ) -> Result<()> {
+        loop {
+            match rx.recv().await? {
+                (_, Message::Done) => {
+                    debug!("Stopping write loop");
+                    return Ok(());
+                }
+                (pipe, Message::Data(buf)) => {
+                    let mut packets = buf
+                        .chunks(Self::PACKET_BUF_SIZE - 1)
+                        .map(|x| {
+                            let mut y = x.to_vec();
+                            let p = match pipe {
+                                Pipe::StdOut => 2,
+                                Pipe::StdErr => 3,
+                            };
+                            y.insert(0, p);
+                            y.resize(Self::PACKET_BUF_SIZE, 0);
+                            y
+                        })
+                        .collect::<Vec<_>>();
+                    packets.push(Self::DONE_PACKET.to_vec());
+
+                    let len = packets.len() - 1;
+                    for (idx, packet) in packets.iter().enumerate() {
+                        match write_half.write(packet).await {
+                            Ok(_) => {
+                                debug!("Wrote {} packet {}/{} to client", &pipe.as_ref(), idx, len)
+                            }
+                            Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
+                            Err(ref e) if e.kind() == ErrorKind::BrokenPipe => break,
+                            Err(e) => bail!("unable to write packet {}/{}: {:#}", idx, len, e),
                         }
-                        debug!("Read {} stdin bytes from client", buf.len());
-                        return Ok(buf.into());
                     }
-                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
-                    Err(e) => {
-                        return Err(e.into());
-                    }
-                    _ => {}
                 }
             }
-        }
-
-        Ok(None)
-    }
-
-    /// Write a buffer to all attached clients.
-    pub async fn write<T>(&self, pipe: Pipe, buf: T) -> Result<()>
-    where
-        T: AsRef<[u8]>,
-    {
-        let mut packets = buf
-            .as_ref()
-            .chunks(ATTACH_PACKET_BUF_SIZE - 1)
-            .map(|x| {
-                let mut y = x.to_vec();
-                let p = match pipe {
-                    Pipe::StdOut => 2,
-                    Pipe::StdErr => 3,
-                };
-                y.insert(0, p);
-                y.resize(ATTACH_PACKET_BUF_SIZE, 0);
-                y
-            })
-            .collect::<Vec<_>>();
-        packets.push(DONE_PACKET.to_vec());
-
-        let mut cleanup_idxs = vec![];
-        let mut clients = self.clients.write().await;
-
-        for (idx, stream) in clients.iter().enumerate() {
-            let ready = if let Some(ready) =
-                Self::default_readiness_timeout(Interest::WRITABLE, stream).await?
-            {
-                ready
-            } else {
-                continue;
-            };
-
-            if ready.is_write_closed() {
-                cleanup_idxs.push(idx);
-                continue;
-            }
-
-            if ready.is_writable() {
-                for packet in &packets {
-                    match stream.try_write(packet) {
-                        Ok(_) => {
-                            debug!("Wrote {} packet to client", &pipe.as_ref());
-                        }
-                        Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
-                        Err(e) => {
-                            Self::cleanup_clients(&mut clients, &cleanup_idxs).await;
-                            return Err(e.into());
-                        }
-                    }
-                }
-                debug!("Done writing all packets to client");
-            }
-        }
-
-        Self::cleanup_clients(&mut clients, &cleanup_idxs).await;
-        Ok(())
-    }
-
-    async fn default_readiness_timeout(
-        interest: Interest,
-        stream: &UnixStream,
-    ) -> Result<Option<Ready>> {
-        match timeout(Duration::from_millis(100), stream.ready(interest)).await {
-            Ok(r) => Ok(Some(r.context("wait for stream to become ready")?)),
-            _ => Ok(None),
-        }
-    }
-
-    async fn cleanup_clients(clients: &mut Vec<UnixStream>, idxs: &[usize]) {
-        for i in idxs.iter().rev() {
-            debug!("Cleanup stale attach client with index: {}", i);
-            clients.remove(*i);
         }
     }
 }
