@@ -20,7 +20,7 @@ use tokio::{
         mpsc::{UnboundedReceiver, UnboundedSender},
         RwLock,
     },
-    time::{self, Duration, Instant},
+    time::{self, Instant},
 };
 use tracing::{debug, error};
 
@@ -81,7 +81,7 @@ pub enum ContainerIOType {
 }
 
 /// A message to be sent through the ContainerIO.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Message {
     Data(Vec<u8>),
     Done,
@@ -111,7 +111,6 @@ impl From<Streams> for ContainerIOType {
 }
 
 impl ContainerIO {
-    const DEFAULT_IO_INTERVAL: Duration = Duration::from_millis(100);
     const MAX_STDIO_STREAM_SIZE: usize = 16 * 1024 * 1024;
 
     /// Create a new container IO instance.
@@ -219,7 +218,7 @@ impl ContainerIO {
         pipe: Pipe,
         logger: SharedContainerLog,
         message_tx: UnboundedSender<Message>,
-        attach: SharedContainerAttach,
+        mut attach: SharedContainerAttach,
     ) -> Result<()>
     where
         T: AsyncRead + Unpin,
@@ -281,15 +280,11 @@ impl ContainerIO {
         }
     }
 
-    pub async fn read_loop_stdin(fd: RawFd, attach: SharedContainerAttach) -> Result<()> {
+    pub async fn read_loop_stdin(fd: RawFd, mut attach: SharedContainerAttach) -> Result<()> {
         let mut writer = unsafe { File::from_raw_fd(fd) };
-        let mut interval = time::interval(Self::DEFAULT_IO_INTERVAL);
-
         loop {
-            interval.tick().await;
-
             if let Some(data) = attach
-                .try_read()
+                .read()
                 .await
                 .context("read from stdin attach endpoints")?
             {
