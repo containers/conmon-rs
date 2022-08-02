@@ -16,6 +16,7 @@ import (
 	"runtime/pprof"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/opencontainers/runc/libcontainer/specconv"
 	"github.com/opencontainers/runtime-tools/generate"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -201,6 +203,11 @@ func MustFile(file string) string {
 func (tr *testRunner) configGivenEnv() *client.ConmonClient {
 	cfg := client.NewConmonServerConfig(runtimePath, tr.rr.runtimeRoot, tr.tmpDir)
 	cfg.ConmonServerPath = conmonPath
+
+	logger := logrus.StandardLogger()
+	logger.Level = logrus.TraceLevel
+	cfg.ClientLogger = logger
+
 	sut, err := client.New(cfg)
 	Expect(err).To(BeNil())
 	Expect(sut).NotTo(BeNil())
@@ -372,34 +379,50 @@ func testName(testName string, terminal bool) string {
 	return testName
 }
 
-func testAttach(stdinWrite io.Writer, stdoutRead, stderrRead io.Reader) {
-	// Stdin
-	stdoutBuf := bufio.NewReader(stdoutRead)
-	stderrBuf := bufio.NewReader(stderrRead)
+func testAttach(
+	sut *client.ConmonClient,
+	cfg *client.AttachConfig,
+	stdinWriter io.Writer,
+	reader *io.PipeReader,
+	testString string,
+	useStdErr bool,
+) {
+	wg := sync.WaitGroup{}
+	wg.Add(3)
+
 	go func() {
-		_, err := fmt.Fprintf(stdinWrite, "/busybox echo Hello world\r")
+		defer GinkgoRecover()
+		var err error
+		command := "/busybox echo -n " + testString
+		if !useStdErr {
+			_, err = fmt.Fprintf(stdinWriter, "%s\n", command)
+		} else {
+			_, err = fmt.Fprintf(stdinWriter, "%s >&2\n", command)
+		}
 		Expect(err).To(BeNil())
 
-		_, err = fmt.Fprintf(stdinWrite, "/busybox echo Hello world >&2\r")
-		Expect(err).To(BeNil())
+		wg.Done()
 	}()
 
 	go func() {
-		line, err := stdoutBuf.ReadString('\n')
+		defer GinkgoRecover()
+		data := make([]byte, len(testString))
+		_, err := reader.Read(data)
 		Expect(err).To(BeNil())
-		fmt.Println(line)
+		Expect(string(data)).To(Equal(testString))
 
-		// Stdout test
-		line, err = stdoutBuf.ReadString('\n')
-		Expect(err).To(BeNil())
-		fmt.Println(line)
-		Expect(line).To(ContainSubstring("Hello world"))
+		Expect(reader.Close()).To(BeNil())
+		wg.Done()
 	}()
 
 	go func() {
-		line, err := stderrBuf.ReadString('\n')
-		Expect(err).To(BeNil())
-		fmt.Println(line)
-		Expect(line).To(ContainSubstring("Hello world"))
+		defer GinkgoRecover()
+		err := sut.AttachContainer(context.Background(), cfg)
+		Expect(err).NotTo(BeNil())
+		Expect(errors.Is(err, io.ErrClosedPipe)).To(BeTrue())
+
+		wg.Done()
 	}()
+
+	wg.Wait()
 }
