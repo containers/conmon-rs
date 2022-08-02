@@ -22,6 +22,9 @@ pub struct Child {
 
     #[getset(get = "pub")]
     io: SharedContainerIO,
+
+    #[getset(get = "pub")]
+    cleanup_cmd: Vec<String>,
 }
 
 impl Child {
@@ -32,6 +35,7 @@ impl Child {
         oom_exit_paths: Vec<PathBuf>,
         timeout: Option<Instant>,
         io: SharedContainerIO,
+        cleanup_cmd: Vec<String>,
     ) -> Self {
         Self {
             id,
@@ -40,6 +44,7 @@ impl Child {
             oom_exit_paths,
             timeout,
             io,
+            cleanup_cmd,
         }
     }
 }
