@@ -4,3 +4,4 @@
 /vendor
 .build
 latest-*.txt
+/*.tar.gz

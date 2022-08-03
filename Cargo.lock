@@ -244,7 +244,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "conmon"
+name = "conmon-common"
+version = "0.1.0"
+dependencies = [
+ "capnp",
+ "capnpc",
+]
+
+[[package]]
+name = "conmonrs"
 version = "0.1.0-dev"
 dependencies = [
  "anyhow",
@@ -278,14 +286,6 @@ dependencies = [
  "tracing-subscriber",
  "tz-rs",
  "uuid",
-]
-
-[[package]]
-name = "conmon-common"
-version = "0.1.0"
-dependencies = [
- "capnp",
- "capnpc",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 [package]
-name = "conmon"
+name = "conmonrs"
 version = "0.1.0-dev"
 edition = "2018"
 

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use conmon::Server;
+use conmonrs::Server;
 
 fn main() -> Result<()> {
     Server::new()
