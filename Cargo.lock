@@ -607,9 +607,9 @@ dependencies = [
 
 [[package]]
 name = "iana-time-zone"
-version = "0.1.40"
+version = "0.1.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00c0d80ad9ca8d30ca648bf6cb1e3e3326d75071b76dbe143dd4a9cedcd58975"
+checksum = "1779539f58004e5dba1c1f093d44325ebeb244bfc04b791acdc0aaeca9c04570"
 dependencies = [
  "android_system_properties",
  "core-foundation",
