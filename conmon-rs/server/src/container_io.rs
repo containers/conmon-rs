@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use getset::{Getters, MutGetters};
 use nix::errno::Errno;
 use std::{
+    fmt,
     marker::Unpin,
     os::unix::io::{FromRawFd, RawFd},
     path::{Path, PathBuf},
@@ -96,6 +97,12 @@ pub enum Pipe {
 
     /// Standard error.
     StdErr,
+}
+
+impl fmt::Display for Pipe {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.as_ref())
+    }
 }
 
 impl From<Terminal> for ContainerIOType {
@@ -283,16 +290,14 @@ impl ContainerIO {
     pub async fn read_loop_stdin(fd: RawFd, mut attach: SharedContainerAttach) -> Result<()> {
         let mut writer = unsafe { File::from_raw_fd(fd) };
         loop {
-            if let Some(data) = attach
+            let data = attach
                 .read()
                 .await
-                .context("read from stdin attach endpoints")?
-            {
-                writer
-                    .write_all(&data)
-                    .await
-                    .context("write attach stdin to stream")?;
-            }
+                .context("read from stdin attach endpoints")?;
+            writer
+                .write_all(&data)
+                .await
+                .context("write attach stdin to stream")?;
         }
     }
 }
