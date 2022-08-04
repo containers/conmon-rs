@@ -22,7 +22,7 @@ pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as i32)
 #[cfg(any(all(
     target_os = "linux",
     not(target_arch = "s390x"),
-    not(target_arch = "armhfp"),
+    not(target_arch = "arm"),
     not(target_env = "musl")
 )))]
 pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as i64);
