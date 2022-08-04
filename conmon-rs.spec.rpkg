@@ -1,0 +1,53 @@
+# The following tag is to get correct syntax highlighting for this file in vim text editor
+# vim: syntax=spec
+
+# This spec file is used for automatic rebuilds in COPR
+# This is not the official spec file for any distro
+
+%global with_debug 0
+
+%if 0%{?with_debug}
+%global _find_debuginfo_dwz_opts %{nil}
+%global _dwz_low_mem_die_limit 0
+%else
+%global debug_package %{nil}
+%endif
+
+%global bin_name conmonrs
+
+Name: {{{ git_dir_name }}}
+Epoch: 101
+Version: {{{ git_dir_version }}}
+Release: 1%{?dist}
+Summary: Container monitor in Rust
+License: ASL 2.0 and BSD and ISC and MIT
+URL: https://github.com/containers/conmon-rs
+VCS: {{{ git_dir_vcs }}}
+Source: {{{ git_dir_pack }}}
+BuildRequires: capnproto
+BuildRequires: cargo
+BuildRequires: git-core
+BuildRequires: make
+Provides: %{bin_name}
+ExclusiveArch: %{rust_arches}
+
+%global _description %{expand:
+%{summary}}
+
+%description %{_description}
+
+%prep
+{{{ git_dir_setup_macro }}}
+
+%build
+%{__make} release
+
+%install
+%{__make} DESTDIR=%{buildroot} PREFIX=%{_prefix} install
+
+%files
+%license LICENSE
+%{_bindir}/%{bin_name}
+
+%changelog
+{{{ git_dir_changelog }}}
