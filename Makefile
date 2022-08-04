@@ -88,4 +88,4 @@ create-release-packages: release
 .PHONY: install
 install:
 	mkdir -p "${DESTDIR}$(PREFIX)/bin"
-	install -D -t "${DESTDIR}$(PREFIX)" target/release/conmonrs
+	install -D -t "${DESTDIR}$(PREFIX)/bin" target/release/conmonrs
