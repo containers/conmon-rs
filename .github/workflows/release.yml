@@ -9,12 +9,14 @@ env:
   CARGO_TERM_COLOR: always
   GO_VERSION: '1.18'
   ACTION_MSRV_TOOLCHAIN: 1.62.0
-  CI_TAG: ${{ env.GITHUB_REF_NAME }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Get branch names
+        id: branch-name
+        uses: tj-actions/branch-names@v5.4
       - name: Checkout
         uses: actions/checkout@v3
       - name: Setup Cache
@@ -37,6 +39,8 @@ jobs:
         run: cargo build
       - name: Create Release Packaging
         run: make create-release-packages
+        env:
+          CI_TAG: ${{ steps.branch-name.outputs.tag }}
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
