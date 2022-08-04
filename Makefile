@@ -84,3 +84,8 @@ create-release-packages: release
 	cargo vendor -q && tar zcf $(PACKAGE_NAME)-vendor.tar.gz vendor && rm -rf vendor
 	git archive --format tar --prefix=conmonrs-$(CI_TAG)/ $(CI_TAG) | gzip >$(PACKAGE_NAME).tar.gz
 
+
+.PHONY: install
+install:
+	mkdir -p "${DESTDIR}$(PREFIX)/bin"
+	install -D -t "${DESTDIR}$(PREFIX)" target/release/conmonrs
