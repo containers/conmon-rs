@@ -81,10 +81,6 @@ create-release-packages: release
 		echo "crate version and tag mismatch" ; \
 		exit 1 ; \
 	fi
-	mkdir -p .cargo
-	cargo vendor -q
-	echo -e '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]' > .cargo/config.toml
-	tar zcf $(PACKAGE_NAME)-vendor.tar.gz .cargo/config.toml vendor
-	rm -rf .cargo/config.toml vendor
-	git archive --format tar --prefix=conmon-rs/ $(CI_TAG) | gzip >$(PACKAGE_NAME).tar.gz
+	cargo vendor -q && tar zcf $(PACKAGE_NAME)-vendor.tar.gz vendor && rm -rf vendor
+	git archive --format tar --prefix=conmonrs-$(CI_TAG)/ $(CI_TAG) | gzip >$(PACKAGE_NAME).tar.gz
 
