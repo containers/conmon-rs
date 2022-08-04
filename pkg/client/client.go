@@ -483,6 +483,9 @@ type CreateContainerConfig struct {
 
 	// LogDrivers is a slice of selected log drivers.
 	LogDrivers []LogDriver
+
+	// CleanupCmd is the command that will be executed once the container exits
+	CleanupCmd []string
 }
 
 // LogDriver specifies a selected logging mechanism.
@@ -552,6 +555,10 @@ func (c *ConmonClient) CreateContainer(
 
 		if err := p.SetRequest(req); err != nil {
 			return fmt.Errorf("set request: %w", err)
+		}
+
+		if err := stringSliceToTextList(cfg.CleanupCmd, req.NewCleanupCmd); err != nil {
+			return fmt.Errorf("convert cleanup command string slice to text list: %w", err)
 		}
 
 		return nil

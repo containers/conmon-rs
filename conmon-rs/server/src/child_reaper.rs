@@ -219,6 +219,9 @@ pub struct ReapableChild {
     token: CancellationToken,
 
     task: Option<TaskHandle>,
+
+    #[getset(get = "pub")]
+    cleanup_cmd: Vec<String>,
 }
 
 #[derive(Clone, CopyGetters, Debug, Getters, Setters)]
@@ -243,6 +246,7 @@ impl ReapableChild {
             timeout: *child.timeout(),
             token: CancellationToken::new(),
             task: None,
+            cleanup_cmd: child.cleanup_cmd().to_vec(),
         }
     }
 
@@ -271,6 +275,7 @@ impl ReapableChild {
         let exit_tx_clone = exit_tx.clone();
         let timeout = *self.timeout();
         let stop_token = self.token().clone();
+        let mut cleanup_cmd_raw = self.cleanup_cmd().clone();
 
         let task = task::spawn(
             async move {
@@ -322,6 +327,11 @@ impl ReapableChild {
                 if let Err(e) = Self::write_to_exit_paths(exit_code, &exit_paths).await {
                     error!(pid, "Could not write exit paths: {:#}", e);
                 }
+
+                if !cleanup_cmd_raw.is_empty() {
+                    Self::spawn_cleanup_process(&mut cleanup_cmd_raw).await;
+                }
+
                 debug!("Sending exit struct to channel: {:?}", exit_channel_data);
                 if exit_tx_clone.send(exit_channel_data).is_err() {
                     debug!("Unable to send exit status");
@@ -339,6 +349,28 @@ impl ReapableChild {
         self.task = Some(tasks);
 
         Ok((exit_tx, exit_rx))
+    }
+
+    async fn spawn_cleanup_process(raw_cmd: &mut Vec<String>) {
+        let mut cleanup_cmd = Command::new(raw_cmd.remove(0));
+
+        raw_cmd.iter().for_each(|arg| {
+            cleanup_cmd.arg(arg);
+        });
+
+        tokio::spawn(async move {
+            match cleanup_cmd.status().await {
+                Ok(status) => {
+                    if !status.success() {
+                        error!("Failed to execute cleanup command successfully: {}", status);
+                    }
+                }
+                Err(e) => error!(
+                    "Failed to spawn and execute cleanup command process successfully: {}",
+                    e
+                ),
+            }
+        });
     }
 
     fn wait_for_exit_code(token: &CancellationToken, pid: u32) -> i32 {

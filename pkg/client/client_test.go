@@ -82,6 +82,27 @@ var _ = Describe("ConmonClient", func() {
 				}, time.Second*20).Should(BeNil())
 			})
 
+			It(testName("should execute cleanup command when container exits", terminal), func() {
+				filepath := fmt.Sprintf("%s/conmon-client-test%s", os.TempDir(), tr.ctrID)
+				tr = newTestRunner()
+				tr.createRuntimeConfig(terminal)
+				sut = tr.configGivenEnv()
+				tr.createContainerWithConfig(sut, &client.CreateContainerConfig{
+					ID:           tr.ctrID,
+					BundlePath:   tr.tmpDir,
+					Terminal:     terminal,
+					ExitPaths:    []string{tr.exitPath()},
+					OOMExitPaths: []string{tr.oomExitPath()},
+					LogDrivers: []client.LogDriver{{
+						Type: client.LogDriverTypeContainerRuntimeInterface,
+						Path: tr.logPath(),
+					}},
+					CleanupCmd: []string{"touch", filepath},
+				})
+				tr.startContainer(sut)
+				Expect(fileContents(filepath)).To(BeEmpty())
+			})
+
 			It(testName("should return error if invalid command", terminal), func() {
 				tr = newTestRunner()
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"invalid"}, nil)

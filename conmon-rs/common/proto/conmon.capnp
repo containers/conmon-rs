@@ -23,6 +23,7 @@ interface Conmon {
         exitPaths @3 :List(Text);
         oomExitPaths @4 :List(Text);
         logDrivers @5 :List(LogDriver);
+        cleanupCmd @6 :List(Text);
     }
 
     struct LogDriver {

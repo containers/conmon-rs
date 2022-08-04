@@ -148,6 +148,7 @@ func (tr *testRunner) defaultConfig(terminal bool) *client.CreateContainerConfig
 			Type: client.LogDriverTypeContainerRuntimeInterface,
 			Path: tr.logPath(),
 		}},
+		CleanupCmd: []string{},
 	}
 }
 

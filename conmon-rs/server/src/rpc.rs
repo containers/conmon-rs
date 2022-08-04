@@ -67,6 +67,10 @@ impl conmon::Server for Server {
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
         let id = pry!(req.get_id()).to_string();
+        let cleanup_cmd: Vec<String> = pry!(pry!(req.get_cleanup_cmd())
+            .iter()
+            .map(|s| s.map(String::from))
+            .collect());
 
         let span = new_root_span!("create_container", id.as_str());
         let _enter = span.enter();
@@ -117,7 +121,15 @@ impl conmon::Server for Server {
 
                 // register grandchild with server
                 let io = SharedContainerIO::new(container_io);
-                let child = Child::new(id, grandchild_pid, exit_paths, oom_exit_paths, None, io);
+                let child = Child::new(
+                    id,
+                    grandchild_pid,
+                    exit_paths,
+                    oom_exit_paths,
+                    None,
+                    io,
+                    cleanup_cmd,
+                );
                 capnp_err!(child_reaper.watch_grandchild(child))?;
 
                 results
@@ -183,6 +195,7 @@ impl conmon::Server for Server {
                             vec![],
                             time_to_timeout,
                             io_clone,
+                            vec![],
                         );
 
                         let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child))?;
