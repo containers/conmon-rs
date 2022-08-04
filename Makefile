@@ -89,3 +89,9 @@ create-release-packages: release
 install:
 	mkdir -p "${DESTDIR}$(PREFIX)/bin"
 	install -D -t "${DESTDIR}$(PREFIX)/bin" target/release/conmonrs
+
+# Only meant to build the latest HEAD commit + any uncommitted changes
+# Not a replacement for the distro package
+.PHONY: rpm
+rpm:
+	rpkg local
