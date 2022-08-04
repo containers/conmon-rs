@@ -17,7 +17,7 @@ use tracing::{debug, debug_span, error, Instrument};
 pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as u64);
 #[cfg(any(all(target_os = "linux", target_arch = "s390x", not(target_env = "musl"))))]
 pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as u32);
-#[cfg(any(all(target_os = "linux", target_arch = "armhfp", not(target_env = "musl"))))]
+#[cfg(any(all(target_os = "linux", target_arch = "arm", not(target_env = "musl"))))]
 pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as i32);
 #[cfg(any(all(
     target_os = "linux",
