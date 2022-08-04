@@ -86,5 +86,5 @@ create-release-packages: release
 	echo -e '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]' > .cargo/config.toml
 	tar zcf $(PACKAGE_NAME)-vendor.tar.gz .cargo/config.toml vendor
 	rm -rf .cargo/config.toml vendor
-	git archive --format tar --prefix=conmon-rs $(CI_TAG) | gzip >$(PACKAGE_NAME).tar.gz
+	git archive --format tar --prefix=conmon-rs/ $(CI_TAG) | gzip >$(PACKAGE_NAME).tar.gz
 
