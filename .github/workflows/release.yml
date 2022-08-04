@@ -37,7 +37,7 @@ jobs:
       - name: Create Release Packaging
         run: make create-release-packages
         env:
-          CI_TAG: {{ env.GITHUB_REF_NAME }}
+          CI_TAG: ${{ env.GITHUB_REF_NAME }}
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
