@@ -7,6 +7,8 @@ BUILD_DIR ?= .build
 GOTOOLS_GOPATH ?= $(BUILD_DIR)/gotools
 GOTOOLS_BINDIR ?= $(GOTOOLS_GOPATH)/bin
 GINKGO_FLAGS ?= -vv --trace --race --randomize-all --flake-attempts 3 --progress --timeout 5m -r pkg/client
+PACKAGE_NAME ?= $(shell cargo metadata --no-deps --format-version 1 | jq -r '.packages[2] | [ .name, .version ] | join("-")')
+CI_TAG ?=
 
 default:
 	cargo build
@@ -72,3 +74,17 @@ update-proto:
 	git checkout $(PROTO_PATH)/conmon.capnp
 
 .PHONY: lint clean unit integration update-proto
+
+.PHONY: create-release-packages
+create-release-packages: release
+	if [ "$(PACKAGE_NAME)" != "conmonrs-$(CI_TAG)" ]; then \
+		echo "crate version and tag mismatch" ; \
+		exit 1 ; \
+	fi
+	mkdir -p .cargo
+	cargo vendor -q
+	echo -e '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]' > .cargo/config.toml
+	tar zcf $(PACKAGE_NAME)-vendor.tar.gz .cargo/config.toml vendor
+	rm -rf .cargo/config.toml vendor
+	git archive --format tar --prefix=conmon-rs $(CI_TAG) | gzip >$(PACKAGE_NAME).tar.gz
+
