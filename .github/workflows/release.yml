@@ -9,6 +9,7 @@ env:
   CARGO_TERM_COLOR: always
   GO_VERSION: '1.18'
   ACTION_MSRV_TOOLCHAIN: 1.62.0
+  CI_TAG: ${{ env.GITHUB_REF_NAME }}
 
 jobs:
   build:
@@ -36,8 +37,6 @@ jobs:
         run: cargo build
       - name: Create Release Packaging
         run: make create-release-packages
-        env:
-          CI_TAG: ${{ env.GITHUB_REF_NAME }}
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
