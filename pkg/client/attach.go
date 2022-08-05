@@ -101,7 +101,7 @@ func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) e
 		}
 	}()
 
-	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
+	client := proto.Conmon(conn.Bootstrap(ctx))
 	future, free := client.AttachContainer(ctx, func(p proto.Conmon_attachContainer_Params) error {
 		req, err := p.NewRequest()
 		if err != nil {
@@ -348,7 +348,7 @@ func (c *ConmonClient) SetWindowSizeContainer(ctx context.Context, cfg *SetWindo
 		return fmt.Errorf("create RPC connection: %w", err)
 	}
 	defer conn.Close()
-	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
+	client := proto.Conmon(conn.Bootstrap(ctx))
 
 	future, free := client.SetWindowSizeContainer(ctx, func(p proto.Conmon_setWindowSizeContainer_Params) error {
 		req, err := p.NewRequest()
