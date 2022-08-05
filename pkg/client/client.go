@@ -413,7 +413,7 @@ func (c *ConmonClient) Version(ctx context.Context) (*VersionResponse, error) {
 		return nil, fmt.Errorf("create RPC connection: %w", err)
 	}
 	defer conn.Close()
-	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
+	client := proto.Conmon(conn.Bootstrap(ctx))
 
 	future, free := client.Version(ctx, nil)
 	defer free()
@@ -525,7 +525,7 @@ func (c *ConmonClient) CreateContainer(
 		return nil, fmt.Errorf("create RPC connection: %w", err)
 	}
 	defer conn.Close()
-	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
+	client := proto.Conmon(conn.Bootstrap(ctx))
 
 	future, free := client.CreateContainer(ctx, func(p proto.Conmon_createContainer_Params) error {
 		req, err := p.NewRequest()
@@ -620,7 +620,7 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 	}
 	defer conn.Close()
 
-	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
+	client := proto.Conmon(conn.Bootstrap(ctx))
 	future, free := client.ExecSyncContainer(ctx, func(p proto.Conmon_execSyncContainer_Params) error {
 		req, err := p.NewRequest()
 		if err != nil {
@@ -760,7 +760,7 @@ func (c *ConmonClient) ReopenLogContainer(ctx context.Context, cfg *ReopenLogCon
 		return fmt.Errorf("create RPC connection: %w", err)
 	}
 	defer conn.Close()
-	client := proto.Conmon{Client: conn.Bootstrap(ctx)}
+	client := proto.Conmon(conn.Bootstrap(ctx))
 
 	future, free := client.ReopenLogContainer(ctx, func(p proto.Conmon_reopenLogContainer_Params) error {
 		req, err := p.NewRequest()
