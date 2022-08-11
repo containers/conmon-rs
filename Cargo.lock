@@ -607,9 +607,9 @@ dependencies = [
 
 [[package]]
 name = "iana-time-zone"
-version = "0.1.41"
+version = "0.1.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1779539f58004e5dba1c1f093d44325ebeb244bfc04b791acdc0aaeca9c04570"
+checksum = "9512e544c25736b82aebbd2bf739a47c8a1c935dfcc3a6adcde10e35cd3cd468"
 dependencies = [
  "android_system_properties",
  "core-foundation",
@@ -1507,9 +1507,9 @@ dependencies = [
 
 [[package]]
 name = "tzdb"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f6bf696b9fc4c9274ac1faf528e4d0c61de641bd51790ce75377c35eec57553"
+checksum = "51cd1e67e6d8f8f1abeebc05282408181c031581919c2440833b1ecc97e150a2"
 dependencies = [
  "iana-time-zone",
  "phf",
