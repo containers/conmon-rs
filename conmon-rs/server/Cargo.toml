@@ -19,7 +19,7 @@ serde = { version = "1.0.143", features = ["derive"] }
 tokio = { version = "1.20.1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "time"] }
 tokio-util = { version = "0.7.3", features = ["compat"] }
 nix = "0.25.0"
-libc = "0.2.131"
+libc = "0.2.132"
 memchr = "2.5.0"
 tempfile = "3.3.0"
 sendfd = { version = "0.4.3", features = ["tokio"] }
