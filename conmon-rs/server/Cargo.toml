@@ -25,7 +25,7 @@ tempfile = "3.3.0"
 sendfd = { version = "0.4.3", features = ["tokio"] }
 prctl = "1.0.0"
 strum = { version = "0.24.1", features = ["derive"] }
-shadow-rs = "0.16.2"
+shadow-rs = "0.16.3"
 multimap = "0.8.3"
 tracing = "0.1.36"
 tracing-journald = "0.3.0"
@@ -39,7 +39,7 @@ tz-rs = "0.6.14"
 tokio-fd = "0.3.0"
 
 [build-dependencies]
-shadow-rs = "0.16.2"
+shadow-rs = "0.16.3"
 
 [dev-dependencies]
 mockall = "0.11.2"
