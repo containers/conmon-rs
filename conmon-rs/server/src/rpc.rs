@@ -40,6 +40,24 @@ macro_rules! new_root_span {
     };
 }
 
+macro_rules! capnp_vec_str {
+    ($x:expr) => {
+        capnp_vec!($x, String::from)
+    };
+}
+
+macro_rules! capnp_vec_path {
+    ($x:expr) => {
+        capnp_vec!($x, PathBuf::from)
+    };
+}
+
+macro_rules! capnp_vec {
+    ($x:expr, $from:expr) => {
+        pry!(pry!($x).iter().map(|r| r.map($from)).collect())
+    };
+}
+
 impl conmon::Server for Server {
     /// Retrieve version information from the server.
     fn version(
@@ -87,16 +105,19 @@ impl conmon::Server for Server {
         debug!("PID file is {}", pidfile.display());
 
         let child_reaper = self.reaper().clone();
-        let args = pry_err!(self.generate_runtime_args(&id, bundle_path, &container_io, &pidfile));
+        let global_args = capnp_vec_str!(req.get_global_args());
+        let command_args = capnp_vec_str!(req.get_command_args());
+        let args = pry_err!(self.generate_create_args(
+            &id,
+            bundle_path,
+            &container_io,
+            &pidfile,
+            global_args,
+            command_args
+        ));
         let runtime = self.config().runtime().clone();
-        let exit_paths: Vec<PathBuf> = pry!(pry!(req.get_exit_paths())
-            .iter()
-            .map(|r| r.map(PathBuf::from))
-            .collect());
-        let oom_exit_paths: Vec<PathBuf> = pry!(pry!(req.get_oom_exit_paths())
-            .iter()
-            .map(|r| r.map(PathBuf::from))
-            .collect());
+        let exit_paths = capnp_vec_path!(req.get_exit_paths());
+        let oom_exit_paths = capnp_vec_path!(req.get_oom_exit_paths());
 
         Promise::from_future(
             async move {

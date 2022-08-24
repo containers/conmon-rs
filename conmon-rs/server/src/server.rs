@@ -222,12 +222,14 @@ impl Server {
     const SYSTEMD_CGROUP_ARG: &'static str = "--systemd-cgroup";
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
-    pub(crate) fn generate_runtime_args(
+    pub(crate) fn generate_create_args(
         &self,
         id: &str,
         bundle_path: &Path,
         container_io: &ContainerIO,
         pidfile: &Path,
+        global_args: Vec<String>,
+        command_args: Vec<String>,
     ) -> Result<Vec<String>> {
         let mut args = vec![];
 
@@ -239,6 +241,8 @@ impl Server {
             args.push(Self::SYSTEMD_CGROUP_ARG.into());
         }
 
+        args.extend(global_args);
+
         args.extend([
             "create".to_string(),
             "--bundle".to_string(),
@@ -246,6 +250,8 @@ impl Server {
             "--pid-file".to_string(),
             pidfile.display().to_string(),
         ]);
+
+        args.extend(command_args);
 
         if let ContainerIOType::Terminal(terminal) = container_io.typ() {
             args.push(format!("--console-socket={}", terminal.path().display()));
