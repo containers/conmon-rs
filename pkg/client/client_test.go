@@ -197,6 +197,23 @@ var _ = Describe("ConmonClient", func() {
 				logs := fileContents(tr.logPath())
 				Expect(logs).NotTo(ContainSubstring("hello"))
 			})
+			It(testName("should respect global args", terminal), func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "sh", "-c", "echo hello && echo world"},
+					nil,
+				)
+				logFile := MustFile(filepath.Join(tr.tmpDir, "runtime-log"))
+				sut = tr.configGivenEnv()
+				cfg := tr.defaultConfig(terminal)
+				cfg.GlobalArgs = []string{"--log", logFile, "--debug"}
+				tr.createContainerWithConfig(sut, cfg)
+				tr.startContainer(sut)
+
+				logs := fileContents(logFile)
+				Expect(logs).NotTo(BeEmpty())
+			})
 		}
 	})
 
