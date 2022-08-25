@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"os/exec"
@@ -180,7 +179,7 @@ func (tr *testRunner) startContainer(*client.ConmonClient) {
 }
 
 func MustTempDir(name string) string {
-	d, err := ioutil.TempDir(os.TempDir(), name)
+	d, err := os.MkdirTemp(os.TempDir(), name)
 	Expect(err).To(BeNil())
 
 	return d
@@ -273,8 +272,14 @@ func downloadFile(url, path string) error {
 	defer out.Close()
 
 	// Get the data
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
 	c := http.Client{Timeout: time.Minute}
-	resp, err := c.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	resp, err := c.Do(req)
 	if err != nil {
 		return fmt.Errorf("get URL: %w", err)
 	}
@@ -357,7 +362,6 @@ func (rr *RuntimeRunner) runCommand(args ...string) (string, error) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	// nolint:gosec // this is intentional
 	cmd := exec.Command(runtimePath, append(rr.runtimeRootArgs(), args...)...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

@@ -5,13 +5,13 @@ run:
 linters:
   disable-all: true
   enable:
+    - asasalint
     - asciicheck
     - bidichk
     - bodyclose
     - containedctx
     - contextcheck
     - cyclop
-    - deadcode
     - decorder
     - depguard
     - dogsled
@@ -47,11 +47,12 @@ linters:
     - gosimple
     - govet
     - grouper
-    - ifshort
     - importas
     - ineffassign
+    - interfacebloat
     - ireturn
     - lll
+    - logrlint
     - maintidx
     - makezero
     - misspell
@@ -66,11 +67,11 @@ linters:
     - prealloc
     - predeclared
     - promlinter
+    - reassign
     - revive
     - rowserrcheck
     - sqlclosecheck
     - staticcheck
-    - structcheck
     - stylecheck
     - tagliatelle
     - tenv
@@ -81,7 +82,7 @@ linters:
     - unconvert
     - unparam
     - unused
-    - varcheck
+    - usestdlibvars
     - varnamelen
     - wastedassign
     - whitespace
@@ -200,6 +201,7 @@ linters-settings:
       - stringConcatSimplify
       - stringsCompare
       - switchTrue
+      - timeCmpSimplify
       - timeExprSimplify
       - todoCommentWithoutDetail
       - tooManyResultsChecker

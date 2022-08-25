@@ -16,7 +16,7 @@ import (
 const (
 	attachPacketBufSize = 8192
 	attachPipeDone      = 0
-	attachPipeStdin     = 1 // nolint:deadcode,varcheck // Not used right now
+	attachPipeStdin     = 1 //nolint:deadcode,varcheck // Not used right now
 	attachPipeStdout    = 2
 	attachPipeStderr    = 3
 )
