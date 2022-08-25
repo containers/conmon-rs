@@ -33,10 +33,16 @@ release-static:
 			make release && \
 			strip -s target/x86_64-unknown-linux-musl/release/$(BINARY)"
 
-lint: .install.golangci-lint
+lint: lint-rust lint-go
+
+lint-rust:
 	cargo fmt && git diff --exit-code
 	cargo clippy --all-targets -- -D warnings
-	$(GOTOOLS_BINDIR)/golangci-lint run
+
+lint-go: .install.golangci-lint
+	$(GOTOOLS_BINDIR)/golangci-lint version
+	$(GOTOOLS_BINDIR)/golangci-lint linters
+	GL_DEBUG=gocritic $(GOTOOLS_BINDIR)/golangci-lint run
 
 unit:
 	cargo test --bins --no-fail-fast
@@ -60,7 +66,8 @@ integration-static: .install.ginkgo # It needs to be release so we correctly tes
 	GOBIN=$(abspath $(GOTOOLS_BINDIR)) go install github.com/onsi/ginkgo/v2/ginkgo@latest
 
 .install.golangci-lint:
-	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | BINDIR=$(abspath $(GOTOOLS_BINDIR)) sh -s v1.46.2
+	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | \
+		BINDIR=$(abspath $(GOTOOLS_BINDIR)) sh -s v1.49.0
 
 clean:
 	rm -rf target/
@@ -74,7 +81,7 @@ update-proto:
 	mv $(PROTO_PATH)/conmon.capnp.go internal/proto/
 	git checkout $(PROTO_PATH)/conmon.capnp
 
-.PHONY: lint clean unit integration update-proto
+.PHONY: lint lint-go lint-rust clean unit integration update-proto
 
 .PHONY: create-release-packages
 create-release-packages: release
