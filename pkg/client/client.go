@@ -486,6 +486,14 @@ type CreateContainerConfig struct {
 
 	// CleanupCmd is the command that will be executed once the container exits
 	CleanupCmd []string
+
+	// GlobalArgs are the additional arguments passed to the create runtime call
+	// before the command. e.g: crun --runtime-arg create
+	GlobalArgs []string
+
+	// CommandArgs are the additional arguments passed to the create runtime call
+	// after the command. e.g: crun create --runtime-opt
+	CommandArgs []string
 }
 
 // LogDriver specifies a selected logging mechanism.
@@ -553,12 +561,20 @@ func (c *ConmonClient) CreateContainer(
 			return fmt.Errorf("init log drivers: %w", err)
 		}
 
-		if err := p.SetRequest(req); err != nil {
-			return fmt.Errorf("set request: %w", err)
-		}
-
 		if err := stringSliceToTextList(cfg.CleanupCmd, req.NewCleanupCmd); err != nil {
 			return fmt.Errorf("convert cleanup command string slice to text list: %w", err)
+		}
+
+		if err := stringSliceToTextList(cfg.GlobalArgs, req.NewGlobalArgs); err != nil {
+			return fmt.Errorf("convert cleanup command string slice to text list: %w", err)
+		}
+
+		if err := stringSliceToTextList(cfg.CommandArgs, req.NewCommandArgs); err != nil {
+			return fmt.Errorf("convert cleanup command string slice to text list: %w", err)
+		}
+
+		if err := p.SetRequest(req); err != nil {
+			return fmt.Errorf("set request: %w", err)
 		}
 
 		return nil
