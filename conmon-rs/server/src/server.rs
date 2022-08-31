@@ -5,6 +5,7 @@ use crate::{
     config::{CgroupManager, Config, LogDriver},
     container_io::{ContainerIO, ContainerIOType},
     init::{DefaultInit, Init},
+    listener::{DefaultListener, Listener},
     version::Version,
 };
 use anyhow::{format_err, Context, Result};
@@ -194,7 +195,8 @@ impl Server {
     }
 
     async fn start_backend(self, mut shutdown_rx: oneshot::Receiver<()>) -> Result<()> {
-        let listener = crate::listener::bind_long_path(&self.config().socket())?;
+        let listener =
+            Listener::<DefaultListener>::default().bind_long_path(&self.config().socket())?;
         let client: conmon::Client = capnp_rpc::new_client(self);
 
         loop {

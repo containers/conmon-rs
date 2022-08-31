@@ -4,7 +4,7 @@ use crate::{
     attach::SharedContainerAttach,
     container_io::{ContainerIO, Message, Pipe},
     container_log::SharedContainerLog,
-    listener,
+    listener::{DefaultListener, Listener},
 };
 use anyhow::{bail, format_err, Context, Result};
 use getset::{Getters, MutGetters, Setters};
@@ -137,7 +137,7 @@ impl Terminal {
     ) -> Result<()> {
         let path = config.path();
         debug!("Listening terminal socket on {}", path.display());
-        let listener = listener::bind_long_path(path)?;
+        let listener = Listener::<DefaultListener>::default().bind_long_path(path)?;
 
         // Update the permissions
         let mut perms = fs::metadata(path).await?.permissions();
