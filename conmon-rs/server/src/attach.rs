@@ -1,4 +1,7 @@
-use crate::{container_io::Pipe, listener};
+use crate::{
+    container_io::Pipe,
+    listener::{DefaultListener, Listener},
+};
 use anyhow::{bail, Context, Result};
 use nix::{
     errno::Errno,
@@ -128,7 +131,8 @@ impl Attach {
         .context("bind socket")?;
 
         // keep parent_fd in scope until the bind, or else the socket will not work
-        let (shortened_path, _parent_dir) = listener::shorten_socket_path(path)?;
+        let (shortened_path, _parent_dir) =
+            Listener::<DefaultListener>::default().shorten_socket_path(path)?;
         let addr = UnixAddr::new(&shortened_path).context("create socket addr")?;
         bind(fd, &addr).context("bind socket fd")?;
 
