@@ -263,7 +263,7 @@ mod tests {
     use sendfd::SendWithFd;
     use std::os::unix::io::FromRawFd;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn new_success() -> Result<()> {
         let logger = ContainerLog::new();
         let attach = SharedContainerAttach::default();
