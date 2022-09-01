@@ -17,12 +17,14 @@ use tempfile::Builder;
 use tokio::{
     fs::File,
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    select,
     sync::{
         mpsc::{UnboundedReceiver, UnboundedSender},
         RwLock,
     },
     time::{self, Instant},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
 
 /// A shared container IO abstraction.
@@ -38,8 +40,13 @@ impl SharedContainerIO {
     pub async fn read_all_with_timeout(
         &self,
         timeout: Option<Instant>,
-    ) -> (Vec<u8>, Vec<u8>, bool) {
-        self.0.write().await.read_all_with_timeout(timeout).await
+        token: CancellationToken,
+    ) -> Result<(Vec<u8>, Vec<u8>, bool)> {
+        self.0
+            .write()
+            .await
+            .read_all_with_timeout(timeout, token)
+            .await
     }
 
     /// Resize the shared container IO to the provided with and height.
@@ -159,28 +166,27 @@ impl ContainerIO {
     pub async fn read_all_with_timeout(
         &mut self,
         time_to_timeout: Option<Instant>,
-    ) -> (Vec<u8>, Vec<u8>, bool) {
+        token: CancellationToken,
+    ) -> Result<(Vec<u8>, Vec<u8>, bool)> {
         match self.typ_mut() {
             ContainerIOType::Terminal(t) => {
                 if let Some(message_rx) = t.message_rx_mut() {
                     let (stdout, timed_out) =
-                        Self::read_stream_with_timeout(time_to_timeout, message_rx).await;
-                    (stdout, vec![], timed_out)
+                        Self::read_stream_with_timeout(time_to_timeout, message_rx, token).await;
+                    Ok((stdout, vec![], timed_out))
                 } else {
-                    // TODO FIXME
-                    error!("read_all_with_timeout called before message_rx was registered");
-                    (vec![], vec![], false)
+                    bail!("read_all_with_timeout called before message_rx was registered");
                 }
             }
             ContainerIOType::Streams(s) => {
                 let stdout_rx = &mut s.message_rx_stdout;
                 let stderr_rx = &mut s.message_rx_stderr;
                 let (stdout, stderr) = tokio::join!(
-                    Self::read_stream_with_timeout(time_to_timeout, stdout_rx),
-                    Self::read_stream_with_timeout(time_to_timeout, stderr_rx),
+                    Self::read_stream_with_timeout(time_to_timeout, stdout_rx, token.clone()),
+                    Self::read_stream_with_timeout(time_to_timeout, stderr_rx, token),
                 );
                 let timed_out = stdout.1 || stderr.1;
-                (stdout.0, stderr.0, timed_out)
+                Ok((stdout.0, stderr.0, timed_out))
             }
         }
     }
@@ -188,39 +194,52 @@ impl ContainerIO {
     async fn read_stream_with_timeout(
         time_to_timeout: Option<Instant>,
         receiver: &mut UnboundedReceiver<Message>,
+        token: CancellationToken,
     ) -> (Vec<u8>, bool) {
         let mut stdio = vec![];
         let mut timed_out = false;
         loop {
-            let msg = if let Some(time_to_timeout) = time_to_timeout {
-                match time::timeout_at(time_to_timeout, receiver.recv()).await {
-                    Ok(Some(msg)) => msg,
-                    Err(_) => {
-                        timed_out = true;
-                        Message::Done
+            let closure = async {
+                if let Some(time_to_timeout) = time_to_timeout {
+                    {
+                        match time::timeout_at(time_to_timeout, receiver.recv()).await {
+                            Ok(Some(msg)) => msg,
+                            Err(_) => {
+                                timed_out = true;
+                                Message::Done
+                            }
+                            Ok(None) => unreachable!(),
+                        }
                     }
-                    Ok(None) => unreachable!(),
-                }
-            } else {
-                match receiver.recv().await {
-                    Some(msg) => msg,
-                    None => Message::Done,
+                } else {
+                    {
+                        match receiver.recv().await {
+                            Some(msg) => msg,
+                            None => Message::Done,
+                        }
+                    }
                 }
             };
-
-            match msg {
-                Message::Data(data) => {
-                    if let Some(future_len) = stdio.len().checked_add(data.len()) {
-                        if future_len < Self::MAX_STDIO_STREAM_SIZE {
-                            stdio.extend(data)
-                        } else {
-                            break;
+            select! {
+                msg = closure => {
+                    match msg {
+                        Message::Data(data) => {
+                            if let Some(future_len) = stdio.len().checked_add(data.len()) {
+                                if future_len < Self::MAX_STDIO_STREAM_SIZE {
+                                    stdio.extend(data)
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
                         }
-                    } else {
-                        break;
+                        Message::Done => break,
                     }
                 }
-                Message::Done => break,
+                _ = token.cancelled() => {
+                    break;
+                }
             }
         }
         (stdio, timed_out)
@@ -232,6 +251,7 @@ impl ContainerIO {
         logger: SharedContainerLog,
         message_tx: UnboundedSender<Message>,
         mut attach: SharedContainerAttach,
+        token: CancellationToken,
     ) -> Result<()>
     where
         T: AsyncRead + Unpin,
@@ -239,71 +259,89 @@ impl ContainerIO {
         let mut buf = vec![0; 1024];
 
         loop {
-            match reader.read(&mut buf).await {
-                Ok(n) if n > 0 => {
-                    debug!("Read {} bytes", n);
-                    let data = &buf[..n];
+            select! {
+                n = reader.read(&mut buf) => {
+                    match n {
+                        Ok(n) if n > 0 => {
+                            debug!("Read {} bytes", n);
+                            let data = &buf[..n];
 
-                    let mut locked_logger = logger.write().await;
-                    locked_logger
-                        .write(pipe, data)
-                        .await
-                        .context("write to log file")?;
+                            let mut locked_logger = logger.write().await;
+                            locked_logger
+                                .write(pipe, data)
+                                .await
+                                .context("write to log file")?;
 
-                    attach
-                        .write(pipe, data)
-                        .await
-                        .context("write to attach endpoints")?;
+                            attach
+                                .write(pipe, data)
+                                .await
+                                .context("write to attach endpoints")?;
 
-                    message_tx
-                        .send(Message::Data(data.into()))
-                        .context("send data message")?;
+                            message_tx
+                                .send(Message::Data(data.into()))
+                                .context("send data message")?;
+                        }
+                        Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
+                            Errno::EIO => {
+                                debug!("Stopping read loop");
+
+                                message_tx
+                                    .send(Message::Done)
+                                    .context("send done message")?;
+                                return Ok(());
+                            }
+                            Errno::EBADF => {
+                                return Err(Errno::EBADFD.into());
+                            }
+                            Errno::EAGAIN => {
+                                continue;
+                            }
+                            _ => error!(
+                                "Unable to read from file descriptor: {} {}",
+                                e,
+                                e.raw_os_error().context("get OS error")?
+                            ),
+                        },
+                        _ => {}
+                    }
                 }
-                Ok(n) if n == 0 => {
-                    debug!("No more to read");
-
+                _ = token.cancelled() => {
+                    debug!("Sending done because token cancelled");
                     message_tx
                         .send(Message::Done)
                         .context("send done message")?;
                     return Ok(());
                 }
-                Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
-                    Errno::EIO => {
-                        debug!("Stopping read loop");
-
-                        message_tx
-                            .send(Message::Done)
-                            .context("send done message")?;
-                        return Ok(());
-                    }
-                    Errno::EBADF => {
-                        return Err(Errno::EBADFD.into());
-                    }
-                    Errno::EAGAIN => {
-                        continue;
-                    }
-                    _ => error!(
-                        "Unable to read from file descriptor: {} {}",
-                        e,
-                        e.raw_os_error().context("get OS error")?
-                    ),
-                },
-                _ => {}
             }
         }
     }
 
-    pub async fn read_loop_stdin(fd: RawFd, mut attach: SharedContainerAttach) -> Result<()> {
+    pub async fn read_loop_stdin(
+        fd: RawFd,
+        mut attach: SharedContainerAttach,
+        token: CancellationToken,
+    ) -> Result<()> {
         let mut writer = unsafe { File::from_raw_fd(fd) };
         loop {
-            let data = attach
-                .read()
-                .await
-                .context("read from stdin attach endpoints")?;
-            writer
-                .write_all(&data)
-                .await
-                .context("write attach stdin to stream")?;
+            select! {
+                res = attach.read() => {
+                    match res {
+                        Ok(data) => {
+                            writer
+                                .write_all(&data)
+                                .await
+                                .context("write attach stdin to stream")?;
+                        }
+                        Err(e) => {
+                            return Err(e).context("read from stdin attach endpoints");
+                        }
+                    }
+                }
+                _ = token.cancelled() => {
+                    debug!("Exiting because token cancelled");
+                    return Ok(());
+                }
+            }
         }
     }
 }

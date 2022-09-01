@@ -15,6 +15,7 @@ use std::{
     time::Duration,
 };
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, error, Instrument};
 use uuid::Uuid;
 
@@ -123,13 +124,18 @@ impl conmon::Server for Server {
             async move {
                 capnp_err!(container_log.write().await.init().await)?;
 
-                let grandchild_pid = capnp_err!(match child_reaper
+                let (grandchild_pid, token) = capnp_err!(match child_reaper
                     .create_child(runtime, args, &mut container_io, &pidfile)
                     .await
                 {
                     Err(e) => {
                         // Attach the stderr output to the error message
-                        let (_, stderr, _) = container_io.read_all_with_timeout(None).await;
+                        // TODO FIXME
+                        let (_, stderr, _) = capnp_err!(
+                            container_io
+                                .read_all_with_timeout(None, CancellationToken::new())
+                                .await
+                        )?;
                         if !stderr.is_empty() {
                             let stderr_str = str::from_utf8(&stderr)?;
                             Err(format_err!("{:#}: {}", e, stderr_str))
@@ -150,6 +156,7 @@ impl conmon::Server for Server {
                     None,
                     io,
                     cleanup_cmd,
+                    token,
                 );
                 capnp_err!(child_reaper.watch_grandchild(child))?;
 
@@ -199,7 +206,7 @@ impl conmon::Server for Server {
                     .create_child(&runtime, &args, &mut container_io, &pidfile)
                     .await
                 {
-                    Ok(grandchild_pid) => {
+                    Ok((grandchild_pid, token)) => {
                         let time_to_timeout = if timeout > 0 {
                             Some(Instant::now() + Duration::from_secs(timeout))
                         } else {
@@ -217,12 +224,13 @@ impl conmon::Server for Server {
                             time_to_timeout,
                             io_clone,
                             vec![],
+                            token.clone(),
                         );
 
                         let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child))?;
 
                         let (stdout, stderr, timed_out) =
-                            io.read_all_with_timeout(time_to_timeout).await;
+                            capnp_err!(io.read_all_with_timeout(time_to_timeout, token).await)?;
 
                         let exit_data = capnp_err!(exit_rx.recv().await)?;
                         resp.set_stdout(&stdout);
@@ -267,8 +275,17 @@ impl conmon::Server for Server {
         let child = pry_err!(self.reaper().get(container_id));
 
         Promise::from_future(
-            async move { capnp_err!(child.io().attach().await.add(&socket_path).await) }
-                .instrument(debug_span!("promise")),
+            async move {
+                capnp_err!(
+                    child
+                        .io()
+                        .attach()
+                        .await
+                        .add(&socket_path, child.token().clone())
+                        .await
+                )
+            }
+            .instrument(debug_span!("promise")),
         )
     }
 

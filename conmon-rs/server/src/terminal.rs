@@ -26,6 +26,7 @@ use tokio::{
     task,
 };
 use tokio_fd::AsyncFd;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, error, trace, Instrument};
 
 #[derive(Debug, Getters, MutGetters, Setters)]
@@ -94,7 +95,7 @@ impl Terminal {
     }
 
     /// Waits for the socket client to be connected.
-    pub async fn wait_connected(&mut self) -> Result<()> {
+    pub async fn wait_connected(&mut self, token: CancellationToken) -> Result<()> {
         debug!("Waiting for terminal socket connection");
         let fd = self
             .connected_rx
@@ -114,6 +115,7 @@ impl Terminal {
         let logger_clone = self.logger.clone();
         let (message_tx, message_rx) = mpsc::unbounded_channel();
         self.message_rx = Some(message_rx);
+        let token_clone = token.clone();
 
         task::spawn(
             async move {
@@ -123,6 +125,7 @@ impl Terminal {
                     logger_clone,
                     message_tx,
                     attach_clone,
+                    token_clone,
                 )
                 .await
                 {
@@ -136,7 +139,7 @@ impl Terminal {
         let attach_clone = self.attach.clone();
         task::spawn(
             async move {
-                if let Err(e) = ContainerIO::read_loop_stdin(fd, attach_clone).await {
+                if let Err(e) = ContainerIO::read_loop_stdin(fd, attach_clone, token).await {
                     error!("Stdin read loop failure: {:#}", e);
                 }
             }
@@ -261,6 +264,7 @@ mod tests {
     async fn new_success() -> Result<()> {
         let logger = ContainerLog::new();
         let attach = SharedContainerAttach::default();
+        let token = CancellationToken::new();
 
         let mut sut = Terminal::new(logger, attach)?;
         assert!(sut.path().exists());
@@ -279,7 +283,7 @@ mod tests {
             }
         }
 
-        sut.wait_connected().await?;
+        sut.wait_connected(token).await?;
         assert!(!sut.path().exists());
 
         // Write to the slave

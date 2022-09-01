@@ -22,9 +22,11 @@ use tokio::{
         unix::{OwnedReadHalf, OwnedWriteHalf},
         UnixListener,
     },
+    select,
     sync::broadcast::{self, Receiver, Sender},
     task,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, error, Instrument};
 
 #[derive(Debug)]
@@ -59,7 +61,7 @@ impl Clone for SharedContainerAttach {
 
 impl SharedContainerAttach {
     /// Add a new attach endpoint to this shared container attach instance.
-    pub async fn add<T>(&mut self, socket_path: T) -> Result<()>
+    pub async fn add<T>(&mut self, socket_path: T, token: CancellationToken) -> Result<()>
     where
         T: AsRef<Path>,
         PathBuf: From<T>,
@@ -68,6 +70,7 @@ impl SharedContainerAttach {
             socket_path,
             self.read_half_tx.clone(),
             self.write_half_tx.clone(),
+            token,
         )
         .context("create attach endpoint")
     }
@@ -110,6 +113,7 @@ impl Attach {
         socket_path: T,
         read_half_tx: Sender<Vec<u8>>,
         write_half_tx: Sender<(Pipe, Vec<u8>)>,
+        token: CancellationToken,
     ) -> Result<()>
     where
         T: AsRef<Path>,
@@ -144,7 +148,7 @@ impl Attach {
 
         task::spawn(
             async move {
-                if let Err(e) = Self::start(fd, read_half_tx, write_half_tx).await {
+                if let Err(e) = Self::start(fd, read_half_tx, write_half_tx, token).await {
                     error!("Attach failure: {:#}", e);
                 }
             }
@@ -158,6 +162,7 @@ impl Attach {
         fd: RawFd,
         read_half_tx: Sender<Vec<u8>>,
         write_half_tx: Sender<(Pipe, Vec<u8>)>,
+        token: CancellationToken,
     ) -> Result<()> {
         debug!("Start listening on attach socket");
         let listener = UnixListener::from_std(unsafe { net::UnixListener::from_raw_fd(fd) })?;
@@ -168,9 +173,12 @@ impl Attach {
                     let (read, write) = stream.into_split();
 
                     let read_half_tx_clone = read_half_tx.clone();
+                    let token_clone = token.clone();
                     task::spawn(
                         async move {
-                            if let Err(e) = Self::read_loop(read, read_half_tx_clone).await {
+                            if let Err(e) =
+                                Self::read_loop(read, read_half_tx_clone, token_clone).await
+                            {
                                 error!("Attach read loop failure: {:#}", e);
                             }
                         }
@@ -178,9 +186,12 @@ impl Attach {
                     );
 
                     let write_half_rx = write_half_tx.subscribe();
+                    let token_clone = token.clone();
                     task::spawn(
                         async move {
-                            if let Err(e) = Self::write_loop(write, write_half_rx).await {
+                            if let Err(e) =
+                                Self::write_loop(write, write_half_rx, token_clone).await
+                            {
                                 error!("Attach write loop failure: {:#}", e);
                             }
                         }
@@ -192,39 +203,47 @@ impl Attach {
         }
     }
 
-    async fn read_loop(mut read_half: OwnedReadHalf, tx: Sender<Vec<u8>>) -> Result<()> {
+    async fn read_loop(
+        mut read_half: OwnedReadHalf,
+        tx: Sender<Vec<u8>>,
+        token: CancellationToken,
+    ) -> Result<()> {
         loop {
             let mut buf = vec![0; Self::PACKET_BUF_SIZE];
-            match read_half.read(&mut buf).await {
-                Ok(n) if n > 0 => {
-                    if let Some(first_zero_idx) = buf.iter().position(|&x| x == 0) {
-                        buf.resize(first_zero_idx, 0);
+            select! {
+                n = read_half.read(&mut buf) => {
+                    match n {
+                        Ok(n) if n > 0 => {
+                            if let Some(first_zero_idx) = buf.iter().position(|&x| x == 0) {
+                                buf.resize(first_zero_idx, 0);
+                            }
+                            debug!("Read {} stdin bytes from client", buf.len());
+                            tx.send(buf).context("send data message")?;
+                        }
+                        Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
+                            Errno::EIO => {
+                                debug!("Stopping read loop because of IO error");
+                                return Ok(());
+                            }
+                            Errno::EBADF => {
+                                return Err(Errno::EBADFD.into());
+                            }
+                            Errno::EAGAIN => {
+                                continue;
+                            }
+                            _ => error!(
+                                "Unable to read from file descriptor: {} {}",
+                                e,
+                                e.raw_os_error().context("get OS error")?
+                            ),
+                        },
+                        _ => {}
                     }
-                    debug!("Read {} stdin bytes from client", buf.len());
-                    tx.send(buf).context("send data message")?;
                 }
-                Ok(n) if n == 0 => {
-                    debug!("Stopping read loop because no more data to read");
+                _ = token.cancelled() => {
+                    debug!("Exiting because token cancelled");
                     return Ok(());
                 }
-                Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
-                    Errno::EIO => {
-                        debug!("Stopping read loop because of IO error");
-                        return Ok(());
-                    }
-                    Errno::EBADF => {
-                        return Err(Errno::EBADFD.into());
-                    }
-                    Errno::EAGAIN => {
-                        continue;
-                    }
-                    _ => error!(
-                        "Unable to read from file descriptor: {} {}",
-                        e,
-                        e.raw_os_error().context("get OS error")?
-                    ),
-                },
-                _ => {}
             }
         }
     }
@@ -232,34 +251,42 @@ impl Attach {
     async fn write_loop(
         mut write_half: OwnedWriteHalf,
         mut rx: Receiver<(Pipe, Vec<u8>)>,
+        token: CancellationToken,
     ) -> Result<()> {
         loop {
-            let (pipe, buf) = rx.recv().await?;
+            select! {
+                res = rx.recv() => {
+                    let (pipe, buf) = res?;
+                    let mut packets = buf
+                        .chunks(Self::PACKET_BUF_SIZE - 1)
+                        .map(|x| {
+                            let mut y = x.to_vec();
+                            let p = match pipe {
+                                Pipe::StdOut => 2,
+                                Pipe::StdErr => 3,
+                            };
+                            y.insert(0, p);
+                            y.resize(Self::PACKET_BUF_SIZE, 0);
+                            y
+                        })
+                        .collect::<Vec<_>>();
+                    packets.push(Self::DONE_PACKET.to_vec());
 
-            let mut packets = buf
-                .chunks(Self::PACKET_BUF_SIZE - 1)
-                .map(|x| {
-                    let mut y = x.to_vec();
-                    let p = match pipe {
-                        Pipe::StdOut => 2,
-                        Pipe::StdErr => 3,
-                    };
-                    y.insert(0, p);
-                    y.resize(Self::PACKET_BUF_SIZE, 0);
-                    y
-                })
-                .collect::<Vec<_>>();
-            packets.push(Self::DONE_PACKET.to_vec());
-
-            let len = packets.len() - 1;
-            for (idx, packet) in packets.iter().enumerate() {
-                match write_half.write(packet).await {
-                    Ok(_) => {
-                        debug!("Wrote {} packet {}/{} to client", pipe, idx, len)
+                    let len = packets.len() - 1;
+                    for (idx, packet) in packets.iter().enumerate() {
+                        match write_half.write(packet).await {
+                            Ok(_) => {
+                                debug!("Wrote {} packet {}/{} to client", pipe, idx, len)
+                            }
+                            Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
+                            Err(ref e) if e.kind() == ErrorKind::BrokenPipe => break,
+                            Err(e) => bail!("unable to write packet {}/{}: {:#}", idx, len, e),
+                        }
                     }
-                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
-                    Err(ref e) if e.kind() == ErrorKind::BrokenPipe => break,
-                    Err(e) => bail!("unable to write packet {}/{}: {:#}", idx, len, e),
+                }
+                _ = token.cancelled() => {
+                    debug!("Exiting because token cancelled");
+                    return Ok(());
                 }
             }
         }
