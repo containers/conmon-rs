@@ -82,7 +82,7 @@ pub enum ContainerIOType {
 }
 
 /// A message to be sent through the ContainerIO.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
     Data(Vec<u8>),
     Done,
