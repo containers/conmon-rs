@@ -393,43 +393,67 @@ func testAttach(
 	reader *io.PipeReader,
 	testString string,
 	useStdErr bool,
+	terminal bool,
 ) {
 	wg := sync.WaitGroup{}
-	wg.Add(3)
+	wg.Add(2)
 
+	command := "/busybox echo -n " + testString
 	go func() {
+		defer wg.Done()
 		defer GinkgoRecover()
-		var err error
-		command := "/busybox echo -n " + testString
-		if !useStdErr {
-			_, err = fmt.Fprintf(stdinWriter, "%s\n", command)
-		} else {
-			_, err = fmt.Fprintf(stdinWriter, "%s >&2\n", command)
+		pipe := ""
+		if useStdErr {
+			pipe = " >&2"
 		}
-		Expect(err).To(BeNil())
+		// Print in synchrony to prevent races with terminals.
+		// Run twice to ensure all data is processed.
+		for i := 0; i < 2; i++ {
+			_, err := fmt.Fprintf(stdinWriter, "%s%s\n", command, pipe)
+			Expect(err).To(BeNil())
+			verifyBuffer(reader, terminal, command, testString)
+		}
 
-		wg.Done()
-	}()
-
-	go func() {
-		defer GinkgoRecover()
-		data := make([]byte, len(testString))
-		_, err := reader.Read(data)
+		// terminate the container
+		_, err := fmt.Fprintf(stdinWriter, "exit\n")
 		Expect(err).To(BeNil())
-		Expect(string(data)).To(Equal(testString))
 
 		Expect(reader.Close()).To(BeNil())
-		wg.Done()
 	}()
 
 	go func() {
+		defer wg.Done()
 		defer GinkgoRecover()
 		err := sut.AttachContainer(context.Background(), cfg)
-		Expect(err).NotTo(BeNil())
-		Expect(errors.Is(err, io.ErrClosedPipe)).To(BeTrue())
-
-		wg.Done()
+		// The test races with itself, and sometimes is EOF and sometimes passes
+		if !errors.Is(err, io.ErrClosedPipe) {
+			Expect(err).To(BeNil())
+		}
 	}()
 
 	wg.Wait()
+}
+
+func verifyBuffer(reader io.Reader, terminal bool, command, expected string) {
+	readSection := func() string {
+		data := make([]byte, 8191)
+		_, err := reader.Read(data)
+		Expect(err).To(BeNil())
+		return string(bytes.Trim(data, "\x00"))
+	}
+	if !terminal {
+		Expect(readSection()).To(Equal(expected))
+		return
+	}
+
+	fullExpectedBuffer := command + "\r\n" + expected + "/ # \x1b[6n"
+	str := ""
+	for {
+		str += readSection()
+		if len(str) < len(fullExpectedBuffer) {
+			continue
+		}
+		Expect(str).To(Equal(fullExpectedBuffer))
+		return
+	}
 }

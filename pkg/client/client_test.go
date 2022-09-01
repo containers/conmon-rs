@@ -352,52 +352,52 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	Describe("Attach", func() {
-		It("should succeed with stdout", func() {
-			const terminal = false
-			tr = newTestRunner()
-			tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh"}, nil)
-			sut = tr.configGivenEnv()
-			tr.createContainer(sut, terminal)
-			tr.startContainer(sut)
+		matrix := []struct {
+			terminal bool
+			pipe     string
+		}{
+			{
+				terminal: true,
+				pipe:     "stdout",
+			},
+			{
+				terminal: false,
+				pipe:     "stdout",
+			},
+			{
+				terminal: false,
+				pipe:     "stderr",
+			},
+		}
+		for _, test := range matrix {
+			terminal := test.terminal
+			pipe := test.pipe
+			It(testName("should succeed with "+test.pipe, test.terminal), func() {
 
-			stdinReader, stdinWriter := io.Pipe()
-			stdoutReader, stdoutWriter := io.Pipe()
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh"}, nil)
+				sut = tr.configGivenEnv()
+				tr.createContainer(sut, terminal)
+				tr.startContainer(sut)
 
-			cfg := &client.AttachConfig{
-				ID:         tr.ctrID,
-				SocketPath: filepath.Join(tr.tmpDir, "attach"),
-				Streams: client.AttachStreams{
-					Stdin:  &client.In{stdinReader},
-					Stdout: &client.Out{stdoutWriter},
-				},
-			}
+				stdinReader, stdinWriter := io.Pipe()
+				stdReader, stdWriter := io.Pipe()
 
-			testAttach(sut, cfg, stdinWriter, stdoutReader, "Test stdout", false)
-		})
+				cfg := &client.AttachConfig{
+					ID:         tr.ctrID,
+					SocketPath: filepath.Join(tr.tmpDir, "attach"),
+					Streams: client.AttachStreams{
+						Stdin: &client.In{stdinReader},
+					},
+				}
+				if pipe == "stdout" {
+					cfg.Streams.Stdout = &client.Out{stdWriter}
+				} else {
+					cfg.Streams.Stderr = &client.Out{stdWriter}
+				}
 
-		It("should succeed with stderr", func() {
-			const terminal = false
-			tr = newTestRunner()
-			tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh"}, nil)
-			sut = tr.configGivenEnv()
-			tr.createContainer(sut, terminal)
-			tr.startContainer(sut)
-
-			stdinReader, stdinWriter := io.Pipe()
-			stderrReader, stderrWriter := io.Pipe()
-
-			cfg := &client.AttachConfig{
-				ID:         tr.ctrID,
-				SocketPath: filepath.Join(tr.tmpDir, "attach"),
-				Streams: client.AttachStreams{
-					Stdin:  &client.In{stdinReader},
-					Stderr: &client.Out{stderrWriter},
-				},
-			}
-
-			testAttach(sut, cfg, stdinWriter, stderrReader, "Test stderr", true)
-		})
-
-		// TODO: add terminal based attach tests
+				testAttach(sut, cfg, stdinWriter, stdReader, pipe, pipe == "stderr", terminal)
+			})
+		}
 	})
 })
