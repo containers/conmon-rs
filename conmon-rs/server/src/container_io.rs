@@ -162,9 +162,15 @@ impl ContainerIO {
     ) -> (Vec<u8>, Vec<u8>, bool) {
         match self.typ_mut() {
             ContainerIOType::Terminal(t) => {
-                let (stdout, timed_out) =
-                    Self::read_stream_with_timeout(time_to_timeout, t.message_rx_mut()).await;
-                (stdout, vec![], timed_out)
+                if let Some(message_rx) = t.message_rx_mut() {
+                    let (stdout, timed_out) =
+                        Self::read_stream_with_timeout(time_to_timeout, message_rx).await;
+                    (stdout, vec![], timed_out)
+                } else {
+                    // TODO FIXME
+                    error!("read_all_with_timeout called before message_rx was registered");
+                    (vec![], vec![], false)
+                }
             }
             ContainerIOType::Streams(s) => {
                 let stdout_rx = &mut s.message_rx_stdout;
