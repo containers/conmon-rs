@@ -4,6 +4,7 @@
 [![gh-pages](https://github.com/containers/conmon-rs/workflows/gh-pages/badge.svg)](https://github.com/containers/conmon-rs/actions)
 [![codecov](https://codecov.io/gh/containers/conmon-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/containers/conmon-rs)
 [![dependencies](https://deps.rs/repo/github/containers/conmon-rs/status.svg)](https://deps.rs/repo/github/containers/conmon-rs)
+[![builds](https://img.shields.io/badge/packages-copr-orange.svg)](https://copr.fedorainfracloud.org/coprs/rhcontainerbot/podman-next/package/conmon-rs)
 [![docs](https://img.shields.io/badge/docs-main-blue.svg)](https://containers.github.io/conmon-rs/conmonrs/index.html)
 [![go-docs](https://godoc.org/github.com/containers/conmon-rs?status.svg)](https://pkg.go.dev/github.com/containers/conmon-rs/pkg/client)
 
