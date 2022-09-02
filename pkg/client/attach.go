@@ -21,10 +21,7 @@ const (
 	attachPipeStderr    = 3
 )
 
-var (
-	errOutputDestNil   = errors.New("output destination cannot be nil")
-	errTerminalSizeNil = errors.New("terminal size cannot be nil")
-)
+var errTerminalSizeNil = errors.New("terminal size cannot be nil")
 
 // AttachStreams are the stdio streams for the AttachConfig.
 type AttachStreams struct {
@@ -209,57 +206,30 @@ func (c *ConmonClient) setupStdioChannels(
 
 func (c *ConmonClient) redirectResponseToOutputStreams(cfg *AttachConfig, conn io.Reader) (err error) {
 	buf := make([]byte, attachPacketBufSize+1) /* Sync with conmonrs ATTACH_PACKET_BUF_SIZE */
+	defer func() {
+		if cfg.Streams.Stdout != nil {
+			cfg.Streams.Stdout.Close()
+		}
+		if cfg.Streams.Stderr != nil {
+			cfg.Streams.Stderr.Close()
+		}
+	}()
 	for {
 		c.logger.Trace("Waiting to read from attach connection")
 		nr, er := conn.Read(buf)
 		c.logger.WithError(er).Tracef("Got %d bytes from attach connection", nr)
 
 		if nr > 0 {
-			var dst io.Writer
-			var doWrite bool
-			switch buf[0] {
-			case attachPipeDone:
-				c.logger.Trace("Received done packet")
-
+			cont, er := c.handlePacket(cfg, buf, nr)
+			if er != nil {
+				return er
+			}
+			if !cont {
 				return nil
-			case attachPipeStdout:
-				dst = cfg.Streams.Stdout
-				doWrite = cfg.Streams.Stdout != nil
-				c.logger.WithField("doWrite", doWrite).Trace("Received stdout packet")
-
-			case attachPipeStderr:
-				dst = cfg.Streams.Stderr
-				doWrite = cfg.Streams.Stderr != nil
-				c.logger.WithField("doWrite", doWrite).Trace("Received stderr packet")
-
-			default:
-				c.logger.Infof("Received unexpected attach type %+d", buf[0])
-			}
-
-			if dst == nil {
-				c.logger.Info("Output destination for packet is nil")
-
-				return errOutputDestNil
-			}
-
-			if doWrite {
-				nw, ew := dst.Write(buf[1:nr])
-				c.logger.WithError(ew).Tracef("Wrote %d bytes to destination", nw)
-				if ew != nil {
-					err = ew
-
-					break
-				}
-				if nr != nw+1 {
-					err = io.ErrShortWrite
-
-					break
-				}
 			}
 		}
-		c.logger.WithError(er).Trace("Validating error")
 		if er == io.EOF {
-			break
+			return nil
 		}
 		if errors.Is(er, syscall.ECONNRESET) {
 			c.logger.WithError(er).Trace("Connection reset, retrying to read")
@@ -278,6 +248,50 @@ func (c *ConmonClient) redirectResponseToOutputStreams(cfg *AttachConfig, conn i
 	}
 
 	return nil
+}
+
+func (c *ConmonClient) handlePacket(cfg *AttachConfig, buf []byte, nr int) (cont bool, err error) {
+	var dst io.Writer
+	switch buf[0] {
+	case attachPipeDone:
+		c.logger.Trace("Received done packet")
+
+		return false, nil
+
+	case attachPipeStdout:
+		if cfg.Streams.Stdout == nil {
+			c.logger.Debug("stdout for packet is nil")
+
+			return true, nil
+		}
+		dst = cfg.Streams.Stdout
+		c.logger.Trace("Received stdout packet")
+
+	case attachPipeStderr:
+		if cfg.Streams.Stderr == nil {
+			c.logger.Debug("stderr for packet is nil")
+
+			return true, nil
+		}
+		dst = cfg.Streams.Stderr
+		c.logger.Trace("Received stderr packet")
+
+	default:
+		c.logger.Infof("Received unexpected attach type %+d", buf[0])
+
+		return true, nil
+	}
+
+	nw, ew := dst.Write(buf[1:nr])
+	c.logger.WithError(ew).Tracef("Wrote %d bytes to destination", nw)
+	if ew != nil {
+		return false, fmt.Errorf("failed to write packet %w", ew)
+	}
+	if nr != nw+1 {
+		return false, io.ErrShortWrite
+	}
+
+	return true, nil
 }
 
 func (c *ConmonClient) readStdio(

@@ -373,7 +373,6 @@ var _ = Describe("ConmonClient", func() {
 			terminal := test.terminal
 			pipe := test.pipe
 			It(testName("should succeed with "+test.pipe, test.terminal), func() {
-
 				tr = newTestRunner()
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh"}, nil)
 				sut = tr.configGivenEnv()

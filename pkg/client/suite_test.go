@@ -439,10 +439,12 @@ func verifyBuffer(reader io.Reader, terminal bool, command, expected string) {
 		data := make([]byte, 8191)
 		_, err := reader.Read(data)
 		Expect(err).To(BeNil())
+
 		return string(bytes.Trim(data, "\x00"))
 	}
 	if !terminal {
 		Expect(readSection()).To(Equal(expected))
+
 		return
 	}
 
@@ -454,6 +456,7 @@ func verifyBuffer(reader io.Reader, terminal bool, command, expected string) {
 			continue
 		}
 		Expect(str).To(Equal(fullExpectedBuffer))
+
 		return
 	}
 }
