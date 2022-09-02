@@ -257,7 +257,7 @@ impl Attach {
             select! {
                 res = rx.recv() => {
                     let (pipe, buf) = res?;
-                    let mut packets = buf
+                    let packets = buf
                         .chunks(Self::PACKET_BUF_SIZE - 1)
                         .map(|x| {
                             let mut y = x.to_vec();
@@ -270,7 +270,6 @@ impl Attach {
                             y
                         })
                         .collect::<Vec<_>>();
-                    packets.push(Self::DONE_PACKET.to_vec());
 
                     let len = packets.len() - 1;
                     for (idx, packet) in packets.iter().enumerate() {
@@ -286,6 +285,13 @@ impl Attach {
                 }
                 _ = token.cancelled() => {
                     debug!("Exiting because token cancelled");
+                    match write_half.write(Self::DONE_PACKET).await {
+                        Ok(_) => {
+                            debug!("Wrote done packet to client")
+                        }
+                        Err(ref e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::BrokenPipe => {},
+                        Err(e) => bail!("unable to write done packet: {:#}", e),
+                    }
                     return Ok(());
                 }
             }
