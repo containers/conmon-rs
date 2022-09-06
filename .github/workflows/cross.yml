@@ -1,0 +1,48 @@
+name: cross
+on:
+  pull_request: {}
+  push:
+    branches:
+      - main
+env:
+  CROSS_VERSION: v0.2.4
+  CARGO_TERM_COLOR: always
+  ACTION_MSRV_TOOLCHAIN: 1.63.0
+jobs:
+  build:
+    strategy:
+      matrix:
+        arch:
+          - x86_64
+          - i686
+          - aarch64
+          - powerpc64le
+          - s390x
+    name: ${{matrix.arch}}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Setup Cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cross-${{matrix.arch}}-${{ hashFiles('**/Cargo.lock') }}
+      - name: Select Toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN']  }}
+          default: true
+          override: true
+          components: rustfmt
+      - name: Install cross-rs
+        run: |
+          curl -sSfL --retry 5 --retry-delay 3 \
+            "https://github.com/cross-rs/cross/releases/download/$CROSS_VERSION/cross-x86_64-unknown-linux-gnu.tar.gz" \
+            -o- | tar xfz - -C /usr/local/bin
+          cross --version
+      - name: Build for ${{matrix.arch}}
+        run: cross build --target ${{matrix.arch}}-unknown-linux-gnu
