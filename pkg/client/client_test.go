@@ -27,7 +27,7 @@ var _ = Describe("ConmonClient", func() {
 			rss := vmRSSGivenPID(pid)
 			// use Println because GinkgoWriter only writes on failure,
 			// and it's interesting to see this value for successful runs too.
-			fmt.Println("VmRSS for server is", rss)
+			GinkgoWriter.Println("VmRSS for server is", rss)
 			Expect(rss).To(BeNumerically("<", maxRSSKB))
 		}
 	})
@@ -175,7 +175,7 @@ var _ = Describe("ConmonClient", func() {
 					if _, err := os.Stat(tr.oomExitPath()); err == nil {
 						break
 					}
-					fmt.Println("Waiting for OOM exit path to exist")
+					GinkgoWriter.Println("Waiting for OOM exit path to exist")
 					time.Sleep(time.Second)
 				}
 				Expect(fileContents(tr.oomExitPath())).To(BeEmpty())
@@ -242,7 +242,7 @@ var _ = Describe("ConmonClient", func() {
 						Expect(err).To(BeNil())
 						Expect(result).NotTo(BeNil())
 						Expect(string(result.Stdout)).To(Equal(fmt.Sprintf("hello world %d", i)))
-						fmt.Println("done with", i, string(result.Stdout))
+						GinkgoWriter.Println("done with", i, string(result.Stdout))
 					}(i)
 				}
 				wg.Wait()
