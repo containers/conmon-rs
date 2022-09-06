@@ -24,6 +24,7 @@ linters:
     - execinquery
     - exhaustive
     - exportloopref
+    - forbidigo
     - forcetypeassert
     - funlen
     - gci
@@ -88,7 +89,6 @@ linters:
     - whitespace
     - wrapcheck
     # - exhaustruct
-    # - forbidigo
     # - gochecknoglobals
     # - nonamedreturns
     # - paralleltest
