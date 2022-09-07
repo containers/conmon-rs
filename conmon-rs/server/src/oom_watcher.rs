@@ -1,14 +1,18 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{bail, Context, Result};
 use lazy_static::lazy_static;
 use nix::sys::statfs::{statfs, FsType};
 use notify::{Error, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::Regex;
-use std::os::unix::prelude::AsRawFd;
-use std::path::{Path, PathBuf};
-use tokio::fs::File;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::mpsc::{channel, Receiver};
-use tokio::task::{self, JoinHandle};
+use std::{
+    os::unix::prelude::AsRawFd,
+    path::{Path, PathBuf},
+};
+use tokio::{
+    fs::File,
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    sync::mpsc::{channel, Receiver},
+    task::{self, JoinHandle},
+};
 use tokio_eventfd::EventFd;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, error, Instrument};
@@ -99,7 +103,9 @@ impl OOMWatcher {
     ) -> Result<()> {
         let span = debug_span!("oom_handling_cgroup_v1", pid);
         let _enter = span.enter();
-        let memory_cgroup_path = Self::process_cgroup_subsystem_path(pid, false, "memory").await?;
+        let memory_cgroup_path = Self::process_cgroup_subsystem_path(pid, false, "memory")
+            .await
+            .context("process cgroup system path")?;
         let memory_cgroup_file_oom_path = memory_cgroup_path.join("memory.oom_control");
         let event_control_path = memory_cgroup_path.join("cgroup.event_control");
         let path = memory_cgroup_file_oom_path.to_str();
@@ -110,14 +116,14 @@ impl OOMWatcher {
             .write(true)
             .open(memory_cgroup_file_oom_path)
             .await
-            .context("opening cgroup file")?;
+            .context("opening cgroup oom file")?;
         let mut oom_event_fd = EventFd::new(0, false).context("creating eventfd")?;
 
         let mut event_control = tokio::fs::OpenOptions::new()
             .write(true)
             .open(event_control_path)
             .await
-            .context("opening cgroup file")?;
+            .context("opening cgroup event control file")?;
         event_control
             .write_all(
                 format!(
@@ -167,7 +173,8 @@ impl OOMWatcher {
                     error!("Unable to send event result: {:#}", e)
                 }
             })
-        })?;
+        })
+        .context("get recommended watcher")?;
 
         Ok((watcher, rx))
     }
@@ -180,15 +187,19 @@ impl OOMWatcher {
     ) -> Result<()> {
         let span = debug_span!("oom_handling_cgroup_v2", pid);
         let _enter = span.enter();
-        let subsystem_path = Self::process_cgroup_subsystem_path(pid, true, "memory").await?;
+        let subsystem_path = Self::process_cgroup_subsystem_path(pid, true, "memory")
+            .await
+            .context("process cgroup system path")?;
         let memory_events_file_path = subsystem_path.join("memory.events");
         let mut last_counter: u64 = 0;
 
         let path = memory_events_file_path.to_str();
         debug!(path, "Setup cgroup v2 handling");
 
-        let (mut watcher, mut rx) = Self::async_watcher()?;
-        watcher.watch(&memory_events_file_path, RecursiveMode::NonRecursive)?;
+        let (mut watcher, mut rx) = Self::async_watcher().context("get async watcher")?;
+        watcher
+            .watch(&memory_events_file_path, RecursiveMode::NonRecursive)
+            .context("watch memory events file")?;
 
         loop {
             tokio::select! {
@@ -250,7 +261,9 @@ impl OOMWatcher {
                 }
             }
         }
-        watcher.unwatch(&memory_events_file_path)?;
+        watcher
+            .unwatch(&memory_events_file_path)
+            .context("unwatch memory events file")?;
 
         debug!("Done watching for ooms");
 
@@ -263,12 +276,18 @@ impl OOMWatcher {
     ) -> Result<(u64, bool)> {
         let mut new_counter: u64 = 0;
         let mut found_oom = false;
-        let fp = File::open(memory_events_file_path).await?;
+        let fp = File::open(memory_events_file_path).await.context(format!(
+            "open memory events file: {}",
+            memory_events_file_path.display()
+        ))?;
         let reader = BufReader::new(fp);
         let mut lines = reader.lines();
-        while let Some(line) = lines.next_line().await? {
+        while let Some(line) = lines.next_line().await.context("get next line")? {
             if let Some(counter) = line.strip_prefix("oom ") {
-                let counter = counter.to_string().parse::<u64>()?;
+                let counter = counter
+                    .to_string()
+                    .parse::<u64>()
+                    .context("parse u64 counter")?;
                 if counter != last_counter {
                     new_counter = counter;
                     found_oom = true;
@@ -296,7 +315,7 @@ impl OOMWatcher {
             })
             .collect();
         for task in tasks {
-            task.await?;
+            task.await.context("wait for task to be finished")?;
         }
         Ok(())
     }
@@ -320,19 +339,27 @@ impl OOMWatcher {
 
         let cgroup_path = format!("/proc/{}/cgroup", pid);
         debug!("Using cgroup path: {}", cgroup_path);
-        let fp = File::open(cgroup_path).await?;
+        let fp = File::open(&cgroup_path)
+            .await
+            .context(format!("open cgroup path: {}", &cgroup_path))?;
         let reader = BufReader::new(fp);
         let mut lines = reader.lines();
-        while let Some(line) = lines.next_line().await? {
+        while let Some(line) = lines.next_line().await.context("read line from buffer")? {
             if let Some(caps) = RE.captures(&line) {
-                let system = caps[1].to_string();
-                let path = caps[2].to_string();
+                let system = caps
+                    .get(1)
+                    .context("no first capture group in regex match")?
+                    .as_str();
+                let path = caps
+                    .get(2)
+                    .context("no second capture group in regex match")?
+                    .as_str();
                 if system.contains(subsystem) || system.eq("") {
                     return Ok(PathBuf::from(CGROUP_ROOT).join(subsystem).join(path));
                 }
             }
         }
-        Err(anyhow!("no path found"))
+        bail!("no path found")
     }
 
     async fn process_cgroup_subsystem_path_cgroup_v2(pid: u32) -> Result<PathBuf> {
@@ -340,15 +367,28 @@ impl OOMWatcher {
             static ref RE: Regex = Regex::new(".*:.*:/(.*)").expect("could not compile regex");
         }
 
-        let fp = File::open(format!("/proc/{}/cgroup", pid)).await?;
+        let path = format!("/proc/{}/cgroup", pid);
+        let fp = File::open(&path)
+            .await
+            .context(format!("open cgroup path: {}", &path))?;
         let mut buffer = String::new();
         let mut reader = BufReader::new(fp);
-        if reader.read_line(&mut buffer).await? == 0 {
-            Err(anyhow!("invalid cgroup"))
+        if reader
+            .read_line(&mut buffer)
+            .await
+            .context("read line from buffer")?
+            == 0
+        {
+            bail!("invalid cgroup")
         } else if let Some(caps) = RE.captures(&buffer) {
-            Ok(Path::new(CGROUP_ROOT).join(&caps[1]))
+            Ok(Path::new(CGROUP_ROOT).join(
+                &caps
+                    .get(1)
+                    .context("no first capture group in regex match")?
+                    .as_str(),
+            ))
         } else {
-            Err(anyhow!("invalid cgroup"))
+            bail!("invalid cgroup")
         }
     }
 }
