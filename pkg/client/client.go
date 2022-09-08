@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -37,9 +38,10 @@ var (
 
 // ConmonClient is the main client structure of this package.
 type ConmonClient struct {
-	serverPID uint32
-	runDir    string
-	logger    *logrus.Logger
+	serverPID     uint32
+	runDir        string
+	logger        *logrus.Logger
+	attachReaders *sync.Map
 }
 
 // ConmonServerConfig is the configuration for the conmon server instance.
@@ -193,8 +195,9 @@ func (c *ConmonServerConfig) toClient() (*ConmonClient, error) {
 	}
 
 	return &ConmonClient{
-		runDir: c.ServerRunDir,
-		logger: c.ClientLogger,
+		runDir:        c.ServerRunDir,
+		logger:        c.ClientLogger,
+		attachReaders: &sync.Map{},
 	}, nil
 }
 
@@ -733,6 +736,12 @@ func (c *ConmonClient) PID() uint32 {
 // Shutdown kill the server via SIGINT. Waits up to 10 seconds for the server
 // PID to be removed from the system.
 func (c *ConmonClient) Shutdown() error {
+	c.attachReaders.Range(func(_, in any) bool {
+		c.closeAttachReader(in)
+
+		return true
+	})
+
 	pid := int(c.serverPID)
 	if err := syscall.Kill(pid, syscall.SIGINT); err != nil {
 		return fmt.Errorf("kill server PID: %w", err)
