@@ -13,6 +13,7 @@ use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, error, Instrument};
 
 #[derive(Debug, Getters)]
@@ -57,16 +58,20 @@ impl Streams {
         stdin: Option<ChildStdin>,
         stdout: Option<ChildStdout>,
         stderr: Option<ChildStderr>,
+        token: CancellationToken,
     ) {
         debug!("Start reading from IO streams");
         let logger = self.logger().clone();
         let attach = self.attach().clone();
         let message_tx = self.message_tx_stdout().clone();
 
+        let token_clone = token.clone();
         if let Some(stdin) = stdin {
             task::spawn(
                 async move {
-                    if let Err(e) = ContainerIO::read_loop_stdin(stdin.as_raw_fd(), attach).await {
+                    if let Err(e) =
+                        ContainerIO::read_loop_stdin(stdin.as_raw_fd(), attach, token_clone).await
+                    {
                         error!("Stdin read loop failure: {:#}", e);
                     }
                 }
@@ -75,12 +80,19 @@ impl Streams {
         }
 
         let attach = self.attach().clone();
+        let token_clone = token.clone();
         if let Some(stdout) = stdout {
             task::spawn(
                 async move {
-                    if let Err(e) =
-                        ContainerIO::read_loop(stdout, Pipe::StdOut, logger, message_tx, attach)
-                            .await
+                    if let Err(e) = ContainerIO::read_loop(
+                        stdout,
+                        Pipe::StdOut,
+                        logger,
+                        message_tx,
+                        attach,
+                        token_clone,
+                    )
+                    .await
                     {
                         error!("Stdout read loop failure: {:#}", e);
                     }
@@ -95,9 +107,15 @@ impl Streams {
         if let Some(stderr) = stderr {
             task::spawn(
                 async move {
-                    if let Err(e) =
-                        ContainerIO::read_loop(stderr, Pipe::StdErr, logger, message_tx, attach)
-                            .await
+                    if let Err(e) = ContainerIO::read_loop(
+                        stderr,
+                        Pipe::StdErr,
+                        logger,
+                        message_tx,
+                        attach,
+                        token,
+                    )
+                    .await
                     {
                         error!("Stderr read loop failure: {:#}", e);
                     }
@@ -127,6 +145,7 @@ mod tests {
     async fn new_success() -> Result<()> {
         let logger = ContainerLog::new();
         let attach = SharedContainerAttach::default();
+        let token = CancellationToken::new();
 
         let mut sut = Streams::new(logger, attach)?;
 
@@ -139,7 +158,12 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()?;
 
-        sut.handle_stdio_receive(child.stdin.take(), child.stdout.take(), child.stderr.take());
+        sut.handle_stdio_receive(
+            child.stdin.take(),
+            child.stdout.take(),
+            child.stderr.take(),
+            token.clone(),
+        );
 
         let msg = sut
             .message_rx_stdout
@@ -148,6 +172,10 @@ mod tests {
             .context("no message on stdout")?;
 
         assert_eq!(msg_string(msg)?, expected);
+
+        // There is no child_reaper instance paying attention to the child we've created,
+        // so the read_loops must be cancelled here instead.
+        token.cancel();
 
         let msg = sut
             .message_rx_stdout

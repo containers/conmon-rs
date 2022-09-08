@@ -2,6 +2,7 @@ use crate::container_io::SharedContainerIO;
 use getset::{CopyGetters, Getters};
 use std::path::PathBuf;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, CopyGetters, Getters)]
 pub struct Child {
@@ -25,9 +26,13 @@ pub struct Child {
 
     #[getset(get = "pub")]
     cleanup_cmd: Vec<String>,
+
+    #[getset(get = "pub")]
+    token: CancellationToken,
 }
 
 impl Child {
+    #![allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
         pid: u32,
@@ -36,6 +41,7 @@ impl Child {
         timeout: Option<Instant>,
         io: SharedContainerIO,
         cleanup_cmd: Vec<String>,
+        token: CancellationToken,
     ) -> Self {
         Self {
             id,
@@ -45,6 +51,7 @@ impl Child {
             timeout,
             io,
             cleanup_cmd,
+            token,
         }
     }
 }

@@ -62,7 +62,7 @@ impl ChildReaper {
         args: I,
         container_io: &mut ContainerIO,
         pidfile: &Path,
-    ) -> Result<u32>
+    ) -> Result<(u32, CancellationToken)>
     where
         P: AsRef<OsStr>,
         I: IntoIterator<Item = S>,
@@ -77,10 +77,12 @@ impl ChildReaper {
             .spawn()
             .context("spawn child process: {}")?;
 
+        let token = CancellationToken::new();
+
         match container_io.typ_mut() {
             ContainerIOType::Terminal(ref mut terminal) => {
                 terminal
-                    .wait_connected()
+                    .wait_connected(token.clone())
                     .await
                     .context("wait for terminal socket connection")?;
             }
@@ -88,7 +90,7 @@ impl ChildReaper {
                 let stdout = child.stdout.take();
                 let stderr = child.stderr.take();
                 let stdin = child.stdin.take();
-                streams.handle_stdio_receive(stdin, stdout, stderr);
+                streams.handle_stdio_receive(stdin, stdout, stderr, token.clone());
             }
         };
 
@@ -109,6 +111,9 @@ impl ChildReaper {
                     str::from_utf8(&output.stderr).context("convert stderr to utf8")?,
                 )?;
             }
+            // token must be cancelled here because the child hasn't been registered yet,
+            // meaning there is no other entity that could cancel the read_loops.
+            token.cancel();
 
             bail!(err_str)
         }
@@ -119,7 +124,7 @@ impl ChildReaper {
             .parse::<u32>()
             .context(format!("grandchild pid parse error {}", pidfile.display()))?;
 
-        Ok(grandchild_pid)
+        Ok((grandchild_pid, token))
     }
 
     pub fn watch_grandchild(&self, child: Child) -> Result<Receiver<ExitChannelData>> {
@@ -244,7 +249,7 @@ impl ReapableChild {
             pid: child.pid(),
             io: child.io().clone(),
             timeout: *child.timeout(),
-            token: CancellationToken::new(),
+            token: child.token().clone(),
             task: None,
             cleanup_cmd: child.cleanup_cmd().to_vec(),
         }
@@ -311,6 +316,7 @@ impl ReapableChild {
                     closure.await;
                 }
                 oom_watcher.stop().await;
+
                 let exit_channel_data = ExitChannelData {
                     exit_code,
                     oomed,

@@ -22,10 +22,11 @@ use tokio::{
     fs,
     io::{AsyncWriteExt, Interest},
     net::UnixStream,
-    sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
+    sync::mpsc::{self, Receiver, Sender, UnboundedReceiver},
     task,
 };
 use tokio_fd::AsyncFd;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, error, trace, Instrument};
 
 #[derive(Debug, Getters, MutGetters, Setters)]
@@ -36,10 +37,13 @@ pub struct Terminal {
     connected_rx: Receiver<RawFd>,
 
     #[getset(get = "pub", get_mut = "pub")]
-    message_rx: UnboundedReceiver<Message>,
+    message_rx: Option<UnboundedReceiver<Message>>,
 
     #[getset(get, set)]
     tty: Option<RawFd>,
+
+    logger: SharedContainerLog,
+    attach: SharedContainerAttach,
 }
 
 #[derive(Debug, Getters)]
@@ -52,9 +56,6 @@ struct Config {
 
     #[get]
     connected_tx: Sender<RawFd>,
-
-    #[get]
-    message_tx: UnboundedSender<Message>,
 }
 
 impl Terminal {
@@ -66,20 +67,14 @@ impl Terminal {
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (connected_tx, connected_rx) = mpsc::channel(1);
-        let (message_tx, message_rx) = mpsc::unbounded_channel();
 
         task::spawn(
             async move {
-                if let Err(e) = Self::listen(
-                    Config {
-                        path: path_clone,
-                        ready_tx,
-                        connected_tx,
-                        message_tx,
-                    },
-                    logger,
-                    attach,
-                )
+                if let Err(e) = Self::listen(Config {
+                    path: path_clone,
+                    ready_tx,
+                    connected_tx,
+                })
                 .await
                 {
                     error!("Unable to listen on terminal: {:#}", e);
@@ -92,13 +87,15 @@ impl Terminal {
         Ok(Self {
             path,
             connected_rx,
-            message_rx,
+            message_rx: None,
             tty: None,
+            logger,
+            attach,
         })
     }
 
     /// Waits for the socket client to be connected.
-    pub async fn wait_connected(&mut self) -> Result<()> {
+    pub async fn wait_connected(&mut self, token: CancellationToken) -> Result<()> {
         debug!("Waiting for terminal socket connection");
         let fd = self
             .connected_rx
@@ -106,6 +103,49 @@ impl Terminal {
             .await
             .context("receive connected channel")?;
         self.set_tty(fd.into());
+
+        debug!("Changing terminal settings");
+        let mut term = termios::tcgetattr(fd)?;
+        term.output_flags |= OutputFlags::ONLCR;
+        termios::tcsetattr(fd, SetArg::TCSANOW, &term)?;
+
+        let stdio = AsyncFd::try_from(fd)?;
+
+        let attach_clone = self.attach.clone();
+        let logger_clone = self.logger.clone();
+        let (message_tx, message_rx) = mpsc::unbounded_channel();
+        self.message_rx = Some(message_rx);
+        let token_clone = token.clone();
+
+        task::spawn(
+            async move {
+                if let Err(e) = ContainerIO::read_loop(
+                    stdio,
+                    Pipe::StdOut,
+                    logger_clone,
+                    message_tx,
+                    attach_clone,
+                    token_clone,
+                )
+                .await
+                {
+                    error!("Stdout read loop failure: {:#}", e)
+                }
+                Ok::<_, anyhow::Error>(())
+            }
+            .instrument(debug_span!("read_loop")),
+        );
+
+        let attach_clone = self.attach.clone();
+        task::spawn(
+            async move {
+                if let Err(e) = ContainerIO::read_loop_stdin(fd, attach_clone, token).await {
+                    error!("Stdin read loop failure: {:#}", e);
+                }
+            }
+            .instrument(debug_span!("read_loop_stdin")),
+        );
+
         Ok(())
     }
 
@@ -130,11 +170,7 @@ impl Terminal {
         }
     }
 
-    async fn listen(
-        config: Config,
-        logger: SharedContainerLog,
-        attach: SharedContainerAttach,
-    ) -> Result<()> {
+    async fn listen(config: Config) -> Result<()> {
         let path = config.path();
         debug!("Listening terminal socket on {}", path.display());
         let listener = Listener::<DefaultListener>::default().bind_long_path(path)?;
@@ -152,15 +188,10 @@ impl Terminal {
         let stream = listener.accept().await?.0;
         debug!("Got terminal socket stream: {:?}", stream);
 
-        Self::handle_fd_receive(stream, config, logger, attach).await
+        Self::handle_fd_receive(stream, config).await
     }
 
-    async fn handle_fd_receive(
-        mut stream: UnixStream,
-        config: Config,
-        logger: SharedContainerLog,
-        attach: SharedContainerAttach,
-    ) -> Result<()> {
+    async fn handle_fd_receive(mut stream: UnixStream, config: Config) -> Result<()> {
         loop {
             if !stream.ready(Interest::READABLE).await?.is_readable() {
                 continue;
@@ -187,45 +218,11 @@ impl Terminal {
                     debug!("Received terminal file descriptor");
                     let fd = fd_buffer[0];
 
-                    debug!("Changing terminal settings");
-                    let mut term = termios::tcgetattr(fd)?;
-                    term.output_flags |= OutputFlags::ONLCR;
-                    termios::tcsetattr(fd, SetArg::TCSANOW, &term)?;
-
-                    let stdio = AsyncFd::try_from(fd)?;
-
-                    let attach_clone = attach.clone();
-                    task::spawn(
-                        async move {
-                            config
-                                .connected_tx
-                                .send(fd)
-                                .await
-                                .context("send connected channel")?;
-                            if let Err(e) = ContainerIO::read_loop(
-                                stdio,
-                                Pipe::StdOut,
-                                logger,
-                                config.message_tx,
-                                attach_clone,
-                            )
-                            .await
-                            {
-                                error!("Stdout read loop failure: {:#}", e)
-                            }
-                            Ok::<_, anyhow::Error>(())
-                        }
-                        .instrument(debug_span!("read_loop")),
-                    );
-
-                    task::spawn(
-                        async move {
-                            if let Err(e) = ContainerIO::read_loop_stdin(fd, attach).await {
-                                error!("Stdin read loop failure: {:#}", e);
-                            }
-                        }
-                        .instrument(debug_span!("read_loop_stdin")),
-                    );
+                    config
+                        .connected_tx
+                        .send(fd)
+                        .await
+                        .context("send connected channel")?;
 
                     debug!("Shutting down listener thread");
                     return Ok(());
@@ -267,6 +264,7 @@ mod tests {
     async fn new_success() -> Result<()> {
         let logger = ContainerLog::new();
         let attach = SharedContainerAttach::default();
+        let token = CancellationToken::new();
 
         let mut sut = Terminal::new(logger, attach)?;
         assert!(sut.path().exists());
@@ -285,7 +283,7 @@ mod tests {
             }
         }
 
-        sut.wait_connected().await?;
+        sut.wait_connected(token).await?;
         assert!(!sut.path().exists());
 
         // Write to the slave

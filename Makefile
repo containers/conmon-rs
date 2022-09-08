@@ -45,7 +45,7 @@ lint-go: .install.golangci-lint
 	GL_DEBUG=gocritic $(GOTOOLS_BINDIR)/golangci-lint run
 
 unit:
-	cargo test --bins --no-fail-fast
+	cargo test --no-fail-fast
 
 integration: .install.ginkgo release # It needs to be release so we correctly test the RSS usage
 	export CONMON_BINARY="$(MAKEFILE_PATH)target/release/$(BINARY)" && \
