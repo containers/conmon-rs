@@ -130,7 +130,6 @@ impl conmon::Server for Server {
                 {
                     Err(e) => {
                         // Attach the stderr output to the error message
-                        // TODO FIXME
                         let (_, stderr, _) = capnp_err!(
                             container_io
                                 .read_all_with_timeout(None, CancellationToken::new())
