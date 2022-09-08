@@ -7,6 +7,7 @@ BUILD_DIR ?= .build
 GOTOOLS_GOPATH ?= $(BUILD_DIR)/gotools
 GOTOOLS_BINDIR ?= $(GOTOOLS_GOPATH)/bin
 GINKGO_FLAGS ?= -vv --trace --race --randomize-all --flake-attempts 3 --progress --timeout 5m -r pkg/client
+TEST_FLAGS ?=
 PACKAGE_NAME ?= $(shell cargo metadata --no-deps --format-version 1 | jq -r '.packages[2] | [ .name, .version ] | join("-")')
 PREFIX ?= /usr
 CI_TAG ?=
@@ -51,7 +52,7 @@ integration: .install.ginkgo release # It needs to be release so we correctly te
 	export CONMON_BINARY="$(MAKEFILE_PATH)target/release/$(BINARY)" && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
 	export MAX_RSS_KB=10240 && \
-	sudo -E "$(GOTOOLS_BINDIR)/ginkgo" $(GINKGO_FLAGS)
+	sudo -E "$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
 
 integration-static: .install.ginkgo # It needs to be release so we correctly test the RSS usage
 	export CONMON_BINARY="$(MAKEFILE_PATH)target/x86_64-unknown-linux-musl/release/$(BINARY)" && \
@@ -60,7 +61,7 @@ integration-static: .install.ginkgo # It needs to be release so we correctly tes
 	fi && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
 	export MAX_RSS_KB=3500 && \
-	sudo -E "$(GOTOOLS_BINDIR)/ginkgo" $(GINKGO_FLAGS)
+	sudo -E "$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
 
 .install.ginkgo:
 	GOBIN=$(abspath $(GOTOOLS_BINDIR)) go install github.com/onsi/ginkgo/v2/ginkgo@latest
