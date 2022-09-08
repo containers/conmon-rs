@@ -8,14 +8,14 @@ use std::{
     path::{Path, PathBuf},
 };
 use tokio::{
-    fs::File,
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    sync::mpsc::{channel, Receiver},
+    fs::{File, OpenOptions},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, ErrorKind},
+    sync::mpsc::{channel, Receiver, Sender},
     task::{self, JoinHandle},
 };
 use tokio_eventfd::EventFd;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, debug_span, error, Instrument};
+use tracing::{debug, debug_span, error, trace, Instrument};
 
 #[cfg(any(all(target_os = "linux", target_env = "musl")))]
 pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as u64);
@@ -62,7 +62,7 @@ impl OOMWatcher {
         token: &CancellationToken,
         pid: u32,
         exit_paths: &[PathBuf],
-        tx: tokio::sync::mpsc::Sender<OOMEvent>,
+        tx: Sender<OOMEvent>,
     ) -> OOMWatcher {
         let exit_paths = exit_paths.to_owned();
         let token = token.clone();
@@ -99,27 +99,36 @@ impl OOMWatcher {
         token: CancellationToken,
         pid: u32,
         exit_paths: &[PathBuf],
-        tx: tokio::sync::mpsc::Sender<OOMEvent>,
+        tx: Sender<OOMEvent>,
     ) -> Result<()> {
         let span = debug_span!("oom_handling_cgroup_v1", pid);
         let _enter = span.enter();
-        let memory_cgroup_path = Self::process_cgroup_subsystem_path(pid, false, "memory")
-            .await
-            .context("process cgroup system path")?;
+
+        let memory_cgroup_path = if let Some(path) =
+            Self::process_cgroup_subsystem_path_cgroup_v1(pid, "memory")
+                .await
+                .context("process cgroup memory subsystem path")?
+        {
+            path
+        } else {
+            debug!("Stopping OOM handler because no cgroup subsystem path exists");
+            return Ok(());
+        };
+
         let memory_cgroup_file_oom_path = memory_cgroup_path.join("memory.oom_control");
         let event_control_path = memory_cgroup_path.join("cgroup.event_control");
         let path = memory_cgroup_file_oom_path.to_str();
 
         debug!(path, "Setup cgroup v1 oom handling");
 
-        let oom_cgroup_file = tokio::fs::OpenOptions::new()
+        let oom_cgroup_file = OpenOptions::new()
             .write(true)
             .open(memory_cgroup_file_oom_path)
             .await
             .context("opening cgroup oom file")?;
         let mut oom_event_fd = EventFd::new(0, false).context("creating eventfd")?;
 
-        let mut event_control = tokio::fs::OpenOptions::new()
+        let mut event_control = OpenOptions::new()
             .write(true)
             .open(event_control_path)
             .await
@@ -183,13 +192,21 @@ impl OOMWatcher {
         token: CancellationToken,
         pid: u32,
         exit_paths: &[PathBuf],
-        tx: tokio::sync::mpsc::Sender<OOMEvent>,
+        tx: Sender<OOMEvent>,
     ) -> Result<()> {
         let span = debug_span!("oom_handling_cgroup_v2", pid);
         let _enter = span.enter();
-        let subsystem_path = Self::process_cgroup_subsystem_path(pid, true, "memory")
+
+        let subsystem_path = if let Some(path) = Self::process_cgroup_subsystem_path_cgroup_v2(pid)
             .await
-            .context("process cgroup system path")?;
+            .context("process cgroup subsystem path")?
+        {
+            path
+        } else {
+            debug!("Stopping OOM handler because no cgroup subsystem path exists");
+            return Ok(());
+        };
+
         let memory_events_file_path = subsystem_path.join("memory.events");
         let mut last_counter: u64 = 0;
 
@@ -320,75 +337,83 @@ impl OOMWatcher {
         Ok(())
     }
 
-    async fn process_cgroup_subsystem_path(
+    async fn process_cgroup_subsystem_path_cgroup_v1(
         pid: u32,
-        is_cgroupv2: bool,
         subsystem: &str,
-    ) -> Result<PathBuf> {
-        if is_cgroupv2 {
-            Self::process_cgroup_subsystem_path_cgroup_v2(pid).await
-        } else {
-            Self::process_cgroup_subsystem_path_cgroup_v1(pid, subsystem).await
-        }
-    }
-
-    async fn process_cgroup_subsystem_path_cgroup_v1(pid: u32, subsystem: &str) -> Result<PathBuf> {
+    ) -> Result<Option<PathBuf>> {
         lazy_static! {
             static ref RE: Regex = Regex::new(".*:(.*):/(.*)").expect("could not compile regex");
         }
 
-        let cgroup_path = format!("/proc/{}/cgroup", pid);
-        debug!("Using cgroup path: {}", cgroup_path);
-        let fp = File::open(&cgroup_path)
-            .await
-            .context(format!("open cgroup path: {}", &cgroup_path))?;
-        let reader = BufReader::new(fp);
-        let mut lines = reader.lines();
-        while let Some(line) = lines.next_line().await.context("read line from buffer")? {
-            if let Some(caps) = RE.captures(&line) {
-                let system = caps
-                    .get(1)
-                    .context("no first capture group in regex match")?
-                    .as_str();
-                let path = caps
-                    .get(2)
-                    .context("no second capture group in regex match")?
-                    .as_str();
-                if system.contains(subsystem) || system.eq("") {
-                    return Ok(PathBuf::from(CGROUP_ROOT).join(subsystem).join(path));
+        if let Some(fp) = Self::try_open_cgroup_path(pid).await? {
+            let reader = BufReader::new(fp);
+
+            let mut lines = reader.lines();
+            while let Some(line) = lines.next_line().await.context("read line from buffer")? {
+                if let Some(caps) = RE.captures(&line) {
+                    let system = caps
+                        .get(1)
+                        .context("no first capture group in regex match")?
+                        .as_str();
+                    let path = caps
+                        .get(2)
+                        .context("no second capture group in regex match")?
+                        .as_str();
+                    if system.contains(subsystem) || system.is_empty() {
+                        return Ok(PathBuf::from(CGROUP_ROOT).join(subsystem).join(path).into());
+                    }
                 }
             }
+
+            bail!("no path found")
         }
-        bail!("no path found")
+
+        Ok(None)
     }
 
-    async fn process_cgroup_subsystem_path_cgroup_v2(pid: u32) -> Result<PathBuf> {
+    async fn process_cgroup_subsystem_path_cgroup_v2(pid: u32) -> Result<Option<PathBuf>> {
         lazy_static! {
             static ref RE: Regex = Regex::new(".*:.*:/(.*)").expect("could not compile regex");
         }
 
-        let path = format!("/proc/{}/cgroup", pid);
-        let fp = File::open(&path)
-            .await
-            .context(format!("open cgroup path: {}", &path))?;
-        let mut buffer = String::new();
-        let mut reader = BufReader::new(fp);
-        if reader
-            .read_line(&mut buffer)
-            .await
-            .context("read line from buffer")?
-            == 0
-        {
+        if let Some(fp) = Self::try_open_cgroup_path(pid).await? {
+            let mut buffer = String::new();
+            let mut reader = BufReader::new(fp);
+
+            reader
+                .read_line(&mut buffer)
+                .await
+                .context("read line from buffer")?;
+
+            if let Some(caps) = RE.captures(&buffer) {
+                return Ok(Path::new(CGROUP_ROOT)
+                    .join(
+                        &caps
+                            .get(1)
+                            .context("no first capture group in regex match")?
+                            .as_str(),
+                    )
+                    .into());
+            }
+
             bail!("invalid cgroup")
-        } else if let Some(caps) = RE.captures(&buffer) {
-            Ok(Path::new(CGROUP_ROOT).join(
-                &caps
-                    .get(1)
-                    .context("no first capture group in regex match")?
-                    .as_str(),
-            ))
-        } else {
-            bail!("invalid cgroup")
+        }
+
+        Ok(None)
+    }
+
+    async fn try_open_cgroup_path(pid: u32) -> Result<Option<File>> {
+        let cgroup_path = PathBuf::from("/proc").join(pid.to_string()).join("cgroup");
+        debug!("Using cgroup path: {}", cgroup_path.display());
+
+        match File::open(&cgroup_path).await {
+            Ok(file) => Ok(file.into()),
+            // Short lived processes will not be handled as an error
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                trace!("Cgroup path not found: {}", cgroup_path.display());
+                Ok(None)
+            }
+            Err(error) => bail!("open cgroup path {}: {}", cgroup_path.display(), error),
         }
     }
 }
