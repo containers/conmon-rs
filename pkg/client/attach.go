@@ -11,6 +11,7 @@ import (
 	"github.com/containers/common/pkg/resize"
 	"github.com/containers/common/pkg/util"
 	"github.com/containers/conmon-rs/internal/proto"
+	"github.com/google/uuid"
 )
 
 const (
@@ -37,8 +38,8 @@ type AttachStreams struct {
 
 // In defines an input stream.
 type In struct {
-	// Wraps an io.Reader
-	io.Reader
+	// Wraps an io.ReadCloser
+	io.ReadCloser
 }
 
 // Out defines an output stream.
@@ -170,14 +171,16 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) (err error
 		return nil
 	}
 
-	receiveStdoutError, stdinDone := c.setupStdioChannels(cfg, conn)
+	id := uuid.NewString()
+
+	receiveStdoutError, stdinDone := c.setupStdioChannels(cfg, conn, id)
 	if cfg.PostAttachFunc != nil {
 		if err := cfg.PostAttachFunc(); err != nil {
 			return fmt.Errorf("run post attach func: %w", err)
 		}
 	}
 
-	if err := c.readStdio(cfg, conn, receiveStdoutError, stdinDone); err != nil {
+	if err := c.readStdio(cfg, conn, id, receiveStdoutError, stdinDone); err != nil {
 		return fmt.Errorf("read stdio: %w", err)
 	}
 
@@ -185,7 +188,7 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) (err error
 }
 
 func (c *ConmonClient) setupStdioChannels(
-	cfg *AttachConfig, conn *net.UnixConn,
+	cfg *AttachConfig, conn *net.UnixConn, id string,
 ) (receiveStdoutError, stdinDone chan error) {
 	receiveStdoutError = make(chan error)
 	go func() {
@@ -193,13 +196,18 @@ func (c *ConmonClient) setupStdioChannels(
 	}()
 
 	stdinDone = make(chan error)
-	go func() {
-		var err error
-		if cfg.Streams.Stdin != nil {
-			_, err = util.CopyDetachable(conn, cfg.Streams.Stdin, cfg.DetachKeys)
-		}
-		stdinDone <- err
-	}()
+	stdin := cfg.Streams.Stdin
+
+	if stdin != nil {
+		c.attachReaders.Store(id, stdin)
+
+		go func() {
+			_, err := util.CopyDetachable(conn, stdin, cfg.DetachKeys)
+			if !errors.Is(err, io.ErrClosedPipe) {
+				stdinDone <- err
+			}
+		}()
+	}
 
 	return receiveStdoutError, stdinDone
 }
@@ -294,13 +302,35 @@ func (c *ConmonClient) handlePacket(cfg *AttachConfig, buf []byte, nr int) (cont
 	return true, nil
 }
 
+func (c *ConmonClient) tryCloseAttachReaderForID(id string) {
+	c.logger.Tracef("Closing attach reader for ID: %s", id)
+	if val, ok := c.attachReaders.LoadAndDelete(id); ok {
+		c.closeAttachReader(val)
+	}
+}
+
+func (c *ConmonClient) closeAttachReader(val any) {
+	in, ok := val.(*In)
+	if !ok {
+		c.logger.Error("Ignoring input value of wrong type")
+
+		return
+	}
+
+	if err := in.Close(); err != nil {
+		c.logger.WithError(err).Warn("Unable to close attach reader")
+	}
+}
+
 func (c *ConmonClient) readStdio(
-	cfg *AttachConfig, conn *net.UnixConn, receiveStdoutError, stdinDone chan error,
+	cfg *AttachConfig, conn *net.UnixConn, id string, receiveStdoutError, stdinDone chan error,
 ) (err error) {
 	c.logger.Trace("Read stdio on attach")
 	select {
 	case err = <-receiveStdoutError:
 		c.logger.WithError(err).Trace("Received message on output channel")
+		c.tryCloseAttachReaderForID(id)
+
 		if closeErr := conn.CloseWrite(); closeErr != nil {
 			return fmt.Errorf("%v: %w", closeErr, err)
 		}
@@ -313,6 +343,7 @@ func (c *ConmonClient) readStdio(
 
 	case err = <-stdinDone:
 		c.logger.WithError(err).Trace("Received possible error on input channel")
+
 		// This particular case is for when we get a non-tty attach
 		// with --leave-stdin-open=true. We want to return as soon
 		// as we receive EOF from the client. However, we should do
