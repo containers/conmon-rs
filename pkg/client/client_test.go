@@ -220,6 +220,7 @@ var _ = Describe("ConmonClient", func() {
 	Describe("ExecSync Stress", func() {
 		for _, terminal := range []bool{true, false} {
 			terminal := terminal
+
 			It(testName("should handle many requests", terminal), func() {
 				tr = newTestRunner()
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "30"}, nil)
@@ -246,6 +247,37 @@ var _ = Describe("ConmonClient", func() {
 					}(i)
 				}
 				wg.Wait()
+			})
+
+			It(testName("should not leak memory", terminal), func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "600"}, nil)
+				sut = tr.configGivenEnv()
+				tr.createContainer(sut, terminal)
+				tr.startContainer(sut)
+
+				pid := sut.PID()
+				rssBefore := vmRSSGivenPID(pid)
+				GinkgoWriter.Printf("VmRSS before: %d\n", rssBefore)
+
+				for i := 0; i < 25; i++ {
+					result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+						ID:       tr.ctrID,
+						Command:  []string{"/busybox", "echo", "-n", "hello", "world", fmt.Sprintf("%d", i)},
+						Terminal: terminal,
+						Timeout:  timeoutUnlimited,
+					})
+
+					Expect(err).To(BeNil())
+					Expect(result).NotTo(BeNil())
+					Expect(string(result.Stdout)).To(Equal(fmt.Sprintf("hello world %d", i)))
+					GinkgoWriter.Println("done with", i, string(result.Stdout))
+				}
+
+				rssAfter := vmRSSGivenPID(pid)
+				GinkgoWriter.Printf("VmRSS after: %d\n", rssAfter)
+				GinkgoWriter.Printf("VmRSS diff: %d\n", rssAfter-rssBefore)
+				Expect(rssAfter - rssBefore).To(BeNumerically("<", 1000))
 			})
 		}
 	})
