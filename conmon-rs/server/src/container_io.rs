@@ -40,13 +40,8 @@ impl SharedContainerIO {
     pub async fn read_all_with_timeout(
         &self,
         timeout: Option<Instant>,
-        token: CancellationToken,
     ) -> Result<(Vec<u8>, Vec<u8>, bool)> {
-        self.0
-            .write()
-            .await
-            .read_all_with_timeout(timeout, token)
-            .await
+        self.0.write().await.read_all_with_timeout(timeout).await
     }
 
     /// Resize the shared container IO to the provided with and height.
@@ -91,11 +86,11 @@ pub enum ContainerIOType {
 /// A message to be sent through the ContainerIO.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
-    Data(Vec<u8>),
+    Data(Vec<u8>, Pipe),
     Done,
 }
 
-#[derive(AsRefStr, Clone, Copy, Debug)]
+#[derive(AsRefStr, Clone, Copy, Debug, PartialEq, Eq)]
 #[strum(serialize_all = "lowercase")]
 /// Available pipe types.
 pub enum Pipe {
@@ -166,13 +161,12 @@ impl ContainerIO {
     pub async fn read_all_with_timeout(
         &mut self,
         time_to_timeout: Option<Instant>,
-        token: CancellationToken,
     ) -> Result<(Vec<u8>, Vec<u8>, bool)> {
         match self.typ_mut() {
             ContainerIOType::Terminal(t) => {
                 if let Some(message_rx) = t.message_rx_mut() {
                     let (stdout, timed_out) =
-                        Self::read_stream_with_timeout(time_to_timeout, message_rx, token).await;
+                        Self::read_stream_with_timeout(time_to_timeout, message_rx).await;
                     Ok((stdout, vec![], timed_out))
                 } else {
                     bail!("read_all_with_timeout called before message_rx was registered");
@@ -182,8 +176,8 @@ impl ContainerIO {
                 let stdout_rx = &mut s.message_rx_stdout;
                 let stderr_rx = &mut s.message_rx_stderr;
                 let (stdout, stderr) = tokio::join!(
-                    Self::read_stream_with_timeout(time_to_timeout, stdout_rx, token.clone()),
-                    Self::read_stream_with_timeout(time_to_timeout, stderr_rx, token),
+                    Self::read_stream_with_timeout(time_to_timeout, stdout_rx),
+                    Self::read_stream_with_timeout(time_to_timeout, stderr_rx),
                 );
                 let timed_out = stdout.1 || stderr.1;
                 Ok((stdout.0, stderr.0, timed_out))
@@ -194,52 +188,42 @@ impl ContainerIO {
     async fn read_stream_with_timeout(
         time_to_timeout: Option<Instant>,
         receiver: &mut UnboundedReceiver<Message>,
-        token: CancellationToken,
     ) -> (Vec<u8>, bool) {
         let mut stdio = vec![];
         let mut timed_out = false;
         loop {
-            let closure = async {
-                if let Some(time_to_timeout) = time_to_timeout {
-                    {
-                        match time::timeout_at(time_to_timeout, receiver.recv()).await {
-                            Ok(Some(msg)) => msg,
-                            Err(_) => {
-                                timed_out = true;
-                                Message::Done
-                            }
-                            Ok(None) => unreachable!(),
+            let msg = if let Some(time_to_timeout) = time_to_timeout {
+                {
+                    match time::timeout_at(time_to_timeout, receiver.recv()).await {
+                        Ok(Some(msg)) => msg,
+                        Err(_) => {
+                            timed_out = true;
+                            Message::Done
                         }
+                        Ok(None) => unreachable!(),
                     }
-                } else {
-                    {
-                        match receiver.recv().await {
-                            Some(msg) => msg,
-                            None => Message::Done,
-                        }
+                }
+            } else {
+                {
+                    match receiver.recv().await {
+                        Some(msg) => msg,
+                        None => Message::Done,
                     }
                 }
             };
-            select! {
-                msg = closure => {
-                    match msg {
-                        Message::Data(data) => {
-                            if let Some(future_len) = stdio.len().checked_add(data.len()) {
-                                if future_len < Self::MAX_STDIO_STREAM_SIZE {
-                                    stdio.extend(data)
-                                } else {
-                                    break;
-                                }
-                            } else {
-                                break;
-                            }
+            match msg {
+                Message::Data(data, _) => {
+                    if let Some(future_len) = stdio.len().checked_add(data.len()) {
+                        if future_len < Self::MAX_STDIO_STREAM_SIZE {
+                            stdio.extend(data)
+                        } else {
+                            break;
                         }
-                        Message::Done => break,
+                    } else {
+                        break;
                     }
                 }
-                _ = token.cancelled() => {
-                    break;
-                }
+                Message::Done => break,
             }
         }
         (stdio, timed_out)
@@ -259,6 +243,12 @@ impl ContainerIO {
         let mut buf = vec![0; 1024];
 
         loop {
+            // In situations we're processing output directly from the I/O streams
+            // we need a mechanism to figure out when to stop that doesn't involve reading the
+            // number of bytes read.
+            // Thus, we need to select on the cancellation token saved in the child.
+            // While this could result in a data race, as select statements are racy,
+            // we won't interleve these two futures, as one ends execution.
             select! {
                 n = reader.read(&mut buf) => {
                     match n {
@@ -273,17 +263,21 @@ impl ContainerIO {
                                 .context("write to log file")?;
 
                             attach
-                                .write(pipe, data)
+                                .write(Message::Data(data.into(), pipe))
                                 .await
                                 .context("write to attach endpoints")?;
 
                             message_tx
-                                .send(Message::Data(data.into()))
+                                .send(Message::Data(data.into(), pipe))
                                 .context("send data message")?;
                         }
                         Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
                             Errno::EIO => {
                                 debug!("Stopping read loop");
+                                attach
+                                    .write(Message::Done)
+                                    .await
+                                    .context("write to attach endpoints")?;
 
                                 message_tx
                                     .send(Message::Done)
@@ -307,6 +301,11 @@ impl ContainerIO {
                 }
                 _ = token.cancelled() => {
                     debug!("Sending done because token cancelled");
+                    attach
+                        .write(Message::Done)
+                        .await
+                        .context("write to attach endpoints")?;
+
                     message_tx
                         .send(Message::Done)
                         .context("send done message")?;
@@ -323,6 +322,12 @@ impl ContainerIO {
     ) -> Result<()> {
         let mut writer = unsafe { File::from_raw_fd(fd) };
         loop {
+            // While we're not processing input from a caller, and logically should be able to
+            // catch a Message::Done here, it doesn't quite work that way.
+            // Every child has an io instance that starts this function, though not
+            // all children have input to process. If there is no input from the child
+            // then we leak this function, causing memory to balloon over time.
+            // Thus, we need the select statement and token.
             select! {
                 res = attach.read() => {
                     match res {

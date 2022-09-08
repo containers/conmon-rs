@@ -15,7 +15,6 @@ use std::{
     time::Duration,
 };
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, error, Instrument};
 use uuid::Uuid;
 
@@ -130,11 +129,8 @@ impl conmon::Server for Server {
                 {
                     Err(e) => {
                         // Attach the stderr output to the error message
-                        let (_, stderr, _) = capnp_err!(
-                            container_io
-                                .read_all_with_timeout(None, CancellationToken::new())
-                                .await
-                        )?;
+                        let (_, stderr, _) =
+                            capnp_err!(container_io.read_all_with_timeout(None).await)?;
                         if !stderr.is_empty() {
                             let stderr_str = str::from_utf8(&stderr)?;
                             Err(format_err!("{:#}: {}", e, stderr_str))
@@ -229,7 +225,7 @@ impl conmon::Server for Server {
                         let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child))?;
 
                         let (stdout, stderr, timed_out) =
-                            capnp_err!(io.read_all_with_timeout(time_to_timeout, token).await)?;
+                            capnp_err!(io.read_all_with_timeout(time_to_timeout).await)?;
 
                         let exit_data = capnp_err!(exit_rx.recv().await)?;
                         resp.set_stdout(&stdout);

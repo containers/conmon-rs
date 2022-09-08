@@ -136,7 +136,7 @@ mod tests {
 
     fn msg_string(message: Message) -> Result<String> {
         match message {
-            Message::Data(v) => Ok(from_utf8(&v)?.into()),
+            Message::Data(v, _) => Ok(from_utf8(&v)?.into()),
             _ => bail!("no data in message"),
         }
     }

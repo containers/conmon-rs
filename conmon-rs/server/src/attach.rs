@@ -1,5 +1,5 @@
 use crate::{
-    container_io::Pipe,
+    container_io::{Message, Pipe},
     listener::{DefaultListener, Listener},
 };
 use anyhow::{bail, Context, Result};
@@ -34,7 +34,7 @@ use tracing::{debug, debug_span, error, Instrument};
 pub struct SharedContainerAttach {
     read_half_rx: Receiver<Vec<u8>>,
     read_half_tx: Sender<Vec<u8>>,
-    write_half_tx: Sender<(Pipe, Vec<u8>)>,
+    write_half_tx: Sender<Message>,
 }
 
 impl Default for SharedContainerAttach {
@@ -84,13 +84,10 @@ impl SharedContainerAttach {
     }
 
     /// Write a buffer to all attach endpoints.
-    pub async fn write<T>(&mut self, pipe: Pipe, buf: T) -> Result<()>
-    where
-        T: AsRef<[u8]>,
-    {
+    pub async fn write(&mut self, m: Message) -> Result<()> {
         if self.write_half_tx.receiver_count() > 0 {
             self.write_half_tx
-                .send((pipe, buf.as_ref().into()))
+                .send(m)
                 .context("send data message to attach clients")?;
         }
         Ok(())
@@ -112,7 +109,7 @@ impl Attach {
     fn create<T>(
         socket_path: T,
         read_half_tx: Sender<Vec<u8>>,
-        write_half_tx: Sender<(Pipe, Vec<u8>)>,
+        write_half_tx: Sender<Message>,
         token: CancellationToken,
     ) -> Result<()>
     where
@@ -161,7 +158,7 @@ impl Attach {
     async fn start(
         fd: RawFd,
         read_half_tx: Sender<Vec<u8>>,
-        write_half_tx: Sender<(Pipe, Vec<u8>)>,
+        write_half_tx: Sender<Message>,
         token: CancellationToken,
     ) -> Result<()> {
         debug!("Start listening on attach socket");
@@ -186,12 +183,9 @@ impl Attach {
                     );
 
                     let write_half_rx = write_half_tx.subscribe();
-                    let token_clone = token.clone();
                     task::spawn(
                         async move {
-                            if let Err(e) =
-                                Self::write_loop(write, write_half_rx, token_clone).await
-                            {
+                            if let Err(e) = Self::write_loop(write, write_half_rx).await {
                                 error!("Attach write loop failure: {:#}", e);
                             }
                         }
@@ -210,6 +204,12 @@ impl Attach {
     ) -> Result<()> {
         loop {
             let mut buf = vec![0; Self::PACKET_BUF_SIZE];
+            // In situations we're processing output directly from the I/O streams
+            // we need a mechanism to figure out when to stop that doesn't involve reading the
+            // number of bytes read.
+            // Thus, we need to select on the cancellation token saved in the child.
+            // While this could result in a data race, as select statements are racy,
+            // we won't interleve these two futures, as one ends execution.
             select! {
                 n = read_half.read(&mut buf) => {
                     match n {
@@ -248,15 +248,23 @@ impl Attach {
         }
     }
 
-    async fn write_loop(
-        mut write_half: OwnedWriteHalf,
-        mut rx: Receiver<(Pipe, Vec<u8>)>,
-        token: CancellationToken,
-    ) -> Result<()> {
+    async fn write_loop(mut write_half: OwnedWriteHalf, mut rx: Receiver<Message>) -> Result<()> {
         loop {
-            select! {
-                res = rx.recv() => {
-                    let (pipe, buf) = res?;
+            match rx.recv().await? {
+                Message::Done => {
+                    debug!("Exiting because token cancelled");
+                    match write_half.write(Self::DONE_PACKET).await {
+                        Ok(_) => {
+                            debug!("Wrote done packet to client")
+                        }
+                        Err(ref e)
+                            if e.kind() == ErrorKind::WouldBlock
+                                || e.kind() == ErrorKind::BrokenPipe => {}
+                        Err(e) => bail!("unable to write done packet: {:#}", e),
+                    }
+                    return Ok(());
+                }
+                Message::Data(buf, pipe) => {
                     let packets = buf
                         .chunks(Self::PACKET_BUF_SIZE - 1)
                         .map(|x| {
@@ -282,17 +290,6 @@ impl Attach {
                             Err(e) => bail!("unable to write packet {}/{}: {:#}", idx, len, e),
                         }
                     }
-                }
-                _ = token.cancelled() => {
-                    debug!("Exiting because token cancelled");
-                    match write_half.write(Self::DONE_PACKET).await {
-                        Ok(_) => {
-                            debug!("Wrote done packet to client")
-                        }
-                        Err(ref e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::BrokenPipe => {},
-                        Err(e) => bail!("unable to write done packet: {:#}", e),
-                    }
-                    return Ok(());
                 }
             }
         }
