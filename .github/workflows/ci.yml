@@ -67,11 +67,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-static-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-release-static-${{ hashFiles('**/Cargo.lock') }}
+      - run: .github/install-deps
+      - name: Select Toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN']  }}
+          default: true
+          override: true
+          components: rustfmt
       - run: make release-static
       - run: |
           mkdir ${{ github.sha }}
-          mv target/x86_64-unknown-linux-musl/release/conmonrs ${{ github.sha }}
+          mv target/x86_64-unknown-linux-gnu/release/conmonrs ${{ github.sha }}
       - run: ./${{ github.sha }}/conmonrs -v
       - uses: sigstore/cosign-installer@v2
       - name: Sign binary
@@ -222,12 +230,12 @@ jobs:
           path: |
             /tmp/conmon-test-images
           key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/files_test.go') }}
-      - run: rm -rf target/x86_64-unknown-linux-musl/release/conmonrs
+      - run: rm -rf target/x86_64-unknown-linux-gnu/release/conmonrs
       - uses: actions/download-artifact@v3
         with:
           name: conmonrs
-          path: target/x86_64-unknown-linux-musl/release
-      - run: chmod +x target/x86_64-unknown-linux-musl/release/conmonrs
+          path: target/x86_64-unknown-linux-gnu/release
+      - run: chmod +x target/x86_64-unknown-linux-gnu/release/conmonrs
       - run: .github/install-deps
       - name: create symlink
         run: sudo ln -f -s $(go env GOROOT)/bin/* /usr/bin/
