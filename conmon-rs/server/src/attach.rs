@@ -39,8 +39,8 @@ pub struct SharedContainerAttach {
 
 impl Default for SharedContainerAttach {
     fn default() -> Self {
-        let (read_half_tx, read_half_rx) = broadcast::channel(1000);
-        let (write_half_tx, _) = broadcast::channel(1000);
+        let (read_half_tx, read_half_rx) = broadcast::channel(4);
+        let (write_half_tx, _) = broadcast::channel(4);
         Self {
             read_half_rx,
             read_half_tx,
@@ -250,7 +250,7 @@ impl Attach {
 
     async fn write_loop(mut write_half: OwnedWriteHalf, mut rx: Receiver<Message>) -> Result<()> {
         loop {
-            match rx.recv().await? {
+            match rx.recv().await.context("receive message")? {
                 Message::Done => {
                     debug!("Exiting because token cancelled");
                     match write_half.write(Self::DONE_PACKET).await {
