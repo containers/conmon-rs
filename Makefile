@@ -2,7 +2,6 @@ MAKEFILE_PATH := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 RUNTIME_PATH ?= "/usr/bin/runc"
 PROTO_PATH ?= "conmon-rs/common/proto"
 BINARY := conmonrs
-CONTAINER_RUNTIME ?= $(if $(shell which podman 2>/dev/null),podman,docker)
 BUILD_DIR ?= .build
 GOTOOLS_GOPATH ?= $(BUILD_DIR)/gotools
 GOTOOLS_BINDIR ?= $(GOTOOLS_GOPATH)/bin
@@ -20,19 +19,8 @@ release:
 
 .PHONY: release-static
 release-static:
-	mkdir -p ~/.cargo/git
-	$(CONTAINER_RUNTIME) run -it \
-		--pull always \
-		-v "$(shell pwd)":/volume \
-		-v ~/.cargo/registry:/root/.cargo/registry \
-		-v ~/.cargo/git:/root/.cargo/git \
-		clux/muslrust:stable \
-		bash -c "\
-			apt-get update && \
-			apt-get install -y capnproto && \
-			rustup component add rustfmt && \
-			make release && \
-			strip -s target/x86_64-unknown-linux-musl/release/$(BINARY)"
+	RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86_64-unknown-linux-gnu
+	ldd target/x86_64-unknown-linux-gnu/release/conmonrs | grep -q "statically linked"
 
 lint: lint-rust lint-go
 
@@ -55,12 +43,12 @@ integration: .install.ginkgo release # It needs to be release so we correctly te
 	sudo -E "$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
 
 integration-static: .install.ginkgo # It needs to be release so we correctly test the RSS usage
-	export CONMON_BINARY="$(MAKEFILE_PATH)target/x86_64-unknown-linux-musl/release/$(BINARY)" && \
+	export CONMON_BINARY="$(MAKEFILE_PATH)target/x86_64-unknown-linux-gnu/release/$(BINARY)" && \
 	if [ ! -f "$$CONMON_BINARY" ]; then \
 		$(MAKE) release-static; \
 	fi && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
-	export MAX_RSS_KB=3500 && \
+	export MAX_RSS_KB=4000 && \
 	sudo -E "$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
 
 .install.ginkgo:
