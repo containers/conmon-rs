@@ -11,7 +11,7 @@ use capnp_rpc::pry;
 use conmon_common::conmon_capnp::conmon;
 use std::{
     path::{Path, PathBuf},
-    str,
+    process, str,
     time::Duration,
 };
 use tokio::time::Instant;
@@ -62,18 +62,25 @@ impl conmon::Server for Server {
     /// Retrieve version information from the server.
     fn version(
         &mut self,
-        _: conmon::VersionParams,
+        params: conmon::VersionParams,
         mut results: conmon::VersionResults,
     ) -> Promise<(), capnp::Error> {
         debug!("Got a version request");
+
+        let req = pry!(pry!(params.get()).get_request());
+        let version = Version::new(req.get_verbose());
+
         let mut response = results.get().init_response();
-        let version = Version::new();
+        response.set_process_id(process::id());
         response.set_version(version.version());
         response.set_tag(version.tag());
         response.set_commit(version.commit());
         response.set_build_date(version.build_date());
+        response.set_target(version.target());
         response.set_rust_version(version.rust_version());
-        response.set_process_id(std::process::id());
+        response.set_cargo_version(version.cargo_version());
+        response.set_cargo_tree(version.cargo_tree());
+
         Promise::ok(())
     }
 

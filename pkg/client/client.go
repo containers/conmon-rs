@@ -149,7 +149,7 @@ func New(config *ConmonServerConfig) (client *ConmonClient, retErr error) {
 	// Check if the process has already started, and inherit that process instead.
 	ctx, cancel := defaultContext()
 	defer cancel()
-	if resp, err := cl.Version(ctx); err == nil {
+	if resp, err := cl.Version(ctx, &VersionConfig{}); err == nil {
 		cl.serverPID = resp.ProcessID
 
 		return cl, nil
@@ -332,7 +332,7 @@ func (c *ConmonClient) waitUntilServerUp() (err error) {
 	for i := 0; i < 100; i++ {
 		ctx, cancel := defaultContext()
 
-		_, err = c.Version(ctx)
+		_, err = c.Version(ctx, &VersionConfig{})
 		if err == nil {
 			cancel()
 
@@ -388,8 +388,17 @@ func DialLongSocket(network, path string) (*net.UnixConn, error) {
 	return conn, nil
 }
 
+// VersionConfig is the configuration for calling the Version method.
+type VersionConfig struct {
+	// Verbose specifies verbose version output.
+	Verbose bool
+}
+
 // VersionResponse is the response of the Version method.
 type VersionResponse struct {
+	// ProcessID is the PID of the server.
+	ProcessID uint32
+
 	// Version is the actual version string of the server.
 	Version string
 
@@ -402,15 +411,24 @@ type VersionResponse struct {
 	// BuildDate is the date of build.
 	BuildDate string
 
+	// Target is the build triple.
+	Target string
+
 	// RustVersion is the used Rust version.
 	RustVersion string
 
-	// ProcessID is the PID of the server.
-	ProcessID uint32
+	// CargoVersion is the used Cargo version.
+	CargoVersion string
+
+	// CargoTree is the used dependency tree.
+	// Only set if request was in verbose mode.
+	CargoTree string
 }
 
 // Version can be used to retrieve all available version information.
-func (c *ConmonClient) Version(ctx context.Context) (*VersionResponse, error) {
+func (c *ConmonClient) Version(
+	ctx context.Context, cfg *VersionConfig,
+) (*VersionResponse, error) {
 	conn, err := c.newRPCConn()
 	if err != nil {
 		return nil, fmt.Errorf("create RPC connection: %w", err)
@@ -418,7 +436,20 @@ func (c *ConmonClient) Version(ctx context.Context) (*VersionResponse, error) {
 	defer conn.Close()
 	client := proto.Conmon(conn.Bootstrap(ctx))
 
-	future, free := client.Version(ctx, nil)
+	future, free := client.Version(ctx, func(p proto.Conmon_version_Params) error {
+		req, err := p.NewRequest()
+		if err != nil {
+			return fmt.Errorf("create request: %w", err)
+		}
+
+		verbose := false
+		if cfg != nil {
+			verbose = cfg.Verbose
+		}
+		req.SetVerbose(verbose)
+
+		return nil
+	})
 	defer free()
 
 	result, err := future.Struct()
@@ -451,18 +482,36 @@ func (c *ConmonClient) Version(ctx context.Context) (*VersionResponse, error) {
 		return nil, fmt.Errorf("set build date: %w", err)
 	}
 
+	target, err := response.Target()
+	if err != nil {
+		return nil, fmt.Errorf("set target: %w", err)
+	}
+
 	rustVersion, err := response.RustVersion()
 	if err != nil {
 		return nil, fmt.Errorf("set rust version: %w", err)
 	}
 
+	cargoVersion, err := response.CargoVersion()
+	if err != nil {
+		return nil, fmt.Errorf("set cargo version: %w", err)
+	}
+
+	cargoTree, err := response.CargoTree()
+	if err != nil {
+		return nil, fmt.Errorf("set cargo version: %w", err)
+	}
+
 	return &VersionResponse{
-		Version:     version,
-		Tag:         tag,
-		Commit:      commit,
-		BuildDate:   buildDate,
-		RustVersion: rustVersion,
-		ProcessID:   response.ProcessId(),
+		ProcessID:    response.ProcessId(),
+		Version:      version,
+		Tag:          tag,
+		Commit:       commit,
+		BuildDate:    buildDate,
+		Target:       target,
+		RustVersion:  rustVersion,
+		CargoVersion: cargoVersion,
+		CargoTree:    cargoTree,
 	}, nil
 }
 

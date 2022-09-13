@@ -3,16 +3,23 @@
 interface Conmon {
     ###############################################
     # Version
-    struct VersionResponse {
-        version @0 :Text;
-        tag @1 :Text;
-        commit @2 :Text;
-        buildDate @3 :Text;
-        rustVersion @4 :Text;
-        processId @5 :UInt32;
+    struct VersionRequest {
+        verbose @0 :Bool;
     }
 
-    version @0 () -> (response: VersionResponse);
+    struct VersionResponse {
+        processId @0 :UInt32;
+        version @1 :Text;
+        tag @2 :Text;
+        commit @3 :Text;
+        buildDate @4 :Text;
+        target @5 :Text;
+        rustVersion @6 :Text;
+        cargoVersion @7 :Text;
+        cargoTree @8 :Text;
+    }
+
+    version @0 (request: VersionRequest) -> (response: VersionResponse);
 
     ###############################################
     # CreateContainer

@@ -49,6 +49,41 @@ var _ = Describe("ConmonClient", func() {
 		})
 	})
 
+	Describe("Version", func() {
+		for _, verbose := range []bool{false, true} {
+			verbose := verbose
+			name := "should succeed"
+			if verbose {
+				name += " with verbose output"
+			}
+			It(name, func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfig(false)
+				sut = tr.configGivenEnv()
+
+				version, err := sut.Version(
+					context.Background(),
+					&client.VersionConfig{Verbose: verbose},
+				)
+				Expect(err).To(BeNil())
+
+				Expect(version.ProcessID).NotTo(BeZero())
+				Expect(version.Version).NotTo(BeEmpty())
+				Expect(version.Commit).NotTo(BeEmpty())
+				Expect(version.BuildDate).NotTo(BeEmpty())
+				Expect(version.Target).NotTo(BeEmpty())
+				Expect(version.RustVersion).NotTo(BeEmpty())
+				Expect(version.CargoVersion).NotTo(BeEmpty())
+
+				if verbose {
+					Expect(version.CargoTree).NotTo(BeEmpty())
+				} else {
+					Expect(version.CargoTree).To(BeEmpty())
+				}
+			})
+		}
+	})
+
 	Describe("CreateContainer", func() {
 		for _, terminal := range []bool{true, false} {
 			terminal := terminal
