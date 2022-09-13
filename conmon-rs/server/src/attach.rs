@@ -117,12 +117,16 @@ impl Attach {
         PathBuf: From<T>,
     {
         let path = socket_path.as_ref();
-        debug!("Creating attach socket: {}", path.display());
 
         if path.exists() {
-            bail!("Attach socket path already exists: {}", path.display())
+            debug!(
+                "Attach path {} already exist, assuming that we're already listening on it",
+                path.display()
+            );
+            return Ok(());
         }
 
+        debug!("Creating attach socket: {}", path.display());
         let fd = socket(
             AddressFamily::Unix,
             SockType::SeqPacket,
@@ -162,7 +166,8 @@ impl Attach {
         token: CancellationToken,
     ) -> Result<()> {
         debug!("Start listening on attach socket");
-        let listener = UnixListener::from_std(unsafe { net::UnixListener::from_raw_fd(fd) })?;
+        let listener = UnixListener::from_std(unsafe { net::UnixListener::from_raw_fd(fd) })
+            .context("create unix listener")?;
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
