@@ -95,7 +95,7 @@ linters:
     # - wsl
 linters-settings:
   funlen:
-    lines: 70
+    lines: 90
     statements: 50
   varnamelen:
     min-name-length: 1

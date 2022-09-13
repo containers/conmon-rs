@@ -12,6 +12,9 @@ macro_rules! prefix {
     };
 }
 
+/// Specifies the full version output option.
+pub const VERSION_FULL: &str = "full";
+
 #[derive(CopyGetters, Debug, Deserialize, Eq, Getters, Parser, PartialEq, Serialize, Setters)]
 #[serde(rename_all = "kebab-case")]
 #[clap(
@@ -21,10 +24,17 @@ macro_rules! prefix {
 
 /// An OCI container runtime monitor.
 pub struct Config {
-    #[get_copy = "pub"]
-    #[clap(long("version"), short('v'))]
-    /// Show version information.
-    version: bool,
+    #[get = "pub"]
+    #[clap(
+        default_missing_value("default"),
+        env(concat!(prefix!(), "VERSION")),
+        long("version"),
+        possible_values(["default",  VERSION_FULL]),
+        short('v'),
+        value_name("VERBOSITY")
+    )]
+    /// Show version information, specify "full" for verbose output.
+    version: Option<String>,
 
     #[get = "pub"]
     #[clap(

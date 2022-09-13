@@ -2,7 +2,7 @@
 
 use crate::{
     child_reaper::ChildReaper,
-    config::{CgroupManager, Config, LogDriver},
+    config::{CgroupManager, Config, LogDriver, VERSION_FULL},
     container_io::{ContainerIO, ContainerIOType},
     init::{DefaultInit, Init},
     listener::{DefaultListener, Listener},
@@ -53,8 +53,8 @@ impl Server {
             reaper: Default::default(),
         };
 
-        if server.config().version() {
-            Version::new().print();
+        if let Some(v) = server.config().version() {
+            Version::new(v == VERSION_FULL).print();
             process::exit(0);
         }
 
