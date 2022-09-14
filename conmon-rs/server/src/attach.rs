@@ -103,7 +103,7 @@ impl Attach {
     const PACKET_BUF_SIZE: usize = 8192;
 
     /// The packet indicating that we're done writing.
-    const DONE_PACKET: &'static [u8; Self::PACKET_BUF_SIZE] = &[0; Self::PACKET_BUF_SIZE];
+    const DONE_PACKET: &'static [u8; 1] = &[0];
 
     /// Create a new attach instance.
     fn create<T>(
@@ -242,7 +242,11 @@ impl Attach {
                                 e.raw_os_error().context("get OS error")?
                             ),
                         },
-                        _ => {}
+                        _ => {
+                            debug!("Stopping read loop because there is nothing more to read");
+                            token.cancel();
+                            return Ok(());
+                        }
                     }
                 }
                 _ = token.cancelled() => {
@@ -279,20 +283,19 @@ impl Attach {
                                 Pipe::StdErr => 3,
                             };
                             y.insert(0, p);
-                            y.resize(Self::PACKET_BUF_SIZE, 0);
                             y
                         })
                         .collect::<Vec<_>>();
 
-                    let len = packets.len() - 1;
+                    let len = packets.len();
                     for (idx, packet) in packets.iter().enumerate() {
                         match write_half.write(packet).await {
                             Ok(_) => {
-                                debug!("Wrote {} packet {}/{} to client", pipe, idx, len)
+                                debug!("Wrote {} packet {}/{} to client", pipe, idx + 1, len)
                             }
                             Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
                             Err(ref e) if e.kind() == ErrorKind::BrokenPipe => break,
-                            Err(e) => bail!("unable to write packet {}/{}: {:#}", idx, len, e),
+                            Err(e) => bail!("unable to write packet {}/{}: {:#}", idx + 1, len, e),
                         }
                     }
                 }
