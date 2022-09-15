@@ -41,7 +41,7 @@ type ConmonClient struct {
 	serverPID     uint32
 	runDir        string
 	logger        *logrus.Logger
-	attachReaders *sync.Map
+	attachReaders *sync.Map // K: UUID string, V: *attachReaderValue
 }
 
 // ConmonServerConfig is the configuration for the conmon server instance.
