@@ -793,6 +793,11 @@ func (c *ConmonClient) Shutdown() error {
 
 	pid := int(c.serverPID)
 	if err := syscall.Kill(pid, syscall.SIGINT); err != nil {
+		// Process does not exist any more, it might be manually killed.
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+
 		return fmt.Errorf("kill server PID: %w", err)
 	}
 
