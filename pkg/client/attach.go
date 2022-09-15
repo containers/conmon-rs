@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"syscall"
 
 	"github.com/containers/common/pkg/resize"
@@ -85,6 +86,12 @@ type AttachConfig struct {
 
 	// The keys that indicate the attach session should be detached.
 	DetachKeys []byte
+}
+
+// attachReaderValue is the value of the attachReaders map.
+type attachReaderValue struct {
+	stdin      *In
+	socketPath string
 }
 
 // AttachContainer can be used to attach to a running container.
@@ -199,7 +206,8 @@ func (c *ConmonClient) setupStdioChannels(
 	stdin := cfg.Streams.Stdin
 
 	if stdin != nil {
-		c.attachReaders.Store(id, stdin)
+		value := &attachReaderValue{stdin: stdin, socketPath: cfg.SocketPath}
+		c.attachReaders.Store(id, value)
 
 		go func() {
 			_, err := util.CopyDetachable(conn, stdin, cfg.DetachKeys)
@@ -310,15 +318,40 @@ func (c *ConmonClient) tryCloseAttachReaderForID(id string) {
 }
 
 func (c *ConmonClient) closeAttachReader(val any) {
-	in, ok := val.(*In)
+	value, ok := val.(*attachReaderValue)
 	if !ok {
 		c.logger.Error("Ignoring input value of wrong type")
 
 		return
 	}
 
-	if err := in.Close(); err != nil {
+	if err := value.stdin.Close(); err != nil {
 		c.logger.WithError(err).Warn("Unable to close attach reader")
+	}
+
+	// Check if the attach socket is still in use by other connections
+	socketPathInUse := false
+	c.attachReaders.Range(func(k, v any) bool {
+		existing, ok := v.(*attachReaderValue)
+		if !ok {
+			return true
+		}
+
+		if existing.socketPath == value.socketPath {
+			socketPathInUse = true
+
+			return false
+		}
+
+		return true
+	})
+
+	if !socketPathInUse {
+		c.logger.Infof("Attach socket path no longer in use, removing it: %s", value.socketPath)
+
+		if err := os.RemoveAll(value.socketPath); err != nil {
+			c.logger.WithError(err).Warn("Unable to remove attach socket path")
+		}
 	}
 }
 
@@ -342,7 +375,8 @@ func (c *ConmonClient) readStdio(
 		return nil
 
 	case err = <-stdinDone:
-		c.logger.WithError(err).Trace("Received possible error on input channel")
+		c.logger.WithError(err).Trace("Received message on input channel")
+		c.tryCloseAttachReaderForID(id)
 
 		// This particular case is for when we get a non-tty attach
 		// with --leave-stdin-open=true. We want to return as soon
