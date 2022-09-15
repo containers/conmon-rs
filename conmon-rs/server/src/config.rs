@@ -62,7 +62,7 @@ pub struct Config {
 
     #[get = "pub"]
     #[clap(
-        default_value_if("version", None, Some("")),
+        default_value(""),
         env(concat!(prefix!(), "RUNTIME")),
         long("runtime"),
         short('r'),
@@ -73,7 +73,7 @@ pub struct Config {
 
     #[get = "pub"]
     #[clap(
-        default_value_if("version", None, Some("")),
+        default_value(""),
         env(concat!(prefix!(), "RUNTIME_DIR")),
         long("runtime-dir"),
         value_name("RUNTIME_DIR")
@@ -171,6 +171,13 @@ const PIDFILE: &str = "pidfile";
 impl Config {
     /// Validate the configuration integrity.
     pub fn validate(&self) -> Result<()> {
+        if self.runtime().as_os_str().is_empty() {
+            bail!("--runtime flag not set")
+        }
+        if self.runtime_dir().as_os_str().is_empty() {
+            bail!("--runtime-dir flag not set")
+        }
+
         if !self.runtime().exists() {
             bail!("runtime path '{}' does not exist", self.runtime().display())
         }
