@@ -20,7 +20,8 @@ release:
 .PHONY: release-static
 release-static:
 	RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86_64-unknown-linux-gnu
-	ldd target/x86_64-unknown-linux-gnu/release/conmonrs | grep -q "statically linked"
+	strip -s target/x86_64-unknown-linux-gnu/release/conmonrs
+	ldd target/x86_64-unknown-linux-gnu/release/conmonrs 2>&1 | grep -qE '(statically linked)|(not a dynamic executable)'
 
 lint: lint-rust lint-go
 
