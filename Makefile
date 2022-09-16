@@ -74,7 +74,7 @@ update-proto:
 
 .PHONY: create-release-packages
 create-release-packages: release
-	if [ "$(PACKAGE_NAME)" != "conmonrs-$(CI_TAG)" ]; then \
+	if [ "v$(PACKAGE_NAME)" != "conmonrs-$(CI_TAG)" ]; then \
 		echo "crate version and tag mismatch" ; \
 		exit 1 ; \
 	fi
