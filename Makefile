@@ -7,7 +7,7 @@ GOTOOLS_GOPATH ?= $(BUILD_DIR)/gotools
 GOTOOLS_BINDIR ?= $(GOTOOLS_GOPATH)/bin
 GINKGO_FLAGS ?= -vv --trace --race --randomize-all --flake-attempts 3 --progress --timeout 5m -r pkg/client
 TEST_FLAGS ?=
-PACKAGE_NAME ?= $(shell cargo metadata --no-deps --format-version 1 | jq -r '.packages[2] | [ .name, .version ] | join("-")')
+PACKAGE_NAME ?= $(shell cargo metadata --no-deps --format-version 1 | jq -r '.packages[2] | [ .name, .version ] | join("-v")')
 PREFIX ?= /usr
 CI_TAG ?=
 
@@ -75,7 +75,7 @@ update-proto:
 
 .PHONY: create-release-packages
 create-release-packages: release
-	if [ "v$(PACKAGE_NAME)" != "conmonrs-$(CI_TAG)" ]; then \
+	if [ "$(PACKAGE_NAME)" != "conmonrs-$(CI_TAG)" ]; then \
 		echo "crate version and tag mismatch" ; \
 		exit 1 ; \
 	fi
