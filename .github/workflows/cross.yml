@@ -7,7 +7,7 @@ on:
 env:
   CROSS_VERSION: v0.2.4
   CARGO_TERM_COLOR: always
-  ACTION_MSRV_TOOLCHAIN: 1.63.0
+  ACTION_MSRV_TOOLCHAIN: 1.58.1
 jobs:
   build:
     strategy:
