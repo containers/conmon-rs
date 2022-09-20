@@ -267,9 +267,11 @@ impl ContainerIO {
                                 .await
                                 .context("write to attach endpoints")?;
 
-                            message_tx
-                                .send(Message::Data(data.into(), pipe))
-                                .context("send data message")?;
+                            if !message_tx.is_closed() {
+                                message_tx
+                                    .send(Message::Data(data.into(), pipe))
+                                    .context("send data message")?;
+                            }
                         }
                         Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
                             Errno::EIO => {
