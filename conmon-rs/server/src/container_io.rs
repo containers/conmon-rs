@@ -240,7 +240,7 @@ impl ContainerIO {
     where
         T: AsyncRead + Unpin,
     {
-        let mut buf = vec![0; 1024];
+        let mut buf = vec![0; 64];
 
         loop {
             // In situations we're processing output directly from the I/O streams
