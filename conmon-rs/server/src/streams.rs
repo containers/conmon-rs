@@ -65,12 +65,11 @@ impl Streams {
         let attach = self.attach().clone();
         let message_tx = self.message_tx_stdout().clone();
 
-        let token_clone = token.clone();
         if let Some(stdin) = stdin {
             task::spawn(
                 async move {
                     if let Err(e) =
-                        ContainerIO::read_loop_stdin(stdin.as_raw_fd(), attach, token_clone).await
+                        ContainerIO::read_loop_stdin(stdin.as_raw_fd(), attach, token).await
                     {
                         error!("Stdin read loop failure: {:#}", e);
                     }
@@ -80,19 +79,12 @@ impl Streams {
         }
 
         let attach = self.attach().clone();
-        let token_clone = token.clone();
         if let Some(stdout) = stdout {
             task::spawn(
                 async move {
-                    if let Err(e) = ContainerIO::read_loop(
-                        stdout,
-                        Pipe::StdOut,
-                        logger,
-                        message_tx,
-                        attach,
-                        token_clone,
-                    )
-                    .await
+                    if let Err(e) =
+                        ContainerIO::read_loop(stdout, Pipe::StdOut, logger, message_tx, attach)
+                            .await
                     {
                         error!("Stdout read loop failure: {:#}", e);
                     }
@@ -107,15 +99,9 @@ impl Streams {
         if let Some(stderr) = stderr {
             task::spawn(
                 async move {
-                    if let Err(e) = ContainerIO::read_loop(
-                        stderr,
-                        Pipe::StdErr,
-                        logger,
-                        message_tx,
-                        attach,
-                        token,
-                    )
-                    .await
+                    if let Err(e) =
+                        ContainerIO::read_loop(stderr, Pipe::StdErr, logger, message_tx, attach)
+                            .await
                     {
                         error!("Stderr read loop failure: {:#}", e);
                     }

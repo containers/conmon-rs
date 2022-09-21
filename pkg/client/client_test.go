@@ -118,8 +118,8 @@ var _ = Describe("ConmonClient", func() {
 			})
 
 			It(testName("should execute cleanup command when container exits", terminal), func() {
-				filepath := fmt.Sprintf("%s/conmon-client-test%s", os.TempDir(), tr.ctrID)
 				tr = newTestRunner()
+				filepath := fmt.Sprintf("%s/conmon-client-test%s", os.TempDir(), tr.ctrID)
 				tr.createRuntimeConfig(terminal)
 				sut = tr.configGivenEnv()
 				tr.createContainerWithConfig(sut, &client.CreateContainerConfig{
@@ -312,7 +312,7 @@ var _ = Describe("ConmonClient", func() {
 				rssAfter := vmRSSGivenPID(pid)
 				GinkgoWriter.Printf("VmRSS after: %d\n", rssAfter)
 				GinkgoWriter.Printf("VmRSS diff: %d\n", rssAfter-rssBefore)
-				Expect(rssAfter - rssBefore).To(BeNumerically("<", 1000))
+				Expect(rssAfter - rssBefore).To(BeNumerically("<", 1200))
 			})
 		}
 	})
