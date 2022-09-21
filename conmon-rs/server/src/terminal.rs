@@ -115,7 +115,6 @@ impl Terminal {
         let logger_clone = self.logger.clone();
         let (message_tx, message_rx) = mpsc::unbounded_channel();
         self.message_rx = Some(message_rx);
-        let token_clone = token.clone();
 
         task::spawn(
             async move {
@@ -125,7 +124,6 @@ impl Terminal {
                     logger_clone,
                     message_tx,
                     attach_clone,
-                    token_clone,
                 )
                 .await
                 {

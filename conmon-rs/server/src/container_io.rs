@@ -235,7 +235,6 @@ impl ContainerIO {
         logger: SharedContainerLog,
         message_tx: UnboundedSender<Message>,
         mut attach: SharedContainerAttach,
-        token: CancellationToken,
     ) -> Result<()>
     where
         T: AsyncRead + Unpin,
@@ -243,76 +242,69 @@ impl ContainerIO {
         let mut buf = vec![0; 1024];
 
         loop {
-            // In situations we're processing output directly from the I/O streams
-            // we need a mechanism to figure out when to stop that doesn't involve reading the
-            // number of bytes read.
-            // Thus, we need to select on the cancellation token saved in the child.
-            // While this could result in a data race, as select statements are racy,
-            // we won't interleve these two futures, as one ends execution.
-            select! {
-                n = reader.read(&mut buf) => {
-                    match n {
-                        Ok(n) if n > 0 => {
-                            debug!("Read {} bytes", n);
-                            let data = &buf[..n];
+            match reader.read(&mut buf).await {
+                Ok(n) if n == 0 => {
+                    debug!("Nothing more to read");
 
-                            let mut locked_logger = logger.write().await;
-                            locked_logger
-                                .write(pipe, data)
-                                .await
-                                .context("write to log file")?;
-
-                            attach
-                                .write(Message::Data(data.into(), pipe))
-                                .await
-                                .context("write to attach endpoints")?;
-
-                            if !message_tx.is_closed() {
-                                message_tx
-                                    .send(Message::Data(data.into(), pipe))
-                                    .context("send data message")?;
-                            }
-                        }
-                        Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
-                            Errno::EIO => {
-                                debug!("Stopping read loop");
-                                attach
-                                    .write(Message::Done)
-                                    .await
-                                    .context("write to attach endpoints")?;
-
-                                message_tx
-                                    .send(Message::Done)
-                                    .context("send done message")?;
-                                return Ok(());
-                            }
-                            Errno::EBADF => {
-                                return Err(Errno::EBADFD.into());
-                            }
-                            Errno::EAGAIN => {
-                                continue;
-                            }
-                            _ => error!(
-                                "Unable to read from file descriptor: {} {}",
-                                e,
-                                e.raw_os_error().context("get OS error")?
-                            ),
-                        },
-                        _ => {}
-                    }
-                }
-                _ = token.cancelled() => {
-                    debug!("Sending done because token cancelled");
                     attach
                         .write(Message::Done)
                         .await
                         .context("write to attach endpoints")?;
 
-                    message_tx
-                        .send(Message::Done)
-                        .context("send done message")?;
+                    if !message_tx.is_closed() {
+                        message_tx
+                            .send(Message::Done)
+                            .context("send done message")?;
+                    }
+
                     return Ok(());
                 }
+
+                Ok(n) => {
+                    debug!("Read {} bytes", n);
+                    let data = &buf[..n];
+
+                    let mut locked_logger = logger.write().await;
+                    locked_logger
+                        .write(pipe, data)
+                        .await
+                        .context("write to log file")?;
+
+                    attach
+                        .write(Message::Data(data.into(), pipe))
+                        .await
+                        .context("write to attach endpoints")?;
+
+                    if !message_tx.is_closed() {
+                        message_tx
+                            .send(Message::Data(data.into(), pipe))
+                            .context("send data message")?;
+                    }
+                }
+
+                Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
+                    Errno::EIO => {
+                        debug!("Stopping read loop");
+                        attach
+                            .write(Message::Done)
+                            .await
+                            .context("write to attach endpoints")?;
+
+                        if !message_tx.is_closed() {
+                            message_tx
+                                .send(Message::Done)
+                                .context("send done message")?;
+                        }
+                        return Ok(());
+                    }
+                    Errno::EBADF => bail!(e),
+                    Errno::EAGAIN => continue,
+                    _ => error!(
+                        "Unable to read from file descriptor: {} {}",
+                        e,
+                        e.raw_os_error().context("get OS error")?
+                    ),
+                },
             }
         }
     }
