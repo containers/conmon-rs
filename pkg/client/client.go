@@ -666,9 +666,6 @@ type ExecSyncConfig struct {
 
 	// Terminal specifies if a tty should be used.
 	Terminal bool
-
-	// Stdin indicates if stdin should be available or not.
-	Stdin bool
 }
 
 // ExecContainerResult is the result for calling the ExecSyncContainer method.
@@ -709,7 +706,6 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 			return err
 		}
 		req.SetTerminal(cfg.Terminal)
-		req.SetStdin(cfg.Stdin)
 		if err := p.SetRequest(req); err != nil {
 			return fmt.Errorf("set request: %w", err)
 		}

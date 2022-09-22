@@ -202,12 +202,11 @@ impl conmon::Server for Server {
 
         let command = pry!(req.get_command());
         let args = pry_err!(self.generate_exec_sync_args(&id, &pidfile, &container_io, &command));
-        let stdin = req.get_stdin();
 
         Promise::from_future(
             async move {
                 match child_reaper
-                    .create_child(&runtime, &args, stdin, &mut container_io, &pidfile)
+                    .create_child(&runtime, &args, false, &mut container_io, &pidfile)
                     .await
                 {
                     Ok((grandchild_pid, token)) => {

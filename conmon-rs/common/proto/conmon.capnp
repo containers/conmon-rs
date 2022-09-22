@@ -65,7 +65,6 @@ interface Conmon {
         timeoutSec @1 :UInt64;
         command @2 :List(Text);
         terminal @3 :Bool;
-        stdin @4 :Bool;
     }
 
     struct ExecSyncContainerResponse {
