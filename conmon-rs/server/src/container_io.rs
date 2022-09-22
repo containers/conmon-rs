@@ -315,6 +315,7 @@ impl ContainerIO {
         token: CancellationToken,
     ) -> Result<()> {
         let mut writer = unsafe { File::from_raw_fd(fd) };
+
         loop {
             // While we're not processing input from a caller, and logically should be able to
             // catch a Message::Done here, it doesn't quite work that way.
@@ -326,10 +327,7 @@ impl ContainerIO {
                 res = attach.read() => {
                     match res {
                         Ok(data) => {
-                            writer
-                                .write_all(&data)
-                                .await
-                                .context("write attach stdin to stream")?;
+                            Self::handle_stdin_data(&data, &mut writer).await?;
                         }
                         Err(e) => {
                             return Err(e).context("read from stdin attach endpoints");
@@ -337,10 +335,23 @@ impl ContainerIO {
                     }
                 }
                 _ = token.cancelled() => {
-                    debug!("Exiting because token cancelled");
+                    // Closing immediately may race with outstanding data on stdin for short lived
+                    // containers. This means we try to read once again.
+                    if let Ok(data) = attach.try_read() {
+                        Self::handle_stdin_data(&data, &mut writer).await?;
+                    }
                     return Ok(());
                 }
             }
         }
+    }
+
+    async fn handle_stdin_data(data: &[u8], writer: &mut File) -> Result<()> {
+        debug!("Got {} attach bytes", data.len());
+
+        writer
+            .write_all(data)
+            .await
+            .context("write attach stdin to stream")
     }
 }
