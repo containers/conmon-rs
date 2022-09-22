@@ -27,12 +27,13 @@ interface Conmon {
         id @0 :Text;
         bundlePath @1 :Text;
         terminal @2 :Bool;
-        exitPaths @3 :List(Text);
-        oomExitPaths @4 :List(Text);
-        logDrivers @5 :List(LogDriver);
-        cleanupCmd @6 :List(Text);
-        globalArgs @7 :List(Text);
-        commandArgs @8 :List(Text);
+        stdin @3 :Bool;
+        exitPaths @4 :List(Text);
+        oomExitPaths @5 :List(Text);
+        logDrivers @6 :List(LogDriver);
+        cleanupCmd @7 :List(Text);
+        globalArgs @8 :List(Text);
+        commandArgs @9 :List(Text);
     }
 
     struct LogDriver {
@@ -64,6 +65,7 @@ interface Conmon {
         timeoutSec @1 :UInt64;
         command @2 :List(Text);
         terminal @3 :Bool;
+        stdin @4 :Bool;
     }
 
     struct ExecSyncContainerResponse {

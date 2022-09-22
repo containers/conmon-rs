@@ -122,6 +122,7 @@ impl conmon::Server for Server {
             global_args,
             command_args
         ));
+        let stdin = req.get_stdin();
         let runtime = self.config().runtime().clone();
         let exit_paths = capnp_vec_path!(req.get_exit_paths());
         let oom_exit_paths = capnp_vec_path!(req.get_oom_exit_paths());
@@ -131,7 +132,7 @@ impl conmon::Server for Server {
                 capnp_err!(container_log.write().await.init().await)?;
 
                 let (grandchild_pid, token) = capnp_err!(match child_reaper
-                    .create_child(runtime, args, &mut container_io, &pidfile)
+                    .create_child(runtime, args, stdin, &mut container_io, &pidfile)
                     .await
                 {
                     Err(e) => {
@@ -201,11 +202,12 @@ impl conmon::Server for Server {
 
         let command = pry!(req.get_command());
         let args = pry_err!(self.generate_exec_sync_args(&id, &pidfile, &container_io, &command));
+        let stdin = req.get_stdin();
 
         Promise::from_future(
             async move {
                 match child_reaper
-                    .create_child(&runtime, &args, &mut container_io, &pidfile)
+                    .create_child(&runtime, &args, stdin, &mut container_io, &pidfile)
                     .await
                 {
                     Ok((grandchild_pid, token)) => {

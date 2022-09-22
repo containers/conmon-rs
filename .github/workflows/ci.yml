@@ -246,19 +246,20 @@ jobs:
           sudo chown -R $(id -u):$(id -g) ~/go/pkg/mod
           sudo chown -R $(id -u):$(id -g) ~/.cache/go-build
 
-  test-critest:
-    needs: release-static
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-      - uses: actions/download-artifact@v3
-        with:
-          name: conmonrs
-          path: target/x86_64-unknown-linux-musl/release
-      - run: sudo cp target/x86_64-unknown-linux-musl/release/conmonrs /usr/local/bin
-      - run: sudo chmod +x /usr/local/bin/conmonrs
-      - run: .github/setup
-      - name: Run critest
-        run: sudo critest
+# TODO: uncomment when https://github.com/cri-o/cri-o/pull/6220 got merged
+#  test-critest:
+#    needs: release-static
+#    runs-on: ubuntu-latest
+#    timeout-minutes: 10
+#    steps:
+#      - name: Checkout
+#        uses: actions/checkout@v3
+#      - uses: actions/download-artifact@v3
+#        with:
+#          name: conmonrs
+#          path: target/x86_64-unknown-linux-musl/release
+#      - run: sudo cp target/x86_64-unknown-linux-musl/release/conmonrs /usr/local/bin
+#      - run: sudo chmod +x /usr/local/bin/conmonrs
+#      - run: .github/setup
+#      - name: Run critest
+#        run: sudo critest
