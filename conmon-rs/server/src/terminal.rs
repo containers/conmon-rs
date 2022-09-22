@@ -95,7 +95,7 @@ impl Terminal {
     }
 
     /// Waits for the socket client to be connected.
-    pub async fn wait_connected(&mut self, token: CancellationToken) -> Result<()> {
+    pub async fn wait_connected(&mut self, stdin: bool, token: CancellationToken) -> Result<()> {
         debug!("Waiting for terminal socket connection");
         let fd = self
             .connected_rx
@@ -134,15 +134,17 @@ impl Terminal {
             .instrument(debug_span!("read_loop")),
         );
 
-        let attach_clone = self.attach.clone();
-        task::spawn(
-            async move {
-                if let Err(e) = ContainerIO::read_loop_stdin(fd, attach_clone, token).await {
-                    error!("Stdin read loop failure: {:#}", e);
+        if stdin {
+            let attach_clone = self.attach.clone();
+            task::spawn(
+                async move {
+                    if let Err(e) = ContainerIO::read_loop_stdin(fd, attach_clone, token).await {
+                        error!("Stdin read loop failure: {:#}", e);
+                    }
                 }
-            }
-            .instrument(debug_span!("read_loop_stdin")),
-        );
+                .instrument(debug_span!("read_loop_stdin")),
+            );
+        }
 
         Ok(())
     }
@@ -281,7 +283,7 @@ mod tests {
             }
         }
 
-        sut.wait_connected(token).await?;
+        sut.wait_connected(true, token).await?;
         assert!(!sut.path().exists());
 
         // Write to the slave

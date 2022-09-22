@@ -273,6 +273,7 @@ var _ = Describe("ConmonClient", func() {
 							ID:       tr.ctrID,
 							Command:  []string{"/busybox", "echo", "-n", "hello", "world", fmt.Sprintf("%d", i)},
 							Terminal: terminal,
+							Stdin:    true,
 							Timeout:  timeoutUnlimited,
 						})
 						Expect(err).To(BeNil())
@@ -300,6 +301,7 @@ var _ = Describe("ConmonClient", func() {
 						ID:       tr.ctrID,
 						Command:  []string{"/busybox", "echo", "-n", "hello", "world", fmt.Sprintf("%d", i)},
 						Terminal: terminal,
+						Stdin:    true,
 						Timeout:  timeoutUnlimited,
 					})
 
@@ -331,6 +333,7 @@ var _ = Describe("ConmonClient", func() {
 					ID:       tr.ctrID,
 					Command:  []string{"/busybox", "echo", "-n", "hello", "world"},
 					Timeout:  timeoutUnlimited,
+					Stdin:    true,
 					Terminal: terminal,
 				})
 
@@ -359,6 +362,7 @@ var _ = Describe("ConmonClient", func() {
 					Command:  []string{"/busybox", "echo", "-n", "hello", "world"},
 					Timeout:  10,
 					Terminal: terminal,
+					Stdin:    true,
 				})
 
 				Expect(err).To(BeNil())
@@ -379,6 +383,7 @@ var _ = Describe("ConmonClient", func() {
 					Command:  []string{"/busybox", "invalid"},
 					Timeout:  timeoutUnlimited,
 					Terminal: terminal,
+					Stdin:    true,
 				})
 
 				Expect(err).To(BeNil())
@@ -409,6 +414,7 @@ var _ = Describe("ConmonClient", func() {
 					Command:  []string{"/busybox", "sleep", "5"},
 					Timeout:  3,
 					Terminal: terminal,
+					Stdin:    true,
 				})
 
 				Expect(err).To(BeNil())

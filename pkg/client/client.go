@@ -527,6 +527,9 @@ type CreateContainerConfig struct {
 	// Terminal indicates if a tty should be used or not.
 	Terminal bool
 
+	// Stdin indicates if stdin should be available or not.
+	Stdin bool
+
 	// ExitPaths is a slice of paths to write the exit statuses.
 	ExitPaths []string
 
@@ -599,6 +602,7 @@ func (c *ConmonClient) CreateContainer(
 			return fmt.Errorf("set bundle path: %w", err)
 		}
 		req.SetTerminal(cfg.Terminal)
+		req.SetStdin(cfg.Stdin)
 		if err := stringSliceToTextList(cfg.ExitPaths, req.NewExitPaths); err != nil {
 			return fmt.Errorf("convert exit paths string slice to text list: %w", err)
 		}
@@ -662,6 +666,9 @@ type ExecSyncConfig struct {
 
 	// Terminal specifies if a tty should be used.
 	Terminal bool
+
+	// Stdin indicates if stdin should be available or not.
+	Stdin bool
 }
 
 // ExecContainerResult is the result for calling the ExecSyncContainer method.
@@ -702,6 +709,7 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 			return err
 		}
 		req.SetTerminal(cfg.Terminal)
+		req.SetStdin(cfg.Stdin)
 		if err := p.SetRequest(req); err != nil {
 			return fmt.Errorf("set request: %w", err)
 		}

@@ -143,6 +143,7 @@ func (tr *testRunner) defaultConfig(terminal bool) *client.CreateContainerConfig
 		ID:           tr.ctrID,
 		BundlePath:   tr.tmpDir,
 		Terminal:     terminal,
+		Stdin:        true,
 		ExitPaths:    []string{tr.exitPath()},
 		OOMExitPaths: []string{tr.oomExitPath()},
 		LogDrivers: []client.LogDriver{{

@@ -60,6 +60,7 @@ impl ChildReaper {
         &self,
         cmd: P,
         args: I,
+        stdin: bool,
         container_io: &mut ContainerIO,
         pidfile: &Path,
     ) -> Result<(u32, CancellationToken)>
@@ -69,9 +70,13 @@ impl ChildReaper {
         S: AsRef<OsStr>,
     {
         let mut cmd = Command::new(cmd);
-        cmd.args(args);
+
+        if stdin {
+            cmd.stdin(Stdio::piped());
+        }
+
         let mut child = cmd
-            .stdin(Stdio::piped())
+            .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -82,7 +87,7 @@ impl ChildReaper {
         match container_io.typ_mut() {
             ContainerIOType::Terminal(ref mut terminal) => {
                 terminal
-                    .wait_connected(token.clone())
+                    .wait_connected(stdin, token.clone())
                     .await
                     .context("wait for terminal socket connection")?;
             }
