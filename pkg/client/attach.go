@@ -376,7 +376,6 @@ func (c *ConmonClient) readStdio(
 
 	case err = <-stdinDone:
 		c.logger.WithError(err).Trace("Received message on input channel")
-		c.tryCloseAttachReaderForID(id)
 
 		// This particular case is for when we get a non-tty attach
 		// with --leave-stdin-open=true. We want to return as soon
@@ -386,6 +385,9 @@ func (c *ConmonClient) readStdio(
 		if cfg.StopAfterStdinEOF {
 			return nil
 		}
+
+		c.tryCloseAttachReaderForID(id)
+
 		if errors.Is(err, util.ErrDetach) {
 			if closeErr := conn.CloseWrite(); closeErr != nil {
 				return fmt.Errorf("%v: %w", closeErr, err)
