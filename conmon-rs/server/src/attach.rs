@@ -25,6 +25,7 @@ use tokio::{
     select,
     sync::broadcast::{self, Receiver, Sender},
     task,
+    time::{self, Duration},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, error, Instrument};
@@ -61,7 +62,12 @@ impl Clone for SharedContainerAttach {
 
 impl SharedContainerAttach {
     /// Add a new attach endpoint to this shared container attach instance.
-    pub async fn add<T>(&mut self, socket_path: T, token: CancellationToken) -> Result<()>
+    pub async fn add<T>(
+        &mut self,
+        socket_path: T,
+        token: CancellationToken,
+        stop_after_stdin_eof: bool,
+    ) -> Result<()>
     where
         T: AsRef<Path>,
         PathBuf: From<T>,
@@ -71,6 +77,7 @@ impl SharedContainerAttach {
             self.read_half_tx.clone(),
             self.write_half_tx.clone(),
             token,
+            stop_after_stdin_eof,
         )
         .context("create attach endpoint")
     }
@@ -118,6 +125,7 @@ impl Attach {
         read_half_tx: Sender<Vec<u8>>,
         write_half_tx: Sender<Message>,
         token: CancellationToken,
+        stop_after_stdin_eof: bool,
     ) -> Result<()>
     where
         T: AsRef<Path>,
@@ -156,7 +164,9 @@ impl Attach {
 
         task::spawn(
             async move {
-                if let Err(e) = Self::start(fd, read_half_tx, write_half_tx, token).await {
+                if let Err(e) =
+                    Self::start(fd, read_half_tx, write_half_tx, token, stop_after_stdin_eof).await
+                {
                     error!("Attach failure: {:#}", e);
                 }
             }
@@ -171,6 +181,7 @@ impl Attach {
         read_half_tx: Sender<Vec<u8>>,
         write_half_tx: Sender<Message>,
         token: CancellationToken,
+        stop_after_stdin_eof: bool,
     ) -> Result<()> {
         debug!("Start listening on attach socket");
         let listener = UnixListener::from_std(unsafe { net::UnixListener::from_raw_fd(fd) })
@@ -185,8 +196,13 @@ impl Attach {
                     let token_clone = token.clone();
                     task::spawn(
                         async move {
-                            if let Err(e) =
-                                Self::read_loop(read, read_half_tx_clone, token_clone).await
+                            if let Err(e) = Self::read_loop(
+                                read,
+                                read_half_tx_clone,
+                                token_clone,
+                                stop_after_stdin_eof,
+                            )
+                            .await
                             {
                                 error!("Attach read loop failure: {:#}", e);
                             }
@@ -213,6 +229,7 @@ impl Attach {
         mut read_half: OwnedReadHalf,
         tx: Sender<Vec<u8>>,
         token: CancellationToken,
+        stop_after_stdin_eof: bool,
     ) -> Result<()> {
         loop {
             let mut buf = vec![0; Self::PACKET_BUF_SIZE];
@@ -249,11 +266,12 @@ impl Attach {
                                 e.raw_os_error().context("get OS error")?
                             ),
                         },
-                        _ => {
+                        _ if stop_after_stdin_eof => {
                             debug!("Stopping read loop because there is nothing more to read");
                             token.cancel();
                             return Ok(());
                         }
+                        _ => time::sleep(Duration::from_millis(500)).await, // avoid busy looping
                     }
                 }
                 _ = token.cancelled() => {

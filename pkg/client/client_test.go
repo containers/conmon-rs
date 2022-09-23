@@ -450,8 +450,9 @@ var _ = Describe("ConmonClient", func() {
 				stdReader, stdWriter := io.Pipe()
 
 				cfg := &client.AttachConfig{
-					ID:         tr.ctrID,
-					SocketPath: filepath.Join(tr.tmpDir, "attach"),
+					ID:                tr.ctrID,
+					SocketPath:        filepath.Join(tr.tmpDir, "attach"),
+					StopAfterStdinEOF: true,
 					Streams: client.AttachStreams{
 						Stdin: &client.In{stdinReader},
 					},

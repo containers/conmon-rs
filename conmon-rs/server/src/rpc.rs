@@ -276,6 +276,7 @@ impl conmon::Server for Server {
 
         let socket_path = pry!(req.get_socket_path()).to_string();
         let child = pry_err!(self.reaper().get(container_id));
+        let stop_after_stdin_eof = req.get_stop_after_stdin_eof();
 
         Promise::from_future(
             async move {
@@ -284,7 +285,7 @@ impl conmon::Server for Server {
                         .io()
                         .attach()
                         .await
-                        .add(&socket_path, child.token().clone())
+                        .add(&socket_path, child.token().clone(), stop_after_stdin_eof)
                         .await
                 )
             }
