@@ -82,6 +82,7 @@ interface Conmon {
         id @0 :Text;
         socketPath @1 :Text;
         execSessionId @2 :Text;
+        stopAfterStdinEof @3 :Bool;
     }
 
     struct AttachResponse {
