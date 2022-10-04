@@ -307,7 +307,7 @@ func validateLogDriver(driver string) error {
 	return validateStringSlice(
 		"log driver",
 		driver,
-		LogDriverStdout, LogDriverSystemd,
+		LogDriverStdout, LogDriverSystemd, LogDriverFile,
 	)
 }
 

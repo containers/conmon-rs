@@ -7,6 +7,11 @@ const (
 	// LogDriverSystemd is the log driver printing to systemd journald.
 	LogDriverSystemd = "systemd"
 
+	// LogDriverFile is the file based log driver. The log file path fill be
+	// generated to match / `[config.ServerRunDir]/logs/conmonrs.YYYY-MM-DD`
+	// and rotates on a daily basis.
+	LogDriverFile = "file"
+
 	// LogLevelTrace is the log level printing only "trace" messages.
 	LogLevelTrace = "trace"
 

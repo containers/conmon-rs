@@ -80,6 +80,15 @@ var _ = Describe("ConmonClient", func() {
 				} else {
 					Expect(version.CargoTree).To(BeEmpty())
 				}
+
+				// Validate the log file
+				logPath := filepath.Join(tr.tmpDir, "logs")
+				files, err := os.ReadDir(logPath)
+				Expect(err).To(BeNil())
+				Expect(files).To(HaveLen(1))
+				content, err := os.ReadFile(filepath.Join(logPath, files[0].Name()))
+				Expect(err).To(BeNil())
+				Expect(string(content)).To(ContainSubstring("Got a version request"))
 			})
 		}
 	})

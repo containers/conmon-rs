@@ -212,6 +212,7 @@ func (tr *testRunner) configGivenEnv() *client.ConmonClient {
 	logger := logrus.StandardLogger()
 	logger.Level = logrus.TraceLevel
 	cfg.ClientLogger = logger
+	cfg.LogDrivers = []string{client.LogDriverStdout, client.LogDriverFile}
 
 	sut, err := client.New(cfg)
 	Expect(err).To(BeNil())

@@ -129,11 +129,15 @@ pub struct Config {
 #[strum(serialize_all = "lowercase")]
 /// Available log drivers.
 pub enum LogDriver {
-    /// Log to stdout
+    /// Log to stdout.
     Stdout,
 
-    /// Use systemd journald as log driver
+    /// Use systemd journald as log driver.
     Systemd,
+
+    /// Use a file destination as log driver. The log file path fill be generated to match
+    /// `[--runtime-dir]/logs/conmonrs.YYYY-MM-DD` and rotates on a daily basis.
+    File,
 }
 
 #[derive(

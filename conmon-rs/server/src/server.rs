@@ -11,6 +11,7 @@ use crate::{
 use anyhow::{format_err, Context, Result};
 use capnp::text_list::Reader;
 use capnp_rpc::{rpc_twoparty_capnp::Side, twoparty, RpcSystem};
+use clap::crate_name;
 use conmon_common::conmon_capnp::conmon;
 use futures::{AsyncReadExt, FutureExt};
 use getset::Getters;
@@ -58,8 +59,8 @@ impl Server {
             process::exit(0);
         }
 
-        server.init_logging().context("set log verbosity")?;
         server.config().validate().context("validate config")?;
+        server.init_logging().context("init logging")?;
 
         Self::init().context("init self")?;
         Ok(server)
@@ -127,9 +128,24 @@ impl Server {
             None
         };
 
+        let file = if self.config().log_drivers().contains(&LogDriver::File) {
+            let path = self.config().runtime_dir().join("logs");
+            let appender = tracing_appender::rolling::daily(path, crate_name!());
+            tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_ansi(false)
+                .with_line_number(true)
+                .with_writer(appender)
+                .with_filter(level)
+                .into()
+        } else {
+            None
+        };
+
         registry
             .with(stdout)
             .with(systemd)
+            .with(file)
             .try_init()
             .context("init registry")?;
         info!("Set log level to: {}", self.config().log_level());
