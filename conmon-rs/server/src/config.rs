@@ -12,9 +12,6 @@ macro_rules! prefix {
     };
 }
 
-/// Specifies the full version output option.
-pub const VERSION_FULL: &str = "full";
-
 #[derive(CopyGetters, Debug, Deserialize, Eq, Getters, Parser, PartialEq, Serialize, Setters)]
 #[serde(rename_all = "kebab-case")]
 #[clap(
@@ -24,17 +21,17 @@ pub const VERSION_FULL: &str = "full";
 
 /// An OCI container runtime monitor.
 pub struct Config {
-    #[get = "pub"]
+    #[get_copy = "pub"]
     #[clap(
         default_missing_value("default"),
         env(concat!(prefix!(), "VERSION")),
         long("version"),
-        possible_values(["default",  VERSION_FULL]),
+        possible_values(Verbosity::iter().map(|x| x.into()).collect::<Vec<&str>>()),
         short('v'),
         value_name("VERBOSITY")
     )]
     /// Show version information, specify "full" for verbose output.
-    version: Option<String>,
+    version: Option<Verbosity>,
 
     #[get = "pub"]
     #[clap(
@@ -110,6 +107,29 @@ pub struct Config {
     )]
     /// Select the cgroup manager to be used
     cgroup_manager: CgroupManager,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Deserialize,
+    EnumIter,
+    EnumString,
+    Eq,
+    IntoStaticStr,
+    Hash,
+    PartialEq,
+    Serialize,
+)]
+#[strum(serialize_all = "lowercase")]
+/// Available verbosity levels.
+pub enum Verbosity {
+    /// The default output verbosity.
+    Default,
+
+    /// The full output verbosity.
+    Full,
 }
 
 #[derive(

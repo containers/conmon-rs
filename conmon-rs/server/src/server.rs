@@ -2,7 +2,7 @@
 
 use crate::{
     child_reaper::ChildReaper,
-    config::{CgroupManager, Config, LogDriver, VERSION_FULL},
+    config::{CgroupManager, Config, LogDriver, Verbosity},
     container_io::{ContainerIO, ContainerIOType},
     init::{DefaultInit, Init},
     listener::{DefaultListener, Listener},
@@ -54,7 +54,7 @@ impl Server {
         };
 
         if let Some(v) = server.config().version() {
-            Version::new(v == VERSION_FULL).print();
+            Version::new(v == Verbosity::Full).print();
             process::exit(0);
         }
 
