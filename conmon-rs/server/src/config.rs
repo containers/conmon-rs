@@ -48,17 +48,18 @@ pub struct Config {
     /// The logging level of the conmon server.
     log_level: String,
 
-    #[get_copy = "pub"]
+    #[get = "pub"]
     #[clap(
         default_value(LogDriver::Systemd.into()),
-        env(concat!(prefix!(), "LOG_DRIVER")),
-        long("log-driver"),
+        env(concat!(prefix!(), "LOG_DRIVERS")),
+        multiple(true),
+        long("log-drivers"),
         short('d'),
         possible_values(LogDriver::iter().map(|x| x.into()).collect::<Vec<&str>>()),
-        value_name("DRIVER")
+        value_name("DRIVERS")
     )]
-    /// The logging driver used by the conmon server.
-    log_driver: LogDriver,
+    /// The logging drivers used by the server. Can be specified multiple times.
+    log_drivers: Vec<LogDriver>,
 
     #[get = "pub"]
     #[clap(

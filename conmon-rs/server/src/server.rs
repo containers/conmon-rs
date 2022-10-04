@@ -108,30 +108,32 @@ impl Server {
             LevelFilter::from_str(self.config().log_level()).context("convert log level filter")?;
         let registry = tracing_subscriber::registry();
 
-        match self.config().log_driver() {
-            LogDriver::Stdout => {
-                let layer = tracing_subscriber::fmt::layer()
-                    .with_target(true)
-                    .with_line_number(true)
-                    .with_filter(level);
-                registry
-                    .with(layer)
-                    .try_init()
-                    .context("init stdout fmt layer")?;
-                info!("Using stdout logger");
-            }
-            LogDriver::Systemd => {
-                let layer = tracing_journald::layer()
-                    .context("unable to connect to journald")?
-                    .with_filter(level);
-                registry
-                    .with(layer)
-                    .try_init()
-                    .context("init journald layer")?;
-                info!("Using systemd/journald logger");
-            }
-        }
+        let stdout = if self.config().log_drivers().contains(&LogDriver::Stdout) {
+            tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_line_number(true)
+                .with_filter(level)
+                .into()
+        } else {
+            None
+        };
+
+        let systemd = if self.config().log_drivers().contains(&LogDriver::Systemd) {
+            tracing_journald::layer()
+                .context("unable to connect to journald")?
+                .with_filter(level)
+                .into()
+        } else {
+            None
+        };
+
+        registry
+            .with(stdout)
+            .with(systemd)
+            .try_init()
+            .context("init registry")?;
         info!("Set log level to: {}", self.config().log_level());
+
         Ok(())
     }
 

@@ -57,9 +57,9 @@ type ConmonServerConfig struct {
 	// Can be "trace", "debug", "info", "warn", "error" or "off".
 	LogLevel string
 
-	// LogDriver is the possible server logging driver.
-	// Can be "stdout" or "systemd".
-	LogDriver string
+	// LogDrivers are the possible server logging drivers.
+	// Can be "stdout", "systemd" or both.
+	LogDrivers []string
 
 	// Runtime is the binary path of the OCI runtime to use to operate on the
 	// containers.
@@ -106,7 +106,7 @@ func NewConmonServerConfig(
 ) *ConmonServerConfig {
 	return &ConmonServerConfig{
 		LogLevel:     LogLevelDebug,
-		LogDriver:    LogDriverStdout,
+		LogDrivers:   []string{LogDriverStdout},
 		Runtime:      runtime,
 		RuntimeRoot:  runtimeRoot,
 		ServerRunDir: serverRunDir,
@@ -212,7 +212,7 @@ func (c *ConmonClient) startServer(config *ConmonServerConfig) error {
 		Setpgid: true,
 	}
 
-	if config.LogDriver == LogDriverStdout {
+	if contains(config.LogDrivers, LogDriverStdout) {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if config.Stdout != nil {
@@ -228,6 +228,16 @@ func (c *ConmonClient) startServer(config *ConmonServerConfig) error {
 	}
 
 	return nil
+}
+
+func contains[T comparable](haystack []T, needle T) bool {
+	for _, value := range haystack {
+		if value == needle {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (c *ConmonClient) toArgs(config *ConmonServerConfig) (entrypoint string, args []string, err error) {
@@ -263,11 +273,11 @@ func (c *ConmonClient) toArgs(config *ConmonServerConfig) (entrypoint string, ar
 		args = append(args, "--log-level", config.LogLevel)
 	}
 
-	if config.LogDriver != "" {
-		if err := validateLogDriver(config.LogDriver); err != nil {
+	for _, driver := range config.LogDrivers {
+		if err := validateLogDriver(driver); err != nil {
 			return "", args, fmt.Errorf("validate log driver: %w", err)
 		}
-		args = append(args, "--log-driver", config.LogDriver)
+		args = append(args, "--log-drivers", driver)
 	}
 
 	const cgroupManagerFlag = "--cgroup-manager"
