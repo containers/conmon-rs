@@ -5,6 +5,7 @@ use crate::{
     config::{CgroupManager, Config, LogDriver, Verbosity},
     container_io::{ContainerIO, ContainerIOType},
     init::{DefaultInit, Init},
+    journal::Journal,
     listener::{DefaultListener, Listener},
     version::Version,
 };
@@ -58,7 +59,7 @@ impl Server {
             process::exit(0);
         }
 
-        server.init_logging().context("set log verbosity")?;
+        server.init_logging().context("init logging")?;
         server.config().validate().context("validate config")?;
 
         Self::init().context("init self")?;
@@ -121,13 +122,16 @@ impl Server {
                 info!("Using stdout logger");
             }
             LogDriver::Systemd => {
-                let layer = tracing_journald::layer()
-                    .context("unable to connect to journald")?
+                let layer = tracing_subscriber::fmt::layer()
+                    .with_target(true)
+                    .with_line_number(true)
+                    .without_time()
+                    .with_writer(Journal::default())
                     .with_filter(level);
                 registry
                     .with(layer)
                     .try_init()
-                    .context("init journald layer")?;
+                    .context("init journald fmt layer")?;
                 info!("Using systemd/journald logger");
             }
         }

@@ -9,6 +9,7 @@ mod container_io;
 mod container_log;
 mod cri_logger;
 mod init;
+mod journal;
 mod listener;
 mod oom_watcher;
 mod rpc;
