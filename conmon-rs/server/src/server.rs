@@ -105,8 +105,8 @@ impl Server {
     }
 
     fn init_logging(&self) -> Result<()> {
-        let level =
-            LevelFilter::from_str(self.config().log_level()).context("convert log level filter")?;
+        let level = LevelFilter::from_str(self.config().log_level().as_ref())
+            .context("convert log level filter")?;
         let registry = tracing_subscriber::registry();
 
         match self.config().log_driver() {

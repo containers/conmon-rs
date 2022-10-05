@@ -1,10 +1,10 @@
 //! Configuration related structures
 use anyhow::{bail, Result};
-use clap::{AppSettings, Parser};
+use clap::{ArgEnum, Parser};
 use getset::{CopyGetters, Getters, Setters};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
-use strum::{EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
+use strum::{AsRefStr, Display, EnumIter, EnumString, IntoStaticStr};
 
 macro_rules! prefix {
     () => {
@@ -16,7 +16,7 @@ macro_rules! prefix {
 #[serde(rename_all = "kebab-case")]
 #[clap(
     after_help("More info at: https://github.com/containers/conmon-rs"),
-    global_setting(AppSettings::NoAutoVersion)
+    disable_version_flag(true)
 )]
 
 /// An OCI container runtime monitor.
@@ -26,8 +26,8 @@ pub struct Config {
         default_missing_value("default"),
         env(concat!(prefix!(), "VERSION")),
         long("version"),
-        possible_values(Verbosity::iter().map(|x| x.into()).collect::<Vec<&str>>()),
         short('v'),
+        value_enum,
         value_name("VERBOSITY")
     )]
     /// Show version information, specify "full" for verbose output.
@@ -35,23 +35,23 @@ pub struct Config {
 
     #[get = "pub"]
     #[clap(
-        default_value("info"),
+        default_value_t,
         env(concat!(prefix!(), "LOG_LEVEL")),
         long("log-level"),
         short('l'),
-        possible_values(["trace", "debug", "info", "warn", "error", "off"]),
+        value_enum,
         value_name("LEVEL")
     )]
     /// The logging level of the conmon server.
-    log_level: String,
+    log_level: LogLevel,
 
     #[get_copy = "pub"]
     #[clap(
-        default_value(LogDriver::Systemd.into()),
+        default_value_t,
         env(concat!(prefix!(), "LOG_DRIVER")),
         long("log-driver"),
         short('d'),
-        possible_values(LogDriver::iter().map(|x| x.into()).collect::<Vec<&str>>()),
+        value_enum,
         value_name("DRIVER")
     )]
     /// The logging driver used by the conmon server.
@@ -98,11 +98,11 @@ pub struct Config {
 
     #[get_copy = "pub"]
     #[clap(
-        default_value(CgroupManager::Systemd.into()),
+        default_value_t,
         env(concat!(prefix!(), "CGROUP_MANAGER")),
         long("cgroup-manager"),
         short('c'),
-        possible_values(CgroupManager::iter().map(|x| x.into()).collect::<Vec<&str>>()),
+        value_enum,
         value_name("MANAGER")
     )]
     /// Select the cgroup manager to be used
@@ -110,15 +110,62 @@ pub struct Config {
 }
 
 #[derive(
+    ArgEnum,
+    AsRefStr,
     Clone,
     Copy,
     Debug,
     Deserialize,
+    Display,
     EnumIter,
     EnumString,
     Eq,
-    IntoStaticStr,
     Hash,
+    IntoStaticStr,
+    PartialEq,
+    Serialize,
+)]
+#[strum(serialize_all = "lowercase")]
+/// Available log levels.
+pub enum LogLevel {
+    /// Trace level, the most verbose one.
+    Trace,
+
+    /// Debug level, less verbose than trace.
+    Debug,
+
+    /// Info level, less verbose than debug.
+    Info,
+
+    /// Warn level, less verbose than info.
+    Warn,
+
+    /// Error level, showing only errors.
+    Error,
+
+    /// Disable logging.
+    Off,
+}
+
+impl Default for LogLevel {
+    fn default() -> Self {
+        Self::Info
+    }
+}
+
+#[derive(
+    ArgEnum,
+    AsRefStr,
+    Clone,
+    Copy,
+    Debug,
+    Deserialize,
+    Display,
+    EnumIter,
+    EnumString,
+    Eq,
+    Hash,
+    IntoStaticStr,
     PartialEq,
     Serialize,
 )]
@@ -133,38 +180,50 @@ pub enum Verbosity {
 }
 
 #[derive(
+    ArgEnum,
+    AsRefStr,
     Clone,
     Copy,
     Debug,
     Deserialize,
+    Display,
     EnumIter,
     EnumString,
     Eq,
-    IntoStaticStr,
     Hash,
+    IntoStaticStr,
     PartialEq,
     Serialize,
 )]
 #[strum(serialize_all = "lowercase")]
 /// Available log drivers.
 pub enum LogDriver {
-    /// Log to stdout
+    /// Use stdout as log driver.
     Stdout,
 
     /// Use systemd journald as log driver
     Systemd,
 }
 
+impl Default for LogDriver {
+    fn default() -> Self {
+        Self::Systemd
+    }
+}
+
 #[derive(
+    ArgEnum,
+    AsRefStr,
     Clone,
     Copy,
     Debug,
     Deserialize,
+    Display,
     EnumIter,
     EnumString,
     Eq,
-    IntoStaticStr,
     Hash,
+    IntoStaticStr,
     PartialEq,
     Serialize,
 )]
@@ -176,6 +235,12 @@ pub enum CgroupManager {
 
     /// Use the cgroup filesystem to create and manage cgroups
     Cgroupfs,
+}
+
+impl Default for CgroupManager {
+    fn default() -> Self {
+        Self::Systemd
+    }
 }
 
 impl Default for Config {
