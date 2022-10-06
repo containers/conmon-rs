@@ -208,6 +208,7 @@ func MustFile(file string) string {
 func (tr *testRunner) configGivenEnv() *client.ConmonClient {
 	cfg := client.NewConmonServerConfig(runtimePath, tr.rr.runtimeRoot, tr.tmpDir)
 	cfg.ConmonServerPath = conmonPath
+	cfg.LogDriver = client.LogDriverStdout
 
 	logger := logrus.StandardLogger()
 	logger.Level = logrus.TraceLevel

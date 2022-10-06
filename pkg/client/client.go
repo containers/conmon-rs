@@ -106,7 +106,7 @@ func NewConmonServerConfig(
 ) *ConmonServerConfig {
 	return &ConmonServerConfig{
 		LogLevel:     LogLevelDebug,
-		LogDriver:    LogDriverStdout,
+		LogDriver:    LogDriverSystemd,
 		Runtime:      runtime,
 		RuntimeRoot:  runtimeRoot,
 		ServerRunDir: serverRunDir,
