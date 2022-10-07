@@ -128,7 +128,7 @@ var _ = Describe("ConmonClient", func() {
 					Terminal:     terminal,
 					ExitPaths:    []string{tr.exitPath()},
 					OOMExitPaths: []string{tr.oomExitPath()},
-					LogDrivers: []client.LogDriver{{
+					LogDrivers: []client.ContainerLogDriver{{
 						Type: client.LogDriverTypeContainerRuntimeInterface,
 						Path: tr.logPath(),
 					}},
@@ -146,7 +146,7 @@ var _ = Describe("ConmonClient", func() {
 					ID:         tr.ctrID,
 					BundlePath: tr.tmpDir,
 					Terminal:   terminal,
-					LogDrivers: []client.LogDriver{{
+					LogDrivers: []client.ContainerLogDriver{{
 						Type: client.LogDriverTypeContainerRuntimeInterface,
 						Path: tr.logPath(),
 					}},

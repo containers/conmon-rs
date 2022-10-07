@@ -146,7 +146,7 @@ func (tr *testRunner) defaultConfig(terminal bool) *client.CreateContainerConfig
 		Stdin:        true,
 		ExitPaths:    []string{tr.exitPath()},
 		OOMExitPaths: []string{tr.oomExitPath()},
-		LogDrivers: []client.LogDriver{{
+		LogDrivers: []client.ContainerLogDriver{{
 			Type: client.LogDriverTypeContainerRuntimeInterface,
 			Path: tr.logPath(),
 		}},
