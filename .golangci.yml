@@ -100,7 +100,7 @@ linters-settings:
   varnamelen:
     min-name-length: 1
   cyclop:
-    max-complexity: 15
+    max-complexity: 20
   gocognit:
     min-complexity: 30
   nestif:

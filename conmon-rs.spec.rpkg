@@ -28,6 +28,7 @@ BuildRequires: capnproto
 BuildRequires: cargo
 BuildRequires: git-core
 BuildRequires: make
+BuildRequires: protobuf-compiler
 Provides: %{bin_name}
 ExclusiveArch: %{rust_arches}
 

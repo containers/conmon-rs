@@ -2,4 +2,4 @@
 set -euo pipefail
 
 sudo apt-get update
-sudo apt-get install capnproto runc
+sudo apt-get install capnproto runc protobuf-compiler

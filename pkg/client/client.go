@@ -83,6 +83,19 @@ type ConmonServerConfig struct {
 
 	// CgroupManager can be use to select the cgroup manager.
 	CgroupManager CgroupManager
+
+	// Tracing can be used to enable OpenTelemetry tracing.
+	Tracing *Tracing
+}
+
+// Tracing is the structure for managing server-side OpenTelemetry tracing.
+type Tracing struct {
+	// Enabled tells the server to run with OpenTelemetry tracing.
+	Enabled bool
+
+	// Endpoint is the GRPC tracing endpoint for OLTP.
+	// Defaults to "http://localhost:4317"
+	Endpoint string
 }
 
 // NewConmonServerConfig creates a new ConmonServerConfig instance for the
@@ -267,6 +280,14 @@ func (c *ConmonClient) toArgs(config *ConmonServerConfig) (entrypoint string, ar
 
 	default:
 		return "", args, errUndefinedCgroupManager
+	}
+
+	if config.Tracing != nil && config.Tracing.Enabled {
+		args = append(args, "--enable-tracing")
+
+		if config.Tracing.Endpoint != "" {
+			args = append(args, "--tracing-endpoint", config.Tracing.Endpoint)
+		}
 	}
 
 	return entrypoint, args, nil
