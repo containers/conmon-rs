@@ -6,7 +6,6 @@ use std::{
     io::{self, ErrorKind, Write},
     path::Path,
 };
-use tracing::info;
 
 #[cfg(test)]
 use mockall::{automock, predicate::*};
@@ -36,7 +35,7 @@ where
         {
             match err.kind() {
                 ErrorKind::PermissionDenied => {
-                    info!("Missing sufficient privileges to adjust OOM score")
+                    println!("Missing sufficient privileges to adjust OOM score")
                 }
                 _ => bail!("adjusting OOM score {}", err),
             }

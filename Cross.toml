@@ -1,2 +1,14 @@
 [build]
-pre-build = ["apt-get update && apt-get install -y capnproto"]
+pre-build = ["apt-get update && apt-get install -y capnproto protobuf-compiler libz-dev"]
+
+[target.i686-unknown-linux-gnu]
+pre-build = ["dpkg --add-architecture i386 && apt-get update && apt-get install -y capnproto protobuf-compiler libz-dev:i386"]
+
+[target.aarch64-unknown-linux-gnu]
+pre-build = ["dpkg --add-architecture arm64 && apt-get update && apt-get install -y capnproto protobuf-compiler libz-dev:arm64"]
+
+[target.powerpc64le-unknown-linux-gnu]
+pre-build = ["dpkg --add-architecture ppc64el && apt-get update && apt-get install -y capnproto protobuf-compiler libz-dev:ppc64el"]
+
+[target.s390x-unknown-linux-gnu]
+pre-build = ["dpkg --add-architecture s390x && apt-get update && apt-get install -y capnproto protobuf-compiler libz-dev:s390x"]

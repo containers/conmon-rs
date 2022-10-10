@@ -5,9 +5,8 @@ on:
     branches:
       - main
 env:
-  CROSS_VERSION: v0.2.4
   CARGO_TERM_COLOR: always
-  ACTION_MSRV_TOOLCHAIN: 1.58.1
+  TRIPLE: unknown-linux-gnu
 jobs:
   build:
     strategy:
@@ -31,18 +30,11 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cross-${{matrix.arch}}-${{ hashFiles('**/Cargo.lock') }}
-      - name: Select Toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN']  }}
-          default: true
-          override: true
-          components: rustfmt
       - name: Install cross-rs
         run: |
-          curl -sSfL --retry 5 --retry-delay 3 \
-            "https://github.com/cross-rs/cross/releases/download/$CROSS_VERSION/cross-x86_64-unknown-linux-gnu.tar.gz" \
-            -o- | tar xfz - -C /usr/local/bin
+          cargo install cross --git https://github.com/cross-rs/cross
           cross --version
+      - name: Ensure the latest base image
+        run: docker pull ghcr.io/cross-rs/${{matrix.arch}}-$TRIPLE:main
       - name: Build for ${{matrix.arch}}
-        run: cross build --target ${{matrix.arch}}-unknown-linux-gnu
+        run: cross build -v --target ${{matrix.arch}}-$TRIPLE

@@ -12,6 +12,7 @@ use crate::{
 use anyhow::{format_err, Context, Result};
 use capnp::text_list::Reader;
 use capnp_rpc::{rpc_twoparty_capnp::Side, twoparty, RpcSystem};
+use clap::crate_name;
 use conmon_common::conmon_capnp::conmon;
 use futures::{AsyncReadExt, FutureExt};
 use getset::Getters;
@@ -21,7 +22,18 @@ use nix::{
     sys::signal::Signal,
     unistd::{fork, ForkResult},
 };
-use std::{fs::File, io::Write, path::Path, process, str::FromStr, sync::Arc};
+use opentelemetry::{
+    global,
+    runtime::Tokio,
+    sdk::{
+        propagation::TraceContextPropagator,
+        trace::{self, Tracer},
+        Resource,
+    },
+    KeyValue,
+};
+use opentelemetry_otlp::{ExportConfig, Protocol, WithExportConfig};
+use std::{fs::File, io::Write, path::Path, process, str::FromStr, sync::Arc, time::Duration};
 use tokio::{
     fs,
     runtime::{Builder, Handle},
@@ -30,8 +42,11 @@ use tokio::{
     task::{self, LocalSet},
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use tracing::{debug, debug_span, info, Instrument};
-use tracing_subscriber::{filter::LevelFilter, prelude::*};
+use tracing::{debug, debug_span, info, Instrument, Subscriber};
+use tracing_opentelemetry::OpenTelemetryLayer;
+use tracing_subscriber::{
+    filter::LevelFilter, layer::SubscriberExt, prelude::*, registry::LookupSpan,
+};
 use twoparty::VatNetwork;
 
 #[derive(Debug, Getters)]
@@ -59,7 +74,6 @@ impl Server {
             process::exit(0);
         }
 
-        server.init_logging().context("init logging")?;
         server.config().validate().context("validate config")?;
 
         Self::init().context("init self")?;
@@ -107,7 +121,7 @@ impl Server {
     fn init_logging(&self) -> Result<()> {
         let level = LevelFilter::from_str(self.config().log_level().as_ref())
             .context("convert log level filter")?;
-        let registry = tracing_subscriber::registry();
+        let registry = tracing_subscriber::registry().with(self.telemetry_layer()?);
 
         match self.config().log_driver() {
             LogDriver::Stdout => {
@@ -139,8 +153,39 @@ impl Server {
         Ok(())
     }
 
+    /// Return the telemetry layer if tracing is enabled.
+    fn telemetry_layer<T>(&self) -> Result<Option<OpenTelemetryLayer<T, Tracer>>>
+    where
+        T: Subscriber + for<'span> LookupSpan<'span>,
+    {
+        if !self.config.enable_tracing() {
+            return Ok(None);
+        }
+
+        global::set_text_map_propagator(TraceContextPropagator::new());
+        let exporter = opentelemetry_otlp::new_exporter()
+            .tonic()
+            .with_export_config(ExportConfig {
+                endpoint: self.config.tracing_endpoint().into(),
+                timeout: Duration::from_secs(3),
+                protocol: Protocol::Grpc,
+            });
+        let tracer =
+            opentelemetry_otlp::new_pipeline()
+                .tracing()
+                .with_exporter(exporter)
+                .with_trace_config(trace::config().with_resource(Resource::new(vec![
+                    KeyValue::new("service.name", crate_name!()),
+                ])))
+                .install_batch(Tokio)?;
+
+        Ok(tracing_opentelemetry::layer().with_tracer(tracer).into())
+    }
+
     /// Spwans all required tokio tasks.
     async fn spawn_tasks(self) -> Result<()> {
+        self.init_logging().context("init logging")?;
+
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let socket = self.config().socket();
         let reaper = self.reaper.clone();
@@ -201,12 +246,16 @@ impl Server {
     async fn start_backend(self, mut shutdown_rx: oneshot::Receiver<()>) -> Result<()> {
         let listener =
             Listener::<DefaultListener>::default().bind_long_path(&self.config().socket())?;
+        let enable_tracing = self.config().enable_tracing();
         let client: conmon::Client = capnp_rpc::new_client(self);
 
         loop {
             let stream = tokio::select! {
                 _ = &mut shutdown_rx => {
                     debug!("Received shutdown message");
+                    if enable_tracing {
+                        global::shutdown_tracer_provider();
+                    }
                     return Ok(())
                 }
                 stream = listener.accept() => {

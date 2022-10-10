@@ -93,7 +93,7 @@ pub struct Config {
         long("skip-fork"),
         value_name("SKIP_FORK")
     )]
-    /// Do not fork if true
+    /// Do not fork if true.
     skip_fork: bool,
 
     #[get_copy = "pub"]
@@ -105,8 +105,28 @@ pub struct Config {
         value_enum,
         value_name("MANAGER")
     )]
-    /// Select the cgroup manager to be used
+    /// Select the cgroup manager to be used.
     cgroup_manager: CgroupManager,
+
+    #[get_copy = "pub"]
+    #[clap(
+        env(concat!(prefix!(), "ENABLE_TRACING")),
+        long("enable-tracing"),
+        short('e'),
+    )]
+    /// Enable OpenTelemetry tracing.
+    enable_tracing: bool,
+
+    #[get = "pub"]
+    #[clap(
+        default_value("http://localhost:4317"),
+        env(concat!(prefix!(), "TRACING_ENDPOINT")),
+        long("tracing-endpoint"),
+        short('t'),
+        value_name("URL")
+    )]
+    /// OpenTelemetry GRPC endpoint to be used for tracing.
+    tracing_endpoint: String,
 }
 
 #[derive(
