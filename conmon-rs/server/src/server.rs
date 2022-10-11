@@ -20,7 +20,7 @@ use nix::{
     errno,
     libc::_exit,
     sys::signal::Signal,
-    unistd::{fork, ForkResult},
+    unistd::{fork, gethostname, ForkResult},
 };
 use opentelemetry::{
     global,
@@ -30,9 +30,9 @@ use opentelemetry::{
         trace::{self, Tracer},
         Resource,
     },
-    KeyValue,
 };
 use opentelemetry_otlp::{ExportConfig, Protocol, WithExportConfig};
+use opentelemetry_semantic_conventions::resource::{HOST_NAME, PROCESS_PID, SERVICE_NAME};
 use std::{fs::File, io::Write, path::Path, process, str::FromStr, sync::Arc, time::Duration};
 use tokio::{
     fs,
@@ -170,14 +170,20 @@ impl Server {
                 timeout: Duration::from_secs(3),
                 protocol: Protocol::Grpc,
             });
-        let tracer =
-            opentelemetry_otlp::new_pipeline()
-                .tracing()
-                .with_exporter(exporter)
-                .with_trace_config(trace::config().with_resource(Resource::new(vec![
-                    KeyValue::new("service.name", crate_name!()),
-                ])))
-                .install_batch(Tokio)?;
+        let hostname = gethostname()
+            .context("get hostname")?
+            .to_str()
+            .context("convert hostname to string")?
+            .to_string();
+        let tracer = opentelemetry_otlp::new_pipeline()
+            .tracing()
+            .with_exporter(exporter)
+            .with_trace_config(trace::config().with_resource(Resource::new(vec![
+                SERVICE_NAME.string(crate_name!()),
+                PROCESS_PID.i64(process::id() as i64),
+                HOST_NAME.string(hostname),
+            ])))
+            .install_batch(Tokio)?;
 
         Ok(tracing_opentelemetry::layer().with_tracer(tracer).into())
     }

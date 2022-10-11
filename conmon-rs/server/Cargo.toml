@@ -24,6 +24,7 @@ nix = "0.25.0"
 notify = "5.0.0"
 opentelemetry = { version = "0.18.0", features = ["rt-tokio"] }
 opentelemetry-otlp = "0.11.0"
+opentelemetry-semantic-conventions = "0.10.0"
 prctl = "1.0.0"
 regex = "1.6.0"
 sendfd = { version = "0.4.3", features = ["tokio"] }
