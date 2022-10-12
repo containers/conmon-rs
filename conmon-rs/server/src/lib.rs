@@ -15,5 +15,6 @@ mod oom_watcher;
 mod rpc;
 mod server;
 mod streams;
+mod telemetry;
 mod terminal;
 mod version;
