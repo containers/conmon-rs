@@ -7,12 +7,12 @@ use crate::{
     init::{DefaultInit, Init},
     journal::Journal,
     listener::{DefaultListener, Listener},
+    telemetry::Telemetry,
     version::Version,
 };
 use anyhow::{format_err, Context, Result};
 use capnp::text_list::Reader;
 use capnp_rpc::{rpc_twoparty_capnp::Side, twoparty, RpcSystem};
-use clap::crate_name;
 use conmon_common::conmon_capnp::conmon;
 use futures::{AsyncReadExt, FutureExt};
 use getset::Getters;
@@ -20,20 +20,9 @@ use nix::{
     errno,
     libc::_exit,
     sys::signal::Signal,
-    unistd::{fork, gethostname, ForkResult},
+    unistd::{fork, ForkResult},
 };
-use opentelemetry::{
-    global,
-    runtime::Tokio,
-    sdk::{
-        propagation::TraceContextPropagator,
-        trace::{self, Tracer},
-        Resource,
-    },
-};
-use opentelemetry_otlp::{ExportConfig, Protocol, WithExportConfig};
-use opentelemetry_semantic_conventions::resource::{HOST_NAME, PROCESS_PID, SERVICE_NAME};
-use std::{fs::File, io::Write, path::Path, process, str::FromStr, sync::Arc, time::Duration};
+use std::{fs::File, io::Write, path::Path, process, str::FromStr, sync::Arc};
 use tokio::{
     fs,
     runtime::{Builder, Handle},
@@ -42,11 +31,8 @@ use tokio::{
     task::{self, LocalSet},
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use tracing::{debug, debug_span, info, Instrument, Subscriber};
-use tracing_opentelemetry::OpenTelemetryLayer;
-use tracing_subscriber::{
-    filter::LevelFilter, layer::SubscriberExt, prelude::*, registry::LookupSpan,
-};
+use tracing::{debug, debug_span, info, Instrument};
+use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, prelude::*};
 use twoparty::VatNetwork;
 
 #[derive(Debug, Getters)]
@@ -121,7 +107,16 @@ impl Server {
     fn init_logging(&self) -> Result<()> {
         let level = LevelFilter::from_str(self.config().log_level().as_ref())
             .context("convert log level filter")?;
-        let registry = tracing_subscriber::registry().with(self.telemetry_layer()?);
+
+        let telemetry_layer = if self.config().enable_tracing() {
+            Telemetry::layer(self.config().tracing_endpoint())
+                .context("build telemetry layer")?
+                .into()
+        } else {
+            None
+        };
+
+        let registry = tracing_subscriber::registry().with(telemetry_layer);
 
         match self.config().log_driver() {
             LogDriver::Stdout => {
@@ -151,41 +146,6 @@ impl Server {
         }
         info!("Set log level to: {}", self.config().log_level());
         Ok(())
-    }
-
-    /// Return the telemetry layer if tracing is enabled.
-    fn telemetry_layer<T>(&self) -> Result<Option<OpenTelemetryLayer<T, Tracer>>>
-    where
-        T: Subscriber + for<'span> LookupSpan<'span>,
-    {
-        if !self.config.enable_tracing() {
-            return Ok(None);
-        }
-
-        global::set_text_map_propagator(TraceContextPropagator::new());
-        let exporter = opentelemetry_otlp::new_exporter()
-            .tonic()
-            .with_export_config(ExportConfig {
-                endpoint: self.config.tracing_endpoint().into(),
-                timeout: Duration::from_secs(3),
-                protocol: Protocol::Grpc,
-            });
-        let hostname = gethostname()
-            .context("get hostname")?
-            .to_str()
-            .context("convert hostname to string")?
-            .to_string();
-        let tracer = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_exporter(exporter)
-            .with_trace_config(trace::config().with_resource(Resource::new(vec![
-                SERVICE_NAME.string(crate_name!()),
-                PROCESS_PID.i64(process::id() as i64),
-                HOST_NAME.string(hostname),
-            ])))
-            .install_batch(Tokio)?;
-
-        Ok(tracing_opentelemetry::layer().with_tracer(tracer).into())
     }
 
     /// Spwans all required tokio tasks.
@@ -260,7 +220,7 @@ impl Server {
                 _ = &mut shutdown_rx => {
                     debug!("Received shutdown message");
                     if enable_tracing {
-                        global::shutdown_tracer_provider();
+                        Telemetry::shutdown();
                     }
                     return Ok(())
                 }
