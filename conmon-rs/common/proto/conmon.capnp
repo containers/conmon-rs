@@ -5,6 +5,7 @@ interface Conmon {
     # Version
     struct VersionRequest {
         verbose @0 :Bool;
+        metadata @1 :Data;
     }
 
     struct VersionResponse {
@@ -17,6 +18,7 @@ interface Conmon {
         rustVersion @6 :Text;
         cargoVersion @7 :Text;
         cargoTree @8 :Text;
+        metadata @9 :Data;
     }
 
     version @0 (request: VersionRequest) -> (response: VersionResponse);
@@ -34,6 +36,7 @@ interface Conmon {
         cleanupCmd @7 :List(Text);
         globalArgs @8 :List(Text);
         commandArgs @9 :List(Text);
+        metadata @10 :Data;
     }
 
     struct LogDriver {
@@ -65,6 +68,7 @@ interface Conmon {
         timeoutSec @1 :UInt64;
         command @2 :List(Text);
         terminal @3 :Bool;
+        metadata @4 :Data;
     }
 
     struct ExecSyncContainerResponse {
@@ -83,6 +87,7 @@ interface Conmon {
         socketPath @1 :Text;
         execSessionId @2 :Text;
         stopAfterStdinEof @3 :Bool;
+        metadata @4 :Data;
     }
 
     struct AttachResponse {
@@ -94,6 +99,7 @@ interface Conmon {
     # ReopenLog
     struct ReopenLogRequest {
         id @0 :Text;
+        metadata @1 :Data;
     }
 
     struct ReopenLogResponse {
@@ -107,6 +113,7 @@ interface Conmon {
         id @0 :Text; # container identifier
         width @1 :UInt16; # columns in characters
         height @2 :UInt16; # rows in characters
+        metadata @3 :Data;
     }
 
     struct SetWindowSizeResponse {
