@@ -2357,9 +2357,9 @@ dependencies = [
 
 [[package]]
 name = "tzdb"
-version = "0.3.7"
+version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17ecc46e3cc5b59ded833d94a8ae50c7146f4a567276dbf9d9b716e1fcd09d09"
+checksum = "2d4b4228e1a1675dfdf0c195919ede50521091e21efaa8995beb55e5cbbf9402"
 dependencies = [
  "iana-time-zone",
  "phf",
