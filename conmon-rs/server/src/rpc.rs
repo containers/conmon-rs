@@ -3,6 +3,7 @@ use crate::{
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     server::Server,
+    telemetry::Telemetry,
     version::Version,
 };
 use anyhow::format_err;
@@ -68,8 +69,9 @@ impl conmon::Server for Server {
         debug!("Got a version request");
 
         let req = pry!(pry!(params.get()).get_request());
-        let version = Version::new(req.get_verbose());
+        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
 
+        let version = Version::new(req.get_verbose());
         let mut response = results.get().init_response();
         response.set_process_id(process::id());
         response.set_version(version.version());
@@ -91,6 +93,8 @@ impl conmon::Server for Server {
         mut results: conmon::CreateContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
+        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+
         let id = pry!(req.get_id()).to_string();
         let cleanup_cmd: Vec<String> = pry!(pry!(req.get_cleanup_cmd())
             .iter()
@@ -180,6 +184,8 @@ impl conmon::Server for Server {
         mut results: conmon::ExecSyncContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
+        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+
         let id = pry!(req.get_id()).to_string();
         let timeout = req.get_timeout_sec();
 
@@ -262,6 +268,8 @@ impl conmon::Server for Server {
         _: conmon::AttachContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
+        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+
         let container_id = pry_err!(req.get_id());
 
         let span = new_root_span!("attach_container", container_id);
@@ -300,6 +308,8 @@ impl conmon::Server for Server {
         _: conmon::ReopenLogContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
+        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+
         let container_id = pry_err!(req.get_id());
 
         let span = new_root_span!("reopen_log_container", container_id);
@@ -322,6 +332,8 @@ impl conmon::Server for Server {
         _: conmon::SetWindowSizeContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
+        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+
         let container_id = pry_err!(req.get_id());
 
         let span = new_root_span!("set_window_size_container", container_id);

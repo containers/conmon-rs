@@ -4,6 +4,7 @@ use clap::crate_name;
 use nix::unistd::gethostname;
 use opentelemetry::{
     global,
+    propagation::Extractor,
     runtime::Tokio,
     sdk::{
         propagation::TraceContextPropagator,
@@ -13,9 +14,9 @@ use opentelemetry::{
 };
 use opentelemetry_otlp::{ExportConfig, WithExportConfig};
 use opentelemetry_semantic_conventions::resource::{HOST_NAME, PROCESS_PID, SERVICE_NAME};
-use std::process;
-use tracing::Subscriber;
-use tracing_opentelemetry::OpenTelemetryLayer;
+use std::{collections::HashMap, process};
+use tracing::{Span, Subscriber};
+use tracing_opentelemetry::{OpenTelemetryLayer, OpenTelemetrySpanExt};
 use tracing_subscriber::registry::LookupSpan;
 
 /// The main structure of this module.
@@ -59,5 +60,33 @@ impl Telemetry {
     /// Shutdown the global tracer provider.
     pub fn shutdown() {
         global::shutdown_tracer_provider();
+    }
+
+    /// Set a new parent context from the provided slice data.
+    pub fn set_parent_context(slice: &'_ [u8]) -> Result<()> {
+        if slice.is_empty() {
+            // Make it a noop if no data is provided.
+            return Ok(());
+        }
+
+        let metadata = Metadata(serde_json::from_slice(slice).context("parse slice as JSON")?);
+        let ctx = global::get_text_map_propagator(|prop| prop.extract(&metadata));
+        Span::current().set_parent(ctx);
+
+        Ok(())
+    }
+}
+
+/// Additional telemetry metadata to carry.
+struct Metadata<'a>(HashMap<&'a str, &'a str>);
+
+impl<'a> Extractor for Metadata<'a> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).copied()
+    }
+
+    /// Collect all the keys from the MetadataMap.
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().copied().collect()
     }
 }
