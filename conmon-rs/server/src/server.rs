@@ -90,8 +90,15 @@ impl Server {
             .map_err(errno::from_i32)
             .context("set child subreaper")?;
 
+        let enable_tracing = self.config().enable_tracing();
+
         let rt = Builder::new_multi_thread().enable_all().build()?;
         rt.block_on(self.spawn_tasks())?;
+
+        if enable_tracing {
+            Telemetry::shutdown();
+        }
+
         rt.shutdown_background();
         Ok(())
     }
@@ -212,16 +219,12 @@ impl Server {
     async fn start_backend(self, mut shutdown_rx: oneshot::Receiver<()>) -> Result<()> {
         let listener =
             Listener::<DefaultListener>::default().bind_long_path(&self.config().socket())?;
-        let enable_tracing = self.config().enable_tracing();
         let client: conmon::Client = capnp_rpc::new_client(self);
 
         loop {
             let stream = tokio::select! {
                 _ = &mut shutdown_rx => {
                     debug!("Received shutdown message");
-                    if enable_tracing {
-                        Telemetry::shutdown();
-                    }
                     return Ok(())
                 }
                 stream = listener.accept() => {
