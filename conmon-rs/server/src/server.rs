@@ -22,6 +22,7 @@ use nix::{
     sys::signal::Signal,
     unistd::{fork, ForkResult},
 };
+use opentelemetry::trace::FutureExt as OpenTelemetryFutureExt;
 use std::{fs::File, io::Write, path::Path, process, str::FromStr, sync::Arc};
 use tokio::{
     fs,
@@ -32,6 +33,7 @@ use tokio::{
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{debug, debug_span, info, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, prelude::*};
 use twoparty::VatNetwork;
 
@@ -162,11 +164,15 @@ impl Server {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let socket = self.config().socket();
         let reaper = self.reaper.clone();
+
+        let signal_handler_span = debug_span!("signal_handler");
         task::spawn(
             Self::start_signal_handler(reaper, socket, shutdown_tx)
-                .instrument(debug_span!("signal_handler")),
+                .with_context(signal_handler_span.context())
+                .instrument(signal_handler_span),
         );
 
+        let backend_span = debug_span!("backend");
         task::spawn_blocking(move || {
             Handle::current().block_on(
                 async {
@@ -174,7 +180,8 @@ impl Server {
                         .run_until(self.start_backend(shutdown_rx))
                         .await
                 }
-                .instrument(debug_span!("backend")),
+                .with_context(backend_span.context())
+                .instrument(backend_span),
             )
         })
         .await?
