@@ -67,8 +67,10 @@ impl conmon::Server for Server {
         mut results: conmon::VersionResults,
     ) -> Promise<(), capnp::Error> {
         debug!("Got a version request");
-
         let req = pry!(pry!(params.get()).get_request());
+
+        let span = debug_span!("version", uuid = Uuid::new_v4().to_string().as_str());
+        let _enter = span.enter();
         pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
 
         let version = Version::new(req.get_verbose());
@@ -93,16 +95,16 @@ impl conmon::Server for Server {
         mut results: conmon::CreateContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
+        let id = pry!(req.get_id()).to_string();
+
+        let span = new_root_span!("create_container", id.as_str());
+        let _enter = span.enter();
         pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
 
-        let id = pry!(req.get_id()).to_string();
         let cleanup_cmd: Vec<String> = pry!(pry!(req.get_cleanup_cmd())
             .iter()
             .map(|s| s.map(String::from))
             .collect());
-
-        let span = new_root_span!("create_container", id.as_str());
-        let _enter = span.enter();
 
         debug!("Got a create container request");
 
@@ -184,9 +186,12 @@ impl conmon::Server for Server {
         mut results: conmon::ExecSyncContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
+        let id = pry!(req.get_id()).to_string();
+
+        let span = new_root_span!("exec_sync_container", id.as_str());
+        let _enter = span.enter();
         pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
 
-        let id = pry!(req.get_id()).to_string();
         let timeout = req.get_timeout_sec();
 
         let pidfile = pry_err!(ContainerIO::temp_file_name(
@@ -194,9 +199,6 @@ impl conmon::Server for Server {
             "exec_sync",
             "pid"
         ));
-
-        let span = new_root_span!("exec_sync_container", id.as_str());
-        let _enter = span.enter();
 
         debug!("Got exec sync container request with timeout {}", timeout);
 
@@ -268,12 +270,11 @@ impl conmon::Server for Server {
         _: conmon::AttachContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
-        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+        let id = pry_err!(req.get_id());
 
-        let container_id = pry_err!(req.get_id());
-
-        let span = new_root_span!("attach_container", container_id);
+        let span = new_root_span!("attach_container", id);
         let _enter = span.enter();
+        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
 
         debug!("Got a attach container request",);
 
@@ -283,7 +284,7 @@ impl conmon::Server for Server {
         }
 
         let socket_path = pry!(req.get_socket_path()).to_string();
-        let child = pry_err!(self.reaper().get(container_id));
+        let child = pry_err!(self.reaper().get(id));
         let stop_after_stdin_eof = req.get_stop_after_stdin_eof();
 
         Promise::from_future(
@@ -308,16 +309,15 @@ impl conmon::Server for Server {
         _: conmon::ReopenLogContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
-        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+        let id = pry_err!(req.get_id());
 
-        let container_id = pry_err!(req.get_id());
-
-        let span = new_root_span!("reopen_log_container", container_id);
+        let span = new_root_span!("reopen_log_container", id);
         let _enter = span.enter();
+        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
 
         debug!("Got a reopen container log request");
 
-        let child = pry_err!(self.reaper().get(container_id));
+        let child = pry_err!(self.reaper().get(id));
 
         Promise::from_future(
             async move { capnp_err!(child.io().logger().await.write().await.reopen().await) }
@@ -332,16 +332,15 @@ impl conmon::Server for Server {
         _: conmon::SetWindowSizeContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
-        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+        let id = pry_err!(req.get_id());
 
-        let container_id = pry_err!(req.get_id());
-
-        let span = new_root_span!("set_window_size_container", container_id);
+        let span = new_root_span!("set_window_size_container", id);
         let _enter = span.enter();
+        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
 
         debug!("Got a set window size container request");
 
-        let child = pry_err!(self.reaper().get(container_id));
+        let child = pry_err!(self.reaper().get(id));
         let width = req.get_width();
         let height = req.get_height();
 
