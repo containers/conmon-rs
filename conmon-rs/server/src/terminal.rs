@@ -22,7 +22,7 @@ use tokio::{
     fs,
     io::{AsyncWriteExt, Interest},
     net::UnixStream,
-    sync::mpsc::{self, Receiver, Sender, UnboundedReceiver},
+    sync::mpsc::{self, Receiver, Sender},
     task,
 };
 use tokio_fd::AsyncFd;
@@ -37,7 +37,7 @@ pub struct Terminal {
     connected_rx: Receiver<RawFd>,
 
     #[getset(get = "pub", get_mut = "pub")]
-    message_rx: Option<UnboundedReceiver<Message>>,
+    message_rx: Option<Receiver<Message>>,
 
     #[getset(get, set)]
     tty: Option<RawFd>,
@@ -113,7 +113,7 @@ impl Terminal {
 
         let attach_clone = self.attach.clone();
         let logger_clone = self.logger.clone();
-        let (message_tx, message_rx) = mpsc::unbounded_channel();
+        let (message_tx, message_rx) = ContainerIO::message_channel();
         self.message_rx = Some(message_rx);
 
         task::spawn(

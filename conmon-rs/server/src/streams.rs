@@ -10,7 +10,7 @@ use getset::Getters;
 use std::os::unix::io::AsRawFd;
 use tokio::{
     process::{ChildStderr, ChildStdin, ChildStdout},
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    sync::mpsc::{Receiver, Sender},
     task,
 };
 use tokio_util::sync::CancellationToken;
@@ -24,15 +24,15 @@ pub struct Streams {
     #[getset(get = "pub")]
     attach: SharedContainerAttach,
 
-    pub message_rx_stdout: UnboundedReceiver<Message>,
+    pub message_rx_stdout: Receiver<Message>,
 
     #[getset(get = "pub")]
-    message_tx_stdout: UnboundedSender<Message>,
+    message_tx_stdout: Sender<Message>,
 
-    pub message_rx_stderr: UnboundedReceiver<Message>,
+    pub message_rx_stderr: Receiver<Message>,
 
     #[getset(get = "pub")]
-    message_tx_stderr: UnboundedSender<Message>,
+    message_tx_stderr: Sender<Message>,
 }
 
 impl Streams {
@@ -40,8 +40,8 @@ impl Streams {
     pub fn new(logger: SharedContainerLog, attach: SharedContainerAttach) -> Result<Self> {
         debug!("Creating new IO streams");
 
-        let (message_tx_stdout, message_rx_stdout) = mpsc::unbounded_channel();
-        let (message_tx_stderr, message_rx_stderr) = mpsc::unbounded_channel();
+        let (message_tx_stdout, message_rx_stdout) = ContainerIO::message_channel();
+        let (message_tx_stderr, message_rx_stderr) = ContainerIO::message_channel();
 
         Ok(Self {
             logger,
@@ -109,6 +109,14 @@ impl Streams {
                 .instrument(debug_span!("stderr")),
             );
         }
+    }
+
+    /// Close the stream
+    pub async fn close(&mut self) {
+        self.message_rx_stderr.close();
+        self.message_tx_stderr.closed().await;
+        self.message_rx_stdout.close();
+        self.message_tx_stdout.closed().await;
     }
 }
 

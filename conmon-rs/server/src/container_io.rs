@@ -19,7 +19,7 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     select,
     sync::{
-        mpsc::{UnboundedReceiver, UnboundedSender},
+        mpsc::{self, Receiver, Sender},
         RwLock,
     },
     time::{self, Instant},
@@ -143,6 +143,11 @@ impl ContainerIO {
         })
     }
 
+    /// Channel can be used to get a default message sender and receiver pair.
+    pub fn message_channel() -> (Sender<Message>, Receiver<Message>) {
+        mpsc::channel(2)
+    }
+
     /// Generate a the temp file name without creating the file.
     pub fn temp_file_name(directory: Option<&Path>, prefix: &str, suffix: &str) -> Result<PathBuf> {
         let mut file = Builder::new();
@@ -180,6 +185,7 @@ impl ContainerIO {
                     Self::read_stream_with_timeout(time_to_timeout, stderr_rx),
                 );
                 let timed_out = stdout.1 || stderr.1;
+                s.close().await;
                 Ok((stdout.0, stderr.0, timed_out))
             }
         }
@@ -187,7 +193,7 @@ impl ContainerIO {
 
     async fn read_stream_with_timeout(
         time_to_timeout: Option<Instant>,
-        receiver: &mut UnboundedReceiver<Message>,
+        receiver: &mut Receiver<Message>,
     ) -> (Vec<u8>, bool) {
         let mut stdio = vec![];
         let mut timed_out = false;
@@ -233,7 +239,7 @@ impl ContainerIO {
         mut reader: T,
         pipe: Pipe,
         logger: SharedContainerLog,
-        message_tx: UnboundedSender<Message>,
+        message_tx: Sender<Message>,
         mut attach: SharedContainerAttach,
     ) -> Result<()>
     where
@@ -254,6 +260,7 @@ impl ContainerIO {
                     if !message_tx.is_closed() {
                         message_tx
                             .send(Message::Done)
+                            .await
                             .context("send done message")?;
                     }
 
@@ -278,6 +285,7 @@ impl ContainerIO {
                     if !message_tx.is_closed() {
                         message_tx
                             .send(Message::Data(data.into(), pipe))
+                            .await
                             .context("send data message")?;
                     }
                 }
@@ -293,6 +301,7 @@ impl ContainerIO {
                         if !message_tx.is_closed() {
                             message_tx
                                 .send(Message::Done)
+                                .await
                                 .context("send done message")?;
                         }
                         return Ok(());
