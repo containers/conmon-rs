@@ -45,7 +45,7 @@ system has [`cosign`](https://github.com/sigstore/cosign) available in its
 
 The whole application consists of two main components:
 
-1. The Rust server: [conmon-rs/server](./conmon-rs/server) ([docs](https://containers.github.io/conmon-rs/conmon/struct.Server.html))
+1. The Rust server: [conmon-rs/server](./conmon-rs/server) ([docs](https://containers.github.io/conmon-rs/conmonrs/struct.Server.html))
 1. A golang client: [pkg/client](./pkg/client) ([docs](https://pkg.go.dev/github.com/containers/conmon-rs/pkg/client#ConmonClient))
 
 The golang client should act as main interface while it takes care of creating
