@@ -34,7 +34,11 @@ use tokio::{
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{debug, debug_span, info, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, prelude::*};
+use tracing_subscriber::{
+    filter::{EnvFilter, LevelFilter},
+    layer::SubscriberExt,
+    util::SubscriberInitExt,
+};
 use twoparty::VatNetwork;
 
 #[derive(Debug, Getters)]
@@ -125,14 +129,17 @@ impl Server {
             None
         };
 
-        let registry = tracing_subscriber::registry().with(telemetry_layer);
+        let registry = tracing_subscriber::registry()
+            .with(
+                EnvFilter::from_default_env().add_directive(format!("conmonrs={}", level).parse()?),
+            )
+            .with(telemetry_layer);
 
         match self.config().log_driver() {
             LogDriver::Stdout => {
                 let layer = tracing_subscriber::fmt::layer()
                     .with_target(true)
-                    .with_line_number(true)
-                    .with_filter(level);
+                    .with_line_number(true);
                 registry
                     .with(layer)
                     .try_init()
@@ -144,8 +151,7 @@ impl Server {
                     .with_target(true)
                     .with_line_number(true)
                     .without_time()
-                    .with_writer(Journal::default())
-                    .with_filter(level);
+                    .with_writer(Journal::default());
                 registry
                     .with(layer)
                     .try_init()
