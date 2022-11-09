@@ -41,6 +41,12 @@ system has [`cosign`](https://github.com/sigstore/cosign) available in its
 
 [bucket]: https://console.cloud.google.com/storage/browser/cri-o/conmon-rs
 
+More information about how to use conmon-rs can be found in the
+[usage documentation](usage.md).
+
+If you want to create a new conmon-rs release, please refer to the [release
+documentation](release.md).
+
 ## Architecture
 
 The whole application consists of two main components:

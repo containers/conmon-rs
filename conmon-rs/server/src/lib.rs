@@ -1,3 +1,6 @@
+#![doc = include_str!("../../../README.md")]
+#![doc = include_str!("../../../usage.md")]
+
 pub use server::Server;
 pub use version::Version;
 
