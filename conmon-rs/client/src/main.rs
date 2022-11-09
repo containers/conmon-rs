@@ -1,15 +1,14 @@
-use async_net::unix;
 use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
 use conmon_common::conmon_capnp::conmon;
 use futures::{AsyncReadExt, FutureExt};
-use std::os::unix::net::UnixStream;
+use tokio::net::UnixStream;
+use tokio_util::compat::TokioAsyncReadCompatExt;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::task::LocalSet::new()
         .run_until(async move {
-            let stream = UnixStream::connect("conmon.sock")?;
-            let stream: unix::UnixStream = async_io::Async::new(stream)?.into();
+            let stream = UnixStream::connect("conmon.sock").await?.compat();
             let (reader, writer) = stream.split();
 
             let rpc_network = Box::new(twoparty::VatNetwork::new(
