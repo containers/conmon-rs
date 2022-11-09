@@ -5,7 +5,7 @@ go 1.18
 require (
 	capnproto.org/go/capnp/v3 v3.0.0-alpha.8
 	github.com/containers/common v0.50.1
-	github.com/containers/storage v1.43.0
+	github.com/containers/storage v1.44.0
 	github.com/google/uuid v1.3.0
 	github.com/onsi/ginkgo/v2 v2.5.0
 	github.com/onsi/gomega v1.24.0
@@ -27,6 +27,7 @@ require (
 	github.com/google/go-cmp v0.5.9 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
+	github.com/kr/text v0.2.0 // indirect
 	github.com/moby/sys/mountinfo v0.6.2 // indirect
 	github.com/opencontainers/runtime-spec v1.0.3-0.20211214071223-8958f93039ab // indirect
 	github.com/opencontainers/selinux v1.10.2 // indirect
