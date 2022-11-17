@@ -1,6 +1,6 @@
 //! Configuration related structures
 use anyhow::{bail, Result};
-use clap::{ArgEnum, Parser};
+use clap::{ArgEnum, Parser, Subcommand};
 use getset::{CopyGetters, Getters, Setters};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
@@ -18,9 +18,13 @@ macro_rules! prefix {
     after_help("More info at: https://github.com/containers/conmon-rs"),
     disable_version_flag(true)
 )]
-
 /// An OCI container runtime monitor.
 pub struct Config {
+    #[get = "pub"]
+    #[clap(subcommand)]
+    /// Possible subcommands.
+    command: Option<Commands>,
+
     #[get_copy = "pub"]
     #[clap(
         default_missing_value("default"),
@@ -127,6 +131,42 @@ pub struct Config {
     )]
     /// OpenTelemetry GRPC endpoint to be used for tracing.
     tracing_endpoint: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Subcommand)]
+/// Possible subcommands.
+pub enum Commands {
+    /// Run pause instead of the server.
+    Pause {
+        #[clap(
+            env(concat!(prefix!(), "PAUSE_PATH")),
+            long("path"),
+            short('p'),
+            value_name("PATH")
+        )]
+        /// The base path for pinning the namespaces.
+        path: PathBuf,
+
+        #[clap(long("ipc"))]
+        /// Unshare the IPC namespace.
+        ipc: bool,
+
+        #[clap(long("pid"))]
+        /// Unshare the PID namespace.
+        pid: bool,
+
+        #[clap(long("net"))]
+        /// Unshare the network namespace.
+        net: bool,
+
+        #[clap(long("user"))]
+        /// Unshare the user namespace.
+        user: bool,
+
+        #[clap(long("uts"))]
+        /// Unshare the UTS namespace.
+        uts: bool,
+    },
 }
 
 #[derive(

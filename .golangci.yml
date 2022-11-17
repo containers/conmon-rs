@@ -95,14 +95,14 @@ linters:
     # - wsl
 linters-settings:
   funlen:
-    lines: 100
+    lines: 120
     statements: 50
   varnamelen:
     min-name-length: 1
   cyclop:
-    max-complexity: 20
+    max-complexity: 25
   gocognit:
-    min-complexity: 30
+    min-complexity: 35
   nestif:
     min-complexity: 15
   errcheck:

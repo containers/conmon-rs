@@ -2,6 +2,7 @@ use crate::{
     child::Child,
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
+    pause::Pause,
     server::Server,
     telemetry::Telemetry,
     version::Version,
@@ -11,6 +12,7 @@ use capnp::{capability::Promise, Error};
 use capnp_rpc::pry;
 use conmon_common::conmon_capnp::conmon;
 use std::{
+    convert::TryInto,
     path::{Path, PathBuf},
     process, str,
     time::Duration,
@@ -348,5 +350,37 @@ impl conmon::Server for Server {
             async move { capnp_err!(child.io().resize(width, height).await) }
                 .instrument(debug_span!("promise")),
         )
+    }
+
+    /// Create a new set of namespaces.
+    fn create_namespaces(
+        &mut self,
+        params: conmon::CreateNamespacesParams,
+        mut results: conmon::CreateNamespacesResults,
+    ) -> Promise<(), capnp::Error> {
+        debug!("Got a create namespaces request");
+        let req = pry!(pry!(params.get()).get_request());
+
+        let span = debug_span!(
+            "create_namespaces",
+            uuid = Uuid::new_v4().to_string().as_str()
+        );
+        let _enter = span.enter();
+        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+
+        let init_namespaces = pry!(req.get_namespaces());
+        let pause = pry_err!(Pause::init_shared(init_namespaces));
+
+        let response = results.get().init_response();
+        let mut namespaces =
+            response.init_namespaces(pry_err!(pause.namespaces().len().try_into()));
+
+        for (idx, namespace) in pause.namespaces().iter().enumerate() {
+            let mut ns = namespaces.reborrow().get(pry_err!(idx.try_into()));
+            ns.set_path(&namespace.path(pause.path()).display().to_string());
+            ns.set_type(namespace.to_capnp_namespace());
+        }
+
+        Promise::ok(())
     }
 }

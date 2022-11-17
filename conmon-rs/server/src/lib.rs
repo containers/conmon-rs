@@ -15,6 +15,7 @@ mod init;
 mod journal;
 mod listener;
 mod oom_watcher;
+mod pause;
 mod rpc;
 mod server;
 mod streams;
