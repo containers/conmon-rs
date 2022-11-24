@@ -8,4 +8,4 @@ capnp = "0.15.1"
 
 [build-dependencies]
 capnp = "0.15.1"
-capnpc = "0.14.9"
+capnpc = "0.15.0"
