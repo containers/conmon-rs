@@ -4,8 +4,8 @@ version = "0.4.0"
 edition = "2018"
 
 [dependencies]
-capnp = "0.14.10"
+capnp = "0.15.1"
 
 [build-dependencies]
-capnp = "0.14.10"
+capnp = "0.15.1"
 capnpc = "0.14.9"
