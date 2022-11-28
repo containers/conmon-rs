@@ -91,7 +91,6 @@ pub struct Config {
     #[clap(
         env(concat!(prefix!(), "SKIP_FORK")),
         long("skip-fork"),
-        value_name("SKIP_FORK")
     )]
     /// Do not fork if true.
     skip_fork: bool,
@@ -127,6 +126,14 @@ pub struct Config {
     )]
     /// OpenTelemetry GRPC endpoint to be used for tracing.
     tracing_endpoint: String,
+
+    #[get_copy = "pub"]
+    #[clap(
+        env(concat!(prefix!(), "USE_EBPF")),
+        long("use-ebpf"),
+    )]
+    /// Use experimental ebpf feature support.
+    use_ebpf: bool,
 }
 
 #[derive(

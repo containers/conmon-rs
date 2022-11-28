@@ -19,7 +19,7 @@ release:
 
 .PHONY: release-static
 release-static:
-	RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86_64-unknown-linux-gnu
+	RUSTFLAGS="-C target-feature=+crt-static -L /usr/lib/x86_64-linux-gnu" cargo build -v --release --target x86_64-unknown-linux-gnu --features static
 	strip -s target/x86_64-unknown-linux-gnu/release/conmonrs
 	ldd target/x86_64-unknown-linux-gnu/release/conmonrs 2>&1 | grep -qE '(statically linked)|(not a dynamic executable)'
 
@@ -71,7 +71,10 @@ update-proto:
 	mv $(PROTO_PATH)/conmon.capnp.go internal/proto/
 	git checkout $(PROTO_PATH)/conmon.capnp
 
-.PHONY: lint lint-go lint-rust clean unit integration update-proto
+update-vmlinux:
+	.github/update-vmlinux
+
+.PHONY: lint lint-go lint-rust clean unit integration update-proto update-vmlinux
 
 .PHONY: create-release-packages
 create-release-packages: release

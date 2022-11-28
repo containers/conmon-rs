@@ -3,6 +3,7 @@ use crate::{
     child::Child,
     container_io::{ContainerIO, ContainerIOType, SharedContainerIO},
     oom_watcher::OOMWatcher,
+    pidwatch::{Event, PidWatch},
 };
 use anyhow::{bail, format_err, Context, Result};
 use getset::{CopyGetters, Getters, Setters};
@@ -35,10 +36,13 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, error, warn, Instrument};
 
-#[derive(Debug, Default, Getters)]
+#[derive(CopyGetters, Debug, Default, Getters, Setters)]
 pub struct ChildReaper {
     #[getset(get)]
     grandchildren: Arc<Mutex<MultiMap<String, ReapableChild>>>,
+
+    #[getset(get_copy, set = "pub")]
+    use_ebpf: bool,
 }
 
 macro_rules! lock {
@@ -135,7 +139,7 @@ impl ChildReaper {
     pub fn watch_grandchild(&self, child: Child) -> Result<Receiver<ExitChannelData>> {
         let locked_grandchildren = &self.grandchildren().clone();
         let mut map = lock!(locked_grandchildren);
-        let mut reapable_grandchild = ReapableChild::from_child(&child);
+        let mut reapable_grandchild = ReapableChild::from_child(&child, self.use_ebpf());
 
         let (exit_tx, exit_rx) = reapable_grandchild.watch()?;
 
@@ -206,10 +210,13 @@ pub fn kill_grandchild(raw_pid: u32, s: Signal) {
     }
 }
 
-type TaskHandle = Arc<Mutex<Option<Vec<JoinHandle<()>>>>>;
+type TaskHandle = Arc<Mutex<Option<Vec<JoinHandle<Result<()>>>>>>;
 
 #[derive(Clone, CopyGetters, Debug, Getters, Setters)]
 pub struct ReapableChild {
+    #[getset(get_copy)]
+    use_ebpf: bool,
+
     #[getset(get)]
     exit_paths: Vec<PathBuf>,
 
@@ -247,8 +254,9 @@ pub struct ExitChannelData {
 }
 
 impl ReapableChild {
-    pub fn from_child(child: &Child) -> Self {
+    pub fn from_child(child: &Child, use_ebpf: bool) -> Self {
         Self {
+            use_ebpf,
             exit_paths: child.exit_paths().clone(),
             oom_exit_paths: child.oom_exit_paths().clone(),
             pid: child.pid(),
@@ -286,6 +294,7 @@ impl ReapableChild {
         let timeout = *self.timeout();
         let stop_token = self.token().clone();
         let mut cleanup_cmd_raw = self.cleanup_cmd().clone();
+        let use_ebpf = self.use_ebpf();
 
         let task = task::spawn(
             async move {
@@ -294,33 +303,71 @@ impl ReapableChild {
                 let mut oomed = false;
                 let mut timed_out = false;
                 let (oom_tx, mut oom_rx) = tokio::sync::mpsc::channel(1);
-                let oom_watcher = OOMWatcher::new(&stop_token, pid, &oom_exit_paths, oom_tx).await;
 
-                let span = debug_span!("wait_for_exit_code");
-                let wait_for_exit_code = task::spawn_blocking(move || {
-                    let _enter = span.enter();
-                    Self::wait_for_exit_code(&stop_token, pid)
-                });
+                let (mut oom_watcher, wait_for_exit_code, mut pidwatch_rx) = if use_ebpf {
+                    (
+                        None,
+                        None,
+                        PidWatch::new(pid)
+                            .run()
+                            .await
+                            .context("create PID watcher")?
+                            .into(),
+                    )
+                } else {
+                    let oom_watcher =
+                        OOMWatcher::new(&stop_token, pid, &oom_exit_paths, oom_tx).await;
+
+                    let span = debug_span!("wait_for_exit_code");
+                    let wait_for_exit_code = task::spawn_blocking(move || {
+                        let _enter = span.enter();
+                        Self::wait_for_exit_code(&stop_token, pid)
+                    });
+
+                    (oom_watcher.into(), wait_for_exit_code.into(), None)
+                };
 
                 let closure = async {
-                    let (code, oom) = tokio::join!(wait_for_exit_code, oom_rx.recv());
-                    if let Ok(code) = code {
-                        exit_code = code;
+                    if let Some(pidwatch_rx) = pidwatch_rx.as_mut() {
+                        match pidwatch_rx.recv().await {
+                            Some(Event::Exited(c)) => exit_code = c,
+                            Some(Event::Signaled(c)) => exit_code = c,
+                            Some(Event::OOMKilled) => {
+                                oomed = true;
+                                Self::write_oom_files(oom_exit_paths)
+                                    .await
+                                    .context("write OOM files")?;
+                            }
+                            Some(Event::Err(e)) => bail!("Unable to watch PID: {:#}", e),
+                            None => (),
+                        }
+                    } else if let Some(wait_for_exit_code) = wait_for_exit_code {
+                        let (code, oom) = tokio::join!(wait_for_exit_code, oom_rx.recv());
+                        if let Ok(code) = code {
+                            exit_code = code;
+                        }
+                        if let Some(event) = oom {
+                            oomed = event.oom;
+                        }
                     }
-                    if let Some(event) = oom {
-                        oomed = event.oom;
-                    }
+
+                    Ok::<_, anyhow::Error>(())
                 };
+
                 if let Some(timeout) = timeout {
-                    if time::timeout_at(timeout, closure).await.is_err() {
+                    if let Err(e) = time::timeout_at(timeout, closure).await {
+                        error!("Unable to wait for timeout: {:#}", e);
                         timed_out = true;
                         exit_code = -3;
                         kill_grandchild(pid, Signal::SIGKILL);
                     }
                 } else {
-                    closure.await;
+                    closure.await.context("wait for closure")?;
                 }
-                oom_watcher.stop().await;
+
+                if let Some(oom_watcher) = oom_watcher.take() {
+                    oom_watcher.stop().await;
+                }
 
                 let exit_channel_data = ExitChannelData {
                     exit_code,
@@ -344,10 +391,12 @@ impl ReapableChild {
                 }
 
                 debug!("Sending exit struct to channel: {:?}", exit_channel_data);
-                if exit_tx_clone.send(exit_channel_data).is_err() {
-                    debug!("Unable to send exit status");
-                }
+                exit_tx_clone
+                    .send(exit_channel_data)
+                    .context("send exit channel data")?;
+
                 debug!("Task done");
+                Ok(())
             }
             .instrument(debug_span!("watch", pid)),
         );
@@ -446,6 +495,27 @@ impl ReapableChild {
             task.await?;
         }
 
+        Ok(())
+    }
+
+    pub async fn write_oom_files(exit_paths: Vec<PathBuf>) -> Result<()> {
+        for task in exit_paths
+            .into_iter()
+            .map(|path| {
+                tokio::spawn(
+                    async move {
+                        debug!("Writing OOM file: {}", path.display());
+                        if let Err(e) = File::create(&path).await {
+                            error!("Could not write oom file to {}: {:#}", path.display(), e);
+                        }
+                    }
+                    .instrument(debug_span!("write_oom_file")),
+                )
+            })
+            .collect::<Vec<_>>()
+        {
+            task.await.context("wait for task to be finished")?;
+        }
         Ok(())
     }
 }

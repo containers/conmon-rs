@@ -5,6 +5,7 @@ pub use server::Server;
 pub use version::Version;
 
 mod attach;
+mod bpf;
 mod child;
 mod child_reaper;
 mod config;
@@ -15,6 +16,7 @@ mod init;
 mod journal;
 mod listener;
 mod oom_watcher;
+mod pidwatch;
 mod rpc;
 mod server;
 mod streams;

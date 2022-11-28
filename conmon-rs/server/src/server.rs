@@ -52,9 +52,14 @@ pub struct Server {
 impl Server {
     /// Create a new `Server` instance.
     pub fn new() -> Result<Self> {
+        let config = Config::default();
+
+        let mut reaper = ChildReaper::default();
+        reaper.set_use_ebpf(config.use_ebpf());
+
         let server = Self {
-            config: Default::default(),
-            reaper: Default::default(),
+            config,
+            reaper: Arc::new(reaper),
         };
 
         if let Some(v) = server.config().version() {

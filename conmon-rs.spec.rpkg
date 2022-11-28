@@ -26,7 +26,9 @@ VCS: {{{ git_dir_vcs }}}
 Source: {{{ git_dir_pack }}}
 BuildRequires: capnproto
 BuildRequires: cargo
+BuildRequires: clang
 BuildRequires: git-core
+BuildRequires: libbpf-devel
 BuildRequires: make
 BuildRequires: protobuf-compiler
 Provides: %{bin_name}
