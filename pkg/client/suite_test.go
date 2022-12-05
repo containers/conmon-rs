@@ -58,7 +58,7 @@ var _ = AfterSuite(func() {
 	By("printing the goroutine stack for debugging purposes")
 	goroutines := pprof.Lookup("goroutine")
 	Expect(goroutines.WriteTo(os.Stdout, 1)).To(BeNil())
-	Expect(goroutines.Count()).To(Equal(6))
+	Expect(goroutines.Count()).To(Equal(7))
 
 	By("Verifying that no conmonrs processes are still running in the background")
 	cmd := exec.Command("ps", "aux")
