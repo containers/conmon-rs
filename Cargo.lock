@@ -699,9 +699,9 @@ dependencies = [
 
 [[package]]
 name = "git2"
-version = "0.14.2"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3826a6e0e2215d7a41c2bfc7c9244123969273f3476b939a226aac0ab56e9e3c"
+checksum = "2994bee4a3a6a51eb90c218523be382fd7ea09b16380b9312e9dbe955ff7c7d1"
 dependencies = [
  "bitflags",
  "libc",
@@ -987,9 +987,9 @@ checksum = "db6d7e329c562c5dfab7a46a2afabc8b987ab9a4834c9d1ca04dc54c1546cef8"
 
 [[package]]
 name = "libgit2-sys"
-version = "0.13.2+1.4.2"
+version = "0.14.0+1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a42de9a51a5c12e00fc0e4ca6bc2ea43582fc6418488e8f615e905d886f258b"
+checksum = "47a00859c70c8a4f7218e6d1cc32875c4b55f6799445b842b0d8ed5e4c3d959b"
 dependencies = [
  "cc",
  "libc",
@@ -1404,24 +1404,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "phf"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fabbf1ead8a5bcbc20f5f8b939ee3f5b0f6f281b6ad3468b84656b658b455259"
-dependencies = [
- "phf_shared",
-]
-
-[[package]]
-name = "phf_shared"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6796ad771acdc0123d2a88dc428b5e38ef24456743ddb1744ed628f9815c096"
-dependencies = [
- "siphasher",
-]
-
-[[package]]
 name = "pin-project"
 version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1778,9 +1760,9 @@ dependencies = [
 
 [[package]]
 name = "shadow-rs"
-version = "0.16.1"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2d399ad15b5c90d8e6461da75c751c77501598dd915d81a108401b252aaa99f"
+checksum = "6c401e795850edb4e9fdde5940f856364f0fbab573e8dea58f6ee5f85fcf471d"
 dependencies = [
  "const_format",
  "git2",
@@ -1806,12 +1788,6 @@ checksum = "e51e73328dc4ac0c7ccbda3a494dfa03df1de2f46018127f60c693f2648455b0"
 dependencies = [
  "libc",
 ]
-
-[[package]]
-name = "siphasher"
-version = "0.3.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bd3e3206899af3f8b12af284fafc038cc1dc2b41d1b89dd17297221c5d225de"
 
 [[package]]
 name = "slab"
@@ -2297,13 +2273,11 @@ dependencies = [
 
 [[package]]
 name = "tzdb"
-version = "0.3.10"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e4ebcdf25ae5833d878057bdc3e5796ecb0dc068115bae6091af51581f92c77"
+checksum = "12cf8bd66b64b0801ee3faac2b86a657d4ddbb345efa9bb6a18d626693d9c2de"
 dependencies = [
  "iana-time-zone",
- "phf",
- "phf_shared",
  "tz-rs",
 ]
 
