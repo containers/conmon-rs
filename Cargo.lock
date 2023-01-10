@@ -1404,24 +1404,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "phf"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fabbf1ead8a5bcbc20f5f8b939ee3f5b0f6f281b6ad3468b84656b658b455259"
-dependencies = [
- "phf_shared",
-]
-
-[[package]]
-name = "phf_shared"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6796ad771acdc0123d2a88dc428b5e38ef24456743ddb1744ed628f9815c096"
-dependencies = [
- "siphasher",
-]
-
-[[package]]
 name = "pin-project"
 version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1786,7 +1768,7 @@ dependencies = [
  "git2",
  "is_debug",
  "time",
- "tzdb",
+ "tzdb 0.3.11",
 ]
 
 [[package]]
@@ -1806,12 +1788,6 @@ checksum = "e51e73328dc4ac0c7ccbda3a494dfa03df1de2f46018127f60c693f2648455b0"
 dependencies = [
  "libc",
 ]
-
-[[package]]
-name = "siphasher"
-version = "0.3.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bd3e3206899af3f8b12af284fafc038cc1dc2b41d1b89dd17297221c5d225de"
 
 [[package]]
 name = "slab"
@@ -2297,13 +2273,20 @@ dependencies = [
 
 [[package]]
 name = "tzdb"
-version = "0.3.10"
+version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e4ebcdf25ae5833d878057bdc3e5796ecb0dc068115bae6091af51581f92c77"
+checksum = "3a52570d849793138587a4fd3d4733365c8de11a6d60445a17b87c579857f86e"
+dependencies = [
+ "tzdb 0.5.3",
+]
+
+[[package]]
+name = "tzdb"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4b882d864be6a5d7c3c916719944458b1e03c85f86dbc825ec98155117c4408"
 dependencies = [
  "iana-time-zone",
- "phf",
- "phf_shared",
  "tz-rs",
 ]
 
