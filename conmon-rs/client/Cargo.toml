@@ -9,6 +9,6 @@ capnp-rpc = "0.14.1"
 conmon-common = { path = "../common" }
 futures = "0.3.25"
 log = { version = "0.4.17", features = ["serde", "std"] }
-serde = { version = "1.0.149", features = ["derive"] }
+serde = { version = "1.0.152", features = ["derive"] }
 tokio = { version = "1.24.1", features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
 tokio-util = { version = "0.7.4", features = ["compat"] }
