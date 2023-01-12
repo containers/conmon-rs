@@ -335,11 +335,11 @@ impl ContainerIO {
                     }
                 }
                 _ = token.cancelled() => {
-                    debug!("Token cancelled, draining stdin");
-                    if let Ok(data) = attach.read().await {
+                    // Closing immediately may race with outstanding data on stdin for short lived
+                    // containers. This means we try to read once again.
+                    if let Ok(data) = attach.try_read() {
                         Self::handle_stdin_data(&data, &mut writer).await?;
                     }
-
                     return Ok(());
                 }
             }
