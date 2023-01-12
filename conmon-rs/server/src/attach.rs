@@ -90,6 +90,13 @@ impl SharedContainerAttach {
             .context("receive attach message")
     }
 
+    /// Try to read from all attach endpoints standard input and return the first result.
+    pub fn try_read(&mut self) -> Result<Vec<u8>> {
+        self.read_half_rx
+            .try_recv()
+            .context("try to receive attach message")
+    }
+
     /// Write a buffer to all attach endpoints.
     pub async fn write(&mut self, m: Message) -> Result<()> {
         if self.write_half_tx.receiver_count() > 0 {
