@@ -9,8 +9,8 @@ github.com/cilium/ebpf v0.7.0/go.mod h1:/oI2+1shJiTGAMgl6/RgJr36Eo1jzrRcAWbcXO2u
 github.com/containerd/console v1.0.3/go.mod h1:7LqA/THxQ86k76b8c/EMSiaJ3h1eZkMkXar0TQ1gf3U=
 github.com/containers/common v0.50.1 h1:AYRAf1xyahNVRez49KIkREInNf36SQx1lyLY9M95wQI=
 github.com/containers/common v0.50.1/go.mod h1:XnWlXPyE9Ky+8v8MfYWJZFnejkprAkUeo0DTWmSiwcY=
-github.com/containers/storage v1.44.0 h1:xCFhwILjjU+Hg133d07EVCgaaXn0ileGcVsAUcV8tDY=
-github.com/containers/storage v1.44.0/go.mod h1:HSfx7vUXwKPatPMqhgMw3mI3c3ijIJPZV5O0sj/mVxI=
+github.com/containers/storage v1.45.0 h1:UoCtlZf1eYi9zPl7XfhdCrifIpQABogomH1Gh0lsU70=
+github.com/containers/storage v1.45.0/go.mod h1:OdRUYHrq1HP6iAo79VxqtYuJzC5j4eA2I60jKOoCT7g=
 github.com/coreos/go-systemd/v22 v22.3.2/go.mod h1:Y58oyj3AT4RCenI/lSvhwexgC+NSVTIJ3seZv2GcEnc=
 github.com/coreos/go-systemd/v22 v22.4.0 h1:y9YHcjnjynCd/DVbg5j9L/33jQM3MxJlbj/zWskzfGU=
 github.com/coreos/go-systemd/v22 v22.4.0/go.mod h1:Y58oyj3AT4RCenI/lSvhwexgC+NSVTIJ3seZv2GcEnc=
