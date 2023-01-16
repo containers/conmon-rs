@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.68"
-capnp = "0.14.10"
+capnp = "0.15.3"
 capnp-rpc = "0.14.1"
 clap = { version = "3.2.22", features = ["cargo", "derive", "deprecated", "env", "wrap_help"] }
 conmon-common = { path = "../common" }
