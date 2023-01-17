@@ -1,5 +1,7 @@
 //! Generic version information for conmon
 
+#![allow(clippy::uninlined_format_args)]
+
 use getset::CopyGetters;
 use shadow_rs::shadow;
 

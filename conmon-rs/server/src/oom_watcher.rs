@@ -33,7 +33,7 @@ pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as i32)
     not(target_arch = "x86"),
     not(target_env = "musl")
 )))]
-pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as i64);
+pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC);
 
 static CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
@@ -388,8 +388,7 @@ impl OOMWatcher {
             if let Some(caps) = RE.captures(&buffer) {
                 return Ok(Path::new(CGROUP_ROOT)
                     .join(
-                        &caps
-                            .get(1)
+                        caps.get(1)
                             .context("no first capture group in regex match")?
                             .as_str(),
                     )

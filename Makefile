@@ -27,7 +27,7 @@ lint: lint-rust lint-go
 
 lint-rust:
 	cargo fmt && git diff --exit-code
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --all-targets --all-features -- -D warnings
 
 lint-go: .install.golangci-lint
 	$(GOTOOLS_BINDIR)/golangci-lint version
