@@ -78,7 +78,7 @@ impl Server {
         if !self.config().skip_fork() {
             match unsafe { fork()? } {
                 ForkResult::Parent { child, .. } => {
-                    let child_str = format!("{}", child);
+                    let child_str = format!("{child}");
                     File::create(self.config().conmon_pidfile())?
                         .write_all(child_str.as_bytes())?;
                     unsafe { _exit(0) };
@@ -225,7 +225,7 @@ impl Server {
 
     async fn start_backend(self, mut shutdown_rx: oneshot::Receiver<()>) -> Result<()> {
         let listener =
-            Listener::<DefaultListener>::default().bind_long_path(&self.config().socket())?;
+            Listener::<DefaultListener>::default().bind_long_path(self.config().socket())?;
         let client: conmon::Client = capnp_rpc::new_client(self);
 
         loop {

@@ -73,7 +73,7 @@ pub struct DefaultListener;
 
 impl ListenerImpl for DefaultListener {
     fn bind(&self, path: &Path) -> io::Result<UnixListener> {
-        UnixListener::bind(&path)
+        UnixListener::bind(path)
     }
 
     fn create_dir_all(&self, path: &Path) -> io::Result<()> {

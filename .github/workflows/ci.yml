@@ -155,12 +155,12 @@ jobs:
       - name: Select Toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN']  }}
+          toolchain: nightly
           default: true
           override: true
           components: clippy, rustfmt
       - name: Clippy Lint
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo +nightly clippy --all-targets --all-features -- -D warnings
 
   lint-rustfmt:
     runs-on: ubuntu-latest

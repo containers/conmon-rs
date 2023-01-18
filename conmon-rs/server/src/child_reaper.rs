@@ -105,8 +105,8 @@ impl ChildReaper {
             const BASE_ERR: &str = "child command exited with";
 
             let mut err_str = match output.status.code() {
-                Some(code) => format!("{}: {}", BASE_ERR, code),
-                None => format!("{} signal", BASE_ERR),
+                Some(code) => format!("{BASE_ERR}: {code}"),
+                None => format!("{BASE_ERR} signal"),
             };
 
             if !output.stderr.is_empty() {
@@ -423,7 +423,7 @@ impl ReapableChild {
                 let path = path_buf.display().to_string();
                 tokio::spawn(
                     async move {
-                        let code_str = format!("{}", code);
+                        let code_str = format!("{code}");
                         debug!("Creating exit file");
                         if let Ok(mut fp) = File::create(&path_buf).await {
                             debug!(code, "Writing exit code to file");
