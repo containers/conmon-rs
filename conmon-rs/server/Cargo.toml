@@ -20,7 +20,7 @@ libc = "0.2.139"
 libsystemd = "0.6.0"
 memchr = "2.5.0"
 multimap = "0.8.3"
-nix = "0.26.1"
+nix = "0.26.2"
 notify = "5.0.0"
 opentelemetry = { version = "0.18.0", features = ["rt-tokio"] }
 opentelemetry-otlp = "0.11.0"
