@@ -1,11 +1,14 @@
 package client_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -466,5 +469,51 @@ var _ = Describe("ConmonClient", func() {
 				testAttach(sut, cfg, stdinWriter, stdReader, pipe, pipe == "stderr", terminal)
 			})
 		}
+	})
+
+	Describe("Tracing", func() {
+		const contribTracingPath = "../../contrib/tracing/"
+
+		BeforeEach(func() {
+			cmd := exec.Command(contribTracingPath + "start")
+			fmt.Fprintln(os.Stdout)
+			cmd.Stdout = os.Stdout
+			Expect(cmd.Run()).To(BeNil())
+		})
+
+		getLog := func() string {
+			cmd := exec.Command(contribTracingPath + "logs")
+			var stdout bytes.Buffer
+			cmd.Stdout = &stdout
+			Expect(cmd.Run()).To(BeNil())
+
+			return stdout.String()
+		}
+
+		It("should succeed", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			tr.enableTracing = true
+
+			sut = tr.configGivenEnv()
+			tr.createContainer(sut, false)
+			tr.startContainer(sut)
+
+			for i := 0; i < 100; i++ {
+				log := getLog()
+
+				if strings.Contains(log, "service.name: Str(conmonrs)") {
+					break
+				}
+
+				time.Sleep(time.Second)
+			}
+		})
+
+		AfterEach(func() {
+			cmd := exec.Command(contribTracingPath + "stop")
+			cmd.Stdout = os.Stdout
+			Expect(cmd.Run()).To(BeNil())
+		})
 	})
 })
