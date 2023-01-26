@@ -120,4 +120,31 @@ interface Conmon {
     }
 
     setWindowSizeContainer @5 (request: SetWindowSizeRequest) -> (response: SetWindowSizeResponse);
+
+    ###############################################
+    # CreateNamespaces
+    struct CreateNamespacesRequest {
+        metadata @0 :Data; # Standard metadata to carry.
+        namespaces @1 :List(Namespace); # The list of namespaces to unshare.
+    }
+
+    enum Namespace {
+        ipc @0; # Unshare the IPC namespace.
+        net @1; # Unshare the network namespace.
+        pid @2; # Unshare the PID namespace.
+        user @3; # Unshare the user namespace.
+        uts @4; # Unshare the UTS namespace.
+    }
+
+    struct CreateNamespacesResponse {
+        namespaces @0 :List(NamespaceResponse);  # The list of created namespaces.
+    }
+
+    # Available namespaces.
+    struct NamespaceResponse {
+        type @0 :Namespace; # The type of the namespace.
+        path @1 :Text; # Path to the directory for the unshared namespaces.
+    }
+
+    createNamespaces @6 (request: CreateNamespacesRequest) -> (response: CreateNamespacesResponse);
 }

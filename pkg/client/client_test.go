@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -514,6 +515,57 @@ var _ = Describe("ConmonClient", func() {
 			cmd := exec.Command(contribTracingPath + "stop")
 			cmd.Stdout = os.Stdout
 			Expect(cmd.Run()).To(BeNil())
+		})
+	})
+
+	Describe("CreateNamespaces", func() {
+		It("should succeed without namespaces", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			response, err := sut.CreateNamespaces(
+				context.Background(),
+				&client.CreateaNamespacesConfig{},
+			)
+			Expect(err).To(BeNil())
+			Expect(response).NotTo(BeNil())
+		})
+
+		It("should succeed with all namespaces", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			response, err := sut.CreateNamespaces(
+				context.Background(),
+				&client.CreateaNamespacesConfig{
+					Namespaces: []client.Namespace{
+						client.NamespaceIPC,
+						client.NamespaceNet,
+						client.NamespacePID,
+						client.NamespaceUTS,
+						client.NamespaceUser, // will be ignored
+					},
+				},
+			)
+			Expect(err).To(BeNil())
+			Expect(response).NotTo(BeNil())
+
+			Expect(len(response.Namespaces)).To(BeEquivalentTo(4))
+			Expect(response.Namespaces[0].Type).To(Equal(client.NamespaceIPC))
+			Expect(response.Namespaces[1].Type).To(Equal(client.NamespaceNet))
+			Expect(response.Namespaces[2].Type).To(Equal(client.NamespacePID))
+			Expect(response.Namespaces[3].Type).To(Equal(client.NamespaceUTS))
+
+			for _, ns := range response.Namespaces {
+				stat, err := os.Lstat(ns.Path)
+				Expect(err).To(BeNil())
+				Expect(stat.IsDir()).To(BeFalse())
+				Expect(stat.Size()).To(BeZero())
+				Expect(stat.Mode()).To(Equal(fs.FileMode(0o444)))
+				Expect(len(stat.Name())).To(BeEquivalentTo(3))
+			}
 		})
 	})
 })

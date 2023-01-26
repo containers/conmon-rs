@@ -2,11 +2,12 @@
 
 use crate::{
     child_reaper::ChildReaper,
-    config::{CgroupManager, Config, LogDriver, Verbosity},
+    config::{CgroupManager, Commands, Config, LogDriver, Verbosity},
     container_io::{ContainerIO, ContainerIOType},
     init::{DefaultInit, Init},
     journal::Journal,
     listener::{DefaultListener, Listener},
+    pause::Pause,
     telemetry::Telemetry,
     version::Version,
 };
@@ -59,6 +60,19 @@ impl Server {
 
         if let Some(v) = server.config().version() {
             Version::new(v == Verbosity::Full).print();
+            process::exit(0);
+        }
+
+        if let Some(Commands::Pause {
+            path,
+            ipc,
+            pid,
+            net,
+            user,
+            uts,
+        }) = server.config().command()
+        {
+            Pause::run(path, *ipc, *pid, *net, *user, *uts).context("run pause")?;
             process::exit(0);
         }
 
@@ -206,6 +220,10 @@ impl Server {
                 handled_sig = Signal::SIGINT;
             }
         };
+
+        if let Some(pause) = Pause::maybe_shared() {
+            pause.stop();
+        }
 
         debug!("Starting grandchildren cleanup task");
         reaper
