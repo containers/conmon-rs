@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# Global vars to be used
+# shellcheck source=stop
+source "$(dirname "${BASH_SOURCE[0]}")"/stop
+
+JAEGER_IMG="jaegertracing/all-in-one:1.41.0"
+OTLP_IMG="otel/opentelemetry-collector:0.70.0"
+
+echo "Starting $JAEGER_CTR"
+"$CONTAINER_RUNTIME" run -d --rm --network host --name "$JAEGER_CTR" "$JAEGER_IMG"
+
+PORT=14250
+MAX_CNT=100
+for ((i = 0; i <= "$MAX_CNT"; i++)); do
+    if netstat -tuplen 2>/dev/null | grep -q "$PORT .* LISTEN"; then
+        break
+    fi
+
+    if [[ $i == "$MAX_CNT" ]]; then
+        echo "Giving up"
+        exit 1
+    fi
+
+    echo "Waiting for gRPC port $PORT to listen… ($i)"
+    sleep 3
+done
+
+echo "Starting $OTLP_CTR"
+"$CONTAINER_RUNTIME" run -d --rm --network host --name "$OTLP_CTR" \
+    -v ./otel-collector-config.yaml:/etc/otel-collector-config.yaml \
+    "$OTLP_IMG" --config=/etc/otel-collector-config.yaml
+
+for ((i = 0; i <= "$MAX_CNT"; i++)); do
+    if ./logs | grep -q '"jaeger", "state": "READY"'; then
+        break
+    fi
+
+    if [[ $i == "$MAX_CNT" ]]; then
+        echo "Giving up"
+        exit 1
+    fi
+
+    echo "Waiting for OTLP to become ready… ($i)"
+    sleep 3
+done
+
+echo "Everything is ready"

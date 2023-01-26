@@ -76,6 +76,7 @@ var _ = AfterSuite(func() {
 
 type testRunner struct {
 	tmpDir, tmpRootfs, ctrID string
+	enableTracing            bool
 	rr                       *RuntimeRunner
 }
 
@@ -212,6 +213,10 @@ func (tr *testRunner) configGivenEnv() *client.ConmonClient {
 	logger := logrus.StandardLogger()
 	logger.Level = logrus.TraceLevel
 	cfg.ClientLogger = logger
+
+	if tr.enableTracing {
+		cfg.Tracing = &client.Tracing{Enabled: true}
+	}
 
 	sut, err := client.New(cfg)
 	Expect(err).To(BeNil())
