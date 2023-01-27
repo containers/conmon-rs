@@ -4,6 +4,7 @@ go 1.18
 
 require (
 	capnproto.org/go/capnp/v3 v3.0.0-alpha.9
+	github.com/blang/semver/v4 v4.0.0
 	github.com/containers/common v0.51.0
 	github.com/containers/storage v1.45.3
 	github.com/google/uuid v1.3.0
@@ -17,7 +18,6 @@ require (
 )
 
 require (
-	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
 	github.com/cyphar/filepath-securejoin v0.2.3 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
