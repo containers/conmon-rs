@@ -38,7 +38,7 @@ const (
 type CgroupManager int
 
 const (
-	// Name specifies to use systemd to create and manage
+	// CgroupManagerSystemd specifies to use systemd to create and manage
 	// cgroups.
 	CgroupManagerSystemd CgroupManager = iota
 

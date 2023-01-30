@@ -17,6 +17,7 @@ import (
 
 	"capnproto.org/go/capnp/v3"
 	"capnproto.org/go/capnp/v3/rpc"
+	"github.com/blang/semver/v4"
 	"github.com/containers/conmon-rs/internal/proto"
 	"github.com/containers/storage/pkg/idtools"
 	"github.com/sirupsen/logrus"
@@ -49,6 +50,7 @@ type ConmonClient struct {
 	attachReaders  *sync.Map // K: UUID string, V: *attachReaderValue
 	tracingEnabled bool
 	tracer         trace.Tracer
+	serverVersion  semver.Version
 }
 
 // ConmonServerConfig is the configuration for the conmon server instance.
@@ -536,6 +538,12 @@ func (c *ConmonClient) Version(
 	if err != nil {
 		return nil, fmt.Errorf("set version: %w", err)
 	}
+
+	semverVersion, err := semver.Parse(version)
+	if err != nil {
+		return nil, fmt.Errorf("parse server version to semver: %w", err)
+	}
+	c.serverVersion = semverVersion
 
 	tag, err := response.Tag()
 	if err != nil {
@@ -1041,6 +1049,13 @@ func (c *ConmonClient) CreateNamespaces(
 	ctx, span := c.startSpan(ctx, "CreateNamespaces")
 	if span != nil {
 		defer span.End()
+	}
+
+	// Feature not supported pre v0.5.0
+	const minMinor = 5
+	minVersion := semver.Version{Minor: minMinor}
+	if c.serverVersion.LT(minVersion) {
+		return nil, fmt.Errorf("requires at least %v: %w", minVersion, ErrUnsupported)
 	}
 
 	conn, err := c.newRPCConn()
