@@ -70,9 +70,21 @@ impl Server {
             net,
             user,
             uts,
+            uid_mappings,
+            gid_mappings,
         }) = server.config().command()
         {
-            Pause::run(path, *ipc, *pid, *net, *user, *uts).context("run pause")?;
+            Pause::run(
+                path,
+                *ipc,
+                *pid,
+                *net,
+                *user,
+                *uts,
+                uid_mappings,
+                gid_mappings,
+            )
+            .context("run pause")?;
             process::exit(0);
         }
 
