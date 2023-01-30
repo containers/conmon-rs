@@ -21,7 +21,7 @@ libsystemd = "0.6.0"
 memchr = "2.5.0"
 multimap = "0.8.3"
 nix = "0.26.2"
-notify = "5.0.0"
+notify = "5.1.0"
 once_cell = "1.17.0"
 opentelemetry = { version = "0.18.0", features = ["rt-tokio"] }
 opentelemetry-otlp = "0.11.0"
