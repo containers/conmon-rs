@@ -3,6 +3,7 @@ package client_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/containers/common/pkg/resize"
 	"github.com/containers/conmon-rs/pkg/client"
+	"github.com/containers/storage/pkg/idtools"
 	"github.com/containers/storage/pkg/unshare"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -532,7 +534,7 @@ var _ = Describe("ConmonClient", func() {
 			Expect(response).NotTo(BeNil())
 		})
 
-		It("should succeed with all namespaces", func() {
+		It("should succeed without user namespace", func() {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
@@ -545,7 +547,6 @@ var _ = Describe("ConmonClient", func() {
 						client.NamespaceNet,
 						client.NamespacePID,
 						client.NamespaceUTS,
-						client.NamespaceUser, // will be ignored
 					},
 				},
 			)
@@ -566,6 +567,64 @@ var _ = Describe("ConmonClient", func() {
 				Expect(stat.Mode()).To(Equal(fs.FileMode(0o444)))
 				Expect(len(stat.Name())).To(BeEquivalentTo(3))
 			}
+		})
+
+		It("should succeed with user namespace", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			uids := []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}}
+			gids := []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}}
+
+			response, err := sut.CreateNamespaces(
+				context.Background(),
+				&client.CreateaNamespacesConfig{
+					Namespaces: []client.Namespace{
+						client.NamespaceIPC,
+						client.NamespaceNet,
+						client.NamespacePID,
+						client.NamespaceUTS,
+						client.NamespaceUser,
+					},
+					IDMappings: idtools.NewIDMappingsFromMaps(uids, gids),
+				},
+			)
+			Expect(err).To(BeNil())
+			Expect(response).NotTo(BeNil())
+
+			Expect(len(response.Namespaces)).To(BeEquivalentTo(5))
+
+			Expect(response.Namespaces[0].Type).To(Equal(client.NamespaceIPC))
+			Expect(response.Namespaces[1].Type).To(Equal(client.NamespaceNet))
+			Expect(response.Namespaces[2].Type).To(Equal(client.NamespacePID))
+			Expect(response.Namespaces[3].Type).To(Equal(client.NamespaceUTS))
+			Expect(response.Namespaces[4].Type).To(Equal(client.NamespaceUser))
+
+			for _, ns := range response.Namespaces {
+				stat, err := os.Lstat(ns.Path)
+				Expect(err).To(BeNil())
+				Expect(stat.IsDir()).To(BeFalse())
+				Expect(stat.Size()).To(BeZero())
+			}
+		})
+
+		It("should fail with user namespace without mappings", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			response, err := sut.CreateNamespaces(
+				context.Background(),
+				&client.CreateaNamespacesConfig{
+					Namespaces: []client.Namespace{
+						client.NamespaceUser,
+					},
+				},
+			)
+			Expect(err).NotTo(BeNil())
+			Expect(errors.Is(err, client.ErrMissingIDMappings)).To(BeTrue())
+			Expect(response).To(BeNil())
 		})
 	})
 })

@@ -368,8 +368,11 @@ impl conmon::Server for Server {
         let _enter = span.enter();
         pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
 
-        let init_namespaces = pry!(req.get_namespaces());
-        let pause = pry_err!(Pause::init_shared(init_namespaces));
+        let pause = pry_err!(Pause::init_shared(
+            pry!(req.get_namespaces()),
+            capnp_vec_str!(req.get_uid_mappings()),
+            capnp_vec_str!(req.get_gid_mappings()),
+        ));
 
         let response = results.get().init_response();
         let mut namespaces =

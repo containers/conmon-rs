@@ -8,8 +8,8 @@ use anyhow::{bail, format_err, Context, Result};
 use getset::{CopyGetters, Getters, Setters};
 use libc::pid_t;
 use multimap::MultiMap;
-use nix::errno::Errno;
 use nix::{
+    errno::Errno,
     sys::{
         signal::{kill, Signal},
         wait::{waitpid, WaitStatus},

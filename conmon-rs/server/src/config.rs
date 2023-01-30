@@ -166,6 +166,16 @@ pub enum Commands {
         #[clap(long("uts"))]
         /// Unshare the UTS namespace.
         uts: bool,
+
+        #[clap(long("uid-mappings"), required_if_eq("user", "true"), short('u'))]
+        /// User ID mappings for unsahring the user namespace.
+        /// Allows multiple mappings in the format: "CONTAINER_ID HOST_ID SIZE".
+        uid_mappings: Vec<String>,
+
+        #[clap(long("gid-mappings"), required_if_eq("user", "true"), short('g'))]
+        /// Group ID mappings for unsahring the user namespace.
+        /// Allows multiple mappings in the format: "CONTAINER_ID HOST_ID SIZE".
+        gid_mappings: Vec<String>,
     },
 }
 

@@ -126,6 +126,8 @@ interface Conmon {
     struct CreateNamespacesRequest {
         metadata @0 :Data; # Standard metadata to carry.
         namespaces @1 :List(Namespace); # The list of namespaces to unshare.
+        uidMappings @2 :List(Text); # User ID mappings when unsharing the user namespace.
+        gidMappings @3 :List(Text); # Group ID mappings when unsharing the user namespace.
     }
 
     enum Namespace {

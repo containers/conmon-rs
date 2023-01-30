@@ -18,6 +18,7 @@ import (
 	"capnproto.org/go/capnp/v3"
 	"capnproto.org/go/capnp/v3/rpc"
 	"github.com/containers/conmon-rs/internal/proto"
+	"github.com/containers/storage/pkg/idtools"
 	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
@@ -1013,6 +1014,10 @@ func (c *ConmonClient) metadataBytes(ctx context.Context) ([]byte, error) {
 type CreateaNamespacesConfig struct {
 	// Namespaces are the list of namespaces to unshare.
 	Namespaces []Namespace
+
+	// IDMappings are the user and group ID mappings when unsharing the user
+	// namespace.
+	IDMappings *idtools.IDMappings
 }
 
 // CreateaNamespacesResponse is the response of the CreateNamespaces method.
@@ -1076,7 +1081,27 @@ func (c *ConmonClient) CreateNamespaces(
 				namespaces.Set(i, proto.Conmon_Namespace_pid)
 
 			case NamespaceUser:
+				if cfg.IDMappings == nil ||
+					len(cfg.IDMappings.UIDs()) == 0 ||
+					len(cfg.IDMappings.GIDs()) == 0 {
+					return ErrMissingIDMappings
+				}
+
 				namespaces.Set(i, proto.Conmon_Namespace_user)
+
+				if err := stringSliceToTextList(
+					mappingsToSlice(cfg.IDMappings.UIDs()),
+					req.NewUidMappings,
+				); err != nil {
+					return fmt.Errorf("convert user ID mappings to text list: %w", err)
+				}
+
+				if err := stringSliceToTextList(
+					mappingsToSlice(cfg.IDMappings.GIDs()),
+					req.NewGidMappings,
+				); err != nil {
+					return fmt.Errorf("convert group ID mappings to text list: %w", err)
+				}
 
 			case NamespaceUTS:
 				namespaces.Set(i, proto.Conmon_Namespace_uts)
@@ -1144,4 +1169,12 @@ func (c *ConmonClient) CreateNamespaces(
 	return &CreateaNamespacesResponse{
 		Namespaces: namespacesResponse,
 	}, nil
+}
+
+func mappingsToSlice(mappings []idtools.IDMap) (res []string) {
+	for _, m := range mappings {
+		res = append(res, fmt.Sprintf("%d %d %d", m.ContainerID, m.HostID, m.Size))
+	}
+
+	return res
 }
