@@ -553,11 +553,12 @@ var _ = Describe("ConmonClient", func() {
 			Expect(err).To(BeNil())
 			Expect(response).NotTo(BeNil())
 
-			Expect(len(response.Namespaces)).To(BeEquivalentTo(4))
+			Expect(len(response.Namespaces)).To(BeEquivalentTo(5))
 			Expect(response.Namespaces[0].Type).To(Equal(client.NamespaceIPC))
-			Expect(response.Namespaces[1].Type).To(Equal(client.NamespaceNet))
-			Expect(response.Namespaces[2].Type).To(Equal(client.NamespacePID))
-			Expect(response.Namespaces[3].Type).To(Equal(client.NamespaceUTS))
+			Expect(response.Namespaces[1].Type).To(Equal(client.NamespacePID))
+			Expect(response.Namespaces[2].Type).To(Equal(client.NamespaceNet))
+			Expect(response.Namespaces[3].Type).To(Equal(client.NamespaceUser))
+			Expect(response.Namespaces[4].Type).To(Equal(client.NamespaceUTS))
 
 			for _, ns := range response.Namespaces {
 				stat, err := os.Lstat(ns.Path)
@@ -565,7 +566,6 @@ var _ = Describe("ConmonClient", func() {
 				Expect(stat.IsDir()).To(BeFalse())
 				Expect(stat.Size()).To(BeZero())
 				Expect(stat.Mode()).To(Equal(fs.FileMode(0o444)))
-				Expect(len(stat.Name())).To(BeEquivalentTo(3))
 			}
 		})
 
@@ -594,12 +594,11 @@ var _ = Describe("ConmonClient", func() {
 			Expect(response).NotTo(BeNil())
 
 			Expect(len(response.Namespaces)).To(BeEquivalentTo(5))
-
 			Expect(response.Namespaces[0].Type).To(Equal(client.NamespaceIPC))
-			Expect(response.Namespaces[1].Type).To(Equal(client.NamespaceNet))
-			Expect(response.Namespaces[2].Type).To(Equal(client.NamespacePID))
-			Expect(response.Namespaces[3].Type).To(Equal(client.NamespaceUTS))
-			Expect(response.Namespaces[4].Type).To(Equal(client.NamespaceUser))
+			Expect(response.Namespaces[1].Type).To(Equal(client.NamespacePID))
+			Expect(response.Namespaces[2].Type).To(Equal(client.NamespaceNet))
+			Expect(response.Namespaces[3].Type).To(Equal(client.NamespaceUser))
+			Expect(response.Namespaces[4].Type).To(Equal(client.NamespaceUTS))
 
 			for _, ns := range response.Namespaces {
 				stat, err := os.Lstat(ns.Path)

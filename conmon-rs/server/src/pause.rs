@@ -19,7 +19,7 @@ use std::{
     path::{Path, PathBuf},
     process::{exit, Command},
 };
-use strum::{AsRefStr, Display, EnumIter, EnumString, IntoStaticStr};
+use strum::{AsRefStr, Display, EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
@@ -165,7 +165,7 @@ impl Pause {
 
         Ok(Self {
             path,
-            namespaces,
+            namespaces: Namespace::iter().collect(),
             pid: Pid::from_raw(pid as pid_t),
         })
     }
@@ -182,30 +182,24 @@ impl Pause {
         uid_mappings: &[String],
         gid_mappings: &[String],
     ) -> Result<()> {
-        let mut namespaces = vec![];
         let mut flags = CloneFlags::empty();
         if ipc {
             flags.insert(CloneFlags::CLONE_NEWIPC);
-            namespaces.push(Namespace::Ipc);
         }
         if pid {
             flags.insert(CloneFlags::CLONE_NEWPID);
-            namespaces.push(Namespace::Pid);
         }
         if net {
             flags.insert(CloneFlags::CLONE_NEWNET);
-            namespaces.push(Namespace::Net);
         }
         if user {
             // CLONE_NEWNS is intentional here, because we need a new mount namespace for user
             // namespace handling as well. The CLONE_NEWUSER will be done before calling unshare
             // with the rest of the flags.
             flags.insert(CloneFlags::CLONE_NEWNS);
-            namespaces.push(Namespace::User);
         }
         if uts {
             flags.insert(CloneFlags::CLONE_NEWUTS);
-            namespaces.push(Namespace::Uts);
         }
 
         if !user {
@@ -262,7 +256,8 @@ impl Pause {
             _ => (),
         }
 
-        for namespace in namespaces {
+        // We bind all namespaces, if not unshared then we use the host namespace.
+        for namespace in Namespace::iter() {
             namespace.bind(path.as_ref()).context(format!(
                 "bind namespace to path: {}",
                 namespace.path(path).display(),
