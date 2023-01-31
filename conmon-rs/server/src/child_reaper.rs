@@ -395,7 +395,7 @@ impl ReapableChild {
                     return exit_code;
                 }
                 Ok(WaitStatus::Signaled(_, sig, _)) => {
-                    debug!("Signaled");
+                    debug!("Signaled: {sig}");
                     token.cancel();
                     return (sig as i32) + 128;
                 }

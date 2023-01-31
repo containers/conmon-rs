@@ -222,34 +222,29 @@ impl OOMWatcher {
             tokio::select! {
                 _ = token.cancelled() => {
                     debug!("Loop cancelled");
-                    match tx.try_send(OOMEvent{ oom: false }) {
-                        Ok(_) => break,
-                        Err(e) => error!("try_send failed: {:#}", e)
+                    if let Err(e) = tx.try_send(OOMEvent{ oom: false }) {
+                        error!("try_send failed: {:#}", e);
                     };
                     break;
                 }
                 Some(res) = rx.recv() => {
                     match res {
                         Ok(event) => {
-                            if event.kind.is_remove() || event.kind.is_other() {
-                                match tx.try_send(OOMEvent{ oom: false }) {
-                                    Ok(_) => break,
-                                    Err(e) => error!("try_send failed: {:#}", e)
+                            debug!("Got event OOM file event: {:?}", event);
+                            if event.kind.is_remove() {
+                                if let Err(e) = tx.try_send(OOMEvent{ oom: false }) {
+                                    error!("try_send failed: {:#}", e);
                                 };
                                 break
                             }
-                            if !event.kind.is_modify() {
-                                continue;
-                            }
-                            debug!("Found modify event");
                             match Self::check_for_oom(&memory_events_file_path, last_counter).await {
                                 Ok((counter, is_oom)) => {
                                     if !is_oom {
                                         continue;
                                     }
-                                    debug!(counter, "Found oom event");
+                                    debug!(counter, "Found OOM event");
                                     if let Err(e) = Self::write_oom_files(exit_paths).await {
-                                        error!("Writing oom files failed: {:#}", e);
+                                        error!("Writing OOM files failed: {:#}", e);
                                     }
                                     last_counter = counter;
                                     match tx.try_send(OOMEvent{ oom: true }) {
@@ -258,7 +253,7 @@ impl OOMWatcher {
                                     };
                                 }
                                 Err(e) => {
-                                    error!("Checking for oom failed: {}", e);
+                                    error!("Checking for OOM failed: {}", e);
                                     match tx.try_send(OOMEvent{ oom: false }) {
                                         Ok(_) => break,
                                         Err(e) => error!("try_send failed: {:#}", e)
@@ -291,6 +286,7 @@ impl OOMWatcher {
         memory_events_file_path: &Path,
         last_counter: u64,
     ) -> Result<(u64, bool)> {
+        debug!("Checking for possible OOM");
         let mut new_counter: u64 = 0;
         let mut found_oom = false;
         let fp = File::open(memory_events_file_path).await.context(format!(
@@ -300,12 +296,13 @@ impl OOMWatcher {
         let reader = BufReader::new(fp);
         let mut lines = reader.lines();
         while let Some(line) = lines.next_line().await.context("get next line")? {
-            if let Some(counter) = line.strip_prefix("oom ") {
+            if let Some(counter) = line.strip_prefix("oom ").or(line.strip_prefix("oom_kill ")) {
                 let counter = counter
                     .to_string()
                     .parse::<u64>()
                     .context("parse u64 counter")?;
                 if counter != last_counter {
+                    debug!("Updating OOM counter to {counter}");
                     new_counter = counter;
                     found_oom = true;
                     break;
