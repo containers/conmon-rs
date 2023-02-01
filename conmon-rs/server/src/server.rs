@@ -64,7 +64,8 @@ impl Server {
         }
 
         if let Some(Commands::Pause {
-            path,
+            base_path,
+            pod_id,
             ipc,
             pid,
             net,
@@ -75,7 +76,8 @@ impl Server {
         }) = server.config().command()
         {
             Pause::run(
-                path,
+                base_path,
+                pod_id,
                 *ipc,
                 *pid,
                 *net,

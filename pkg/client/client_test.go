@@ -18,6 +18,7 @@ import (
 	"github.com/containers/conmon-rs/pkg/client"
 	"github.com/containers/storage/pkg/idtools"
 	"github.com/containers/storage/pkg/unshare"
+	"github.com/google/uuid"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/opencontainers/runtime-tools/generate"
@@ -526,12 +527,29 @@ var _ = Describe("ConmonClient", func() {
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
 
+			podID := uuid.New().String()
+
+			response, err := sut.CreateNamespaces(
+				context.Background(),
+				&client.CreateaNamespacesConfig{
+					PodID: podID,
+				},
+			)
+			Expect(err).To(BeNil())
+			Expect(response).NotTo(BeNil())
+		})
+
+		It("should fail without pod ID", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
 			response, err := sut.CreateNamespaces(
 				context.Background(),
 				&client.CreateaNamespacesConfig{},
 			)
-			Expect(err).To(BeNil())
-			Expect(response).NotTo(BeNil())
+			Expect(err).NotTo(BeNil())
+			Expect(response).To(BeNil())
 		})
 
 		It("should succeed without user namespace", func() {
@@ -539,9 +557,12 @@ var _ = Describe("ConmonClient", func() {
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
 
+			podID := uuid.New().String()
+
 			response, err := sut.CreateNamespaces(
 				context.Background(),
 				&client.CreateaNamespacesConfig{
+					PodID: podID,
 					Namespaces: []client.Namespace{
 						client.NamespaceIPC,
 						client.NamespaceNet,
@@ -560,19 +581,40 @@ var _ = Describe("ConmonClient", func() {
 			Expect(response.Namespaces[3].Type).To(Equal(client.NamespaceUser))
 			Expect(response.Namespaces[4].Type).To(Equal(client.NamespaceUTS))
 
-			for _, ns := range response.Namespaces {
+			for i, ns := range response.Namespaces {
 				stat, err := os.Lstat(ns.Path)
 				Expect(err).To(BeNil())
 				Expect(stat.IsDir()).To(BeFalse())
 				Expect(stat.Size()).To(BeZero())
 				Expect(stat.Mode()).To(Equal(fs.FileMode(0o444)))
+
+				Expect(filepath.Base(ns.Path)).To(Equal(podID))
+				Expect(err).To(BeNil())
+
+				const basePath = "/var/run/"
+				switch i {
+				case 0:
+					Expect(ns.Path).To(ContainSubstring(basePath + "ipcns/"))
+				case 1:
+					Expect(ns.Path).To(ContainSubstring(basePath + "pidns/"))
+				case 2:
+					Expect(ns.Path).To(ContainSubstring(basePath + "netns/"))
+				case 3:
+					Expect(ns.Path).To(ContainSubstring(basePath + "userns/"))
+				case 4:
+					Expect(ns.Path).To(ContainSubstring(basePath + "utsns/"))
+				}
 			}
 		})
 
-		It("should succeed with user namespace", func() {
+		It("should succeed with user namespace and custom base path", func() {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
+
+			basePath := MustTempDir("ns-test-")
+			defer os.RemoveAll(basePath)
+			podID := uuid.New().String()
 
 			uids := []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}}
 			gids := []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}}
@@ -588,6 +630,8 @@ var _ = Describe("ConmonClient", func() {
 						client.NamespaceUser,
 					},
 					IDMappings: idtools.NewIDMappingsFromMaps(uids, gids),
+					BasePath:   basePath,
+					PodID:      podID,
 				},
 			)
 			Expect(err).To(BeNil())

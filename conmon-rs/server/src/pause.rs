@@ -20,14 +20,16 @@ use std::{
     process::{exit, Command},
 };
 use strum::{AsRefStr, Display, EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
-use tracing::{debug, error, info};
-use uuid::Uuid;
+use tracing::{debug, info, trace, warn};
 
 /// The main structure for this module.
 #[derive(Debug, CopyGetters, Getters)]
 pub struct Pause {
     #[get = "pub"]
-    path: PathBuf,
+    base_path: PathBuf,
+
+    #[get = "pub"]
+    pod_id: String,
 
     #[get = "pub"]
     namespaces: Vec<Namespace>,
@@ -39,21 +41,18 @@ pub struct Pause {
 /// The global shared multiple pause instance.
 static PAUSE: OnceCell<Pause> = OnceCell::new();
 
-/// The global path for storing bin mounted namespaces.
-const PAUSE_PATH: &str = "/var/run/conmonrs";
-
-/// The file path for storing the pause PID.
-const PAUSE_PID_FILE: &str = ".pause_pid";
-
 impl Pause {
     /// Retrieve the global instance of pause
     pub fn init_shared(
+        base_path: &str,
+        pod_id: &str,
         namespaces: Reader<conmon::Namespace>,
         uid_mappings: Vec<String>,
         gid_mappings: Vec<String>,
     ) -> Result<&'static Pause> {
         PAUSE.get_or_try_init(|| {
-            Self::init(namespaces, uid_mappings, gid_mappings).context("init pause")
+            Self::init(base_path, pod_id, namespaces, uid_mappings, gid_mappings)
+                .context("init pause")
         })
     }
 
@@ -66,34 +65,39 @@ impl Pause {
     pub fn stop(&self) {
         info!("Stopping pause");
         for namespace in self.namespaces() {
-            if let Err(e) = namespace.umount(self.path()) {
+            if let Err(e) = namespace.umount(self.base_path(), self.pod_id()) {
                 debug!("Unable to umount namespace {namespace}: {:#}", e);
             }
-        }
-        if let Err(e) = fs::remove_dir_all(self.path()) {
-            error!(
-                "Unable to remove pause path {}: {:#}",
-                self.path().display(),
-                e
-            );
         }
 
         info!("Killing pause PID: {}", self.pid());
         if let Err(e) = kill(self.pid(), Signal::SIGTERM) {
-            error!("Unable to kill pause PID {}: {:#}", self.pid(), e);
+            warn!("Unable to kill pause PID {}: {:#}", self.pid(), e);
+        }
+
+        let pause_pid_path = Self::pause_pid_path(self.base_path(), self.pod_id());
+        if let Err(e) = fs::remove_file(&pause_pid_path) {
+            debug!(
+                "Unable to remove pause PID path {}: {:#}",
+                pause_pid_path.display(),
+                e
+            );
         }
     }
 
     /// Initialize a new pause instance.
     fn init(
+        base_path: &str,
+        pod_id: &str,
         init_namespaces: Reader<conmon::Namespace>,
         uid_mappings: Vec<String>,
         gid_mappings: Vec<String>,
     ) -> Result<Self> {
         debug!("Initializing pause");
 
-        let mut args: Vec<String> = vec![];
+        let mut args: Vec<String> = vec![format!("--pod-id={pod_id}")];
         let mut namespaces = vec![];
+
         for namespace in init_namespaces.iter() {
             match namespace? {
                 conmon::Namespace::Ipc => {
@@ -138,15 +142,15 @@ impl Pause {
         debug!("Pause namespaces: {:?}", namespaces);
         debug!("Pause args: {:?}", args);
 
-        let path = PathBuf::from(PAUSE_PATH).join(Uuid::new_v4().to_string());
-        fs::create_dir_all(&path).context("create base path")?;
-        debug!("Pause base path: {}", path.display());
+        let base_path = PathBuf::from(base_path);
+        fs::create_dir_all(&base_path).context("create base path")?;
+        debug!("Pause base path: {}", base_path.display());
 
         let program = env::args().next().context("no args set")?;
         let mut child = Command::new(program)
             .arg("pause")
-            .arg("--path")
-            .arg(&path)
+            .arg("--base-path")
+            .arg(&base_path)
             .args(args)
             .spawn()
             .context("run pause")?;
@@ -156,7 +160,7 @@ impl Pause {
             bail!("exit status not ok: {status}")
         }
 
-        let pid = fs::read_to_string(path.join(PAUSE_PID_FILE))
+        let pid = fs::read_to_string(Self::pause_pid_path(&base_path, pod_id))
             .context("read pause PID path")?
             .trim()
             .parse::<u32>()
@@ -164,16 +168,26 @@ impl Pause {
         info!("Pause PID is: {pid}");
 
         Ok(Self {
-            path,
+            base_path,
+            pod_id: pod_id.to_owned(),
             namespaces: Namespace::iter().collect(),
             pid: Pid::from_raw(pid as pid_t),
         })
     }
 
+    /// Retrieve the pause PID path for a base and pod ID.
+    fn pause_pid_path<T: AsRef<Path>>(base_path: T, pod_id: &str) -> PathBuf {
+        base_path
+            .as_ref()
+            .join("conmonrs")
+            .join(format!("{pod_id}.pid"))
+    }
+
     #[allow(clippy::too_many_arguments)]
     /// Run a new pause instance.
     pub fn run<T: AsRef<Path> + Copy>(
-        path: T,
+        base_path: T,
+        pod_id: &str,
         ipc: bool,
         pid: bool,
         net: bool,
@@ -209,16 +223,22 @@ impl Pause {
         let (mut sock_parent, mut sock_child) =
             UnixStream::pair().context("create unix socket pair")?;
         const MSG: &[u8] = &[1];
+        let mut res = [0];
 
         match unsafe { fork().context("forking process")? } {
             ForkResult::Parent { child } => {
-                let mut file = File::create(path.as_ref().join(PAUSE_PID_FILE))
-                    .context("create pause PID file")?;
+                let pause_pid_path = Self::pause_pid_path(base_path, pod_id);
+                fs::create_dir_all(
+                    pause_pid_path
+                        .parent()
+                        .context("no parent for pause PID path")?,
+                )
+                .context("create pause PID parent path")?;
+                let mut file = File::create(pause_pid_path).context("create pause PID file")?;
                 write!(file, "{child}").context("write child to pause file")?;
 
                 if user {
                     // Wait for user namespace creation
-                    let mut res = [0];
                     sock_parent.read_exact(&mut res)?;
 
                     // Write mappings
@@ -228,6 +248,9 @@ impl Pause {
                     // Notify that user mappings have been written
                     sock_parent.write_all(MSG)?;
                 }
+
+                // Wait for mounts to be created
+                sock_parent.read_exact(&mut res)?;
 
                 exit(0);
             }
@@ -239,7 +262,6 @@ impl Pause {
                 sock_child.write_all(MSG)?;
 
                 // Wait for the mappings to be written
-                let mut res = [0];
                 sock_child.read_exact(&mut res)?;
 
                 // Set the UID and GID
@@ -258,11 +280,14 @@ impl Pause {
 
         // We bind all namespaces, if not unshared then we use the host namespace.
         for namespace in Namespace::iter() {
-            namespace.bind(path.as_ref()).context(format!(
+            namespace.bind(base_path, pod_id).context(format!(
                 "bind namespace to path: {}",
-                namespace.path(path).display(),
+                namespace.path(base_path, pod_id).display(),
             ))?;
         }
+
+        // Notify that all mounts are created
+        sock_child.write_all(MSG)?;
 
         let mut signals = Signals::new(TERM_SIGNALS).context("register signals")?;
         signals.forever().next().context("no signal number")?;
@@ -323,9 +348,15 @@ pub enum Namespace {
 }
 
 impl Namespace {
-    /// Bind the namespace to the provided base path.
-    pub fn bind<T: AsRef<Path>>(&self, path: T) -> Result<()> {
-        let bind_path = self.path(path);
+    /// Bind the namespace to the provided base path and pod ID.
+    pub fn bind<T: AsRef<Path>>(&self, path: T, pod_id: &str) -> Result<()> {
+        let bind_path = self.path(path, pod_id);
+        fs::create_dir_all(
+            bind_path
+                .parent()
+                .context("no parent namespace bind path")?,
+        )
+        .context("create namespace parent path")?;
         File::create(&bind_path).context("create namespace bind path")?;
         let source_path = PathBuf::from("/proc/self/ns").join(self.as_ref());
 
@@ -342,14 +373,17 @@ impl Namespace {
     }
 
     /// Umount the namespace.
-    pub fn umount<T: AsRef<Path>>(&self, path: T) -> Result<()> {
-        let bind_path = self.path(path);
-        umount(&bind_path).context("umount namespace")
+    pub fn umount<T: AsRef<Path>>(&self, path: T, pod_id: &str) -> Result<()> {
+        let bind_path = self.path(path, pod_id);
+        if let Err(e) = umount(&bind_path) {
+            trace!("Unable to umount namespace {self}: {:#}", e);
+        }
+        fs::remove_file(&bind_path).context("remove namespace bind path")
     }
 
-    /// Retrieve the bind path of the namespace for the provided base path.
-    pub fn path<T: AsRef<Path>>(&self, path: T) -> PathBuf {
-        path.as_ref().join(self.as_ref())
+    /// Retrieve the bind path of the namespace for the provided base path and pod ID.
+    pub fn path<T: AsRef<Path>>(&self, path: T, pod_id: &str) -> PathBuf {
+        path.as_ref().join(format!("{self}ns")).join(pod_id)
     }
 
     pub fn to_capnp_namespace(self) -> conmon::Namespace {
