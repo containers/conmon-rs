@@ -10,6 +10,7 @@ TEST_FLAGS ?=
 PACKAGE_NAME ?= $(shell cargo metadata --no-deps --format-version 1 | jq -r '.packages[2] | [ .name, .version ] | join("-v")')
 PREFIX ?= /usr
 CI_TAG ?=
+GOLANGCI_LINT_VERSION := v1.50.1
 
 default:
 	cargo build
@@ -57,7 +58,7 @@ integration-static: .install.ginkgo # It needs to be release so we correctly tes
 
 .install.golangci-lint:
 	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | \
-		BINDIR=$(abspath $(GOTOOLS_BINDIR)) sh -s v1.49.0
+		BINDIR=$(abspath $(GOTOOLS_BINDIR)) sh -s $(GOLANGCI_LINT_VERSION)
 
 clean:
 	rm -rf target/
