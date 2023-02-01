@@ -11,6 +11,8 @@ PACKAGE_NAME ?= $(shell cargo metadata --no-deps --format-version 1 | jq -r '.pa
 PREFIX ?= /usr
 CI_TAG ?=
 GOLANGCI_LINT_VERSION := v1.50.1
+ZEITGEIST_VERSION := v0.3.5
+GINKGO_VERSION := v2.8.0
 
 default:
 	cargo build
@@ -35,6 +37,10 @@ lint-go: .install.golangci-lint
 	$(GOTOOLS_BINDIR)/golangci-lint linters
 	GL_DEBUG=gocritic $(GOTOOLS_BINDIR)/golangci-lint run
 
+.PHONY: verify-dependencies
+verify-dependencies: $(GOTOOLS_BINDIR)/zeitgeist
+	$(GOTOOLS_BINDIR)/zeitgeist validate --local-only --base-path . --config dependencies.yaml
+
 unit:
 	cargo test --no-fail-fast
 
@@ -54,11 +60,17 @@ integration-static: .install.ginkgo # It needs to be release so we correctly tes
 	sudo -E "$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
 
 .install.ginkgo:
-	GOBIN=$(abspath $(GOTOOLS_BINDIR)) go install github.com/onsi/ginkgo/v2/ginkgo@latest
+	GOBIN=$(abspath $(GOTOOLS_BINDIR)) go install github.com/onsi/ginkgo/v2/ginkgo@$(GINKGO_VERSION)
 
 .install.golangci-lint:
 	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | \
 		BINDIR=$(abspath $(GOTOOLS_BINDIR)) sh -s $(GOLANGCI_LINT_VERSION)
+
+$(GOTOOLS_BINDIR)/zeitgeist:
+	mkdir -p $(GOTOOLS_BINDIR)
+	curl -sSfL -o $(GOTOOLS_BINDIR)/zeitgeist \
+		https://github.com/kubernetes-sigs/zeitgeist/releases/download/$(ZEITGEIST_VERSION)/zeitgeist_$(ZEITGEIST_VERSION:v%=%)_linux_amd64
+	chmod +x $(GOTOOLS_BINDIR)/zeitgeist
 
 clean:
 	rm -rf target/

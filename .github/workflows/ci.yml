@@ -32,6 +32,12 @@ jobs:
           components: rustfmt
       - run: cargo build
 
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - run: make verify-dependencies
+
   go-lint:
     runs-on: ubuntu-latest
     steps:
