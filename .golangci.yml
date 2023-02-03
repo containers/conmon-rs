@@ -29,6 +29,7 @@ linters:
     - forcetypeassert
     - funlen
     - gci
+    - gocheckcompilerdirectives
     - gochecknoinits
     - gocognit
     - goconst
@@ -58,6 +59,7 @@ linters:
     - maintidx
     - makezero
     - misspell
+    - musttag
     - nakedret
     - nestif
     - nilerr
@@ -91,6 +93,7 @@ linters:
     - whitespace
     - wrapcheck
     # - exhaustruct
+    # - ginkgolinter
     # - gochecknoglobals
     # - nonamedreturns
     # - paralleltest
