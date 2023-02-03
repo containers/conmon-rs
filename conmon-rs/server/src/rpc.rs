@@ -360,15 +360,19 @@ impl conmon::Server for Server {
     ) -> Promise<(), capnp::Error> {
         debug!("Got a create namespaces request");
         let req = pry!(pry!(params.get()).get_request());
+        let pod_id = pry_err!(req.get_pod_id());
 
-        let span = debug_span!(
-            "create_namespaces",
-            uuid = Uuid::new_v4().to_string().as_str()
-        );
+        if pod_id.is_empty() {
+            return Promise::err(Error::failed("no pod ID provided".into()));
+        }
+
+        let span = new_root_span!("create_namespaces", pod_id);
         let _enter = span.enter();
         pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
 
         let pause = pry_err!(Pause::init_shared(
+            pry!(req.get_base_path()),
+            pod_id,
             pry!(req.get_namespaces()),
             capnp_vec_str!(req.get_uid_mappings()),
             capnp_vec_str!(req.get_gid_mappings()),
@@ -380,7 +384,12 @@ impl conmon::Server for Server {
 
         for (idx, namespace) in pause.namespaces().iter().enumerate() {
             let mut ns = namespaces.reborrow().get(pry_err!(idx.try_into()));
-            ns.set_path(&namespace.path(pause.path()).display().to_string());
+            ns.set_path(
+                &namespace
+                    .path(pause.base_path(), pod_id)
+                    .display()
+                    .to_string(),
+            );
             ns.set_type(namespace.to_capnp_namespace());
         }
 

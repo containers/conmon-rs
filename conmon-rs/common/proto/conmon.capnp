@@ -128,6 +128,8 @@ interface Conmon {
         namespaces @1 :List(Namespace); # The list of namespaces to unshare.
         uidMappings @2 :List(Text); # User ID mappings when unsharing the user namespace.
         gidMappings @3 :List(Text); # Group ID mappings when unsharing the user namespace.
+        basePath @4 :Text; # The root path for storing the namespaces.
+        podId @5 :Text; # The pod identifier.
     }
 
     enum Namespace {

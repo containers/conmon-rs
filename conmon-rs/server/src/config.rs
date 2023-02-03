@@ -136,16 +136,35 @@ pub struct Config {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Subcommand)]
 /// Possible subcommands.
 pub enum Commands {
-    /// Run pause instead of the server.
+    /// Run pause, which bind mounts selected namespaces to the local file system.
+    ///
+    /// If a namespace is not selected by one of the flags, then it will fallback to the host
+    /// namespace and still create the bind mount to it. All namespaces are mounted to
+    /// /var/run/[ipc,pid,net,user,uts]ns/$POD_ID, whereas the POD_ID is being passed from the
+    /// client.
+    ///
+    /// Tracking of the pause PID will be done by using a file in /var/run/conmonrs/$POD_ID.pid,
+    /// which gets removed together with the mounted namespaces if `conmonrs pause` terminates.
+    ///
+    /// UID and GID mappings are required if unsharing of the user namespace (via `--user`) is
+    /// selected.
     Pause {
         #[clap(
-            env(concat!(prefix!(), "PAUSE_PATH")),
-            long("path"),
+            default_value("/var/run"),
+            env(concat!(prefix!(), "PAUSE_BASE_PATH")),
+            long("base-path"),
             short('p'),
             value_name("PATH")
         )]
         /// The base path for pinning the namespaces.
-        path: PathBuf,
+        base_path: PathBuf,
+
+        #[clap(
+            env(concat!(prefix!(), "PAUSE_POD_ID")),
+            long("pod-id"),
+        )]
+        /// The unique pod identifier for referring to the namespaces.
+        pod_id: String,
 
         #[clap(long("ipc"))]
         /// Unshare the IPC namespace.
