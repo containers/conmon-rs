@@ -3,7 +3,6 @@ package client_test
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -522,7 +521,25 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	Describe("CreateNamespaces", func() {
-		It("should succeed without namespaces", func() {
+		It("should succeed with PID namespace", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			podID := uuid.New().String()
+
+			response, err := sut.CreateNamespaces(
+				context.Background(),
+				&client.CreateaNamespacesConfig{
+					PodID:      podID,
+					Namespaces: []client.Namespace{client.NamespacePID},
+				},
+			)
+			Expect(err).To(BeNil())
+			Expect(response).NotTo(BeNil())
+		})
+
+		It("should fail without PID namespace", func() {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
@@ -535,8 +552,9 @@ var _ = Describe("ConmonClient", func() {
 					PodID: podID,
 				},
 			)
-			Expect(err).To(BeNil())
-			Expect(response).NotTo(BeNil())
+			Expect(err).NotTo(Succeed())
+			Expect(err).To(MatchError(client.ErrNoPIDNamespaceSpecified))
+			Expect(response).To(BeNil())
 		})
 
 		It("should fail without pod ID", func() {
@@ -661,12 +679,13 @@ var _ = Describe("ConmonClient", func() {
 				context.Background(),
 				&client.CreateaNamespacesConfig{
 					Namespaces: []client.Namespace{
+						client.NamespacePID,
 						client.NamespaceUser,
 					},
 				},
 			)
 			Expect(err).NotTo(BeNil())
-			Expect(errors.Is(err, client.ErrMissingIDMappings)).To(BeTrue())
+			Expect(err).To(MatchError(client.ErrMissingIDMappings))
 			Expect(response).To(BeNil())
 		})
 	})

@@ -1074,6 +1074,20 @@ func (c *ConmonClient) CreateNamespaces(
 		return nil, fmt.Errorf("requires at least %v: %w", minVersion, ErrUnsupported)
 	}
 
+	// The pause process is only required if a PID namespace should be unshared.
+	foundPIDNamespace := false
+	for _, ns := range cfg.Namespaces {
+		if ns == NamespacePID {
+			foundPIDNamespace = true
+
+			break
+		}
+	}
+
+	if !foundPIDNamespace {
+		return nil, ErrNoPIDNamespaceSpecified
+	}
+
 	conn, err := c.newRPCConn()
 	if err != nil {
 		return nil, fmt.Errorf("create RPC connection: %w", err)
