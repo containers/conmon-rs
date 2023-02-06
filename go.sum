@@ -1,5 +1,5 @@
-capnproto.org/go/capnp/v3 v3.0.0-alpha.9 h1:aQhrN87/+sxoXPNRm8ZVMLAPh9fPSf4ZO5y6cHqJHQE=
-capnproto.org/go/capnp/v3 v3.0.0-alpha.9/go.mod h1:Dynqh9/LE2Wy7jYd2wIoYgqFwh3hZHCmG7j6/uCWX6c=
+capnproto.org/go/capnp/v3 v3.0.0-alpha.24 h1:Vxks4FsGgR6hE4A1wcrQC4BOkQANvgOXCcFmPYhHqls=
+capnproto.org/go/capnp/v3 v3.0.0-alpha.24/go.mod h1:Dynqh9/LE2Wy7jYd2wIoYgqFwh3hZHCmG7j6/uCWX6c=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
 github.com/blang/semver/v4 v4.0.0 h1:1PFHFE6yCCTv8C1TeyNNarDzntLi7wMI5i/pzqYIsAM=
 github.com/blang/semver/v4 v4.0.0/go.mod h1:IbckMUScFkM3pff0VJDNKRiT6TG/YpiHIM2yvyW5YoQ=
