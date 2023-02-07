@@ -29,6 +29,7 @@ linters:
     - forcetypeassert
     - funlen
     - gci
+    - ginkgolinter
     - gocheckcompilerdirectives
     - gochecknoinits
     - gocognit
@@ -93,7 +94,6 @@ linters:
     - whitespace
     - wrapcheck
     # - exhaustruct
-    # - ginkgolinter
     # - gochecknoglobals
     # - nonamedreturns
     # - paralleltest
