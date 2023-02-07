@@ -57,13 +57,13 @@ func TestConmonClient(t *testing.T) {
 var _ = AfterSuite(func() {
 	By("printing the goroutine stack for debugging purposes")
 	goroutines := pprof.Lookup("goroutine")
-	Expect(goroutines.WriteTo(os.Stdout, 1)).To(BeNil())
+	Expect(goroutines.WriteTo(os.Stdout, 1)).To(Succeed())
 
 	By("Verifying that no conmonrs processes are still running in the background")
 	cmd := exec.Command("ps", "aux")
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-	Expect(cmd.Run()).To(BeNil())
+	Expect(cmd.Run()).To(Succeed())
 	scanner := bufio.NewScanner(strings.NewReader(stdout.String()))
 	for scanner.Scan() {
 		text := scanner.Text()
@@ -98,7 +98,7 @@ func (tr *testRunner) createRuntimeConfigWithProcessArgs(
 	}
 
 	// Save busy box binary if we don't have it.
-	Expect(cacheBusyBox()).To(BeNil())
+	Expect(cacheBusyBox()).To(Succeed())
 
 	// generate container ID.
 	ctrID := stringid.GenerateNonCryptoID()
@@ -107,12 +107,12 @@ func (tr *testRunner) createRuntimeConfigWithProcessArgs(
 	tmpRootfs := MustDirInTempDir(tr.tmpDir, "rootfs")
 
 	// Link busybox binary to rootfs.
-	Expect(os.Link(busyboxDest, filepath.Join(tmpRootfs, "busybox"))).To(BeNil())
+	Expect(os.Link(busyboxDest, filepath.Join(tmpRootfs, "busybox"))).To(Succeed())
 
 	// Finally, create config.json.
 	Expect(generateRuntimeConfigWithProcessArgs(
 		tr.tmpDir, tmpRootfs, terminal, processArgs, changeSpec,
-	)).To(BeNil())
+	)).To(Succeed())
 	tr.rr = rr
 	tr.ctrID = ctrID
 	tr.tmpRootfs = tmpRootfs
@@ -133,7 +133,7 @@ func (tr *testRunner) oomExitPath() string {
 
 func fileContents(path string) string {
 	contents, err := os.ReadFile(path)
-	Expect(err).To(BeNil())
+	Expect(err).To(Succeed())
 
 	return string(contents)
 }
@@ -162,16 +162,16 @@ func (tr *testRunner) createContainer(sut *client.ConmonClient, terminal bool) {
 
 func (tr *testRunner) createContainerWithConfig(sut *client.ConmonClient, cfg *client.CreateContainerConfig) {
 	resp, err := sut.CreateContainer(context.Background(), cfg)
-	Expect(err).To(BeNil())
+	Expect(err).To(Succeed())
 	Expect(resp.PID).NotTo(Equal(0))
 	Eventually(func() error {
 		return tr.rr.RunCommandCheckOutput(tr.ctrID, "list")
-	}, time.Second*5).Should(BeNil())
+	}, time.Second*5).Should(Succeed())
 }
 
 func (tr *testRunner) startContainer(*client.ConmonClient) {
 	// Start the container
-	Expect(tr.rr.RunCommand("start", tr.ctrID)).To(BeNil())
+	Expect(tr.rr.RunCommand("start", tr.ctrID)).To(Succeed())
 
 	// Wait for container to be running
 	Eventually(func() error {
@@ -180,19 +180,19 @@ func (tr *testRunner) startContainer(*client.ConmonClient) {
 		}
 
 		return tr.rr.RunCommandCheckOutput("stopped", "list")
-	}, time.Second*10).Should(BeNil())
+	}, time.Second*10).Should(Succeed())
 }
 
 func MustTempDir(name string) string {
 	d, err := os.MkdirTemp(os.TempDir(), name)
-	Expect(err).To(BeNil())
+	Expect(err).To(Succeed())
 
 	return d
 }
 
 func MustDirInTempDir(parent, name string) string {
 	dir := filepath.Join(parent, name)
-	Expect(os.MkdirAll(dir, 0o755)).To(BeNil())
+	Expect(os.MkdirAll(dir, 0o755)).To(Succeed())
 
 	return dir
 }
@@ -200,7 +200,7 @@ func MustDirInTempDir(parent, name string) string {
 func MustFile(file string) string {
 	f, err := os.Create(file)
 	f.Close()
-	Expect(err).To(BeNil())
+	Expect(err).To(Succeed())
 
 	return file
 }
@@ -219,7 +219,7 @@ func (tr *testRunner) configGivenEnv() *client.ConmonClient {
 	}
 
 	sut, err := client.New(cfg)
-	Expect(err).To(BeNil())
+	Expect(err).To(Succeed())
 	Expect(sut).NotTo(BeNil())
 
 	return sut
@@ -230,7 +230,7 @@ func vmRSSGivenPID(pid uint32) uint32 {
 	procEntry := filepath.Join(procPath, strconv.Itoa(int(pid)), "status")
 
 	f, err := os.Open(procEntry)
-	Expect(err).To(BeNil())
+	Expect(err).To(Succeed())
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
@@ -241,13 +241,13 @@ func vmRSSGivenPID(pid uint32) uint32 {
 			continue
 		}
 		parts := strings.Fields(scanner.Text())
-		Expect(len(parts)).To(Equal(3))
+		Expect(parts).To(HaveLen(3))
 		rss = parts[1]
 
 		break
 	}
 	rssU64, err := strconv.ParseUint(rss, 10, 32)
-	Expect(err).To(BeNil())
+	Expect(err).To(Succeed())
 
 	return uint32(rssU64)
 }
@@ -418,15 +418,15 @@ func testAttach(
 		// Run twice to ensure all data is processed.
 		for i := 0; i < 2; i++ {
 			_, err := fmt.Fprintf(stdinWriter, "%s%s\n", command, pipe)
-			Expect(err).To(BeNil())
+			Expect(err).To(Succeed())
 			verifyBuffer(reader, terminal, command, testString)
 		}
 
 		// terminate the container
 		_, err := fmt.Fprintf(stdinWriter, "exit\n")
-		Expect(err).To(BeNil())
+		Expect(err).To(Succeed())
 
-		Expect(reader.Close()).To(BeNil())
+		Expect(reader.Close()).To(Succeed())
 	}()
 
 	go func() {
@@ -435,7 +435,7 @@ func testAttach(
 		err := sut.AttachContainer(context.Background(), cfg)
 		// The test races with itself, and sometimes is EOF and sometimes passes
 		if !errors.Is(err, io.ErrClosedPipe) {
-			Expect(err).To(BeNil())
+			Expect(err).To(Succeed())
 		}
 	}()
 
@@ -446,7 +446,7 @@ func verifyBuffer(reader io.Reader, terminal bool, command, expected string) {
 	readSection := func() string {
 		data := make([]byte, 8191)
 		_, err := reader.Read(data)
-		Expect(err).To(BeNil())
+		Expect(err).To(Succeed())
 
 		return string(bytes.Trim(data, "\x00"))
 	}

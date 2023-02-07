@@ -40,11 +40,11 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	AfterEach(func() {
-		Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID)).To(BeNil())
+		Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID)).To(Succeed())
 		if sut != nil {
-			Expect(sut.Shutdown()).To(BeNil())
+			Expect(sut.Shutdown()).To(Succeed())
 		}
-		Expect(os.RemoveAll(tr.tmpDir)).To(BeNil())
+		Expect(os.RemoveAll(tr.tmpDir)).To(Succeed())
 	})
 	Describe("New", func() {
 		It("should restore from running server", func() {
@@ -72,7 +72,7 @@ var _ = Describe("ConmonClient", func() {
 					context.Background(),
 					&client.VersionConfig{Verbose: verbose},
 				)
-				Expect(err).To(BeNil())
+				Expect(err).To(Succeed())
 
 				Expect(version.ProcessID).NotTo(BeZero())
 				Expect(version.Version).NotTo(BeEmpty())
@@ -116,12 +116,12 @@ var _ = Describe("ConmonClient", func() {
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 
-				Expect(sut.Shutdown()).To(BeNil())
+				Expect(sut.Shutdown()).To(Succeed())
 				sut = nil
 
 				Eventually(func() error {
 					return tr.rr.RunCommandCheckOutput("stopped", "list")
-				}, time.Second*20).Should(BeNil())
+				}, time.Second*20).Should(Succeed())
 			})
 
 			It(testName("should execute cleanup command when container exits", terminal), func() {
@@ -158,7 +158,7 @@ var _ = Describe("ConmonClient", func() {
 						Path: tr.logPath(),
 					}},
 				})
-				Expect(err).NotTo(BeNil())
+				Expect(err).NotTo(Succeed())
 				Expect(err.Error()).To(ContainSubstring(`executable file not found in $PATH"`))
 			})
 
@@ -190,9 +190,9 @@ var _ = Describe("ConmonClient", func() {
 					},
 				)
 				if terminal {
-					Expect(err).To(BeNil())
+					Expect(err).To(Succeed())
 				} else {
-					Expect(err).NotTo(BeNil())
+					Expect(err).NotTo(Succeed())
 				}
 			})
 
@@ -282,7 +282,7 @@ var _ = Describe("ConmonClient", func() {
 							Terminal: terminal,
 							Timeout:  timeoutUnlimited,
 						})
-						Expect(err).To(BeNil())
+						Expect(err).To(Succeed())
 						Expect(result).NotTo(BeNil())
 						Expect(string(result.Stdout)).To(Equal(fmt.Sprintf("hello world %d", i)))
 						GinkgoWriter.Println("done with", i, string(result.Stdout))
@@ -310,7 +310,7 @@ var _ = Describe("ConmonClient", func() {
 						Timeout:  timeoutUnlimited,
 					})
 
-					Expect(err).To(BeNil())
+					Expect(err).To(Succeed())
 					Expect(result).NotTo(BeNil())
 					Expect(string(result.Stdout)).To(Equal(fmt.Sprintf("hello world %d", i)))
 					GinkgoWriter.Println("done with", i, string(result.Stdout))
@@ -341,7 +341,7 @@ var _ = Describe("ConmonClient", func() {
 					Terminal: terminal,
 				})
 
-				Expect(err).To(BeNil())
+				Expect(err).To(Succeed())
 				Expect(result.ExitCode).To(BeEquivalentTo(0))
 				Expect(result.Stdout).To(BeEquivalentTo("hello world"))
 				Expect(result.Stderr).To(BeEmpty())
@@ -349,7 +349,7 @@ var _ = Describe("ConmonClient", func() {
 				err = sut.ReopenLogContainer(context.Background(), &client.ReopenLogContainerConfig{
 					ID: tr.ctrID,
 				})
-				Expect(err).To(BeNil())
+				Expect(err).To(Succeed())
 				logs := fileContents(tr.logPath())
 				Expect(logs).To(BeEmpty())
 			})
@@ -368,7 +368,7 @@ var _ = Describe("ConmonClient", func() {
 					Terminal: terminal,
 				})
 
-				Expect(err).To(BeNil())
+				Expect(err).To(Succeed())
 				Expect(result.ExitCode).To(BeEquivalentTo(0))
 				Expect(result.Stdout).To(BeEquivalentTo("hello world"))
 				Expect(result.Stderr).To(BeEmpty())
@@ -388,7 +388,7 @@ var _ = Describe("ConmonClient", func() {
 					Terminal: terminal,
 				})
 
-				Expect(err).To(BeNil())
+				Expect(err).To(Succeed())
 				Expect(result.ExitCode).To(BeEquivalentTo(127))
 				expectedStr := "invalid: applet not found"
 				if terminal {
@@ -418,9 +418,9 @@ var _ = Describe("ConmonClient", func() {
 					Terminal: terminal,
 				})
 
-				Expect(err).To(BeNil())
+				Expect(err).To(Succeed())
 				Expect(result).NotTo(BeNil())
-				Expect(result.TimedOut).To(Equal(true))
+				Expect(result.TimedOut).To(BeTrue())
 			})
 		}
 	})
@@ -482,14 +482,14 @@ var _ = Describe("ConmonClient", func() {
 			cmd := exec.Command(contribTracingPath + "start")
 			fmt.Fprintln(os.Stdout)
 			cmd.Stdout = os.Stdout
-			Expect(cmd.Run()).To(BeNil())
+			Expect(cmd.Run()).To(Succeed())
 		})
 
 		getLog := func() string {
 			cmd := exec.Command(contribTracingPath + "logs")
 			var stdout bytes.Buffer
 			cmd.Stdout = &stdout
-			Expect(cmd.Run()).To(BeNil())
+			Expect(cmd.Run()).To(Succeed())
 
 			return stdout.String()
 		}
@@ -517,7 +517,7 @@ var _ = Describe("ConmonClient", func() {
 		AfterEach(func() {
 			cmd := exec.Command(contribTracingPath + "stop")
 			cmd.Stdout = os.Stdout
-			Expect(cmd.Run()).To(BeNil())
+			Expect(cmd.Run()).To(Succeed())
 		})
 	})
 
@@ -535,7 +535,7 @@ var _ = Describe("ConmonClient", func() {
 					PodID: podID,
 				},
 			)
-			Expect(err).To(BeNil())
+			Expect(err).To(Succeed())
 			Expect(response).NotTo(BeNil())
 		})
 
@@ -548,7 +548,7 @@ var _ = Describe("ConmonClient", func() {
 				context.Background(),
 				&client.CreateaNamespacesConfig{},
 			)
-			Expect(err).NotTo(BeNil())
+			Expect(err).NotTo(Succeed())
 			Expect(response).To(BeNil())
 		})
 
@@ -571,7 +571,7 @@ var _ = Describe("ConmonClient", func() {
 					},
 				},
 			)
-			Expect(err).To(BeNil())
+			Expect(err).To(Succeed())
 			Expect(response).NotTo(BeNil())
 
 			Expect(len(response.Namespaces)).To(BeEquivalentTo(5))
@@ -583,13 +583,13 @@ var _ = Describe("ConmonClient", func() {
 
 			for i, ns := range response.Namespaces {
 				stat, err := os.Lstat(ns.Path)
-				Expect(err).To(BeNil())
+				Expect(err).To(Succeed())
 				Expect(stat.IsDir()).To(BeFalse())
 				Expect(stat.Size()).To(BeZero())
 				Expect(stat.Mode()).To(Equal(fs.FileMode(0o444)))
 
 				Expect(filepath.Base(ns.Path)).To(Equal(podID))
-				Expect(err).To(BeNil())
+				Expect(err).To(Succeed())
 
 				const basePath = "/var/run/"
 				switch i {
@@ -634,7 +634,7 @@ var _ = Describe("ConmonClient", func() {
 					PodID:      podID,
 				},
 			)
-			Expect(err).To(BeNil())
+			Expect(err).To(Succeed())
 			Expect(response).NotTo(BeNil())
 
 			Expect(len(response.Namespaces)).To(BeEquivalentTo(5))
@@ -646,7 +646,7 @@ var _ = Describe("ConmonClient", func() {
 
 			for _, ns := range response.Namespaces {
 				stat, err := os.Lstat(ns.Path)
-				Expect(err).To(BeNil())
+				Expect(err).To(Succeed())
 				Expect(stat.IsDir()).To(BeFalse())
 				Expect(stat.Size()).To(BeZero())
 			}
@@ -665,7 +665,7 @@ var _ = Describe("ConmonClient", func() {
 					},
 				},
 			)
-			Expect(err).NotTo(BeNil())
+			Expect(err).NotTo(Succeed())
 			Expect(errors.Is(err, client.ErrMissingIDMappings)).To(BeTrue())
 			Expect(response).To(BeNil())
 		})
