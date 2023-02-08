@@ -13,8 +13,8 @@ require (
 	github.com/opencontainers/runc v1.1.4
 	github.com/opencontainers/runtime-tools v0.9.1-0.20221014010322-58c91d646d86
 	github.com/sirupsen/logrus v1.9.0
-	go.opentelemetry.io/otel v1.12.0
-	go.opentelemetry.io/otel/trace v1.12.0
+	go.opentelemetry.io/otel v1.13.0
+	go.opentelemetry.io/otel/trace v1.13.0
 )
 
 require (
