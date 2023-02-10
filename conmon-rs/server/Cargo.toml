@@ -38,7 +38,7 @@ tempfile = "3.3.0"
 tokio = { version = "1.25.0", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "time"] }
 tokio-eventfd = "0.2.0"
 tokio-fd = "0.3.0"
-tokio-util = { version = "0.7.4", features = ["compat"] }
+tokio-util = { version = "0.7.6", features = ["compat"] }
 tracing = "0.1.37"
 tracing-opentelemetry = "0.18.0"
 tracing-subscriber = "0.3.16"
