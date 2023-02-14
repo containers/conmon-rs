@@ -1,5 +1,6 @@
 [package]
 name = "conmon-common"
+# Version listed below is also used by .packit.sh
 version = "0.5.0"
 edition = "2018"
 
