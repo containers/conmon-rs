@@ -24,6 +24,8 @@ License: ASL 2.0 and BSD and ISC and MIT
 URL: https://github.com/containers/conmon-rs
 VCS: {{{ git_dir_vcs }}}
 Source: {{{ git_dir_pack }}}
+# CentOS Stream doesn't have capnproto yet.
+# It's built separately on the copr
 BuildRequires: capnproto
 BuildRequires: cargo
 BuildRequires: git-core
