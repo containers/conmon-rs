@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 
 # Packit's default fix-spec-file often doesn't fetch version string correctly.
-# This script handles any custom processing of the dist-git spec file and gets used by the
-# fix-spec-file action in .packit.yaml
+# This script handles any custom processing of the spec file generated in the
+# `post-upstream-clone` action and gets used by the fix-spec-file action
+# in .packit.yaml.
 
 set -eo pipefail
 
