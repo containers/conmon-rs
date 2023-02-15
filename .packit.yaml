@@ -2,8 +2,11 @@
 # See the documentation for more information:
 # https://packit.dev/docs/configuration/
 
-# Build targets can be found at:
+# Pull request build targets can be found at:
 # https://copr.fedorainfracloud.org/coprs/rhcontainerbot/packit-builds/
+
+# Main branch commit build targets can be found at:
+# https://copr.fedorainfracloud.org/coprs/rhcontainerbot/podman-next/
 
 specfile_path: conmon-rs.spec
 
