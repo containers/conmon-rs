@@ -336,7 +336,7 @@ pub enum Namespace {
     /// The PID namespace. The child process becomes PID 1.
     Pid,
 
-    /// The network namespace. The namespace is empty and has no conectivity, even localhost
+    /// The network namespace. The namespace is empty and has no connectivity, even localhost
     /// network, unless some setup is done afterwards.
     Net,
 
