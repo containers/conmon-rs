@@ -27,3 +27,4 @@ jobs:
   - <<: *copr
     trigger: commit
     branch: main
+    project: podman-next
