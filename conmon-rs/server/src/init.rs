@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use libc::{c_char, c_int, setlocale, LC_ALL};
+use nix::sys::stat::{umask, Mode};
 use std::{
     ffi::CString,
     fs::File,
@@ -42,6 +43,11 @@ where
         }
         Ok(())
     }
+
+    /// Set the default umask
+    pub fn set_default_umask(&self) {
+        self.imp.umask(Mode::from_bits_truncate(0o022))
+    }
 }
 
 #[cfg_attr(test, automock)]
@@ -49,6 +55,7 @@ pub trait InitImpl {
     fn setlocale(&self, category: c_int, locale: *const c_char) -> *mut c_char;
     fn create_file<P: 'static + AsRef<Path>>(&self, path: P) -> io::Result<File>;
     fn write_all_file(&self, file: &mut File, buf: &[u8]) -> io::Result<()>;
+    fn umask(&self, mode: Mode);
 }
 
 #[derive(Debug, Default)]
@@ -65,6 +72,10 @@ impl InitImpl for DefaultInit {
 
     fn write_all_file(&self, file: &mut File, buf: &[u8]) -> io::Result<()> {
         file.write_all(buf)
+    }
+
+    fn umask(&self, mode: Mode) {
+        umask(mode);
     }
 }
 
@@ -152,5 +163,14 @@ mod tests {
         let res = sut.set_oom_score("-1000");
 
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn umask() {
+        let mut mock = MockInitImpl::new();
+        mock.expect_umask().returning(|_| ());
+
+        let sut = new_sut(mock);
+        sut.set_default_umask();
     }
 }

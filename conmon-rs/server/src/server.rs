@@ -136,6 +136,7 @@ impl Server {
     fn init() -> Result<()> {
         let init = Init::<DefaultInit>::default();
         init.unset_locale()?;
+        init.set_default_umask();
         // While we could configure this, standard practice has it as -1000,
         // so it may be YAGNI to add configuration.
         init.set_oom_score("-1000")
