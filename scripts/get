@@ -72,6 +72,8 @@ download_binary() {
         done
 
         COSIGN_EXPERIMENTAL=1 cosign verify-blob conmonrs \
+            --certificate-identity-regexp '.*' \
+            --certificate-oidc-issuer-regexp '.*' \
             --signature conmonrs.sig \
             --certificate conmonrs.cert
 
