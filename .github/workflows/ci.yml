@@ -95,7 +95,7 @@ jobs:
         if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
         run: |
           cd ${{ github.sha }}
-          cosign sign-blob conmonrs \
+          cosign sign-blob -y conmonrs \
             --output-signature conmonrs.sig \
             --output-certificate conmonrs.cert
       - uses: actions/upload-artifact@v3
