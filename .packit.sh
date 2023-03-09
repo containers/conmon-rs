@@ -19,7 +19,7 @@ git archive --prefix=conmon-rs-$HEAD_VERSION/ -o conmon-rs-$HEAD_VERSION.tar.gz 
 sed -i "s/^Version:.*/Version: $HEAD_VERSION/" conmon-rs.spec
 
 # Update Release in spec with Packit's release envvar
-sed -i "s/^Release: %autorelease/Release: $PACKIT_RPMSPEC_RELEASE%{?dist}/" conmon-rs.spec
+sed -i "s/^Release:.*/Release: $PACKIT_RPMSPEC_RELEASE%{?dist}/" conmon-rs.spec
 
 # Update Source tarball name in spec
 sed -i "s/^Source:.*.tar.gz/Source: %{name}-$HEAD_VERSION.tar.gz/" conmon-rs.spec
