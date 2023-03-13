@@ -204,13 +204,10 @@ impl Server {
         let backend_span = debug_span!("backend");
         task::spawn_blocking(move || {
             Handle::current().block_on(
-                async {
-                    LocalSet::new()
-                        .run_until(self.start_backend(shutdown_rx))
-                        .await
-                }
-                .with_context(backend_span.context())
-                .instrument(backend_span),
+                LocalSet::new()
+                    .run_until(self.start_backend(shutdown_rx))
+                    .with_context(backend_span.context())
+                    .instrument(backend_span),
             )
         })
         .await?
