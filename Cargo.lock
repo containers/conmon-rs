@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "conmon-common"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "capnp",
  "capnpc",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "conmonrs"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "capnp",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "conmonrs-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "capnp",
  "capnp-rpc",
@@ -1479,9 +1479,9 @@ dependencies = [
 
 [[package]]
 name = "predicates-core"
-version = "1.0.3"
+version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da1c2388b1513e1b605fcec39a95e0a9e8ef088f71443ef37099fa9ae6673fcb"
+checksum = "b794032607612e7abeb4db69adb4e33590fa6cf1149e95fd7cb00e634b92f174"
 
 [[package]]
 name = "predicates-tree"
