@@ -11,7 +11,7 @@ PACKAGE_NAME ?= $(shell cargo metadata --no-deps --format-version 1 | jq -r '.pa
 PREFIX ?= /usr
 CI_TAG ?=
 GOLANGCI_LINT_VERSION := v1.51.1
-ZEITGEIST_VERSION := v0.3.5
+ZEITGEIST_VERSION := v0.4.1
 GINKGO_VERSION := v2.8.0
 
 default:
