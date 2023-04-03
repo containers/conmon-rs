@@ -1,7 +1,7 @@
 [package]
 name = "conmonrs"
 version = "0.5.1"
-edition = "2018"
+edition = "2021"
 
 [[bin]]
 name = "conmonrs"
@@ -9,11 +9,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.70"
-capnp = "0.14.11"
-capnp-rpc = "0.14.1"
-clap = { version = "3.2.22", features = ["cargo", "derive", "deprecated", "env", "wrap_help"] }
+capnp = "0.16.1"
+capnp-rpc = "0.16.1"
+clap = { version = "3.2.23", features = ["cargo", "derive", "deprecated", "env", "wrap_help"] }
 conmon-common = { path = "../common" }
-futures = "0.3.27"
+futures = "0.3.28"
 getset = "0.1.2"
 lazy_static = "1.4.0"
 libc = "0.2.140"
@@ -31,7 +31,7 @@ regex = "1.7.3"
 sendfd = { version = "0.4.3", features = ["tokio"] }
 serde = { version = "1.0.159", features = ["derive"] }
 serde_json = "1.0.95"
-shadow-rs = "=0.16.1"
+shadow-rs = "=0.21.0"
 signal-hook = "0.3.15"
 strum = { version = "0.24.1", features = ["derive"] }
 tempfile = "3.5.0"
@@ -46,9 +46,9 @@ tz-rs = "0.6.14"
 uuid = { version = "1.3.0", features = ["v4", "fast-rng", "macro-diagnostics"] }
 
 [build-dependencies]
-shadow-rs = "=0.16.1"
-dashmap = "=5.2.0"
+shadow-rs = "=0.21.0"
+dashmap = "=5.4.0"
 
 [dev-dependencies]
 mockall = "0.11.4"
-time = { version = "=0.3.13", features = ["parsing"] }
+time = { version = "=0.3.20", features = ["parsing"] }
