@@ -1,6 +1,6 @@
 //! Configuration related structures
-use anyhow::{bail, Result};
-use clap::{ArgEnum, Parser, Subcommand};
+use anyhow::{bail, Context, Result};
+use clap::{Parser, Subcommand, ValueEnum};
 use getset::{CopyGetters, Getters, Setters};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
@@ -14,22 +14,23 @@ macro_rules! prefix {
 
 #[derive(CopyGetters, Debug, Deserialize, Eq, Getters, Parser, PartialEq, Serialize, Setters)]
 #[serde(rename_all = "kebab-case")]
-#[clap(
+#[command(
     after_help("More info at: https://github.com/containers/conmon-rs"),
     disable_version_flag(true)
 )]
 /// An OCI container runtime monitor.
 pub struct Config {
     #[get = "pub"]
-    #[clap(subcommand)]
+    #[command(subcommand)]
     /// Possible subcommands.
     command: Option<Commands>,
 
     #[get_copy = "pub"]
-    #[clap(
+    #[arg(
         default_missing_value("default"),
         env(concat!(prefix!(), "VERSION")),
         long("version"),
+        num_args(0..=1),
         short('v'),
         value_enum,
         value_name("VERBOSITY")
@@ -38,7 +39,7 @@ pub struct Config {
     version: Option<Verbosity>,
 
     #[get = "pub"]
-    #[clap(
+    #[arg(
         default_value_t,
         env(concat!(prefix!(), "LOG_LEVEL")),
         long("log-level"),
@@ -50,7 +51,7 @@ pub struct Config {
     log_level: LogLevel,
 
     #[get_copy = "pub"]
-    #[clap(
+    #[arg(
         default_value_t,
         env(concat!(prefix!(), "LOG_DRIVER")),
         long("log-driver"),
@@ -62,8 +63,8 @@ pub struct Config {
     log_driver: LogDriver,
 
     #[get = "pub"]
-    #[clap(
-        default_value(""),
+    #[arg(
+        default_value(" "),
         env(concat!(prefix!(), "RUNTIME")),
         long("runtime"),
         short('r'),
@@ -73,8 +74,8 @@ pub struct Config {
     runtime: PathBuf,
 
     #[get = "pub"]
-    #[clap(
-        default_value(""),
+    #[arg(
+        default_value(" "),
         env(concat!(prefix!(), "RUNTIME_DIR")),
         long("runtime-dir"),
         value_name("RUNTIME_DIR")
@@ -83,7 +84,7 @@ pub struct Config {
     runtime_dir: PathBuf,
 
     #[get = "pub"]
-    #[clap(
+    #[arg(
         env(concat!(prefix!(), "RUNTIME_ROOT")),
         long("runtime-root"),
         value_name("RUNTIME_ROOT")
@@ -92,7 +93,7 @@ pub struct Config {
     runtime_root: Option<PathBuf>,
 
     #[get_copy = "pub"]
-    #[clap(
+    #[arg(
         env(concat!(prefix!(), "SKIP_FORK")),
         long("skip-fork"),
         value_name("SKIP_FORK")
@@ -101,7 +102,7 @@ pub struct Config {
     skip_fork: bool,
 
     #[get_copy = "pub"]
-    #[clap(
+    #[arg(
         default_value_t,
         env(concat!(prefix!(), "CGROUP_MANAGER")),
         long("cgroup-manager"),
@@ -113,7 +114,7 @@ pub struct Config {
     cgroup_manager: CgroupManager,
 
     #[get_copy = "pub"]
-    #[clap(
+    #[arg(
         env(concat!(prefix!(), "ENABLE_TRACING")),
         long("enable-tracing"),
         short('e'),
@@ -122,7 +123,7 @@ pub struct Config {
     enable_tracing: bool,
 
     #[get = "pub"]
-    #[clap(
+    #[arg(
         default_value("http://localhost:4317"),
         env(concat!(prefix!(), "TRACING_ENDPOINT")),
         long("tracing-endpoint"),
@@ -149,7 +150,7 @@ pub enum Commands {
     /// UID and GID mappings are required if unsharing of the user namespace (via `--user`) is
     /// selected.
     Pause {
-        #[clap(
+        #[arg(
             default_value("/var/run"),
             env(concat!(prefix!(), "PAUSE_BASE_PATH")),
             long("base-path"),
@@ -159,39 +160,39 @@ pub enum Commands {
         /// The base path for pinning the namespaces.
         base_path: PathBuf,
 
-        #[clap(
+        #[arg(
             env(concat!(prefix!(), "PAUSE_POD_ID")),
             long("pod-id"),
         )]
         /// The unique pod identifier for referring to the namespaces.
         pod_id: String,
 
-        #[clap(long("ipc"))]
+        #[arg(long("ipc"))]
         /// Unshare the IPC namespace.
         ipc: bool,
 
-        #[clap(long("pid"))]
+        #[arg(long("pid"))]
         /// Unshare the PID namespace.
         pid: bool,
 
-        #[clap(long("net"))]
+        #[arg(long("net"))]
         /// Unshare the network namespace.
         net: bool,
 
-        #[clap(long("user"))]
+        #[arg(long("user"))]
         /// Unshare the user namespace.
         user: bool,
 
-        #[clap(long("uts"))]
+        #[arg(long("uts"))]
         /// Unshare the UTS namespace.
         uts: bool,
 
-        #[clap(long("uid-mappings"), required_if_eq("user", "true"), short('u'))]
+        #[arg(long("uid-mappings"), required_if_eq("user", "true"), short('u'))]
         /// User ID mappings for unsahring the user namespace.
         /// Allows multiple mappings in the format: "CONTAINER_ID HOST_ID SIZE".
         uid_mappings: Vec<String>,
 
-        #[clap(long("gid-mappings"), required_if_eq("user", "true"), short('g'))]
+        #[arg(long("gid-mappings"), required_if_eq("user", "true"), short('g'))]
         /// Group ID mappings for unsahring the user namespace.
         /// Allows multiple mappings in the format: "CONTAINER_ID HOST_ID SIZE".
         gid_mappings: Vec<String>,
@@ -199,7 +200,6 @@ pub enum Commands {
 }
 
 #[derive(
-    ArgEnum,
     AsRefStr,
     Clone,
     Copy,
@@ -213,6 +213,7 @@ pub enum Commands {
     IntoStaticStr,
     PartialEq,
     Serialize,
+    ValueEnum,
 )]
 #[strum(serialize_all = "lowercase")]
 /// Available log levels.
@@ -243,7 +244,6 @@ impl Default for LogLevel {
 }
 
 #[derive(
-    ArgEnum,
     AsRefStr,
     Clone,
     Copy,
@@ -257,6 +257,7 @@ impl Default for LogLevel {
     IntoStaticStr,
     PartialEq,
     Serialize,
+    ValueEnum,
 )]
 #[strum(serialize_all = "lowercase")]
 /// Available verbosity levels.
@@ -269,7 +270,6 @@ pub enum Verbosity {
 }
 
 #[derive(
-    ArgEnum,
     AsRefStr,
     Clone,
     Copy,
@@ -283,6 +283,7 @@ pub enum Verbosity {
     IntoStaticStr,
     PartialEq,
     Serialize,
+    ValueEnum,
 )]
 #[strum(serialize_all = "lowercase")]
 /// Available log drivers.
@@ -301,7 +302,6 @@ impl Default for LogDriver {
 }
 
 #[derive(
-    ArgEnum,
     AsRefStr,
     Clone,
     Copy,
@@ -315,6 +315,7 @@ impl Default for LogDriver {
     IntoStaticStr,
     PartialEq,
     Serialize,
+    ValueEnum,
 )]
 #[strum(serialize_all = "lowercase")]
 /// Available cgroup managers.
@@ -345,17 +346,37 @@ const PIDFILE: &str = "pidfile";
 impl Config {
     /// Validate the configuration integrity.
     pub fn validate(&self) -> Result<()> {
-        if self.runtime().as_os_str().is_empty() {
-            bail!("--runtime flag not set")
+        const RUNTIME_FLAG: &str = "--runtime";
+        if self
+            .runtime()
+            .to_str()
+            .context(format!("{} does not parse as string", RUNTIME_FLAG))?
+            .trim()
+            .is_empty()
+        {
+            bail!("{} flag not set", RUNTIME_FLAG)
         }
-        if self.runtime_dir().as_os_str().is_empty() {
-            bail!("--runtime-dir flag not set")
+
+        const RUNTIME_DIR_FLAG: &str = "--runtime-dir";
+        if self
+            .runtime_dir()
+            .to_str()
+            .context(format!("{} does not parse as string", RUNTIME_DIR_FLAG))?
+            .trim()
+            .is_empty()
+        {
+            bail!("{} flag not set", RUNTIME_DIR_FLAG)
         }
 
         if !self.runtime().exists() {
-            bail!("runtime path '{}' does not exist", self.runtime().display())
+            bail!(
+                "{} '{}' does not exist",
+                RUNTIME_FLAG,
+                self.runtime().display()
+            )
         }
 
+        const RUNTIME_ROOT_FLAG: &str = "--runtime-root";
         if !self.runtime_dir().exists() {
             fs::create_dir_all(self.runtime_dir())?;
         }
@@ -364,7 +385,7 @@ impl Config {
             if !rr.exists() {
                 fs::create_dir_all(rr)?;
             } else if !rr.is_dir() {
-                bail!("runtime root '{}' does not exist", rr.display())
+                bail!("{} '{}' does not exist", RUNTIME_ROOT_FLAG, rr.display())
             }
         }
 
