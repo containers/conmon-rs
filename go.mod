@@ -6,7 +6,7 @@ require (
 	capnproto.org/go/capnp/v3 v3.0.0-alpha.25
 	github.com/blang/semver/v4 v4.0.0
 	github.com/containers/common v0.51.2
-	github.com/containers/storage v1.45.4
+	github.com/containers/storage v1.46.1
 	github.com/google/uuid v1.3.0
 	github.com/onsi/ginkgo/v2 v2.9.2
 	github.com/onsi/gomega v1.27.6
@@ -40,7 +40,7 @@ require (
 	github.com/xeipuuv/gojsonschema v1.2.0 // indirect
 	golang.org/x/net v0.8.0 // indirect
 	golang.org/x/sync v0.1.0 // indirect
-	golang.org/x/sys v0.6.0 // indirect
+	golang.org/x/sys v0.7.0 // indirect
 	golang.org/x/text v0.8.0 // indirect
 	golang.org/x/tools v0.7.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
