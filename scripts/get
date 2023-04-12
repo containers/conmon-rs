@@ -72,13 +72,13 @@ download_binary() {
             curl_retry "$BASE_URL/$COMMIT/$FILE" -o "$FILE"
         done
 
-        ORG=${GITHUB_ACTOR:-containers}
+        SLUG=containers/conmon-rs
         GIT_REF=refs/heads/main
         cosign verify-blob conmonrs \
-            --certificate-identity "https://github.com/$ORG/conmon-rs/.github/workflows/ci.yml@$GIT_REF" \
+            --certificate-identity "https://github.com/$SLUG/.github/workflows/ci.yml@$GIT_REF" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-github-workflow-name ci \
-            --certificate-github-workflow-repository "$ORG/conmon-rs" \
+            --certificate-github-workflow-repository "$SLUG" \
             --certificate-github-workflow-ref $GIT_REF \
             --signature conmonrs.sig \
             --certificate conmonrs.cert
