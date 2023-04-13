@@ -3,7 +3,7 @@ module github.com/containers/conmon-rs
 go 1.18
 
 require (
-	capnproto.org/go/capnp/v3 v3.0.0-alpha.25
+	capnproto.org/go/capnp/v3 v3.0.0-alpha.27
 	github.com/blang/semver/v4 v4.0.0
 	github.com/containers/common v0.52.0
 	github.com/containers/storage v1.46.1
@@ -40,5 +40,5 @@ require (
 	golang.org/x/tools v0.7.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	zenhack.net/go/util v0.0.0-20230218002511-744d2d6d1739 // indirect
+	zenhack.net/go/util v0.0.0-20230327231740-da8cb323921c // indirect
 )
