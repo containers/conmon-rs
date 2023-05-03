@@ -11,4 +11,4 @@ futures = "0.3.28"
 log = { version = "0.4.17", features = ["serde", "std"] }
 serde = { version = "1.0.160", features = ["derive"] }
 tokio = { version = "1.27.0", features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
-tokio-util = { version = "0.7.7", features = ["compat"] }
+tokio-util = { version = "0.7.8", features = ["compat"] }
