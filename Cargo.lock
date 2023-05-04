@@ -2401,9 +2401,9 @@ dependencies = [
 
 [[package]]
 name = "uuid-macro-internal"
-version = "1.3.1"
+version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20e8a505384e9309dc842520c6c9348f4b141dee06aaa845522727b1b99ca235"
+checksum = "18d884370cccfad1f913e67c7362f9c00357844bc9f3cfce86faa2241cabd166"
 dependencies = [
  "proc-macro2",
  "quote",
