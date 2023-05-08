@@ -173,7 +173,7 @@ impl Server {
                     .with_target(true)
                     .with_line_number(true)
                     .without_time()
-                    .with_writer(Journal::default())
+                    .with_writer(Journal)
                     .with_filter(level);
                 registry
                     .with(layer)
