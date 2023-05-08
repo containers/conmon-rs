@@ -30,6 +30,6 @@ impl<'a> MakeWriter<'a> for Journal {
     type Writer = Journal;
 
     fn make_writer(&'a self) -> Self::Writer {
-        Journal::default()
+        Journal
     }
 }
