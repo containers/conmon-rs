@@ -185,44 +185,38 @@ checksum = "89b2fd2a0dcf38d7971e2194b6b6eebab45ae01067456a7fd93d5547a61b70be"
 
 [[package]]
 name = "capnp"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18eca1b9aca7e3623dda158213b1b79c1e5c4293fbbf0ead6b9ed28a1763bbff"
-
-[[package]]
-name = "capnp"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13e2d432d1601d61d1e11140d04e9d239b5cf7316fa1106523c3d86eea19c29d"
 
 [[package]]
 name = "capnp-futures"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cbe2479d667c6d44219a07d3da971379e4321ea7343b319994695be7da97a17"
+checksum = "71d520e0af228b92de357f230f4987ee4f9786f2b8aa24b9cfe53f5b11c17198"
 dependencies = [
- "capnp 0.16.1",
+ "capnp",
  "futures",
 ]
 
 [[package]]
 name = "capnp-rpc"
-version = "0.16.2"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "619ac0423bdd1dc0b9bb4348cc80daaf81e8e41d64210822e603d44c668534e6"
+checksum = "9ab8e869783e491cbcc350427a5e775aa4d8a1deaa5198d74332957cfa430779"
 dependencies = [
- "capnp 0.16.1",
+ "capnp",
  "capnp-futures",
  "futures",
 ]
 
 [[package]]
 name = "capnpc"
-version = "0.16.5"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55b72fc31ab0a8fd0420a799737d15e0a5297d695ba6c8b7b578d8cc0ba8360c"
+checksum = "93a9ad66f56468a890565d818ec4ab1300c1f6c62adbbc3295392f61d8f7dbd7"
 dependencies = [
- "capnp 0.16.1",
+ "capnp",
 ]
 
 [[package]]
@@ -324,7 +318,7 @@ dependencies = [
 name = "conmon-common"
 version = "0.5.1"
 dependencies = [
- "capnp 0.17.0",
+ "capnp",
  "capnpc",
 ]
 
@@ -333,7 +327,7 @@ name = "conmonrs"
 version = "0.5.1"
 dependencies = [
  "anyhow",
- "capnp 0.17.0",
+ "capnp",
  "capnp-rpc",
  "clap",
  "conmon-common",
@@ -377,7 +371,7 @@ dependencies = [
 name = "conmonrs-cli"
 version = "0.5.1"
 dependencies = [
- "capnp 0.17.0",
+ "capnp",
  "capnp-rpc",
  "conmon-common",
  "futures",
