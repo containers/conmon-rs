@@ -16,7 +16,7 @@ jobs:
     steps:
       - name: Get branch names
         id: branch-name
-        uses: tj-actions/branch-names@v6
+        uses: tj-actions/branch-names@v7
       - name: Checkout
         uses: actions/checkout@v3
       - name: Setup Cache
