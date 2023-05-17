@@ -531,7 +531,7 @@ var _ = Describe("ConmonClient", func() {
 
 			response, err := sut.CreateNamespaces(
 				context.Background(),
-				&client.CreateaNamespacesConfig{
+				&client.CreateNamespacesConfig{
 					PodID: podID,
 				},
 			)
@@ -546,7 +546,7 @@ var _ = Describe("ConmonClient", func() {
 
 			response, err := sut.CreateNamespaces(
 				context.Background(),
-				&client.CreateaNamespacesConfig{},
+				&client.CreateNamespacesConfig{},
 			)
 			Expect(err).NotTo(Succeed())
 			Expect(response).To(BeNil())
@@ -561,7 +561,7 @@ var _ = Describe("ConmonClient", func() {
 
 			response, err := sut.CreateNamespaces(
 				context.Background(),
-				&client.CreateaNamespacesConfig{
+				&client.CreateNamespacesConfig{
 					PodID: podID,
 					Namespaces: []client.Namespace{
 						client.NamespaceIPC,
@@ -621,7 +621,7 @@ var _ = Describe("ConmonClient", func() {
 
 			response, err := sut.CreateNamespaces(
 				context.Background(),
-				&client.CreateaNamespacesConfig{
+				&client.CreateNamespacesConfig{
 					Namespaces: []client.Namespace{
 						client.NamespaceIPC,
 						client.NamespaceNet,
@@ -659,7 +659,7 @@ var _ = Describe("ConmonClient", func() {
 
 			response, err := sut.CreateNamespaces(
 				context.Background(),
-				&client.CreateaNamespacesConfig{
+				&client.CreateNamespacesConfig{
 					Namespaces: []client.Namespace{
 						client.NamespaceUser,
 					},

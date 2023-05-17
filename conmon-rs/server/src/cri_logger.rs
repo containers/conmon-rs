@@ -62,7 +62,7 @@ impl CriLogger {
     {
         let mut reader = BufReader::new(bytes);
 
-        // Get the RFC3339 timestmap
+        // Get the RFC3339 timestamp
         let local_tz = TimeZone::local().context("get local timezone")?;
         let timestamp = DateTime::now(local_tz.as_ref())
             .context("get local datetime")?
@@ -111,7 +111,7 @@ impl CriLogger {
                 }
             }
 
-            // Write the timestmap
+            // Write the timestamp
             let file = self.file.as_mut().context(Self::ERR_UNINITIALIZED)?;
             file.write_all(timestamp.as_bytes()).await?;
 
