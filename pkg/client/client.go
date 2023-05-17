@@ -1017,9 +1017,9 @@ func (c *ConmonClient) metadataBytes(ctx context.Context) ([]byte, error) {
 	return metadata, nil
 }
 
-// CreateaNamespacesConfig is the configuration for calling the
+// CreateNamespacesConfig is the configuration for calling the
 // CreateNamespaces method.
-type CreateaNamespacesConfig struct {
+type CreateNamespacesConfig struct {
 	// Namespaces are the list of namespaces to unshare.
 	Namespaces []Namespace
 
@@ -1035,12 +1035,12 @@ type CreateaNamespacesConfig struct {
 	PodID string
 }
 
-// CreateaNamespacesResponse is the response of the CreateNamespaces method.
-type CreateaNamespacesResponse struct {
+// CreateNamespacesResponse is the response of the CreateNamespaces method.
+type CreateNamespacesResponse struct {
 	Namespaces []*NamespacesResponse
 }
 
-// NamespacesResponse is the response data for the CreateaNamespacesResponse.
+// NamespacesResponse is the response data for the CreateNamespacesResponse.
 type NamespacesResponse struct {
 	// Namespace is the type of namespace.
 	Type Namespace
@@ -1052,16 +1052,16 @@ type NamespacesResponse struct {
 // CreateNamespaces can be used to create a new set of unshared namespaces by
 // bind mounting it to the local filesystem.
 //
-// If a namespace is not selected by the CreateaNamespacesConfig, then the
+// If a namespace is not selected by the CreateNamespacesConfig, then the
 // server will fallback to the host namespace and still create the bind mount
 // to it. All namespaces are mounted to /var/run/[ipc,pid,net,user,uts]ns/$POD_ID,
-// whereas the POD_ID is being used from the CreateaNamespacesConfig as well.
+// whereas the POD_ID is being used from the CreateNamespacesConfig as well.
 //
 // UID and GID mappings are required if unsharing of the user namespace is
 // requested.
 func (c *ConmonClient) CreateNamespaces(
-	ctx context.Context, cfg *CreateaNamespacesConfig,
-) (*CreateaNamespacesResponse, error) {
+	ctx context.Context, cfg *CreateNamespacesConfig,
+) (*CreateNamespacesResponse, error) {
 	ctx, span := c.startSpan(ctx, "CreateNamespaces")
 	if span != nil {
 		defer span.End()
@@ -1209,7 +1209,7 @@ func (c *ConmonClient) CreateNamespaces(
 		)
 	}
 
-	return &CreateaNamespacesResponse{
+	return &CreateNamespacesResponse{
 		Namespaces: namespacesResponse,
 	}, nil
 }
