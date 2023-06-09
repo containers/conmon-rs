@@ -4,7 +4,7 @@ version = "0.5.1"
 edition = "2021"
 
 [dependencies]
-capnp = "0.17.0"
+capnp = "0.17.1"
 capnp-rpc = "0.17.0"
 conmon-common = { path = "../common" }
 futures = "0.3.28"
