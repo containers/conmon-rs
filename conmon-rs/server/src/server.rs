@@ -186,7 +186,7 @@ impl Server {
         Ok(())
     }
 
-    /// Spwans all required tokio tasks.
+    /// Spawns all required tokio tasks.
     async fn spawn_tasks(self) -> Result<()> {
         self.init_logging().context("init logging")?;
 
