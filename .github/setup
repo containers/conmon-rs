@@ -60,9 +60,14 @@ EOT
 }
 
 install_critest() {
-    TAG=v1.25.0
-    curl_retry "https://storage.googleapis.com/k8s-artifacts-cri-tools/release/$TAG/critest-$TAG-linux-amd64.tar.gz" |
-        sudo tar xfz - -C /usr/local/bin
+    URL=https://github.com/kubernetes-sigs/cri-tools
+
+    git clone $URL
+    pushd cri-tools
+    sudo -E PATH="$PATH" make BINDIR=/usr/local/bin install
+    popd
+    sudo rm -rf cri-tools
+    sudo critest --version
 }
 
 main "$@"
