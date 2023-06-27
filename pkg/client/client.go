@@ -153,6 +153,11 @@ func FromLogrusLevel(level logrus.Level) LogLevel {
 }
 
 // New creates a new conmon server, starts it and connects a new client to it.
+//
+// If a server is already started with the same `ServerRunDir` specified
+// the client connects to the existing server instead.
+// Note: Other options from the `ConmonServerConfig` will be ignored
+// and the settings of the existing server will remain unchanged.
 func New(config *ConmonServerConfig) (client *ConmonClient, retErr error) {
 	cl, err := config.toClient()
 	if err != nil {
