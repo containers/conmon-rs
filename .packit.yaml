@@ -21,6 +21,13 @@ jobs:
       - cargo
       - make
       - rpkg
+    targets:
+      - centos-stream-8-aarch64
+      - centos-stream-8-x86_64
+      - centos-stream-9-aarch64
+      - centos-stream-9-x86_64
+      - fedora-all-aarch64
+      - fedora-all-x86_64
     actions:
       post-upstream-clone:
         - "rpkg spec --outdir ./"
@@ -31,3 +38,10 @@ jobs:
     trigger: commit
     branch: main
     project: podman-next
+    targets:
+      - centos-stream+epel-next-8-aarch64
+      - centos-stream+epel-next-8-x86_64
+      - centos-stream+epel-next-9-aarch64
+      - centos-stream+epel-9-x86_64
+      - fedora-all-aarch64
+      - fedora-all-x86_64
