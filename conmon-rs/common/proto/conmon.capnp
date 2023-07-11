@@ -39,6 +39,7 @@ interface Conmon {
         commandArgs @9 :List(Text);
         metadataOld @10 :Data; # deprecated
         metadata @11 :Metadata; # Standard metadata to carry.
+        envVars @12 :TextTextMap;
     }
 
     struct LogDriver {

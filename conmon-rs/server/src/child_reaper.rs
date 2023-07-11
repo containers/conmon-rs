@@ -63,6 +63,7 @@ impl ChildReaper {
         stdin: bool,
         container_io: &mut ContainerIO,
         pidfile: &Path,
+        env_vars: Vec<(String, String)>,
     ) -> Result<(u32, CancellationToken)>
     where
         P: AsRef<OsStr>,
@@ -79,6 +80,7 @@ impl ChildReaper {
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .envs(env_vars)
             .spawn()
             .context("spawn child process: {}")?;
 

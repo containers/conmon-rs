@@ -1,4 +1,5 @@
 use crate::{
+    capnp_util,
     child::Child,
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
@@ -134,13 +135,14 @@ impl conmon::Server for Server {
         let runtime = self.config().runtime().clone();
         let exit_paths = capnp_vec_path!(req.get_exit_paths());
         let oom_exit_paths = capnp_vec_path!(req.get_oom_exit_paths());
+        let env_vars = pry!(req.get_env_vars().and_then(capnp_util::into_map));
 
         Promise::from_future(
             async move {
                 capnp_err!(container_log.write().await.init().await)?;
 
                 let (grandchild_pid, token) = capnp_err!(match child_reaper
-                    .create_child(runtime, args, stdin, &mut container_io, &pidfile)
+                    .create_child(runtime, args, stdin, &mut container_io, &pidfile, env_vars)
                     .await
                 {
                     Err(e) => {
@@ -216,7 +218,7 @@ impl conmon::Server for Server {
         Promise::from_future(
             async move {
                 match child_reaper
-                    .create_child(&runtime, &args, false, &mut container_io, &pidfile)
+                    .create_child(&runtime, &args, false, &mut container_io, &pidfile, vec![])
                     .await
                 {
                     Ok((grandchild_pid, token)) => {
