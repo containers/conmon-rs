@@ -2,6 +2,7 @@
 use crate::{
     child::Child,
     container_io::{ContainerIO, ContainerIOType, SharedContainerIO},
+    inactivity::{Activity, Inactivity},
     oom_watcher::OOMWatcher,
 };
 use anyhow::{bail, Context, Result};
@@ -37,16 +38,26 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, error, warn, Instrument};
 
-#[derive(Debug, Default, Getters)]
+#[derive(Debug, Getters)]
 pub struct ChildReaper {
     #[getset(get)]
     grandchildren: Arc<Mutex<MultiMap<String, ReapableChild>>>,
+
+    #[getset(get)]
+    inactivity: Inactivity,
 }
 
 /// first usable file descriptor after stdin, stdout and stderr
 const FIRST_FD_AFTER_STDIO: RawFd = 3;
 
 impl ChildReaper {
+    pub fn new(inactivity: Inactivity) -> ChildReaper {
+        Self {
+            grandchildren: Arc::default(),
+            inactivity,
+        }
+    }
+
     pub fn get(&self, id: &str) -> Result<ReapableChild> {
         let locked_grandchildren = &self.grandchildren().clone();
         let lock = lock!(locked_grandchildren);
@@ -155,7 +166,7 @@ impl ChildReaper {
     ) -> Result<Receiver<ExitChannelData>> {
         let locked_grandchildren = &self.grandchildren().clone();
         let mut map = lock!(locked_grandchildren);
-        let mut reapable_grandchild = ReapableChild::from_child(&child);
+        let mut reapable_grandchild = ReapableChild::from_child(&child, self.inactivity.activity());
 
         let (exit_tx, exit_rx) = reapable_grandchild.watch()?;
 
@@ -252,6 +263,8 @@ pub struct ReapableChild {
 
     #[getset(get = "pub")]
     cleanup_cmd: Vec<String>,
+
+    activity: Activity,
 }
 
 #[derive(Clone, CopyGetters, Debug, Getters, Setters)]
@@ -267,7 +280,7 @@ pub struct ExitChannelData {
 }
 
 impl ReapableChild {
-    pub fn from_child(child: &Child) -> Self {
+    pub fn from_child(child: &Child, activity: Activity) -> Self {
         Self {
             exit_paths: child.exit_paths().clone(),
             oom_exit_paths: child.oom_exit_paths().clone(),
@@ -277,6 +290,7 @@ impl ReapableChild {
             token: child.token().clone(),
             task: None,
             cleanup_cmd: child.cleanup_cmd().to_vec(),
+            activity,
         }
     }
 
@@ -306,6 +320,8 @@ impl ReapableChild {
         let timeout = *self.timeout();
         let stop_token = self.token().clone();
         let cleanup_cmd_raw = self.cleanup_cmd().clone();
+
+        let activity = self.activity.clone();
 
         let task = task::spawn(
             async move {
@@ -360,7 +376,7 @@ impl ReapableChild {
                 }
 
                 if !cleanup_cmd_raw.is_empty() {
-                    Self::spawn_cleanup_process(&cleanup_cmd_raw).await;
+                    Self::spawn_cleanup_process(&cleanup_cmd_raw, activity.clone()).await;
                 }
 
                 debug!("Sending exit struct to channel: {:?}", exit_channel_data);
@@ -368,6 +384,8 @@ impl ReapableChild {
                     debug!("Unable to send exit status");
                 }
                 debug!("Task done");
+
+                activity.stop();
             }
             .instrument(debug_span!("watch", pid)),
         );
@@ -382,7 +400,7 @@ impl ReapableChild {
         Ok((exit_tx, exit_rx))
     }
 
-    async fn spawn_cleanup_process(raw_cmd: &[String]) {
+    async fn spawn_cleanup_process(raw_cmd: &[String], activity: Activity) {
         let mut cleanup_cmd = Command::new(&raw_cmd[0]);
 
         cleanup_cmd.args(&raw_cmd[1..]);
@@ -399,6 +417,7 @@ impl ReapableChild {
                     e
                 ),
             }
+            activity.stop();
         });
     }
 

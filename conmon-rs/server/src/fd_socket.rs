@@ -36,7 +36,10 @@
 //!
 //! An empty request does **not** receive a response.
 
-use crate::listener::{Listener, SeqpacketListener};
+use crate::{
+    inactivity::Inactivity,
+    listener::{Listener, SeqpacketListener},
+};
 use anyhow::Result;
 use std::{
     collections::{hash_map, HashMap},
@@ -46,10 +49,11 @@ use std::{
     os::fd::OwnedFd,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use tokio::{runtime::Handle, sync::Mutex as AsyncMutex, task};
 use tokio_seqpacket::{ancillary::OwnedAncillaryMessage, UnixSeqpacket};
-use tracing::{debug_span, Instrument};
+use tracing::{debug, debug_span, error, Instrument};
 
 #[derive(Debug, Default)]
 pub struct FdSocket {
@@ -170,12 +174,34 @@ impl Server {
         let mut listener = Listener::<SeqpacketListener>::default().bind_long_path(&server.path)?;
         let guard = ListenerGuard(fd_socket);
 
+        let inactivity = Inactivity::new();
+        let timeout = Duration::from_secs(3);
+
         task::spawn(
             async move {
-                while let Ok(conn) = listener.accept().await {
+                loop {
+                    let conn = tokio::select! {
+                        () = inactivity.wait(timeout) => {
+                            debug!("Stop fd socket after inactivity");
+                            break;
+                        }
+                        conn = listener.accept() => match conn {
+                            Ok(conn) => conn,
+                            Err(err) => {
+                                error!("Unable to accept on fd socket: {err}");
+                                break;
+                            }
+                        },
+                    };
                     let fd_socket = guard.0.clone();
+                    let activity = inactivity.activity();
                     task::spawn(
-                        Self::serve(conn, fd_socket).instrument(debug_span!("fd_socket_serve")),
+                        async move {
+                            let result = Self::serve(conn, fd_socket).await;
+                            activity.stop();
+                            result
+                        }
+                        .instrument(debug_span!("fd_socket_serve")),
                     );
                 }
                 drop(guard);

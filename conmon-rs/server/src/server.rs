@@ -5,6 +5,7 @@ use crate::{
     config::{Commands, Config, LogDriver, Verbosity},
     container_io::{ContainerIO, ContainerIOType},
     fd_socket::FdSocket,
+    inactivity::Inactivity,
     init::{DefaultInit, Init},
     journal::Journal,
     listener::{DefaultListener, Listener},
@@ -16,7 +17,7 @@ use anyhow::{format_err, Context, Result};
 use capnp::text_list::Reader;
 use capnp_rpc::{rpc_twoparty_capnp::Side, twoparty, RpcSystem};
 use conmon_common::conmon_capnp::conmon::{self, CgroupManager};
-use futures::{AsyncReadExt, FutureExt};
+use futures::AsyncReadExt;
 use getset::Getters;
 use nix::{
     errno,
@@ -25,7 +26,7 @@ use nix::{
     unistd::{fork, ForkResult},
 };
 use opentelemetry::trace::FutureExt as OpenTelemetryFutureExt;
-use std::{fs::File, io::Write, path::Path, process, str::FromStr, sync::Arc};
+use std::{fs::File, io::Write, path::Path, process, str::FromStr, sync::Arc, time::Duration};
 use tokio::{
     fs,
     runtime::{Builder, Handle},
@@ -53,15 +54,26 @@ pub struct Server {
     /// Fd socket instance.
     #[getset(get = "pub(crate)")]
     fd_socket: Arc<FdSocket>,
+
+    // Shutdown controller.
+    #[getset(get = "pub(crate)")]
+    inactivity: Inactivity,
 }
 
 impl Server {
     /// Create a new `Server` instance.
     pub fn new() -> Result<Self> {
+        let config = Config::default();
+        let inactivity = if config.shutdown_delay() == 0.0 {
+            Inactivity::disabled()
+        } else {
+            Inactivity::new()
+        };
         let server = Self {
-            config: Default::default(),
-            reaper: Default::default(),
+            config,
+            reaper: ChildReaper::new(inactivity.clone()).into(),
             fd_socket: Default::default(),
+            inactivity,
         };
 
         if let Some(v) = server.config().version() {
@@ -274,6 +286,8 @@ impl Server {
     }
 
     async fn start_backend(self, mut shutdown_rx: oneshot::Receiver<()>) -> Result<()> {
+        let inactivity = self.inactivity().clone();
+        let timeout = Duration::from_secs_f64(self.config().shutdown_delay());
         let listener =
             Listener::<DefaultListener>::default().bind_long_path(self.config().socket())?;
         let client: conmon::Client = capnp_rpc::new_client(self);
@@ -282,6 +296,10 @@ impl Server {
             let stream = tokio::select! {
                 _ = &mut shutdown_rx => {
                     debug!("Received shutdown message");
+                    return Ok(())
+                }
+                () = inactivity.wait(timeout) => {
+                    debug!("Automatic shutdown after inactivity");
                     return Ok(())
                 }
                 stream = listener.accept() => {
@@ -296,7 +314,11 @@ impl Server {
                 Default::default(),
             ));
             let rpc_system = RpcSystem::new(network, Some(client.clone().client));
-            task::spawn_local(Box::pin(rpc_system.map(|_| ())));
+            let activity = inactivity.activity();
+            task::spawn_local(async move {
+                let _ = rpc_system.await;
+                activity.stop();
+            });
         }
     }
 }
