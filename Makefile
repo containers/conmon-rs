@@ -75,14 +75,15 @@ $(GOTOOLS_BINDIR)/zeitgeist:
 clean:
 	rm -rf target/
 
-update-proto:
+.INTERMEDIATE: internal/proto/conmon.capnp
+internal/proto/conmon.capnp:
+	cat $(PROTO_PATH)/conmon.capnp $(PROTO_PATH)/go-patch > $@
+
+update-proto: internal/proto/conmon.capnp
 	go install capnproto.org/go/capnp/v3/capnpc-go@latest
-	cat $(PROTO_PATH)/go-patch >> $(PROTO_PATH)/conmon.capnp
 	capnp compile \
 		-I$$GOPATH/src/capnproto.org/go/capnp/std \
-		-ogo $(PROTO_PATH)/conmon.capnp
-	mv $(PROTO_PATH)/conmon.capnp.go internal/proto/
-	git checkout $(PROTO_PATH)/conmon.capnp
+		-ogo internal/proto/conmon.capnp
 
 .PHONY: lint lint-go lint-rust clean unit integration update-proto
 
