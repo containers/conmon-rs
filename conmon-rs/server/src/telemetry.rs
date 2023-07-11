@@ -1,6 +1,9 @@
 /// Open Telemetry related source code.
+use crate::capnp_util;
 use anyhow::{Context, Result};
+use capnp::struct_list::Reader;
 use clap::crate_name;
+use conmon_common::conmon_capnp::conmon;
 use nix::unistd::gethostname;
 use opentelemetry::{
     global,
@@ -63,13 +66,13 @@ impl Telemetry {
     }
 
     /// Set a new parent context from the provided slice data.
-    pub fn set_parent_context(slice: &'_ [u8]) -> Result<()> {
-        if slice.is_empty() {
+    pub fn set_parent_context(reader: Reader<conmon::text_text_map_entry::Owned>) -> Result<()> {
+        if reader.is_empty() {
             // Make it a noop if no data is provided.
             return Ok(());
         }
 
-        let metadata = Metadata(serde_json::from_slice(slice).context("parse slice as JSON")?);
+        let metadata = Metadata(capnp_util::into_map(reader)?);
         let ctx = global::get_text_map_propagator(|prop| prop.extract(&metadata));
         Span::current().set_parent(ctx);
 

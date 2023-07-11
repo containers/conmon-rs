@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	"capnproto.org/go/capnp/v3"
 	"capnproto.org/go/capnp/v3/rpc"
 	"github.com/blang/semver/v4"
 	"github.com/containers/conmon-rs/internal/proto"
@@ -511,12 +510,8 @@ func (c *ConmonClient) Version(
 			return fmt.Errorf("create request: %w", err)
 		}
 
-		metadata, err := c.metadataBytes(ctx)
-		if err != nil {
-			return fmt.Errorf("get metadata: %w", err)
-		}
-		if err := req.SetMetadata(metadata); err != nil {
-			return fmt.Errorf("set metadata: %w", err)
+		if err := c.setMetadata(ctx, req); err != nil {
+			return err
 		}
 
 		verbose := false
@@ -686,12 +681,8 @@ func (c *ConmonClient) CreateContainer(
 		if err != nil {
 			return fmt.Errorf("create request: %w", err)
 		}
-		metadata, err := c.metadataBytes(ctx)
-		if err != nil {
-			return fmt.Errorf("get metadata: %w", err)
-		}
-		if err := req.SetMetadata(metadata); err != nil {
-			return fmt.Errorf("set metadata: %w", err)
+		if err := c.setMetadata(ctx, req); err != nil {
+			return err
 		}
 		if err := req.SetId(cfg.ID); err != nil {
 			return fmt.Errorf("set ID: %w", err)
@@ -794,12 +785,8 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 		if err != nil {
 			return fmt.Errorf("create request: %w", err)
 		}
-		metadata, err := c.metadataBytes(ctx)
-		if err != nil {
-			return fmt.Errorf("get metadata: %w", err)
-		}
-		if err := req.SetMetadata(metadata); err != nil {
-			return fmt.Errorf("set metadata: %w", err)
+		if err := c.setMetadata(ctx, req); err != nil {
+			return err
 		}
 		if err := req.SetId(cfg.ID); err != nil {
 			return fmt.Errorf("set ID: %w", err)
@@ -842,24 +829,6 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 	}
 
 	return execContainerResult, nil
-}
-
-func stringSliceToTextList(src []string, newFunc func(int32) (capnp.TextList, error)) error {
-	l := int32(len(src))
-	if l == 0 {
-		return nil
-	}
-	list, err := newFunc(l)
-	if err != nil {
-		return err
-	}
-	for i := 0; i < len(src); i++ {
-		if err := list.Set(i, src[i]); err != nil {
-			return fmt.Errorf("set list element: %w", err)
-		}
-	}
-
-	return nil
 }
 
 func (c *ConmonClient) initLogDrivers(req *proto.Conmon_CreateContainerRequest, logDrivers []ContainerLogDriver) error {
@@ -961,12 +930,8 @@ func (c *ConmonClient) ReopenLogContainer(ctx context.Context, cfg *ReopenLogCon
 			return fmt.Errorf("create request: %w", err)
 		}
 
-		metadata, err := c.metadataBytes(ctx)
-		if err != nil {
-			return fmt.Errorf("get metadata: %w", err)
-		}
-		if err := req.SetMetadata(metadata); err != nil {
-			return fmt.Errorf("set metadata: %w", err)
+		if err := c.setMetadata(ctx, req); err != nil {
+			return err
 		}
 
 		if err := req.SetId(cfg.ID); err != nil {
@@ -989,9 +954,32 @@ func (c *ConmonClient) ReopenLogContainer(ctx context.Context, cfg *ReopenLogCon
 	return nil
 }
 
-func (c *ConmonClient) metadataBytes(ctx context.Context) ([]byte, error) {
+type RequestWithMetadata interface {
+	NewMetadata(n int32) (proto.Conmon_TextTextMapEntry_List, error)
+}
+
+type RequestWithMetadataOld interface {
+	RequestWithMetadata
+	SetMetadataOld(v []byte) error
+}
+
+var (
+	_ RequestWithMetadataOld = nil
+	// verify that all existing messages are compatible with old conmon-rs servers
+	// (new messages don't need to support the old encoding).
+	_ = proto.Conmon_VersionRequest{}
+	_ = proto.Conmon_CreateContainerRequest{}
+	_ = proto.Conmon_ExecSyncContainerRequest{}
+	_ = proto.Conmon_AttachRequest{}
+	_ = proto.Conmon_ReopenLogRequest{}
+	_ = proto.Conmon_SetWindowSizeRequest{}
+	_ = proto.Conmon_CreateNamespacesRequest{}
+)
+
+// setMetadata sets the tracing metadata properties on the request.
+func (c *ConmonClient) setMetadata(ctx context.Context, req RequestWithMetadata) error {
 	if !c.tracingEnabled {
-		return nil, nil
+		return nil
 	}
 
 	span := trace.SpanFromContext(ctx)
@@ -1000,12 +988,24 @@ func (c *ConmonClient) metadataBytes(ctx context.Context) ([]byte, error) {
 		c.logger.Tracef("Injecting tracing span ID %v", span.SpanContext().SpanID())
 		otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(m))
 	}
-	metadata, err := json.Marshal(m)
-	if err != nil {
-		return nil, fmt.Errorf("marshal metadata: %w", err)
+
+	if err := stringStringMapToMapEntryList(m, req.NewMetadata); err != nil {
+		return fmt.Errorf("set metadata2: %w", err)
 	}
 
-	return metadata, nil
+	// support old conmon-rs servers with json encoded metadata field
+	if req, ok := req.(RequestWithMetadataOld); ok {
+		metadataBytes, err := json.Marshal(m)
+		if err != nil {
+			return fmt.Errorf("marshal metadata: %w", err)
+		}
+
+		if err := req.SetMetadataOld(metadataBytes); err != nil {
+			return fmt.Errorf("set metadata: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // CreateNamespacesConfig is the configuration for calling the
@@ -1078,12 +1078,8 @@ func (c *ConmonClient) CreateNamespaces(
 			return fmt.Errorf("create request: %w", err)
 		}
 
-		metadata, err := c.metadataBytes(ctx)
-		if err != nil {
-			return fmt.Errorf("get metadata: %w", err)
-		}
-		if err := req.SetMetadata(metadata); err != nil {
-			return fmt.Errorf("set metadata: %w", err)
+		if err := c.setMetadata(ctx, req); err != nil {
+			return err
 		}
 
 		namespaces, err := req.NewNamespaces(int32(len(cfg.Namespaces)))
