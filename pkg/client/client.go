@@ -724,10 +724,6 @@ func (c *ConmonClient) CreateContainer(
 			return fmt.Errorf("convert cleanup command string slice to text list: %w", err)
 		}
 
-		if err := p.SetRequest(req); err != nil {
-			return fmt.Errorf("set request: %w", err)
-		}
-
 		return nil
 	})
 	defer free()
@@ -813,9 +809,6 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 			return err
 		}
 		req.SetTerminal(cfg.Terminal)
-		if err := p.SetRequest(req); err != nil {
-			return fmt.Errorf("set request: %w", err)
-		}
 
 		return nil
 	})
@@ -978,10 +971,6 @@ func (c *ConmonClient) ReopenLogContainer(ctx context.Context, cfg *ReopenLogCon
 
 		if err := req.SetId(cfg.ID); err != nil {
 			return fmt.Errorf("set ID: %w", err)
-		}
-
-		if err := p.SetRequest(req); err != nil {
-			return fmt.Errorf("set request: %w", err)
 		}
 
 		return nil
