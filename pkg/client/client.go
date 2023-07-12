@@ -50,6 +50,7 @@ type ConmonClient struct {
 	tracingEnabled bool
 	tracer         trace.Tracer
 	serverVersion  semver.Version
+	cgroupManager  CgroupManager
 }
 
 // ConmonServerConfig is the configuration for the conmon server instance.
@@ -226,6 +227,7 @@ func (c *ConmonServerConfig) toClient() (*ConmonClient, error) {
 		logger:        c.ClientLogger,
 		attachReaders: &sync.Map{},
 		tracer:        tracer,
+		cgroupManager: c.CgroupManager,
 	}, nil
 }
 
@@ -320,6 +322,9 @@ func (c *ConmonClient) toArgs(config *ConmonServerConfig) (entrypoint string, ar
 
 	case CgroupManagerCgroupfs:
 		args = append(args, cgroupManagerFlag, "cgroupfs")
+
+	case CgroupManagerPerCommand:
+		// nothing to do, will use the cgroup manager specified per command
 
 	default:
 		return "", args, errUndefinedCgroupManager
@@ -593,6 +598,23 @@ func (c *ConmonClient) Version(
 	}, nil
 }
 
+func (c *ConmonClient) setCgroupManager(
+	cfg CgroupManager,
+	req interface {
+		SetCgroupManager(proto.Conmon_CgroupManager)
+	},
+) {
+	cgroupManager := c.cgroupManager
+	if cgroupManager == CgroupManagerPerCommand {
+		cgroupManager = cfg
+	} else if cfg != CgroupManager(0) {
+		c.logger.Warnf(
+			"cgroup manager specified in per command config, but global cgroup manager is not set to CgroupManagerPerCommand",
+		)
+	}
+	req.SetCgroupManager(proto.Conmon_CgroupManager(cgroupManager))
+}
+
 // CreateContainerConfig is the configuration for calling the CreateContainer
 // method.
 type CreateContainerConfig struct {
@@ -630,6 +652,11 @@ type CreateContainerConfig struct {
 
 	// EnvVars are the environment variables passed to the create runtime call.
 	EnvVars map[string]string
+
+	// CgroupManager can be use to select the cgroup manager.
+	//
+	// To use this option set `ConmonServerConfig.CgroupManager` to `CgroupManagerPerCommand`.
+	CgroupManager CgroupManager
 }
 
 // ContainerLogDriver specifies a selected logging mechanism.
@@ -722,6 +749,8 @@ func (c *ConmonClient) CreateContainer(
 			return fmt.Errorf("convert environment variables string slice to text list: %w", err)
 		}
 
+		c.setCgroupManager(cfg.CgroupManager, req)
+
 		return nil
 	})
 	defer free()
@@ -758,6 +787,11 @@ type ExecSyncConfig struct {
 
 	// EnvVars are the environment variables passed to the exec runtime call.
 	EnvVars map[string]string
+
+	// CgroupManager can be use to select the cgroup manager.
+	//
+	// To use this option set `ConmonServerConfig.CgroupManager` to `CgroupManagerPerCommand`.
+	CgroupManager CgroupManager
 }
 
 // ExecContainerResult is the result for calling the ExecSyncContainer method.
@@ -809,6 +843,7 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 		if err := stringStringMapToMapEntryList(cfg.EnvVars, req.NewEnvVars); err != nil {
 			return err
 		}
+		c.setCgroupManager(cfg.CgroupManager, req)
 
 		return nil
 	})

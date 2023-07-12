@@ -4,7 +4,7 @@ use crate::{
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     pause::Pause,
-    server::Server,
+    server::{GenerateRuntimeArgs, Server},
     telemetry::Telemetry,
     version::Version,
 };
@@ -121,16 +121,17 @@ impl conmon::Server for Server {
         debug!("PID file is {}", pidfile.display());
 
         let child_reaper = self.reaper().clone();
-        let global_args = capnp_vec_str!(req.get_global_args());
-        let command_args = capnp_vec_str!(req.get_command_args());
-        let args = pry_err!(self.generate_create_args(
-            &id,
-            bundle_path,
-            &container_io,
-            &pidfile,
-            global_args,
-            command_args
-        ));
+        let global_args = pry!(req.get_global_args());
+        let command_args = pry!(req.get_command_args());
+        let cgroup_manager = pry!(req.get_cgroup_manager());
+        let args = GenerateRuntimeArgs {
+            config: self.config(),
+            id: &id,
+            container_io: &container_io,
+            pidfile: &pidfile,
+            cgroup_manager,
+        };
+        let args = pry_err!(args.create_args(bundle_path, global_args, command_args));
         let stdin = req.get_stdin();
         let runtime = self.config().runtime().clone();
         let exit_paths = capnp_vec_path!(req.get_exit_paths());
@@ -213,8 +214,17 @@ impl conmon::Server for Server {
         let mut container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger));
 
         let command = pry!(req.get_command());
-        let args = pry_err!(self.generate_exec_sync_args(&id, &pidfile, &container_io, &command));
         let env_vars = pry!(req.get_env_vars().and_then(capnp_util::into_map));
+        let cgroup_manager = pry!(req.get_cgroup_manager());
+
+        let args = GenerateRuntimeArgs {
+            config: self.config(),
+            id: &id,
+            container_io: &container_io,
+            pidfile: &pidfile,
+            cgroup_manager,
+        };
+        let args = pry_err!(args.exec_sync_args(command));
 
         Promise::from_future(
             async move {
