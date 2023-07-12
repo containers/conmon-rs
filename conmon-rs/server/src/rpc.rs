@@ -214,11 +214,19 @@ impl conmon::Server for Server {
 
         let command = pry!(req.get_command());
         let args = pry_err!(self.generate_exec_sync_args(&id, &pidfile, &container_io, &command));
+        let env_vars = pry!(req.get_env_vars().and_then(capnp_util::into_map));
 
         Promise::from_future(
             async move {
                 match child_reaper
-                    .create_child(&runtime, &args, false, &mut container_io, &pidfile, vec![])
+                    .create_child(
+                        &runtime,
+                        &args,
+                        false,
+                        &mut container_io,
+                        &pidfile,
+                        env_vars,
+                    )
                     .await
                 {
                     Ok((grandchild_pid, token)) => {

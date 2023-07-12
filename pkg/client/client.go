@@ -755,6 +755,9 @@ type ExecSyncConfig struct {
 
 	// Terminal specifies if a tty should be used.
 	Terminal bool
+
+	// EnvVars are the environment variables passed to the exec runtime call.
+	EnvVars map[string]string
 }
 
 // ExecContainerResult is the result for calling the ExecSyncContainer method.
@@ -803,6 +806,9 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 			return err
 		}
 		req.SetTerminal(cfg.Terminal)
+		if err := stringStringMapToMapEntryList(cfg.EnvVars, req.NewEnvVars); err != nil {
+			return err
+		}
 
 		return nil
 	})

@@ -73,6 +73,7 @@ interface Conmon {
         terminal @3 :Bool;
         metadataOld @4 :Data; # deprecated
         metadata @5 :Metadata; # Standard metadata to carry.
+        envVars @6 :TextTextMap;
     }
 
     struct ExecSyncContainerResponse {
