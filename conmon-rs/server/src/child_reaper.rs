@@ -157,8 +157,7 @@ impl ChildReaper {
         locked_grandchildren: &Arc<Mutex<MultiMap<String, ReapableChild>>>,
         grandchild_pid: u32,
     ) -> Result<()> {
-        let mut map = lock!(locked_grandchildren);
-        map.retain(|_, v| v.pid == grandchild_pid);
+        lock!(locked_grandchildren).retain(|_, v| v.pid != grandchild_pid);
         Ok(())
     }
 
