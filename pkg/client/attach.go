@@ -499,10 +499,6 @@ func (c *ConmonClient) SetWindowSizeContainer(ctx context.Context, cfg *SetWindo
 		req.SetWidth(cfg.Size.Width)
 		req.SetHeight(cfg.Size.Height)
 
-		if err := p.SetRequest(req); err != nil {
-			return fmt.Errorf("set request: %w", err)
-		}
-
 		return nil
 	})
 	defer free()
