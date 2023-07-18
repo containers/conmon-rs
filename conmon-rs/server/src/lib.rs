@@ -5,6 +5,7 @@ pub use server::Server;
 pub use version::Version;
 
 mod attach;
+mod capnp_util;
 mod child;
 mod child_reaper;
 mod config;

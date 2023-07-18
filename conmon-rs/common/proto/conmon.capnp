@@ -5,7 +5,8 @@ interface Conmon {
     # Version
     struct VersionRequest {
         verbose @0 :Bool;
-        metadata @1 :Data;
+        metadataOld @1 :Data; # deprecated
+        metadata @2 :Metadata; # Standard metadata to carry.
     }
 
     struct VersionResponse {
@@ -18,7 +19,7 @@ interface Conmon {
         rustVersion @6 :Text;
         cargoVersion @7 :Text;
         cargoTree @8 :Text;
-        metadata @9 :Data;
+        metadata @9 :Data; # deprecated (never used, remove in next major release)
     }
 
     version @0 (request: VersionRequest) -> (response: VersionResponse);
@@ -36,7 +37,8 @@ interface Conmon {
         cleanupCmd @7 :List(Text);
         globalArgs @8 :List(Text);
         commandArgs @9 :List(Text);
-        metadata @10 :Data;
+        metadataOld @10 :Data; # deprecated
+        metadata @11 :Metadata; # Standard metadata to carry.
     }
 
     struct LogDriver {
@@ -68,7 +70,8 @@ interface Conmon {
         timeoutSec @1 :UInt64;
         command @2 :List(Text);
         terminal @3 :Bool;
-        metadata @4 :Data;
+        metadataOld @4 :Data; # deprecated
+        metadata @5 :Metadata; # Standard metadata to carry.
     }
 
     struct ExecSyncContainerResponse {
@@ -87,7 +90,8 @@ interface Conmon {
         socketPath @1 :Text;
         execSessionId @2 :Text;
         stopAfterStdinEof @3 :Bool;
-        metadata @4 :Data;
+        metadataOld @4 :Data; # deprecated
+        metadata @5 :Metadata; # Standard metadata to carry.
     }
 
     struct AttachResponse {
@@ -99,7 +103,8 @@ interface Conmon {
     # ReopenLog
     struct ReopenLogRequest {
         id @0 :Text;
-        metadata @1 :Data;
+        metadataOld @1 :Data; # deprecated
+        metadata @2 :Metadata; # Standard metadata to carry.
     }
 
     struct ReopenLogResponse {
@@ -113,7 +118,9 @@ interface Conmon {
         id @0 :Text; # container identifier
         width @1 :UInt16; # columns in characters
         height @2 :UInt16; # rows in characters
-        metadata @3 :Data;
+        metadataOld @3 :Data; # deprecated
+        metadata @4 :Metadata; # Standard metadata to carry.
+
     }
 
     struct SetWindowSizeResponse {
@@ -124,12 +131,13 @@ interface Conmon {
     ###############################################
     # CreateNamespaces
     struct CreateNamespacesRequest {
-        metadata @0 :Data; # Standard metadata to carry.
+        metadataOld @0 :Data; # deprecated
         namespaces @1 :List(Namespace); # The list of namespaces to unshare.
         uidMappings @2 :List(Text); # User ID mappings when unsharing the user namespace.
         gidMappings @3 :List(Text); # Group ID mappings when unsharing the user namespace.
         basePath @4 :Text; # The root path for storing the namespaces.
         podId @5 :Text; # The pod identifier.
+        metadata @6 :Metadata; # Standard metadata to carry.
     }
 
     enum Namespace {
@@ -151,4 +159,14 @@ interface Conmon {
     }
 
     createNamespaces @6 (request: CreateNamespacesRequest) -> (response: CreateNamespacesResponse);
+
+    ###############################################
+    # Helper types
+
+    using Metadata = TextTextMap;
+    using TextTextMap = List(TextTextMapEntry);
+    struct TextTextMapEntry {
+        key @0 :Text;
+        value @1 :Text;
+    }
 }

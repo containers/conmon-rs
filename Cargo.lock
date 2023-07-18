@@ -376,7 +376,6 @@ dependencies = [
  "regex",
  "sendfd",
  "serde",
- "serde_json",
  "shadow-rs",
  "signal-hook",
  "strum",
@@ -1692,12 +1691,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ffc183a10b4478d04cbbbfc96d0873219d962dd5accaff2ffbd4ceb7df837f4"
 
 [[package]]
-name = "ryu"
-version = "1.0.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe232bdf6be8c8de797b22184ee71118d63780ea42ac85b61d1baa6d3b782ae9"
-
-[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1740,17 +1733,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.26",
-]
-
-[[package]]
-name = "serde_json"
-version = "1.0.102"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5062a995d481b2308b6064e9af76011f2921c35f97b0468811ed9f6cd91dfed"
-dependencies = [
- "itoa",
- "ryu",
- "serde",
 ]
 
 [[package]]

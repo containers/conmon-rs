@@ -284,7 +284,7 @@ impl ReapableChild {
         let exit_tx_clone = exit_tx.clone();
         let timeout = *self.timeout();
         let stop_token = self.token().clone();
-        let mut cleanup_cmd_raw = self.cleanup_cmd().clone();
+        let cleanup_cmd_raw = self.cleanup_cmd().clone();
 
         let task = task::spawn(
             async move {
@@ -339,7 +339,7 @@ impl ReapableChild {
                 }
 
                 if !cleanup_cmd_raw.is_empty() {
-                    Self::spawn_cleanup_process(&mut cleanup_cmd_raw).await;
+                    Self::spawn_cleanup_process(&cleanup_cmd_raw).await;
                 }
 
                 debug!("Sending exit struct to channel: {:?}", exit_channel_data);
@@ -361,12 +361,10 @@ impl ReapableChild {
         Ok((exit_tx, exit_rx))
     }
 
-    async fn spawn_cleanup_process(raw_cmd: &mut Vec<String>) {
-        let mut cleanup_cmd = Command::new(raw_cmd.remove(0));
+    async fn spawn_cleanup_process(raw_cmd: &[String]) {
+        let mut cleanup_cmd = Command::new(&raw_cmd[0]);
 
-        raw_cmd.iter().for_each(|arg| {
-            cleanup_cmd.arg(arg);
-        });
+        cleanup_cmd.args(&raw_cmd[1..]);
 
         tokio::spawn(async move {
             match cleanup_cmd.status().await {
