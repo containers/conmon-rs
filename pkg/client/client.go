@@ -627,6 +627,9 @@ type CreateContainerConfig struct {
 	// CommandArgs are the additional arguments passed to the create runtime call
 	// after the command. e.g: crun create --runtime-opt
 	CommandArgs []string
+
+	// EnvVars are the environment variables passed to the create runtime call.
+	EnvVars map[string]string
 }
 
 // ContainerLogDriver specifies a selected logging mechanism.
@@ -708,11 +711,15 @@ func (c *ConmonClient) CreateContainer(
 		}
 
 		if err := stringSliceToTextList(cfg.GlobalArgs, req.NewGlobalArgs); err != nil {
-			return fmt.Errorf("convert cleanup command string slice to text list: %w", err)
+			return fmt.Errorf("convert global arguments string slice to text list: %w", err)
 		}
 
 		if err := stringSliceToTextList(cfg.CommandArgs, req.NewCommandArgs); err != nil {
-			return fmt.Errorf("convert cleanup command string slice to text list: %w", err)
+			return fmt.Errorf("convert command arguments string slice to text list: %w", err)
+		}
+
+		if err := stringStringMapToMapEntryList(cfg.EnvVars, req.NewEnvVars); err != nil {
+			return fmt.Errorf("convert environment variables string slice to text list: %w", err)
 		}
 
 		return nil
@@ -748,6 +755,9 @@ type ExecSyncConfig struct {
 
 	// Terminal specifies if a tty should be used.
 	Terminal bool
+
+	// EnvVars are the environment variables passed to the exec runtime call.
+	EnvVars map[string]string
 }
 
 // ExecContainerResult is the result for calling the ExecSyncContainer method.
@@ -796,6 +806,9 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 			return err
 		}
 		req.SetTerminal(cfg.Terminal)
+		if err := stringStringMapToMapEntryList(cfg.EnvVars, req.NewEnvVars); err != nil {
+			return err
+		}
 
 		return nil
 	})
