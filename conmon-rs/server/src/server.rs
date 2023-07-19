@@ -2,7 +2,7 @@
 
 use crate::{
     child_reaper::ChildReaper,
-    config::{CgroupManager, Commands, Config, LogDriver, Verbosity},
+    config::{Commands, Config, LogDriver, Verbosity},
     container_io::{ContainerIO, ContainerIOType},
     init::{DefaultInit, Init},
     journal::Journal,
@@ -14,7 +14,7 @@ use crate::{
 use anyhow::{format_err, Context, Result};
 use capnp::text_list::Reader;
 use capnp_rpc::{rpc_twoparty_capnp::Side, twoparty, RpcSystem};
-use conmon_common::conmon_capnp::conmon;
+use conmon_common::conmon_capnp::conmon::{self, CgroupManager};
 use futures::{AsyncReadExt, FutureExt};
 use getset::Getters;
 use nix::{
@@ -279,80 +279,87 @@ impl Server {
             task::spawn_local(Box::pin(rpc_system.map(|_| ())));
         }
     }
+}
 
+pub(crate) struct GenerateRuntimeArgs<'a> {
+    pub(crate) config: &'a Config,
+    pub(crate) id: &'a str,
+    pub(crate) container_io: &'a ContainerIO,
+    pub(crate) pidfile: &'a Path,
+    pub(crate) cgroup_manager: CgroupManager,
+}
+
+impl GenerateRuntimeArgs<'_> {
     const SYSTEMD_CGROUP_ARG: &'static str = "--systemd-cgroup";
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
-    pub(crate) fn generate_create_args(
-        &self,
-        id: &str,
+    pub fn create_args(
+        self,
         bundle_path: &Path,
-        container_io: &ContainerIO,
-        pidfile: &Path,
-        global_args: Vec<String>,
-        command_args: Vec<String>,
+        global_args: Reader,
+        command_args: Reader,
     ) -> Result<Vec<String>> {
         let mut args = vec![];
 
-        if let Some(rr) = self.config().runtime_root() {
+        if let Some(rr) = self.config.runtime_root() {
             args.push(format!("--root={}", rr.display()));
         }
 
-        if self.config().cgroup_manager() == CgroupManager::Systemd {
+        if self.cgroup_manager == CgroupManager::Systemd {
             args.push(Self::SYSTEMD_CGROUP_ARG.into());
         }
 
-        args.extend(global_args);
+        for arg in global_args {
+            args.push(arg?.to_string());
+        }
 
         args.extend([
             "create".to_string(),
             "--bundle".to_string(),
             bundle_path.display().to_string(),
             "--pid-file".to_string(),
-            pidfile.display().to_string(),
+            self.pidfile.display().to_string(),
         ]);
 
-        args.extend(command_args);
+        for arg in command_args {
+            args.push(arg?.to_string());
+        }
 
-        if let ContainerIOType::Terminal(terminal) = container_io.typ() {
+        if let ContainerIOType::Terminal(terminal) = self.container_io.typ() {
             args.push(format!("--console-socket={}", terminal.path().display()));
         }
-        args.push(id.into());
+
+        args.push(self.id.into());
+
         debug!("Runtime args {:?}", args.join(" "));
         Ok(args)
     }
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
-    pub(crate) fn generate_exec_sync_args(
-        &self,
-        id: &str,
-        pidfile: &Path,
-        container_io: &ContainerIO,
-        command: &Reader,
-    ) -> Result<Vec<String>> {
+    pub(crate) fn exec_sync_args(&self, command: Reader) -> Result<Vec<String>> {
         let mut args = vec![];
 
-        if let Some(rr) = self.config().runtime_root() {
+        if let Some(rr) = self.config.runtime_root() {
             args.push(format!("--root={}", rr.display()));
         }
 
-        if self.config().cgroup_manager() == CgroupManager::Systemd {
+        if self.cgroup_manager == CgroupManager::Systemd {
             args.push(Self::SYSTEMD_CGROUP_ARG.into());
         }
 
         args.push("exec".to_string());
         args.push("-d".to_string());
 
-        if let ContainerIOType::Terminal(terminal) = container_io.typ() {
+        if let ContainerIOType::Terminal(terminal) = self.container_io.typ() {
             args.push(format!("--console-socket={}", terminal.path().display()));
             args.push("--tty".to_string());
         }
 
-        args.push(format!("--pid-file={}", pidfile.display()));
-        args.push(id.into());
+        args.push(format!("--pid-file={}", self.pidfile.display()));
+        args.push(self.id.into());
 
-        for value in command.iter() {
-            args.push(value?.to_string());
+        for arg in command {
+            args.push(arg?.to_string());
         }
 
         debug!("Exec args {:?}", args.join(" "));

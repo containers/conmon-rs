@@ -101,17 +101,10 @@ pub struct Config {
     /// Do not fork if true.
     skip_fork: bool,
 
-    #[get_copy = "pub"]
-    #[arg(
-        default_value_t,
-        env(concat!(prefix!(), "CGROUP_MANAGER")),
-        long("cgroup-manager"),
-        short('c'),
-        value_enum,
-        value_name("MANAGER")
-    )]
-    /// Select the cgroup manager to be used.
-    cgroup_manager: CgroupManager,
+    // TODO: remove in next major release
+    #[arg(default_value(""), long("cgroup-manager"), short('c'), hide(true))]
+    /// (ignored for backwards compatibility)
+    cgroup_manager: String,
 
     #[get_copy = "pub"]
     #[arg(
@@ -296,38 +289,6 @@ pub enum LogDriver {
 }
 
 impl Default for LogDriver {
-    fn default() -> Self {
-        Self::Systemd
-    }
-}
-
-#[derive(
-    AsRefStr,
-    Clone,
-    Copy,
-    Debug,
-    Deserialize,
-    Display,
-    EnumIter,
-    EnumString,
-    Eq,
-    Hash,
-    IntoStaticStr,
-    PartialEq,
-    Serialize,
-    ValueEnum,
-)]
-#[strum(serialize_all = "lowercase")]
-/// Available cgroup managers.
-pub enum CgroupManager {
-    /// Use systemd to create and manage cgroups
-    Systemd,
-
-    /// Use the cgroup filesystem to create and manage cgroups
-    Cgroupfs,
-}
-
-impl Default for CgroupManager {
     fn default() -> Self {
         Self::Systemd
     }

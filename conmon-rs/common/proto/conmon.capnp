@@ -40,6 +40,7 @@ interface Conmon {
         metadataOld @10 :Data; # deprecated
         metadata @11 :Metadata; # Standard metadata to carry.
         envVars @12 :TextTextMap;
+        cgroupManager @13 :CgroupManager;
     }
 
     struct LogDriver {
@@ -58,6 +59,11 @@ interface Conmon {
         }
     }
 
+    enum CgroupManager {
+        systemd @0;
+        cgroupfs @1;
+    }
+
     struct CreateContainerResponse {
         containerPid @0 :UInt32;
     }
@@ -74,6 +80,7 @@ interface Conmon {
         metadataOld @4 :Data; # deprecated
         metadata @5 :Metadata; # Standard metadata to carry.
         envVars @6 :TextTextMap;
+        cgroupManager @7 :CgroupManager;
     }
 
     struct ExecSyncContainerResponse {
