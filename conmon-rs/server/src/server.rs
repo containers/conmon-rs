@@ -4,6 +4,7 @@ use crate::{
     child_reaper::ChildReaper,
     config::{Commands, Config, LogDriver, Verbosity},
     container_io::{ContainerIO, ContainerIOType},
+    fd_socket::FdSocket,
     init::{DefaultInit, Init},
     journal::Journal,
     listener::{DefaultListener, Listener},
@@ -48,6 +49,10 @@ pub struct Server {
     /// Child reaper instance.
     #[getset(get = "pub(crate)")]
     reaper: Arc<ChildReaper>,
+
+    /// Fd socket instance.
+    #[getset(get = "pub(crate)")]
+    fd_socket: Arc<FdSocket>,
 }
 
 impl Server {
@@ -56,6 +61,7 @@ impl Server {
         let server = Self {
             config: Default::default(),
             reaper: Default::default(),
+            fd_socket: Default::default(),
         };
 
         if let Some(v) = server.config().version() {
@@ -192,11 +198,12 @@ impl Server {
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let socket = self.config().socket();
+        let fd_socket = self.config().fd_socket();
         let reaper = self.reaper.clone();
 
         let signal_handler_span = debug_span!("signal_handler");
         task::spawn(
-            Self::start_signal_handler(reaper, socket, shutdown_tx)
+            Self::start_signal_handler(reaper, socket, fd_socket, shutdown_tx)
                 .with_context(signal_handler_span.context())
                 .instrument(signal_handler_span),
         );
@@ -216,6 +223,7 @@ impl Server {
     async fn start_signal_handler<T: AsRef<Path>>(
         reaper: Arc<ChildReaper>,
         socket: T,
+        fd_socket: T,
         shutdown_tx: oneshot::Sender<()>,
     ) -> Result<()> {
         let mut sigterm = signal(SignalKind::terminate())?;
@@ -250,7 +258,19 @@ impl Server {
         debug!("Removing socket file {}", socket.as_ref().display());
         fs::remove_file(socket)
             .await
-            .context("remove existing socket file")
+            .context("remove existing socket file")?;
+
+        debug!("Removing fd socket file {}", fd_socket.as_ref().display());
+        fs::remove_file(fd_socket)
+            .await
+            .or_else(|err| {
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(err)
+                }
+            })
+            .context("remove existing fd socket file")
     }
 
     async fn start_backend(self, mut shutdown_rx: oneshot::Receiver<()>) -> Result<()> {

@@ -4,7 +4,8 @@ use crate::{
     container_io::{ContainerIO, ContainerIOType, SharedContainerIO},
     oom_watcher::OOMWatcher,
 };
-use anyhow::{bail, format_err, Context, Result};
+use anyhow::{bail, Context, Result};
+use command_fds::{tokio::CommandFdAsyncExt, FdMapping};
 use getset::{CopyGetters, Getters, Setters};
 use libc::pid_t;
 use multimap::MultiMap;
@@ -19,6 +20,7 @@ use nix::{
 use std::{
     ffi::OsStr,
     fmt::Write,
+    os::fd::{AsRawFd, OwnedFd, RawFd},
     path::{Path, PathBuf},
     process::Stdio,
     str,
@@ -41,11 +43,8 @@ pub struct ChildReaper {
     grandchildren: Arc<Mutex<MultiMap<String, ReapableChild>>>,
 }
 
-macro_rules! lock {
-    ($x:expr) => {
-        $x.lock().map_err(|e| format_err!("{:#}", e))?
-    };
-}
+/// first usable file descriptor after stdin, stdout and stderr
+const FIRST_FD_AFTER_STDIO: RawFd = 3;
 
 impl ChildReaper {
     pub fn get(&self, id: &str) -> Result<ReapableChild> {
@@ -56,6 +55,7 @@ impl ChildReaper {
         Ok(r)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_child<P, I, S>(
         &self,
         cmd: P,
@@ -64,6 +64,7 @@ impl ChildReaper {
         container_io: &mut ContainerIO,
         pidfile: &Path,
         env_vars: Vec<(String, String)>,
+        additional_fds: Vec<OwnedFd>,
     ) -> Result<(u32, CancellationToken)>
     where
         P: AsRef<OsStr>,
@@ -81,8 +82,21 @@ impl ChildReaper {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .envs(env_vars)
+            .fd_mappings(
+                additional_fds
+                    .iter()
+                    .enumerate()
+                    .map(|(i, fd)| FdMapping {
+                        parent_fd: fd.as_raw_fd(),
+                        child_fd: i as RawFd + FIRST_FD_AFTER_STDIO,
+                    })
+                    .collect(),
+            )?
             .spawn()
             .context("spawn child process: {}")?;
+
+        // close file descriptors after spawn
+        drop(additional_fds);
 
         let token = CancellationToken::new();
 
@@ -134,7 +148,11 @@ impl ChildReaper {
         Ok((grandchild_pid, token))
     }
 
-    pub fn watch_grandchild(&self, child: Child) -> Result<Receiver<ExitChannelData>> {
+    pub fn watch_grandchild(
+        &self,
+        child: Child,
+        leak_fds: Vec<OwnedFd>,
+    ) -> Result<Receiver<ExitChannelData>> {
         let locked_grandchildren = &self.grandchildren().clone();
         let mut map = lock!(locked_grandchildren);
         let mut reapable_grandchild = ReapableChild::from_child(&child);
@@ -148,6 +166,7 @@ impl ChildReaper {
         task::spawn(
             async move {
                 exit_tx.subscribe().recv().await?;
+                drop(leak_fds);
                 Self::forget_grandchild(&cleanup_grandchildren, pid)
             }
             .instrument(debug_span!("watch_grandchild", pid)),

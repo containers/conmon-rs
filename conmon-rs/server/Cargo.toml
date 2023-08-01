@@ -12,6 +12,7 @@ anyhow = "1.0.72"
 capnp = "0.17.2"
 capnp-rpc = "0.17.0"
 clap = { version = "4.3.8", features = ["color", "cargo", "deprecated", "derive", "deprecated", "env", "string", "unicode", "wrap_help"] }
+command-fds = { version = "0.2.2", features = ["tokio"] }
 conmon-common = { path = "../common" }
 futures = "0.3.28"
 getset = "0.1.2"
@@ -37,6 +38,7 @@ tempfile = "3.7.1"
 tokio = { version = "1.31.0", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "time"] }
 tokio-eventfd = "0.2.0"
 tokio-fd = "0.3.0"
+tokio-seqpacket = "0.7.0"
 tokio-util = { version = "0.7.8", features = ["compat"] }
 tracing = "0.1.37"
 tracing-opentelemetry = "0.20.0"

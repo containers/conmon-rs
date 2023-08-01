@@ -657,6 +657,12 @@ type CreateContainerConfig struct {
 	//
 	// To use this option set `ConmonServerConfig.CgroupManager` to `CgroupManagerPerCommand`.
 	CgroupManager CgroupManager
+
+	// AdditionalFDs can be used to pass additional file descriptors to the container.
+	AdditionalFDs []RemoteFD
+
+	// LeakFDs can be used to keep file descriptors open as long as the container is running.
+	LeakFDs []RemoteFD
 }
 
 // ContainerLogDriver specifies a selected logging mechanism.
@@ -750,6 +756,14 @@ func (c *ConmonClient) CreateContainer(
 		}
 
 		c.setCgroupManager(cfg.CgroupManager, req)
+
+		if err := remoteFDSliceToUInt64List(cfg.AdditionalFDs, req.NewAdditionalFds); err != nil {
+			return fmt.Errorf("convert file descriptor slice to slot list: %w", err)
+		}
+
+		if err := remoteFDSliceToUInt64List(cfg.LeakFDs, req.NewLeakFds); err != nil {
+			return fmt.Errorf("convert file descriptor slice to slot list: %w", err)
+		}
 
 		return nil
 	})
