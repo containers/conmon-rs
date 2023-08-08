@@ -243,7 +243,7 @@ impl ContainerIO {
 
         loop {
             match reader.read(&mut buf).await {
-                Ok(n) if n == 0 => {
+                Ok(0) => {
                     debug!("Nothing more to read");
 
                     attach
