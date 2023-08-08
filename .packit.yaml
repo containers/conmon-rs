@@ -2,46 +2,41 @@
 # See the documentation for more information:
 # https://packit.dev/docs/configuration/
 
-# Pull request build targets can be found at:
-# https://copr.fedorainfracloud.org/coprs/rhcontainerbot/packit-builds/
-
 # Main branch commit build targets can be found at:
 # https://copr.fedorainfracloud.org/coprs/rhcontainerbot/podman-next/
 
 specfile_path: conmon-rs.spec
 
-jobs:
-  - &copr
-    job: copr_build
-    trigger: pull_request
-    owner: rhcontainerbot
-    project: packit-builds
-    enable_net: true
-    srpm_build_deps:
-      - cargo
-      - make
-      - rpkg
-    targets:
-      - centos-stream-8-aarch64
-      - centos-stream-8-x86_64
-      - centos-stream-9-aarch64
-      - centos-stream-9-x86_64
-      - fedora-all-aarch64
-      - fedora-all-x86_64
-    actions:
-      post-upstream-clone:
-        - "rpkg spec --outdir ./"
-      fix-spec-file:
-        - "bash .packit.sh"
+srpm_build_deps:
+  - cargo
+  - make
+  - rpkg
 
-  - <<: *copr
+actions:
+  post-upstream-clone:
+    - "rpkg spec --outdir ./"
+  fix-spec-file:
+    - "bash .packit.sh"
+
+jobs:
+  - job: copr_build
+    trigger: pull_request
+    # keep in sync with https://copr.fedorainfracloud.org/coprs/rhcontainerbot/podman-next
+    enable_net: true
+    targets:
+      - fedora-all-x86_64
+      - fedora-all-aarch64
+      - centos-stream+epel-next-8-x86_64
+      - centos-stream+epel-next-8-aarch64
+      - centos-stream+epel-next-9-x86_64
+      - centos-stream+epel-next-9-aarch64
+    additional_repos:
+      - "copr://rhcontainerbot/podman-next"
+
+  # Run on commit to main branch
+  - job: copr_build
     trigger: commit
     branch: main
+    owner: rhcontainerbot
     project: podman-next
-    targets:
-      - centos-stream+epel-next-8-aarch64
-      - centos-stream+epel-next-8-x86_64
-      - centos-stream+epel-next-9-aarch64
-      - centos-stream+epel-next-9-x86_64
-      - fedora-all-aarch64
-      - fedora-all-x86_64
+    enable_net: true
