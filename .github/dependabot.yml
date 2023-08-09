@@ -11,6 +11,11 @@ updates:
   allow:
   - dependency-type: direct
   - dependency-type: indirect
+  groups:
+    opentelemetry:
+      patterns:
+        - "opentelemetry*"
+        - "tracing-opentelemetry"
 - package-ecosystem: gomod
   directory: "/"
   schedule:
