@@ -30,7 +30,7 @@ prctl = "1.0.0"
 regex = "1.9.3"
 sendfd = { version = "0.4.3", features = ["tokio"] }
 serde = { version = "1.0.183", features = ["derive"] }
-shadow-rs = "=0.23.0"
+shadow-rs = "0.23.0"
 signal-hook = "0.3.17"
 strum = { version = "0.25.0", features = ["derive"] }
 tempfile = "3.7.1"
@@ -45,9 +45,9 @@ tz-rs = "0.6.14"
 uuid = { version = "1.4.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
 
 [build-dependencies]
-shadow-rs = "=0.23.0"
-dashmap = "=5.5.0"
+shadow-rs = "0.23.0"
+dashmap = "5.5.0"
 
 [dev-dependencies]
 mockall = "0.11.4"
-time = { version = "=0.3.23", features = ["parsing"] }
+time = { version = "0.3.23", features = ["parsing"] }
