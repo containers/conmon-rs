@@ -7,7 +7,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   GO_VERSION: '1.20'
-  ACTION_MSRV_TOOLCHAIN: 1.66.1
+  ACTION_MSRV_TOOLCHAIN: 1.69.0
 jobs:
   build:
     runs-on: ubuntu-latest
