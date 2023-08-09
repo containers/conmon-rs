@@ -12,7 +12,7 @@ PREFIX ?= /usr
 CI_TAG ?=
 GOLANGCI_LINT_VERSION := v1.51.1
 ZEITGEIST_VERSION := v0.4.1
-GINKGO_VERSION := v2.8.0
+GINKGO_VERSION := v2.11.0
 
 default:
 	cargo build
