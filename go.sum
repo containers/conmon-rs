@@ -2,8 +2,8 @@ capnproto.org/go/capnp/v3 v3.0.0-alpha.25 h1:VfSMVPjhSJMe+SMtbaBgFS5a2BLo4W2HHhd
 capnproto.org/go/capnp/v3 v3.0.0-alpha.25/go.mod h1:SazsSKIo0mjdwYyEMD8l65Tvg5pvm2kO1emuWa1+YB4=
 github.com/blang/semver/v4 v4.0.0 h1:1PFHFE6yCCTv8C1TeyNNarDzntLi7wMI5i/pzqYIsAM=
 github.com/blang/semver/v4 v4.0.0/go.mod h1:IbckMUScFkM3pff0VJDNKRiT6TG/YpiHIM2yvyW5YoQ=
-github.com/containers/common v0.55.2 h1:Cd+vmkUPDrPvL2v4Te1Wew6SIZdn4/XiyiBRT9IbcGg=
-github.com/containers/common v0.55.2/go.mod h1:ZKPllYOZ2xj2rgWRdnHHVvWg6ru4BT28En8mO8DMMPk=
+github.com/containers/common v0.55.3 h1:mhNQRU4OgW1wpmmKMFSYRn42+hr8SEVSPFdKML3WZik=
+github.com/containers/common v0.55.3/go.mod h1:ZKPllYOZ2xj2rgWRdnHHVvWg6ru4BT28En8mO8DMMPk=
 github.com/containers/storage v1.48.0 h1:wiPs8J2xiFoOEAhxHDRtP6A90Jzj57VqzLRXOqeizns=
 github.com/containers/storage v1.48.0/go.mod h1:pRp3lkRo2qodb/ltpnudoXggrviRmaCmU5a5GhTBae0=
 github.com/coreos/go-systemd/v22 v22.5.0 h1:RrqgGjYQKalulkV8NGVIfkXQf6YYmOyiJKk8iXXhfZs=
