@@ -74,7 +74,7 @@ type AttachConfig struct {
 	Passthrough bool
 
 	// Channel of resize events.
-	Resize chan resize.TerminalSize
+	Resize <-chan resize.TerminalSize
 
 	// The standard streams for this attach session.
 	Streams AttachStreams
