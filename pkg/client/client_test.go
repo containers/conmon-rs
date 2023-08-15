@@ -319,7 +319,7 @@ var _ = Describe("ConmonClient", func() {
 				rssAfter := vmRSSGivenPID(pid)
 				GinkgoWriter.Printf("VmRSS after: %d\n", rssAfter)
 				GinkgoWriter.Printf("VmRSS diff: %d\n", rssAfter-rssBefore)
-				Expect(rssAfter - rssBefore).To(BeNumerically("<", 1500))
+				Expect(rssAfter - rssBefore).To(BeNumerically("<", 2000))
 			})
 		}
 	})

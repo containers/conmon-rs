@@ -277,3 +277,5 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: crate-ci/typos@v1.16.4
+        with:
+          config: .github/typos.toml
