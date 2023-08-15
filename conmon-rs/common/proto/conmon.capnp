@@ -41,6 +41,8 @@ interface Conmon {
         metadata @11 :Metadata; # Standard metadata to carry.
         envVars @12 :TextTextMap;
         cgroupManager @13 :CgroupManager;
+        additionalFds @14 :List(UInt64);
+        leakFds @15 :List(UInt64);
     }
 
     struct LogDriver {
@@ -168,6 +170,18 @@ interface Conmon {
     }
 
     createNamespaces @6 (request: CreateNamespacesRequest) -> (response: CreateNamespacesResponse);
+
+    ###############################################
+    # StartFdSocket
+    struct StartFdSocketRequest {
+        metadata @0 :Metadata; # Standard metadata to carry.
+    }
+
+    struct StartFdSocketResponse {
+        path @0 :Text; # The path to the fd socket.
+    }
+
+    startFdSocket @7 (request: StartFdSocketRequest) -> (response: StartFdSocketResponse);
 
     ###############################################
     # Helper types

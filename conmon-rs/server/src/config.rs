@@ -303,6 +303,7 @@ impl Default for Config {
 // Sync with `pkg/client/client.go`
 const SOCKET: &str = "conmon.sock";
 const PIDFILE: &str = "pidfile";
+const FD_SOCKET: &str = "conmon-fd.sock";
 
 impl Config {
     /// Validate the configuration integrity.
@@ -354,6 +355,10 @@ impl Config {
             fs::remove_file(self.socket())?;
         }
 
+        if self.fd_socket().exists() {
+            fs::remove_file(self.fd_socket())?;
+        }
+
         Ok(())
     }
     pub fn socket(&self) -> PathBuf {
@@ -361,5 +366,8 @@ impl Config {
     }
     pub fn conmon_pidfile(&self) -> PathBuf {
         self.runtime_dir().join(PIDFILE)
+    }
+    pub fn fd_socket(&self) -> PathBuf {
+        self.runtime_dir().join(FD_SOCKET)
     }
 }

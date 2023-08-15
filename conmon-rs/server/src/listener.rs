@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use tokio::net::UnixListener;
+use tokio_seqpacket::UnixSeqpacketListener;
 
 #[cfg(test)]
 use mockall::{automock, predicate::*};
@@ -20,7 +21,7 @@ impl<T> Listener<T>
 where
     T: ListenerImpl,
 {
-    pub fn bind_long_path<P>(&self, path: P) -> Result<UnixListener>
+    pub fn bind_long_path<P>(&self, path: P) -> Result<T::Listener>
     where
         P: AsRef<Path>,
     {
@@ -60,9 +61,10 @@ where
     }
 }
 
-#[cfg_attr(test, automock)]
+#[cfg_attr(test, automock(type Listener = UnixListener;))]
 pub trait ListenerImpl {
-    fn bind(&self, path: &Path) -> io::Result<UnixListener>;
+    type Listener;
+    fn bind(&self, path: &Path) -> io::Result<Self::Listener>;
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
     fn open(&self, path: &Path) -> io::Result<File>;
 }
@@ -72,8 +74,28 @@ pub trait ListenerImpl {
 pub struct DefaultListener;
 
 impl ListenerImpl for DefaultListener {
-    fn bind(&self, path: &Path) -> io::Result<UnixListener> {
+    type Listener = UnixListener;
+    fn bind(&self, path: &Path) -> io::Result<Self::Listener> {
         UnixListener::bind(path)
+    }
+
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        fs::create_dir_all(path)
+    }
+
+    fn open(&self, path: &Path) -> io::Result<File> {
+        File::open(path)
+    }
+}
+
+#[derive(Debug, Default)]
+/// The default implementation for the Listener.
+pub struct SeqpacketListener;
+
+impl ListenerImpl for SeqpacketListener {
+    type Listener = UnixSeqpacketListener;
+    fn bind(&self, path: &Path) -> io::Result<Self::Listener> {
+        UnixSeqpacketListener::bind(path)
     }
 
     fn create_dir_all(&self, path: &Path) -> io::Result<()> {
