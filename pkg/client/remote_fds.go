@@ -153,7 +153,7 @@ func (c *ConmonClient) RemoteFDs(ctx context.Context) (*RemoteFDs, error) {
 		}
 
 		if err := c.setMetadata(ctx, req); err != nil {
-			return err
+			return fmt.Errorf("set metadata: %w", err)
 		}
 
 		return nil
