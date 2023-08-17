@@ -403,7 +403,7 @@ func (c *ConmonClient) readStdio(
 		c.tryCloseAttachReaderForID(id)
 
 		if closeErr := conn.CloseWrite(); closeErr != nil {
-			return fmt.Errorf("%v: %w", closeErr, err)
+			return errors.Join(closeErr, err)
 		}
 
 		if err != nil {
@@ -428,7 +428,7 @@ func (c *ConmonClient) readStdio(
 
 		if errors.Is(err, util.ErrDetach) {
 			if closeErr := conn.CloseWrite(); closeErr != nil {
-				return fmt.Errorf("%v: %w", closeErr, err)
+				return errors.Join(closeErr, err)
 			}
 
 			return err
