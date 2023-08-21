@@ -1,4 +1,4 @@
-use crate::{container_io::Pipe, cri_logger::CriLogger};
+use crate::{container_io::Pipe, cri_logger::CriLogger, json_logger::JSONLogger};
 use anyhow::Result;
 use capnp::struct_list::Reader;
 use conmon_common::conmon_capnp::conmon::log_driver::{Owned, Type};
