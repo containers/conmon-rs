@@ -2059,9 +2059,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-eventfd"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "435aa354af05ef661bac1f4fd46f1c635d7879bcf6c49303ce929e79bbd30f51"
+checksum = "d8574d08892a39f0d7b9d19e1884bf334811dd46f96a4334926858c51a3944f0"
 dependencies = [
  "futures-lite",
  "libc",
