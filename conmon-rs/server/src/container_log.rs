@@ -16,7 +16,23 @@ pub struct ContainerLog {
 #[derive(Debug)]
 enum LogDriver {
     ContainerRuntimeInterface(CriLogger),
+    JSONLogger(JSONLogger),
 }
+
+#[derive(Debug)]
+struct JSONLogger  { 
+    // The type of the log driver. 
+    type  :Type = Type::JSONLogger; 
+ 
+    // The filesystem path of the log driver, if required. 
+    path  :Text = "JSONlogger.rs".to_string(); 
+ 
+    // The maximum log size in bytes, 0 means unlimited. 
+    maxSize  :0; 
+    // ig we keep it zero coz log-rotation being implemented.
+    
+} 
+
 
 impl ContainerLog {
     /// Create a new default SharedContainerLog.
@@ -30,7 +46,7 @@ impl ContainerLog {
             .iter()
             .flat_map(|x| -> Result<_> {
                 Ok(match x.get_type()? {
-                    Type::ContainerRuntimeInterface => {
+                    Type::ContainerRuntimeInterface => {//CRILogger
                         LogDriver::ContainerRuntimeInterface(CriLogger::new(
                             x.get_path()?,
                             if x.get_max_size() > 0 {
@@ -40,6 +56,16 @@ impl ContainerLog {
                             },
                         )?)
                     }
+
+                    //JSONLogger
+                    Type::JSONLogger => LogDriver::JSONLogger(JSONLogger::new(
+                        x.get_path()?,
+                        if x.get_max_size() > 0 {
+                            Some(x.get_max_size() as usize)
+                        } else {
+                            None
+                        },
+                    )?),
                 })
             })
             .collect();
@@ -53,6 +79,8 @@ impl ContainerLog {
                 .iter_mut()
                 .map(|x| match x {
                     LogDriver::ContainerRuntimeInterface(ref mut cri_logger) => cri_logger.init(),
+                    LogDriver::JSONLogger(ref mut json_logger) => json_logger.init(),
+                    //JSONLogger match case
                 })
                 .collect::<Vec<_>>(),
         )
@@ -69,6 +97,8 @@ impl ContainerLog {
                 .iter_mut()
                 .map(|x| match x {
                     LogDriver::ContainerRuntimeInterface(ref mut cri_logger) => cri_logger.reopen(),
+                    LogDriver::JSONLogger(ref mut json_logger) => json_logger.reopen(),
+                    //Reopening JSONLogger, no need to create new methods for the same
                 })
                 .collect::<Vec<_>>(),
         )
@@ -90,6 +120,7 @@ impl ContainerLog {
                     LogDriver::ContainerRuntimeInterface(ref mut cri_logger) => {
                         cri_logger.write(pipe, bytes)
                     }
+                    LogDriver::JSONLogger(ref mut json_logger) => json_logger.write(pipe, bytes),
                 })
                 .collect::<Vec<_>>(),
         )
