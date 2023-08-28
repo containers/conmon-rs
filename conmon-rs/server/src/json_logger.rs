@@ -171,13 +171,120 @@ pub async fn rotate(&mut self) -> Result<()> {
     //Reopen the file
     self.init().await?;
 
+    /// Ensures that all content is written to disk.
+    pub async fn flush(&mut self) -> Result<()> {
+        self.file
+            .as_mut()
+            .context(Self::ERR_UNINITIALIZED)?
+            .flush()
+            .await
+            .context("flush file writer")
+    }
+
     Ok(())
 }
 }
 }
-//Reopeningg the container log file and syncing it to be written, will take a week or so for the PR.
-//Onto understanding the splunker driver creation soon .
-//Will continue with tests ovver here soon.
+//Need help with opening the provided path above
+#[cfg(test)]
+
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::NamedTempFile;
+    use time::{format_description::FormatItem, OffsetDateTime};
+
+    #[tokio::test]
+    async fn write_stdout_success() -> Result<()> {
+        let buffer = "test line to be converted to bytes";
+        let bytes = buffer.as_bytes();
+        let file = NamedTempFile::new()?;
+        let path = file.path();
+        let mut sut = JSONLogger::new(path, None)?;
+        sut.init().await?;
+
+        sut.write(Pipe::StdOut, bytes).await?;
+
+        let res = fs::read_to_string(path)?;
+        assert!(res.contains(" stdout F this is a line"));
+        assert!(res.contains(" stdout F and another line"));
+
+        let timestamp = res.split_whitespace().next().context("no timestamp")?;
+        OffsetDateTime::parse(timestamp, &Rfc3339).context("unable to parse timestamp")?;
+        Ok(())
+
+    }
+
+    #[tokio::test]
+    async fn write_stdout_stderr_success() -> Result<()> {
+        let buffer = "some random shit";
+        let bytes = buffer.as_bytes();
+
+        let file = NamedTempFile::new()?;
+        let path = file.path();
+        let mut sut = JSONLogger::new(path, None)?;
+        sut.init().await?;
+
+        sut.write(Pipe::StdOut,bytes).await?;
+
+        let res = fs::read_to_string(path)?;
+        assert!(res.contains(" stdout F s"));
+        assert!(res.contains(" stdout F r"));
+        assert!(res.contains(" stdout F h"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_reopen() -> Result<()> {
+        let buffer = "a\nb\nc\nd\ne\nf\n";
+        let bytes = buffer.as_bytes();
+
+        let file = NamedTempFile::new()?;
+        let path = file.path();
+        let mut sut = JSONLogger::new(path, Some(150))?;
+        sut.init().await?;
+
+        sut.write(Pipe::StdOut, bytes).await?;
+
+        let res = fs::read_to_string(path)?;
+        assert!(!res.contains(" stdout F a"));
+        assert!(!res.contains(" stdout F b"));
+        assert!(!res.contains(" stdout F c"));
+        assert!(res.contains(" stdout F d"));
+        assert!(res.contains(" stdout F e"));
+        assert!(res.contains(" stdout F f"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_multi_reopen() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let path = file.path();
+        let mut sut = JSONLogger::new(path, Some(150))?;
+        sut.init().await?;
+
+        sut.write(Pipe::StdOut, "abcd\nabcd\nabcd\n".as_bytes())
+            .await?;
+        sut.write(Pipe::StdErr, "a\nb\nc\n".as_bytes()).await?;
+
+        let res = fs::read_to_string(path)?;
+        assert!(!res.contains(" stdout "));
+        assert!(res.contains(" stderr F a"));
+        assert!(res.contains(" stderr F b"));
+        assert!(res.contains(" stderr F c"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn init_failure() -> Result<()> {
+        let mut sut = JSONLogger::new("/file/doesn't/exist", None)?;
+        assert!(sut.init().await.is_err());
+        Ok(())
+    } 
+} 
+
+
 
 
     
