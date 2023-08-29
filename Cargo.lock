@@ -365,7 +365,6 @@ dependencies = [
  "time",
  "tokio",
  "tokio-eventfd",
- "tokio-fd",
  "tokio-seqpacket",
  "tokio-util",
  "tracing",
@@ -2064,16 +2063,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8574d08892a39f0d7b9d19e1884bf334811dd46f96a4334926858c51a3944f0"
 dependencies = [
  "futures-lite",
- "libc",
- "tokio",
-]
-
-[[package]]
-name = "tokio-fd"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cedf0b897610a4baff98bf6116c060c5cfe7574d4339c50e9d23fe09377641d"
-dependencies = [
  "libc",
  "tokio",
 ]

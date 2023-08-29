@@ -7,7 +7,6 @@ use crate::{
 };
 use anyhow::Result;
 use getset::Getters;
-use std::os::unix::io::AsRawFd;
 use tokio::{
     process::{ChildStderr, ChildStdin, ChildStdout},
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -68,9 +67,7 @@ impl Streams {
         if let Some(stdin) = stdin {
             task::spawn(
                 async move {
-                    if let Err(e) =
-                        ContainerIO::read_loop_stdin(stdin.as_raw_fd(), attach, token).await
-                    {
+                    if let Err(e) = ContainerIO::read_loop_stdin(stdin, attach, token).await {
                         error!("Stdin read loop failure: {:#}", e);
                     }
                 }
