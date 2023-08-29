@@ -8,15 +8,13 @@ use nix::errno::Errno;
 use std::{
     fmt,
     marker::Unpin,
-    os::unix::io::{FromRawFd, RawFd},
     path::{Path, PathBuf},
     sync::Arc,
 };
 use strum::AsRefStr;
 use tempfile::Builder;
 use tokio::{
-    fs::File,
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     select,
     sync::{
         mpsc::{UnboundedReceiver, UnboundedSender},
@@ -310,12 +308,10 @@ impl ContainerIO {
     }
 
     pub async fn read_loop_stdin(
-        fd: RawFd,
+        mut writer: impl AsyncWrite + Unpin,
         mut attach: SharedContainerAttach,
         token: CancellationToken,
     ) -> Result<()> {
-        let mut writer = unsafe { File::from_raw_fd(fd) };
-
         loop {
             // While we're not processing input from a caller, and logically should be able to
             // catch a Message::Done here, it doesn't quite work that way.
@@ -346,7 +342,7 @@ impl ContainerIO {
         }
     }
 
-    async fn handle_stdin_data(data: &[u8], writer: &mut File) -> Result<()> {
+    async fn handle_stdin_data(data: &[u8], mut writer: impl AsyncWrite + Unpin) -> Result<()> {
         debug!("Got {} attach bytes", data.len());
 
         writer
