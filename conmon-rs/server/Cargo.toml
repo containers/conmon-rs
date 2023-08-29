@@ -48,7 +48,7 @@ uuid = { version = "1.4.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
 
 [build-dependencies]
 shadow-rs = "0.23.0"
-dashmap = "5.5.1"
+dashmap = "5.5.2"
 
 [dev-dependencies]
 mockall = "0.11.4"
