@@ -17,7 +17,7 @@ use sendfd::RecvWithFd;
 use std::{
     io::{self, ErrorKind, Read, Write},
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
+        fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
         unix::{fs::PermissionsExt, io::RawFd},
     },
     path::PathBuf,
@@ -112,9 +112,9 @@ impl Terminal {
         self.set_tty(Arc::downgrade(&fd).into());
 
         debug!("Changing terminal settings");
-        let mut term = termios::tcgetattr(fd.as_raw_fd())?;
+        let mut term = termios::tcgetattr(&fd)?;
         term.output_flags |= OutputFlags::ONLCR;
-        termios::tcsetattr(fd.as_raw_fd(), SetArg::TCSANOW, &term)?;
+        termios::tcsetattr(&fd, SetArg::TCSANOW, &term)?;
 
         let attach_clone = self.attach.clone();
         let logger_clone = self.logger.clone();
@@ -268,7 +268,6 @@ mod tests {
     use crate::{attach::SharedContainerAttach, container_log::ContainerLog};
     use nix::pty;
     use sendfd::SendWithFd;
-    use std::os::unix::io::FromRawFd;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn new_success() -> Result<()> {
@@ -285,7 +284,7 @@ mod tests {
         loop {
             let ready = stream.ready(Interest::WRITABLE).await?;
             if ready.is_writable() {
-                match stream.send_with_fd(b"test", &[res.master]) {
+                match stream.send_with_fd(b"test", &[res.master.as_raw_fd()]) {
                     Ok(_) => break,
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
                     Err(e) => anyhow::bail!(e),
@@ -297,8 +296,8 @@ mod tests {
         assert!(!sut.path().exists());
 
         // Write to the slave
-        let mut file = unsafe { fs::File::from_raw_fd(res.slave) };
-        file.write_all(b"test").await?;
+        let mut file: std::fs::File = res.slave.into();
+        file.write_all(b"test")?;
 
         Ok(())
     }
@@ -319,6 +318,12 @@ impl TerminalFd {
 impl AsRawFd for TerminalFd {
     fn as_raw_fd(&self) -> RawFd {
         self.0.as_raw_fd()
+    }
+}
+
+impl AsFd for TerminalFd {
+    fn as_fd(&self) -> BorrowedFd {
+        self.0.as_fd()
     }
 }
 
