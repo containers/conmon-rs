@@ -3,6 +3,7 @@ set -euo pipefail
 
 BASE_URL=https://storage.googleapis.com/cri-o/conmon-rs
 COMMIT=
+TAG=
 OUTPUT=conmonrs
 
 usage() {
@@ -10,14 +11,19 @@ usage() {
     echo "Possible arguments:"
     printf "  -o\tOutput path for the downloaded binary (defaults to './conmonrs')\n"
     printf "  -t\tFull length SHA to be used (defaults to the latest available main)\n"
+    printf "  -l\tTag to be used\n"
     printf "  -h\tShow this help message\n"
 }
 
 parse_args() {
     echo "Welcome to the conmon-rs install script!"
 
-    while getopts 'o:t:h' OPTION; do
+    while getopts 'l:o:t:h' OPTION; do
         case "$OPTION" in
+        l)
+            TAG="$OPTARG"
+            echo "Using tag: $TAG"
+            ;;
         o)
             OUTPUT="$OPTARG"
             echo "Using output path: $OUTPUT"
@@ -39,7 +45,7 @@ parse_args() {
 }
 
 verify_requirements() {
-    CMDS=(curl)
+    CMDS=(curl jq)
     echo "Checking if all commands are available: ${CMDS[*]}"
     for CMD in "${CMDS[@]}"; do
         if ! command -v "$CMD" >/dev/null; then
@@ -54,10 +60,14 @@ curl_retry() {
 }
 
 download_binary() {
-    if [[ $COMMIT == "" ]]; then
+    if [[ $TAG != "" ]]; then
+        echo "Getting commit from tag"
+        COMMIT=$(curl_retry "https://api.github.com/repos/containers/conmon-rs/git/refs/tags/$TAG" | jq -r .object.sha)
+    elif [[ $COMMIT == "" ]]; then
+        echo "Getting latest commit on main"
         COMMIT=$(curl_retry $BASE_URL/latest-main.txt)
     fi
-    echo "Using commit $COMMIT"
+    echo "Found commit: $COMMIT"
 
     mkdir -p "$(dirname "$OUTPUT")"
 
