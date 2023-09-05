@@ -32,7 +32,7 @@ jobs:
           default: true
           override: true
           components: rustfmt
-      - run: cargo build
+      - run: cargo build && git diff --exit-code
 
   dependencies:
     runs-on: ubuntu-latest
