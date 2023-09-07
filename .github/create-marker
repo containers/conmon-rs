@@ -9,6 +9,6 @@ VERSION=$(git rev-parse HEAD)
 if [[ $MARKER == HEAD ]]; then
     # use the major.minor as marker
     VERSION=$(git describe --tags --exact-match)
-    MARKER=$(echo "$VERSION" | cut -c 2-5)
+    MARKER=$(echo "$VERSION" | cut -c 2-4)
 fi
 echo "$VERSION" >"latest-$MARKER.txt"

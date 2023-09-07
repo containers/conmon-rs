@@ -60,14 +60,30 @@ curl_retry() {
 }
 
 download_binary() {
+    GIT_REF=refs/heads/main
+
     if [[ $TAG != "" ]]; then
         echo "Getting commit from tag"
-        COMMIT=$(curl_retry "https://api.github.com/repos/containers/conmon-rs/git/refs/tags/$TAG" | jq -r .object.sha)
-    elif [[ $COMMIT == "" ]]; then
-        echo "Getting latest commit on main"
-        COMMIT=$(curl_retry $BASE_URL/latest-main.txt)
+        TAG_JSON=$(curl_retry "https://api.github.com/repos/containers/conmon-rs/git/refs/tags/$TAG")
+        COMMIT=$(echo "$TAG_JSON" | jq -r .object.sha)
+        GIT_REF=$(echo "$TAG_JSON" | jq -r .ref)
+    else
+        if [[ $COMMIT == "" ]]; then
+            echo "Getting latest commit on main"
+            COMMIT=$(curl_retry $BASE_URL/latest-main.txt)
+        fi
+
+        # Latest commit can be a tag
+        POSSIBLE_TAG_JSON=$(curl_retry "https://api.github.com/repos/containers/conmon-rs/git/refs/tags" | jq '.[] | select(.object.sha == "'"$COMMIT"'")')
+
+        if [[ $POSSIBLE_TAG_JSON != "" ]]; then
+            GIT_REF=$(echo "$POSSIBLE_TAG_JSON" | jq -r .ref)
+            echo "Commit $COMMIT is tag ref $TAG"
+        fi
     fi
+
     echo "Found commit: $COMMIT"
+    echo "Using git ref: $GIT_REF"
 
     mkdir -p "$(dirname "$OUTPUT")"
 
@@ -83,13 +99,12 @@ download_binary() {
         done
 
         SLUG=containers/conmon-rs
-        GIT_REF=refs/heads/main
         cosign verify-blob conmonrs \
             --certificate-identity "https://github.com/$SLUG/.github/workflows/ci.yml@$GIT_REF" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-github-workflow-name ci \
             --certificate-github-workflow-repository "$SLUG" \
-            --certificate-github-workflow-ref $GIT_REF \
+            --certificate-github-workflow-ref "$GIT_REF" \
             --signature conmonrs.sig \
             --certificate conmonrs.cert
 
