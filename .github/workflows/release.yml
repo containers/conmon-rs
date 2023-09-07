@@ -18,7 +18,7 @@ jobs:
         id: branch-name
         uses: tj-actions/branch-names@v7
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Setup Cache
         uses: actions/cache@v3
         with:

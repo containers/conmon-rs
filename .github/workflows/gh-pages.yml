@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - run: .github/install-deps
       - name: Select Nightly Toolchain
         uses: actions-rs/toolchain@v1
