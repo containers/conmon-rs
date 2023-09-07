@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "conmon-common"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "capnp",
  "capnpc",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "conmonrs"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "capnp",
@@ -376,7 +376,7 @@ dependencies = [
 
 [[package]]
 name = "conmonrs-cli"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "capnp",
  "capnp-rpc",
@@ -1126,9 +1126,9 @@ checksum = "ed1202b2a6f884ae56f04cff409ab315c5ce26b5e58d7412e484f01fd52f52ef"
 
 [[package]]
 name = "memchr"
-version = "2.6.2"
+version = "2.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5486aed0026218e61b8a01d5fbd5a0a134649abb71a0e53b7bc088529dced86e"
+checksum = "8f232d6ef707e1956a43342693d2a31e72989554d58299d7a88738cc95b0d35c"
 
 [[package]]
 name = "memoffset"
