@@ -1,6 +1,7 @@
 *.orig
 *.test
 /target
+/result
 /vendor
 .build
 latest-*.txt

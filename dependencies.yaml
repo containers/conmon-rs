@@ -49,3 +49,9 @@ dependencies:
     refPaths:
       - path: contrib/tracing/start
         match: OTLP_IMG
+
+  - name: nix
+    version: 2.17.0
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: NIX_VERSION
