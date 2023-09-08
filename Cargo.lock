@@ -213,12 +213,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95e65021d89250bbfe7c2791789ced2c4bdc21b0e8bb59c64f3fd6145a5fd678"
 
 [[package]]
+name = "capnp"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a04bb924792fc85a5eddb48d40febd41c2b55b7f2927e14fbab340cce8c44b4e"
+dependencies = [
+ "embedded-io",
+]
+
+[[package]]
 name = "capnp-futures"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71d520e0af228b92de357f230f4987ee4f9786f2b8aa24b9cfe53f5b11c17198"
 dependencies = [
- "capnp",
+ "capnp 0.17.2",
  "futures",
 ]
 
@@ -228,7 +237,7 @@ version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ab8e869783e491cbcc350427a5e775aa4d8a1deaa5198d74332957cfa430779"
 dependencies = [
- "capnp",
+ "capnp 0.17.2",
  "capnp-futures",
  "futures",
 ]
@@ -239,7 +248,7 @@ version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fbbc3763fb3e6635188e9cc51ee11a26f8777c553ca377430818dbebaaf6042b"
 dependencies = [
- "capnp",
+ "capnp 0.17.2",
 ]
 
 [[package]]
@@ -325,7 +334,7 @@ dependencies = [
 name = "conmon-common"
 version = "0.6.0"
 dependencies = [
- "capnp",
+ "capnp 0.18.0",
  "capnpc",
 ]
 
@@ -334,7 +343,7 @@ name = "conmonrs"
 version = "0.6.0"
 dependencies = [
  "anyhow",
- "capnp",
+ "capnp 0.18.0",
  "capnp-rpc",
  "clap",
  "command-fds",
@@ -378,7 +387,7 @@ dependencies = [
 name = "conmonrs-cli"
 version = "0.6.0"
 dependencies = [
- "capnp",
+ "capnp 0.18.0",
  "capnp-rpc",
  "conmon-common",
  "futures",
@@ -505,6 +514,12 @@ name = "either"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a26ae43d7bcc3b814de94796a5e736d4029efb0ee900c12e2d54c993ad1a1e07"
+
+[[package]]
+name = "embedded-io"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "658bbadc628dc286b9ae02f0cb0f5411c056eb7487b72f0083203f115de94060"
 
 [[package]]
 name = "errno"

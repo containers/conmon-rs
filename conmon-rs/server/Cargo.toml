@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.75"
-capnp = "0.17.2"
+capnp = "0.18.0"
 capnp-rpc = "0.17.0"
 clap = { version = "4.3.8", features = ["color", "cargo", "deprecated", "derive", "deprecated", "env", "string", "unicode", "wrap_help"] }
 command-fds = { version = "0.2.2", features = ["tokio"] }
