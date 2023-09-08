@@ -108,3 +108,7 @@ install:
 .PHONY: rpm
 rpm:
 	rpkg local
+
+nixpkgs:
+	@nix run -f channel:nixpkgs-unstable nix-prefetch-git -- \
+		--no-deepClone https://github.com/nixos/nixpkgs > nix/nixpkgs.json
