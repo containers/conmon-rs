@@ -2,24 +2,33 @@
 set -euo pipefail
 
 BASE_URL=https://storage.googleapis.com/cri-o/conmon-rs
+ARCH_AMD64=amd64
+ARCH_ARM64=arm64
+ARCH_PPC64LE=ppc64le
+ARCH=
 COMMIT=
 TAG=
 OUTPUT=conmonrs
 
 usage() {
-    printf "Usage: %s [ -t SHA ] [ -h ]\n\n" "$(basename "$0")"
+    printf "Usage: %s [ -t SHA ] [-l TAG ] [-a ARCH] [ -h ]\n\n" "$(basename "$0")"
     echo "Possible arguments:"
     printf "  -o\tOutput path for the downloaded binary (defaults to './conmonrs')\n"
     printf "  -t\tFull length SHA to be used (defaults to the latest available main)\n"
     printf "  -l\tTag to be used\n"
+    printf "  -a\tArchitecture to retrieve (defaults to the local system)\n"
     printf "  -h\tShow this help message\n"
 }
 
 parse_args() {
     echo "Welcome to the conmon-rs install script!"
 
-    while getopts 'l:o:t:h' OPTION; do
+    while getopts 'a:l:o:t:h' OPTION; do
         case "$OPTION" in
+        a)
+            ARCH="$OPTARG"
+            echo "Using architecture: $TAG"
+            ;;
         l)
             TAG="$OPTARG"
             echo "Using tag: $TAG"
@@ -42,6 +51,21 @@ parse_args() {
             ;;
         esac
     done
+
+    if [[ $ARCH == "" ]]; then
+        LOCAL_ARCH=$(uname -m)
+        if [[ "$LOCAL_ARCH" == x86_64 ]]; then
+            ARCH=$ARCH_AMD64
+        elif [[ "$LOCAL_ARCH" == aarch64 ]]; then
+            ARCH=$ARCH_ARM64
+        elif [[ "$LOCAL_ARCH" == "$ARCH_PPC64LE" ]]; then
+            ARCH=$ARCH_PPC64LE
+        else
+            echo "Unsupported local architecture: $LOCAL_ARCH"
+            exit 1
+        fi
+        echo "No architecture provided, using: $ARCH"
+    fi
 }
 
 verify_requirements() {
@@ -93,23 +117,27 @@ download_binary() {
         trap 'rm -rf $TMPDIR' EXIT
         pushd "$TMPDIR" >/dev/null
 
-        FILES=(conmonrs conmonrs.sig conmonrs.cert)
+        FILES=(
+            "conmonrs.$ARCH"
+            "conmonrs.$ARCH.sig"
+            "conmonrs.$ARCH.cert"
+        )
         for FILE in "${FILES[@]}"; do
             curl_retry "$BASE_URL/$COMMIT/$FILE" -o "$FILE"
         done
 
         SLUG=containers/conmon-rs
-        cosign verify-blob conmonrs \
+        cosign verify-blob "${FILES[0]}" \
             --certificate-identity "https://github.com/$SLUG/.github/workflows/ci.yml@$GIT_REF" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-github-workflow-name ci \
             --certificate-github-workflow-repository "$SLUG" \
             --certificate-github-workflow-ref "$GIT_REF" \
-            --signature conmonrs.sig \
-            --certificate conmonrs.cert
+            --signature "${FILES[1]}" \
+            --certificate "${FILES[2]}"
 
         popd >/dev/null
-        mv "$TMPDIR/conmonrs" "$OUTPUT"
+        mv "$TMPDIR/${FILES[0]}" "$OUTPUT"
     else
         curl_retry "$BASE_URL/$COMMIT/conmonrs" -o "$OUTPUT"
     fi
