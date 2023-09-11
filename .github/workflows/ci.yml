@@ -125,6 +125,10 @@ jobs:
 
   build-static:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    env:
+      COSIGN_EXPERIMENTAL: 1
     strategy:
       matrix:
         arch: [amd64, arm64, ppc64le]
