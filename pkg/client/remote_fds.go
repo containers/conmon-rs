@@ -98,7 +98,7 @@ func (r *RemoteFDs) Send(fds ...int) ([]RemoteFD, error) {
 	}
 
 	numFDs := int(resIDAndNumFDs & (1<<numFDsBits - 1))
-	if numFDs == 1<<numFDsBits-1 {
+	if int64(numFDs) == 1<<numFDsBits-1 {
 		return nil, serverError(buf)
 	}
 
