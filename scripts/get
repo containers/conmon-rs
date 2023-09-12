@@ -29,7 +29,7 @@ parse_args() {
         case "$OPTION" in
         a)
             ARCH="$OPTARG"
-            echo "Using architecture: $TAG"
+            echo "Using architecture: $ARCH"
             ;;
         l)
             TAG="$OPTARG"
@@ -144,7 +144,7 @@ download_binary() {
         popd >/dev/null
         mv "$TMPDIR/${FILES[0]}" "$OUTPUT"
     else
-        curl_retry "$BASE_URL/$COMMIT/conmonrs" -o "$OUTPUT"
+        curl_retry "$BASE_URL/$COMMIT/conmonrs.$ARCH" -o "$OUTPUT"
     fi
 
     chmod +x "$OUTPUT"
