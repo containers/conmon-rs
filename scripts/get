@@ -8,6 +8,7 @@ ARCH_PPC64LE=ppc64le
 ARCH=
 COMMIT=
 TAG=
+NO_EXEC=
 OUTPUT=conmonrs
 
 usage() {
@@ -17,13 +18,14 @@ usage() {
     printf "  -t\tFull length SHA to be used (defaults to the latest available main)\n"
     printf "  -l\tTag to be used\n"
     printf "  -a\tArchitecture to retrieve (defaults to the local system)\n"
+    printf "  -n\tDo not print the version after install, means don't execute the binary\n"
     printf "  -h\tShow this help message\n"
 }
 
 parse_args() {
     echo "Welcome to the conmon-rs install script!"
 
-    while getopts 'a:l:o:t:h' OPTION; do
+    while getopts 'a:l:no:t:h' OPTION; do
         case "$OPTION" in
         a)
             ARCH="$OPTARG"
@@ -32,6 +34,9 @@ parse_args() {
         l)
             TAG="$OPTARG"
             echo "Using tag: $TAG"
+            ;;
+        n)
+            NO_EXEC=1
             ;;
         o)
             OUTPUT="$OPTARG"
@@ -143,8 +148,11 @@ download_binary() {
     fi
 
     chmod +x "$OUTPUT"
-    printf "Installed binary into: %s\n\n" "$OUTPUT"
-    eval "$(realpath "$OUTPUT")" -v
+    printf "Installed binary into: %s\n" "$OUTPUT"
+
+    if [[ $NO_EXEC == "" ]]; then
+        eval "$(realpath "$OUTPUT")" -v
+    fi
 }
 
 parse_args "$@"
