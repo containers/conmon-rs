@@ -94,6 +94,7 @@ jobs:
           mv target/x86_64-unknown-linux-gnu/release/conmonrs ${{ github.sha }}
       - run: ./${{ github.sha }}/conmonrs -v
       - uses: sigstore/cosign-installer@v3
+        if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
       - name: Sign binary
         if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
         run: |
@@ -154,6 +155,7 @@ jobs:
           mkdir ${{ github.sha }}
           cp result/bin/conmonrs ${{ github.sha }}/conmonrs.${{ matrix.arch }}
       - uses: sigstore/cosign-installer@v3
+        if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
       - name: Sign binary
         if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
         run: |
