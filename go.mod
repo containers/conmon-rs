@@ -6,7 +6,7 @@ require (
 	capnproto.org/go/capnp/v3 v3.0.0-alpha.25
 	github.com/blang/semver/v4 v4.0.0
 	github.com/containers/common v0.55.4
-	github.com/containers/storage v1.50.0
+	github.com/containers/storage v1.50.2
 	github.com/google/uuid v1.3.1
 	github.com/onsi/ginkgo/v2 v2.12.0
 	github.com/onsi/gomega v1.27.10
