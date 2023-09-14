@@ -149,23 +149,19 @@ impl OOMWatcher {
         debug!("Successfully setup cgroup v1 oom detection");
 
         let mut buffer = [0u8; 16];
-        loop {
-            tokio::select! {
-                _ = token.cancelled() => {
-                    debug!("Loop cancelled");
-                    let _ = tx.try_send(OOMEvent{ oom: false });
-                    break;
+        tokio::select! {
+            _ = token.cancelled() => {
+                debug!("Loop cancelled");
+                let _ = tx.try_send(OOMEvent{ oom: false });
+            }
+            _ = oom_event_fd.read(&mut buffer) => {
+                debug!("Got oom event");
+                if let Err(e) = Self::write_oom_files(exit_paths).await {
+                    error!("Writing oom files failed: {:#}", e);
+                } else {
+                    debug!("Successfully wrote oom files");
                 }
-                _ = oom_event_fd.read(&mut buffer) => {
-                    debug!("Got oom event");
-                    if let Err(e) = Self::write_oom_files(exit_paths).await {
-                        error!("Writing oom files failed: {:#}", e);
-                    } else {
-                        debug!("Successfully wrote oom files");
-                    }
-                    let _ = tx.try_send(OOMEvent{ oom: true });
-                    break;
-                }
+                let _ = tx.try_send(OOMEvent{ oom: true });
             }
         }
 
