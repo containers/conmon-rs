@@ -123,6 +123,8 @@ jobs:
       - release-static
       - build-static
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
       - run: .github/create-marker
       - uses: google-github-actions/auth@v1
         with:
