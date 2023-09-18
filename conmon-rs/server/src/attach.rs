@@ -9,10 +9,9 @@ use nix::{
 };
 use std::{
     convert::From,
-    os::unix::{
-        fs::PermissionsExt,
-        io::{FromRawFd, RawFd},
-        net,
+    os::{
+        fd::{AsRawFd, OwnedFd},
+        unix::fs::PermissionsExt,
     },
     path::{Path, PathBuf},
 };
@@ -154,13 +153,13 @@ impl Attach {
         let (shortened_path, _parent_dir) =
             Listener::<DefaultListener>::default().shorten_socket_path(path)?;
         let addr = UnixAddr::new(&shortened_path).context("create socket addr")?;
-        bind(fd, &addr).context("bind socket fd")?;
+        bind(fd.as_raw_fd(), &addr).context("bind socket fd")?;
 
         let metadata = path.metadata()?;
         let mut permissions = metadata.permissions();
         permissions.set_mode(0o700);
 
-        listen(fd, 10).context("listen on socket fd")?;
+        listen(&fd, 10).context("listen on socket fd")?;
 
         task::spawn(
             async move {
@@ -177,15 +176,14 @@ impl Attach {
     }
 
     async fn start(
-        fd: RawFd,
+        fd: OwnedFd,
         read_half_tx: Sender<Vec<u8>>,
         write_half_tx: Sender<Message>,
         token: CancellationToken,
         stop_after_stdin_eof: bool,
     ) -> Result<()> {
         debug!("Start listening on attach socket");
-        let listener = UnixListener::from_std(unsafe { net::UnixListener::from_raw_fd(fd) })
-            .context("create unix listener")?;
+        let listener = UnixListener::from_std(fd.into()).context("create unix listener")?;
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
