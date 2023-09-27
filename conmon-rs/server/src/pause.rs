@@ -302,7 +302,7 @@ impl Pause {
 
         let mut file = File::options()
             .write(true)
-            .open(&path)
+            .open(path)
             .context("open mapping file")?;
 
         for mapping in mappings {
