@@ -6,3 +6,4 @@
 .build
 latest-*.txt
 /*.tar.gz
+.vscode
