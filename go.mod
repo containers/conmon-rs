@@ -1,6 +1,6 @@
 module github.com/containers/conmon-rs
 
-go 1.20
+go 1.21
 
 require (
 	capnproto.org/go/capnp/v3 v3.0.0-alpha.25
@@ -31,7 +31,6 @@ require (
 	github.com/opencontainers/runtime-spec v1.1.0 // indirect
 	github.com/seccomp/libseccomp-golang v0.10.0 // indirect
 	github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 // indirect
-	github.com/xeipuuv/gojsonpointer v0.0.0-20190905194746-02993c407bfb // indirect
 	go.opentelemetry.io/otel/metric v1.19.0 // indirect
 	golang.org/x/net v0.15.0 // indirect
 	golang.org/x/sync v0.3.0 // indirect

@@ -10,9 +10,9 @@ TEST_FLAGS ?=
 PACKAGE_NAME ?= $(shell cargo metadata --no-deps --format-version 1 | jq -r '.packages[2] | [ .name, .version ] | join("-v")')
 PREFIX ?= /usr
 CI_TAG ?=
-GOLANGCI_LINT_VERSION := v1.54.1
+GOLANGCI_LINT_VERSION := v1.54.2
 ZEITGEIST_VERSION := v0.4.1
-GINKGO_VERSION := v2.12.0
+GINKGO_VERSION := v2.13.0
 
 default:
 	cargo build
