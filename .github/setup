@@ -40,7 +40,7 @@ prepare_system() {
 }
 
 install_crio() {
-    curl_retry "https://raw.githubusercontent.com/cri-o/cri-o/main/scripts/get" |
+    curl_retry "https://raw.githubusercontent.com/cri-o/packaging/main/get" |
         sudo bash -s --
 
     cat <<EOT | sudo tee /etc/crio/crio.conf.d/10-crun.conf
