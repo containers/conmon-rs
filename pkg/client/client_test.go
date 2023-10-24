@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -278,7 +279,7 @@ var _ = Describe("ConmonClient", func() {
 						defer wg.Done()
 						result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
 							ID:       tr.ctrID,
-							Command:  []string{"/busybox", "echo", "-n", "hello", "world", fmt.Sprintf("%d", i)},
+							Command:  []string{"/busybox", "echo", "-n", "hello", "world", strconv.Itoa(i)},
 							Terminal: terminal,
 							Timeout:  timeoutUnlimited,
 						})
@@ -305,7 +306,7 @@ var _ = Describe("ConmonClient", func() {
 				for i := 0; i < 25; i++ {
 					result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
 						ID:       tr.ctrID,
-						Command:  []string{"/busybox", "echo", "-n", "hello", "world", fmt.Sprintf("%d", i)},
+						Command:  []string{"/busybox", "echo", "-n", "hello", "world", strconv.Itoa(i)},
 						Terminal: terminal,
 						Timeout:  timeoutUnlimited,
 					})

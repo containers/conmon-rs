@@ -163,7 +163,7 @@ func (tr *testRunner) createContainer(sut *client.ConmonClient, terminal bool) {
 func (tr *testRunner) createContainerWithConfig(sut *client.ConmonClient, cfg *client.CreateContainerConfig) {
 	resp, err := sut.CreateContainer(context.Background(), cfg)
 	Expect(err).To(Succeed())
-	Expect(resp.PID).NotTo(Equal(0))
+	Expect(resp.PID).NotTo(BeEquivalentTo(0))
 	Eventually(func() error {
 		return tr.rr.RunCommandCheckOutput(tr.ctrID, "list")
 	}, time.Second*5).Should(Succeed())

@@ -601,7 +601,7 @@ func (c *ConmonClient) Version(
 func (c *ConmonClient) setCgroupManager(
 	cfg CgroupManager,
 	req interface {
-		SetCgroupManager(proto.Conmon_CgroupManager)
+		SetCgroupManager(manager proto.Conmon_CgroupManager)
 	},
 ) {
 	cgroupManager := c.cgroupManager
