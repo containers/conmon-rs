@@ -96,6 +96,12 @@ linters:
     - whitespace
     - wrapcheck
     - zerologlint
+    - gochecksumtype
+    - inamedparam
+    - perfsprint
+    - protogetter
+    - sloglint
+    - testifylint
     # - depguard
     # - exhaustruct
     # - gochecknoglobals
@@ -119,6 +125,10 @@ linters-settings:
   errcheck:
     check-type-assertions: true
     check-blank: true
+  revive:
+    rules:
+      - name: dot-imports
+        disabled: true
   godox:
     keywords:
       - BUG
