@@ -722,3 +722,46 @@ var _ = Describe("JSONLogger", func() {
 		}
 	})
 })
+
+var _ = Describe("JournaldLogger", func() {
+	var tr *testRunner
+	var sut *client.ConmonClient
+
+	AfterEach(func() {
+		if sut != nil {
+			Expect(sut.Shutdown()).To(Succeed())
+		}
+	})
+
+	Describe("Logging", func() {
+		for _, terminal := range []bool{true, false} {
+			It(testName("should log to journald", terminal), func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "sh", "-c", "echo hello world && echo foo bar"},
+					nil,
+				)
+
+				sut = tr.configGivenEnv()
+				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+					ID:         tr.ctrID,
+					BundlePath: tr.tmpDir,
+					Terminal:   terminal,
+					LogDrivers: []client.ContainerLogDriver{{Type: client.LogDriverTypeJournald}},
+				})
+				Expect(err).NotTo(HaveOccurred())
+				tr.startContainer(sut)
+
+				// Verify the journal logs
+				cmd := exec.Command("journalctl", "-n2", "_COMM=conmonrs")
+				stdout := strings.Builder{}
+				cmd.Stdout = &stdout
+				Expect(cmd.Run()).NotTo(HaveOccurred())
+				res := stdout.String()
+				Expect(res).To(ContainSubstring("hello world"))
+				Expect(res).To(ContainSubstring("foo bar"))
+			})
+		}
+	})
+})

@@ -687,6 +687,7 @@ const (
 	// type.
 	LogDriverTypeContainerRuntimeInterface LogDriverType = iota
 	LogDriverTypeJSONLogger                LogDriverType = iota
+	LogDriverTypeJournald                  LogDriverType = iota
 )
 
 // CreateContainerResponse is the response of the CreateContainer method.
@@ -909,6 +910,9 @@ func (c *ConmonClient) initLogDrivers(req *proto.Conmon_CreateContainerRequest, 
 		}
 		if logDriver.Type == LogDriverTypeJSONLogger {
 			n.SetType(proto.Conmon_LogDriver_Type_json)
+		}
+		if logDriver.Type == LogDriverTypeJournald {
+			n.SetType(proto.Conmon_LogDriver_Type_journald)
 		}
 		if err := n.SetPath(logDriver.Path); err != nil {
 			return fmt.Errorf("set log driver path: %w", err)
