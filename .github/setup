@@ -55,8 +55,8 @@ EOT
     sudo systemctl enable --now crio.service
 
     # Validate if the correct config is being loaded
-    sudo crio-status config | grep -q 'default_runtime = "runc"'
-    sudo crio-status config | grep -q 'runtime_type = "pod"'
+    sudo crio status config | grep -q 'default_runtime = "runc"'
+    sudo crio status config | grep -q 'runtime_type = "pod"'
 }
 
 install_critest() {
