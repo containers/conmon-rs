@@ -214,9 +214,9 @@ checksum = "95e65021d89250bbfe7c2791789ced2c4bdc21b0e8bb59c64f3fd6145a5fd678"
 
 [[package]]
 name = "capnp-futures"
-version = "0.17.0"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71d520e0af228b92de357f230f4987ee4f9786f2b8aa24b9cfe53f5b11c17198"
+checksum = "a600667bb198b5d34e9cd90d23b88c0a2a2c36d5f3edc9e6aafc7d5a206bc750"
 dependencies = [
  "capnp",
  "futures",
