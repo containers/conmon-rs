@@ -213,12 +213,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95e65021d89250bbfe7c2791789ced2c4bdc21b0e8bb59c64f3fd6145a5fd678"
 
 [[package]]
+name = "capnp"
+version = "0.18.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfb4e822ca379e0c588cfcaedd082f53aba001b2b11629a14e4a8c6bb0351d6f"
+dependencies = [
+ "embedded-io",
+]
+
+[[package]]
 name = "capnp-futures"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a600667bb198b5d34e9cd90d23b88c0a2a2c36d5f3edc9e6aafc7d5a206bc750"
 dependencies = [
- "capnp",
+ "capnp 0.17.2",
  "futures",
 ]
 
@@ -228,7 +237,7 @@ version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ab8e869783e491cbcc350427a5e775aa4d8a1deaa5198d74332957cfa430779"
 dependencies = [
- "capnp",
+ "capnp 0.17.2",
  "capnp-futures",
  "futures",
 ]
@@ -239,7 +248,7 @@ version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fbbc3763fb3e6635188e9cc51ee11a26f8777c553ca377430818dbebaaf6042b"
 dependencies = [
- "capnp",
+ "capnp 0.17.2",
 ]
 
 [[package]]
@@ -324,7 +333,7 @@ dependencies = [
 name = "conmon-common"
 version = "0.6.1"
 dependencies = [
- "capnp",
+ "capnp 0.18.9",
  "capnpc",
 ]
 
@@ -333,7 +342,7 @@ name = "conmonrs"
 version = "0.6.1"
 dependencies = [
  "anyhow",
- "capnp",
+ "capnp 0.18.9",
  "capnp-rpc",
  "clap",
  "command-fds",
@@ -378,7 +387,7 @@ dependencies = [
 name = "conmonrs-cli"
 version = "0.6.1"
 dependencies = [
- "capnp",
+ "capnp 0.18.9",
  "capnp-rpc",
  "conmon-common",
  "futures",
@@ -508,6 +517,12 @@ name = "either"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a26ae43d7bcc3b814de94796a5e736d4029efb0ee900c12e2d54c993ad1a1e07"
+
+[[package]]
+name = "embedded-io"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "658bbadc628dc286b9ae02f0cb0f5411c056eb7487b72f0083203f115de94060"
 
 [[package]]
 name = "equivalent"
