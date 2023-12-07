@@ -672,3 +672,46 @@ var _ = Describe("ConmonClient", func() {
 		})
 	})
 })
+
+var _ = Describe("JSONLogger", func() {
+	var tr *testRunner
+	var sut *client.ConmonClient
+
+	AfterEach(func() {
+		Expect(os.RemoveAll(tr.tmpDir)).To(Succeed())
+		if sut != nil {
+			Expect(sut.Shutdown()).To(Succeed())
+		}
+	})
+
+	Describe("Logging", func() {
+		for _, terminal := range []bool{true, false} {
+			It(testName("should log in JSON format", terminal), func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"invalid"}, nil)
+
+				sut = tr.configGivenEnv()
+				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
+					ID:         tr.ctrID,
+					BundlePath: tr.tmpDir,
+					Terminal:   terminal,
+					LogDrivers: []client.ContainerLogDriver{{
+						Type: client.LogDriverTypeJSONLogger,
+						Path: tr.logPath(),
+					}},
+				})
+				Expect(err).To(HaveOccurred())
+
+				logContent, err := os.ReadFile(tr.logPath())
+				Expect(err).NotTo(HaveOccurred())
+				// Check if the log content is in JSON format
+				// This is a basic check assuming that a valid JSON starts and ends with braces '{' and '}'
+				Expect(strings.TrimSpace(string(logContent))).To(SatisfyAll(
+					Not(BeEmpty()),
+					HavePrefix("{"),
+					HaveSuffix("}"),
+				))
+			})
+		}
+	})
+})
