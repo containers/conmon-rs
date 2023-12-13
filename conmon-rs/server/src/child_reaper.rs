@@ -5,7 +5,7 @@ use crate::{
     oom_watcher::OOMWatcher,
 };
 use anyhow::{bail, Context, Result};
-use command_fds::{tokio::CommandFdAsyncExt, FdMapping};
+use command_fds::{CommandFdExt, FdMapping};
 use getset::{CopyGetters, Getters, Setters};
 use libc::pid_t;
 use multimap::MultiMap;
@@ -20,7 +20,7 @@ use nix::{
 use std::{
     ffi::OsStr,
     fmt::Write,
-    os::fd::{AsRawFd, OwnedFd, RawFd},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     path::{Path, PathBuf},
     process::Stdio,
     str,
@@ -87,7 +87,7 @@ impl ChildReaper {
                     .iter()
                     .enumerate()
                     .map(|(i, fd)| FdMapping {
-                        parent_fd: fd.as_raw_fd(),
+                        parent_fd: unsafe { OwnedFd::from_raw_fd(fd.as_raw_fd()) },
                         child_fd: i as RawFd + FIRST_FD_AFTER_STDIO,
                     })
                     .collect(),
