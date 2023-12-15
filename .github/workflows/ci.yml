@@ -102,7 +102,7 @@ jobs:
           cosign sign-blob -y conmonrs \
             --output-signature conmonrs.sig \
             --output-certificate conmonrs.cert
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: conmonrs
           path: ${{ github.sha }}/*
@@ -157,7 +157,7 @@ jobs:
           pushFilter: "(conmon-rs|cargo-vendor)"
       - run: nix-build nix/default-${{ matrix.arch }}.nix
       - run: file result/bin/conmonrs | grep static | grep stripped
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: build-static-${{ matrix.arch }}
           path: |
@@ -174,7 +174,7 @@ jobs:
           cosign sign-blob -y conmonrs.${{ matrix.arch }} \
             --output-signature conmonrs.${{ matrix.arch }}.sig \
             --output-certificate conmonrs.${{ matrix.arch }}.cert
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: conmonrs
           path: ${{ github.sha }}/*
