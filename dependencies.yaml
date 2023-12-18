@@ -39,16 +39,10 @@ dependencies:
         match: ZEITGEIST_VERSION
 
   - name: jaeger
-    version: 1.41.0
+    version: 1.52
     refPaths:
       - path: contrib/tracing/start
         match: JAEGER_IMG
-
-  - name: opentelemetry-collector
-    version: 0.70.0
-    refPaths:
-      - path: contrib/tracing/start
-        match: OTLP_IMG
 
   - name: nix
     version: 2.17.0

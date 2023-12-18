@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-set -uo pipefail
-
-# Global vars to be used
-# shellcheck source=env
-source "$(dirname "${BASH_SOURCE[0]}")"/env
-
-"$CONTAINER_RUNTIME" logs "$OTLP_CTR" 2>&1

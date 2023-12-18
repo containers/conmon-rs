@@ -1,12 +1,13 @@
 package client_test
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -486,13 +487,21 @@ var _ = Describe("ConmonClient", func() {
 			Expect(cmd.Run()).To(Succeed())
 		})
 
-		getLog := func() string {
-			cmd := exec.Command(contribTracingPath + "logs")
-			var stdout bytes.Buffer
-			cmd.Stdout = &stdout
-			Expect(cmd.Run()).To(Succeed())
+		hasTraces := func() bool {
+			resp, err := http.Get("http://localhost:16686/api/traces?service=conmonrs")
+			Expect(err).NotTo(HaveOccurred())
+			defer resp.Body.Close()
 
-			return stdout.String()
+			body, err := io.ReadAll(resp.Body)
+			Expect(err).NotTo(HaveOccurred())
+
+			type traceData struct {
+				Data []interface{} `json:"data"`
+			}
+			traces := &traceData{}
+			Expect(json.Unmarshal(body, traces)).NotTo(HaveOccurred())
+
+			return len(traces.Data) > 0
 		}
 
 		It("should succeed", func() {
@@ -505,9 +514,7 @@ var _ = Describe("ConmonClient", func() {
 			tr.startContainer(sut)
 
 			for i := 0; i < 100; i++ {
-				log := getLog()
-
-				if strings.Contains(log, "service.name: Str(conmonrs)") {
+				if hasTraces() {
 					break
 				}
 
