@@ -5,7 +5,5 @@ set -uo pipefail
 # shellcheck source=env
 source "$(dirname "${BASH_SOURCE[0]}")"/env
 
-echo "Stopping $JAEGER_CTR and $OTLP_CTR containers"
-for CTR in "$JAEGER_CTR" "$OTLP_CTR"; do
-    "$CONTAINER_RUNTIME" stop "$CTR" >/dev/null 2>&1 || true
-done
+echo "Stopping $JAEGER_CTR container"
+"$CONTAINER_RUNTIME" stop "$JAEGER_CTR" >/dev/null 2>&1 || true

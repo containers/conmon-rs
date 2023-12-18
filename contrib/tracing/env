@@ -11,6 +11,5 @@ fi
 
 set -e
 
-export OTLP_CTR=otlp
 export JAEGER_CTR=jaeger
 export CONTAINER_RUNTIME
