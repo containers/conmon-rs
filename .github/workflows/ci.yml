@@ -102,7 +102,7 @@ jobs:
           cosign sign-blob -y conmonrs \
             --output-signature conmonrs.sig \
             --output-certificate conmonrs.cert
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: conmonrs
           path: ${{ github.sha }}/*
@@ -157,7 +157,7 @@ jobs:
           pushFilter: "(conmon-rs|cargo-vendor)"
       - run: nix-build nix/default-${{ matrix.arch }}.nix
       - run: file result/bin/conmonrs | grep static | grep stripped
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: build-static-${{ matrix.arch }}
           path: |
@@ -174,9 +174,9 @@ jobs:
           cosign sign-blob -y conmonrs.${{ matrix.arch }} \
             --output-signature conmonrs.${{ matrix.arch }}.sig \
             --output-certificate conmonrs.${{ matrix.arch }}.cert
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
-          name: conmonrs
+          name: conmonrs-${{ matrix.arch }}
           path: ${{ github.sha }}/*
       - uses: google-github-actions/auth@v2
         if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
@@ -308,7 +308,7 @@ jobs:
             /tmp/conmon-test-images
           key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/files_test.go') }}
       - run: rm -rf target/x86_64-unknown-linux-gnu/release/conmonrs
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v4
         with:
           name: conmonrs
           path: target/x86_64-unknown-linux-gnu/release
@@ -330,7 +330,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v4
         with:
           name: conmonrs
           path: target/x86_64-unknown-linux-musl/release
