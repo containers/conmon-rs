@@ -37,7 +37,7 @@ shadow-rs = "0.25.0"
 signal-hook = "0.3.17"
 strum = { version = "0.25.0", features = ["derive"] }
 tempfile = "3.8.1"
-tokio = { version = "1.35.0", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1.35.1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "time"] }
 tokio-eventfd = "0.2.1"
 tokio-seqpacket = "0.7.1"
 tokio-util = { version = "0.7.10", features = ["compat"] }
