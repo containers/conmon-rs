@@ -8,7 +8,7 @@ require (
 	github.com/containers/common v0.57.1
 	github.com/containers/storage v1.51.0
 	github.com/google/uuid v1.5.0
-	github.com/onsi/ginkgo/v2 v2.13.2
+	github.com/onsi/ginkgo/v2 v2.14.0
 	github.com/onsi/gomega v1.30.0
 	github.com/opencontainers/runc v1.1.10
 	github.com/opencontainers/runtime-tools v0.9.1-0.20230914150019-408c51e934dc
@@ -32,11 +32,11 @@ require (
 	github.com/seccomp/libseccomp-golang v0.10.0 // indirect
 	github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 // indirect
 	go.opentelemetry.io/otel/metric v1.21.0 // indirect
-	golang.org/x/net v0.18.0 // indirect
+	golang.org/x/net v0.19.0 // indirect
 	golang.org/x/sync v0.5.0 // indirect
-	golang.org/x/sys v0.14.0 // indirect
+	golang.org/x/sys v0.15.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
-	golang.org/x/tools v0.14.0 // indirect
+	golang.org/x/tools v0.16.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	zenhack.net/go/util v0.0.0-20230218002511-744d2d6d1739 // indirect
 )
