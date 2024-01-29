@@ -7,7 +7,7 @@ edition = "2021"
 capnp = "0.17.2"
 capnp-rpc = "0.17.0"
 conmon-common = { path = "../common" }
-futures = "0.3.29"
+futures = "0.3.30"
 log = { version = "0.4.20", features = ["serde", "std"] }
 serde = { version = "1.0.193", features = ["derive"] }
 tokio = { version = "1.35.1", features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
