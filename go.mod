@@ -5,7 +5,7 @@ go 1.21
 require (
 	capnproto.org/go/capnp/v3 v3.0.0-alpha.25
 	github.com/blang/semver/v4 v4.0.0
-	github.com/containers/common v0.57.1
+	github.com/containers/common v0.57.2
 	github.com/containers/storage v1.52.0
 	github.com/google/uuid v1.5.0
 	github.com/onsi/ginkgo/v2 v2.15.0
