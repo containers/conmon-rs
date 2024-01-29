@@ -18,7 +18,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Setup Cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -70,7 +70,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Setup Cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -194,7 +194,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Setup Cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -218,7 +218,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Setup Cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -292,7 +292,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Setup Rust and Golang Cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -302,7 +302,7 @@ jobs:
             ~/.cache/go-build
           key: ${{ runner.os }}-cargo-test-integration-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/go.sum') }}
       - name: Setup Testfiles Cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             /tmp/conmon-test-images
