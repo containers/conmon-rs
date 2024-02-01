@@ -279,7 +279,7 @@ jobs:
         with:
           config: .github/grcov.yml
       - name: Upload Results
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
 
   test-integration:
     needs: release-static
