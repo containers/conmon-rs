@@ -29,7 +29,7 @@ opentelemetry_sdk = { version = "0.21.2", features = ["rt-tokio"] }
 opentelemetry-otlp = "0.14.0"
 opentelemetry-semantic-conventions = "0.13.0"
 prctl = "1.0.0"
-regex = "1.10.2"
+regex = "1.10.3"
 sendfd = { version = "0.4.3", features = ["tokio"] }
 serde = { version = "1.0.196", features = ["derive"] }
 serde_json = "1.0.113"
