@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::{format_err, Context as _, Result};
 use getset::{Getters, MutGetters, Setters};
-use libc::{self, winsize, TIOCSWINSZ};
+use libc::{winsize, TIOCSWINSZ};
 use nix::{
     fcntl::{self, FcntlArg, OFlag},
     sys::termios::{self, OutputFlags, SetArg},
@@ -265,7 +265,7 @@ impl Drop for Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{attach::SharedContainerAttach, container_log::ContainerLog};
+    use crate::container_log::ContainerLog;
     use nix::pty;
     use sendfd::SendWithFd;
 

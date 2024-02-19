@@ -4,10 +4,7 @@ use crate::container_io::Pipe;
 use anyhow::{Context, Result};
 use getset::{CopyGetters, Getters, Setters};
 use memchr::memchr;
-use std::{
-    marker::Unpin,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},

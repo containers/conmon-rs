@@ -13,7 +13,6 @@ use capnp::{capability::Promise, Error};
 use capnp_rpc::pry;
 use conmon_common::conmon_capnp::conmon;
 use std::{
-    convert::TryInto,
     path::{Path, PathBuf},
     process, str,
     time::Duration,
