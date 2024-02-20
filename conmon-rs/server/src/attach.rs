@@ -8,7 +8,6 @@ use nix::{
     sys::socket::{bind, listen, socket, AddressFamily, SockFlag, SockType, UnixAddr},
 };
 use std::{
-    convert::From,
     os::{
         fd::{AsRawFd, OwnedFd},
         unix::fs::PermissionsExt,

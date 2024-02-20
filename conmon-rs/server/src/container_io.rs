@@ -7,7 +7,6 @@ use getset::{Getters, MutGetters};
 use nix::errno::Errno;
 use std::{
     fmt,
-    marker::Unpin,
     path::{Path, PathBuf},
     sync::Arc,
 };
