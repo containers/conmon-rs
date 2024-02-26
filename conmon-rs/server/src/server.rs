@@ -19,7 +19,7 @@ use conmon_common::conmon_capnp::conmon::{self, CgroupManager};
 use futures::{AsyncReadExt, FutureExt};
 use getset::Getters;
 use nix::{
-    errno,
+    errno::Errno,
     libc::_exit,
     sys::signal::Signal,
     unistd::{fork, ForkResult},
@@ -123,7 +123,7 @@ impl Server {
 
         // now that we've forked, set self to childreaper
         prctl::set_child_subreaper(true)
-            .map_err(errno::from_i32)
+            .map_err(Errno::from_raw)
             .context("set child subreaper")?;
 
         let enable_tracing = self.config().enable_tracing();
