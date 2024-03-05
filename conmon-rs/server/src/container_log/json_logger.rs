@@ -1,4 +1,4 @@
-use crate::container_io::Pipe;
+pub use crate::container_io::Pipe;
 use anyhow::{Context, Result};
 use getset::{CopyGetters, Getters, Setters};
 use serde_json::json;

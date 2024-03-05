@@ -1,8 +1,8 @@
+use crate::container_log::types;
 use crate::{
     capnp_util,
     child::Child,
     container_io::{ContainerIO, SharedContainerIO},
-    container_log::ContainerLog,
     pause::Pause,
     server::{GenerateRuntimeArgs, Server},
     telemetry::Telemetry,
@@ -111,7 +111,7 @@ impl conmon::Server for Server {
         debug!("Got a create container request");
 
         let log_drivers = pry!(req.get_log_drivers());
-        let container_log = pry_err!(ContainerLog::from(log_drivers));
+        let container_log = pry_err!(types::ContainerLog::from(log_drivers));
         let mut container_io =
             pry_err!(ContainerIO::new(req.get_terminal(), container_log.clone()));
 
@@ -220,7 +220,7 @@ impl conmon::Server for Server {
         let runtime = self.config().runtime().clone();
         let child_reaper = self.reaper().clone();
 
-        let logger = ContainerLog::new();
+        let logger = types::ContainerLog::new();
         let mut container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger));
 
         let command = pry!(req.get_command());

@@ -1,5 +1,5 @@
 use crate::{
-    attach::SharedContainerAttach, container_log::SharedContainerLog, streams::Streams,
+    attach::SharedContainerAttach, container_log::types::SharedContainerLog, streams::Streams,
     terminal::Terminal,
 };
 use anyhow::{bail, Context, Result};

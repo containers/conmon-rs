@@ -50,7 +50,6 @@ uuid = { version = "1.7.0", features = ["v4", "fast-rng", "macro-diagnostics"] }
 [build-dependencies]
 shadow-rs = "0.26.1"
 dashmap = "5.5.3"
-
 [dev-dependencies]
 mockall = "0.12.1"
 time = { version = "0.3.34", features = ["parsing"] }

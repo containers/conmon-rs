@@ -3,7 +3,7 @@
 use crate::{
     attach::SharedContainerAttach,
     container_io::{ContainerIO, Message, Pipe},
-    container_log::SharedContainerLog,
+    container_log::types::SharedContainerLog,
     listener::{DefaultListener, Listener},
 };
 use anyhow::{format_err, Context as _, Result};
@@ -265,13 +265,13 @@ impl Drop for Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::container_log::ContainerLog;
+    use crate::container_log::types;
     use nix::pty;
     use sendfd::SendWithFd;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn new_success() -> Result<()> {
-        let logger = ContainerLog::new();
+        let logger = types::ContainerLog::new();
         let attach = SharedContainerAttach::default();
         let token = CancellationToken::new();
 

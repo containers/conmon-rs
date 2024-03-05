@@ -3,7 +3,7 @@
 use crate::{
     attach::SharedContainerAttach,
     container_io::{ContainerIO, Message, Pipe},
-    container_log::SharedContainerLog,
+    container_log::types::SharedContainerLog,
 };
 use anyhow::Result;
 use getset::Getters;
@@ -112,7 +112,7 @@ impl Streams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::container_log::ContainerLog;
+    use crate::container_log::types::ContainerLog;
     use anyhow::{bail, Context};
     use std::{process::Stdio, str::from_utf8};
     use tokio::process::Command;
