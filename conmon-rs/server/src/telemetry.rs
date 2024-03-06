@@ -5,7 +5,7 @@ use capnp::struct_list::Reader;
 use clap::crate_name;
 use conmon_common::conmon_capnp::conmon;
 use nix::unistd::gethostname;
-use opentelemetry::{global, propagation::Extractor};
+use opentelemetry::{global, propagation::Extractor, KeyValue};
 use opentelemetry_otlp::{ExportConfig, WithExportConfig};
 use opentelemetry_sdk::{
     propagation::TraceContextPropagator,
@@ -47,9 +47,9 @@ impl Telemetry {
             .tracing()
             .with_exporter(exporter)
             .with_trace_config(trace::config().with_resource(Resource::new(vec![
-                SERVICE_NAME.string(crate_name!()),
-                PROCESS_PID.i64(process::id() as i64),
-                HOST_NAME.string(hostname),
+                KeyValue::new(SERVICE_NAME, crate_name!()),
+                KeyValue::new(PROCESS_PID, process::id() as i64),
+                KeyValue::new(HOST_NAME, hostname),
             ])))
             .install_batch(Tokio)
             .context("install tracer")?;
