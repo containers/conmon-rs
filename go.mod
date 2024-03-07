@@ -5,7 +5,7 @@ go 1.21
 require (
 	capnproto.org/go/capnp/v3 v3.0.0-alpha.25
 	github.com/blang/semver/v4 v4.0.0
-	github.com/containers/common v0.57.4
+	github.com/containers/common v0.58.0
 	github.com/containers/storage v1.53.0
 	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.16.0
@@ -34,11 +34,11 @@ require (
 	github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 // indirect
 	github.com/xeipuuv/gojsonpointer v0.0.0-20190905194746-02993c407bfb // indirect
 	go.opentelemetry.io/otel/metric v1.24.0 // indirect
-	golang.org/x/net v0.20.0 // indirect
+	golang.org/x/net v0.22.0 // indirect
 	golang.org/x/sync v0.6.0 // indirect
-	golang.org/x/sys v0.17.0 // indirect
+	golang.org/x/sys v0.18.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
-	golang.org/x/tools v0.17.0 // indirect
+	golang.org/x/tools v0.18.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	zenhack.net/go/util v0.0.0-20230218002511-744d2d6d1739 // indirect
 )
