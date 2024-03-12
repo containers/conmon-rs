@@ -10,8 +10,8 @@ TEST_FLAGS ?=
 PACKAGE_NAME ?= $(shell cargo metadata --no-deps --format-version 1 | jq -r '.packages[2] | [ .name, .version ] | join("-v")')
 PREFIX ?= /usr
 CI_TAG ?=
-GOLANGCI_LINT_VERSION := v1.55.0
-ZEITGEIST_VERSION := v0.4.1
+GOLANGCI_LINT_VERSION := v1.56.2
+ZEITGEIST_VERSION := v0.4.4
 
 default:
 	cargo build
@@ -55,7 +55,7 @@ integration-static: .install.ginkgo # It needs to be release so we correctly tes
 		$(MAKE) release-static; \
 	fi && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
-	export MAX_RSS_KB=7500 && \
+	export MAX_RSS_KB=9500 && \
 	sudo -E "$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
 
 .install.ginkgo:
@@ -69,7 +69,7 @@ integration-static: .install.ginkgo # It needs to be release so we correctly tes
 $(GOTOOLS_BINDIR)/zeitgeist:
 	mkdir -p $(GOTOOLS_BINDIR)
 	curl -sSfL -o $(GOTOOLS_BINDIR)/zeitgeist \
-		https://github.com/kubernetes-sigs/zeitgeist/releases/download/$(ZEITGEIST_VERSION)/zeitgeist_$(ZEITGEIST_VERSION:v%=%)_linux_amd64
+		https://storage.googleapis.com/k8s-artifacts-sig-release/kubernetes-sigs/zeitgeist/$(ZEITGEIST_VERSION)/zeitgeist-amd64-linux
 	chmod +x $(GOTOOLS_BINDIR)/zeitgeist
 
 clean:

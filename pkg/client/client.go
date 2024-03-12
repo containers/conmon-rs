@@ -238,6 +238,7 @@ func (c *ConmonClient) startSpan(ctx context.Context, name string) (context.Cont
 	}
 	const prefix = "conmonrs-client: "
 
+	//nolint:spancheck // https://github.com/jjti/go-spancheck/issues/7
 	return c.tracer.Start(ctx, prefix+name, trace.WithSpanKind(trace.SpanKindClient))
 }
 
