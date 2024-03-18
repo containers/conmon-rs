@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.56"
 name = "axum-core"
-version = "0.3.4"
+version = "0.4.3"
 description = "Core types and traits for axum"
 homepage = "https://github.com/tokio-rs/axum"
 readme = "README.md"
@@ -33,10 +33,17 @@ repository = "https://github.com/tokio-rs/axum"
 [package.metadata.cargo-public-api-crates]
 allowed = [
     "futures_core",
-    "http",
-    "bytes",
-    "http_body",
     "tower_layer",
+    "bytes",
+    "http",
+    "http_body",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = [
+    "--cfg",
+    "docsrs",
 ]
 
 [dependencies.async-trait]
@@ -51,16 +58,25 @@ features = ["alloc"]
 default-features = false
 
 [dependencies.http]
-version = "0.2.7"
+version = "1.0.0"
 
 [dependencies.http-body]
-version = "0.4.5"
+version = "1.0.0"
+
+[dependencies.http-body-util]
+version = "0.1.0"
 
 [dependencies.mime]
 version = "0.3.16"
 
+[dependencies.pin-project-lite]
+version = "0.2.7"
+
+[dependencies.sync_wrapper]
+version = "0.1.1"
+
 [dependencies.tower-http]
-version = "0.4"
+version = "0.5.0"
 features = ["limit"]
 optional = true
 
@@ -76,8 +92,7 @@ optional = true
 default-features = false
 
 [dev-dependencies.axum]
-version = "0.6.0"
-features = ["headers"]
+version = "0.7.2"
 
 [dev-dependencies.futures-util]
 version = "0.3"
@@ -85,14 +100,14 @@ features = ["alloc"]
 default-features = false
 
 [dev-dependencies.hyper]
-version = "0.14.24"
+version = "1.0.0"
 
 [dev-dependencies.tokio]
 version = "1.25.0"
 features = ["macros"]
 
 [dev-dependencies.tower-http]
-version = "0.4"
+version = "0.5.0"
 features = ["limit"]
 
 [build-dependencies.rustversion]

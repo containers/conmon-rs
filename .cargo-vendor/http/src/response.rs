@@ -176,6 +176,7 @@ use crate::{Extensions, Result};
 /// #
 /// # fn main() {}
 /// ```
+#[derive(Clone)]
 pub struct Response<T> {
     head: Parts,
     body: T,
@@ -185,6 +186,7 @@ pub struct Response<T> {
 ///
 /// The HTTP response head consists of a status, version, and a set of
 /// header fields.
+#[derive(Clone)]
 pub struct Parts {
     /// The response's status
     pub status: StatusCode,
@@ -235,7 +237,7 @@ impl Response<()> {
 impl<T> Response<T> {
     /// Creates a new blank `Response` with the body
     ///
-    /// The component ports of this response will be set to their default, e.g.
+    /// The component parts of this response will be set to their default, e.g.
     /// the ok status, no headers, etc.
     ///
     /// # Examples
@@ -251,7 +253,7 @@ impl<T> Response<T> {
     pub fn new(body: T) -> Response<T> {
         Response {
             head: Parts::new(),
-            body: body,
+            body,
         }
     }
 
@@ -272,10 +274,7 @@ impl<T> Response<T> {
     /// ```
     #[inline]
     pub fn from_parts(parts: Parts, body: T) -> Response<T> {
-        Response {
-            head: parts,
-            body: body,
-        }
+        Response { head: parts, body }
     }
 
     /// Returns the `StatusCode`.
@@ -684,7 +683,7 @@ impl Builder {
     /// ```
     pub fn extension<T>(self, extension: T) -> Builder
     where
-        T: Any + Send + Sync + 'static,
+        T: Clone + Any + Send + Sync + 'static,
     {
         self.and_then(move |mut head| {
             head.extensions.insert(extension);
@@ -748,19 +747,14 @@ impl Builder {
     ///     .unwrap();
     /// ```
     pub fn body<T>(self, body: T) -> Result<Response<T>> {
-        self.inner.map(move |head| {
-            Response {
-                head,
-                body,
-            }
-        })
+        self.inner.map(move |head| Response { head, body })
     }
 
     // private
 
     fn and_then<F>(self, func: F) -> Self
     where
-        F: FnOnce(Parts) -> Result<Parts>
+        F: FnOnce(Parts) -> Result<Parts>,
     {
         Builder {
             inner: self.inner.and_then(func),

@@ -32,9 +32,7 @@ use serde::de::DeserializeOwned;
 /// }
 ///
 /// let app = Router::new().route("/list_things", get(list_things));
-/// # async {
-/// # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-/// # };
+/// # let _: Router = app;
 /// ```
 ///
 /// If the query string cannot be parsed it will reject the request with a `400
@@ -44,6 +42,11 @@ use serde::de::DeserializeOwned;
 /// example.
 ///
 /// [example]: https://github.com/tokio-rs/axum/blob/main/examples/query-params-with-empty-strings/src/main.rs
+///
+/// For handling multiple values for the same query parameter, in a `?foo=1&foo=2&foo=3`
+/// fashion, use [`axum_extra::extract::Query`] instead.
+///
+/// [`axum_extra::extract::Query`]: https://docs.rs/axum-extra/latest/axum_extra/extract/struct.Query.html
 #[cfg_attr(docsrs, doc(cfg(feature = "query")))]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Query<T>(pub T);
@@ -99,7 +102,7 @@ mod tests {
     use crate::{routing::get, test_helpers::TestClient, Router};
 
     use super::*;
-    use axum_core::extract::FromRequest;
+    use axum_core::{body::Body, extract::FromRequest};
     use http::{Request, StatusCode};
     use serde::Deserialize;
     use std::fmt::Debug;
@@ -108,7 +111,10 @@ mod tests {
     where
         T: DeserializeOwned + PartialEq + Debug,
     {
-        let req = Request::builder().uri(uri.as_ref()).body(()).unwrap();
+        let req = Request::builder()
+            .uri(uri.as_ref())
+            .body(Body::empty())
+            .unwrap();
         assert_eq!(Query::<T>::from_request(req, &()).await.unwrap().0, value);
     }
 
@@ -161,7 +167,7 @@ mod tests {
         let app = Router::new().route("/", get(handler));
         let client = TestClient::new(app);
 
-        let res = client.get("/?n=hi").send().await;
+        let res = client.get("/?n=hi").await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 

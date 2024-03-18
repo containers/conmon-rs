@@ -1,10 +1,10 @@
-use std::marker::Unpin;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::{cmp, io};
 
 use bytes::{Buf, Bytes};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+use crate::rt::{Read, ReadBufCursor, Write};
 
 /// Combine a buffer with an IO, rewinding reads to use the buffer.
 #[derive(Debug)]
@@ -14,7 +14,7 @@ pub(crate) struct Rewind<T> {
 }
 
 impl<T> Rewind<T> {
-    #[cfg(any(all(feature = "http2", feature = "server"), test))]
+    #[cfg(test)]
     pub(crate) fn new(io: T) -> Self {
         Rewind {
             pre: None,
@@ -29,14 +29,14 @@ impl<T> Rewind<T> {
         }
     }
 
-    #[cfg(any(all(feature = "http1", feature = "http2", feature = "server"), test))]
+    #[cfg(test)]
     pub(crate) fn rewind(&mut self, bs: Bytes) {
         debug_assert!(self.pre.is_none());
         self.pre = Some(bs);
     }
 
     pub(crate) fn into_inner(self) -> (T, Bytes) {
-        (self.inner, self.pre.unwrap_or_else(Bytes::new))
+        (self.inner, self.pre.unwrap_or_default())
     }
 
     // pub(crate) fn get_mut(&mut self) -> &mut T {
@@ -44,14 +44,14 @@ impl<T> Rewind<T> {
     // }
 }
 
-impl<T> AsyncRead for Rewind<T>
+impl<T> Read for Rewind<T>
 where
-    T: AsyncRead + Unpin,
+    T: Read + Unpin,
 {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
+        mut buf: ReadBufCursor<'_>,
     ) -> Poll<io::Result<()>> {
         if let Some(mut prefix) = self.pre.take() {
             // If there are no remaining bytes, let the bytes get dropped.
@@ -72,9 +72,9 @@ where
     }
 }
 
-impl<T> AsyncWrite for Rewind<T>
+impl<T> Write for Rewind<T>
 where
-    T: AsyncWrite + Unpin,
+    T: Write + Unpin,
 {
     fn poll_write(
         mut self: Pin<&mut Self>,
@@ -105,28 +105,32 @@ where
     }
 }
 
+#[cfg(all(
+    any(feature = "client", feature = "server"),
+    any(feature = "http1", feature = "http2"),
+))]
 #[cfg(test)]
 mod tests {
-    // FIXME: re-implement tests with `async/await`, this import should
-    // trigger a warning to remind us
+    use super::super::Compat;
     use super::Rewind;
     use bytes::Bytes;
     use tokio::io::AsyncReadExt;
 
+    #[cfg(not(miri))]
     #[tokio::test]
     async fn partial_rewind() {
         let underlying = [104, 101, 108, 108, 111];
 
         let mock = tokio_test::io::Builder::new().read(&underlying).build();
 
-        let mut stream = Rewind::new(mock);
+        let mut stream = Compat::new(Rewind::new(Compat::new(mock)));
 
         // Read off some bytes, ensure we filled o1
         let mut buf = [0; 2];
         stream.read_exact(&mut buf).await.expect("read1");
 
         // Rewind the stream so that it is as if we never read in the first place.
-        stream.rewind(Bytes::copy_from_slice(&buf[..]));
+        stream.0.rewind(Bytes::copy_from_slice(&buf[..]));
 
         let mut buf = [0; 5];
         stream.read_exact(&mut buf).await.expect("read1");
@@ -135,19 +139,20 @@ mod tests {
         assert_eq!(&buf, &underlying);
     }
 
+    #[cfg(not(miri))]
     #[tokio::test]
     async fn full_rewind() {
         let underlying = [104, 101, 108, 108, 111];
 
         let mock = tokio_test::io::Builder::new().read(&underlying).build();
 
-        let mut stream = Rewind::new(mock);
+        let mut stream = Compat::new(Rewind::new(Compat::new(mock)));
 
         let mut buf = [0; 5];
         stream.read_exact(&mut buf).await.expect("read1");
 
         // Rewind the stream so that it is as if we never read in the first place.
-        stream.rewind(Bytes::copy_from_slice(&buf[..]));
+        stream.0.rewind(Bytes::copy_from_slice(&buf[..]));
 
         let mut buf = [0; 5];
         stream.read_exact(&mut buf).await.expect("read1");

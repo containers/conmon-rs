@@ -1,9 +1,9 @@
-#![doc(html_root_url = "https://docs.rs/http-body/0.4.6")]
 #![deny(
     missing_debug_implementations,
     missing_docs,
     unreachable_pub,
-    broken_intra_doc_links
+    clippy::missing_safety_doc,
+    clippy::undocumented_unsafe_blocks
 )]
 #![cfg_attr(test, deny(warnings))]
 
@@ -13,25 +13,13 @@
 //!
 //! [`Body`]: trait.Body.html
 
-mod collect;
-mod empty;
-mod full;
-mod limited;
-mod next;
+mod frame;
 mod size_hint;
 
-pub mod combinators;
-
-pub use self::collect::Collected;
-pub use self::empty::Empty;
-pub use self::full::Full;
-pub use self::limited::{LengthLimitError, Limited};
-pub use self::next::{Data, Trailers};
+pub use self::frame::Frame;
 pub use self::size_hint::SizeHint;
 
-use self::combinators::{BoxBody, MapData, MapErr, UnsyncBoxBody};
 use bytes::{Buf, Bytes};
-use http::HeaderMap;
 use std::convert::Infallible;
 use std::ops;
 use std::pin::Pin;
@@ -39,12 +27,14 @@ use std::task::{Context, Poll};
 
 /// Trait representing a streaming body of a Request or Response.
 ///
-/// Data is streamed via the `poll_data` function, which asynchronously yields `T: Buf` values. The
-/// `size_hint` function provides insight into the total number of bytes that will be streamed.
+/// Individual frames are streamed via the `poll_frame` function, which asynchronously yields
+/// instances of [`Frame<Data>`].
 ///
-/// The `poll_trailers` function returns an optional set of trailers used to finalize the request /
-/// response exchange. This is mostly used when using the HTTP/2.0 protocol.
+/// Frames can contain a data buffer of type `Self::Data`. Frames can also contain an optional
+/// set of trailers used to finalize the request/response exchange. This is mostly used when using
+/// the HTTP/2.0 protocol.
 ///
+/// The `size_hint` function provides insight into the total number of bytes that will be streamed.
 pub trait Body {
     /// Values yielded by the `Body`.
     type Data: Buf;
@@ -52,27 +42,19 @@ pub trait Body {
     /// The error type this `Body` might generate.
     type Error;
 
+    #[allow(clippy::type_complexity)]
     /// Attempt to pull out the next data buffer of this stream.
-    fn poll_data(
+    fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>>;
-
-    /// Poll for an optional **single** `HeaderMap` of trailers.
-    ///
-    /// This function should only be called once `poll_data` returns `None`.
-    fn poll_trailers(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<HeaderMap>, Self::Error>>;
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>>;
 
     /// Returns `true` when the end of stream has been reached.
     ///
-    /// An end of stream means that both `poll_data` and `poll_trailers` will
-    /// return `None`.
+    /// An end of stream means that `poll_frame` will return `None`.
     ///
     /// A return value of `false` **does not** guarantee that a value will be
-    /// returned from `poll_stream` or `poll_trailers`.
+    /// returned from `poll_frame`.
     fn is_end_stream(&self) -> bool {
         false
     }
@@ -84,84 +66,17 @@ pub trait Body {
     fn size_hint(&self) -> SizeHint {
         SizeHint::default()
     }
-
-    /// Returns future that resolves to next data chunk, if any.
-    fn data(&mut self) -> Data<'_, Self>
-    where
-        Self: Unpin + Sized,
-    {
-        Data(self)
-    }
-
-    /// Returns future that resolves to trailers, if any.
-    fn trailers(&mut self) -> Trailers<'_, Self>
-    where
-        Self: Unpin + Sized,
-    {
-        Trailers(self)
-    }
-
-    /// Maps this body's data value to a different value.
-    fn map_data<F, B>(self, f: F) -> MapData<Self, F>
-    where
-        Self: Sized,
-        F: FnMut(Self::Data) -> B,
-        B: Buf,
-    {
-        MapData::new(self, f)
-    }
-
-    /// Maps this body's error value to a different value.
-    fn map_err<F, E>(self, f: F) -> MapErr<Self, F>
-    where
-        Self: Sized,
-        F: FnMut(Self::Error) -> E,
-    {
-        MapErr::new(self, f)
-    }
-
-    /// Turn this body into [`Collected`] body which will collect all the DATA frames
-    /// and trailers.
-    fn collect(self) -> crate::collect::Collect<Self>
-    where
-        Self: Sized,
-    {
-        collect::Collect::new(self)
-    }
-
-    /// Turn this body into a boxed trait object.
-    fn boxed(self) -> BoxBody<Self::Data, Self::Error>
-    where
-        Self: Sized + Send + Sync + 'static,
-    {
-        BoxBody::new(self)
-    }
-
-    /// Turn this body into a boxed trait object that is !Sync.
-    fn boxed_unsync(self) -> UnsyncBoxBody<Self::Data, Self::Error>
-    where
-        Self: Sized + Send + 'static,
-    {
-        UnsyncBoxBody::new(self)
-    }
 }
 
 impl<T: Body + Unpin + ?Sized> Body for &mut T {
     type Data = T::Data;
     type Error = T::Error;
 
-    fn poll_data(
+    fn poll_frame(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
-        Pin::new(&mut **self).poll_data(cx)
-    }
-
-    fn poll_trailers(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<HeaderMap>, Self::Error>> {
-        Pin::new(&mut **self).poll_trailers(cx)
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut **self).poll_frame(cx)
     }
 
     fn is_end_stream(&self) -> bool {
@@ -181,18 +96,11 @@ where
     type Data = <<P as ops::Deref>::Target as Body>::Data;
     type Error = <<P as ops::Deref>::Target as Body>::Error;
 
-    fn poll_data(
+    fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
-        Pin::get_mut(self).as_mut().poll_data(cx)
-    }
-
-    fn poll_trailers(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<HeaderMap>, Self::Error>> {
-        Pin::get_mut(self).as_mut().poll_trailers(cx)
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::get_mut(self).as_mut().poll_frame(cx)
     }
 
     fn is_end_stream(&self) -> bool {
@@ -208,18 +116,11 @@ impl<T: Body + Unpin + ?Sized> Body for Box<T> {
     type Data = T::Data;
     type Error = T::Error;
 
-    fn poll_data(
+    fn poll_frame(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
-        Pin::new(&mut **self).poll_data(cx)
-    }
-
-    fn poll_trailers(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<HeaderMap>, Self::Error>> {
-        Pin::new(&mut **self).poll_trailers(cx)
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut **self).poll_frame(cx)
     }
 
     fn is_end_stream(&self) -> bool {
@@ -235,23 +136,15 @@ impl<B: Body> Body for http::Request<B> {
     type Data = B::Data;
     type Error = B::Error;
 
-    fn poll_data(
+    fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        // SAFETY:
+        // A pin projection.
         unsafe {
             self.map_unchecked_mut(http::Request::body_mut)
-                .poll_data(cx)
-        }
-    }
-
-    fn poll_trailers(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<HeaderMap>, Self::Error>> {
-        unsafe {
-            self.map_unchecked_mut(http::Request::body_mut)
-                .poll_trailers(cx)
+                .poll_frame(cx)
         }
     }
 
@@ -268,23 +161,15 @@ impl<B: Body> Body for http::Response<B> {
     type Data = B::Data;
     type Error = B::Error;
 
-    fn poll_data(
+    fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        // SAFETY:
+        // A pin projection.
         unsafe {
             self.map_unchecked_mut(http::Response::body_mut)
-                .poll_data(cx)
-        }
-    }
-
-    fn poll_trailers(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<HeaderMap>, Self::Error>> {
-        unsafe {
-            self.map_unchecked_mut(http::Response::body_mut)
-                .poll_trailers(cx)
+                .poll_frame(cx)
         }
     }
 
@@ -301,23 +186,16 @@ impl Body for String {
     type Data = Bytes;
     type Error = Infallible;
 
-    fn poll_data(
+    fn poll_frame(
         mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         if !self.is_empty() {
             let s = std::mem::take(&mut *self);
-            Poll::Ready(Some(Ok(s.into_bytes().into())))
+            Poll::Ready(Some(Ok(Frame::data(s.into_bytes().into()))))
         } else {
             Poll::Ready(None)
         }
-    }
-
-    fn poll_trailers(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<HeaderMap>, Self::Error>> {
-        Poll::Ready(Ok(None))
     }
 
     fn is_end_stream(&self) -> bool {
