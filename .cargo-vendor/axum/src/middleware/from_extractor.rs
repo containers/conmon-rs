@@ -84,9 +84,7 @@ use tower_service::Service;
 ///     .route("/foo", post(other_handler))
 ///     // The extractor will run before all routes
 ///     .route_layer(from_extractor::<RequireAuth>());
-/// # async {
-/// # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-/// # };
+/// # let _: Router = app;
 /// ```
 ///
 /// [`Bytes`]: bytes::Bytes
@@ -354,13 +352,12 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/").send().await;
+        let res = client.get("/").await;
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
         let res = client
             .get("/")
             .header(http::header::AUTHORIZATION, "secret")
-            .send()
             .await;
         assert_eq!(res.status(), StatusCode::OK);
     }

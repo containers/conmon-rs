@@ -1,4 +1,6 @@
+use crate::body::{Body, Bytes, HttpBody};
 use crate::response::{IntoResponse, Response};
+use crate::BoxError;
 use axum_core::extract::{FromRequest, FromRequestParts};
 use futures_util::future::BoxFuture;
 use http::Request;
@@ -251,7 +253,7 @@ macro_rules! impl_service {
         where
             F: FnMut($($ty,)* $last) -> Fut + Clone + Send + 'static,
             $( $ty: FromRequestParts<S> + Send, )*
-            $last: FromRequest<S, B> + Send,
+            $last: FromRequest<S> + Send,
             Fut: Future + Send + 'static,
             Fut::Output: IntoMapRequestResult<B> + Send + 'static,
             I: Service<Request<B>, Error = Infallible>
@@ -260,7 +262,8 @@ macro_rules! impl_service {
                 + 'static,
             I::Response: IntoResponse,
             I::Future: Send + 'static,
-            B: Send + 'static,
+            B: HttpBody<Data = Bytes> + Send + 'static,
+            B::Error: Into<BoxError>,
             S: Clone + Send + Sync + 'static,
         {
             type Response = Response;
@@ -272,6 +275,8 @@ macro_rules! impl_service {
             }
 
             fn call(&mut self, req: Request<B>) -> Self::Future {
+                let req = req.map(Body::new);
+
                 let not_ready_inner = self.inner.clone();
                 let mut ready_inner = std::mem::replace(&mut self.inner, not_ready_inner);
 
@@ -406,7 +411,7 @@ mod tests {
             .layer(map_request(add_header));
         let client = TestClient::new(app);
 
-        let res = client.get("/").send().await;
+        let res = client.get("/").await;
 
         assert_eq!(res.text().await, "foo");
     }
@@ -426,7 +431,7 @@ mod tests {
             .layer(map_request(add_header));
         let client = TestClient::new(app);
 
-        let res = client.get("/").send().await;
+        let res = client.get("/").await;
 
         assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(res.text().await, "something went wrong");

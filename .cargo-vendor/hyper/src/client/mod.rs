@@ -1,68 +1,22 @@
 //! HTTP Client
 //!
-//! There are two levels of APIs provided for construct HTTP clients:
+//! hyper provides HTTP over a single connection. See the [`conn`] module.
 //!
-//! - The higher-level [`Client`](Client) type.
-//! - The lower-level [`conn`](conn) module.
+//! ## Examples
 //!
-//! # Client
+//! * [`client`] - A simple CLI http client that requests the url passed in parameters and outputs the response content and details to the stdout, reading content chunk-by-chunk.
 //!
-//! The [`Client`](Client) is the main way to send HTTP requests to a server.
-//! The default `Client` provides these things on top of the lower-level API:
+//! * [`client_json`] - A simple program that GETs some json, reads the body asynchronously, parses it with serde and outputs the result.
 //!
-//! - A default **connector**, able to resolve hostnames and connect to
-//!   destinations over plain-text TCP.
-//! - A **pool** of existing connections, allowing better performance when
-//!   making multiple requests to the same hostname.
-//! - Automatic setting of the `Host` header, based on the request `Uri`.
-//! - Automatic request **retries** when a pooled connection is closed by the
-//!   server before any bytes have been written.
-//!
-//! Many of these features can configured, by making use of
-//! [`Client::builder`](Client::builder).
-//!
-//! ## Example
-//!
-//! For a small example program simply fetching a URL, take a look at the
-//! [full client example](https://github.com/hyperium/hyper/blob/master/examples/client.rs).
-//!
-//! ```
-//! # #[cfg(all(feature = "tcp", feature = "client", any(feature = "http1", feature = "http2")))]
-//! # async fn fetch_httpbin() -> hyper::Result<()> {
-//! use hyper::{body::HttpBody as _, Client, Uri};
-//!
-//! let client = Client::new();
-//!
-//! // Make a GET /ip to 'http://httpbin.org'
-//! let res = client.get(Uri::from_static("http://httpbin.org/ip")).await?;
-//!
-//! // And then, if the request gets a response...
-//! println!("status: {}", res.status());
-//!
-//! // Concatenate the body stream into a single buffer...
-//! let buf = hyper::body::to_bytes(res).await?;
-//!
-//! println!("body: {:?}", buf);
-//! # Ok(())
-//! # }
-//! # fn main () {}
-//! ```
+//! [`client`]: https://github.com/hyperium/hyper/blob/master/examples/client.rs
+//! [`client_json`]: https://github.com/hyperium/hyper/blob/master/examples/client_json.rs
 
-#[cfg(feature = "tcp")]
-pub use self::connect::HttpConnector;
-
-pub mod connect;
-#[cfg(all(test, feature = "runtime"))]
+#[cfg(test)]
 mod tests;
 
 cfg_feature! {
     #![any(feature = "http1", feature = "http2")]
 
-    pub use self::client::{Builder, Client, ResponseFuture};
-
-    mod client;
     pub mod conn;
     pub(super) mod dispatch;
-    mod pool;
-    pub mod service;
 }

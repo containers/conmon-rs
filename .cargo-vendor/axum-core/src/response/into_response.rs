@@ -1,14 +1,11 @@
 use super::{IntoResponseParts, Response, ResponseParts};
-use crate::{body, BoxError};
+use crate::{body::Body, BoxError};
 use bytes::{buf::Chain, Buf, Bytes, BytesMut};
 use http::{
     header::{self, HeaderMap, HeaderName, HeaderValue},
     Extensions, StatusCode,
 };
-use http_body::{
-    combinators::{MapData, MapErr},
-    Empty, Full, SizeHint,
-};
+use http_body::{Frame, SizeHint};
 use std::{
     borrow::Cow,
     convert::Infallible,
@@ -61,9 +58,7 @@ use std::{
 /// async fn handler() -> Result<(), MyError> {
 ///     Err(MyError::SomethingWentWrong)
 /// }
-/// # async {
-/// # hyper::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-/// # };
+/// # let _: Router = app;
 /// ```
 ///
 /// Or if you have a custom body type you'll also need to implement
@@ -74,11 +69,12 @@ use std::{
 ///     body,
 ///     routing::get,
 ///     response::{IntoResponse, Response},
+///     body::Body,
 ///     Router,
 /// };
-/// use http_body::Body;
 /// use http::HeaderMap;
 /// use bytes::Bytes;
+/// use http_body::Frame;
 /// use std::{
 ///     convert::Infallible,
 ///     task::{Poll, Context},
@@ -89,22 +85,14 @@ use std::{
 ///
 /// // First implement `Body` for `MyBody`. This could for example use
 /// // some custom streaming protocol.
-/// impl Body for MyBody {
+/// impl http_body::Body for MyBody {
 ///     type Data = Bytes;
 ///     type Error = Infallible;
 ///
-///     fn poll_data(
+///     fn poll_frame(
 ///         self: Pin<&mut Self>,
-///         cx: &mut Context<'_>
-///     ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
-///         # unimplemented!()
-///         // ...
-///     }
-///
-///     fn poll_trailers(
-///         self: Pin<&mut Self>,
-///         cx: &mut Context<'_>
-///     ) -> Poll<Result<Option<HeaderMap>, Self::Error>> {
+///         cx: &mut Context<'_>,
+///     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
 ///         # unimplemented!()
 ///         // ...
 ///     }
@@ -113,15 +101,13 @@ use std::{
 /// // Now we can implement `IntoResponse` directly for `MyBody`
 /// impl IntoResponse for MyBody {
 ///     fn into_response(self) -> Response {
-///         Response::new(body::boxed(self))
+///         Response::new(Body::new(self))
 ///     }
 /// }
 ///
 /// // `MyBody` can now be returned from handlers.
 /// let app = Router::new().route("/", get(|| async { MyBody }));
-/// # async {
-/// # hyper::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-/// # };
+/// # let _: Router = app;
 /// ```
 pub trait IntoResponse {
     /// Create a response.
@@ -138,7 +124,7 @@ impl IntoResponse for StatusCode {
 
 impl IntoResponse for () {
     fn into_response(self) -> Response {
-        Empty::new().into_response()
+        Body::empty().into_response()
     }
 }
 
@@ -167,65 +153,19 @@ where
     B::Error: Into<BoxError>,
 {
     fn into_response(self) -> Response {
-        self.map(body::boxed)
+        self.map(Body::new)
     }
 }
 
 impl IntoResponse for http::response::Parts {
     fn into_response(self) -> Response {
-        Response::from_parts(self, body::boxed(Empty::new()))
+        Response::from_parts(self, Body::empty())
     }
 }
 
-impl IntoResponse for Full<Bytes> {
+impl IntoResponse for Body {
     fn into_response(self) -> Response {
-        Response::new(body::boxed(self))
-    }
-}
-
-impl IntoResponse for Empty<Bytes> {
-    fn into_response(self) -> Response {
-        Response::new(body::boxed(self))
-    }
-}
-
-impl<E> IntoResponse for http_body::combinators::BoxBody<Bytes, E>
-where
-    E: Into<BoxError> + 'static,
-{
-    fn into_response(self) -> Response {
-        Response::new(body::boxed(self))
-    }
-}
-
-impl<E> IntoResponse for http_body::combinators::UnsyncBoxBody<Bytes, E>
-where
-    E: Into<BoxError> + 'static,
-{
-    fn into_response(self) -> Response {
-        Response::new(body::boxed(self))
-    }
-}
-
-impl<B, F> IntoResponse for MapData<B, F>
-where
-    B: http_body::Body + Send + 'static,
-    F: FnMut(B::Data) -> Bytes + Send + 'static,
-    B::Error: Into<BoxError>,
-{
-    fn into_response(self) -> Response {
-        Response::new(body::boxed(self))
-    }
-}
-
-impl<B, F, E> IntoResponse for MapErr<B, F>
-where
-    B: http_body::Body<Data = Bytes> + Send + 'static,
-    F: FnMut(B::Error) -> E + Send + 'static,
-    E: Into<BoxError>,
-{
-    fn into_response(self) -> Response {
-        Response::new(body::boxed(self))
+        Response::new(self)
     }
 }
 
@@ -241,9 +181,15 @@ impl IntoResponse for String {
     }
 }
 
+impl IntoResponse for Box<str> {
+    fn into_response(self) -> Response {
+        String::from(self).into_response()
+    }
+}
+
 impl IntoResponse for Cow<'static, str> {
     fn into_response(self) -> Response {
-        let mut res = Full::from(self).into_response();
+        let mut res = Body::from(self).into_response();
         res.headers_mut().insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static(mime::TEXT_PLAIN_UTF_8.as_ref()),
@@ -254,7 +200,7 @@ impl IntoResponse for Cow<'static, str> {
 
 impl IntoResponse for Bytes {
     fn into_response(self) -> Response {
-        let mut res = Full::from(self).into_response();
+        let mut res = Body::from(self).into_response();
         res.headers_mut().insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static(mime::APPLICATION_OCTET_STREAM.as_ref()),
@@ -276,7 +222,7 @@ where
 {
     fn into_response(self) -> Response {
         let (first, second) = self.into_inner();
-        let mut res = Response::new(body::boxed(BytesChainBody {
+        let mut res = Response::new(Body::new(BytesChainBody {
             first: Some(first),
             second: Some(second),
         }));
@@ -301,28 +247,21 @@ where
     type Data = Bytes;
     type Error = Infallible;
 
-    fn poll_data(
+    fn poll_frame(
         mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         if let Some(mut buf) = self.first.take() {
             let bytes = buf.copy_to_bytes(buf.remaining());
-            return Poll::Ready(Some(Ok(bytes)));
+            return Poll::Ready(Some(Ok(Frame::data(bytes))));
         }
 
         if let Some(mut buf) = self.second.take() {
             let bytes = buf.copy_to_bytes(buf.remaining());
-            return Poll::Ready(Some(Ok(bytes)));
+            return Poll::Ready(Some(Ok(Frame::data(bytes))));
         }
 
         Poll::Ready(None)
-    }
-
-    fn poll_trailers(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<HeaderMap>, Self::Error>> {
-        Poll::Ready(Ok(None))
     }
 
     fn is_end_stream(&self) -> bool {
@@ -366,9 +305,15 @@ impl IntoResponse for Vec<u8> {
     }
 }
 
+impl IntoResponse for Box<[u8]> {
+    fn into_response(self) -> Response {
+        Vec::from(self).into_response()
+    }
+}
+
 impl IntoResponse for Cow<'static, [u8]> {
     fn into_response(self) -> Response {
-        let mut res = Full::from(self).into_response();
+        let mut res = Body::from(self).into_response();
         res.headers_mut().insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static(mime::APPLICATION_OCTET_STREAM.as_ref()),
@@ -434,6 +379,16 @@ where
         let (template, res) = self;
         let (parts, ()) = template.into_parts();
         (parts, res).into_response()
+    }
+}
+
+impl<R> IntoResponse for (R,)
+where
+    R: IntoResponse,
+{
+    fn into_response(self) -> Response {
+        let (res,) = self;
+        res.into_response()
     }
 }
 

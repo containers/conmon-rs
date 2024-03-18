@@ -1,4 +1,4 @@
-#![cfg_attr(nightly_error_messages, feature(rustc_attrs))]
+#![cfg_attr(nightly_error_messages, feature(diagnostic_namespace))]
 //! Core types and traits for [`axum`].
 //!
 //! Libraries authors that want to provide [`FromRequest`] or [`IntoResponse`] implementations
@@ -44,10 +44,11 @@
     missing_debug_implementations,
     missing_docs
 )]
-#![deny(unreachable_pub, private_in_public)]
+#![deny(unreachable_pub)]
 #![allow(elided_lifetimes_in_paths, clippy::type_complexity)]
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::float_cmp))]
+#![cfg_attr(not(test), warn(clippy::print_stdout, clippy::dbg_macro))]
 
 #[macro_use]
 pub(crate) mod macros;
