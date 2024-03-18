@@ -7,6 +7,7 @@ use crate::{
     listener::{DefaultListener, Listener},
 };
 use anyhow::{format_err, Context as _, Result};
+use async_channel::Receiver as UnboundedReceiver;
 use getset::{Getters, MutGetters, Setters};
 use libc::{winsize, TIOCSWINSZ};
 use nix::{
@@ -29,7 +30,7 @@ use tokio::{
     fs,
     io::{unix::AsyncFd, AsyncRead, AsyncWrite, AsyncWriteExt, Interest, ReadBuf},
     net::UnixStream,
-    sync::mpsc::{self, Receiver, Sender, UnboundedReceiver},
+    sync::mpsc::{self, Receiver, Sender},
     task,
 };
 use tokio_util::sync::CancellationToken;
@@ -118,7 +119,7 @@ impl Terminal {
 
         let attach_clone = self.attach.clone();
         let logger_clone = self.logger.clone();
-        let (message_tx, message_rx) = mpsc::unbounded_channel();
+        let (message_tx, message_rx) = async_channel::unbounded();
         self.message_rx = Some(message_rx);
 
         task::spawn({

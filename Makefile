@@ -55,7 +55,7 @@ integration-static: .install.ginkgo # It needs to be release so we correctly tes
 		$(MAKE) release-static; \
 	fi && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
-	export MAX_RSS_KB=7500 && \
+	export MAX_RSS_KB=10000 && \
 	sudo -E "$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
 
 .install.ginkgo:
