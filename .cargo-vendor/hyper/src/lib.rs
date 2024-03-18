@@ -2,8 +2,7 @@
 #![deny(missing_debug_implementations)]
 #![cfg_attr(test, deny(rust_2018_idioms))]
 #![cfg_attr(all(test, feature = "full"), deny(unreachable_pub))]
-// 0.14.x is not actively developed, new warnings just get in the way.
-//#![cfg_attr(all(test, feature = "full", not(feature = "nightly")), deny(warnings))]
+#![cfg_attr(all(test, feature = "full"), deny(warnings))]
 #![cfg_attr(all(test, feature = "nightly"), feature(test))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
@@ -20,7 +19,7 @@
 //! - Extensive production use
 //! - [Client](client/index.html) and [Server](server/index.html) APIs
 //!
-//! If just starting out, **check out the [Guides](https://hyper.rs/guides)
+//! If just starting out, **check out the [Guides](https://hyper.rs/guides/1/)
 //! first.**
 //!
 //! ## "Low-level"
@@ -50,15 +49,44 @@
 //! - `http2`: Enables HTTP/2 support.
 //! - `client`: Enables the HTTP `client`.
 //! - `server`: Enables the HTTP `server`.
-//! - `runtime`: Enables convenient integration with `tokio`, providing
-//!   connectors and acceptors for TCP, and a default executor.
-//! - `tcp`: Enables convenient implementations over TCP (using tokio).
-//! - `stream`: Provides `futures::Stream` capabilities.
-//! - `backports`: 1.0 functionality backported to 0.14.
-//! - `deprecated`: opt-in to deprecation warnings to prepare you for 1.0.
 //!
 //! [feature flags]: https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section
-
+//!
+//! # Unstable Features
+//!
+//! hyper includes a set of unstable optional features that can be enabled through the use of a
+//! feature flag and a [configuration flag].
+//!
+//! The following is a list of feature flags and their corresponding `RUSTFLAG`:
+//! - `ffi`: Enables C API for hyper `hyper_unstable_ffi`.
+//! - `tracing`: Enables debug logging with `hyper_unstable_tracing`.
+//!
+//! Enabling an unstable feature is possible with the following `cargo` command, as of version `1.64.0`:
+//! ```notrust
+//! RUSTFLAGS="--cfg hyper_unstable_tracing" cargo rustc --features client,http1,http2,tracing --crate-type cdylib
+//!```
+//! [configuration flag]: https://doc.rust-lang.org/reference/conditional-compilation.html
+//!
+//! # Stability
+//!
+//! It's worth talking a bit about the stability of hyper. hyper's API follows
+//! [SemVer](https://semver.org). Breaking changes will only be introduced in
+//! major versions, if ever. New additions to the API, such as new types,
+//! methods, or traits will only be added in minor versions.
+//!
+//! Some parts of hyper are documented as NOT being part of the stable API. The
+//! following is a brief list, you can read more about each one in the relevant
+//! part of the documentation.
+//!
+//! - Downcasting error types from `Error::source()` is not considered stable.
+//! - Private dependencies use of global variables is not considered stable.
+//!   So, if a dependency uses `log` or `tracing`, hyper doesn't promise it
+//!   will continue to do so.
+//! - Behavior from default options is not stable. hyper reserves the right to
+//!   add new options that are enabled by default which might alter the
+//!   behavior, for the purposes of protection. It is also possible to _change_
+//!   what the default options are set to, also in efforts to protect the
+//!   most people possible.
 #[doc(hidden)]
 pub use http;
 
@@ -70,14 +98,16 @@ pub use crate::http::{header, Method, Request, Response, StatusCode, Uri, Versio
 #[doc(no_inline)]
 pub use crate::http::HeaderMap;
 
-pub use crate::body::Body;
 pub use crate::error::{Error, Result};
 
 #[macro_use]
 mod cfg;
+
 #[macro_use]
-mod common;
+mod trace;
+
 pub mod body;
+mod common;
 mod error;
 pub mod ext;
 #[cfg(test)]
@@ -87,6 +117,7 @@ pub mod service;
 pub mod upgrade;
 
 #[cfg(feature = "ffi")]
+#[cfg_attr(docsrs, doc(cfg(all(feature = "ffi", hyper_unstable_ffi))))]
 pub mod ffi;
 
 cfg_proto! {
@@ -98,15 +129,10 @@ cfg_feature! {
     #![feature = "client"]
 
     pub mod client;
-    #[cfg(any(feature = "http1", feature = "http2"))]
-    #[doc(no_inline)]
-    pub use crate::client::Client;
 }
 
 cfg_feature! {
     #![feature = "server"]
 
     pub mod server;
-    #[doc(no_inline)]
-    pub use crate::server::Server;
 }

@@ -12,9 +12,9 @@
 [package]
 edition = "2018"
 name = "sync_wrapper"
-version = "0.1.2"
+version = "1.0.1"
 authors = ["Actyx AG <developer@actyx.io>"]
-description = "A tool for enlisting the compiler’s help in proving the absence of concurrency"
+description = "A tool for enlisting the compiler's help in proving the absence of concurrency"
 homepage = "https://docs.rs/sync_wrapper"
 documentation = "https://docs.rs/sync_wrapper"
 readme = "README.md"
@@ -22,6 +22,9 @@ keywords = ["concurrency"]
 categories = ["concurrency"]
 license = "Apache-2.0"
 repository = "https://github.com/Actyx/sync_wrapper"
+
+[package.metadata.docs.rs]
+features = ["futures"]
 
 [dependencies.futures-core]
 version = "0.3"

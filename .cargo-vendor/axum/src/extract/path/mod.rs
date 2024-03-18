@@ -25,6 +25,9 @@ use std::{fmt, sync::Arc};
 ///
 /// These examples assume the `serde` feature of the [`uuid`] crate is enabled.
 ///
+/// One `Path` can extract multiple captures. It is not necessary (and does
+/// not work) to give a handler more than one `Path` argument.
+///
 /// [`uuid`]: https://crates.io/crates/uuid
 ///
 /// ```rust,no_run
@@ -42,9 +45,7 @@ use std::{fmt, sync::Arc};
 /// }
 ///
 /// let app = Router::new().route("/users/:user_id/team/:team_id", get(users_teams_show));
-/// # async {
-/// # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-/// # };
+/// # let _: Router = app;
 /// ```
 ///
 /// If the path contains only one parameter, then you can omit the tuple.
@@ -62,9 +63,7 @@ use std::{fmt, sync::Arc};
 /// }
 ///
 /// let app = Router::new().route("/users/:user_id", get(user_info));
-/// # async {
-/// # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-/// # };
+/// # let _: Router = app;
 /// ```
 ///
 /// Path segments also can be deserialized into any type that implements
@@ -103,9 +102,7 @@ use std::{fmt, sync::Arc};
 ///     "/users/:user_id/team/:team_id",
 ///     get(users_teams_show).post(users_teams_create),
 /// );
-/// # async {
-/// # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-/// # };
+/// # let _: Router = app;
 /// ```
 ///
 /// If you wish to capture all path parameters you can use `HashMap` or `Vec`:
@@ -132,9 +129,7 @@ use std::{fmt, sync::Arc};
 ///
 /// let app = Router::new()
 ///     .route("/users/:user_id/team/:team_id", get(params_map).post(params_vec));
-/// # async {
-/// # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-/// # };
+/// # let _: Router = app;
 /// ```
 ///
 /// # Providing detailed rejection output
@@ -356,7 +351,7 @@ impl fmt::Display for ErrorKind {
     }
 }
 
-/// Rejection type for [`Path`](super::Path) if the captured routes params couldn't be deserialized
+/// Rejection type for [`Path`] if the captured routes params couldn't be deserialized
 /// into the expected type.
 #[derive(Debug)]
 pub struct FailedToDeserializePathParams(PathDeserializationError);
@@ -403,12 +398,13 @@ impl FailedToDeserializePathParams {
 
 impl IntoResponse for FailedToDeserializePathParams {
     fn into_response(self) -> Response {
+        let body = self.body_text();
         axum_core::__log_rejection!(
             rejection_type = Self,
-            body_text = self.body_text(),
+            body_text = body,
             status = self.status(),
         );
-        (self.status(), self.body_text()).into_response()
+        (self.status(), body).into_response()
     }
 }
 
@@ -535,7 +531,13 @@ impl std::error::Error for InvalidUtf8InPathParam {}
 
 impl IntoResponse for InvalidUtf8InPathParam {
     fn into_response(self) -> Response {
-        (self.status(), self.body_text()).into_response()
+        let body = self.body_text();
+        axum_core::__log_rejection!(
+            rejection_type = Self,
+            body_text = body,
+            status = self.status(),
+        );
+        (self.status(), body).into_response()
     }
 }
 
@@ -543,7 +545,6 @@ impl IntoResponse for InvalidUtf8InPathParam {
 mod tests {
     use super::*;
     use crate::{routing::get, test_helpers::*, Router};
-    use http::StatusCode;
     use serde::Deserialize;
     use std::collections::HashMap;
 
@@ -561,10 +562,10 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/users/42").send().await;
+        let res = client.get("/users/42").await;
         assert_eq!(res.status(), StatusCode::OK);
 
-        let res = client.post("/users/1337").send().await;
+        let res = client.post("/users/1337").await;
         assert_eq!(res.status(), StatusCode::OK);
     }
 
@@ -574,7 +575,7 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/users/42").send().await;
+        let res = client.get("/users/42").await;
         assert_eq!(res.status(), StatusCode::OK);
     }
 
@@ -587,7 +588,7 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/one%20two").send().await;
+        let res = client.get("/one%20two").await;
 
         assert_eq!(res.text().await, "one two");
     }
@@ -606,10 +607,10 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/i/123").send().await;
+        let res = client.get("/i/123").await;
         assert_eq!(res.text().await, "123");
 
-        let res = client.get("/u/123").send().await;
+        let res = client.get("/u/123").await;
         assert_eq!(res.text().await, "123");
     }
 
@@ -629,24 +630,81 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/foo/bar/baz").send().await;
+        let res = client.get("/foo/bar/baz").await;
         assert_eq!(res.text().await, "bar/baz");
 
-        let res = client.get("/bar/baz/qux").send().await;
+        let res = client.get("/bar/baz/qux").await;
         assert_eq!(res.text().await, "baz/qux");
     }
 
     #[crate::test]
-    async fn captures_dont_match_empty_segments() {
+    async fn captures_dont_match_empty_path() {
         let app = Router::new().route("/:key", get(|| async {}));
 
         let client = TestClient::new(app);
 
-        let res = client.get("/").send().await;
+        let res = client.get("/").await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
-        let res = client.get("/foo").send().await;
+        let res = client.get("/foo").await;
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[crate::test]
+    async fn captures_match_empty_inner_segments() {
+        let app = Router::new().route(
+            "/:key/method",
+            get(|Path(param): Path<String>| async move { param.to_string() }),
+        );
+
+        let client = TestClient::new(app);
+
+        let res = client.get("/abc/method").await;
+        assert_eq!(res.text().await, "abc");
+
+        let res = client.get("//method").await;
+        assert_eq!(res.text().await, "");
+    }
+
+    #[crate::test]
+    async fn captures_match_empty_inner_segments_near_end() {
+        let app = Router::new().route(
+            "/method/:key/",
+            get(|Path(param): Path<String>| async move { param.to_string() }),
+        );
+
+        let client = TestClient::new(app);
+
+        let res = client.get("/method/abc").await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        let res = client.get("/method/abc/").await;
+        assert_eq!(res.text().await, "abc");
+
+        let res = client.get("/method//").await;
+        assert_eq!(res.text().await, "");
+    }
+
+    #[crate::test]
+    async fn captures_match_empty_trailing_segment() {
+        let app = Router::new().route(
+            "/method/:key",
+            get(|Path(param): Path<String>| async move { param.to_string() }),
+        );
+
+        let client = TestClient::new(app);
+
+        let res = client.get("/method/abc/").await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        let res = client.get("/method/abc").await;
+        assert_eq!(res.text().await, "abc");
+
+        let res = client.get("/method/").await;
+        assert_eq!(res.text().await, "");
+
+        let res = client.get("/method").await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
     #[crate::test]
@@ -666,11 +724,11 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/foo").send().await;
+        let res = client.get("/foo").await;
         assert_eq!(res.text().await, "foo");
 
         // percent decoding should also work
-        let res = client.get("/foo%20bar").send().await;
+        let res = client.get("/foo%20bar").await;
         assert_eq!(res.text().await, "foo bar");
     }
 
@@ -680,7 +738,7 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/a/b").send().await;
+        let res = client.get("/a/b").await;
         assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
             res.text().await,
@@ -706,7 +764,7 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/foo/bar").send().await;
+        let res = client.get("/foo/bar").await;
         assert_eq!(res.status(), StatusCode::OK);
     }
 
@@ -764,40 +822,27 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/single/2023-01-01").send().await;
+        let res = client.get("/single/2023-01-01").await;
         assert_eq!(res.text().await, "single: 2023-01-01");
 
-        let res = client
-            .get("/tuple/2023-01-01/2023-01-02/2023-01-03")
-            .send()
-            .await;
+        let res = client.get("/tuple/2023-01-01/2023-01-02/2023-01-03").await;
         assert_eq!(res.text().await, "tuple: 2023-01-01 2023-01-02 2023-01-03");
 
-        let res = client
-            .get("/vec/2023-01-01/2023-01-02/2023-01-03")
-            .send()
-            .await;
+        let res = client.get("/vec/2023-01-01/2023-01-02/2023-01-03").await;
         assert_eq!(res.text().await, "vec: 2023-01-01 2023-01-02 2023-01-03");
 
         let res = client
             .get("/vec_pairs/2023-01-01/2023-01-02/2023-01-03")
-            .send()
             .await;
         assert_eq!(
             res.text().await,
             "vec_pairs: 2023-01-01 2023-01-02 2023-01-03",
         );
 
-        let res = client
-            .get("/map/2023-01-01/2023-01-02/2023-01-03")
-            .send()
-            .await;
+        let res = client.get("/map/2023-01-01/2023-01-02/2023-01-03").await;
         assert_eq!(res.text().await, "map: 2023-01-01 2023-01-02 2023-01-03");
 
-        let res = client
-            .get("/struct/2023-01-01/2023-01-02/2023-01-03")
-            .send()
-            .await;
+        let res = client.get("/struct/2023-01-01/2023-01-02/2023-01-03").await;
         assert_eq!(res.text().await, "struct: 2023-01-01 2023-01-02 2023-01-03");
     }
 
@@ -811,13 +856,13 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/one/1").send().await;
+        let res = client.get("/one/1").await;
         assert!(res
             .text()
             .await
             .starts_with("Wrong number of path arguments for `Path`. Expected 2 but got 1"));
 
-        let res = client.get("/two/1/2").send().await;
+        let res = client.get("/two/1/2").await;
         assert!(res
             .text()
             .await
@@ -838,7 +883,7 @@ mod tests {
         );
 
         let client = TestClient::new(app);
-        let res = client.get("/foo/bar/baz").send().await;
+        let res = client.get("/foo/bar/baz").await;
         let body = res.text().await;
         assert_eq!(body, "a=foo b=bar c=baz");
     }

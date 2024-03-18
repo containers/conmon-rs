@@ -6,10 +6,10 @@ use crate::{
     container_log::SharedContainerLog,
 };
 use anyhow::Result;
+use async_channel::{Receiver, Sender};
 use getset::Getters;
 use tokio::{
     process::{ChildStderr, ChildStdin, ChildStdout},
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task,
 };
 use tokio_util::sync::CancellationToken;
@@ -23,15 +23,15 @@ pub struct Streams {
     #[getset(get = "pub")]
     attach: SharedContainerAttach,
 
-    pub message_rx_stdout: UnboundedReceiver<Message>,
+    pub message_rx_stdout: Receiver<Message>,
 
     #[getset(get = "pub")]
-    message_tx_stdout: UnboundedSender<Message>,
+    message_tx_stdout: Sender<Message>,
 
-    pub message_rx_stderr: UnboundedReceiver<Message>,
+    pub message_rx_stderr: Receiver<Message>,
 
     #[getset(get = "pub")]
-    message_tx_stderr: UnboundedSender<Message>,
+    message_tx_stderr: Sender<Message>,
 }
 
 impl Streams {
@@ -39,8 +39,8 @@ impl Streams {
     pub fn new(logger: SharedContainerLog, attach: SharedContainerAttach) -> Result<Self> {
         debug!("Creating new IO streams");
 
-        let (message_tx_stdout, message_rx_stdout) = mpsc::unbounded_channel();
-        let (message_tx_stderr, message_rx_stderr) = mpsc::unbounded_channel();
+        let (message_tx_stdout, message_rx_stdout) = async_channel::unbounded();
+        let (message_tx_stderr, message_rx_stderr) = async_channel::unbounded();
 
         Ok(Self {
             logger,
@@ -130,7 +130,7 @@ mod tests {
         let attach = SharedContainerAttach::default();
         let token = CancellationToken::new();
 
-        let mut sut = Streams::new(logger, attach)?;
+        let sut = Streams::new(logger, attach)?;
 
         let expected = "hello world";
         let mut child = Command::new("echo")

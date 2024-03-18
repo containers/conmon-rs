@@ -20,9 +20,7 @@ use std::{collections::HashMap, sync::Arc};
 ///         // `path` will be "/users/:id"
 ///     })
 /// );
-/// # async {
-/// # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-/// # };
+/// # let _: Router = app;
 /// ```
 ///
 /// # Accessing `MatchedPath` via extensions
@@ -35,8 +33,7 @@ use std::{collections::HashMap, sync::Arc};
 /// ```
 /// use axum::{
 ///     Router,
-///     extract::MatchedPath,
-///     http::Request,
+///     extract::{Request, MatchedPath},
 ///     routing::get,
 /// };
 /// use tower_http::trace::TraceLayer;
@@ -55,44 +52,6 @@ use std::{collections::HashMap, sync::Arc};
 ///     );
 /// # let _: Router = app;
 /// ```
-///
-/// # Matched path in nested routers
-///
-/// Because of how [nesting] works `MatchedPath` isn't accessible in middleware on nested routes:
-///
-/// ```
-/// use axum::{
-///     Router,
-///     RequestExt,
-///     routing::get,
-///     extract::{MatchedPath, rejection::MatchedPathRejection},
-///     middleware::map_request,
-///     http::Request,
-///     body::Body,
-/// };
-///
-/// async fn access_matched_path(mut request: Request<Body>) -> Request<Body> {
-///     // if `/foo/bar` is called this will be `Err(_)` since that matches
-///     // a nested route
-///     let matched_path: Result<MatchedPath, MatchedPathRejection> =
-///         request.extract_parts::<MatchedPath>().await;
-///
-///     request
-/// }
-///
-/// // `MatchedPath` is always accessible on handlers added via `Router::route`
-/// async fn handler(matched_path: MatchedPath) {}
-///
-/// let app = Router::new()
-///     .nest(
-///         "/foo",
-///         Router::new().route("/bar", get(handler)),
-///     )
-///     .layer(map_request(access_matched_path));
-/// # let _: Router = app;
-/// ```
-///
-/// [nesting]: crate::Router::nest
 #[cfg_attr(docsrs, doc(cfg(feature = "matched-path")))]
 #[derive(Clone, Debug)]
 pub struct MatchedPath(pub(crate) Arc<str>);
@@ -172,14 +131,14 @@ fn append_nested_matched_path(matched_path: &Arc<str>, extensions: &http::Extens
 mod tests {
     use super::*;
     use crate::{
-        body::Body,
+        extract::Request,
         handler::HandlerWithoutStateExt,
         middleware::map_request,
         routing::{any, get},
         test_helpers::*,
         Router,
     };
-    use http::{Request, StatusCode};
+    use http::StatusCode;
 
     #[crate::test]
     async fn extracting_on_handler() {
@@ -190,7 +149,7 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/foo").send().await;
+        let res = client.get("/foo").await;
         assert_eq!(res.text().await, "/:a");
     }
 
@@ -206,7 +165,7 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/foo/bar").send().await;
+        let res = client.get("/foo/bar").await;
         assert_eq!(res.text().await, "/:a/:b");
     }
 
@@ -225,7 +184,7 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/foo/bar/baz").send().await;
+        let res = client.get("/foo/bar/baz").await;
         assert_eq!(res.text().await, "/:a/:b/:c");
     }
 
@@ -245,7 +204,7 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/foo/bar").send().await;
+        let res = client.get("/foo/bar").await;
         assert_eq!(res.status(), StatusCode::OK);
     }
 
@@ -265,7 +224,7 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/foo/bar").send().await;
+        let res = client.get("/foo/bar").await;
         assert_eq!(res.status(), StatusCode::OK);
     }
 
@@ -282,7 +241,7 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/foo/bar").send().await;
+        let res = client.get("/foo/bar").await;
         assert_eq!(res.status(), StatusCode::OK);
     }
 
@@ -299,7 +258,7 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/foo/bar").send().await;
+        let res = client.get("/foo/bar").await;
         assert_eq!(res.status(), StatusCode::OK);
     }
 
@@ -319,7 +278,7 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/foo/bar").send().await;
+        let res = client.get("/foo/bar").await;
         assert_eq!(res.status(), StatusCode::OK);
     }
 
@@ -340,7 +299,7 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/foo/bar").send().await;
+        let res = client.get("/foo/bar").await;
         assert_eq!(res.status(), StatusCode::OK);
     }
 
@@ -354,7 +313,7 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/foo/bar").send().await;
+        let res = client.get("/foo/bar").await;
         assert_eq!(res.status(), StatusCode::OK);
     }
 
@@ -365,7 +324,7 @@ mod tests {
 
         let app = Router::new().route(
             "/*path",
-            any(|req: Request<Body>| {
+            any(|req: Request| {
                 Router::new()
                     .nest("/", Router::new().route("/foo", get(|| async {})))
                     .oneshot(req)
@@ -374,13 +333,13 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/foo").send().await;
+        let res = client.get("/foo").await;
         assert_eq!(res.status(), StatusCode::OK);
     }
 
     #[crate::test]
     async fn cant_extract_in_fallback() {
-        async fn handler(path: Option<MatchedPath>, req: Request<Body>) {
+        async fn handler(path: Option<MatchedPath>, req: Request) {
             assert!(path.is_none());
             assert!(req.extensions().get::<MatchedPath>().is_none());
         }
@@ -389,7 +348,7 @@ mod tests {
 
         let client = TestClient::new(app);
 
-        let res = client.get("/foo/bar").send().await;
+        let res = client.get("/foo/bar").await;
         assert_eq!(res.status(), StatusCode::OK);
     }
 }

@@ -9,6 +9,7 @@ use crate::{
     journal::Journal,
     listener::{DefaultListener, Listener},
     pause::Pause,
+    streaming_server::StreamingServer,
     telemetry::Telemetry,
     version::Version,
 };
@@ -30,7 +31,7 @@ use tokio::{
     fs,
     runtime::{Builder, Handle},
     signal::unix::{signal, SignalKind},
-    sync::oneshot,
+    sync::{oneshot, RwLock},
     task::{self, LocalSet},
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -53,6 +54,10 @@ pub struct Server {
     /// Fd socket instance.
     #[getset(get = "pub(crate)")]
     fd_socket: Arc<FdSocket>,
+
+    /// Streaming server instance.
+    #[getset(get = "pub(crate)")]
+    streaming_server: Arc<RwLock<StreamingServer>>,
 }
 
 impl Server {
@@ -62,6 +67,7 @@ impl Server {
             config: Default::default(),
             reaper: Default::default(),
             fd_socket: Default::default(),
+            streaming_server: Default::default(),
         };
 
         if let Some(v) = server.config().version() {
@@ -359,7 +365,28 @@ impl GenerateRuntimeArgs<'_> {
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
     pub(crate) fn exec_sync_args(&self, command: Reader) -> Result<Vec<String>> {
+        let mut args = self
+            .exec_sync_args_without_command()
+            .context("exec sync args without command")?;
+
+        for arg in command {
+            args.push(arg?.to_string()?);
+        }
+
+        debug!("Exec args {:?}", args.join(" "));
+        Ok(args)
+    }
+
+    pub(crate) fn exec_sync_args_without_command(&self) -> Result<Vec<String>> {
         let mut args = self.default_args().context("build default runtime args")?;
+
+        if let Some(rr) = self.config.runtime_root() {
+            args.push(format!("--root={}", rr.display()));
+        }
+
+        if self.cgroup_manager == CgroupManager::Systemd {
+            args.push(Self::SYSTEMD_CGROUP_ARG.into());
+        }
 
         args.push("exec".to_string());
         args.push("-d".to_string());
@@ -372,11 +399,6 @@ impl GenerateRuntimeArgs<'_> {
         args.push(format!("--pid-file={}", self.pidfile.display()));
         args.push(self.id.into());
 
-        for arg in command {
-            args.push(arg?.to_string()?);
-        }
-
-        debug!("Exec args {:?}", args.join(" "));
         Ok(args)
     }
 

@@ -31,9 +31,7 @@
 //!         }
 //!     }
 //! }
-//! # async {
-//! # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-//! # };
+//! # let _: Router = app;
 //! ```
 //!
 //! # Passing data and/or state to an `on_upgrade` callback
@@ -62,9 +60,7 @@
 //! let app = Router::new()
 //!     .route("/ws", get(handler))
 //!     .with_state(AppState { /* ... */ });
-//! # async {
-//! # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-//! # };
+//! # let _: Router = app;
 //! ```
 //!
 //! # Read and write concurrently
@@ -96,12 +92,9 @@
 
 use self::rejection::*;
 use super::FromRequestParts;
-use crate::{
-    body::{self, Bytes},
-    response::Response,
-    Error,
-};
+use crate::{body::Bytes, response::Response, Error};
 use async_trait::async_trait;
+use axum_core::body::Body;
 use futures_util::{
     sink::{Sink, SinkExt},
     stream::{Stream, StreamExt},
@@ -111,7 +104,7 @@ use http::{
     request::Parts,
     Method, StatusCode,
 };
-use hyper::upgrade::{OnUpgrade, Upgraded};
+use hyper_util::rt::TokioIo;
 use sha1::{Digest, Sha1};
 use std::{
     borrow::Cow,
@@ -135,12 +128,12 @@ use tokio_tungstenite::{
 ///
 /// See the [module docs](self) for an example.
 #[cfg_attr(docsrs, doc(cfg(feature = "ws")))]
-pub struct WebSocketUpgrade<F = DefaultOnFailedUpdgrade> {
+pub struct WebSocketUpgrade<F = DefaultOnFailedUpgrade> {
     config: WebSocketConfig,
     /// The chosen protocol sent in the `Sec-WebSocket-Protocol` header of the response.
     protocol: Option<HeaderValue>,
     sec_websocket_key: HeaderValue,
-    on_upgrade: OnUpgrade,
+    on_upgrade: hyper::upgrade::OnUpgrade,
     on_failed_upgrade: F,
     sec_websocket_protocol: Option<HeaderValue>,
 }
@@ -157,12 +150,6 @@ impl<F> std::fmt::Debug for WebSocketUpgrade<F> {
 }
 
 impl<F> WebSocketUpgrade<F> {
-    /// Does nothing, instead use `max_write_buffer_size`.
-    #[deprecated]
-    pub fn max_send_queue(self, _: usize) -> Self {
-        self
-    }
-
     /// The target minimum size of the write buffer to reach before writing the data
     /// to the underlying stream.
     ///
@@ -239,9 +226,7 @@ impl<F> WebSocketUpgrade<F> {
     ///             // ...
     ///         })
     /// }
-    /// # async {
-    /// # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-    /// # };
+    /// # let _: Router = app;
     /// ```
     pub fn protocols<I>(mut self, protocols: I) -> Self
     where
@@ -298,7 +283,7 @@ impl<F> WebSocketUpgrade<F> {
     /// ```
     pub fn on_failed_upgrade<C>(self, callback: C) -> WebSocketUpgrade<C>
     where
-        C: OnFailedUpdgrade,
+        C: OnFailedUpgrade,
     {
         WebSocketUpgrade {
             config: self.config,
@@ -312,12 +297,12 @@ impl<F> WebSocketUpgrade<F> {
 
     /// Finalize upgrading the connection and call the provided callback with
     /// the stream.
-    #[must_use = "to setup the WebSocket connection, this response must be returned"]
+    #[must_use = "to set up the WebSocket connection, this response must be returned"]
     pub fn on_upgrade<C, Fut>(self, callback: C) -> Response
     where
         C: FnOnce(WebSocket) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
-        F: OnFailedUpdgrade,
+        F: OnFailedUpgrade,
     {
         let on_upgrade = self.on_upgrade;
         let config = self.config;
@@ -333,6 +318,7 @@ impl<F> WebSocketUpgrade<F> {
                     return;
                 }
             };
+            let upgraded = TokioIo::new(upgraded);
 
             let socket =
                 WebSocketStream::from_raw_socket(upgraded, protocol::Role::Server, Some(config))
@@ -362,19 +348,19 @@ impl<F> WebSocketUpgrade<F> {
             builder = builder.header(header::SEC_WEBSOCKET_PROTOCOL, protocol);
         }
 
-        builder.body(body::boxed(body::Empty::new())).unwrap()
+        builder.body(Body::empty()).unwrap()
     }
 }
 
 /// What to do when a connection upgrade fails.
 ///
 /// See [`WebSocketUpgrade::on_failed_upgrade`] for more details.
-pub trait OnFailedUpdgrade: Send + 'static {
+pub trait OnFailedUpgrade: Send + 'static {
     /// Call the callback.
     fn call(self, error: Error);
 }
 
-impl<F> OnFailedUpdgrade for F
+impl<F> OnFailedUpgrade for F
 where
     F: FnOnce(Error) + Send + 'static,
 {
@@ -383,20 +369,20 @@ where
     }
 }
 
-/// The default `OnFailedUpdgrade` used by `WebSocketUpgrade`.
+/// The default `OnFailedUpgrade` used by `WebSocketUpgrade`.
 ///
 /// It simply ignores the error.
 #[non_exhaustive]
 #[derive(Debug)]
-pub struct DefaultOnFailedUpdgrade;
+pub struct DefaultOnFailedUpgrade;
 
-impl OnFailedUpdgrade for DefaultOnFailedUpdgrade {
+impl OnFailedUpgrade for DefaultOnFailedUpgrade {
     #[inline]
     fn call(self, _error: Error) {}
 }
 
 #[async_trait]
-impl<S> FromRequestParts<S> for WebSocketUpgrade<DefaultOnFailedUpdgrade>
+impl<S> FromRequestParts<S> for WebSocketUpgrade<DefaultOnFailedUpgrade>
 where
     S: Send + Sync,
 {
@@ -427,7 +413,7 @@ where
 
         let on_upgrade = parts
             .extensions
-            .remove::<OnUpgrade>()
+            .remove::<hyper::upgrade::OnUpgrade>()
             .ok_or(ConnectionNotUpgradable)?;
 
         let sec_websocket_protocol = parts.headers.get(header::SEC_WEBSOCKET_PROTOCOL).cloned();
@@ -438,7 +424,7 @@ where
             sec_websocket_key,
             on_upgrade,
             sec_websocket_protocol,
-            on_failed_upgrade: DefaultOnFailedUpdgrade,
+            on_failed_upgrade: DefaultOnFailedUpgrade,
         })
     }
 }
@@ -470,7 +456,7 @@ fn header_contains(headers: &HeaderMap, key: HeaderName, value: &'static str) ->
 /// See [the module level documentation](self) for more details.
 #[derive(Debug)]
 pub struct WebSocket {
-    inner: WebSocketStream<Upgraded>,
+    inner: WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>,
     protocol: Option<HeaderValue>,
 }
 
@@ -844,9 +830,12 @@ pub mod close_code {
 
 #[cfg(test)]
 mod tests {
+    use std::future::ready;
+
     use super::*;
-    use crate::{body::Body, routing::get, Router};
+    use crate::{routing::get, test_helpers::spawn_service, Router};
     use http::{Request, Version};
+    use tokio_tungstenite::tungstenite;
     use tower::ServiceExt;
 
     #[crate::test]
@@ -890,5 +879,48 @@ mod tests {
                 .on_upgrade(|_| async {})
         }
         let _: Router = Router::new().route("/", get(handler));
+    }
+
+    #[crate::test]
+    async fn integration_test() {
+        let app = Router::new().route(
+            "/echo",
+            get(|ws: WebSocketUpgrade| ready(ws.on_upgrade(handle_socket))),
+        );
+
+        async fn handle_socket(mut socket: WebSocket) {
+            while let Some(Ok(msg)) = socket.recv().await {
+                match msg {
+                    Message::Text(_) | Message::Binary(_) | Message::Close(_) => {
+                        if socket.send(msg).await.is_err() {
+                            break;
+                        }
+                    }
+                    Message::Ping(_) | Message::Pong(_) => {
+                        // tungstenite will respond to pings automatically
+                    }
+                }
+            }
+        }
+
+        let addr = spawn_service(app);
+        let (mut socket, _response) = tokio_tungstenite::connect_async(format!("ws://{addr}/echo"))
+            .await
+            .unwrap();
+
+        let input = tungstenite::Message::Text("foobar".to_owned());
+        socket.send(input.clone()).await.unwrap();
+        let output = socket.next().await.unwrap().unwrap();
+        assert_eq!(input, output);
+
+        socket
+            .send(tungstenite::Message::Ping("ping".to_owned().into_bytes()))
+            .await
+            .unwrap();
+        let output = socket.next().await.unwrap().unwrap();
+        assert_eq!(
+            output,
+            tungstenite::Message::Pong("ping".to_owned().into_bytes())
+        );
     }
 }

@@ -1,5 +1,3 @@
-#![doc(html_root_url = "https://docs.rs/http/0.2.11")]
-
 //! A general purpose library of common HTTP types
 //!
 //! This crate is a general purpose library for common types found when working
@@ -158,7 +156,11 @@
 //! assert_eq!(uri.query(), None);
 //! ```
 
-#![deny(missing_docs, missing_debug_implementations)]
+#![deny(warnings, missing_docs, missing_debug_implementations)]
+
+//#![cfg_attr(not(feature = "std"), no_std)]
+#[cfg(not(feature = "std"))]
+compile_error!("`std` feature currently required, support for `no_std` may be added later");
 
 #[cfg(test)]
 #[macro_use]
@@ -193,19 +195,19 @@ pub use crate::status::StatusCode;
 pub use crate::uri::Uri;
 pub use crate::version::Version;
 
-fn _assert_types() {
-    fn assert_send<T: Send>() {}
-    fn assert_sync<T: Sync>() {}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    assert_send::<Request<()>>();
-    assert_send::<Response<()>>();
+    fn assert_send_sync<T: Send + Sync>() {}
 
-    assert_sync::<Request<()>>();
-    assert_sync::<Response<()>>();
-}
+    #[test]
+    fn request_satisfies_send_sync() {
+        assert_send_sync::<Request<()>>();
+    }
 
-mod sealed {
-    /// Private trait to this crate to prevent traits from being implemented in
-    /// downstream crates.
-    pub trait Sealed {}
+    #[test]
+    fn response_satisfies_send_sync() {
+        assert_send_sync::<Response<()>>();
+    }
 }
