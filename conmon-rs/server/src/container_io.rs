@@ -3,6 +3,7 @@ use crate::{
     terminal::Terminal,
 };
 use anyhow::{Context, Result, bail};
+use async_channel::{Receiver, Sender};
 use getset::{Getters, MutGetters};
 use nix::errno::Errno;
 use std::{
@@ -15,10 +16,7 @@ use tempfile::Builder;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     select,
-    sync::{
-        RwLock,
-        mpsc::{UnboundedReceiver, UnboundedSender},
-    },
+    sync::RwLock,
     time::{self, Instant},
 };
 use tokio_util::sync::CancellationToken;
@@ -58,6 +56,11 @@ impl SharedContainerIO {
     /// Retrieve the underlying SharedContainerAttach instance.
     pub async fn attach(&self) -> SharedContainerAttach {
         self.0.read().await.attach().clone()
+    }
+
+    /// Retrieve the underlying stdout and stderr channels.
+    pub async fn stdio(&self) -> Result<(Receiver<Message>, Receiver<Message>)> {
+        self.0.read().await.stdio()
     }
 }
 
@@ -155,6 +158,23 @@ impl ContainerIO {
         Ok(path)
     }
 
+    /// Retrieve clones of the stdout and stderr channels.
+    pub fn stdio(&self) -> Result<(Receiver<Message>, Receiver<Message>)> {
+        match self.typ() {
+            ContainerIOType::Terminal(t) => {
+                if let Some(message_rx) = t.message_rx() {
+                    let (_, fake_rx) = async_channel::unbounded();
+                    Ok((message_rx.clone(), fake_rx))
+                } else {
+                    bail!("called before message receiver was registered")
+                }
+            }
+            ContainerIOType::Streams(s) => {
+                Ok((s.message_rx_stdout.clone(), s.message_rx_stderr.clone()))
+            }
+        }
+    }
+
     pub async fn read_all_with_timeout(
         &mut self,
         time_to_timeout: Option<Instant>,
@@ -184,7 +204,7 @@ impl ContainerIO {
 
     async fn read_stream_with_timeout(
         time_to_timeout: Option<Instant>,
-        receiver: &mut UnboundedReceiver<Message>,
+        receiver: &mut Receiver<Message>,
     ) -> (Vec<u8>, bool) {
         let mut stdio = vec![];
         let mut timed_out = false;
@@ -192,19 +212,18 @@ impl ContainerIO {
             let msg = if let Some(time_to_timeout) = time_to_timeout {
                 {
                     match time::timeout_at(time_to_timeout, receiver.recv()).await {
-                        Ok(Some(msg)) => msg,
-                        Err(_) => {
+                        Ok(Ok(msg)) => msg,
+                        _ => {
                             timed_out = true;
                             Message::Done
                         }
-                        Ok(None) => unreachable!(),
                     }
                 }
             } else {
                 {
                     match receiver.recv().await {
-                        Some(msg) => msg,
-                        None => Message::Done,
+                        Ok(msg) => msg,
+                        _ => Message::Done,
                     }
                 }
             };
@@ -230,7 +249,7 @@ impl ContainerIO {
         mut reader: T,
         pipe: Pipe,
         logger: SharedContainerLog,
-        message_tx: UnboundedSender<Message>,
+        message_tx: Sender<Message>,
         mut attach: SharedContainerAttach,
     ) -> Result<()>
     where
@@ -251,6 +270,7 @@ impl ContainerIO {
                     if !message_tx.is_closed() {
                         message_tx
                             .send(Message::Done)
+                            .await
                             .context("send done message")?;
                     }
 
@@ -275,6 +295,7 @@ impl ContainerIO {
                     if !message_tx.is_closed() {
                         message_tx
                             .send(Message::Data(data.into(), pipe))
+                            .await
                             .context("send data message")?;
                     }
                 }
@@ -290,6 +311,7 @@ impl ContainerIO {
                         if !message_tx.is_closed() {
                             message_tx
                                 .send(Message::Done)
+                                .await
                                 .context("send done message")?;
                         }
                         return Ok(());

@@ -9,6 +9,7 @@ pub use version::Version;
 mod macros;
 
 mod attach;
+mod bounded_hashmap;
 mod capnp_util;
 mod child;
 mod child_reaper;
@@ -23,6 +24,7 @@ mod oom_watcher;
 mod pause;
 mod rpc;
 mod server;
+mod streaming_server;
 mod streams;
 mod telemetry;
 mod terminal;

@@ -196,4 +196,52 @@ interface Conmon {
         key @0 :Text;
         value @1 :Text;
     }
+
+    ###############################################
+    # ServeExecContainer
+    struct ServeExecContainerRequest {
+        metadata @0 :Metadata; # Standard metadata to carry.
+        id @1 :Text;
+        command @2 :List(Text);
+        tty @3 :Bool;
+        stdin @4 :Bool;
+        stdout @5 :Bool;
+        stderr @6 :Bool;
+        cgroupManager @7 :CgroupManager;
+    }
+
+    struct ServeExecContainerResponse {
+        url @0 :Text;
+    }
+
+    serveExecContainer @8 (request: ServeExecContainerRequest) -> (response: ServeExecContainerResponse);
+
+    ###############################################
+    # ServeAttachContainer
+    struct ServeAttachContainerRequest {
+        metadata @0 :Metadata; # Standard metadata to carry.
+        id @1 :Text;
+        stdin @2 :Bool;
+        stdout @3 :Bool;
+        stderr @4 :Bool;
+    }
+
+    struct ServeAttachContainerResponse {
+        url @0 :Text;
+    }
+
+    serveAttachContainer @9 (request: ServeAttachContainerRequest) -> (response: ServeAttachContainerResponse);
+
+    ###############################################
+    # ServePortForwardContainer
+    struct ServePortForwardContainerRequest {
+        metadata @0 :Metadata; # Standard metadata to carry.
+        netNsPath @1 :Text;
+    }
+
+    struct ServePortForwardContainerResponse {
+        url @0 :Text;
+    }
+
+    servePortForwardContainer @10 (request: ServePortForwardContainerRequest) -> (response: ServePortForwardContainerResponse);
 }

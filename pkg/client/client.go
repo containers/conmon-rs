@@ -1332,3 +1332,252 @@ func mappingsToSlice(mappings []idtools.IDMap) (res []string) {
 
 	return res
 }
+
+// ServeExecContainerConfig is the configuration for calling the ServeExecContainer method.
+type ServeExecContainerConfig struct {
+	// ID is the container identifier.
+	ID string
+
+	// Command is the command to be run.
+	Command []string
+
+	// Tty indicates if a tty should be used or not.
+	Tty bool
+
+	// Stdin indicates if stdin should be available or not.
+	Stdin bool
+
+	// Stdout indicates if stdout should be available or not.
+	Stdout bool
+
+	// Stderr indicates if stderr should be available or not.
+	Stderr bool
+
+	// CgroupManager can be use to select the cgroup manager.
+	//
+	// To use this option set `ConmonServerConfig.CgroupManager` to
+	// `CgroupManagerPerCommand`.
+	CgroupManager CgroupManager
+}
+
+// ServeExecContainerResult is the result for calling the ServeExecContainer method.
+type ServeExecContainerResult struct {
+	// URL specifies the returned URL.
+	URL string
+}
+
+// ServeExecContainer can be used to execute a command within a running container.
+func (c *ConmonClient) ServeExecContainer(
+	ctx context.Context,
+	cfg *ServeExecContainerConfig,
+) (*ServeExecContainerResult, error) {
+	ctx, span := c.startSpan(ctx, "ServeExecContainer")
+	if span != nil {
+		defer span.End()
+	}
+
+	conn, err := c.newRPCConn()
+	if err != nil {
+		return nil, fmt.Errorf("create RPC connection: %w", err)
+	}
+	defer conn.Close()
+
+	client := proto.Conmon(conn.Bootstrap(ctx))
+
+	future, free := client.ServeExecContainer(ctx, func(p proto.Conmon_serveExecContainer_Params) error {
+		req, err := p.NewRequest()
+		if err != nil {
+			return fmt.Errorf("create request: %w", err)
+		}
+
+		if err := c.setMetadata(ctx, req); err != nil {
+			return err
+		}
+
+		if err := req.SetId(cfg.ID); err != nil {
+			return fmt.Errorf("set ID: %w", err)
+		}
+
+		if err := stringSliceToTextList(cfg.Command, req.NewCommand); err != nil {
+			return fmt.Errorf("convert command to text list: %w", err)
+		}
+
+		req.SetTty(cfg.Tty)
+		req.SetStdin(cfg.Stdin)
+		req.SetStdout(cfg.Stdout)
+		req.SetStderr(cfg.Stderr)
+
+		c.setCgroupManager(cfg.CgroupManager, req)
+
+		return nil
+	})
+	defer free()
+
+	result, err := future.Struct()
+	if err != nil {
+		return nil, fmt.Errorf("create result: %w", err)
+	}
+
+	resp, err := result.Response()
+	if err != nil {
+		return nil, fmt.Errorf("set response: %w", err)
+	}
+
+	url, err := resp.Url()
+	if err != nil {
+		return nil, fmt.Errorf("get url: %w", err)
+	}
+
+	return &ServeExecContainerResult{URL: url}, nil
+}
+
+// ServeAttachContainerConfig is the configuration for calling the ServeAttachContainer method.
+type ServeAttachContainerConfig struct {
+	// ID is the container identifier.
+	ID string
+
+	// Stdin indicates if stdin should be available or not.
+	Stdin bool
+
+	// Stdout indicates if stdout should be available or not.
+	Stdout bool
+
+	// Stderr indicates if stderr should be available or not.
+	Stderr bool
+
+	// CgroupManager can be use to select the cgroup manager.
+	//
+	// To use this option set `ConmonServerConfig.CgroupManager` to
+	// `CgroupManagerPerCommand`.
+	CgroupManager CgroupManager
+}
+
+// ServeAttachContainerResult is the result for calling the ServeAttachContainer method.
+type ServeAttachContainerResult struct {
+	// URL specifies the returned URL.
+	URL string
+}
+
+// ServeAttachContainer can be used to attach to a running container.
+func (c *ConmonClient) ServeAttachContainer(
+	ctx context.Context,
+	cfg *ServeAttachContainerConfig,
+) (*ServeAttachContainerResult, error) {
+	ctx, span := c.startSpan(ctx, "ServeAttachContainer")
+	if span != nil {
+		defer span.End()
+	}
+
+	conn, err := c.newRPCConn()
+	if err != nil {
+		return nil, fmt.Errorf("create RPC connection: %w", err)
+	}
+	defer conn.Close()
+
+	client := proto.Conmon(conn.Bootstrap(ctx))
+
+	future, free := client.ServeAttachContainer(ctx, func(p proto.Conmon_serveAttachContainer_Params) error {
+		req, err := p.NewRequest()
+		if err != nil {
+			return fmt.Errorf("create request: %w", err)
+		}
+
+		if err := c.setMetadata(ctx, req); err != nil {
+			return err
+		}
+
+		if err := req.SetId(cfg.ID); err != nil {
+			return fmt.Errorf("set ID: %w", err)
+		}
+
+		req.SetStdin(cfg.Stdin)
+		req.SetStdout(cfg.Stdout)
+		req.SetStderr(cfg.Stderr)
+
+		return nil
+	})
+	defer free()
+
+	result, err := future.Struct()
+	if err != nil {
+		return nil, fmt.Errorf("create result: %w", err)
+	}
+
+	resp, err := result.Response()
+	if err != nil {
+		return nil, fmt.Errorf("set response: %w", err)
+	}
+
+	url, err := resp.Url()
+	if err != nil {
+		return nil, fmt.Errorf("get url: %w", err)
+	}
+
+	return &ServeAttachContainerResult{URL: url}, nil
+}
+
+// ServePortForwardContainerConfig is the configuration for calling the ServePortForwardContainer method.
+type ServePortForwardContainerConfig struct {
+	// NetNsPath is the path to the network namespace of the container.
+	NetNsPath string
+}
+
+// ServePortForwardContainerResult is the result for calling the ServePortForwardContainer method.
+type ServePortForwardContainerResult struct {
+	// URL specifies the returned URL.
+	URL string
+}
+
+// ServePortForwardContainer can be used to forward ports to a running container.
+func (c *ConmonClient) ServePortForwardContainer(
+	ctx context.Context,
+	cfg *ServePortForwardContainerConfig,
+) (*ServePortForwardContainerResult, error) {
+	ctx, span := c.startSpan(ctx, "ServePortForwardContainer")
+	if span != nil {
+		defer span.End()
+	}
+
+	conn, err := c.newRPCConn()
+	if err != nil {
+		return nil, fmt.Errorf("create RPC connection: %w", err)
+	}
+	defer conn.Close()
+
+	client := proto.Conmon(conn.Bootstrap(ctx))
+
+	future, free := client.ServePortForwardContainer(ctx, func(p proto.Conmon_servePortForwardContainer_Params) error {
+		req, err := p.NewRequest()
+		if err != nil {
+			return fmt.Errorf("create request: %w", err)
+		}
+
+		if err := c.setMetadata(ctx, req); err != nil {
+			return err
+		}
+
+		if err := req.SetNetNsPath(cfg.NetNsPath); err != nil {
+			return fmt.Errorf("set ID: %w", err)
+		}
+
+		return nil
+	})
+	defer free()
+
+	result, err := future.Struct()
+	if err != nil {
+		return nil, fmt.Errorf("create result: %w", err)
+	}
+
+	resp, err := result.Response()
+	if err != nil {
+		return nil, fmt.Errorf("set response: %w", err)
+	}
+
+	url, err := resp.Url()
+	if err != nil {
+		return nil, fmt.Errorf("get url: %w", err)
+	}
+
+	return &ServePortForwardContainerResult{URL: url}, nil
+}
