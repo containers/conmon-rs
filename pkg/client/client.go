@@ -95,6 +95,11 @@ type ConmonServerConfig struct {
 
 	// Tracing can be used to enable OpenTelemetry tracing.
 	Tracing *Tracing
+
+	// ShutdownDelay an be used to automatically stop the conmonrs server after DELAY seconds of inactivity.
+	//
+	// 0 = disabled (run until manually stopped by client.Shutdown)
+	ShutdownDelay time.Duration
 }
 
 // Tracing is the structure for managing server-side OpenTelemetry tracing.
@@ -337,6 +342,10 @@ func (c *ConmonClient) toArgs(config *ConmonServerConfig) (entrypoint string, ar
 		if config.Tracing.Endpoint != "" {
 			args = append(args, "--tracing-endpoint", config.Tracing.Endpoint)
 		}
+	}
+
+	if config.ShutdownDelay > 0 {
+		args = append(args, "--shutdown-delay", fmt.Sprint(config.ShutdownDelay.Seconds()))
 	}
 
 	return entrypoint, args, nil
