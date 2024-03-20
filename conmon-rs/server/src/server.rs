@@ -239,7 +239,7 @@ impl Server {
                 info!("Received SIGINT");
                 handled_sig = Signal::SIGINT;
             }
-        };
+        }
 
         if let Some(pause) = Pause::maybe_shared() {
             pause.stop();
@@ -330,7 +330,7 @@ impl GenerateRuntimeArgs<'_> {
         }
 
         for arg in global_args {
-            args.push(arg?.to_string());
+            args.push(arg?.to_string()?);
         }
 
         args.extend([
@@ -342,7 +342,7 @@ impl GenerateRuntimeArgs<'_> {
         ]);
 
         for arg in command_args {
-            args.push(arg?.to_string());
+            args.push(arg?.to_string()?);
         }
 
         if let ContainerIOType::Terminal(terminal) = self.container_io.typ() {
@@ -379,7 +379,7 @@ impl GenerateRuntimeArgs<'_> {
         args.push(self.id.into());
 
         for arg in command {
-            args.push(arg?.to_string());
+            args.push(arg?.to_string()?);
         }
 
         debug!("Exec args {:?}", args.join(" "));

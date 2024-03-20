@@ -32,7 +32,7 @@ impl ContainerLog {
                 match x.get_type()? {
                     Type::ContainerRuntimeInterface => {
                         Ok(LogDriver::ContainerRuntimeInterface(CriLogger::new(
-                            x.get_path()?,
+                            x.get_path()?.to_str()?,
                             if x.get_max_size() > 0 {
                                 Some(x.get_max_size() as usize)
                             } else {
@@ -41,7 +41,7 @@ impl ContainerLog {
                         )?))
                     }
                     Type::Json => Ok(LogDriver::Json(JsonLogger::new(
-                        x.get_path()?,
+                        x.get_path()?.to_str()?,
                         if x.get_max_size() > 0 {
                             Some(x.get_max_size() as usize)
                         } else {

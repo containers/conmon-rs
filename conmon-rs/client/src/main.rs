@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!(
                 "received: {}",
-                response.get()?.get_response()?.get_version()?
+                response.get()?.get_response()?.get_version()?.to_str()?
             );
             Ok(())
         })
