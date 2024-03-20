@@ -43,21 +43,28 @@ macro_rules! new_root_span {
     };
 }
 
+/// capnp_text_list takes text_list as an input and outputs list of text.
+macro_rules! capnp_text_list {
+    ($x:expr) => {
+        pry!(pry!($x).iter().collect::<Result<Vec<_>, _>>())
+    };
+}
+
 macro_rules! capnp_vec_str {
     ($x:expr) => {
-        capnp_vec!($x, String::from)
+        pry!(capnp_text_list!($x)
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Result<Vec<_>, _>>())
     };
 }
 
 macro_rules! capnp_vec_path {
     ($x:expr) => {
-        capnp_vec!($x, PathBuf::from)
-    };
-}
-
-macro_rules! capnp_vec {
-    ($x:expr, $from:expr) => {
-        pry!(pry!($x).iter().map(|r| r.map($from)).collect())
+        pry!(capnp_text_list!($x)
+            .iter()
+            .map(|s| s.to_str().map(|x| PathBuf::from(x)))
+            .collect::<Result<Vec<_>, _>>())
     };
 }
 
@@ -97,16 +104,13 @@ impl conmon::Server for Server {
         mut results: conmon::CreateContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
-        let id = pry!(req.get_id()).to_string();
+        let id = pry!(pry!(req.get_id()).to_string());
 
         let span = new_root_span!("create_container", id.as_str());
         let _enter = span.enter();
         pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
 
-        let cleanup_cmd: Vec<String> = pry!(pry!(req.get_cleanup_cmd())
-            .iter()
-            .map(|s| s.map(String::from))
-            .collect());
+        let cleanup_cmd: Vec<String> = capnp_vec_str!(req.get_cleanup_cmd());
 
         debug!("Got a create container request");
 
@@ -115,7 +119,7 @@ impl conmon::Server for Server {
         let mut container_io =
             pry_err!(ContainerIO::new(req.get_terminal(), container_log.clone()));
 
-        let bundle_path = Path::new(pry!(req.get_bundle_path()));
+        let bundle_path = Path::new(pry!(pry!(req.get_bundle_path()).to_str()));
         let pidfile = bundle_path.join("pidfile");
         debug!("PID file is {}", pidfile.display());
 
@@ -201,7 +205,7 @@ impl conmon::Server for Server {
         mut results: conmon::ExecSyncContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
-        let id = pry!(req.get_id()).to_string();
+        let id = pry!(pry!(req.get_id()).to_string());
 
         let span = new_root_span!("exec_sync_container", id.as_str());
         let _enter = span.enter();
@@ -303,7 +307,7 @@ impl conmon::Server for Server {
         _: conmon::AttachContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
-        let id = pry_err!(req.get_id());
+        let id = pry_err!(pry_err!(req.get_id()).to_str());
 
         let span = new_root_span!("attach_container", id);
         let _enter = span.enter();
@@ -311,12 +315,12 @@ impl conmon::Server for Server {
 
         debug!("Got a attach container request",);
 
-        let exec_session_id = pry_err!(req.get_exec_session_id());
+        let exec_session_id = pry_err!(pry_err!(req.get_exec_session_id()).to_str());
         if !exec_session_id.is_empty() {
             debug!("Using exec session id {}", exec_session_id);
         }
 
-        let socket_path = pry!(req.get_socket_path()).to_string();
+        let socket_path = pry!(pry!(req.get_socket_path()).to_string());
         let child = pry_err!(self.reaper().get(id));
         let stop_after_stdin_eof = req.get_stop_after_stdin_eof();
 
@@ -342,7 +346,7 @@ impl conmon::Server for Server {
         _: conmon::ReopenLogContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
-        let id = pry_err!(req.get_id());
+        let id = pry_err!(pry_err!(req.get_id()).to_str());
 
         let span = new_root_span!("reopen_log_container", id);
         let _enter = span.enter();
@@ -365,7 +369,7 @@ impl conmon::Server for Server {
         _: conmon::SetWindowSizeContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
-        let id = pry_err!(req.get_id());
+        let id = pry_err!(pry_err!(req.get_id()).to_str());
 
         let span = new_root_span!("set_window_size_container", id);
         let _enter = span.enter();
@@ -391,7 +395,7 @@ impl conmon::Server for Server {
     ) -> Promise<(), capnp::Error> {
         debug!("Got a create namespaces request");
         let req = pry!(pry!(params.get()).get_request());
-        let pod_id = pry_err!(req.get_pod_id());
+        let pod_id = pry_err!(pry_err!(req.get_pod_id()).to_str());
 
         if pod_id.is_empty() {
             return Promise::err(Error::failed("no pod ID provided".into()));
@@ -402,7 +406,7 @@ impl conmon::Server for Server {
         pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
 
         let pause = pry_err!(Pause::init_shared(
-            pry!(req.get_base_path()),
+            pry!(pry!(req.get_base_path()).to_str()),
             pod_id,
             pry!(req.get_namespaces()),
             capnp_vec_str!(req.get_uid_mappings()),

@@ -27,7 +27,10 @@ mod map_entry {
         V: From<&'a str>,
     {
         fn into_key_value(entry: Self::Reader<'a>) -> capnp::Result<(K, V)> {
-            Ok((entry.get_key()?.into(), entry.get_value()?.into()))
+            Ok((
+                entry.get_key()?.to_str()?.into(),
+                entry.get_value()?.to_str()?.into(),
+            ))
         }
     }
 
