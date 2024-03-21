@@ -12,7 +12,6 @@ PREFIX ?= /usr
 CI_TAG ?=
 GOLANGCI_LINT_VERSION := v1.55.0
 ZEITGEIST_VERSION := v0.4.1
-GINKGO_VERSION := v2.13.0
 
 default:
 	cargo build
@@ -60,7 +59,8 @@ integration-static: .install.ginkgo # It needs to be release so we correctly tes
 	sudo -E "$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
 
 .install.ginkgo:
-	GOBIN=$(abspath $(GOTOOLS_BINDIR)) go install github.com/onsi/ginkgo/v2/ginkgo@$(GINKGO_VERSION)
+	GOBIN=$(abspath $(GOTOOLS_BINDIR)) \
+		go install "github.com/onsi/ginkgo/v2/ginkgo@$$(go list -m -f {{.Version}} github.com/onsi/ginkgo/v2)"
 
 .install.golangci-lint:
 	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | \
