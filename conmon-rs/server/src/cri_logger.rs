@@ -83,16 +83,16 @@ impl CriLogger {
                 bytes_to_be_written += 1; // the added newline
             }
 
-            let mut new_bytes_written = match self.bytes_written().checked_add(bytes_to_be_written)
-            {
-                Some(x) => x,
-                None => {
-                    self.reopen()
-                        .await
-                        .context("reopen logs because of overflowing bytes_written")?;
-                    0
-                }
-            };
+            let mut new_bytes_written = self
+                .bytes_written()
+                .checked_add(bytes_to_be_written)
+                .unwrap_or_default();
+
+            if new_bytes_written == 0 {
+                self.reopen()
+                    .await
+                    .context("reopen logs because of overflowing bytes_written")?;
+            }
 
             if let Some(max_log_size) = self.max_log_size() {
                 trace!(

@@ -259,6 +259,7 @@ pub struct ExitChannelData {
     #[getset(get = "pub")]
     pub exit_code: i32,
 
+    #[allow(dead_code)]
     #[getset(get = "pub")]
     pub oomed: bool,
 
