@@ -176,6 +176,66 @@ func (c Conmon) StartFdSocket(ctx context.Context, params func(Conmon_startFdSoc
 
 }
 
+func (c Conmon) ServeExecContainer(ctx context.Context, params func(Conmon_serveExecContainer_Params) error) (Conmon_serveExecContainer_Results_Future, capnp.ReleaseFunc) {
+
+	s := capnp.Send{
+		Method: capnp.Method{
+			InterfaceID:   0xb737e899dd6633f1,
+			MethodID:      8,
+			InterfaceName: "internal/proto/conmon.capnp:Conmon",
+			MethodName:    "serveExecContainer",
+		},
+	}
+	if params != nil {
+		s.ArgsSize = capnp.ObjectSize{DataSize: 0, PointerCount: 1}
+		s.PlaceArgs = func(s capnp.Struct) error { return params(Conmon_serveExecContainer_Params(s)) }
+	}
+
+	ans, release := capnp.Client(c).SendCall(ctx, s)
+	return Conmon_serveExecContainer_Results_Future{Future: ans.Future()}, release
+
+}
+
+func (c Conmon) ServeAttachContainer(ctx context.Context, params func(Conmon_serveAttachContainer_Params) error) (Conmon_serveAttachContainer_Results_Future, capnp.ReleaseFunc) {
+
+	s := capnp.Send{
+		Method: capnp.Method{
+			InterfaceID:   0xb737e899dd6633f1,
+			MethodID:      9,
+			InterfaceName: "internal/proto/conmon.capnp:Conmon",
+			MethodName:    "serveAttachContainer",
+		},
+	}
+	if params != nil {
+		s.ArgsSize = capnp.ObjectSize{DataSize: 0, PointerCount: 1}
+		s.PlaceArgs = func(s capnp.Struct) error { return params(Conmon_serveAttachContainer_Params(s)) }
+	}
+
+	ans, release := capnp.Client(c).SendCall(ctx, s)
+	return Conmon_serveAttachContainer_Results_Future{Future: ans.Future()}, release
+
+}
+
+func (c Conmon) ServePortForwardContainer(ctx context.Context, params func(Conmon_servePortForwardContainer_Params) error) (Conmon_servePortForwardContainer_Results_Future, capnp.ReleaseFunc) {
+
+	s := capnp.Send{
+		Method: capnp.Method{
+			InterfaceID:   0xb737e899dd6633f1,
+			MethodID:      10,
+			InterfaceName: "internal/proto/conmon.capnp:Conmon",
+			MethodName:    "servePortForwardContainer",
+		},
+	}
+	if params != nil {
+		s.ArgsSize = capnp.ObjectSize{DataSize: 0, PointerCount: 1}
+		s.PlaceArgs = func(s capnp.Struct) error { return params(Conmon_servePortForwardContainer_Params(s)) }
+	}
+
+	ans, release := capnp.Client(c).SendCall(ctx, s)
+	return Conmon_servePortForwardContainer_Results_Future{Future: ans.Future()}, release
+
+}
+
 func (c Conmon) WaitStreaming() error {
 	return capnp.Client(c).WaitStreaming()
 }
@@ -264,6 +324,12 @@ type Conmon_Server interface {
 	CreateNamespaces(context.Context, Conmon_createNamespaces) error
 
 	StartFdSocket(context.Context, Conmon_startFdSocket) error
+
+	ServeExecContainer(context.Context, Conmon_serveExecContainer) error
+
+	ServeAttachContainer(context.Context, Conmon_serveAttachContainer) error
+
+	ServePortForwardContainer(context.Context, Conmon_servePortForwardContainer) error
 }
 
 // Conmon_NewServer creates a new Server from an implementation of Conmon_Server.
@@ -282,7 +348,7 @@ func Conmon_ServerToClient(s Conmon_Server) Conmon {
 // This can be used to create a more complicated Server.
 func Conmon_Methods(methods []server.Method, s Conmon_Server) []server.Method {
 	if cap(methods) == 0 {
-		methods = make([]server.Method, 0, 8)
+		methods = make([]server.Method, 0, 11)
 	}
 
 	methods = append(methods, server.Method{
@@ -378,6 +444,42 @@ func Conmon_Methods(methods []server.Method, s Conmon_Server) []server.Method {
 		},
 		Impl: func(ctx context.Context, call *server.Call) error {
 			return s.StartFdSocket(ctx, Conmon_startFdSocket{call})
+		},
+	})
+
+	methods = append(methods, server.Method{
+		Method: capnp.Method{
+			InterfaceID:   0xb737e899dd6633f1,
+			MethodID:      8,
+			InterfaceName: "internal/proto/conmon.capnp:Conmon",
+			MethodName:    "serveExecContainer",
+		},
+		Impl: func(ctx context.Context, call *server.Call) error {
+			return s.ServeExecContainer(ctx, Conmon_serveExecContainer{call})
+		},
+	})
+
+	methods = append(methods, server.Method{
+		Method: capnp.Method{
+			InterfaceID:   0xb737e899dd6633f1,
+			MethodID:      9,
+			InterfaceName: "internal/proto/conmon.capnp:Conmon",
+			MethodName:    "serveAttachContainer",
+		},
+		Impl: func(ctx context.Context, call *server.Call) error {
+			return s.ServeAttachContainer(ctx, Conmon_serveAttachContainer{call})
+		},
+	})
+
+	methods = append(methods, server.Method{
+		Method: capnp.Method{
+			InterfaceID:   0xb737e899dd6633f1,
+			MethodID:      10,
+			InterfaceName: "internal/proto/conmon.capnp:Conmon",
+			MethodName:    "servePortForwardContainer",
+		},
+		Impl: func(ctx context.Context, call *server.Call) error {
+			return s.ServePortForwardContainer(ctx, Conmon_servePortForwardContainer{call})
 		},
 	})
 
@@ -518,6 +620,57 @@ func (c Conmon_startFdSocket) Args() Conmon_startFdSocket_Params {
 func (c Conmon_startFdSocket) AllocResults() (Conmon_startFdSocket_Results, error) {
 	r, err := c.Call.AllocResults(capnp.ObjectSize{DataSize: 0, PointerCount: 1})
 	return Conmon_startFdSocket_Results(r), err
+}
+
+// Conmon_serveExecContainer holds the state for a server call to Conmon.serveExecContainer.
+// See server.Call for documentation.
+type Conmon_serveExecContainer struct {
+	*server.Call
+}
+
+// Args returns the call's arguments.
+func (c Conmon_serveExecContainer) Args() Conmon_serveExecContainer_Params {
+	return Conmon_serveExecContainer_Params(c.Call.Args())
+}
+
+// AllocResults allocates the results struct.
+func (c Conmon_serveExecContainer) AllocResults() (Conmon_serveExecContainer_Results, error) {
+	r, err := c.Call.AllocResults(capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_serveExecContainer_Results(r), err
+}
+
+// Conmon_serveAttachContainer holds the state for a server call to Conmon.serveAttachContainer.
+// See server.Call for documentation.
+type Conmon_serveAttachContainer struct {
+	*server.Call
+}
+
+// Args returns the call's arguments.
+func (c Conmon_serveAttachContainer) Args() Conmon_serveAttachContainer_Params {
+	return Conmon_serveAttachContainer_Params(c.Call.Args())
+}
+
+// AllocResults allocates the results struct.
+func (c Conmon_serveAttachContainer) AllocResults() (Conmon_serveAttachContainer_Results, error) {
+	r, err := c.Call.AllocResults(capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_serveAttachContainer_Results(r), err
+}
+
+// Conmon_servePortForwardContainer holds the state for a server call to Conmon.servePortForwardContainer.
+// See server.Call for documentation.
+type Conmon_servePortForwardContainer struct {
+	*server.Call
+}
+
+// Args returns the call's arguments.
+func (c Conmon_servePortForwardContainer) Args() Conmon_servePortForwardContainer_Params {
+	return Conmon_servePortForwardContainer_Params(c.Call.Args())
+}
+
+// AllocResults allocates the results struct.
+func (c Conmon_servePortForwardContainer) AllocResults() (Conmon_servePortForwardContainer_Results, error) {
+	r, err := c.Call.AllocResults(capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_servePortForwardContainer_Results(r), err
 }
 
 // Conmon_List is a list of Conmon.
@@ -3112,6 +3265,654 @@ func (f Conmon_TextTextMapEntry_Future) Struct() (Conmon_TextTextMapEntry, error
 	return Conmon_TextTextMapEntry(p.Struct()), err
 }
 
+type Conmon_ServeExecContainerRequest capnp.Struct
+
+// Conmon_ServeExecContainerRequest_TypeID is the unique identifier for the type Conmon_ServeExecContainerRequest.
+const Conmon_ServeExecContainerRequest_TypeID = 0xd01c697281e61c21
+
+func NewConmon_ServeExecContainerRequest(s *capnp.Segment) (Conmon_ServeExecContainerRequest, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 3})
+	return Conmon_ServeExecContainerRequest(st), err
+}
+
+func NewRootConmon_ServeExecContainerRequest(s *capnp.Segment) (Conmon_ServeExecContainerRequest, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 3})
+	return Conmon_ServeExecContainerRequest(st), err
+}
+
+func ReadRootConmon_ServeExecContainerRequest(msg *capnp.Message) (Conmon_ServeExecContainerRequest, error) {
+	root, err := msg.Root()
+	return Conmon_ServeExecContainerRequest(root.Struct()), err
+}
+
+func (s Conmon_ServeExecContainerRequest) String() string {
+	str, _ := text.Marshal(0xd01c697281e61c21, capnp.Struct(s))
+	return str
+}
+
+func (s Conmon_ServeExecContainerRequest) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (Conmon_ServeExecContainerRequest) DecodeFromPtr(p capnp.Ptr) Conmon_ServeExecContainerRequest {
+	return Conmon_ServeExecContainerRequest(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s Conmon_ServeExecContainerRequest) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s Conmon_ServeExecContainerRequest) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s Conmon_ServeExecContainerRequest) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s Conmon_ServeExecContainerRequest) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s Conmon_ServeExecContainerRequest) Metadata() (Conmon_TextTextMapEntry_List, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return Conmon_TextTextMapEntry_List(p.List()), err
+}
+
+func (s Conmon_ServeExecContainerRequest) HasMetadata() bool {
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s Conmon_ServeExecContainerRequest) SetMetadata(v Conmon_TextTextMapEntry_List) error {
+	return capnp.Struct(s).SetPtr(0, v.ToPtr())
+}
+
+// NewMetadata sets the metadata field to a newly
+// allocated Conmon_TextTextMapEntry_List, preferring placement in s's segment.
+func (s Conmon_ServeExecContainerRequest) NewMetadata(n int32) (Conmon_TextTextMapEntry_List, error) {
+	l, err := NewConmon_TextTextMapEntry_List(capnp.Struct(s).Segment(), n)
+	if err != nil {
+		return Conmon_TextTextMapEntry_List{}, err
+	}
+	err = capnp.Struct(s).SetPtr(0, l.ToPtr())
+	return l, err
+}
+func (s Conmon_ServeExecContainerRequest) Id() (string, error) {
+	p, err := capnp.Struct(s).Ptr(1)
+	return p.Text(), err
+}
+
+func (s Conmon_ServeExecContainerRequest) HasId() bool {
+	return capnp.Struct(s).HasPtr(1)
+}
+
+func (s Conmon_ServeExecContainerRequest) IdBytes() ([]byte, error) {
+	p, err := capnp.Struct(s).Ptr(1)
+	return p.TextBytes(), err
+}
+
+func (s Conmon_ServeExecContainerRequest) SetId(v string) error {
+	return capnp.Struct(s).SetText(1, v)
+}
+
+func (s Conmon_ServeExecContainerRequest) Command() (capnp.TextList, error) {
+	p, err := capnp.Struct(s).Ptr(2)
+	return capnp.TextList(p.List()), err
+}
+
+func (s Conmon_ServeExecContainerRequest) HasCommand() bool {
+	return capnp.Struct(s).HasPtr(2)
+}
+
+func (s Conmon_ServeExecContainerRequest) SetCommand(v capnp.TextList) error {
+	return capnp.Struct(s).SetPtr(2, v.ToPtr())
+}
+
+// NewCommand sets the command field to a newly
+// allocated capnp.TextList, preferring placement in s's segment.
+func (s Conmon_ServeExecContainerRequest) NewCommand(n int32) (capnp.TextList, error) {
+	l, err := capnp.NewTextList(capnp.Struct(s).Segment(), n)
+	if err != nil {
+		return capnp.TextList{}, err
+	}
+	err = capnp.Struct(s).SetPtr(2, l.ToPtr())
+	return l, err
+}
+func (s Conmon_ServeExecContainerRequest) Tty() bool {
+	return capnp.Struct(s).Bit(0)
+}
+
+func (s Conmon_ServeExecContainerRequest) SetTty(v bool) {
+	capnp.Struct(s).SetBit(0, v)
+}
+
+func (s Conmon_ServeExecContainerRequest) Stdin() bool {
+	return capnp.Struct(s).Bit(1)
+}
+
+func (s Conmon_ServeExecContainerRequest) SetStdin(v bool) {
+	capnp.Struct(s).SetBit(1, v)
+}
+
+func (s Conmon_ServeExecContainerRequest) Stdout() bool {
+	return capnp.Struct(s).Bit(2)
+}
+
+func (s Conmon_ServeExecContainerRequest) SetStdout(v bool) {
+	capnp.Struct(s).SetBit(2, v)
+}
+
+func (s Conmon_ServeExecContainerRequest) Stderr() bool {
+	return capnp.Struct(s).Bit(3)
+}
+
+func (s Conmon_ServeExecContainerRequest) SetStderr(v bool) {
+	capnp.Struct(s).SetBit(3, v)
+}
+
+func (s Conmon_ServeExecContainerRequest) CgroupManager() Conmon_CgroupManager {
+	return Conmon_CgroupManager(capnp.Struct(s).Uint16(2))
+}
+
+func (s Conmon_ServeExecContainerRequest) SetCgroupManager(v Conmon_CgroupManager) {
+	capnp.Struct(s).SetUint16(2, uint16(v))
+}
+
+// Conmon_ServeExecContainerRequest_List is a list of Conmon_ServeExecContainerRequest.
+type Conmon_ServeExecContainerRequest_List = capnp.StructList[Conmon_ServeExecContainerRequest]
+
+// NewConmon_ServeExecContainerRequest creates a new list of Conmon_ServeExecContainerRequest.
+func NewConmon_ServeExecContainerRequest_List(s *capnp.Segment, sz int32) (Conmon_ServeExecContainerRequest_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 8, PointerCount: 3}, sz)
+	return capnp.StructList[Conmon_ServeExecContainerRequest](l), err
+}
+
+// Conmon_ServeExecContainerRequest_Future is a wrapper for a Conmon_ServeExecContainerRequest promised by a client call.
+type Conmon_ServeExecContainerRequest_Future struct{ *capnp.Future }
+
+func (f Conmon_ServeExecContainerRequest_Future) Struct() (Conmon_ServeExecContainerRequest, error) {
+	p, err := f.Future.Ptr()
+	return Conmon_ServeExecContainerRequest(p.Struct()), err
+}
+
+type Conmon_ServeExecContainerResponse capnp.Struct
+
+// Conmon_ServeExecContainerResponse_TypeID is the unique identifier for the type Conmon_ServeExecContainerResponse.
+const Conmon_ServeExecContainerResponse_TypeID = 0xa9e93cf268b17735
+
+func NewConmon_ServeExecContainerResponse(s *capnp.Segment) (Conmon_ServeExecContainerResponse, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_ServeExecContainerResponse(st), err
+}
+
+func NewRootConmon_ServeExecContainerResponse(s *capnp.Segment) (Conmon_ServeExecContainerResponse, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_ServeExecContainerResponse(st), err
+}
+
+func ReadRootConmon_ServeExecContainerResponse(msg *capnp.Message) (Conmon_ServeExecContainerResponse, error) {
+	root, err := msg.Root()
+	return Conmon_ServeExecContainerResponse(root.Struct()), err
+}
+
+func (s Conmon_ServeExecContainerResponse) String() string {
+	str, _ := text.Marshal(0xa9e93cf268b17735, capnp.Struct(s))
+	return str
+}
+
+func (s Conmon_ServeExecContainerResponse) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (Conmon_ServeExecContainerResponse) DecodeFromPtr(p capnp.Ptr) Conmon_ServeExecContainerResponse {
+	return Conmon_ServeExecContainerResponse(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s Conmon_ServeExecContainerResponse) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s Conmon_ServeExecContainerResponse) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s Conmon_ServeExecContainerResponse) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s Conmon_ServeExecContainerResponse) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s Conmon_ServeExecContainerResponse) Url() (string, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return p.Text(), err
+}
+
+func (s Conmon_ServeExecContainerResponse) HasUrl() bool {
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s Conmon_ServeExecContainerResponse) UrlBytes() ([]byte, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return p.TextBytes(), err
+}
+
+func (s Conmon_ServeExecContainerResponse) SetUrl(v string) error {
+	return capnp.Struct(s).SetText(0, v)
+}
+
+// Conmon_ServeExecContainerResponse_List is a list of Conmon_ServeExecContainerResponse.
+type Conmon_ServeExecContainerResponse_List = capnp.StructList[Conmon_ServeExecContainerResponse]
+
+// NewConmon_ServeExecContainerResponse creates a new list of Conmon_ServeExecContainerResponse.
+func NewConmon_ServeExecContainerResponse_List(s *capnp.Segment, sz int32) (Conmon_ServeExecContainerResponse_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1}, sz)
+	return capnp.StructList[Conmon_ServeExecContainerResponse](l), err
+}
+
+// Conmon_ServeExecContainerResponse_Future is a wrapper for a Conmon_ServeExecContainerResponse promised by a client call.
+type Conmon_ServeExecContainerResponse_Future struct{ *capnp.Future }
+
+func (f Conmon_ServeExecContainerResponse_Future) Struct() (Conmon_ServeExecContainerResponse, error) {
+	p, err := f.Future.Ptr()
+	return Conmon_ServeExecContainerResponse(p.Struct()), err
+}
+
+type Conmon_ServeAttachContainerRequest capnp.Struct
+
+// Conmon_ServeAttachContainerRequest_TypeID is the unique identifier for the type Conmon_ServeAttachContainerRequest.
+const Conmon_ServeAttachContainerRequest_TypeID = 0xca8c8e0d7826ae86
+
+func NewConmon_ServeAttachContainerRequest(s *capnp.Segment) (Conmon_ServeAttachContainerRequest, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2})
+	return Conmon_ServeAttachContainerRequest(st), err
+}
+
+func NewRootConmon_ServeAttachContainerRequest(s *capnp.Segment) (Conmon_ServeAttachContainerRequest, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2})
+	return Conmon_ServeAttachContainerRequest(st), err
+}
+
+func ReadRootConmon_ServeAttachContainerRequest(msg *capnp.Message) (Conmon_ServeAttachContainerRequest, error) {
+	root, err := msg.Root()
+	return Conmon_ServeAttachContainerRequest(root.Struct()), err
+}
+
+func (s Conmon_ServeAttachContainerRequest) String() string {
+	str, _ := text.Marshal(0xca8c8e0d7826ae86, capnp.Struct(s))
+	return str
+}
+
+func (s Conmon_ServeAttachContainerRequest) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (Conmon_ServeAttachContainerRequest) DecodeFromPtr(p capnp.Ptr) Conmon_ServeAttachContainerRequest {
+	return Conmon_ServeAttachContainerRequest(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s Conmon_ServeAttachContainerRequest) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s Conmon_ServeAttachContainerRequest) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s Conmon_ServeAttachContainerRequest) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s Conmon_ServeAttachContainerRequest) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s Conmon_ServeAttachContainerRequest) Metadata() (Conmon_TextTextMapEntry_List, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return Conmon_TextTextMapEntry_List(p.List()), err
+}
+
+func (s Conmon_ServeAttachContainerRequest) HasMetadata() bool {
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s Conmon_ServeAttachContainerRequest) SetMetadata(v Conmon_TextTextMapEntry_List) error {
+	return capnp.Struct(s).SetPtr(0, v.ToPtr())
+}
+
+// NewMetadata sets the metadata field to a newly
+// allocated Conmon_TextTextMapEntry_List, preferring placement in s's segment.
+func (s Conmon_ServeAttachContainerRequest) NewMetadata(n int32) (Conmon_TextTextMapEntry_List, error) {
+	l, err := NewConmon_TextTextMapEntry_List(capnp.Struct(s).Segment(), n)
+	if err != nil {
+		return Conmon_TextTextMapEntry_List{}, err
+	}
+	err = capnp.Struct(s).SetPtr(0, l.ToPtr())
+	return l, err
+}
+func (s Conmon_ServeAttachContainerRequest) Id() (string, error) {
+	p, err := capnp.Struct(s).Ptr(1)
+	return p.Text(), err
+}
+
+func (s Conmon_ServeAttachContainerRequest) HasId() bool {
+	return capnp.Struct(s).HasPtr(1)
+}
+
+func (s Conmon_ServeAttachContainerRequest) IdBytes() ([]byte, error) {
+	p, err := capnp.Struct(s).Ptr(1)
+	return p.TextBytes(), err
+}
+
+func (s Conmon_ServeAttachContainerRequest) SetId(v string) error {
+	return capnp.Struct(s).SetText(1, v)
+}
+
+func (s Conmon_ServeAttachContainerRequest) Stdin() bool {
+	return capnp.Struct(s).Bit(0)
+}
+
+func (s Conmon_ServeAttachContainerRequest) SetStdin(v bool) {
+	capnp.Struct(s).SetBit(0, v)
+}
+
+func (s Conmon_ServeAttachContainerRequest) Stdout() bool {
+	return capnp.Struct(s).Bit(1)
+}
+
+func (s Conmon_ServeAttachContainerRequest) SetStdout(v bool) {
+	capnp.Struct(s).SetBit(1, v)
+}
+
+func (s Conmon_ServeAttachContainerRequest) Stderr() bool {
+	return capnp.Struct(s).Bit(2)
+}
+
+func (s Conmon_ServeAttachContainerRequest) SetStderr(v bool) {
+	capnp.Struct(s).SetBit(2, v)
+}
+
+// Conmon_ServeAttachContainerRequest_List is a list of Conmon_ServeAttachContainerRequest.
+type Conmon_ServeAttachContainerRequest_List = capnp.StructList[Conmon_ServeAttachContainerRequest]
+
+// NewConmon_ServeAttachContainerRequest creates a new list of Conmon_ServeAttachContainerRequest.
+func NewConmon_ServeAttachContainerRequest_List(s *capnp.Segment, sz int32) (Conmon_ServeAttachContainerRequest_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2}, sz)
+	return capnp.StructList[Conmon_ServeAttachContainerRequest](l), err
+}
+
+// Conmon_ServeAttachContainerRequest_Future is a wrapper for a Conmon_ServeAttachContainerRequest promised by a client call.
+type Conmon_ServeAttachContainerRequest_Future struct{ *capnp.Future }
+
+func (f Conmon_ServeAttachContainerRequest_Future) Struct() (Conmon_ServeAttachContainerRequest, error) {
+	p, err := f.Future.Ptr()
+	return Conmon_ServeAttachContainerRequest(p.Struct()), err
+}
+
+type Conmon_ServeAttachContainerResponse capnp.Struct
+
+// Conmon_ServeAttachContainerResponse_TypeID is the unique identifier for the type Conmon_ServeAttachContainerResponse.
+const Conmon_ServeAttachContainerResponse_TypeID = 0x94a72d9a2ccb9a30
+
+func NewConmon_ServeAttachContainerResponse(s *capnp.Segment) (Conmon_ServeAttachContainerResponse, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_ServeAttachContainerResponse(st), err
+}
+
+func NewRootConmon_ServeAttachContainerResponse(s *capnp.Segment) (Conmon_ServeAttachContainerResponse, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_ServeAttachContainerResponse(st), err
+}
+
+func ReadRootConmon_ServeAttachContainerResponse(msg *capnp.Message) (Conmon_ServeAttachContainerResponse, error) {
+	root, err := msg.Root()
+	return Conmon_ServeAttachContainerResponse(root.Struct()), err
+}
+
+func (s Conmon_ServeAttachContainerResponse) String() string {
+	str, _ := text.Marshal(0x94a72d9a2ccb9a30, capnp.Struct(s))
+	return str
+}
+
+func (s Conmon_ServeAttachContainerResponse) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (Conmon_ServeAttachContainerResponse) DecodeFromPtr(p capnp.Ptr) Conmon_ServeAttachContainerResponse {
+	return Conmon_ServeAttachContainerResponse(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s Conmon_ServeAttachContainerResponse) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s Conmon_ServeAttachContainerResponse) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s Conmon_ServeAttachContainerResponse) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s Conmon_ServeAttachContainerResponse) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s Conmon_ServeAttachContainerResponse) Url() (string, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return p.Text(), err
+}
+
+func (s Conmon_ServeAttachContainerResponse) HasUrl() bool {
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s Conmon_ServeAttachContainerResponse) UrlBytes() ([]byte, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return p.TextBytes(), err
+}
+
+func (s Conmon_ServeAttachContainerResponse) SetUrl(v string) error {
+	return capnp.Struct(s).SetText(0, v)
+}
+
+// Conmon_ServeAttachContainerResponse_List is a list of Conmon_ServeAttachContainerResponse.
+type Conmon_ServeAttachContainerResponse_List = capnp.StructList[Conmon_ServeAttachContainerResponse]
+
+// NewConmon_ServeAttachContainerResponse creates a new list of Conmon_ServeAttachContainerResponse.
+func NewConmon_ServeAttachContainerResponse_List(s *capnp.Segment, sz int32) (Conmon_ServeAttachContainerResponse_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1}, sz)
+	return capnp.StructList[Conmon_ServeAttachContainerResponse](l), err
+}
+
+// Conmon_ServeAttachContainerResponse_Future is a wrapper for a Conmon_ServeAttachContainerResponse promised by a client call.
+type Conmon_ServeAttachContainerResponse_Future struct{ *capnp.Future }
+
+func (f Conmon_ServeAttachContainerResponse_Future) Struct() (Conmon_ServeAttachContainerResponse, error) {
+	p, err := f.Future.Ptr()
+	return Conmon_ServeAttachContainerResponse(p.Struct()), err
+}
+
+type Conmon_ServePortForwardContainerRequest capnp.Struct
+
+// Conmon_ServePortForwardContainerRequest_TypeID is the unique identifier for the type Conmon_ServePortForwardContainerRequest.
+const Conmon_ServePortForwardContainerRequest_TypeID = 0xc865d8a1122038c5
+
+func NewConmon_ServePortForwardContainerRequest(s *capnp.Segment) (Conmon_ServePortForwardContainerRequest, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 2})
+	return Conmon_ServePortForwardContainerRequest(st), err
+}
+
+func NewRootConmon_ServePortForwardContainerRequest(s *capnp.Segment) (Conmon_ServePortForwardContainerRequest, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 2})
+	return Conmon_ServePortForwardContainerRequest(st), err
+}
+
+func ReadRootConmon_ServePortForwardContainerRequest(msg *capnp.Message) (Conmon_ServePortForwardContainerRequest, error) {
+	root, err := msg.Root()
+	return Conmon_ServePortForwardContainerRequest(root.Struct()), err
+}
+
+func (s Conmon_ServePortForwardContainerRequest) String() string {
+	str, _ := text.Marshal(0xc865d8a1122038c5, capnp.Struct(s))
+	return str
+}
+
+func (s Conmon_ServePortForwardContainerRequest) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (Conmon_ServePortForwardContainerRequest) DecodeFromPtr(p capnp.Ptr) Conmon_ServePortForwardContainerRequest {
+	return Conmon_ServePortForwardContainerRequest(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s Conmon_ServePortForwardContainerRequest) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s Conmon_ServePortForwardContainerRequest) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s Conmon_ServePortForwardContainerRequest) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s Conmon_ServePortForwardContainerRequest) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s Conmon_ServePortForwardContainerRequest) Metadata() (Conmon_TextTextMapEntry_List, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return Conmon_TextTextMapEntry_List(p.List()), err
+}
+
+func (s Conmon_ServePortForwardContainerRequest) HasMetadata() bool {
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s Conmon_ServePortForwardContainerRequest) SetMetadata(v Conmon_TextTextMapEntry_List) error {
+	return capnp.Struct(s).SetPtr(0, v.ToPtr())
+}
+
+// NewMetadata sets the metadata field to a newly
+// allocated Conmon_TextTextMapEntry_List, preferring placement in s's segment.
+func (s Conmon_ServePortForwardContainerRequest) NewMetadata(n int32) (Conmon_TextTextMapEntry_List, error) {
+	l, err := NewConmon_TextTextMapEntry_List(capnp.Struct(s).Segment(), n)
+	if err != nil {
+		return Conmon_TextTextMapEntry_List{}, err
+	}
+	err = capnp.Struct(s).SetPtr(0, l.ToPtr())
+	return l, err
+}
+func (s Conmon_ServePortForwardContainerRequest) NetNsPath() (string, error) {
+	p, err := capnp.Struct(s).Ptr(1)
+	return p.Text(), err
+}
+
+func (s Conmon_ServePortForwardContainerRequest) HasNetNsPath() bool {
+	return capnp.Struct(s).HasPtr(1)
+}
+
+func (s Conmon_ServePortForwardContainerRequest) NetNsPathBytes() ([]byte, error) {
+	p, err := capnp.Struct(s).Ptr(1)
+	return p.TextBytes(), err
+}
+
+func (s Conmon_ServePortForwardContainerRequest) SetNetNsPath(v string) error {
+	return capnp.Struct(s).SetText(1, v)
+}
+
+// Conmon_ServePortForwardContainerRequest_List is a list of Conmon_ServePortForwardContainerRequest.
+type Conmon_ServePortForwardContainerRequest_List = capnp.StructList[Conmon_ServePortForwardContainerRequest]
+
+// NewConmon_ServePortForwardContainerRequest creates a new list of Conmon_ServePortForwardContainerRequest.
+func NewConmon_ServePortForwardContainerRequest_List(s *capnp.Segment, sz int32) (Conmon_ServePortForwardContainerRequest_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 0, PointerCount: 2}, sz)
+	return capnp.StructList[Conmon_ServePortForwardContainerRequest](l), err
+}
+
+// Conmon_ServePortForwardContainerRequest_Future is a wrapper for a Conmon_ServePortForwardContainerRequest promised by a client call.
+type Conmon_ServePortForwardContainerRequest_Future struct{ *capnp.Future }
+
+func (f Conmon_ServePortForwardContainerRequest_Future) Struct() (Conmon_ServePortForwardContainerRequest, error) {
+	p, err := f.Future.Ptr()
+	return Conmon_ServePortForwardContainerRequest(p.Struct()), err
+}
+
+type Conmon_ServePortForwardContainerResponse capnp.Struct
+
+// Conmon_ServePortForwardContainerResponse_TypeID is the unique identifier for the type Conmon_ServePortForwardContainerResponse.
+const Conmon_ServePortForwardContainerResponse_TypeID = 0xf7507d1843e734e4
+
+func NewConmon_ServePortForwardContainerResponse(s *capnp.Segment) (Conmon_ServePortForwardContainerResponse, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_ServePortForwardContainerResponse(st), err
+}
+
+func NewRootConmon_ServePortForwardContainerResponse(s *capnp.Segment) (Conmon_ServePortForwardContainerResponse, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_ServePortForwardContainerResponse(st), err
+}
+
+func ReadRootConmon_ServePortForwardContainerResponse(msg *capnp.Message) (Conmon_ServePortForwardContainerResponse, error) {
+	root, err := msg.Root()
+	return Conmon_ServePortForwardContainerResponse(root.Struct()), err
+}
+
+func (s Conmon_ServePortForwardContainerResponse) String() string {
+	str, _ := text.Marshal(0xf7507d1843e734e4, capnp.Struct(s))
+	return str
+}
+
+func (s Conmon_ServePortForwardContainerResponse) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (Conmon_ServePortForwardContainerResponse) DecodeFromPtr(p capnp.Ptr) Conmon_ServePortForwardContainerResponse {
+	return Conmon_ServePortForwardContainerResponse(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s Conmon_ServePortForwardContainerResponse) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s Conmon_ServePortForwardContainerResponse) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s Conmon_ServePortForwardContainerResponse) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s Conmon_ServePortForwardContainerResponse) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s Conmon_ServePortForwardContainerResponse) Url() (string, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return p.Text(), err
+}
+
+func (s Conmon_ServePortForwardContainerResponse) HasUrl() bool {
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s Conmon_ServePortForwardContainerResponse) UrlBytes() ([]byte, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return p.TextBytes(), err
+}
+
+func (s Conmon_ServePortForwardContainerResponse) SetUrl(v string) error {
+	return capnp.Struct(s).SetText(0, v)
+}
+
+// Conmon_ServePortForwardContainerResponse_List is a list of Conmon_ServePortForwardContainerResponse.
+type Conmon_ServePortForwardContainerResponse_List = capnp.StructList[Conmon_ServePortForwardContainerResponse]
+
+// NewConmon_ServePortForwardContainerResponse creates a new list of Conmon_ServePortForwardContainerResponse.
+func NewConmon_ServePortForwardContainerResponse_List(s *capnp.Segment, sz int32) (Conmon_ServePortForwardContainerResponse_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1}, sz)
+	return capnp.StructList[Conmon_ServePortForwardContainerResponse](l), err
+}
+
+// Conmon_ServePortForwardContainerResponse_Future is a wrapper for a Conmon_ServePortForwardContainerResponse promised by a client call.
+type Conmon_ServePortForwardContainerResponse_Future struct{ *capnp.Future }
+
+func (f Conmon_ServePortForwardContainerResponse_Future) Struct() (Conmon_ServePortForwardContainerResponse, error) {
+	p, err := f.Future.Ptr()
+	return Conmon_ServePortForwardContainerResponse(p.Struct()), err
+}
+
 type Conmon_version_Params capnp.Struct
 
 // Conmon_version_Params_TypeID is the unique identifier for the type Conmon_version_Params.
@@ -4568,222 +5369,815 @@ func (p Conmon_startFdSocket_Results_Future) Response() Conmon_StartFdSocketResp
 	return Conmon_StartFdSocketResponse_Future{Future: p.Future.Field(0, nil)}
 }
 
-const schema_ffaaf7385bc4adad = "x\xda\xc4Y}p\x14\xe7y\x7f\x9e\xdd\x93V\xa7\x0f" +
-	"N\xdb=\x09\x10\xa8\xd2\x10HA\x0d\xe1C\xb8&\x0c" +
-	"\x19I\x80B!\xe0hu`ZH\\\x96\xbbE:" +
-	"\xb8\xdb=v\xf7\x00\x11\xa72I=v\x94\xd81*" +
-	"\x9e\xd8L\x99A\xb6\xa1\x80\xa1\xc6\x1fP\x83\xc1\x03\x18" +
-	"\xc6\x80M]h\xa1\xc6c\\0\xa6\xb6\x19\x7fQ\xbb" +
-	"S\xec\x81n\xe7y\xef\xf6C'\x19\x9fTw\xf2\x07" +
-	"\x83\xee\xd9\xdf>\xef\xc7\xf3\xf9{v\xe2\xe7\xc1\xc6\xc0" +
-	"\xa4\xb27\x86\x00'\xef*(\xb4\xcd\xcb\x1d\xc6\xb6\xcd" +
-	"\xb3\x7f\x05\xe2w\x10\xa0\x00\x05\x80\xfa\xf9\xc2\xbb\x08(" +
-	")B\x03\xa0\xfd_O\x9d\xf8\xe1\xef7|\xda\xe5\x07" +
-	"\xac\xcf\x00\x1ee\x80\xb7\xa7\xd6-\xdf\xc2\xcf\xfb\x8d\x1f" +
-	"\xb0_x\x8b\x00\xa7\x19\xe0\xaf\x97\x866\xfem\xe5\x12" +
-	"\x06\xb0\xaf\xd7/\xbf\xf8\xf8\x07w\xfe#\x14\x08\x04\xfc" +
-	"Xx\x0b\xa5`\x11\xfdYP\xf4;\x04\xb4_\xfb\xe3" +
-	"u\x8bB\xdb\x1ex,\x07\xcd\xd4^\x0d\xbe\x8b\x12\x16" +
-	"\x0b\x00\xd2\xad \xa9\xbe\xff\xc3\xbb\xf6-\xfc\xd5\xa7[" +
-	"\xfckO*\xfeOZ\xbb\xb9\x98\x00\x8f/\xf9`e" +
-	"\xf3\x9c\xd0\x13\xbd\xb5\x05\x08\x17/\xde\x89\xd2\xfab\x01" +
-	"x\xbb\xf2\xab+O\x9d\x8fL\xdd\x01\xf2w\xb0\xcf\xa2" +
-	"?#\\\x9a-\xba\xaax\x0d\xa0=\xfa\x99W\xcet" +
-	"M\x9f\xb0\xd3\xbf\xe8\xe9\xe2\xb3\xb4\xe8e\xb6h\xd7\xdf" +
-	"\xab\x7fr\xe4\xc0\x8f\x09\xc0y\xda\x00\xeb\xb1\xa4\x0b\xa5" +
-	"\xe1%\xa4\xaa\xa2\xe4N@{\xcd\xd2\x13\xcf\xac\x93\xaf" +
-	"\xee\xeag{\xd5%\xdd(\xddQB\xdb\x93fM\xdc" +
-	"\x7f\xbe\xbenw\xee\xf68\xc2\x89\x84\x1b\xc7t\x8e)" +
-	"y\x06\xd0\x9e\xd2\xf3\xfc\xbe\x87?Y\xfb\x0f\x84\xe6r" +
-	"\x0fs\xaed\x05J\x1f\x96\x0c\x05\x90\xae3\xf4\xcf\xcf" +
-	"\\\xdb\xfe\xf0o\x9a\xf6\xe6\xea\xe6\x09\xfd\xeb\xd2\xa3(" +
-	"\xf5\x94\xd2\x9f\x9bKk\xc8:\xfc\xa5\xf7\x8a\x1fn\x9a" +
-	"\xb0\xaf?\xeb\x1c/;\x85\xd2\xe52\xda\xc9\xc52\xba" +
-	"\x07\xf7\xb98\x92\xb7w\xef>\xb6d\xea\x7f\xef\xb4\xe9" +
-	"\x1en\x95Ua}\xd9\x90EH\x8aC\x02'\x05E" +
-	"\x01\xc0\x1e\xf7\xd1\x83\xdb\x1ex:r\xa0?\xe5\xd7\xcb" +
-	"\x8fb\x06&\x15\x88\xa4\xfc\xd4\xbe\x1d\xd3\xbe\xba\xb2\xe6" +
-	"@\xee\xc6i\xfd\xfa\x1f\x88gQZH\xe8zY|" +
-	"\x80\x07\xb4\xcb\x97\xbc\xf1\xc3\x8f\xee\xf9\x8f\xe3~\xa3\x1d" +
-	"\xaf`^z\xa1\x82\xf4\xbd\xaf\xbc\xc45\x9fN\xbc\xea" +
-	"\x07\xdc\xaa(\xe6\x00\xa5\x8aJ\x06x\xef\x7fV\xb4\xa5" +
-	"&\xbc\xee\x07\xdcQ\xd9\xcd|\x8d\x01V\x96\x9c\x08\x07" +
-	"\x1b\xcc\x7f\xf2\x03\xd4\xca\xa3\x04H3\xc0\x8d\x8a\x97\x7f" +
-	"_5\xfd@/\xc0\xa3\x95l\x0f;\x18\xa0\xaa\xe9\xcc" +
-	"\x94\x906\xfb\x9fs.\x80\xd9\xe2t\xe5\x13(]\xad" +
-	"\xa4\x0b\xb8\\I\x96{\xf2\xf3\xedK\xf7n\x08\x9f\xef" +
-	"\xe3e\x1b\x86\xae@i\xebPB\xf6\x0c\xed\x04\xb4o" +
-	"\xde?\xfd\xbe\xea\xea\xf3\x17\xfa\xf5\x9fsC\xaf\xa1t" +
-	"\x9d\xa1?\x1e\xfa>\xa0\xbd\xe9O\xd7\xa4\xeeY6\xed" +
-	"\x9d\x1c4s\xca\x93\xc3\xdeB\xe9\xea0\xb6\x89a\xb4" +
-	"\xe3\x9b\xd3n\xbe\xbcez\xea\xdfsU\x17\xb0\x88\x1e" +
-	"\xde\x85R\xf5p\xfas\xf8\xf0E\xe4>\x0bS\xb3\xc5" +
-	"\xef\xb6\x0e\xb9\xe4\xbf\x81\x87\xaa\xfe\x88.yk\x15\xe9" +
-	"\x9b\xf8\xf3\xd9;\xee\x89KW\xfc\x80\x93U\x9b\x98\x99" +
-	"\x18\xe0\xcf\xa4W\xf6h\x1b\xae]\xede\xa6\xaak\x04" +
-	"\x10G\x10\xe0\xc8\x92\xfa\x96\x7f\xbb\xf2\xdd\xcf@\x1c\xcf" +
-	"y\xb1\x00X?iD7JsF\xd0\xde\x9bGP" +
-	"\xf0\x9d\xf9\xa4f\xd7kW\x7f\xfcy\xee\xde\x83\xa4s" +
-	"\xe1\x88M(%G\xb0D1\xe2N\x0e\xd0\xde\xb6\xea" +
-	"\xc9Gn\x8c\x12\xbf\xc8\x8d+v\xd4C\xd5\xef\xa2t" +
-	"\xa1\x9a]h\xf5\xabt\xd4\x177m\xfc\xdd\xb1\xc9\xb3" +
-	"\xbf\xf0o\xf4b\x0d\xcb\x12\xd7kh\xa3\x15\x7f\xb5\xfe" +
-	"R\xdd\x87Wz\x01\xc4\xdaS\x04\x18SK\x80\x83\xb8" +
-	"\xb3\xe4\xa7+>\xb8\xe1\x07\xcc\xa9eG\xfd\x19\x03\xdc" +
-	"\xe8y\xba\xfe\xbe\xd3\xcf\x7f\xd9O\xf6X_{\x0a\xa5" +
-	"\xcd\xb5\x94=\xba\xffen\xf2\x9d[/}\x95\xe3T" +
-	"\xcc\xf8\x1d\xb5O\xa0\xb4\xa1\x96\xee\xe4\xa1\xda50\xde" +
-	"\x8ek\x96jhJ\xa2pB\xca\xd0-}BT\xd7" +
-	"\x92\xba\xf6\xfd\xa8\x92\xd2R\xd3ff~\xa8k\xd5h" +
-	"\xa4C\x8b\xce\xd45K\x89k\xaa1\xbaE1\x04%" +
-	"i\xca\x01>\x00\x10@\x00\xb1l\x06\x80\\\xc4\xa3\x1c" +
-	"\xe6\xb0\xd3PW\xa5U\xd3\xc2r\xef\x0e\x01\xb1\x1c0" +
-	"\xaf\xe5\xa2\x86\xaaX\xea]JR5SJT5G" +
-	"\xb7\xaafZHX\xbd\x96\x9b\x0b \x97\xf2(\x0f\xe3" +
-	"\xd06T3\xa5k\xa6\x0a\x00X\xee\xd5\x93\xff\xcb\x92" +
-	"-\x8a\xa1\xf0\xf9\x1c\xd0\xadu\x03Xmf\xcej\xad" +
-	"\xa4\x8d7\xad\x16Dy\xa4\xbb\xe0\xdee\x00\xf2\x0b<" +
-	"\xca\x879\x14\x11\xc3H\xc2C\x8b\x01\xe4\x83<\xcao" +
-	"r(r\\\x189\x00\xf1\x1c!\xff\x95G\xf93\x0e" +
-	"E\x9e\x0f#\x0f ~L\xc2\x8fx\x8c\x14!\x87b" +
-	" \x10\xc6\x00\xa5R\x9c\x0b\x10\x09 \x8f\x91r\x92\x17" +
-	"\x14\x84\xb1\x00@*\xc3\xc9\x00\x91\"\x92\x87I^X" +
-	"\x18\xc6B\x00Id\xf8r\x92\x7f\x0f9\xb4\x93\xaa\xa5" +
-	"\xc4\x14K\x01\xe1'\x89\x18\x96\x01\x87e\x80\xb6\x96=" +
-	"\x0a\xf0\xaa\x89C\x00[x\xc4\x90\x97\xaf\x00Ih\xa7" +
-	"\xe3\xb1\xf9J*\x15\x07Aksa\xa5\xc0\xb1\x87m" +
-	"\xb7{\xb8L1\xd5\x16\xc5j'\x03\x93\xac\x14\xb0&" +
-	"\xa5\xc7\xe6\xc4\x9c_\xde\xbe\x00\x9c\x97\xcb\xbd@\xc8n" +
-	"`p\xb61S\xba\xa0\x99*\x19\xc7\xe7\x0d\x8b\xb3\xfe" +
-	"7\x96\xeb\xff\xf8\xe5^\x8f1\x80\xd5\x0dUO\xa9\xda" +
-	"<\xbd\xcd\x0b\xb5V\xb5\xc6L\xe7\xed\xfcn\xfb\x93\xe3" +
-	"\x8e\x05\xb7Y\xb4\xd5Y\x94\xce\x1a\xd23g\xcd\xebM" +
-	"\xf7\x9a\xfco\xcaE\xeeF\xc7\xd5\x01\xc8\xa3y\x94'" +
-	"r\xe8x\xf0x\x92\x8d\xe5Q\x9e\xc2a\xc8\xeaH\xa9" +
-	"9\x9e\x12\x02\x0c\xa5\x14\xab\xdd5m>\xf7\xa6X\x96" +
-	"\x12m\xef\x95\x9f\x94$\xe6\x11\xben9\x1b\xc0}\xcd" +
-	"l3\xf4tj\xbe\xa2)m\xaa\x01\xc0\x8e\xcc\xe2P" +
-	"\x9cAj\xc4\xe0\\\x80N\xb3\xc3\xb4\xd4d\xcc\x8e2" +
-	"\xf0r\x13\x00\xf2R\xde\xc4N\xd2\x9a1*\xe6m\x89" +
-	"\xbbU\xc3\x8c\xeb\x1a\xcb$&\xb2LR\xea\x9e\xbd\x99" +
-	"\xce\xde\xc8\xa3<\xcf3\xc3\x1cJ\x0f\x7f\xce\xa3\xbc\x80" +
-	"\x12\x09f\x12\x89L\x8e\xd5\xc2\xa3\x9c\xe0\xb0s\xb5j" +
-	",\xd3M\x15\x118D\xf8\xba\xd0\x1fP\xe0\x05ns" +
-	"\x82yz\xdb,#\x14_\xad\x1ar\x00\xfdU\x1d\xeb" +
-	"B\x0b:R\xaa\xff<u\xfd\x9c\x87d\xb3x\x94[" +
-	"|\xe7\x99?\xc3;\xa4\xe3k\xae\xe2~|\xad3\xa9" +
-	"\xac\x8d\xc4\xd7\xa9\x18\x04\x0e\x83y\xfa^D\xb5\x16\xc5" +
-	"\xb5\x98\xbe\x86\xde\xcc\x18\xc0bN\x11v7\xfc\x8b*" +
-	"\x00y-\x8f\xf2\xdfx\x1b^?\x19@\xbe\x97G\xf9" +
-	"A\xdf\x86\xef\x9f\x06 \xdf\xc7\xa3\xfc[\xca\xe4\x98\xc9" +
-	"\xe4\xbf&S=\xc8\xa3\xbc\x91\x129\xc7\x12\xb9\xb8\x81" +
-	"L\xf5\x08\x8f\xf2.\x0e\xf9\xb8\x9b\x08k\xd6\xc4cV" +
-	";\x0a\xc0\xa1\x00\xd8\xd0\xae\xc6\xdb\xda-\xe7\xe7\xb7a" +
-	"\xc2\xdb\xde\x84\xa5\x18\xd6\x8fb\x11=\xbaR\xb5Z\xdd" +
-	"\xbc\x94\x939\xeb\xbc@\xec?\xd0\xf9\xaf[\x82\xd75" +
-	"y\x01\xa2G\x8f\xc4\x9eu^S'\xf6\xfc\xd2\xe3\x08" +
-	"b\xcf\x01\xaf\x17\x14\xb7\xb6\xfa(\xdaV\xc3\xebx\xc5" +
-	"\xadG\xbd\x16E\xdcq\xca\xeb\x9c\xc5g\xcfz\xc9A" +
-	"\xdco\xf8\x98\xdb\xfeu\xbe\xbe}\x7f\x97\x8fr\x1e\xea" +
-	"\xf6\xe8\x95xd\xa7\xaf_;\xfe\x9c\x8f\x15\x9f<\xea" +
-	"\xeb\xe5O\xb7\xfa\x18\xf0\xe9S^\xd9\x10\xcfu\xfb\x08" +
-	"\xd2\x85\x9d>*v\xf19_\x93w\xb9\xcbv\xa2\x1f" +
-	"\x1a2\xee\xe7\x0ax\xc7\x08\x99\xb2\xe6&\xc8V\x07\xc8" +
-	"\xa2.\xbeZ\x054l'\xafA\x0d\xcbl\xb6\xf3N" +
-	"\x81\xf3\x92\xa3\xac9\xb7\x1ft\xbc\x1el\xe7\x11\xe7{" +
-	"\x96Me\xb6\x93\xda\xa0&\xb3\xb6\xfb\xbb!\xa3\xd7v" +
-	"\x0a\x11\xb6y\x0a\xfd2G\x91\x13q\xe8\x84\\\x88\xe9" +
-	"\xcb\x15\x9b5\x19\xb5NI\xe7{\xf5[\xa6\x05N\xf9" +
-	"B\x0f\xc3\xf5\xaa\xfb\xcc}m\x0f\xe6\xdbB\xd6\xd51" +
-	"\xeb\xeb\xce\x16r\xc4\xce\x16\x16\xa8k-\xfa\x87\xf3\x95" +
-	"T\xb3f\x19\x1d\x00r-_\x00\xe0\x92Lt\x88\x90" +
-	"x}\x06p\xe2U\x01=F\x81\x0e\x8f\x14/\xfc\x12" +
-	"8\xf1\x8c\x80\x9c;\xc6A\x874\x88\xc7\xbb\x81\x13\x8f" +
-	"\x08\xc8\xbb\xf3\x0at8\xb0\xb8\x97\xde\xdb-`\xc0\xa5" +
-	"S\xe8LR\xc4\x9eM\xc0\x89\x9b\x05,p\x191:" +
-	"\xacM\xdcp\x008\xf1!\x01\x0b\xdd\xa1\x0f:\xe3!" +
-	"q}\x17p\xe2/\x04\x14\\\x1e\x8c\x0e\xc3\x11W\x19" +
-	"\xc0\x89q\x81j\x08\xf9a#\xda\xd1\xac3a\xd6-" +
-	"\xa0\x11m\x87W\xa0\xe3,h4\xa2\xed\xd4r?\xd2" +
-	"p\xbd \x0b\xe5U\x82\x9a\xbd,>S\xd7\x1a2\xaf" +
-	"\xb8\xeb\xdd\xa5\xa0cP =f\xd6>P\xc3\x0c\xd4" +
-	"\x88\xfe\xfa:\x80\xd4\xe6%\xf9~\xba\xb2\xb1\xdc\xb7\xde" +
-	"\x8f\xe6DZ\xa6\xc07:KK\xcfb\x15@d\x17" +
-	"u\xe9/\xa2\xc7\x16\xa4\xbd\xb8\x18 \xf2\x02\xc9\x0f#" +
-	"\x87\x98\xe1\x0b\xd2!\xd6\xd4\x1f$\xf1\x09\xf4\x0a\x8dt" +
-	"\x9c\x91\x80\xc3$\x7f\x1d\xbdZ#\x9d\xc4V\x80\xc8\x09" +
-	"\x92\xbf\xc7H\x03\x9f!\x0d\x97q\x05@\xe4\x12\xc9o" +
-	"2\xd2\x10\xc8\x90\x86/\xd9\xb27\x18\x99\xe08\x14\x85" +
-	"\x820qYI\xe4H^\xce\x11\x99 yQa\x18" +
-	"\x8b\x00\xa4qL>\x96\xe4\xb3H\x1e\x14\xc2\x18\x04\x90" +
-	"\x9a\xb8e\x00\x91F\x92\xff\x94\xe4\xc5Ea,\x06\x90" +
-	"\xfe\x92\xc9\xff\x82\xe41\x92\x97\x04\xc3X\x02 )\x1c" +
-	"\x9dk)\xc9\xef%yiq\x18K\x01\xa4\x0en\x06" +
-	"@\xc4\"\xf9#$/\xc30\x96\x11\x03\xe6\x0c\x80\xc8" +
-	"oI\xfe\x18\xc9\x87\x94\x84q\x08\x80\xf4(\x93o$" +
-	"\xf9\x1e\x92\x87J\xc3\x18\x02\x90v3=\xdbI~\x8c" +
-	"\xebUv\xedei-\x96P[\x14\xe0}\x05\xcdR" +
-	"\x8dd\\S\x12\xe4\x04\xd9.\xaa\xc6\xb4bq\xcd\xed" +
-	"\xa9\xd4\xb5q\x8b\x11\x1b\xec\xc3yt=\xd9LO!" +
-	"\xa4X\xed}\x9e&\x9c\xbc\xcd\x1b>\xca\xe1\x9b~0" +
-	"T4\xa1*Z:5\x13\xf8d\xac\x0f\xe1J\xe8\xcb" +
-	"\x94D\x93\x01|_\xbe\x15\xd5\x93IE\x8b5\x81`" +
-	"\xf4}8\xf8&\xa2S\xd5V\xdf\xad\xf87\x9c\x1b\x11" +
-	"\xd1\xde%\x08C^\xdd\xce\xb4k\xb6\x12\x8b\xc5\xad\xb8" +
-	"\xaeA\x8d\x92\xf8Q\xccU\x15\xccl\xae3\xa1*+" +
-	"\xfb\x8a\x07\xc5!ZU3\x9d\xe0\xf3%^n{\x90" +
-	"C$\x84\xdb\xach\xfa;\xc7\x1c\xf2b\x02|3{" +
-	"q\x9b\x8d\x01\xb0\x97lJ\xce\x9f\"\xb9\xdd\xd6\x00&" +
-	"\x1c\xa6?]:\x07\xfa\xe6\xa5\xdcvg\xc0\xa3\x9b\xc1" +
-	"\x9a\xcd\xed\x04\x07\xc7\x97W\xa5\x05\xd5\xcce[U\x1e" +
-	";\x11\xfb\xa7[\\_\xba\xe5O&\xff\xcfL\x8b\xf5" +
-	"3!*\x8a\x8c\xa5\xb0\xad\xdc1\x8aQ\xd7\xf1\xf4\x1f" +
-	"'\x8e\xa1\xffx\xb1\xba\x0e\x00\x03b\xc5(\x00!\x9e" +
-	"\x8a\x0a\x9aj\x09\xa9x,\x946UCH[f^" +
-	"\xf6\xe9\xa7Y\xf4\xcd\x0a\xca\xddkS\xe82\x96f." +
-	"\xc3\xb9\xb58\xd1\xa1\x18\x8fr\xca\xc7\x91\x92$l\xe7" +
-	"Q\xb6\xa8t\xd5f8\xd2*z;\xc5\xa3|/\x97" +
-	"\xc9\xaa3\xf5\x183q\x008\x0c\x006\x98VLO" +
-	"[\xcee\xd2O\xd50\xdc\xbb\xb5\xe2I5\xf6\x93\xb4" +
-	"\xe5\xcb\xd4\x83\xab\xce\xe4[|\x9fa\xd1\x0a\x9f\xffE" +
-	"\xb3`\x08\x19-\xf1\x18\x16\x01\x87Ey:\x9e\xd30" +
-	"g{cZd\x98\xbb\xc8\xe3\xe4v\x1by\x94\xb7\xf8" +
-	"\xdcn\xf3b\x00\xf9\xefx\x94\xb7\xfb\xdcn\xab\x01 " +
-	"?\xc5\xa3\xbc\x87C\xccN\x0bww\x03\xc8{x\x94" +
-	"\x0fR\xdd\xe73\x1cs?9\xed\x8b<\xca\xc7\xa8\xe8" +
-	"\x07X\xd1\x17\x8f\xd0M\x1f\xe6Q~\xbb\xb7\xd3\x9a," +
-	"\xd6s* \xeb\xf0T\xd3\x84\x9a\xb8\xae\xf9\xc6u\xa6" +
-	"\xa5\xa7\x9a\x96[*\x1a\x11\xaa\x87\xcd:.\xff6\xe7" +
-	"\x0c\x83H\xba,mX\x98g\xdap\x89\xdd \x12\xef" +
-	"\xc0\x12\x94Ko\x07\x90\x12\xfb\x99\"\xb6(!#\xaf" +
-	"\x81\xbd\xcbl\x07p2\x87D\x1a\xdf_\xd0\x91B\xd5" +
-	"7\x10;\xcb\xb2JE\x1d\x80\xeb\xf7\x9c\xd1\x9a\xd6(" +
-	"\xde\xe6\x90\xe6\xe5D\xabB+L]\x1b\xd8\x98\xcb\x17" +
-	"gc\xdd68\xc8\xfaTw\x88\xedt\xc1\"R\xdb" +
-	"VJ\xe2a\xe8%\x12\xa9\x02G9\xb3\xed\x91\xac\x0d" +
-	"\xe62m\xf0p\x9c\x06\x10\x09\x93\xbc\x16\xbdp\x90\xaa" +
-	"\x99\xfa\x91$\x1f\x8b^DHc\x18\xbe\xd6\x99\x91\x8b" +
-	"\x85\x05\x996x\x1cR\x9b:\x96\xe4SH.\x14f" +
-	"\xda\xe0I\xacm\x9eH\xf2\xe9$/\x122m\xf0\x0f" +
-	"\x98\xfe\xa9$\x9fE\xf2`Q\xb6\x0df\xedz#\xc9" +
-	"\xe7!\x87v\xca\xd0\xa3\xaai\xce\x01t\xd3\x87C\xb4" +
-	"\x9c\x00\x13,\xa5\xcd\xf9\xbb\x81\xba\xb9\xb8\xe5kU\xe3" +
-	"\x89\xd8,\xc5\x02T]\x88\xa5\x18m\xaa\x071\xd2\xa6" +
-	"EW\x0d\x82O\xa7\x1dU\x8c6\xfdn\xd5\x80\x90\xd9" +
-	"G\xbc\xc0P}\xfazE\xab\x13\xc1\x83,\x16^\x89" +
-	"\xadu}\xf7\x0c\xe5\xba\xd73_A\x9cTwnq" +
-	"\xf6#\xc8%_\xad\xb8HN\xfe&\x8f\xf2\x17d\xdf" +
-	"\xc6L\xae\xbbN\xd1\xf6\x19\x8f\xf2M\xdf<\xedK\xca" +
-	"u7x\x8c\x04\xfc\x0c\x07\xe9\xea[]\x0fq\x08\xce" +
-	"p\xe6Q\xccC&\xa2\x8f\xe0\x8cG\"\x0e\xdf#\xf9" +
-	"T\xec\x9d\x1e\xc9\xe3\xf5\xb4\x15\x01^\x8d:\xe3\xc5\xce" +
-	"l\x9f\x9d\xdba\xf7\xc3\x1b\xfe\xc0]\xf7`\x1a\xb1\xbc" +
-	"\x1bLwh7\xe8\x063\x93\xbcsZ\xe6\xaf\xcf\xa9" +
-	"\xee m\x00\x0b\xf6\xfd\x06\xda\xaa\x9a\xa1\xfc?\xcc\xb8" +
-	"\x83\xc5\x01\xac\x993Y\xf6\xcdS\xf3J\x96\xce\xd0\x89" +
-	"\xcd\x9c\x04\xcb\xe8\xc8\xf983\xca\xfb8\xe36\x0c\xe3" +
-	"'{_g\x84\x95j\x87;W^\xad$\xd2n|" +
-	"\xffo\x00\x00\x00\xff\xff\xfe\x11AT"
+type Conmon_serveExecContainer_Params capnp.Struct
+
+// Conmon_serveExecContainer_Params_TypeID is the unique identifier for the type Conmon_serveExecContainer_Params.
+const Conmon_serveExecContainer_Params_TypeID = 0x90a3950a51412b8b
+
+func NewConmon_serveExecContainer_Params(s *capnp.Segment) (Conmon_serveExecContainer_Params, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_serveExecContainer_Params(st), err
+}
+
+func NewRootConmon_serveExecContainer_Params(s *capnp.Segment) (Conmon_serveExecContainer_Params, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_serveExecContainer_Params(st), err
+}
+
+func ReadRootConmon_serveExecContainer_Params(msg *capnp.Message) (Conmon_serveExecContainer_Params, error) {
+	root, err := msg.Root()
+	return Conmon_serveExecContainer_Params(root.Struct()), err
+}
+
+func (s Conmon_serveExecContainer_Params) String() string {
+	str, _ := text.Marshal(0x90a3950a51412b8b, capnp.Struct(s))
+	return str
+}
+
+func (s Conmon_serveExecContainer_Params) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (Conmon_serveExecContainer_Params) DecodeFromPtr(p capnp.Ptr) Conmon_serveExecContainer_Params {
+	return Conmon_serveExecContainer_Params(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s Conmon_serveExecContainer_Params) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s Conmon_serveExecContainer_Params) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s Conmon_serveExecContainer_Params) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s Conmon_serveExecContainer_Params) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s Conmon_serveExecContainer_Params) Request() (Conmon_ServeExecContainerRequest, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return Conmon_ServeExecContainerRequest(p.Struct()), err
+}
+
+func (s Conmon_serveExecContainer_Params) HasRequest() bool {
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s Conmon_serveExecContainer_Params) SetRequest(v Conmon_ServeExecContainerRequest) error {
+	return capnp.Struct(s).SetPtr(0, capnp.Struct(v).ToPtr())
+}
+
+// NewRequest sets the request field to a newly
+// allocated Conmon_ServeExecContainerRequest struct, preferring placement in s's segment.
+func (s Conmon_serveExecContainer_Params) NewRequest() (Conmon_ServeExecContainerRequest, error) {
+	ss, err := NewConmon_ServeExecContainerRequest(capnp.Struct(s).Segment())
+	if err != nil {
+		return Conmon_ServeExecContainerRequest{}, err
+	}
+	err = capnp.Struct(s).SetPtr(0, capnp.Struct(ss).ToPtr())
+	return ss, err
+}
+
+// Conmon_serveExecContainer_Params_List is a list of Conmon_serveExecContainer_Params.
+type Conmon_serveExecContainer_Params_List = capnp.StructList[Conmon_serveExecContainer_Params]
+
+// NewConmon_serveExecContainer_Params creates a new list of Conmon_serveExecContainer_Params.
+func NewConmon_serveExecContainer_Params_List(s *capnp.Segment, sz int32) (Conmon_serveExecContainer_Params_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1}, sz)
+	return capnp.StructList[Conmon_serveExecContainer_Params](l), err
+}
+
+// Conmon_serveExecContainer_Params_Future is a wrapper for a Conmon_serveExecContainer_Params promised by a client call.
+type Conmon_serveExecContainer_Params_Future struct{ *capnp.Future }
+
+func (f Conmon_serveExecContainer_Params_Future) Struct() (Conmon_serveExecContainer_Params, error) {
+	p, err := f.Future.Ptr()
+	return Conmon_serveExecContainer_Params(p.Struct()), err
+}
+func (p Conmon_serveExecContainer_Params_Future) Request() Conmon_ServeExecContainerRequest_Future {
+	return Conmon_ServeExecContainerRequest_Future{Future: p.Future.Field(0, nil)}
+}
+
+type Conmon_serveExecContainer_Results capnp.Struct
+
+// Conmon_serveExecContainer_Results_TypeID is the unique identifier for the type Conmon_serveExecContainer_Results.
+const Conmon_serveExecContainer_Results_TypeID = 0xdebaeed2a782ac80
+
+func NewConmon_serveExecContainer_Results(s *capnp.Segment) (Conmon_serveExecContainer_Results, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_serveExecContainer_Results(st), err
+}
+
+func NewRootConmon_serveExecContainer_Results(s *capnp.Segment) (Conmon_serveExecContainer_Results, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_serveExecContainer_Results(st), err
+}
+
+func ReadRootConmon_serveExecContainer_Results(msg *capnp.Message) (Conmon_serveExecContainer_Results, error) {
+	root, err := msg.Root()
+	return Conmon_serveExecContainer_Results(root.Struct()), err
+}
+
+func (s Conmon_serveExecContainer_Results) String() string {
+	str, _ := text.Marshal(0xdebaeed2a782ac80, capnp.Struct(s))
+	return str
+}
+
+func (s Conmon_serveExecContainer_Results) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (Conmon_serveExecContainer_Results) DecodeFromPtr(p capnp.Ptr) Conmon_serveExecContainer_Results {
+	return Conmon_serveExecContainer_Results(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s Conmon_serveExecContainer_Results) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s Conmon_serveExecContainer_Results) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s Conmon_serveExecContainer_Results) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s Conmon_serveExecContainer_Results) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s Conmon_serveExecContainer_Results) Response() (Conmon_ServeExecContainerResponse, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return Conmon_ServeExecContainerResponse(p.Struct()), err
+}
+
+func (s Conmon_serveExecContainer_Results) HasResponse() bool {
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s Conmon_serveExecContainer_Results) SetResponse(v Conmon_ServeExecContainerResponse) error {
+	return capnp.Struct(s).SetPtr(0, capnp.Struct(v).ToPtr())
+}
+
+// NewResponse sets the response field to a newly
+// allocated Conmon_ServeExecContainerResponse struct, preferring placement in s's segment.
+func (s Conmon_serveExecContainer_Results) NewResponse() (Conmon_ServeExecContainerResponse, error) {
+	ss, err := NewConmon_ServeExecContainerResponse(capnp.Struct(s).Segment())
+	if err != nil {
+		return Conmon_ServeExecContainerResponse{}, err
+	}
+	err = capnp.Struct(s).SetPtr(0, capnp.Struct(ss).ToPtr())
+	return ss, err
+}
+
+// Conmon_serveExecContainer_Results_List is a list of Conmon_serveExecContainer_Results.
+type Conmon_serveExecContainer_Results_List = capnp.StructList[Conmon_serveExecContainer_Results]
+
+// NewConmon_serveExecContainer_Results creates a new list of Conmon_serveExecContainer_Results.
+func NewConmon_serveExecContainer_Results_List(s *capnp.Segment, sz int32) (Conmon_serveExecContainer_Results_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1}, sz)
+	return capnp.StructList[Conmon_serveExecContainer_Results](l), err
+}
+
+// Conmon_serveExecContainer_Results_Future is a wrapper for a Conmon_serveExecContainer_Results promised by a client call.
+type Conmon_serveExecContainer_Results_Future struct{ *capnp.Future }
+
+func (f Conmon_serveExecContainer_Results_Future) Struct() (Conmon_serveExecContainer_Results, error) {
+	p, err := f.Future.Ptr()
+	return Conmon_serveExecContainer_Results(p.Struct()), err
+}
+func (p Conmon_serveExecContainer_Results_Future) Response() Conmon_ServeExecContainerResponse_Future {
+	return Conmon_ServeExecContainerResponse_Future{Future: p.Future.Field(0, nil)}
+}
+
+type Conmon_serveAttachContainer_Params capnp.Struct
+
+// Conmon_serveAttachContainer_Params_TypeID is the unique identifier for the type Conmon_serveAttachContainer_Params.
+const Conmon_serveAttachContainer_Params_TypeID = 0xa3cb406c522dcab1
+
+func NewConmon_serveAttachContainer_Params(s *capnp.Segment) (Conmon_serveAttachContainer_Params, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_serveAttachContainer_Params(st), err
+}
+
+func NewRootConmon_serveAttachContainer_Params(s *capnp.Segment) (Conmon_serveAttachContainer_Params, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_serveAttachContainer_Params(st), err
+}
+
+func ReadRootConmon_serveAttachContainer_Params(msg *capnp.Message) (Conmon_serveAttachContainer_Params, error) {
+	root, err := msg.Root()
+	return Conmon_serveAttachContainer_Params(root.Struct()), err
+}
+
+func (s Conmon_serveAttachContainer_Params) String() string {
+	str, _ := text.Marshal(0xa3cb406c522dcab1, capnp.Struct(s))
+	return str
+}
+
+func (s Conmon_serveAttachContainer_Params) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (Conmon_serveAttachContainer_Params) DecodeFromPtr(p capnp.Ptr) Conmon_serveAttachContainer_Params {
+	return Conmon_serveAttachContainer_Params(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s Conmon_serveAttachContainer_Params) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s Conmon_serveAttachContainer_Params) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s Conmon_serveAttachContainer_Params) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s Conmon_serveAttachContainer_Params) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s Conmon_serveAttachContainer_Params) Request() (Conmon_ServeAttachContainerRequest, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return Conmon_ServeAttachContainerRequest(p.Struct()), err
+}
+
+func (s Conmon_serveAttachContainer_Params) HasRequest() bool {
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s Conmon_serveAttachContainer_Params) SetRequest(v Conmon_ServeAttachContainerRequest) error {
+	return capnp.Struct(s).SetPtr(0, capnp.Struct(v).ToPtr())
+}
+
+// NewRequest sets the request field to a newly
+// allocated Conmon_ServeAttachContainerRequest struct, preferring placement in s's segment.
+func (s Conmon_serveAttachContainer_Params) NewRequest() (Conmon_ServeAttachContainerRequest, error) {
+	ss, err := NewConmon_ServeAttachContainerRequest(capnp.Struct(s).Segment())
+	if err != nil {
+		return Conmon_ServeAttachContainerRequest{}, err
+	}
+	err = capnp.Struct(s).SetPtr(0, capnp.Struct(ss).ToPtr())
+	return ss, err
+}
+
+// Conmon_serveAttachContainer_Params_List is a list of Conmon_serveAttachContainer_Params.
+type Conmon_serveAttachContainer_Params_List = capnp.StructList[Conmon_serveAttachContainer_Params]
+
+// NewConmon_serveAttachContainer_Params creates a new list of Conmon_serveAttachContainer_Params.
+func NewConmon_serveAttachContainer_Params_List(s *capnp.Segment, sz int32) (Conmon_serveAttachContainer_Params_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1}, sz)
+	return capnp.StructList[Conmon_serveAttachContainer_Params](l), err
+}
+
+// Conmon_serveAttachContainer_Params_Future is a wrapper for a Conmon_serveAttachContainer_Params promised by a client call.
+type Conmon_serveAttachContainer_Params_Future struct{ *capnp.Future }
+
+func (f Conmon_serveAttachContainer_Params_Future) Struct() (Conmon_serveAttachContainer_Params, error) {
+	p, err := f.Future.Ptr()
+	return Conmon_serveAttachContainer_Params(p.Struct()), err
+}
+func (p Conmon_serveAttachContainer_Params_Future) Request() Conmon_ServeAttachContainerRequest_Future {
+	return Conmon_ServeAttachContainerRequest_Future{Future: p.Future.Field(0, nil)}
+}
+
+type Conmon_serveAttachContainer_Results capnp.Struct
+
+// Conmon_serveAttachContainer_Results_TypeID is the unique identifier for the type Conmon_serveAttachContainer_Results.
+const Conmon_serveAttachContainer_Results_TypeID = 0xedd2e5b018f17bbb
+
+func NewConmon_serveAttachContainer_Results(s *capnp.Segment) (Conmon_serveAttachContainer_Results, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_serveAttachContainer_Results(st), err
+}
+
+func NewRootConmon_serveAttachContainer_Results(s *capnp.Segment) (Conmon_serveAttachContainer_Results, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_serveAttachContainer_Results(st), err
+}
+
+func ReadRootConmon_serveAttachContainer_Results(msg *capnp.Message) (Conmon_serveAttachContainer_Results, error) {
+	root, err := msg.Root()
+	return Conmon_serveAttachContainer_Results(root.Struct()), err
+}
+
+func (s Conmon_serveAttachContainer_Results) String() string {
+	str, _ := text.Marshal(0xedd2e5b018f17bbb, capnp.Struct(s))
+	return str
+}
+
+func (s Conmon_serveAttachContainer_Results) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (Conmon_serveAttachContainer_Results) DecodeFromPtr(p capnp.Ptr) Conmon_serveAttachContainer_Results {
+	return Conmon_serveAttachContainer_Results(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s Conmon_serveAttachContainer_Results) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s Conmon_serveAttachContainer_Results) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s Conmon_serveAttachContainer_Results) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s Conmon_serveAttachContainer_Results) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s Conmon_serveAttachContainer_Results) Response() (Conmon_ServeAttachContainerResponse, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return Conmon_ServeAttachContainerResponse(p.Struct()), err
+}
+
+func (s Conmon_serveAttachContainer_Results) HasResponse() bool {
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s Conmon_serveAttachContainer_Results) SetResponse(v Conmon_ServeAttachContainerResponse) error {
+	return capnp.Struct(s).SetPtr(0, capnp.Struct(v).ToPtr())
+}
+
+// NewResponse sets the response field to a newly
+// allocated Conmon_ServeAttachContainerResponse struct, preferring placement in s's segment.
+func (s Conmon_serveAttachContainer_Results) NewResponse() (Conmon_ServeAttachContainerResponse, error) {
+	ss, err := NewConmon_ServeAttachContainerResponse(capnp.Struct(s).Segment())
+	if err != nil {
+		return Conmon_ServeAttachContainerResponse{}, err
+	}
+	err = capnp.Struct(s).SetPtr(0, capnp.Struct(ss).ToPtr())
+	return ss, err
+}
+
+// Conmon_serveAttachContainer_Results_List is a list of Conmon_serveAttachContainer_Results.
+type Conmon_serveAttachContainer_Results_List = capnp.StructList[Conmon_serveAttachContainer_Results]
+
+// NewConmon_serveAttachContainer_Results creates a new list of Conmon_serveAttachContainer_Results.
+func NewConmon_serveAttachContainer_Results_List(s *capnp.Segment, sz int32) (Conmon_serveAttachContainer_Results_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1}, sz)
+	return capnp.StructList[Conmon_serveAttachContainer_Results](l), err
+}
+
+// Conmon_serveAttachContainer_Results_Future is a wrapper for a Conmon_serveAttachContainer_Results promised by a client call.
+type Conmon_serveAttachContainer_Results_Future struct{ *capnp.Future }
+
+func (f Conmon_serveAttachContainer_Results_Future) Struct() (Conmon_serveAttachContainer_Results, error) {
+	p, err := f.Future.Ptr()
+	return Conmon_serveAttachContainer_Results(p.Struct()), err
+}
+func (p Conmon_serveAttachContainer_Results_Future) Response() Conmon_ServeAttachContainerResponse_Future {
+	return Conmon_ServeAttachContainerResponse_Future{Future: p.Future.Field(0, nil)}
+}
+
+type Conmon_servePortForwardContainer_Params capnp.Struct
+
+// Conmon_servePortForwardContainer_Params_TypeID is the unique identifier for the type Conmon_servePortForwardContainer_Params.
+const Conmon_servePortForwardContainer_Params_TypeID = 0x9d82529754851252
+
+func NewConmon_servePortForwardContainer_Params(s *capnp.Segment) (Conmon_servePortForwardContainer_Params, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_servePortForwardContainer_Params(st), err
+}
+
+func NewRootConmon_servePortForwardContainer_Params(s *capnp.Segment) (Conmon_servePortForwardContainer_Params, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_servePortForwardContainer_Params(st), err
+}
+
+func ReadRootConmon_servePortForwardContainer_Params(msg *capnp.Message) (Conmon_servePortForwardContainer_Params, error) {
+	root, err := msg.Root()
+	return Conmon_servePortForwardContainer_Params(root.Struct()), err
+}
+
+func (s Conmon_servePortForwardContainer_Params) String() string {
+	str, _ := text.Marshal(0x9d82529754851252, capnp.Struct(s))
+	return str
+}
+
+func (s Conmon_servePortForwardContainer_Params) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (Conmon_servePortForwardContainer_Params) DecodeFromPtr(p capnp.Ptr) Conmon_servePortForwardContainer_Params {
+	return Conmon_servePortForwardContainer_Params(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s Conmon_servePortForwardContainer_Params) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s Conmon_servePortForwardContainer_Params) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s Conmon_servePortForwardContainer_Params) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s Conmon_servePortForwardContainer_Params) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s Conmon_servePortForwardContainer_Params) Request() (Conmon_ServePortForwardContainerRequest, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return Conmon_ServePortForwardContainerRequest(p.Struct()), err
+}
+
+func (s Conmon_servePortForwardContainer_Params) HasRequest() bool {
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s Conmon_servePortForwardContainer_Params) SetRequest(v Conmon_ServePortForwardContainerRequest) error {
+	return capnp.Struct(s).SetPtr(0, capnp.Struct(v).ToPtr())
+}
+
+// NewRequest sets the request field to a newly
+// allocated Conmon_ServePortForwardContainerRequest struct, preferring placement in s's segment.
+func (s Conmon_servePortForwardContainer_Params) NewRequest() (Conmon_ServePortForwardContainerRequest, error) {
+	ss, err := NewConmon_ServePortForwardContainerRequest(capnp.Struct(s).Segment())
+	if err != nil {
+		return Conmon_ServePortForwardContainerRequest{}, err
+	}
+	err = capnp.Struct(s).SetPtr(0, capnp.Struct(ss).ToPtr())
+	return ss, err
+}
+
+// Conmon_servePortForwardContainer_Params_List is a list of Conmon_servePortForwardContainer_Params.
+type Conmon_servePortForwardContainer_Params_List = capnp.StructList[Conmon_servePortForwardContainer_Params]
+
+// NewConmon_servePortForwardContainer_Params creates a new list of Conmon_servePortForwardContainer_Params.
+func NewConmon_servePortForwardContainer_Params_List(s *capnp.Segment, sz int32) (Conmon_servePortForwardContainer_Params_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1}, sz)
+	return capnp.StructList[Conmon_servePortForwardContainer_Params](l), err
+}
+
+// Conmon_servePortForwardContainer_Params_Future is a wrapper for a Conmon_servePortForwardContainer_Params promised by a client call.
+type Conmon_servePortForwardContainer_Params_Future struct{ *capnp.Future }
+
+func (f Conmon_servePortForwardContainer_Params_Future) Struct() (Conmon_servePortForwardContainer_Params, error) {
+	p, err := f.Future.Ptr()
+	return Conmon_servePortForwardContainer_Params(p.Struct()), err
+}
+func (p Conmon_servePortForwardContainer_Params_Future) Request() Conmon_ServePortForwardContainerRequest_Future {
+	return Conmon_ServePortForwardContainerRequest_Future{Future: p.Future.Field(0, nil)}
+}
+
+type Conmon_servePortForwardContainer_Results capnp.Struct
+
+// Conmon_servePortForwardContainer_Results_TypeID is the unique identifier for the type Conmon_servePortForwardContainer_Results.
+const Conmon_servePortForwardContainer_Results_TypeID = 0xae5e0ae5001ebdfe
+
+func NewConmon_servePortForwardContainer_Results(s *capnp.Segment) (Conmon_servePortForwardContainer_Results, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_servePortForwardContainer_Results(st), err
+}
+
+func NewRootConmon_servePortForwardContainer_Results(s *capnp.Segment) (Conmon_servePortForwardContainer_Results, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1})
+	return Conmon_servePortForwardContainer_Results(st), err
+}
+
+func ReadRootConmon_servePortForwardContainer_Results(msg *capnp.Message) (Conmon_servePortForwardContainer_Results, error) {
+	root, err := msg.Root()
+	return Conmon_servePortForwardContainer_Results(root.Struct()), err
+}
+
+func (s Conmon_servePortForwardContainer_Results) String() string {
+	str, _ := text.Marshal(0xae5e0ae5001ebdfe, capnp.Struct(s))
+	return str
+}
+
+func (s Conmon_servePortForwardContainer_Results) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (Conmon_servePortForwardContainer_Results) DecodeFromPtr(p capnp.Ptr) Conmon_servePortForwardContainer_Results {
+	return Conmon_servePortForwardContainer_Results(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s Conmon_servePortForwardContainer_Results) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s Conmon_servePortForwardContainer_Results) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s Conmon_servePortForwardContainer_Results) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s Conmon_servePortForwardContainer_Results) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s Conmon_servePortForwardContainer_Results) Response() (Conmon_ServePortForwardContainerResponse, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return Conmon_ServePortForwardContainerResponse(p.Struct()), err
+}
+
+func (s Conmon_servePortForwardContainer_Results) HasResponse() bool {
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s Conmon_servePortForwardContainer_Results) SetResponse(v Conmon_ServePortForwardContainerResponse) error {
+	return capnp.Struct(s).SetPtr(0, capnp.Struct(v).ToPtr())
+}
+
+// NewResponse sets the response field to a newly
+// allocated Conmon_ServePortForwardContainerResponse struct, preferring placement in s's segment.
+func (s Conmon_servePortForwardContainer_Results) NewResponse() (Conmon_ServePortForwardContainerResponse, error) {
+	ss, err := NewConmon_ServePortForwardContainerResponse(capnp.Struct(s).Segment())
+	if err != nil {
+		return Conmon_ServePortForwardContainerResponse{}, err
+	}
+	err = capnp.Struct(s).SetPtr(0, capnp.Struct(ss).ToPtr())
+	return ss, err
+}
+
+// Conmon_servePortForwardContainer_Results_List is a list of Conmon_servePortForwardContainer_Results.
+type Conmon_servePortForwardContainer_Results_List = capnp.StructList[Conmon_servePortForwardContainer_Results]
+
+// NewConmon_servePortForwardContainer_Results creates a new list of Conmon_servePortForwardContainer_Results.
+func NewConmon_servePortForwardContainer_Results_List(s *capnp.Segment, sz int32) (Conmon_servePortForwardContainer_Results_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 0, PointerCount: 1}, sz)
+	return capnp.StructList[Conmon_servePortForwardContainer_Results](l), err
+}
+
+// Conmon_servePortForwardContainer_Results_Future is a wrapper for a Conmon_servePortForwardContainer_Results promised by a client call.
+type Conmon_servePortForwardContainer_Results_Future struct{ *capnp.Future }
+
+func (f Conmon_servePortForwardContainer_Results_Future) Struct() (Conmon_servePortForwardContainer_Results, error) {
+	p, err := f.Future.Ptr()
+	return Conmon_servePortForwardContainer_Results(p.Struct()), err
+}
+func (p Conmon_servePortForwardContainer_Results_Future) Response() Conmon_ServePortForwardContainerResponse_Future {
+	return Conmon_ServePortForwardContainerResponse_Future{Future: p.Future.Field(0, nil)}
+}
+
+const schema_ffaaf7385bc4adad = "x\xda\xc4Z}p\x14e\x9a\x7f\x9e\xeeI:\x132" +
+	"\x99\xb4=\xd9\xd3\x98\x18\x02\x81K\xb2f\xf9\x08\x9c@" +
+	"A\x91\x00\x91\x83\x057=\x83z\xc2\xaeG3\xd3\x84" +
+	"\x81\xc9\xcc\xd0\xdd\x01\x82z\xa8{\x9c.~\xacpP" +
+	"\x0a\xb5T\x89\xdf\xb0\xa0\xb8\xbb\xb8\x82\xb2%\xac\x96\x88" +
+	"zg\xb8\xc3\x13K<\x14X\x85\x12\x15WK\xa0\xc0" +
+	"\xb9z\xde\x99\xfe\x98\xce\x083\x91\xba\xfd#\x95\x99\xa7" +
+	"\x9f~\x9e\xf7}\xde\xe7\xf3\xf7\xce\xf0\x17\xcbZ=#" +
+	"|_\\\x01\x9c\xfcAQqJ\xff\xa8G{j\xe3" +
+	"\xd4_\x828\x18\x01\x8aP\x00h\xf9\x85\xf7c\x04\x94" +
+	"\x16{'\x02\xa6\xbeyb\xdf\x84\x87W\x7f\xb1\xca\xc9" +
+	"\xb0:\xcd\xf0$c\xf8`L\xd3\xfcG\xf9\x19\xf79" +
+	"\x19\xde\xf0\xbeO\x0c\x87\x19\xc3\xbf\xcc\xf5\xaf\xfd\xf7\x1f" +
+	"\xcda\x0c\xa9\xd3-\xf3\x0f\xaf\xff\xf4\xba?B\x91@" +
+	"\x8c\x17\xbc\xef\xa3tU)}\xac,\xfd5\x02\xa6\xee" +
+	"\xfbq\x9b\\\xba\xee\xf1\x87\x9c\xe2\xbe\x19p\x92\xc4y" +
+	"\xcbH\xdc\xf0\x0do^\xbb\xa1\xf9\xe9\xb5.q\x8c\xb1" +
+	"\xb1\x8c\xe3\xa4\xf62\x01@jc\xcco^\xb3\xfcf" +
+	"\xffS\xf7<\x92\x8bY)\xfb\x18\xa5;\x18s\x0fc" +
+	"\x0e^\xb1r\xd6\xc3\xc1\xbb7:Uo+\x1b\xc4\x01" +
+	"J\xaf1\x86\x95'nx\xe1\xc6_~\xf1\xa8\x93\xe1" +
+	"x\xd9W\xb4\xb6\xb3\x8ca\xfd\x9cO\x17\xb5O\xf3?" +
+	"\x96\xad\xceC|5\xbe-(\x8d\xf6\x09\xc0\xa7\x9e\xdf" +
+	"\xdf\x1c\x8c\xb5\xbe\xf9\xb8S\x8c\xe8;Gb\x86\xf8H" +
+	"\xcc\x8f\xce\x1d}\xe2\xdd\xd0\x98\xcd \x0f\xc6>\xcbn" +
+	"'A\xbf\xf0\xd1\xb2o\xf1-\x05L\x8d^\xfa\xfc\x82" +
+	"\xaf\xc6\x9f\xd8\x9ck\x8f;|_\xa1\xd4\xcb\x98\xdff" +
+	"\xa2\xeb\x9f\xfbs\xef\xaa\xf1\xc3\xb68u\x9f\xf2\x1d " +
+	"\xddXN\x0c\xab\x9eV\xff~\xcf\xae\x9f\x12\x03gK" +
+	"\x03l\xa9+_\x85\xd2\xd8r\x125\xba\xfc:\xc0\xd4" +
+	"\xd2\xb9\xfb\x9e[.\x1f\xdf\x9ac\xb3\x13\xca\xd7\xa0t" +
+	"c9mV\x9a2|\xe7\xbb-M\xdb\xdc{\xe1\x88" +
+	"o\x04\xf1Mc2\xdb\xcb\x9f\x03\xfc\xf6\xbb\xdd\xd7\x1c" +
+	"/\xbd\xf5Y\xe7\xd9\x977\xd1\x01\xf8\xfc\xb4\xb8Q\x9b" +
+	"~\xff\xc2\x83\x9f/{\x96\x84q\xee\xbd\x8e\xf0/D" +
+	"\xa9\xdd\xffw\x00\xd2L\xffs\x80\xa9\xdbzO>\xf3" +
+	"\xe0}m;\xdc\xaayvn\xfe\xbd(]\xf0\xd3\xc7" +
+	"\xb3\xfeZ\xf2<\xfe\xc8\xb1\xd2\x07\xdb\x86\xbd\x90\xcb\x8e" +
+	"u\xe2~\x94&\x88\xb4\xd0\xb1\"\xad\xc4z.V\xf3" +
+	"\xa9m\xdb^\x9d3\xe6\xdb-)2\xd3-b\x15\xb6" +
+	"D\xc5?\"\xc5\x89\xf4:'\xad\xae\x14\x00R\x8d\x9f" +
+	"\xdd\xfb\xd4=\xbf\x0d\xed\xca%\xbc\xa7r/\xa6\xd9\xa4" +
+	"\x07*I\xf8\xfe\x176\x8f;wt\xe9.\xf7\xc2\xe9" +
+	"\x1c[\xf6T\x1e@\xe90q\xb7\x1c\xaa\xbc\x87\x07L" +
+	"U\xcc\xf9\xcf\x09\x9f\xdd\xfa\x97\xd7\x9cg:\xb3\x8aE" +
+	"\xa0RE\xf2>Q^\xe2\xda\xdf\x8e\xbd\xeedXY" +
+	"UJv\xdd\xc8\x18^\x1b3\xf0\x8aM\xef\xa9\xfb\\" +
+	"\xabcg\xb4\xbbj\x10'\x1d\xae\xa2\xd5\x1d\xaa\"\x7f" +
+	"\xfb\xb7g\x87.\xf3=x\xff\xfe\x9c':\xf3\xeas" +
+	"(E\xaf\xa6\x8f\xea\xd5\xcc\xac\x9f\x1c\xfbnagr" +
+	"\xd8[N\xe5\xbf\xaa^C\xab[_M\xca\x17\x0d\xd8" +
+	"\x17\xf0N\xd4\xff\xc3\xc9\xb0\xb3z/1\xbc\xc1\x18\xce" +
+	"T\xfe\xe9\xe1\xaa\xf1\xbb\xb2\x18NT\xb3\xfd]`\x0c" +
+	"u\xd5\x7f\xb9K\x8bV\xbf\x93\xf3\xa0\xebjN\xa24" +
+	"\xa1\x86>\x8e\xady\x9dVT\xd5\xd6;\xca\x1f\x9f\xfa" +
+	"\x8ek\xb7\x8c{H\xedc(M\xa8e\x07]KN" +
+	"\xf4\xf8_\x9f\x99\xbbcu\xe0\xdd>\xf1p\xa2v!" +
+	"J\x17\x18\xe7\xd9\xda\x15\x80\xa9\xf3+\xc7\xdfYS\xf3" +
+	"\xee\xa1\x9cvi\x1ex\x12\xa5i\x03\x99\xa7\x0f\xfc\x04" +
+	"0\xb5\xe1\xc7K\x93\xb7\xce\x1b\xf7\xa1\x8b\x9b\x85O]" +
+	"\xdd\xfb(M\xa8c\x8b\xa8\xa3\x0d\xde\xb9\xf5\xee\xa7\x0f" +
+	"|\xbe\xeb\xc3\xac,]\xc7\x12\xcfb\xc6p~\xdc\xf9" +
+	"?=:>\xf9\xbfn\xddE\xc4\xb9\xaen\x15J\xdb" +
+	"H\\\xcb\xe6\xba\x9b\xc9\x027&\xa7\x8aC\x83\xe5G" +
+	"\x9c\xf2j\x06_A\x0e1z0K\xb2\xb7M\xdd|" +
+	"kT:\xead\xb8e\xf0\x06R\x18e\x0c\xff \xfd" +
+	"y{|\xf5\xc9\xe3N\x86\x07\x06\xb34\xbd\x891\xbc" +
+	"t\xdb\xe9+\xb7\x1f?p\xca\xc9\xb0g0G*\x0e" +
+	"2\x86=sZ:\xfe\xe7\xe8\xd0/Al\xe6\xec\xc0" +
+	"\x06l9;x\x0dJb=\xed\xdeWO\x89\xa6\xf7" +
+	"\xf3\xda\xado\x1e\xff\xe9_\xdd\x9b\xf3\xb2e\xd7o@" +
+	"it=K\x00\xf5\xd7q\x80\xa9\xa7\x16?\xfe\xd0\x99" +
+	"A\xe2\xd7\xee$\xc1l\xb1r\xe8\xc7(m\x1aJ\x1f" +
+	"7\x0ee\xde\xf0\xe2\x86\xb5\xbf~u\xe4\xd4\xaf\x9d\x0b" +
+	"}\xb2\x81e\xc4\x9d\x0d\xb4\xd0\xca\x7f\xbe\xebH\xd3\x89" +
+	"\xa3Y\x0c\x87\x1a\xf6\x13\xc3)\xc6pl\xd4'\x93\xaf" +
+	"\xbc\xa3\xe3\xdb\\\xb1-66q\xd2\x88F\xdaLs" +
+	"#1\xbf\x8c[\x06\xfc|\xe1\xa7g\xb2\x82\xb5\x91\x19" +
+	"Na\x0cg6\xfd\xb6\xe5\xce\xb7\x7f\x7f6GZ]" +
+	"\xd9\xb8\x1f\xa5M\x8d\x94V\xd7\xfc\xd7\xf4\xae\x0f/\xbc" +
+	"t.W\xc4\xde\xd1\xf8\x18J\xeb\x98\xce\xd5\x8dK\xa1" +
+	"9\x15\x8d\x1b\xaa\x16Wb\xc5\xc3\x92Z\xc2H\x0c\x0b" +
+	"'\xe2]\x89\xf8O\xc2J2\x9e\x1c79\xfdE]" +
+	"\xa6\x86C=\xf1\xf0\xe4D\xdcP\xa2qU\xab\xefP" +
+	"4A\xe9\xd2e\x0f\xef\x01\xf0 \x80\xe8\x9b\x04 \x97" +
+	"\xf0(\x078\\\xa1\xa9\x8b\xbbU\xdd\xc0\x0a\xdb\xe0\x80" +
+	"X\x01\x98\x97\xba\xb0\xa6*\x86z\x83\xd2\xa5\xeaI%" +
+	"\xac\xea\xf5AU\xef\x16bF\x96\xba\xe9\x00r\x19\x8f" +
+	"\xf2\x95\x1c\xa64UO&\xe2\xba\x0a\x00Xa\xd7\xf5" +
+	"\x1f\xa2\xb2C\xd1\x14>\x9f\x0dZ\x1dL\x01\xda&\xbb" +
+	"\xb4\x05I\x1a\xaf\x1b\x1d\x88r\xb5\xa5p\xc7<\x00\xf9" +
+	"\x0f<\xca\xafp(\"\x06\x90\x88\xbbg\x03\xc8/\xf3" +
+	"(\xbf\xc7\xa1\xc8q\x01\xe4\x00\xc4\x83\xc4\xf9\xdf<\xca" +
+	"_r(\xf2|\x00y\x00\xf1\x14\x11?\xe31T\x82" +
+	"\x1c\x8a\x1eO\x00=\x00R\x11N\x07\x08y\x90\xc7P" +
+	"\x05\xd1\x8b\x8a\x02XD\xd1\x84#\x01B%D\x0f\x10" +
+	"\xbd\xb88\x80\xc5\x00\x92\xc8\xf8+\x88~-r\x98\xea" +
+	"R\x0d%\xa2\x18\x0a\x08?\x8bE\xd0\x07\x1c\xfa\x00S" +
+	"\xf1\xccV\x80Wu,\x07\xec\xe0\x11\xfdvz\x04$" +
+	"b\xaa;\x1a\x99\xa9$\x93Q\x10\xe2\x9d\x16[\x19p" +
+	"\xeca\xe7\xc5\x1e\xceSt\xb5C1\x16\xd0\x01\x13\xad" +
+	"\x0c\xb06\x99\x88L\x8b\x98\xdf\xecu\x01\x98/W\xd8" +
+	"\x81\x90Y@>g\xa3\xab\xda\x12\xb5}\x99\x9a\xe5\xec" +
+	"~-/g\xb7j\x8d\xcb\x17\x84\x8b\xe8\x0b\x91\xbe6" +
+	"\xc3P\xc2\x0b,\x8dA\xd3\x9f\xc9!\x1cZ\x07\xd9Z" +
+	"\x85n-fm\xbe\x7f>\xa7'\x13B\\W]:" +
+	"fg\xe2\xaa\x81\xcb}\xac\x15v\x07\xea\xb2\xaap)" +
+	"\xabv$4\xe3\xfa\x84\xb6T\xd1\"\xfd\xc8$V\x1f" +
+	"R@\xa0ij\"\xa9\xc6g$:m}A\xb5V" +
+	"\xef\xce;\x97XM\xbbKi\xd1E\x94\x06M\xa5d" +
+	"b\x7f\"m\xe2\xfc}\xcf\xe5\x0b\xf5\x13)\x15\xe5c" +
+	" \xab\xf7*`\xad\x96?8\xd7*\x97X\xaa\x1a\x9b" +
+	"\x00\xe4z\x1e\xe5\xe1\x1c\x9a)\xa8\x99h\x0d<\xca\xa3" +
+	"8\xf4\x1b=I\xd5\x15\xea~@\x7fR1\x16\x14\xe4" +
+	"\x9e\xa1>a\x17T\xf5\xdad\xa2\xaf\x83\xfe\x90 P" +
+	"\\\xb6e\xa6\xc5<lk\xf5P\x05\xd8vr\xa7\x96" +
+	"\xe8N\xceT\xe2J\xa7\xaa\x01\x8b\xe5\x12\x96\xae\xc5I" +
+	"$F\xf4N\x07X\xa1\xf7\xe8\x86\xda\x15I\x85\x19\xf3" +
+	"|\x1d\x00\xf2\x12\x9e\xf6\x92L\xa2\xc0,\x0f\xbb\xd8k" +
+	"7\xa9\x9a\x1eM\xc4Y\xc1\xd1\x91\x15\x9c2k\xef\xed" +
+	"\xb4\xf7V\x1e\xe5\x19\xf6aO\xa3*\xf2\x8f<\xca\xb3" +
+	"\xa8\xde`\xba\xde\xc8\x140\x1d<\xca1\x0eW,Q" +
+	"\xb5y\x09]E\x04\x0e\x11\xbe\xafB\x14\x94\x9f\xfb\x97" +
+	"I\x82\xaa\xee\xcf?\xb2\xad\xc6\xccu\xa2\x9e\x8b\xe8\x9e" +
+	"\x91\xe8\x9c\xa2\xf9\xa3KTM\xf6\xa0\xb3K\xc5&\xff" +
+	"\xac\x9e\xa4\xea\xb4eS\x0e[\x12m\x0a\x8fr\x87\xc3" +
+	"\x963'\xd9\x066\xa3\xc9\x12\x9c#\x9aVt)\xcb" +
+	"B\xd1\xe5*z\x81Co\xde\xd1e\xdc\x1c\x8dG\x12" +
+	"K\xe9\xcd\xf4\xe1\x1b\xcc!\x03\xd6\x82\xef\xa8\x02\x90\x97" +
+	"\xf1(\xff\xab\xbd\xe0\xbbF\x02\xc8\xb7\xf3(\xdf\xebX" +
+	"\xf0\xcaq\x00\xf2\x9d<\xca\xf7S\xb3\x81\xe9f\xe3W" +
+	"\xe4&\xf7\xf2(\xaf\xa5^\x83c\xbd\x86\xb8\x9a\xac\xff" +
+	"\x10\x8f\xf2V\x0e\xf9\xa8U\xabk\x97F#\xc6\x02\x14" +
+	"\x80C\x01p\xe2\x025\xda\xb9\xc00\xbf^\x0e\xf7\xb9" +
+	"\xa8%\x0cE3\xae\x8f\x84\x12\xe1E\xaaa\xd5Yw" +
+	"\xa1m\xb2\x93@\xeeT\xc6\x7f\x9f\x0a>\x11\x97c\x88" +
+	"6\xb4!\xf6.\xb7\x87\x14\xb1\xf7n{\x80\x17{w" +
+	"\xd9\xb3\x8dx0\xe8\x80W\x0ej\xf6\x0c(\x1e\xdck" +
+	"w\xd1\xe2\xa1\xfd\xf6,)~t\xc0NL\xe2\x09\xcd" +
+	"\x81\xba\x9cX\xee\x98dO\xacr\x80O\xa7\xd6\xd8\xd8" +
+	"\x87xz\x8bc\xa4\xf8\xe6w\x0e8\xee\xec^\xc7t" +
+	"{!\xe8\x00\xcb.\xec\xb7;\x00\xa9\x08\xd7\xd8\xf0\x85" +
+	"\xe4\xc5-6R\"\xf9\xf0w\xf6\x11I\"\xae\xb2\xfb" +
+	"#\xa9\x12\x0f\xd8\xd8\x94T\x83\xef\xdb\xd5K\x1a\x82\x1f" +
+	"\xdb@\x9e\xd4\x8c'\xed\xd2\xdf2\x1aK\x1d3UK" +
+	"\x1b^\x81)3\xa7\xc1\xc4\xb4c[\x04\xde<\xdet" +
+	"\xefcW\x16\x93\x91\xc5st\x89\x0a\xa8\xa5\xccl\x0d" +
+	"\xb5,_\xa7\xccw\x8a\xdc=Y\xbb{\x182\xe3\x09" +
+	"R\xe6#\xce\xdd\xc9\xa1\x9a2\x136\xd4\xa6u[\xdf" +
+	"'\xa6\xe5\xa6\xcc\xb6\x01;m\x81N\x9a)\xc8\x8ce" +
+	"4\x83\xd9\xcf\xe4\xb9\xc9\x99\xe2\x992\xfb>>k\xd8" +
+	"\xd0\x0d0K?\xda<\\Vs\xc8\x02#e\xb39" +
+	"\x96\x90\x09\"\xccD\x91\xb9\x04\x17\xd9\\\xc2,u\x99" +
+	"A\x7f8SI\xb6\xc7\x0d\xad\x07 e\xd6{\xcem" +
+	"G4r?#\xdd\xbc\xae\xa6\xcc~\x99\xcbn\x98\x17" +
+	"w\x0bi+\xe4|\x9a\xe9m\xd2\x8f;\x12\x1a\xdf\xa7" +
+	"z\xd86\xbf\x18O\xc6\x00\xf2\xb5|\x11\x80\x85^\xa1" +
+	"\x89\x88H2N\x02NjG\x01m\xec\x00M\x88J" +
+	"\x1a\x8bw\x03'\x8d@\x019\x0b[Gs\xe6\x97\x86" +
+	"\xe0\x1a\xe0\xa4:\x14\x90\xb7\x90X4\xe1;\xa9\x92\xbd" +
+	"\xebC\x01=\x16\xbe\x82&\xe6,!n\x00N\xbc " +
+	"`\x91\x85\xe7\xa1\x89\xe3\x88\xa7w\x01'\x9e\x12\xb0\xd8" +
+	"\x82\xe3\xd1\x04\xee\xc5\x8fV\x01'\x1e\x16P\xb0\x906" +
+	"4!\x0d\xb1W\x03N|C\xc0\x12\x0bwG\x13k" +
+	"\x12w\x93\xbe\x9d\x02z-\xc0\x1aMPG\xdc\xb6\x05" +
+	"8q\xb3\x80\xa5\x16h\x8e\xdf\xed\xbe\x06\x18v\xbb\xf1" +
+	"\x00p\xe2F\x81\x9a\x06\x0a\xd1VL\x853q\x86\x19" +
+	"#C+\xa6L\xbc\x01M\xd3\xa3\xd6\x8a)\xb3ys" +
+	"rjV\x80dXy\x95X\xf5\xac`\x98\x9c\x88O" +
+	"L\xbfb\xe9\xbbAA\xd3\xd7\x81\xe4\xe8\x19\xd7\x85Z" +
+	"\xe6\xbbLD\xda\x091\xec\x92\x9cv04\x1d\xcc\x9f" +
+	"\x91k\xf6%\x9c\xdbmh\xed\xf9\x0e\x00\xae\xead\xd7" +
+	"\xe9\x1c-M\x03w\x19\xcb\xa2;C:\xfa\xc3VS" +
+	"\xb5\xf4<V\x01\x84\xb6\"\x8f\xa1\x17\xd1\xc6$\xa4\x1d" +
+	"8\x1b \xf4\x07\xa2\xbf\x82\x1cb\x1a\x95\x90v3\xe8" +
+	"\xe0e\"\xefC\xbbW\x90^cP\xc3+D\x7f\x0b" +
+	"\xedvAz\x03\x83\x00\xa1}D?\xc6\xa0\x09>\x0d" +
+	"M|\x84\x0b\x01BG\x88~\x9eA\x13\x9e44q" +
+	"\x96\xa9=\xc3 \x0b\x8eCQ(\x0a\xa0\x00 \x89\x1c" +
+	"\xd1+8\x1eC\xd7\x12\xbd\xa48\x80%\x00R#\xa3" +
+	"7\x10}\x0a\xd1\xbdB\x00\xbd\x00R\x1b7\x0f \xd4" +
+	"J\xf4\x9f\x13\xbd\xb4$\x80\xa5\x00\xd2-\x8c\xfeOD" +
+	"\x8f\x10}\x807\x80\x03\x00$\x85\xa3}\xcd%\xfa\xed" +
+	"D/+\x0d`\x19\x80\xd4\xc3M\x02\x08\x19D\x7f\x88" +
+	"\xe8>\x0c\xa0\x0f@z\x80\xd3\x00B\xf7\x13\xfd\x11\xa2" +
+	"\x97\x0f\x08`9\x80\xb4\x8e\xd1\xd7\x12};\xd1\xfde" +
+	"\x01\xf4\x03H\xdb\x98\x9cg\x88\xfe*\x97\xd59\xa5\xe6" +
+	"u\xc7#1\xb5C\x01\xde\xd1\x93\x18\xaa\xd6\x15\x8d+" +
+	"1r\x82L\x13^\xab\x1b\x91h\xdcj\xc9\xd5eQ" +
+	"\x83\xc1'\xd8\x07YI$\xba\xda\xe9)\xf8\x15cA" +
+	"\x9f\xa71\xb3@\xf2\x9a\x03\x00p\x00\xb2\x8c+\x1cS" +
+	"\x95xwr2\xf0]\x91>\xb0N,1O\x89\xb5" +
+	"i\xc0\xf7Eu\xc2\x89\xae.%\x1ei\x03A\xeb\xfb" +
+	"\xb0\xff}\xe0\x0a5\xbe\xe4&\xc5\xb9`wD\x84\xb3" +
+	"k=\xfa\xed\xd6+\xddq\xa7\x94H$jD\x13q" +
+	"\xa8Ub\xd7G,Q\xde\xf4\xe2V\xc4TeQ_" +
+	"r\xbfF\xd0\xa0\xaaw\xc7\xf8|\xa7\x16\xab\xc3+\x00" +
+	"a\xd2\x9d\xcd\xbfk\xf6\xd5\x01.=\xfcZ\xfdb\xa1" +
+	"\xb0V\xae1\xcd,\xd5.\x9caz\x06S\x98\xe2\xc0" +
+	":\xdb\x82\xf6\x0c\x95_\xaa\x8b\xab\xc6\x0dz\x87b\x00" +
+	"\xf6\x03}p\x83p\x99.\xd15&M\xcf\x8cD\x8f" +
+	"8\x16\xba\xae*3\xe8\xfc\xc6\xca~\xe2z\x9a\x9d\xd6" +
+	"\xf2(?\xea\x18\x936\xd2\xec\xf4\x08\x8f\xf2\x13\x8e1" +
+	"i\x13\x11\x7f\xc3\xa3\xfcL\x9e\xdbt\xceRY\x81>" +
+	"Q7\"\x89n\xc3\xf9U\xd54+\x0d\xe4\x03\x10d" +
+	"\x0as\xfe\xc8\x885\xe8\x14\x00\xcb\xe9\xce2g:\xe2" +
+	"\xa5UY\x83F\xc1\xc0~\x7f\xc3\xcd\x1a\xc2\x0a\xd0\x98" +
+	"\x0b\xc9J7\xc8\xe4I\x03-\xb5\xbd\xa4\xf6\x1d\x1e\xe5" +
+	"\xcf\x1c\x9et\x82<\xe9X\x06\xc97\xe1\xfdSd\x8e" +
+	"Oy\x0cy\xa8\xba\xa6\xe1}\x09q\x10\x80|\xde\xc2" +
+	"\xf7\xd1\xc4\xf7G\x02\x04\xa9&\x96\xb1\x1a\xca\xa5k\xa8" +
+	"\x17\xc7e\xc1\xfe\xc5|\xba\x86\xfa\x18\xdd\x86\xfd\x05\xcc" +
+	"\xd4P\xd4L\xd8\xbf\x1a\x0bw\xcb\x15\x99\xd4\xeeJ\xea" +
+	"\x82a\xf4\xe4.Q\x97\xf0\xdcK'\xec\x02\x81Y;" +
+	"\x079 \x9b*;\xdd\x88\xb9\xf1/\xae/\xfe\xe5," +
+	"\xcf\x97\x01\xbb\xf0\\\x0a\xac\xf5S\xd3\xcar\x12[\xca" +
+	"\xe8A\x0cKl\xa6\x7f\x9c8\x84\xfe\xf1bM\x13\x00" +
+	"z\xc4\xcaA\x00B4\x19\x16\xe2\xaa!$\xa3\x11\x7f" +
+	"\xb7\xaejB\xb7\xa1\xe7\xe5\xc79\xe6\\\x07D\\a" +
+	"\x99M!c\xccM\x1b\xc3\xb4Z\x94RZ\x84G9" +
+	"\xe9\x00\x8e\xba\x88\xb8\x80G\xd9\xa0\x8c80\x9d\x11\x17" +
+	"\xd3\xdbI\x1e\xe5\xdb\xb9t\x9f29\x11a\xc1\xe7\x01" +
+	"\x0e=\xb6cd\x8ci:\x86i[#\xda\xa5F~" +
+	"\xd6m8z\x9f\xfe\xf5\xbb\x99\xf1\xd2\xd5k/td" +
+	"\x86p\x86\x19\xfcZG4\x82%\xc0aI\xff\xef\x94" +
+	"\x0a\xbb\x86\xb0\xa0\x92\x02\xe0g\x13`\xc8\xcc\xb5\xb4\xb3" +
+	"+-]\xeb\xab\x1c\xd5\xc9<\xb5\x8d\xb3\xedBd\xf9" +
+	"\xfa\x93\x1a\x80\xfc\x04\x8f\xf2v+\xf7\x88\xdb\xd6\x00\xc8" +
+	"\xdby\x94_\xa6\xcc\xc3\xa7\xcb\xd8N\x8a\x94\x17y\x94" +
+	"_\xa5\xbc\xe3ayG\xdcC{z\x85G\xf9\x83\xec" +
+	"H\xd1Y\xeaw5\xb2l\xecSu\x1dj\xa3\x89\xb8" +
+	"\xe3nO7\x12\xc9\xb6\xf9\x86\x8aZ\x88rF{\x02" +
+	"\xe7\xff\xff\xa1\xcd9{'VE\x0c\xcc\xf3\xf4,\x88" +
+	"\xad\x80\xd33\xebpa\xf5\xca\x02\x1a\x7f\xd8\x1dY\xde" +
+	"\x17\x9e\x16\xc6XP;\x9a\xe3\x92+m\xd0\xec&\xe0" +
+	"\xfb\xb7i\xa1\x83\x05\x18\xd4\xc4\xfa\xb4\x9f\xcc\xeaI\xa2" +
+	"\xea\xb8\x8d9\xc02he\x13\x80\x15\xe3\x9c\x16\xec\x8e" +
+	"Sn\x99F\x92\xe7+aT\xfd\x0b\xf5D\xbc\xb0;" +
+	"\x16GNi\xb0\x86h/\x9br\xad\x8ak\xce\xd0\"" +
+	"\xd2\xd0WF\xe4+\xd1N\x9aR%\x95y\xbb\x10\x8b" +
+	"<\x97.\xffW\xb1\xc2\x1d \xfa@\xb4\xa3P\xaaa" +
+	"\xe2\xab\x89\xde\x80v JC\x18\xff@\xf3\x1e_," +
+	".J7\x00\x8dHCn\x03\xd1G\xb1\x06\xa08\xdd" +
+	"\x00\x8c`C\xf7p\xa2\x8f'z\x89\x90\x1e\xa2\xc72" +
+	"\xf9c\x88>\x85\xe8\xde\x92\xcc\x10\xcd\x86\xfdV\xa2\xcf" +
+	"\xa0\x86!\xa9%\xc2\xaa\xaeO\x03\xb4R\xa5\x09\xfa\x98" +
+	"q-\x18J\xa7\xf9y\"5\x0cQ\xc31\xe8Fc" +
+	"\x91)\xd4\xc8\xab\x16\x8b\xa1h\x9d\xaa\xcd\xa2u\xeb\x06" +
+	"\x99\x1a\x04\x87\xccTX\xd1:\x137\xa9\x1a\xf8\xf5>" +
+	"\xe4Y\x9a\xea\x90\x97\x95$\xcc\xc4\xd1\xcf\xc2h\xb7\x13" +
+	"\x8e\xfe\x8eR\xec[\xe9_j\x98\x19\xf6\xe0\xec\xcc\x0f" +
+	"5\x8e8\xea\xe2a\x8a\xad\xf7x\x94\xbf\xa6\xf3mM" +
+	"\xa7\xd8\xd3\xe4\xfd_\xf2(\x9fwL\x0ag)\xc5\x9e" +
+	"\xc94\x82\x16>\x82d\xfa\xa0\xe5!&<r\x15\xf3" +
+	"(\xe6!\xc3\xd1\x01\x8f4\xb3\xd6\xeeZ\xa2\x8f\xc1\xec" +
+	"\xacL\x1e\x9f\xe86B\xc0\xaba\xf3~\xe9{Z\xb9" +
+	"\\\xa8\xc3\xdfxf\xef\xcf8\x90\xf7\x98c\xdd\xda\xf4" +
+	"{\xcc1S\\\x9e9\xce\xbaG\xb9<C\xb7\xa3u" +
+	"\xbbLw\xe9}\x7f\x14V\xd8\x05\xacu\x8dU\xd0l" +
+	"\x95u\x8f\xe9\xb8\xbd\xcb+3\x9b\x17\x11\xec\x1eB0" +
+	"\xb4\x1e\x17\x081\xc8\xfe\xb1\x83\xd5\x145\x8f\xb4\x7f\xed" +
+	" ,R{\xac\xc9{\x89\x12\xeb\xb6\x92\xc9\xff\x05\x00" +
+	"\x00\xff\xff'\x04a\xf9"
 
 func RegisterSchema(reg *schemas.Registry) {
 	reg.Register(&schemas.Schema{
@@ -4793,14 +6187,20 @@ func RegisterSchema(reg *schemas.Registry) {
 			0x8aef91973dc8a4f5,
 			0x8b4c03a0662a38dc,
 			0x8b5b1693940f607e,
+			0x90a3950a51412b8b,
+			0x94a72d9a2ccb9a30,
 			0x9887a60f577a1ecb,
+			0x9d82529754851252,
 			0xa0ef8355b64ee985,
 			0xa20f49456be85b99,
+			0xa3cb406c522dcab1,
 			0xa93853d6a4e3fa16,
+			0xa9e93cf268b17735,
 			0xaa2f3c8ad1c3af24,
 			0xaa4bbac12765a78a,
 			0xace5517aafc86077,
 			0xad2a33d6b9304413,
+			0xae5e0ae5001ebdfe,
 			0xae78ee8eb6b3a134,
 			0xb5418b8ea8ead17b,
 			0xb62f418e0ae4e003,
@@ -4809,22 +6209,28 @@ func RegisterSchema(reg *schemas.Registry) {
 			0xba77e3fa3aa9b6ca,
 			0xc5e65eec3dcf5b10,
 			0xc76ccd4502bb61e7,
+			0xc865d8a1122038c5,
+			0xca8c8e0d7826ae86,
 			0xcc2f70676afee4e7,
 			0xce733f0914c80b6b,
 			0xceba3c1a97be15f8,
+			0xd01c697281e61c21,
 			0xd0476e0f34d1411a,
 			0xd61491b560a8f3a3,
 			0xd9d61d1d803c85fc,
 			0xde3a625e70772b9a,
+			0xdebaeed2a782ac80,
 			0xdf703ca0befc3afc,
 			0xe00e522611477055,
 			0xe313695ea9477b30,
 			0xe5ea916eb0c31336,
+			0xedd2e5b018f17bbb,
 			0xf026e3d750335bc1,
 			0xf34be5cbac1feed1,
 			0xf41122f890a371a6,
 			0xf44732c48f949ab8,
 			0xf4e3e92ae0815f15,
+			0xf7507d1843e734e4,
 			0xf8e86a5c0baa01bc,
 			0xf9b3cd8033aba1f8,
 			0xfabbfdde6d4ad392,
