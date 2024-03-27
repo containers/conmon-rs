@@ -31,6 +31,7 @@ linters:
     - ginkgolinter
     - gocheckcompilerdirectives
     - gochecknoinits
+    - gochecksumtype
     - gocognit
     - goconst
     - gocritic
@@ -52,6 +53,7 @@ linters:
     - govet
     - grouper
     - importas
+    - inamedparam
     - ineffassign
     - interfacebloat
     - ireturn
@@ -70,12 +72,16 @@ linters:
     - noctx
     - nolintlint
     - nosprintfhostport
+    - perfsprint
     - prealloc
     - predeclared
     - promlinter
+    - protogetter
     - reassign
     - revive
     - rowserrcheck
+    - sloglint
+    - spancheck
     - sqlclosecheck
     - staticcheck
     - stylecheck
@@ -83,6 +89,7 @@ linters:
     - tagliatelle
     - tenv
     - testableexamples
+    - testifylint
     - testpackage
     - thelper
     - tparallel
@@ -96,12 +103,6 @@ linters:
     - whitespace
     - wrapcheck
     - zerologlint
-    - gochecksumtype
-    - inamedparam
-    - perfsprint
-    - protogetter
-    - sloglint
-    - testifylint
     # - depguard
     # - exhaustruct
     # - gochecknoglobals
@@ -145,6 +146,7 @@ linters-settings:
       - badLock
       - badRegexp
       - badSorting
+      - badSyncOnceFunc
       - boolExprSimplify
       - builtinShadow
       - builtinShadowDecl
@@ -210,7 +212,6 @@ linters-settings:
       - sliceClear
       - sloppyLen
       - sloppyReassign
-      - sloppyTestFuncName
       - sloppyTypeAssert
       - sortSlice
       - sprintfQuotedString
@@ -220,7 +221,6 @@ linters-settings:
       - stringsCompare
       - switchTrue
       - syncMapLoadAndDelete
-      - timeCmpSimplify
       - timeExprSimplify
       - todoCommentWithoutDetail
       - tooManyResultsChecker
