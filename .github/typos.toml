@@ -2,4 +2,9 @@
 extend-ignore-re = [
     # ignore the generated schema binary string in *.capnp.go files
     "const schema_[0-9a-f]+ = \"(\\\\?.|[^\"\\\\])*\"( \\+\\s+\"(\\\\?.|[^\"\\\\])*\")+",
+    "ans",
+]
+[type.rust]
+extend-ignore-re = [
+    "ws",
 ]
