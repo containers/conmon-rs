@@ -11,7 +11,7 @@ dependencies:
         match: GO_VERSION
 
   - name: rust
-    version: 1.71.0
+    version: 1.75.0
     refPaths:
       - path: .github/workflows/ci.yml
         match: ACTION_MSRV_TOOLCHAIN
@@ -19,7 +19,7 @@ dependencies:
         match: ACTION_MSRV_TOOLCHAIN
 
   - name: golangci-lint
-    version: 1.55.0
+    version: 1.56.2
     refPaths:
       - path: .github/workflows/ci.yml
         match: version
@@ -27,7 +27,7 @@ dependencies:
         match: GOLANGCI_LINT_VERSION
 
   - name: zeitgeist
-    version: 0.4.1
+    version: 0.4.4
     refPaths:
       - path: Makefile
         match: ZEITGEIST_VERSION
@@ -39,7 +39,7 @@ dependencies:
         match: JAEGER_IMG
 
   - name: nix
-    version: 2.17.0
+    version: 2.21.0
     refPaths:
       - path: .github/workflows/ci.yml
         match: NIX_VERSION
