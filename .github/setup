@@ -17,6 +17,9 @@ prepare_system() {
     sudo systemctl stop docker
     sudo ufw disable
 
+    sudo apt-get update
+    sudo apt-get install -y criu
+
     # enable necessary kernel modules
     sudo ip6tables --list >/dev/null
 
