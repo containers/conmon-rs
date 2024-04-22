@@ -1,6 +1,6 @@
 module github.com/containers/conmon-rs
 
-go 1.21
+go 1.22
 
 require (
 	capnproto.org/go/capnp/v3 v3.0.0-alpha.25
