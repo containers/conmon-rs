@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{bail, Context, Result};
 use nix::{
     errno::Errno,
-    sys::socket::{bind, listen, socket, AddressFamily, Backlog, SockFlag, SockType, UnixAddr},
+    sys::socket::{bind, listen, socket, AddressFamily, SockFlag, SockType, UnixAddr},
 };
 use std::{
     os::{
@@ -158,7 +158,7 @@ impl Attach {
         let mut permissions = metadata.permissions();
         permissions.set_mode(0o700);
 
-        listen(&fd, Backlog::new(10).context("create backlog")?).context("listen on socket fd")?;
+        listen(&fd, 10).context("listen on socket fd")?;
 
         task::spawn(
             async move {
@@ -246,7 +246,7 @@ impl Attach {
                             debug!("Read {} stdin bytes from client", buf.len());
                             tx.send(buf).context("send data message")?;
                         }
-                        Err(e) => match Errno::from_raw(e.raw_os_error().context("get OS error")?) {
+                        Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
                             Errno::EIO => {
                                 debug!("Stopping read loop because of IO error");
                                 return Ok(());
