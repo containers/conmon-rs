@@ -279,7 +279,7 @@ impl ContainerIO {
                     }
                 }
 
-                Err(e) => match Errno::from_raw(e.raw_os_error().context("get OS error")?) {
+                Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
                     Errno::EIO => {
                         debug!("Stopping read loop");
                         attach
