@@ -7,7 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  GO_VERSION: '1.21'
+  GO_VERSION: '1.22'
   ACTION_MSRV_TOOLCHAIN: 1.75.0
 
 jobs:

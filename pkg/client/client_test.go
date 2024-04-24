@@ -695,7 +695,11 @@ var _ = Describe("JSONLogger", func() {
 		for _, terminal := range []bool{true, false} {
 			It(testName("should log in JSON format", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"invalid"}, nil)
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "sh", "-c", "echo hello && echo world"},
+					nil,
+				)
 
 				sut = tr.configGivenEnv()
 				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
@@ -707,7 +711,8 @@ var _ = Describe("JSONLogger", func() {
 						Path: tr.logPath(),
 					}},
 				})
-				Expect(err).To(HaveOccurred())
+				Expect(err).NotTo(HaveOccurred())
+				tr.startContainer(sut)
 
 				logContent, err := os.ReadFile(tr.logPath())
 				Expect(err).NotTo(HaveOccurred())
