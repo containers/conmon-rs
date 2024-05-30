@@ -10,6 +10,8 @@ env:
   CARGO_TERM_COLOR: always
   GO_VERSION: '1.22'
   ACTION_MSRV_TOOLCHAIN: 1.66.1
+  # Latest available toolchain which does not break clippy and the unit tests
+  ACTION_MSRV_NIGHTLY_TOOLCHAIN: nightly-2024-05-19
   NIX_VERSION: '2.21.0'
 jobs:
   build:
@@ -229,12 +231,14 @@ jobs:
       - name: Select Toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly
+          toolchain: ${{ env['ACTION_MSRV_NIGHTLY_TOOLCHAIN']  }}
           default: true
           override: true
           components: clippy, rustfmt
       - name: Clippy Lint
-        run: cargo +nightly clippy --all-targets --all-features -- -D warnings
+        run: |
+          cargo +${{ env['ACTION_MSRV_NIGHTLY_TOOLCHAIN']  }} clippy \
+            --all-targets --all-features -- -D warnings
 
   lint-rustfmt:
     runs-on: ubuntu-latest
@@ -257,10 +261,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - run: .github/install-deps
-      - name: Select Nightly Toolchain
+      - name: Select Toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly
+          toolchain: ${{ env['ACTION_MSRV_NIGHTLY_TOOLCHAIN']  }}
           override: true
       - name: Install rustfmt
         shell: bash
