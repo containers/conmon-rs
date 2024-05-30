@@ -18,6 +18,12 @@ dependencies:
       - path: .github/workflows/release.yml
         match: ACTION_MSRV_TOOLCHAIN
 
+  - name: rust (nightly)
+    version: nightly-2024-05-19
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: ACTION_MSRV_NIGHTLY_TOOLCHAIN
+
   - name: golangci-lint
     version: 1.56.2
     refPaths:
