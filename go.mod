@@ -6,7 +6,7 @@ require (
 	capnproto.org/go/capnp/v3 v3.0.0-alpha.25
 	github.com/blang/semver/v4 v4.0.0
 	github.com/containers/common v0.58.3
-	github.com/containers/storage v1.53.0
+	github.com/containers/storage v1.54.0
 	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.17.3
 	github.com/onsi/gomega v1.33.1
@@ -19,7 +19,7 @@ require (
 
 require (
 	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
-	github.com/cyphar/filepath-securejoin v0.2.4 // indirect
+	github.com/cyphar/filepath-securejoin v0.2.5 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/go-logr/logr v1.4.1 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
@@ -36,7 +36,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.26.0 // indirect
 	golang.org/x/net v0.24.0 // indirect
 	golang.org/x/sync v0.7.0 // indirect
-	golang.org/x/sys v0.19.0 // indirect
+	golang.org/x/sys v0.20.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	golang.org/x/tools v0.20.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
