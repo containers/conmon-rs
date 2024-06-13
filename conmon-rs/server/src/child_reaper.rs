@@ -19,7 +19,7 @@ use nix::{
 };
 use std::{
     ffi::OsStr,
-    fmt::Write,
+    fmt::{Debug, Write},
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     path::{Path, PathBuf},
     process::Stdio,
@@ -67,10 +67,11 @@ impl ChildReaper {
         additional_fds: Vec<OwnedFd>,
     ) -> Result<(u32, CancellationToken)>
     where
-        P: AsRef<OsStr>,
-        I: IntoIterator<Item = S>,
+        P: AsRef<OsStr> + Debug,
+        I: IntoIterator<Item = S> + Debug,
         S: AsRef<OsStr>,
     {
+        debug!("Running: {:?} {:?}", cmd, args);
         let mut cmd = Command::new(cmd);
 
         if stdin {
