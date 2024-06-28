@@ -58,7 +58,7 @@ impl Version {
 
     /// Print the version information to stdout.
     pub fn print(&self) {
-        println!("version: {}", self.version());
+        println!("conmonrs version: {}", self.version());
         println!(
             "tag: {}",
             if self.tag().is_empty() {
