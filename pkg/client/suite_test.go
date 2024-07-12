@@ -416,7 +416,7 @@ func testAttach(
 		}
 		// Print in synchrony to prevent races with terminals.
 		// Run twice to ensure all data is processed.
-		for i := 0; i < 2; i++ {
+		for range 2 {
 			_, err := fmt.Fprintf(stdinWriter, "%s%s\n", command, pipe)
 			Expect(err).To(Succeed())
 			verifyBuffer(reader, terminal, command, testString)

@@ -60,7 +60,6 @@ var _ = Describe("ConmonClient", func() {
 
 	Describe("Version", func() {
 		for _, verbose := range []bool{false, true} {
-			verbose := verbose
 			name := "should succeed"
 			if verbose {
 				name += " with verbose output"
@@ -95,7 +94,6 @@ var _ = Describe("ConmonClient", func() {
 
 	Describe("CreateContainer", func() {
 		for _, terminal := range []bool{true, false} {
-			terminal := terminal
 			It(testName("should create a simple container", terminal), func() {
 				tr = newTestRunner()
 				tr.createRuntimeConfig(terminal)
@@ -215,7 +213,7 @@ var _ = Describe("ConmonClient", func() {
 				tr.createContainer(sut, terminal)
 				tr.startContainer(sut)
 
-				for i := 0; i < 10; i++ {
+				for range 10 {
 					if _, err := os.Stat(tr.oomExitPath()); err == nil {
 						break
 					}
@@ -263,8 +261,6 @@ var _ = Describe("ConmonClient", func() {
 
 	Describe("ExecSync Stress", func() {
 		for _, terminal := range []bool{true, false} {
-			terminal := terminal
-
 			It(testName("should handle many requests", terminal), func() {
 				tr = newTestRunner()
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "30"}, nil)
@@ -273,7 +269,7 @@ var _ = Describe("ConmonClient", func() {
 				tr.startContainer(sut)
 
 				var wg sync.WaitGroup
-				for i := 0; i < 10; i++ {
+				for i := range 10 {
 					wg.Add(1)
 					go func(i int) {
 						defer GinkgoRecover()
@@ -304,7 +300,7 @@ var _ = Describe("ConmonClient", func() {
 				rssBefore := vmRSSGivenPID(pid)
 				GinkgoWriter.Printf("VmRSS before: %d\n", rssBefore)
 
-				for i := 0; i < 25; i++ {
+				for i := range 25 {
 					result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
 						ID:       tr.ctrID,
 						Command:  []string{"/busybox", "echo", "-n", "hello", "world", strconv.Itoa(i)},
@@ -328,7 +324,6 @@ var _ = Describe("ConmonClient", func() {
 
 	Describe("ExecSyncContainer", func() {
 		for _, terminal := range []bool{true, false} {
-			terminal := terminal
 			It(testName("should succeed without timeout", terminal), func() {
 				tr = newTestRunner()
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
@@ -513,7 +508,7 @@ var _ = Describe("ConmonClient", func() {
 			tr.createContainer(sut, false)
 			tr.startContainer(sut)
 
-			for i := 0; i < 100; i++ {
+			for range 100 {
 				if hasTraces() {
 					break
 				}

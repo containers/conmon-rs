@@ -398,7 +398,7 @@ func (c *ConmonClient) waitUntilServerUp() (err error) {
 		defer span.End()
 	}
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		ctx, cancel := defaultContext()
 
 		_, err = c.Version(ctx, &VersionConfig{})
@@ -950,7 +950,7 @@ func (c *ConmonClient) Shutdown() error {
 		waitInterval = 100 * time.Millisecond
 		waitCount    = 100
 	)
-	for i := 0; i < waitCount; i++ {
+	for range waitCount {
 		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
@@ -1229,7 +1229,7 @@ func (c *ConmonClient) CreateNamespaces(
 	}
 
 	namespacesResponse := []*NamespacesResponse{}
-	for i := 0; i < namespaces.Len(); i++ {
+	for i := range namespaces.Len() {
 		namespace := namespaces.At(i)
 
 		var typ Namespace
