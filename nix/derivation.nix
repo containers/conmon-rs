@@ -1,7 +1,8 @@
 { pkgs }:
 with pkgs; rustPlatform.buildRustPackage {
   name = "conmon-rs";
-  src = ./..;
+  # Use Pure to avoid exuding the .git directory
+  src = nix-gitignore.gitignoreSourcePure [ ../.gitignore ] ./..;
   doCheck = false;
   nativeBuildInputs = with buildPackages; [
     capnproto
