@@ -24,10 +24,10 @@ multimap = "0.10.0"
 nix = { version = "0.27.1", features = ["fs", "hostname", "mount", "sched", "signal", "socket", "term", "user"] }
 notify = "6.1.1"
 once_cell = "1.19.0"
-opentelemetry = "0.23.0"
-opentelemetry_sdk = { version = "0.23.0", features = ["rt-tokio"] }
-opentelemetry-otlp = "0.16.0"
-opentelemetry-semantic-conventions = "0.15.0"
+opentelemetry = "0.24.0"
+opentelemetry_sdk = { version = "0.24.1", features = ["rt-tokio"] }
+opentelemetry-otlp = "0.17.0"
+opentelemetry-semantic-conventions = "0.16.0"
 prctl = "1.0.0"
 regex = "1.10.5"
 sendfd = { version = "0.4.3", features = ["tokio"] }
