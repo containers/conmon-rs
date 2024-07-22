@@ -50,6 +50,7 @@ seccomp_use_default_when_empty = false
 
 [crio.runtime.runtimes.runc]
 runtime_type = "pod"
+runtime_path = "/usr/libexec/crio/conmonrs"
 EOT
 
     sudo systemctl enable --now crio.service
