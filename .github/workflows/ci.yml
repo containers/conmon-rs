@@ -341,11 +341,10 @@ jobs:
         with:
           name: conmonrs
           path: target/x86_64-unknown-linux-musl/release
-      - run: sudo cp target/x86_64-unknown-linux-musl/release/conmonrs /usr/local/bin
-      - run: sudo chmod +x /usr/local/bin/conmonrs
+      - run: sudo cp target/x86_64-unknown-linux-musl/release/conmonrs /usr/libexec/crio/conmonrs
       - run: .github/setup
       - name: Run critest
-        run: sudo critest
+        run: sudo critest --runtime-endpoint unix:///var/run/crio/crio.sock
 
   typos:
     runs-on: ubuntu-latest
