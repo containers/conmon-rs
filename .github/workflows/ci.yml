@@ -31,7 +31,7 @@ jobs:
       - name: Select Toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN']  }}
+          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
           default: true
           override: true
           components: rustfmt
@@ -86,7 +86,7 @@ jobs:
           # Ubuntu 22.04 glibc static is not compatible with rustc 1.58.1 (see
           # ACTION_MSRV_TOOLCHAIN). Means we now just use the latest one, since
           # the static builds are made for the community.
-          toolchain: stable
+          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
           default: true
           override: true
           components: rustfmt
@@ -207,7 +207,7 @@ jobs:
       - name: Select Toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN']  }}
+          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
           default: true
           override: true
           components: rustfmt
@@ -231,13 +231,13 @@ jobs:
       - name: Select Toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: ${{ env['ACTION_MSRV_NIGHTLY_TOOLCHAIN']  }}
+          toolchain: ${{ env['ACTION_MSRV_NIGHTLY_TOOLCHAIN'] }}
           default: true
           override: true
           components: clippy, rustfmt
       - name: Clippy Lint
         run: |
-          cargo +${{ env['ACTION_MSRV_NIGHTLY_TOOLCHAIN']  }} clippy \
+          cargo +${{ env['ACTION_MSRV_NIGHTLY_TOOLCHAIN'] }} clippy \
             --all-targets --all-features -- -D warnings
 
   lint-rustfmt:
@@ -248,7 +248,7 @@ jobs:
       - name: Select Toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN']  }}
+          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
           default: true
           override: true
           components: rustfmt
@@ -264,7 +264,7 @@ jobs:
       - name: Select Toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: ${{ env['ACTION_MSRV_NIGHTLY_TOOLCHAIN']  }}
+          toolchain: ${{ env['ACTION_MSRV_NIGHTLY_TOOLCHAIN'] }}
           override: true
       - name: Install rustfmt
         shell: bash

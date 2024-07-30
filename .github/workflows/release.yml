@@ -31,7 +31,7 @@ jobs:
       - name: Select Toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN']  }}
+          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
           default: true
           override: true
           components: rustfmt
