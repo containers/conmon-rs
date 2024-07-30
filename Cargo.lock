@@ -388,7 +388,7 @@ dependencies = [
  "signal-hook",
  "strum",
  "tempfile",
- "time",
+ "time 0.3.23 (git+https://github.com/saschagrunert/time?branch=v0.3.23-fix)",
  "tokio",
  "tokio-eventfd",
  "tokio-seqpacket",
@@ -1781,7 +1781,7 @@ dependencies = [
  "const_format",
  "git2",
  "is_debug",
- "time",
+ "time 0.3.23 (registry+https://github.com/rust-lang/crates.io-index)",
  "tzdb",
 ]
 
@@ -1968,8 +1968,18 @@ dependencies = [
  "libc",
  "num_threads",
  "serde",
- "time-core",
- "time-macros",
+ "time-core 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "time-macros 0.2.10 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "time"
+version = "0.3.23"
+source = "git+https://github.com/saschagrunert/time?branch=v0.3.23-fix#22f9ac760e36ca965a7205056f719d5db8d153c1"
+dependencies = [
+ "serde",
+ "time-core 0.1.1 (git+https://github.com/saschagrunert/time?branch=v0.3.23-fix)",
+ "time-macros 0.2.10 (git+https://github.com/saschagrunert/time?branch=v0.3.23-fix)",
 ]
 
 [[package]]
@@ -1979,12 +1989,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7300fbefb4dadc1af235a9cef3737cea692a9d97e1b9cbcd4ebdae6f8868e6fb"
 
 [[package]]
+name = "time-core"
+version = "0.1.1"
+source = "git+https://github.com/saschagrunert/time?branch=v0.3.23-fix#22f9ac760e36ca965a7205056f719d5db8d153c1"
+
+[[package]]
 name = "time-macros"
 version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96ba15a897f3c86766b757e5ac7221554c6750054d74d5b28844fce5fb36a6c4"
 dependencies = [
- "time-core",
+ "time-core 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "time-macros"
+version = "0.2.10"
+source = "git+https://github.com/saschagrunert/time?branch=v0.3.23-fix#22f9ac760e36ca965a7205056f719d5db8d153c1"
+dependencies = [
+ "time-core 0.1.1 (git+https://github.com/saschagrunert/time?branch=v0.3.23-fix)",
 ]
 
 [[package]]

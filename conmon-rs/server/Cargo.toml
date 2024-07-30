@@ -53,4 +53,8 @@ dashmap = "6.0.1"
 
 [dev-dependencies]
 mockall = "0.13.0"
-time = { version = "0.3.23", features = ["parsing"] }
+# Use this time-rs fork to fix the build issues with newer rust. It's identical
+# to v0.3.23 of the crate, except:
+# https://github.com/saschagrunert/time/commit/22f9ac760e36ca965a7205056f719d5db8d153c1
+# TODO: Remove when we can use newer Rust versions than v1.66.1
+time = { git = "https://github.com/saschagrunert/time", branch = "v0.3.23-fix", features = ["parsing"] }
