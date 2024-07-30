@@ -53,4 +53,3 @@ dashmap = "6.0.1"
 
 [dev-dependencies]
 mockall = "0.13.0"
-time = { version = "0.3.23", features = ["parsing"] }
