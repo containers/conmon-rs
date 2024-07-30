@@ -83,10 +83,7 @@ jobs:
       - name: Select Toolchain
         uses: actions-rs/toolchain@v1
         with:
-          # Ubuntu 22.04 glibc static is not compatible with rustc 1.58.1 (see
-          # ACTION_MSRV_TOOLCHAIN). Means we now just use the latest one, since
-          # the static builds are made for the community.
-          toolchain: stable
+          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN']  }}
           default: true
           override: true
           components: rustfmt
