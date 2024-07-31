@@ -3,7 +3,7 @@ module github.com/containers/conmon-rs
 go 1.22
 
 require (
-	capnproto.org/go/capnp/v3 v3.0.0-alpha.25
+	capnproto.org/go/capnp/v3 v3.0.1-alpha.2
 	github.com/blang/semver/v4 v4.0.0
 	github.com/containers/common v0.59.2
 	github.com/containers/storage v1.54.0
@@ -18,6 +18,7 @@ require (
 )
 
 require (
+	github.com/colega/zeropool v0.0.0-20230505084239-6fb4a4f75381 // indirect
 	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
 	github.com/cyphar/filepath-securejoin v0.2.5 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
@@ -40,5 +41,4 @@ require (
 	golang.org/x/text v0.15.0 // indirect
 	golang.org/x/tools v0.21.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	zenhack.net/go/util v0.0.0-20230218002511-744d2d6d1739 // indirect
 )

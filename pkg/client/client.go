@@ -887,8 +887,10 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 
 	execContainerResult := &ExecContainerResult{
 		ExitCode: resp.ExitCode(),
-		Stdout:   stdout,
-		Stderr:   stderr,
+		// Copy content of both slices as the `capnp.ReleaseFunc` will
+		// zero them when the deferred call to `free()` takes place.
+		Stdout:   append(stdout[:0:0], stdout...),
+		Stderr:   append(stderr[:0:0], stderr...),
 		TimedOut: resp.TimedOut(),
 	}
 
