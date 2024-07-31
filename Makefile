@@ -47,7 +47,7 @@ integration: .install.ginkgo release # It needs to be release so we correctly te
 	export CONMON_BINARY="$(MAKEFILE_PATH)target/release/$(BINARY)" && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
 	export MAX_RSS_KB=10240 && \
-	sudo -E "$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
+	"$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
 
 integration-static: .install.ginkgo # It needs to be release so we correctly test the RSS usage
 	export CONMON_BINARY="$(MAKEFILE_PATH)target/x86_64-unknown-linux-gnu/release/$(BINARY)" && \
@@ -56,7 +56,7 @@ integration-static: .install.ginkgo # It needs to be release so we correctly tes
 	fi && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
 	export MAX_RSS_KB=9500 && \
-	sudo -E "$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
+	"$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
 
 .install.ginkgo:
 	GOBIN=$(abspath $(GOTOOLS_BINDIR)) \
