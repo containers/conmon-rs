@@ -8,8 +8,8 @@ require (
 	github.com/containers/common v0.60.0
 	github.com/containers/storage v1.55.0
 	github.com/google/uuid v1.6.0
-	github.com/onsi/ginkgo/v2 v2.19.0
-	github.com/onsi/gomega v1.33.1
+	github.com/onsi/ginkgo/v2 v2.19.1
+	github.com/onsi/gomega v1.34.0
 	github.com/opencontainers/runc v1.1.13
 	github.com/opencontainers/runtime-tools v0.9.1-0.20230914150019-408c51e934dc
 	github.com/sirupsen/logrus v1.9.3
