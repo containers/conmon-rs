@@ -420,7 +420,7 @@ impl conmon::Server for Server {
         for (idx, namespace) in pause.namespaces().iter().enumerate() {
             let mut ns = namespaces.reborrow().get(pry_err!(idx.try_into()));
             ns.set_path(
-                &namespace
+                namespace
                     .path(pause.base_path(), pod_id)
                     .display()
                     .to_string(),
