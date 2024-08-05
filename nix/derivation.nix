@@ -6,6 +6,7 @@ with pkgs; rustPlatform.buildRustPackage {
   doCheck = false;
   nativeBuildInputs = with buildPackages; [
     capnproto
+    gitMinimal
     protobuf
   ];
   buildInputs =
