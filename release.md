@@ -14,7 +14,6 @@ action](https://github.com/containers/conmon-rs/actions/workflows/release.yml)
 should run for that tag which attaches the vendored sources to the release, for
 example:
 
-- [conmonrs-v0.4.0-vendor.tar.gz](https://github.com/containers/conmon-rs/releases/download/v0.4.0/conmonrs-v0.4.0-vendor.tar.gz)
 - [conmonrs-v0.4.0.tar.gz](https://github.com/containers/conmon-rs/releases/download/v0.4.0/conmonrs-v0.4.0.tar.gz)
 
 Those sources have to be used to update the package in

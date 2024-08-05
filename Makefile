@@ -94,7 +94,6 @@ create-release-packages: release
 		echo "crate version and tag mismatch" ; \
 		exit 1 ; \
 	fi
-	cargo vendor -q && tar zcf $(PACKAGE_NAME)-vendor.tar.gz vendor && rm -rf vendor
 	git archive --format tar --prefix=conmonrs-$(CI_TAG)/ $(CI_TAG) | gzip >$(PACKAGE_NAME).tar.gz
 
 
