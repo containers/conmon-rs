@@ -144,6 +144,7 @@ jobs:
     env:
       COSIGN_EXPERIMENTAL: 1
     strategy:
+      fail-fast: false
       matrix:
         arch: [amd64, arm64, ppc64le, s390x]
     name: build-static-${{ matrix.arch }}
@@ -240,6 +241,29 @@ jobs:
           cargo +${{ env['ACTION_MSRV_NIGHTLY_TOOLCHAIN'] }} clippy \
             --all-targets --all-features -- -D warnings
 
+  vendor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-vendor-${{ hashFiles('**/Cargo.lock') }}
+      - run: .github/install-deps
+      - name: Select Toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          default: true
+          override: true
+      - name: Vendor
+        run: cargo vendor .cargo-vendor && git diff --exit-code
+
   lint-rustfmt:
     runs-on: ubuntu-latest
     steps:
@@ -332,20 +356,49 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-      - name: Checkout
-        uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: conmonrs
           path: target/x86_64-unknown-linux-musl/release
-      - run: sudo cp target/x86_64-unknown-linux-musl/release/conmonrs /usr/local/bin
-      - run: sudo chmod +x /usr/local/bin/conmonrs
       - run: .github/setup
+      - name: Install ginkgo
+        run: |
+          go install github.com/onsi/ginkgo/v2/ginkgo@latest
+          ginkgo version
+          sudo cp $(command -v ginkgo) /usr/local/bin
       - name: Run critest
-        run: sudo critest
+        shell: bash
+        run: |
+          set -euox pipefail
+
+          sudo cp target/x86_64-unknown-linux-musl/release/conmonrs /usr/libexec/crio/conmonrs
+          sudo chmod +x /usr/libexec/crio/conmonrs
+
+          set +o errexit
+          sudo -E PATH=$PATH critest \
+            --runtime-endpoint=unix:///var/run/crio/crio.sock \
+            --parallel=$(nproc) \
+            --ginkgo.flake-attempts=3 \
+            --ginkgo.randomize-all \
+            --ginkgo.timeout=2m \
+            --ginkgo.trace \
+            --ginkgo.vv
+          TEST_RC=$?
+          set -o errexit
+
+          sudo journalctl --no-pager > journal.log
+          test $TEST_RC -ne 0 && cat journal.log
+          exit $TEST_RC
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: journal.log
+          path: journal.log
 
   typos:
     runs-on: ubuntu-latest
