@@ -361,6 +361,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+      - name: Chown cache
+        run: |
+          sudo chown -R $(id -u):$(id -g) ~/go/pkg/mod
+          sudo chown -R $(id -u):$(id -g) ~/.cache/go-build
       - uses: actions/download-artifact@v4
         with:
           name: conmonrs
