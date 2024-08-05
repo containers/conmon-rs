@@ -23,12 +23,8 @@ with pkgs; rustPlatform.buildRustPackage {
     "-Clink-args=-nostartfiles"
     "-Clink-args=-L${libunwind}/lib"
   ];
-  # Patch nix v0.27.1 for musl
-  preBuild = lib.optionalString stdenv.hostPlatform.isMusl ''
-    sed -i 's;target_arch = "s390x";target_arch = "s390x" , not(target_env = "musl");g' \
-      /build/cargo-vendor-dir/nix-0.27.1/src/sys/statfs.rs
-  '';
   stripAllList = [ "bin" ];
+  cargoVendorDir = ".cargo-vendor";
   cargoLock = {
     lockFile = lib.cleanSource ./.. + "/Cargo.lock";
     allowBuiltinFetchGit = true;
