@@ -353,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "conmon-common"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "capnp",
  "capnpc",
@@ -361,7 +361,7 @@ dependencies = [
 
 [[package]]
 name = "conmonrs"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "capnp",
@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "conmonrs-cli"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "capnp",
  "capnp-rpc",
