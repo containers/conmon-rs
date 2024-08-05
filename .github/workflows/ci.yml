@@ -368,6 +368,8 @@ jobs:
       - run: .github/setup
       - name: Install ginkgo
         run: |
+          sudo chown -R $(id -u):$(id -g) ~/go
+          sudo chown -R $(id -u):$(id -g) ~/.cache
           go install github.com/onsi/ginkgo/v2/ginkgo@latest
           ginkgo version
           sudo cp $(command -v ginkgo) /usr/local/bin
