@@ -1,4 +1,7 @@
-approvers:
-  - haircommander
-  - rphillips
-  - saschagrunert
+filters:
+  .*:
+    reviewers:
+    - cri-o-reviewers
+    approvers:
+    - cri-o-approvers
+    - rphillips
