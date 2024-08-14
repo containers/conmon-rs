@@ -4,6 +4,7 @@
 /result
 /vendor
 .build
+.cargo-upgrades
 latest-*.txt
 /*.tar.gz
 .vscode
