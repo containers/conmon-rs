@@ -25,9 +25,8 @@ pub struct ZipEq<I, J> {
 /// }
 /// ```
 pub fn zip_eq<I, J>(i: I, j: J) -> ZipEq<I::IntoIter, J::IntoIter>
-where
-    I: IntoIterator,
-    J: IntoIterator,
+    where I: IntoIterator,
+          J: IntoIterator
 {
     ZipEq {
         a: i.into_iter(),
@@ -36,9 +35,8 @@ where
 }
 
 impl<I, J> Iterator for ZipEq<I, J>
-where
-    I: Iterator,
-    J: Iterator,
+    where I: Iterator,
+          J: Iterator
 {
     type Item = (I::Item, J::Item);
 
@@ -46,9 +44,8 @@ where
         match (self.a.next(), self.b.next()) {
             (None, None) => None,
             (Some(a), Some(b)) => Some((a, b)),
-            (None, Some(_)) | (Some(_), None) => {
-                panic!("itertools: .zip_eq() reached end of one iterator before the other")
-            }
+            (None, Some(_)) | (Some(_), None) =>
+            panic!("itertools: .zip_eq() reached end of one iterator before the other")
         }
     }
 
@@ -58,8 +55,6 @@ where
 }
 
 impl<I, J> ExactSizeIterator for ZipEq<I, J>
-where
-    I: ExactSizeIterator,
-    J: ExactSizeIterator,
-{
-}
+    where I: ExactSizeIterator,
+          J: ExactSizeIterator
+{}

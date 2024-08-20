@@ -1,7 +1,8 @@
+
 /// `MinMaxResult` is an enum returned by `minmax`.
 ///
 /// See [`.minmax()`](crate::Itertools::minmax) for more detail.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub enum MinMaxResult<T> {
     /// Empty iterator
     NoElements,
@@ -11,7 +12,7 @@ pub enum MinMaxResult<T> {
 
     /// More than one element in the iterator, the first element is not larger
     /// than the second
-    MinMax(T, T),
+    MinMax(T, T)
 }
 
 impl<T: Clone> MinMaxResult<T> {
@@ -35,36 +36,34 @@ impl<T: Clone> MinMaxResult<T> {
     /// let r = MinMax(1, 2);
     /// assert_eq!(r.into_option(), Some((1, 2)));
     /// ```
-    pub fn into_option(self) -> Option<(T, T)> {
+    pub fn into_option(self) -> Option<(T,T)> {
         match self {
-            Self::NoElements => None,
-            Self::OneElement(x) => Some((x.clone(), x)),
-            Self::MinMax(x, y) => Some((x, y)),
+            MinMaxResult::NoElements => None,
+            MinMaxResult::OneElement(x) => Some((x.clone(), x)),
+            MinMaxResult::MinMax(x, y) => Some((x, y))
         }
     }
 }
 
 /// Implementation guts for `minmax` and `minmax_by_key`.
-pub fn minmax_impl<I, K, F, L>(mut it: I, mut key_for: F, mut lt: L) -> MinMaxResult<I::Item>
-where
-    I: Iterator,
-    F: FnMut(&I::Item) -> K,
-    L: FnMut(&I::Item, &I::Item, &K, &K) -> bool,
+pub fn minmax_impl<I, K, F, L>(mut it: I, mut key_for: F,
+                               mut lt: L) -> MinMaxResult<I::Item>
+    where I: Iterator,
+          F: FnMut(&I::Item) -> K,
+          L: FnMut(&I::Item, &I::Item, &K, &K) -> bool,
 {
     let (mut min, mut max, mut min_key, mut max_key) = match it.next() {
         None => return MinMaxResult::NoElements,
-        Some(x) => match it.next() {
-            None => return MinMaxResult::OneElement(x),
-            Some(y) => {
-                let xk = key_for(&x);
-                let yk = key_for(&y);
-                if !lt(&y, &x, &yk, &xk) {
-                    (x, y, xk, yk)
-                } else {
-                    (y, x, yk, xk)
+        Some(x) => {
+            match it.next() {
+                None => return MinMaxResult::OneElement(x),
+                Some(y) => {
+                    let xk = key_for(&x);
+                    let yk = key_for(&y);
+                    if !lt(&y, &x, &yk, &xk) {(x, y, xk, yk)} else {(y, x, yk, xk)}
                 }
             }
-        },
+        }
     };
 
     loop {
@@ -75,7 +74,7 @@ where
         // for 2 elements.
         let first = match it.next() {
             None => break,
-            Some(x) => x,
+            Some(x) => x
         };
         let second = match it.next() {
             None => {
@@ -87,7 +86,7 @@ where
                 }
                 break;
             }
-            Some(x) => x,
+            Some(x) => x
         };
         let first_key = key_for(&first);
         let second_key = key_for(&second);

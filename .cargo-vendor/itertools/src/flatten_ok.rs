@@ -147,7 +147,13 @@ where
     T: IntoIterator,
     T::IntoIter: fmt::Debug,
 {
-    debug_fmt_fields!(FlattenOk, iter, inner_front, inner_back);
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FlattenOk")
+            .field("iter", &self.iter)
+            .field("inner_front", &self.inner_front)
+            .field("inner_back", &self.inner_back)
+            .finish()
+    }
 }
 
 /// Only the iterator being flattened needs to implement [`FusedIterator`].

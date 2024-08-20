@@ -1,8 +1,6 @@
 //! Support for associating type name information with a [`Message`].
 
 use crate::Message;
-
-#[cfg(not(feature = "std"))]
 use alloc::{format, string::String};
 
 /// Associate a type name with a [`Message`] type.

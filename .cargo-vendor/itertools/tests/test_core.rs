@@ -4,19 +4,18 @@
 //! option. This file may not be copied, modified, or distributed
 //! except according to those terms.
 #![no_std]
-#![allow(deprecated)]
 
-use crate::it::chain;
-use crate::it::free::put_back;
+use core::iter;
+use itertools as it;
+use crate::it::Itertools;
 use crate::it::interleave;
 use crate::it::intersperse;
 use crate::it::intersperse_with;
+use crate::it::multizip;
+use crate::it::free::put_back;
 use crate::it::iproduct;
 use crate::it::izip;
-use crate::it::multizip;
-use crate::it::Itertools;
-use core::iter;
-use itertools as it;
+use crate::it::chain;
 
 #[test]
 fn product2() {
@@ -27,7 +26,7 @@ fn product2() {
     assert!(prod.next() == Some(('α', 1)));
     assert!(prod.next() == Some(('β', 0)));
     assert!(prod.next() == Some(('β', 1)));
-    assert!(prod.next().is_none());
+    assert!(prod.next() == None);
 }
 
 #[test]
@@ -35,11 +34,12 @@ fn product_temporary() {
     for (_x, _y, _z) in iproduct!(
         [0, 1, 2].iter().cloned(),
         [0, 1, 2].iter().cloned(),
-        [0, 1, 2].iter().cloned()
-    ) {
+        [0, 1, 2].iter().cloned())
+    {
         // ok
     }
 }
+
 
 #[test]
 fn izip_macro() {
@@ -61,7 +61,7 @@ fn izip_macro() {
 #[test]
 fn izip2() {
     let _zip1: iter::Zip<_, _> = izip!(1.., 2..);
-    let _zip2: iter::Zip<_, _> = izip!(1.., 2..,);
+    let _zip2: iter::Zip<_, _> = izip!(1.., 2.., );
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn chain_macro() {
 #[test]
 fn chain2() {
     let _ = chain!(1.., 2..);
-    let _ = chain!(1.., 2..,);
+    let _ = chain!(1.., 2.., );
 }
 
 #[test]
@@ -127,7 +127,7 @@ fn write_to() {
 
 #[test]
 fn test_interleave() {
-    let xs: [u8; 0] = [];
+    let xs: [u8; 0]  = [];
     let ys = [7u8, 9, 8, 10];
     let zs = [2u8, 77];
     let it = interleave(xs.iter(), ys.iter());
@@ -211,6 +211,7 @@ fn merge() {
     it::assert_equal((0..10).step(2).merge((1..10).step(2)), 0..10);
 }
 
+
 #[test]
 fn repeatn() {
     let s = "α";
@@ -230,33 +231,29 @@ fn count_clones() {
     use core::cell::Cell;
     #[derive(PartialEq, Debug)]
     struct Foo {
-        n: Cell<usize>,
+        n: Cell<usize>
     }
 
-    impl Clone for Foo {
-        fn clone(&self) -> Self {
+    impl Clone for Foo
+    {
+        fn clone(&self) -> Self
+        {
             let n = self.n.get();
             self.n.set(n + 1);
-            Self {
-                n: Cell::new(n + 1),
-            }
+            Foo { n: Cell::new(n + 1) }
         }
     }
 
+
     for n in 0..10 {
-        let f = Foo { n: Cell::new(0) };
+        let f = Foo{n: Cell::new(0)};
         let it = it::repeat_n(f, n);
         // drain it
         let last = it.last();
         if n == 0 {
             assert_eq!(last, None);
         } else {
-            assert_eq!(
-                last,
-                Some(Foo {
-                    n: Cell::new(n - 1)
-                })
-            );
+            assert_eq!(last, Some(Foo{n: Cell::new(n - 1)}));
         }
     }
 }
@@ -288,36 +285,16 @@ fn tree_fold1() {
 #[test]
 fn exactly_one() {
     assert_eq!((0..10).filter(|&x| x == 2).exactly_one().unwrap(), 2);
-    assert!((0..10)
-        .filter(|&x| x > 1 && x < 4)
-        .exactly_one()
-        .unwrap_err()
-        .eq(2..4));
-    assert!((0..10)
-        .filter(|&x| x > 1 && x < 5)
-        .exactly_one()
-        .unwrap_err()
-        .eq(2..5));
-    assert!((0..10)
-        .filter(|&_| false)
-        .exactly_one()
-        .unwrap_err()
-        .eq(0..0));
+    assert!((0..10).filter(|&x| x > 1 && x < 4).exactly_one().unwrap_err().eq(2..4));
+    assert!((0..10).filter(|&x| x > 1 && x < 5).exactly_one().unwrap_err().eq(2..5));
+    assert!((0..10).filter(|&_| false).exactly_one().unwrap_err().eq(0..0));
 }
 
 #[test]
 fn at_most_one() {
     assert_eq!((0..10).filter(|&x| x == 2).at_most_one().unwrap(), Some(2));
-    assert!((0..10)
-        .filter(|&x| x > 1 && x < 4)
-        .at_most_one()
-        .unwrap_err()
-        .eq(2..4));
-    assert!((0..10)
-        .filter(|&x| x > 1 && x < 5)
-        .at_most_one()
-        .unwrap_err()
-        .eq(2..5));
+    assert!((0..10).filter(|&x| x > 1 && x < 4).at_most_one().unwrap_err().eq(2..4));
+    assert!((0..10).filter(|&x| x > 1 && x < 5).at_most_one().unwrap_err().eq(2..5));
     assert_eq!((0..10).filter(|&_| false).at_most_one().unwrap(), None);
 }
 

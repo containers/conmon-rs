@@ -1,4 +1,4 @@
-[![continuous integration](https://github.com/tokio-rs/prost/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/tokio-rs/prost/actions/workflows/ci.yml?query=branch%3Amaster)
+![continuous integration](https://github.com/tokio-rs/prost/workflows/continuous%20integration/badge.svg)
 [![Documentation](https://docs.rs/prost/badge.svg)](https://docs.rs/prost/)
 [![Crate](https://img.shields.io/crates/v/prost.svg)](https://crates.io/crates/prost)
 [![Dependency Status](https://deps.rs/repo/github/tokio-rs/prost/status.svg)](https://deps.rs/repo/github/tokio-rs/prost)
@@ -36,17 +36,15 @@ prost-types = "0.12"
 ```
 
 The recommended way to add `.proto` compilation to a Cargo project is to use the
-`prost-build` library. See the [`prost-build` documentation][prost-build] for
+`prost-build` library. See the [`prost-build` documentation](prost-build) for
 more details and examples.
 
-See the [snazzy repository][snazzy] for a simple start-to-finish example.
-
-[prost-build]: https://docs.rs/prost-build/latest/prost_build/
-[snazzy]: https://github.com/danburkert/snazzy
+See the [snazzy repository](https://github.com/danburkert/snazzy) for a simple
+start-to-finish example.
 
 ### MSRV
 
-`prost` follows the `tokio-rs` project's MSRV model and supports 1.70. For more
+`prost` follows the `tokio-rs` projects MSRV model and supports 1.60. For more
 information on the tokio msrv policy you can check it out [here][tokio msrv]
 
 [tokio msrv]: https://github.com/tokio-rs/tokio/#supported-rust-versions
@@ -61,8 +59,8 @@ possible.
 
 With `prost-build` v0.11 release, `protoc` will be required to invoke
 `compile_protos` (unless `skip_protoc` is enabled). Prost will no longer provide
-bundled `protoc` or attempt to compile `protoc` for users. For install
-instructions for `protoc`, please check out the [protobuf install] instructions.
+bundled a `protoc` or attempt to compile `protoc` for users. For install
+instructions for `protoc` please check out the [protobuf install] instructions.
 
 [protobuf install]: https://github.com/protocolbuffers/protobuf#protobuf-compiler-installation
 
@@ -463,11 +461,6 @@ The prost project maintains flakes support for local development. Once you have
 nix and nix flakes setup you can just run `nix develop` to get a shell
 configured with the required dependencies to compile the whole project.
 
-## Feature Flags
-- `std`: Enable integration with standard library. Disable this feature for `no_std` support. This feature is enabled by default.
-- `derive`: Enable integration with `prost-derive`. Disable this feature to reduce compile times. This feature is enabled by default.
-- `prost-derive`: Deprecated. Alias for `derive` feature.
-- `no-recursion-limit`: Disable the recursion limit. The recursion limit is 100 and cannot be customized. 
 
 ## FAQ
 
