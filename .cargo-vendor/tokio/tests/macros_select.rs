@@ -692,3 +692,28 @@ mod unstable {
         )
     }
 }
+
+#[tokio::test]
+async fn select_into_future() {
+    struct NotAFuture;
+    impl std::future::IntoFuture for NotAFuture {
+        type Output = ();
+        type IntoFuture = std::future::Ready<()>;
+
+        fn into_future(self) -> Self::IntoFuture {
+            std::future::ready(())
+        }
+    }
+
+    tokio::select! {
+        () = NotAFuture => {},
+    }
+}
+
+// regression test for https://github.com/tokio-rs/tokio/issues/6721
+#[tokio::test]
+async fn temporary_lifetime_extension() {
+    tokio::select! {
+        () = &mut std::future::ready(()) => {},
+    }
+}

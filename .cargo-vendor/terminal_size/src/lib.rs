@@ -34,4 +34,6 @@ mod windows;
 pub use crate::windows::{terminal_size, terminal_size_using_handle};
 
 #[cfg(not(any(unix, windows)))]
-pub fn terminal_size() -> Option<(Width, Height)> { None }
+pub fn terminal_size() -> Option<(Width, Height)> {
+    None
+}

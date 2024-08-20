@@ -4,55 +4,51 @@ use std::io;
 use std::os::unix::prelude::*;
 use std::path::Path;
 
+use libredox::{
+    call, errno,
+    error::{Error, Result},
+    flag, Fd,
+};
+
 pub fn set_file_times(p: &Path, atime: FileTime, mtime: FileTime) -> io::Result<()> {
-    let fd = open_redox(p, 0).map_err(|err| io::Error::from_raw_os_error(err.errno))?;
-    let res = set_file_times_redox(fd, atime, mtime);
-    let _ = syscall::close(fd);
-    res
+    let fd = open_redox(p, 0)?;
+    set_file_times_redox(fd.raw(), atime, mtime)
 }
 
 pub fn set_file_mtime(p: &Path, mtime: FileTime) -> io::Result<()> {
-    let fd = open_redox(p, 0).map_err(|err| io::Error::from_raw_os_error(err.errno))?;
-    let mut st = syscall::Stat::default();
-    let res = match syscall::fstat(fd, &mut st) {
-        Err(err) => Err(io::Error::from_raw_os_error(err.errno)),
-        Ok(_) => set_file_times_redox(
-            fd,
-            FileTime {
-                seconds: st.st_atime as i64,
-                nanos: st.st_atime_nsec as u32,
-            },
-            mtime,
-        ),
-    };
-    let _ = syscall::close(fd);
-    res
+    let fd = open_redox(p, 0)?;
+    let st = fd.stat()?;
+
+    set_file_times_redox(
+        fd.raw(),
+        FileTime {
+            seconds: st.st_atime as i64,
+            nanos: st.st_atime_nsec as u32,
+        },
+        mtime,
+    )?;
+    Ok(())
 }
 
 pub fn set_file_atime(p: &Path, atime: FileTime) -> io::Result<()> {
-    let fd = open_redox(p, 0).map_err(|err| io::Error::from_raw_os_error(err.errno))?;
-    let mut st = syscall::Stat::default();
-    let res = match syscall::fstat(fd, &mut st) {
-        Err(err) => Err(io::Error::from_raw_os_error(err.errno)),
-        Ok(_) => set_file_times_redox(
-            fd,
-            atime,
-            FileTime {
-                seconds: st.st_mtime as i64,
-                nanos: st.st_mtime_nsec as u32,
-            },
-        ),
-    };
-    let _ = syscall::close(fd);
-    res
+    let fd = open_redox(p, 0)?;
+    let st = fd.stat()?;
+
+    set_file_times_redox(
+        fd.raw(),
+        atime,
+        FileTime {
+            seconds: st.st_mtime as i64,
+            nanos: st.st_mtime_nsec as u32,
+        },
+    )?;
+    Ok(())
 }
 
 pub fn set_symlink_file_times(p: &Path, atime: FileTime, mtime: FileTime) -> io::Result<()> {
-    let fd = open_redox(p, syscall::O_NOFOLLOW)
-        .map_err(|err| io::Error::from_raw_os_error(err.errno))?;
-    let res = set_file_times_redox(fd, atime, mtime);
-    let _ = syscall::close(fd);
-    res
+    let fd = open_redox(p, flag::O_NOFOLLOW)?;
+    set_file_times_redox(fd.raw(), atime, mtime)?;
+    Ok(())
 }
 
 pub fn set_file_handle_times(
@@ -75,28 +71,27 @@ pub fn set_file_handle_times(
     set_file_times_redox(f.as_raw_fd() as usize, atime1, mtime1)
 }
 
-fn open_redox(path: &Path, flags: usize) -> syscall::Result<usize> {
+fn open_redox(path: &Path, flags: i32) -> Result<Fd> {
     match path.to_str() {
-        Some(string) => syscall::open(string, flags),
-        None => Err(syscall::Error::new(syscall::EINVAL)),
+        Some(string) => Fd::open(string, flags, 0),
+        None => Err(Error::new(errno::EINVAL)),
     }
 }
 
 fn set_file_times_redox(fd: usize, atime: FileTime, mtime: FileTime) -> io::Result<()> {
-    use syscall::TimeSpec;
+    use libredox::data::TimeSpec;
 
     fn to_timespec(ft: &FileTime) -> TimeSpec {
         TimeSpec {
             tv_sec: ft.seconds(),
-            tv_nsec: ft.nanoseconds() as i32,
+            tv_nsec: ft.nanoseconds() as i64,
         }
     }
 
     let times = [to_timespec(&atime), to_timespec(&mtime)];
-    match syscall::futimens(fd, &times) {
-        Ok(_) => Ok(()),
-        Err(err) => Err(io::Error::from_raw_os_error(err.errno)),
-    }
+
+    call::futimens(fd, &times)?;
+    Ok(())
 }
 
 pub fn from_last_modification_time(meta: &fs::Metadata) -> FileTime {

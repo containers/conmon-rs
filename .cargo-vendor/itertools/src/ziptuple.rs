@@ -38,8 +38,8 @@ pub struct Zip<T> {
 /// ```
 /// [`izip!()`]: crate::izip
 pub fn multizip<T, U>(t: U) -> Zip<T>
-    where Zip<T>: From<U>,
-          Zip<T>: Iterator,
+where
+    Zip<T>: From<U> + Iterator,
 {
     Zip::from(t)
 }

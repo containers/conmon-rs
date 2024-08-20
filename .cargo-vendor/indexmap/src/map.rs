@@ -16,8 +16,9 @@ mod tests;
 pub use self::core::raw_entry_v1::{self, RawEntryApiV1};
 pub use self::core::{Entry, IndexedEntry, OccupiedEntry, VacantEntry};
 pub use self::iter::{
-    Drain, IntoIter, IntoKeys, IntoValues, Iter, IterMut, Keys, Splice, Values, ValuesMut,
+    Drain, IntoIter, IntoKeys, IntoValues, Iter, IterMut, IterMut2, Keys, Splice, Values, ValuesMut,
 };
+pub use self::mutable::MutableEntryKey;
 pub use self::mutable::MutableKeys;
 pub use self::slice::Slice;
 
@@ -518,6 +519,35 @@ where
         I: IntoIterator<Item = (K, V)>,
     {
         Splice::new(self, range, replace_with.into_iter())
+    }
+
+    /// Moves all key-value pairs from `other` into `self`, leaving `other` empty.
+    ///
+    /// This is equivalent to calling [`insert`][Self::insert] for each
+    /// key-value pair from `other` in order, which means that for keys that
+    /// already exist in `self`, their value is updated in the current position.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use indexmap::IndexMap;
+    ///
+    /// // Note: Key (3) is present in both maps.
+    /// let mut a = IndexMap::from([(3, "c"), (2, "b"), (1, "a")]);
+    /// let mut b = IndexMap::from([(3, "d"), (4, "e"), (5, "f")]);
+    /// let old_capacity = b.capacity();
+    ///
+    /// a.append(&mut b);
+    ///
+    /// assert_eq!(a.len(), 5);
+    /// assert_eq!(b.len(), 0);
+    /// assert_eq!(b.capacity(), old_capacity);
+    ///
+    /// assert!(a.keys().eq(&[3, 2, 1, 4, 5]));
+    /// assert_eq!(a[&3], "d"); // "c" was overwritten.
+    /// ```
+    pub fn append<S2>(&mut self, other: &mut IndexMap<K, V, S2>) {
+        self.extend(other.drain(..));
     }
 }
 

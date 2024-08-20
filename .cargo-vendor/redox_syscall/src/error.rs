@@ -44,6 +44,15 @@ impl fmt::Display for Error {
         f.write_str(self.text())
     }
 }
+#[cfg(feature = "std")]
+impl std::error::Error for Error {}
+
+#[cfg(feature = "std")]
+impl From<Error> for std::io::Error {
+    fn from(value: Error) -> Self {
+        std::io::Error::from_raw_os_error(value.errno)
+    }
+}
 
 pub const EPERM: i32 = 1;  /* Operation not permitted */
 pub const ENOENT: i32 = 2;  /* No such file or directory */

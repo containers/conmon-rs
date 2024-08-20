@@ -11,11 +11,10 @@
 
 [package]
 edition = "2018"
-rust-version = "1.36.0"
+rust-version = "1.43.1"
 name = "itertools"
-version = "0.11.0"
+version = "0.12.1"
 authors = ["bluss"]
-exclude = ["/bors.toml"]
 description = "Extra iterator adaptors, iterator methods, free functions, and macros."
 documentation = "https://docs.rs/itertools/"
 readme = "README.md"
@@ -34,7 +33,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/rust-itertools/itertools"
 
 [profile.bench]
-debug = 2
+debug = true
 
 [lib]
 test = false
@@ -70,6 +69,10 @@ harness = false
 
 [[bench]]
 name = "powerset"
+harness = false
+
+[[bench]]
+name = "specializations"
 harness = false
 
 [dependencies.either]

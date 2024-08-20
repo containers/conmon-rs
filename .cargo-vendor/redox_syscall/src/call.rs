@@ -1,16 +1,10 @@
 use super::arch::*;
-use super::data::{Map, SigAction, Stat, StatVfs, TimeSpec};
+use super::data::{Map, Stat, StatVfs, TimeSpec};
 use super::error::Result;
 use super::flag::*;
 use super::number::*;
 
-use core::{mem, ptr};
-
-// Signal restorer
-extern "C" fn restorer() -> ! {
-    sigreturn().unwrap();
-    unreachable!();
-}
+use core::mem;
 
 /// Close a file
 pub fn close(fd: usize) -> Result<usize> {
@@ -233,26 +227,6 @@ pub fn setrens(rns: usize, ens: usize) -> Result<usize> {
 /// Set the current process user IDs
 pub fn setreuid(ruid: usize, euid: usize) -> Result<usize> {
     unsafe { syscall2(SYS_SETREUID, ruid, euid) }
-}
-
-/// Set up a signal handler
-pub fn sigaction(sig: usize, act: Option<&SigAction>, oldact: Option<&mut SigAction>) -> Result<usize> {
-    unsafe { syscall4(SYS_SIGACTION, sig,
-                      act.map(|x| x as *const _).unwrap_or_else(ptr::null) as usize,
-                      oldact.map(|x| x as *mut _).unwrap_or_else(ptr::null_mut) as usize,
-                      restorer as usize) }
-}
-
-/// Get and/or set signal masks
-pub fn sigprocmask(how: usize, set: Option<&u64>, oldset: Option<&mut u64>) -> Result<usize> {
-    unsafe { syscall3(SYS_SIGPROCMASK, how,
-                      set.map(|x| x as *const _).unwrap_or_else(ptr::null) as usize,
-                      oldset.map(|x| x as *mut _).unwrap_or_else(ptr::null_mut) as usize) }
-}
-
-// Return from signal handler
-pub fn sigreturn() -> Result<usize> {
-    unsafe { syscall0(SYS_SIGRETURN) }
 }
 
 /// Set the file mode creation mask

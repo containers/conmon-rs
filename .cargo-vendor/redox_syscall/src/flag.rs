@@ -72,6 +72,7 @@ pub const SKMSG_FOBTAINFD: usize = 2;
 
 // TODO: Split SendFdFlags into caller flags and flags that the scheme receives?
 bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug)]
     pub struct SendFdFlags: usize {
         /// If set, the kernel will enforce that the file descriptor is exclusively owned.
         ///
@@ -82,6 +83,7 @@ bitflags::bitflags! {
     }
 }
 bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug)]
     pub struct FobtainFdFlags: usize {
         /// If set, `packet.c` specifies the destination file descriptor slot, otherwise the lowest
         /// available slot will be selected, and placed in the usize pointed to by `packet.c`.
@@ -255,26 +257,6 @@ pub const SIGIO: usize =    29;
 pub const SIGPWR: usize =   30;
 pub const SIGSYS: usize =   31;
 
-pub const SIG_DFL: usize = 0;
-pub const SIG_IGN: usize = 1;
-
-pub const SIG_BLOCK: usize = 0;
-pub const SIG_UNBLOCK: usize = 1;
-pub const SIG_SETMASK: usize = 2;
-
-bitflags! {
-    pub struct SigActionFlags: usize {
-        const SA_NOCLDSTOP = 0x00000001;
-        const SA_NOCLDWAIT = 0x00000002;
-        const SA_SIGINFO =   0x00000004;
-        const SA_RESTORER =  0x04000000;
-        const SA_ONSTACK =   0x08000000;
-        const SA_RESTART =   0x10000000;
-        const SA_NODEFER =   0x40000000;
-        const SA_RESETHAND = 0x80000000;
-    }
-}
-
 bitflags! {
     pub struct WaitFlags: usize {
         const WNOHANG =    0x01;
@@ -333,5 +315,21 @@ bitflags! {
         const FIXED = 1;
         const FIXED_REPLACE = 3;
         // TODO: MAYMOVE, DONTUNMAP
+    }
+}
+bitflags! {
+    pub struct RwFlags: u32 {
+        const NONBLOCK = 1;
+        const APPEND = 2;
+        // TODO: sync/dsync
+        // TODO: O_DIRECT?
+    }
+}
+bitflags! {
+    pub struct SigcontrolFlags: usize {
+        /// Prevents the kernel from jumping the context to the signal trampoline, but otherwise
+        /// has absolutely no effect on which signals are blocked etc. Meant to be used for
+        /// short-lived critical sections inside libc.
+        const INHIBIT_DELIVERY = 1;
     }
 }

@@ -22,6 +22,14 @@ fn main() {
         return build_zlib_ng(&target, true);
     }
 
+    // All android compilers should come with libz by default, so let's just use
+    // the one already there. Likewise, Haiku always ships with libz, so we can
+    // link to it even when cross-compiling.
+    if target.contains("android") || target.contains("haiku") {
+        println!("cargo:rustc-link-lib=z");
+        return;
+    }
+
     // Don't run pkg-config if we're linking statically (we'll build below) and
     // also don't run pkg-config on FreeBSD/DragonFly. That'll end up printing
     // `-L /usr/lib` which wreaks havoc with linking to an OpenSSL in /usr/local/lib
@@ -61,14 +69,6 @@ fn main() {
         if try_vcpkg() {
             return;
         }
-    }
-
-    // All android compilers should come with libz by default, so let's just use
-    // the one already there. Likewise, Haiku always ships with libz, so we can
-    // link to it even when cross-compiling.
-    if target.contains("android") || target.contains("haiku") {
-        println!("cargo:rustc-link-lib=z");
-        return;
     }
 
     let mut cfg = cc::Build::new();
@@ -207,7 +207,17 @@ fn try_vcpkg() -> bool {
         .emit_includes(true)
         .find_package("zlib")
     {
-        Ok(_) => true,
+        Ok(zlib) => {
+            if !zlib.include_paths.is_empty() {
+                let paths = zlib
+                    .include_paths
+                    .iter()
+                    .map(|s| s.display().to_string())
+                    .collect::<Vec<_>>();
+                println!("cargo:include={}", paths.join(","));
+            }
+            true
+        }
         Err(e) => {
             println!("note, vcpkg did not find zlib: {}", e);
             false

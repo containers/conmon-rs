@@ -84,6 +84,10 @@
 //! * `CC_ENABLE_DEBUG_OUTPUT` - if set, compiler command invocations and exit codes will
 //!   be logged to stdout. This is useful for debugging build script issues, but can be
 //!   overly verbose for normal use.
+//! * `CC_SHELL_ESCAPED_FLAGS` - if set, `*FLAGS` will be parsed as if they were shell
+//!   arguments (similar to `make` and `cmake`) rather than splitting them on each space.
+//!   For example, with `CFLAGS='a "b c"'`, the compiler will be invoked with 2 arguments -
+//!   `a` and `b c` - rather than 3: `a`, `"b` and `c"`.
 //! * `CXX...` - see [C++ Support](#c-support).
 //!
 //! Furthermore, projects using this crate may specify custom environment variables
@@ -140,15 +144,14 @@
 //!   set up by running the appropriate developer tools shell.
 //! * Windows platforms targeting MinGW (e.g. your target triple ends in `-gnu`)
 //!   require `cc` to be available in `PATH`. We recommend the
-//!   [MinGW-w64](https://www.mingw-w64.org/) distribution, which is using the
-//!   [Win-builds](http://win-builds.org/) installation system.
+//!   [MinGW-w64](https://www.mingw-w64.org/) distribution.
 //!   You may also acquire it via
 //!   [MSYS2](https://www.msys2.org/), as explained [here][msys2-help].  Make sure
 //!   to install the appropriate architecture corresponding to your installation of
 //!   rustc. GCC from older [MinGW](http://www.mingw.org/) project is compatible
 //!   only with 32-bit rust compiler.
 //!
-//! [msys2-help]: https://github.com/rust-lang/rust#building-on-windows
+//! [msys2-help]: https://github.com/rust-lang/rust/blob/master/INSTALL.md#building-on-windows
 //!
 //! # C++ support
 //!
@@ -224,6 +227,8 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Child;
 use std::process::Command;
 use std::sync::{Arc, RwLock};
+
+use shlex::Shlex;
 
 #[cfg(feature = "parallel")]
 mod parallel;
@@ -302,6 +307,7 @@ pub struct Build {
     apple_versions_cache: Arc<RwLock<HashMap<Box<str>, Arc<str>>>>,
     emit_rerun_if_env_changed: bool,
     cached_compiler_family: Arc<RwLock<HashMap<Box<Path>, ToolFamily>>>,
+    shell_escaped_flags: Option<bool>,
 }
 
 /// Represents the types of errors that may occur while using cc-rs.
@@ -426,6 +432,7 @@ impl Build {
             apple_versions_cache: Arc::new(RwLock::new(HashMap::new())),
             emit_rerun_if_env_changed: true,
             cached_compiler_family: Arc::default(),
+            shell_escaped_flags: None,
         }
     }
 
@@ -1275,6 +1282,15 @@ impl Build {
     /// This option defaults to `false`, and affect only msvc targets.
     pub fn static_crt(&mut self, static_crt: bool) -> &mut Build {
         self.static_crt = Some(static_crt);
+        self
+    }
+
+    /// Configure whether *FLAGS variables are parsed using `shlex`, similarly to `make` and
+    /// `cmake`.
+    ///
+    /// This option defaults to `false`.
+    pub fn shell_escaped_flags(&mut self, shell_escaped_flags: bool) -> &mut Build {
+        self.shell_escaped_flags = Some(shell_escaped_flags);
         self
     }
 
@@ -2190,6 +2206,17 @@ impl Build {
                         }
 
                         cmd.push_cc_arg(format!("--target={}", target).into());
+                    } else if let Ok(index) = target_info::WINDOWS_TRIPLE_MAPPING
+                        .binary_search_by_key(&target, |(target, _)| target)
+                    {
+                        cmd.args.push(
+                            format!(
+                                "--target={}-{}",
+                                target_info::WINDOWS_TRIPLE_MAPPING[index].1,
+                                rest
+                            )
+                            .into(),
+                        )
                     } else {
                         cmd.push_cc_arg(format!("--target={}", target).into());
                     }
@@ -3120,7 +3147,11 @@ impl Build {
         //
         // It's true that everything here is a bit of a pain, but apparently if
         // you're not literally make or bash then you get a lot of bug reports.
-        let known_wrappers = ["ccache", "distcc", "sccache", "icecc", "cachepot"];
+        let mut known_wrappers = vec!["ccache", "distcc", "sccache", "icecc", "cachepot"];
+        let custom_wrapper = self.getenv("CC_KNOWN_WRAPPER_CUSTOM");
+        if custom_wrapper.is_some() {
+            known_wrappers.push(custom_wrapper.as_deref().unwrap().to_str().unwrap());
+        }
 
         let mut parts = tool.split_whitespace();
         let maybe_wrapper = match parts.next() {
@@ -3620,6 +3651,11 @@ impl Build {
         })
     }
 
+    fn get_shell_escaped_flags(&self) -> bool {
+        self.shell_escaped_flags
+            .unwrap_or_else(|| self.getenv("CC_SHELL_ESCAPED_FLAGS").is_some())
+    }
+
     fn get_dwarf_version(&self) -> Option<u32> {
         // Tentatively matches the DWARF version defaults as of rustc 1.62.
         let target = self.get_target().ok()?;
@@ -3734,12 +3770,17 @@ impl Build {
     }
 
     fn envflags(&self, name: &str) -> Result<Vec<String>, Error> {
-        Ok(self
-            .getenv_with_target_prefixes(name)?
-            .to_string_lossy()
-            .split_ascii_whitespace()
-            .map(ToString::to_string)
-            .collect())
+        let env_os = self.getenv_with_target_prefixes(name)?;
+        let env = env_os.to_string_lossy();
+
+        if self.get_shell_escaped_flags() {
+            Ok(Shlex::new(&env).collect())
+        } else {
+            Ok(env
+                .split_ascii_whitespace()
+                .map(ToString::to_string)
+                .collect())
+        }
     }
 
     fn fix_env_for_apple_os(&self, cmd: &mut Command) -> Result<(), Error> {

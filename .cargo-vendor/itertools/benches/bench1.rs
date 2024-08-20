@@ -1,10 +1,10 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use itertools::Itertools;
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
 use itertools::free::cloned;
 use itertools::iproduct;
+use itertools::Itertools;
 
-use std::iter::repeat;
 use std::cmp;
+use std::iter::repeat;
 use std::ops::{Add, Range};
 
 mod extra;
@@ -15,8 +15,10 @@ fn slice_iter(c: &mut Criterion) {
     let xs: Vec<_> = repeat(1i32).take(20).collect();
 
     c.bench_function("slice iter", move |b| {
-        b.iter(|| for elt in xs.iter() {
-            black_box(elt);
+        b.iter(|| {
+            for elt in xs.iter() {
+                black_box(elt);
+            }
         })
     });
 }
@@ -25,8 +27,10 @@ fn slice_iter_rev(c: &mut Criterion) {
     let xs: Vec<_> = repeat(1i32).take(20).collect();
 
     c.bench_function("slice iter rev", move |b| {
-        b.iter(|| for elt in xs.iter().rev() {
-            black_box(elt);
+        b.iter(|| {
+            for elt in xs.iter().rev() {
+                black_box(elt);
+            }
         })
     });
 }
@@ -307,10 +311,10 @@ fn zip_unchecked_counted_loop(c: &mut Criterion) {
             let len = cmp::min(xs.len(), ys.len());
             for i in 0..len {
                 unsafe {
-                let x = *xs.get_unchecked(i);
-                let y = *ys.get_unchecked(i);
-                black_box(x);
-                black_box(y);
+                    let x = *xs.get_unchecked(i);
+                    let y = *ys.get_unchecked(i);
+                    black_box(x);
+                    black_box(y);
                 }
             }
         })
@@ -329,9 +333,9 @@ fn zipdot_i32_unchecked_counted_loop(c: &mut Criterion) {
             let mut s = 0i32;
             for i in 0..len {
                 unsafe {
-                let x = *xs.get_unchecked(i);
-                let y = *ys.get_unchecked(i);
-                s += x * y;
+                    let x = *xs.get_unchecked(i);
+                    let y = *ys.get_unchecked(i);
+                    s += x * y;
                 }
             }
             s
@@ -351,9 +355,9 @@ fn zipdot_f32_unchecked_counted_loop(c: &mut Criterion) {
             let mut s = 0f32;
             for i in 0..len {
                 unsafe {
-                let x = *xs.get_unchecked(i);
-                let y = *ys.get_unchecked(i);
-                s += x * y;
+                    let x = *xs.get_unchecked(i);
+                    let y = *ys.get_unchecked(i);
+                    s += x * y;
                 }
             }
             s
@@ -374,12 +378,12 @@ fn zip_unchecked_counted_loop3(c: &mut Criterion) {
             let len = cmp::min(xs.len(), cmp::min(ys.len(), zs.len()));
             for i in 0..len {
                 unsafe {
-                let x = *xs.get_unchecked(i);
-                let y = *ys.get_unchecked(i);
-                let z = *zs.get_unchecked(i);
-                black_box(x);
-                black_box(y);
-                black_box(z);
+                    let x = *xs.get_unchecked(i);
+                    let y = *ys.get_unchecked(i);
+                    let z = *zs.get_unchecked(i);
+                    black_box(x);
+                    black_box(y);
+                    black_box(z);
                 }
             }
         })
@@ -464,17 +468,15 @@ fn equal(c: &mut Criterion) {
     let alpha = black_box(&data[1..]);
     let beta = black_box(&data[..l - 1]);
 
-    c.bench_function("equal", move |b| {
-        b.iter(|| {
-            itertools::equal(alpha, beta)
-        })
-    });
+    c.bench_function("equal", move |b| b.iter(|| itertools::equal(alpha, beta)));
 }
 
 fn merge_default(c: &mut Criterion) {
     let mut data1 = vec![0; 1024];
     let mut data2 = vec![0; 800];
     let mut x = 0;
+
+    #[allow(clippy::explicit_counter_loop, clippy::unused_enumerate_index)]
     for (_, elt) in data1.iter_mut().enumerate() {
         *elt = x;
         x += 1;
@@ -493,9 +495,7 @@ fn merge_default(c: &mut Criterion) {
     let data2 = black_box(data2);
 
     c.bench_function("merge default", move |b| {
-        b.iter(|| {
-            data1.iter().merge(&data2).count()
-        })
+        b.iter(|| data1.iter().merge(&data2).count())
     });
 }
 
@@ -503,6 +503,8 @@ fn merge_by_cmp(c: &mut Criterion) {
     let mut data1 = vec![0; 1024];
     let mut data2 = vec![0; 800];
     let mut x = 0;
+
+    #[allow(clippy::explicit_counter_loop, clippy::unused_enumerate_index)]
     for (_, elt) in data1.iter_mut().enumerate() {
         *elt = x;
         x += 1;
@@ -521,9 +523,7 @@ fn merge_by_cmp(c: &mut Criterion) {
     let data2 = black_box(data2);
 
     c.bench_function("merge by cmp", move |b| {
-        b.iter(|| {
-            data1.iter().merge_by(&data2, PartialOrd::le).count()
-        })
+        b.iter(|| data1.iter().merge_by(&data2, PartialOrd::le).count())
     });
 }
 
@@ -531,6 +531,8 @@ fn merge_by_lt(c: &mut Criterion) {
     let mut data1 = vec![0; 1024];
     let mut data2 = vec![0; 800];
     let mut x = 0;
+
+    #[allow(clippy::explicit_counter_loop, clippy::unused_enumerate_index)]
     for (_, elt) in data1.iter_mut().enumerate() {
         *elt = x;
         x += 1;
@@ -549,9 +551,7 @@ fn merge_by_lt(c: &mut Criterion) {
     let data2 = black_box(data2);
 
     c.bench_function("merge by lt", move |b| {
-        b.iter(|| {
-            data1.iter().merge_by(&data2, |a, b| a <= b).count()
-        })
+        b.iter(|| data1.iter().merge_by(&data2, |a, b| a <= b).count())
     });
 }
 
@@ -559,6 +559,8 @@ fn kmerge_default(c: &mut Criterion) {
     let mut data1 = vec![0; 1024];
     let mut data2 = vec![0; 800];
     let mut x = 0;
+
+    #[allow(clippy::explicit_counter_loop, clippy::unused_enumerate_index)]
     for (_, elt) in data1.iter_mut().enumerate() {
         *elt = x;
         x += 1;
@@ -578,9 +580,7 @@ fn kmerge_default(c: &mut Criterion) {
     let its = &[data1.iter(), data2.iter()];
 
     c.bench_function("kmerge default", move |b| {
-        b.iter(|| {
-            its.iter().cloned().kmerge().count()
-        })
+        b.iter(|| its.iter().cloned().kmerge().count())
     });
 }
 
@@ -589,7 +589,7 @@ fn kmerge_tenway(c: &mut Criterion) {
 
     let mut state = 1729u16;
     fn rng(state: &mut u16) -> u16 {
-        let new = state.wrapping_mul(31421) + 6927;
+        let new = state.wrapping_mul(31421).wrapping_add(6927);
         *state = new;
         new
     }
@@ -600,10 +600,10 @@ fn kmerge_tenway(c: &mut Criterion) {
 
     let mut chunks = Vec::new();
     let mut rest = &mut data[..];
-    while rest.len() > 0 {
+    while !rest.is_empty() {
         let chunk_len = 1 + rng(&mut state) % 512;
         let chunk_len = cmp::min(rest.len(), chunk_len as usize);
-        let (fst, tail) = {rest}.split_at_mut(chunk_len);
+        let (fst, tail) = { rest }.split_at_mut(chunk_len);
         fst.sort();
         chunks.push(fst.iter().cloned());
         rest = tail;
@@ -612,15 +612,14 @@ fn kmerge_tenway(c: &mut Criterion) {
     // println!("Chunk lengths: {}", chunks.iter().format_with(", ", |elt, f| f(&elt.len())));
 
     c.bench_function("kmerge tenway", move |b| {
-        b.iter(|| {
-            chunks.iter().cloned().kmerge().count()
-        })
+        b.iter(|| chunks.iter().cloned().kmerge().count())
     });
 }
 
 fn fast_integer_sum<I>(iter: I) -> I::Item
-    where I: IntoIterator,
-          I::Item: Default + Add<Output=I::Item>
+where
+    I: IntoIterator,
+    I::Item: Default + Add<Output = I::Item>,
 {
     iter.into_iter().fold(<_>::default(), |x, y| x + y)
 }
@@ -629,9 +628,7 @@ fn step_vec_2(c: &mut Criterion) {
     let v = vec![0; 1024];
 
     c.bench_function("step vec 2", move |b| {
-        b.iter(|| {
-            fast_integer_sum(cloned(v.iter().step_by(2)))
-        })
+        b.iter(|| fast_integer_sum(cloned(v.iter().step_by(2))))
     });
 }
 
@@ -639,9 +636,7 @@ fn step_vec_10(c: &mut Criterion) {
     let v = vec![0; 1024];
 
     c.bench_function("step vec 10", move |b| {
-        b.iter(|| {
-            fast_integer_sum(cloned(v.iter().step_by(10)))
-        })
+        b.iter(|| fast_integer_sum(cloned(v.iter().step_by(10))))
     });
 }
 
@@ -649,9 +644,7 @@ fn step_range_2(c: &mut Criterion) {
     let v = black_box(0..1024);
 
     c.bench_function("step range 2", move |b| {
-        b.iter(|| {
-            fast_integer_sum(v.clone().step_by(2))
-        })
+        b.iter(|| fast_integer_sum(v.clone().step_by(2)))
     });
 }
 
@@ -659,9 +652,23 @@ fn step_range_10(c: &mut Criterion) {
     let v = black_box(0..1024);
 
     c.bench_function("step range 10", move |b| {
-        b.iter(|| {
-            fast_integer_sum(v.clone().step_by(10))
-        })
+        b.iter(|| fast_integer_sum(v.clone().step_by(10)))
+    });
+}
+
+fn vec_iter_mut_partition(c: &mut Criterion) {
+    let data = std::iter::repeat(-1024i32..1024)
+        .take(256)
+        .flatten()
+        .collect_vec();
+    c.bench_function("vec iter mut partition", move |b| {
+        b.iter_batched(
+            || data.clone(),
+            |mut data| {
+                black_box(itertools::partition(black_box(&mut data), |n| *n >= 0));
+            },
+            BatchSize::LargeInput,
+        )
     });
 }
 
@@ -681,22 +688,6 @@ fn cartesian_product_iterator(c: &mut Criterion) {
     });
 }
 
-fn cartesian_product_fold(c: &mut Criterion) {
-    let xs = vec![0; 16];
-
-    c.bench_function("cartesian product fold", move |b| {
-        b.iter(|| {
-            let mut sum = 0;
-            iproduct!(&xs, &xs, &xs).fold((), |(), (&x, &y, &z)| {
-                sum += x;
-                sum += y;
-                sum += z;
-            });
-            sum
-        })
-    });
-}
-
 fn multi_cartesian_product_iterator(c: &mut Criterion) {
     let xs = [vec![0; 16], vec![0; 16], vec![0; 16]];
 
@@ -708,22 +699,6 @@ fn multi_cartesian_product_iterator(c: &mut Criterion) {
                 sum += x[1];
                 sum += x[2];
             }
-            sum
-        })
-    });
-}
-
-fn multi_cartesian_product_fold(c: &mut Criterion) {
-    let xs = [vec![0; 16], vec![0; 16], vec![0; 16]];
-
-    c.bench_function("multi cartesian product fold", move |b| {
-        b.iter(|| {
-            let mut sum = 0;
-            xs.iter().multi_cartesian_product().fold((), |(), x| {
-                sum += x[0];
-                sum += x[1];
-                sum += x[2];
-            });
             sum
         })
     });
@@ -753,9 +728,7 @@ fn all_equal(c: &mut Criterion) {
     let mut xs = vec![0; 5_000_000];
     xs.extend(vec![1; 5_000_000]);
 
-    c.bench_function("all equal", move |b| {
-        b.iter(|| xs.iter().all_equal())
-    });
+    c.bench_function("all equal", move |b| b.iter(|| xs.iter().all_equal()));
 }
 
 fn all_equal_for(c: &mut Criterion) {
@@ -797,21 +770,17 @@ fn permutations_iter(c: &mut Criterion) {
     }
 
     c.bench_function("permutations iter", move |b| {
-        b.iter(|| {
-            for _ in NewIterator(0..PERM_COUNT).permutations(PERM_COUNT) {
-
-            }
-        })
+        b.iter(
+            || {
+                for _ in NewIterator(0..PERM_COUNT).permutations(PERM_COUNT) {}
+            },
+        )
     });
 }
 
 fn permutations_range(c: &mut Criterion) {
     c.bench_function("permutations range", move |b| {
-        b.iter(|| {
-            for _ in (0..PERM_COUNT).permutations(PERM_COUNT) {
-
-            }
-        })
+        b.iter(|| for _ in (0..PERM_COUNT).permutations(PERM_COUNT) {})
     });
 }
 
@@ -819,11 +788,7 @@ fn permutations_slice(c: &mut Criterion) {
     let v = (0..PERM_COUNT).collect_vec();
 
     c.bench_function("permutations slice", move |b| {
-        b.iter(|| {
-            for _ in v.as_slice().iter().permutations(PERM_COUNT) {
-
-            }
-        })
+        b.iter(|| for _ in v.as_slice().iter().permutations(PERM_COUNT) {})
     });
 }
 
@@ -862,10 +827,9 @@ criterion_group!(
     step_vec_10,
     step_range_2,
     step_range_10,
+    vec_iter_mut_partition,
     cartesian_product_iterator,
-    cartesian_product_fold,
     multi_cartesian_product_iterator,
-    multi_cartesian_product_fold,
     cartesian_product_nested_for,
     all_equal,
     all_equal_for,

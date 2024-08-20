@@ -1,82 +1,104 @@
+#![allow(clippy::unwrap_used)]
+
 use std::io::Write as _;
 
-use criterion::{black_box, Criterion};
+#[divan::bench(args = DATA)]
+fn nop(data: &Data) -> Vec<u8> {
+    let buffer = Vec::with_capacity(data.content().len());
+    let mut stream = buffer;
 
-fn stream(c: &mut Criterion) {
-    for (name, content) in [
-        ("demo.vte", &include_bytes!("../tests/demo.vte")[..]),
-        ("rg_help.vte", &include_bytes!("../tests/rg_help.vte")[..]),
-        ("rg_linus.vte", &include_bytes!("../tests/rg_linus.vte")[..]),
-        (
-            "state_changes",
-            &b"\x1b]2;X\x1b\\ \x1b[0m \x1bP0@\x1b\\"[..],
-        ),
-    ] {
-        let mut group = c.benchmark_group(name);
-        group.bench_function("nop", |b| {
-            b.iter(|| {
-                let buffer = anstream::Buffer::with_capacity(content.len());
-                let mut stream = buffer;
+    stream.write_all(data.content()).unwrap();
 
-                stream.write_all(content).unwrap();
+    stream
+}
 
-                black_box(stream)
-            })
-        });
-        group.bench_function("StripStream", |b| {
-            b.iter(|| {
-                let buffer = anstream::Buffer::with_capacity(content.len());
-                let mut stream = anstream::StripStream::new(buffer);
+#[divan::bench(args = DATA)]
+fn strip_stream(data: &Data) -> Vec<u8> {
+    let buffer = Vec::with_capacity(data.content().len());
+    let mut stream = anstream::StripStream::new(buffer);
 
-                stream.write_all(content).unwrap();
+    stream.write_all(data.content()).unwrap();
 
-                black_box(stream)
-            })
-        });
-        #[cfg(all(windows, feature = "wincon"))]
-        group.bench_function("WinconStream", |b| {
-            b.iter(|| {
-                let buffer = anstream::Buffer::with_capacity(content.len());
-                let mut stream =
-                    anstream::WinconStream::new(anstyle_wincon::Console::new(buffer).unwrap());
+    stream.into_inner()
+}
 
-                stream.write_all(content).unwrap();
+#[divan::bench(args = DATA)]
+#[cfg(all(windows, feature = "wincon"))]
+fn wincon_stream(data: &Data) -> Vec<u8> {
+    let buffer = Vec::with_capacity(data.content().len());
+    let mut stream = anstream::WinconStream::new(buffer);
 
-                black_box(stream)
-            })
-        });
-        group.bench_function("AutoStream::always_ansi", |b| {
-            b.iter(|| {
-                let buffer = anstream::Buffer::with_capacity(content.len());
-                let mut stream = anstream::AutoStream::always_ansi(buffer);
+    stream.write_all(data.content()).unwrap();
 
-                stream.write_all(content).unwrap();
+    stream.into_inner()
+}
 
-                black_box(stream)
-            })
-        });
-        group.bench_function("AutoStream::always", |b| {
-            b.iter(|| {
-                let buffer = anstream::Buffer::with_capacity(content.len());
-                let mut stream = anstream::AutoStream::always(buffer);
+#[divan::bench(args = DATA)]
+fn auto_stream_always_ansi(data: &Data) -> Vec<u8> {
+    let buffer = Vec::with_capacity(data.content().len());
+    let mut stream = anstream::AutoStream::always_ansi(buffer);
 
-                stream.write_all(content).unwrap();
+    stream.write_all(data.content()).unwrap();
 
-                black_box(stream)
-            })
-        });
-        group.bench_function("AutoStream::never", |b| {
-            b.iter(|| {
-                let buffer = anstream::Buffer::with_capacity(content.len());
-                let mut stream = anstream::AutoStream::never(buffer);
+    stream.into_inner()
+}
 
-                stream.write_all(content).unwrap();
+#[divan::bench(args = DATA)]
+fn auto_stream_always(data: &Data) -> Vec<u8> {
+    let buffer = Vec::with_capacity(data.content().len());
+    let mut stream = anstream::AutoStream::always(buffer);
 
-                black_box(stream)
-            })
-        });
+    stream.write_all(data.content()).unwrap();
+
+    stream.into_inner()
+}
+
+#[divan::bench(args = DATA)]
+fn auto_stream_never(data: &Data) -> Vec<u8> {
+    let buffer = Vec::with_capacity(data.content().len());
+    let mut stream = anstream::AutoStream::never(buffer);
+
+    stream.write_all(data.content()).unwrap();
+
+    stream.into_inner()
+}
+
+const DATA: &[Data] = &[
+    Data(
+        "0-state_changes",
+        b"\x1b]2;X\x1b\\ \x1b[0m \x1bP0@\x1b\\".as_slice(),
+    ),
+    #[cfg(feature = "utf8")]
+    Data("1-demo.vte", include_bytes!("../tests/demo.vte").as_slice()),
+    Data(
+        "2-rg_help.vte",
+        include_bytes!("../tests/rg_help.vte").as_slice(),
+    ),
+    Data(
+        "3-rg_linus.vte",
+        include_bytes!("../tests/rg_linus.vte").as_slice(),
+    ),
+];
+
+#[derive(Debug)]
+struct Data(&'static str, &'static [u8]);
+
+impl Data {
+    const fn name(&self) -> &'static str {
+        self.0
+    }
+
+    const fn content(&self) -> &'static [u8] {
+        self.1
     }
 }
 
-criterion::criterion_group!(benches, stream);
-criterion::criterion_main!(benches);
+impl std::fmt::Display for Data {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.name().fmt(f)
+    }
+}
+
+fn main() {
+    divan::main();
+}

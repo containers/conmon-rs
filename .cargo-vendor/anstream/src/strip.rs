@@ -1,17 +1,20 @@
 use crate::adapter::StripBytes;
-use crate::Lockable;
-use crate::RawStream;
+use crate::stream::AsLockedWrite;
+use crate::stream::IsTerminal;
 
 /// Only pass printable data to the inner `Write`
 #[derive(Debug)]
-pub struct StripStream<S> {
+pub struct StripStream<S>
+where
+    S: std::io::Write,
+{
     raw: S,
     state: StripBytes,
 }
 
 impl<S> StripStream<S>
 where
-    S: RawStream,
+    S: std::io::Write,
 {
     /// Only pass printable data to the inner `Write`
     #[inline]
@@ -22,54 +25,88 @@ where
         }
     }
 
-    /// Get the wrapped [`RawStream`]
+    /// Get the wrapped [`std::io::Write`]
     #[inline]
     pub fn into_inner(self) -> S {
         self.raw
     }
+}
 
+impl<S> StripStream<S>
+where
+    S: std::io::Write,
+    S: IsTerminal,
+{
+    /// Returns `true` if the descriptor/handle refers to a terminal/tty.
     #[inline]
-    #[cfg(feature = "auto")]
     pub fn is_terminal(&self) -> bool {
         self.raw.is_terminal()
     }
 }
 
-#[cfg(feature = "auto")]
-impl<S> is_terminal::IsTerminal for StripStream<S>
-where
-    S: RawStream,
-{
+impl StripStream<std::io::Stdout> {
+    /// Get exclusive access to the `StripStream`
+    ///
+    /// Why?
+    /// - Faster performance when writing in a loop
+    /// - Avoid other threads interleaving output with the current thread
     #[inline]
-    fn is_terminal(&self) -> bool {
-        self.is_terminal()
+    pub fn lock(self) -> StripStream<std::io::StdoutLock<'static>> {
+        StripStream {
+            raw: self.raw.lock(),
+            state: self.state,
+        }
+    }
+}
+
+impl StripStream<std::io::Stderr> {
+    /// Get exclusive access to the `StripStream`
+    ///
+    /// Why?
+    /// - Faster performance when writing in a loop
+    /// - Avoid other threads interleaving output with the current thread
+    #[inline]
+    pub fn lock(self) -> StripStream<std::io::StderrLock<'static>> {
+        StripStream {
+            raw: self.raw.lock(),
+            state: self.state,
+        }
     }
 }
 
 impl<S> std::io::Write for StripStream<S>
 where
-    S: RawStream,
+    S: std::io::Write,
+    S: AsLockedWrite,
 {
+    // Must forward all calls to ensure locking happens appropriately
     #[inline]
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        write(&mut self.raw, &mut self.state, buf)
+        write(&mut self.raw.as_locked_write(), &mut self.state, buf)
     }
-
+    #[inline]
+    fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> std::io::Result<usize> {
+        let buf = bufs
+            .iter()
+            .find(|b| !b.is_empty())
+            .map(|b| &**b)
+            .unwrap_or(&[][..]);
+        self.write(buf)
+    }
+    // is_write_vectored: nightly only
     #[inline]
     fn flush(&mut self) -> std::io::Result<()> {
-        self.raw.flush()
+        self.raw.as_locked_write().flush()
     }
-
-    // Provide explicit implementations of trait methods
-    // - To reduce bookkeeping
-    // - Avoid acquiring / releasing locks in a loop
-
     #[inline]
     fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
-        write_all(&mut self.raw, &mut self.state, buf)
+        write_all(&mut self.raw.as_locked_write(), &mut self.state, buf)
     }
-
-    // Not bothering with `write_fmt` as it just calls `write_all`
+    // write_all_vectored: nightly only
+    #[inline]
+    fn write_fmt(&mut self, args: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+        write_fmt(&mut self.raw.as_locked_write(), &mut self.state, args)
+    }
 }
 
 fn write(
@@ -105,6 +142,15 @@ fn write_all(
     Ok(())
 }
 
+fn write_fmt(
+    raw: &mut dyn std::io::Write,
+    state: &mut StripBytes,
+    args: std::fmt::Arguments<'_>,
+) -> std::io::Result<()> {
+    let write_all = |buf: &[u8]| write_all(raw, state, buf);
+    crate::fmt::Adapter::new(write_all).write_fmt(args)
+}
+
 #[inline]
 fn offset_to(total: &[u8], subslice: &[u8]) -> usize {
     let total = total.as_ptr();
@@ -117,21 +163,6 @@ fn offset_to(total: &[u8], subslice: &[u8]) -> usize {
     subslice as usize - total as usize
 }
 
-impl<S> Lockable for StripStream<S>
-where
-    S: Lockable,
-{
-    type Locked = StripStream<<S as Lockable>::Locked>;
-
-    #[inline]
-    fn lock(self) -> Self::Locked {
-        Self::Locked {
-            raw: self.raw.lock(),
-            state: self.state,
-        }
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -142,7 +173,7 @@ mod test {
         #[test]
         #[cfg_attr(miri, ignore)]  // See https://github.com/AltSysrq/proptest/issues/253
         fn write_all_no_escapes(s in "\\PC*") {
-            let buffer = crate::Buffer::new();
+            let buffer = Vec::new();
             let mut stream = StripStream::new(buffer);
             stream.write_all(s.as_bytes()).unwrap();
             let buffer = stream.into_inner();
@@ -153,7 +184,7 @@ mod test {
         #[test]
         #[cfg_attr(miri, ignore)]  // See https://github.com/AltSysrq/proptest/issues/253
         fn write_byte_no_escapes(s in "\\PC*") {
-            let buffer = crate::Buffer::new();
+            let buffer = Vec::new();
             let mut stream = StripStream::new(buffer);
             for byte in s.as_bytes() {
                 stream.write_all(&[*byte]).unwrap();
@@ -166,7 +197,7 @@ mod test {
         #[test]
         #[cfg_attr(miri, ignore)]  // See https://github.com/AltSysrq/proptest/issues/253
         fn write_all_random(s in any::<Vec<u8>>()) {
-            let buffer = crate::Buffer::new();
+            let buffer = Vec::new();
             let mut stream = StripStream::new(buffer);
             stream.write_all(s.as_slice()).unwrap();
             let buffer = stream.into_inner();
@@ -180,7 +211,7 @@ mod test {
         #[test]
         #[cfg_attr(miri, ignore)]  // See https://github.com/AltSysrq/proptest/issues/253
         fn write_byte_random(s in any::<Vec<u8>>()) {
-            let buffer = crate::Buffer::new();
+            let buffer = Vec::new();
             let mut stream = StripStream::new(buffer);
             for byte in s.as_slice() {
                 stream.write_all(&[*byte]).unwrap();

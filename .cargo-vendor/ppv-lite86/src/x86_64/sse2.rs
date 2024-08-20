@@ -9,8 +9,7 @@ use core::marker::PhantomData;
 use core::ops::{
     Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not,
 };
-use zerocopy::transmute;
-use zerocopy_derive::{AsBytes, FromBytes, FromZeroes};
+use zerocopy::{transmute, AsBytes, FromBytes, FromZeroes};
 
 macro_rules! impl_binop {
     ($vec:ident, $trait:ident, $fn:ident, $impl_fn:ident) => {
@@ -1385,8 +1384,7 @@ pub mod avx2 {
     use core::arch::x86_64::*;
     use core::marker::PhantomData;
     use core::ops::*;
-    use zerocopy::transmute;
-    use zerocopy_derive::{AsBytes, FromBytes, FromZeroes};
+    use zerocopy::{transmute, AsBytes, FromBytes, FromZeroes};
 
     #[derive(Copy, Clone, FromBytes, AsBytes, FromZeroes)]
     #[repr(transparent)]

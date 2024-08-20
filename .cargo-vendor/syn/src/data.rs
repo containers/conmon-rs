@@ -1,5 +1,5 @@
 use crate::attr::Attribute;
-use crate::expr::Expr;
+use crate::expr::{Expr, Index, Member};
 use crate::ident::Ident;
 use crate::punctuated::{self, Punctuated};
 use crate::restriction::{FieldMutability, Visibility};
@@ -8,7 +8,7 @@ use crate::ty::Type;
 
 ast_struct! {
     /// An enum variant.
-    #[cfg_attr(doc_cfg, doc(cfg(any(feature = "full", feature = "derive"))))]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "full", feature = "derive"))))]
     pub struct Variant {
         pub attrs: Vec<Attribute>,
 
@@ -31,7 +31,7 @@ ast_enum_of_structs! {
     /// This type is a [syntax tree enum].
     ///
     /// [syntax tree enum]: crate::expr::Expr#syntax-tree-enums
-    #[cfg_attr(doc_cfg, doc(cfg(any(feature = "full", feature = "derive"))))]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "full", feature = "derive"))))]
     pub enum Fields {
         /// Named fields of a struct or struct variant such as `Point { x: f64,
         /// y: f64 }`.
@@ -48,7 +48,7 @@ ast_enum_of_structs! {
 ast_struct! {
     /// Named fields of a struct or struct variant such as `Point { x: f64,
     /// y: f64 }`.
-    #[cfg_attr(doc_cfg, doc(cfg(any(feature = "full", feature = "derive"))))]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "full", feature = "derive"))))]
     pub struct FieldsNamed {
         pub brace_token: token::Brace,
         pub named: Punctuated<Field, Token![,]>,
@@ -57,7 +57,7 @@ ast_struct! {
 
 ast_struct! {
     /// Unnamed fields of a tuple struct or tuple variant such as `Some(T)`.
-    #[cfg_attr(doc_cfg, doc(cfg(any(feature = "full", feature = "derive"))))]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "full", feature = "derive"))))]
     pub struct FieldsUnnamed {
         pub paren_token: token::Paren,
         pub unnamed: Punctuated<Field, Token![,]>,
@@ -104,6 +104,47 @@ impl Fields {
             Fields::Unnamed(f) => f.unnamed.is_empty(),
         }
     }
+
+    return_impl_trait! {
+        /// Get an iterator over the fields of a struct or variant as [`Member`]s.
+        /// This iterator can be used to iterate over a named or unnamed struct or
+        /// variant's fields uniformly.
+        ///
+        /// # Example
+        ///
+        /// The following is a simplistic [`Clone`] derive for structs. (A more
+        /// complete implementation would additionally want to infer trait bounds on
+        /// the generic type parameters.)
+        ///
+        /// ```
+        /// # use quote::quote;
+        /// #
+        /// fn derive_clone(input: &syn::ItemStruct) -> proc_macro2::TokenStream {
+        ///     let ident = &input.ident;
+        ///     let members = input.fields.members();
+        ///     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+        ///     quote! {
+        ///         impl #impl_generics Clone for #ident #ty_generics #where_clause {
+        ///             fn clone(&self) -> Self {
+        ///                 Self {
+        ///                     #(#members: self.#members.clone()),*
+        ///                 }
+        ///             }
+        ///         }
+        ///     }
+        /// }
+        /// ```
+        ///
+        /// For structs with named fields, it produces an expression like `Self { a:
+        /// self.a.clone() }`. For structs with unnamed fields, `Self { 0:
+        /// self.0.clone() }`. And for unit structs, `Self {}`.
+        pub fn members(&self) -> impl Iterator<Item = Member> + Clone + '_ [Members] {
+            Members {
+                fields: self.iter(),
+                index: 0,
+            }
+        }
+    }
 }
 
 impl IntoIterator for Fields {
@@ -139,7 +180,7 @@ impl<'a> IntoIterator for &'a mut Fields {
 
 ast_struct! {
     /// A field of a struct or enum variant.
-    #[cfg_attr(doc_cfg, doc(cfg(any(feature = "full", feature = "derive"))))]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "full", feature = "derive"))))]
     pub struct Field {
         pub attrs: Vec<Attribute>,
 
@@ -155,6 +196,43 @@ ast_struct! {
         pub colon_token: Option<Token![:]>,
 
         pub ty: Type,
+    }
+}
+
+pub struct Members<'a> {
+    fields: punctuated::Iter<'a, Field>,
+    index: u32,
+}
+
+impl<'a> Iterator for Members<'a> {
+    type Item = Member;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let field = self.fields.next()?;
+        let member = match &field.ident {
+            Some(ident) => Member::Named(ident.clone()),
+            None => {
+                #[cfg(all(feature = "parsing", feature = "printing"))]
+                let span = crate::spanned::Spanned::span(&field.ty);
+                #[cfg(not(all(feature = "parsing", feature = "printing")))]
+                let span = proc_macro2::Span::call_site();
+                Member::Unnamed(Index {
+                    index: self.index,
+                    span,
+                })
+            }
+        };
+        self.index += 1;
+        Some(member)
+    }
+}
+
+impl<'a> Clone for Members<'a> {
+    fn clone(&self) -> Self {
+        Members {
+            fields: self.fields.clone(),
+            index: self.index,
+        }
     }
 }
 
@@ -174,7 +252,7 @@ pub(crate) mod parsing {
     use crate::ty::Type;
     use crate::verbatim;
 
-    #[cfg_attr(doc_cfg, doc(cfg(feature = "parsing")))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
     impl Parse for Variant {
         fn parse(input: ParseStream) -> Result<Self> {
             let attrs = input.call(Attribute::parse_outer)?;
@@ -295,7 +373,7 @@ pub(crate) mod parsing {
         Err(input.error("unsupported expression"))
     }
 
-    #[cfg_attr(doc_cfg, doc(cfg(feature = "parsing")))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
     impl Parse for FieldsNamed {
         fn parse(input: ParseStream) -> Result<Self> {
             let content;
@@ -306,7 +384,7 @@ pub(crate) mod parsing {
         }
     }
 
-    #[cfg_attr(doc_cfg, doc(cfg(feature = "parsing")))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
     impl Parse for FieldsUnnamed {
         fn parse(input: ParseStream) -> Result<Self> {
             let content;
@@ -319,7 +397,7 @@ pub(crate) mod parsing {
 
     impl Field {
         /// Parses a named (braced struct) field.
-        #[cfg_attr(doc_cfg, doc(cfg(feature = "parsing")))]
+        #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
         pub fn parse_named(input: ParseStream) -> Result<Self> {
             let attrs = input.call(Attribute::parse_outer)?;
             let vis: Visibility = input.parse()?;
@@ -356,7 +434,7 @@ pub(crate) mod parsing {
         }
 
         /// Parses an unnamed (tuple struct) field.
-        #[cfg_attr(doc_cfg, doc(cfg(feature = "parsing")))]
+        #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
         pub fn parse_unnamed(input: ParseStream) -> Result<Self> {
             Ok(Field {
                 attrs: input.call(Attribute::parse_outer)?,
@@ -377,7 +455,7 @@ mod printing {
     use proc_macro2::TokenStream;
     use quote::{ToTokens, TokenStreamExt};
 
-    #[cfg_attr(doc_cfg, doc(cfg(feature = "printing")))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "printing")))]
     impl ToTokens for Variant {
         fn to_tokens(&self, tokens: &mut TokenStream) {
             tokens.append_all(&self.attrs);
@@ -390,7 +468,7 @@ mod printing {
         }
     }
 
-    #[cfg_attr(doc_cfg, doc(cfg(feature = "printing")))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "printing")))]
     impl ToTokens for FieldsNamed {
         fn to_tokens(&self, tokens: &mut TokenStream) {
             self.brace_token.surround(tokens, |tokens| {
@@ -399,7 +477,7 @@ mod printing {
         }
     }
 
-    #[cfg_attr(doc_cfg, doc(cfg(feature = "printing")))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "printing")))]
     impl ToTokens for FieldsUnnamed {
         fn to_tokens(&self, tokens: &mut TokenStream) {
             self.paren_token.surround(tokens, |tokens| {
@@ -408,7 +486,7 @@ mod printing {
         }
     }
 
-    #[cfg_attr(doc_cfg, doc(cfg(feature = "printing")))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "printing")))]
     impl ToTokens for Field {
         fn to_tokens(&self, tokens: &mut TokenStream) {
             tokens.append_all(&self.attrs);

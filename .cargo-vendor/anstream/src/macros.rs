@@ -22,6 +22,10 @@
 /// Use `print!` only for the primary output of your program. Use
 /// [`eprint!`] instead to print error and progress messages.
 ///
+/// **NOTE:** Not all `print!` calls will be captured in tests like [`std::print!`]
+/// - Capturing will automatically be activated in test binaries
+/// - Otherwise, only when the `test` feature is enabled
+///
 /// # Panics
 ///
 /// Panics if writing to `stdout` fails for any reason **except** broken pipe.
@@ -56,14 +60,29 @@
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => {{
-        use std::io::Write as _;
+        if cfg!(any(feature = "test", test)) {
+            use std::io::Write as _;
 
-        let mut stream = $crate::stdout();
-        match ::std::write!(&mut stream, $($arg)*) {
-            Err(e) if e.kind() != ::std::io::ErrorKind::BrokenPipe => {
-                ::std::panic!("failed printing to stdout: {e}");
+            let stdio = std::io::stdout();
+            let choice = $crate::AutoStream::choice(&stdio);
+            let buffer = Vec::new();
+            let mut stream = $crate::AutoStream::new(buffer, choice);
+            // Ignore errors rather than panic
+            let _ = ::std::write!(&mut stream, $($arg)*);
+            let buffer = stream.into_inner();
+            // Should be UTF-8 but not wanting to panic
+            let buffer = String::from_utf8_lossy(&buffer);
+            ::std::print!("{}", buffer)
+        } else {
+            use std::io::Write as _;
+
+            let mut stream = $crate::stdout();
+            match ::std::write!(&mut stream, $($arg)*) {
+                Err(e) if e.kind() != ::std::io::ErrorKind::BrokenPipe => {
+                    ::std::panic!("failed printing to stdout: {e}");
+                }
+                Err(_) | Ok(_) => {}
             }
-            Err(_) | Ok(_) => {}
         }
     }};
 }
@@ -90,6 +109,10 @@ macro_rules! print {
 ///
 /// Use `println!` only for the primary output of your program. Use
 /// [`eprintln!`] instead to print error and progress messages.
+///
+/// **NOTE:** Not all `println!` calls will be captured in tests like [`std::println!`]
+/// - Capturing will automatically be activated in test binaries
+/// - Otherwise, only when the `test` feature is enabled
 ///
 /// # Panics
 ///
@@ -118,14 +141,29 @@ macro_rules! println {
         $crate::print!("\n")
     };
     ($($arg:tt)*) => {{
-        use std::io::Write as _;
+        if cfg!(any(feature = "test", test)) {
+            use std::io::Write as _;
 
-        let mut stream = $crate::stdout();
-        match ::std::writeln!(&mut stream, $($arg)*) {
-            Err(e) if e.kind() != ::std::io::ErrorKind::BrokenPipe => {
-                ::std::panic!("failed printing to stdout: {e}");
+            let stdio = std::io::stdout();
+            let choice = $crate::AutoStream::choice(&stdio);
+            let buffer = Vec::new();
+            let mut stream = $crate::AutoStream::new(buffer, choice);
+            // Ignore errors rather than panic
+            let _ = ::std::write!(&mut stream, $($arg)*);
+            let buffer = stream.into_inner();
+            // Should be UTF-8 but not wanting to panic
+            let buffer = String::from_utf8_lossy(&buffer);
+            ::std::println!("{}", buffer)
+        } else {
+            use std::io::Write as _;
+
+            let mut stream = $crate::stdout();
+            match ::std::writeln!(&mut stream, $($arg)*) {
+                Err(e) if e.kind() != ::std::io::ErrorKind::BrokenPipe => {
+                    ::std::panic!("failed printing to stdout: {e}");
+                }
+                Err(_) | Ok(_) => {}
             }
-            Err(_) | Ok(_) => {}
         }
     }};
 }
@@ -138,6 +176,10 @@ macro_rules! println {
 ///
 /// Use `eprint!` only for error and progress messages. Use `print!`
 /// instead for the primary output of your program.
+///
+/// **NOTE:** Not all `eprint!` calls will be captured in tests like [`std::eprint!`]
+/// - Capturing will automatically be activated in test binaries
+/// - Otherwise, only when the `test` feature is enabled
 ///
 /// # Panics
 ///
@@ -159,14 +201,29 @@ macro_rules! println {
 #[macro_export]
 macro_rules! eprint {
     ($($arg:tt)*) => {{
-        use std::io::Write as _;
+        if cfg!(any(feature = "test", test)) {
+            use std::io::Write as _;
 
-        let mut stream = $crate::stderr();
-        match ::std::write!(&mut stream, $($arg)*) {
-            Err(e) if e.kind() != ::std::io::ErrorKind::BrokenPipe => {
-                ::std::panic!("failed printing to stdout: {e}");
+            let stdio = std::io::stderr();
+            let choice = $crate::AutoStream::choice(&stdio);
+            let buffer = Vec::new();
+            let mut stream = $crate::AutoStream::new(buffer, choice);
+            // Ignore errors rather than panic
+            let _ = ::std::write!(&mut stream, $($arg)*);
+            let buffer = stream.into_inner();
+            // Should be UTF-8 but not wanting to panic
+            let buffer = String::from_utf8_lossy(&buffer);
+            ::std::eprint!("{}", buffer)
+        } else {
+            use std::io::Write as _;
+
+            let mut stream = $crate::stderr();
+            match ::std::write!(&mut stream, $($arg)*) {
+                Err(e) if e.kind() != ::std::io::ErrorKind::BrokenPipe => {
+                    ::std::panic!("failed printing to stdout: {e}");
+                }
+                Err(_) | Ok(_) => {}
             }
-            Err(_) | Ok(_) => {}
         }
     }};
 }
@@ -179,6 +236,10 @@ macro_rules! eprint {
 ///
 /// Use `eprintln!` only for error and progress messages. Use `println!`
 /// instead for the primary output of your program.
+///
+/// **NOTE:** Not all `eprintln!` calls will be captured in tests like [`std::eprintln!`]
+/// - Capturing will automatically be activated in test binaries
+/// - Otherwise, only when the `test` feature is enabled
 ///
 /// # Panics
 ///
@@ -203,14 +264,29 @@ macro_rules! eprintln {
         $crate::eprint!("\n")
     };
     ($($arg:tt)*) => {{
-        use std::io::Write as _;
+        if cfg!(any(feature = "test", test)) {
+            use std::io::Write as _;
 
-        let mut stream = $crate::stderr();
-        match ::std::writeln!(&mut stream, $($arg)*) {
-            Err(e) if e.kind() != ::std::io::ErrorKind::BrokenPipe => {
-                ::std::panic!("failed printing to stdout: {e}");
+            let stdio = std::io::stderr();
+            let choice = $crate::AutoStream::choice(&stdio);
+            let buffer = Vec::new();
+            let mut stream = $crate::AutoStream::new(buffer, choice);
+            // Ignore errors rather than panic
+            let _ = ::std::write!(&mut stream, $($arg)*);
+            let buffer = stream.into_inner();
+            // Should be UTF-8 but not wanting to panic
+            let buffer = String::from_utf8_lossy(&buffer);
+            ::std::eprintln!("{}", buffer)
+        } else {
+            use std::io::Write as _;
+
+            let mut stream = $crate::stderr();
+            match ::std::writeln!(&mut stream, $($arg)*) {
+                Err(e) if e.kind() != ::std::io::ErrorKind::BrokenPipe => {
+                    ::std::panic!("failed printing to stdout: {e}");
+                }
+                Err(_) | Ok(_) => {}
             }
-            Err(_) | Ok(_) => {}
         }
     }};
 }
@@ -301,13 +377,13 @@ macro_rules! panic {
 
         let panic_stream = std::io::stderr();
         let choice = $crate::AutoStream::choice(&panic_stream);
-        let buffer = $crate::Buffer::new();
+        let buffer = Vec::new();
         let mut stream = $crate::AutoStream::new(buffer, choice);
         // Ignore errors rather than panic
         let _ = ::std::write!(&mut stream, $($arg)*);
         let buffer = stream.into_inner();
         // Should be UTF-8 but not wanting to panic
-        let buffer = String::from_utf8_lossy(buffer.as_bytes()).into_owned();
+        let buffer = String::from_utf8_lossy(&buffer).into_owned();
         ::std::panic!("{}", buffer)
     }};
 }

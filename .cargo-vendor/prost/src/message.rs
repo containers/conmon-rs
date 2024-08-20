@@ -1,8 +1,9 @@
+#[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use core::fmt::Debug;
-use core::usize;
 
 use bytes::{Buf, BufMut};
 
@@ -53,7 +54,7 @@ pub trait Message: Debug + Send + Sync {
     {
         let required = self.encoded_len();
         let remaining = buf.remaining_mut();
-        if required > buf.remaining_mut() {
+        if required > remaining {
             return Err(EncodeError::new(required, remaining));
         }
 

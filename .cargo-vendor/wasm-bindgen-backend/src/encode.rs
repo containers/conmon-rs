@@ -5,12 +5,20 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use syn::ext::IdentExt;
 
 use crate::ast;
 use crate::Diagnostic;
 
+#[derive(Clone)]
+pub enum EncodeChunk {
+    EncodedBuf(Vec<u8>),
+    StrExpr(syn::Expr),
+    // TODO: support more expr type;
+}
+
 pub struct EncodeResult {
-    pub custom_section: Vec<u8>,
+    pub custom_section: Vec<EncodeChunk>,
     pub included_files: Vec<PathBuf>,
 }
 
@@ -144,7 +152,7 @@ fn shared_program<'a>(
         typescript_custom_sections: prog
             .typescript_custom_sections
             .iter()
-            .map(|x| -> &'a str { x })
+            .map(|x| shared_lit_or_expr(x, intern))
             .collect(),
         linked_modules: prog
             .linked_modules
@@ -205,7 +213,7 @@ fn shared_function<'a>(func: &'a ast::Function, _intern: &'a Interner) -> Functi
         .enumerate()
         .map(|(idx, arg)| {
             if let syn::Pat::Ident(x) = &*arg.pat {
-                return x.ident.to_string();
+                return x.ident.unraw().to_string();
             }
             format!("arg{}", idx)
         })
@@ -253,6 +261,13 @@ fn shared_import<'a>(i: &'a ast::Import, intern: &'a Interner) -> Result<Import<
     })
 }
 
+fn shared_lit_or_expr<'a>(i: &'a ast::LitOrExpr, _intern: &'a Interner) -> LitOrExpr<'a> {
+    match i {
+        ast::LitOrExpr::Lit(lit) => LitOrExpr::Lit(lit),
+        ast::LitOrExpr::Expr(expr) => LitOrExpr::Expr(expr),
+    }
+}
+
 fn shared_linked_module<'a>(
     name: &str,
     i: &'a ast::ImportModule,
@@ -282,6 +297,7 @@ fn shared_import_kind<'a>(
     Ok(match i {
         ast::ImportKind::Function(f) => ImportKind::Function(shared_import_function(f, intern)?),
         ast::ImportKind::Static(f) => ImportKind::Static(shared_import_static(f, intern)),
+        ast::ImportKind::String(f) => ImportKind::String(shared_import_string(f, intern)),
         ast::ImportKind::Type(f) => ImportKind::Type(shared_import_type(f, intern)),
         ast::ImportKind::Enum(f) => ImportKind::Enum(shared_import_enum(f, intern)),
     })
@@ -317,6 +333,13 @@ fn shared_import_static<'a>(i: &'a ast::ImportStatic, intern: &'a Interner) -> I
     }
 }
 
+fn shared_import_string<'a>(i: &'a ast::ImportString, intern: &'a Interner) -> ImportString<'a> {
+    ImportString {
+        shim: intern.intern(&i.shim),
+        string: &i.string,
+    }
+}
+
 fn shared_import_type<'a>(i: &'a ast::ImportType, intern: &'a Interner) -> ImportType<'a> {
     ImportType {
         name: &i.js_name,
@@ -325,8 +348,8 @@ fn shared_import_type<'a>(i: &'a ast::ImportType, intern: &'a Interner) -> Impor
     }
 }
 
-fn shared_import_enum<'a>(_i: &'a ast::ImportEnum, _intern: &'a Interner) -> ImportEnum {
-    ImportEnum {}
+fn shared_import_enum<'a>(_i: &'a ast::StringEnum, _intern: &'a Interner) -> StringEnum {
+    StringEnum {}
 }
 
 fn shared_struct<'a>(s: &'a ast::Struct, intern: &'a Interner) -> Struct<'a> {
@@ -358,24 +381,48 @@ trait Encode {
 }
 
 struct Encoder {
-    dst: Vec<u8>,
+    dst: Vec<EncodeChunk>,
+}
+
+enum LitOrExpr<'a> {
+    Expr(&'a syn::Expr),
+    Lit(&'a str),
+}
+
+impl<'a> Encode for LitOrExpr<'a> {
+    fn encode(&self, dst: &mut Encoder) {
+        match self {
+            LitOrExpr::Expr(expr) => {
+                dst.dst.push(EncodeChunk::StrExpr((*expr).clone()));
+            }
+            LitOrExpr::Lit(s) => s.encode(dst),
+        }
+    }
 }
 
 impl Encoder {
     fn new() -> Encoder {
-        Encoder {
-            dst: vec![0, 0, 0, 0],
-        }
+        Encoder { dst: vec![] }
     }
 
-    fn finish(mut self) -> Vec<u8> {
-        let len = (self.dst.len() - 4) as u32;
-        self.dst[..4].copy_from_slice(&len.to_le_bytes()[..]);
+    fn finish(self) -> Vec<EncodeChunk> {
         self.dst
     }
 
     fn byte(&mut self, byte: u8) {
-        self.dst.push(byte);
+        if let Some(EncodeChunk::EncodedBuf(buf)) = self.dst.last_mut() {
+            buf.push(byte);
+        } else {
+            self.dst.push(EncodeChunk::EncodedBuf(vec![byte]));
+        }
+    }
+
+    fn extend_from_slice(&mut self, slice: &[u8]) {
+        if let Some(EncodeChunk::EncodedBuf(buf)) = self.dst.last_mut() {
+            buf.extend_from_slice(slice);
+        } else {
+            self.dst.push(EncodeChunk::EncodedBuf(slice.to_owned()));
+        }
     }
 }
 
@@ -399,7 +446,7 @@ impl Encode for u32 {
 
 impl Encode for usize {
     fn encode(&self, dst: &mut Encoder) {
-        assert!(*self <= u32::max_value() as usize);
+        assert!(*self <= u32::MAX as usize);
         (*self as u32).encode(dst);
     }
 }
@@ -407,7 +454,7 @@ impl Encode for usize {
 impl<'a> Encode for &'a [u8] {
     fn encode(&self, dst: &mut Encoder) {
         self.len().encode(dst);
-        dst.dst.extend_from_slice(self);
+        dst.extend_from_slice(self);
     }
 }
 
@@ -531,12 +578,12 @@ fn from_ast_method_kind<'a>(
             let is_static = *is_static;
             let kind = match kind {
                 ast::OperationKind::Getter(g) => {
-                    let g = g.as_ref().map(|g| intern.intern(g));
+                    let g = g.as_ref().map(|g| intern.intern_str(g));
                     OperationKind::Getter(g.unwrap_or_else(|| function.infer_getter_property()))
                 }
                 ast::OperationKind::Regular => OperationKind::Regular,
                 ast::OperationKind::Setter(s) => {
-                    let s = s.as_ref().map(|s| intern.intern(s));
+                    let s = s.as_ref().map(|s| intern.intern_str(s));
                     OperationKind::Setter(match s {
                         Some(s) => s,
                         None => intern.intern_str(&function.infer_setter_property()?),

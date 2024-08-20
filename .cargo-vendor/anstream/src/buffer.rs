@@ -1,5 +1,9 @@
-/// In-memory [`RawStream`][crate::RawStream]
+#![allow(deprecated)]
+
+/// In-memory [`RawStream`][crate::stream::RawStream]
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
+#[deprecated(since = "0.6.2", note = "Use Vec")]
+#[doc(hidden)]
 pub struct Buffer(Vec<u8>);
 
 impl Buffer {
@@ -26,14 +30,6 @@ impl AsRef<[u8]> for Buffer {
     }
 }
 
-#[cfg(feature = "auto")]
-impl is_terminal::IsTerminal for Buffer {
-    #[inline]
-    fn is_terminal(&self) -> bool {
-        false
-    }
-}
-
 impl std::io::Write for Buffer {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -49,28 +45,24 @@ impl std::io::Write for Buffer {
 
 #[cfg(all(windows, feature = "wincon"))]
 impl anstyle_wincon::WinconStream for Buffer {
-    fn set_colors(
+    fn write_colored(
         &mut self,
         fg: Option<anstyle::AnsiColor>,
         bg: Option<anstyle::AnsiColor>,
-    ) -> std::io::Result<()> {
-        use std::io::Write as _;
-
-        if let Some(fg) = fg {
-            write!(self, "{}", fg.render_fg())?;
-        }
-        if let Some(bg) = bg {
-            write!(self, "{}", bg.render_bg())?;
-        }
-        if fg.is_none() && bg.is_none() {
-            write!(self, "{}", anstyle::Reset.render())?;
-        }
-        Ok(())
+        data: &[u8],
+    ) -> std::io::Result<usize> {
+        self.0.write_colored(fg, bg, data)
     }
+}
 
-    fn get_colors(
-        &self,
-    ) -> std::io::Result<(Option<anstyle::AnsiColor>, Option<anstyle::AnsiColor>)> {
-        Ok((None, None))
+#[cfg(all(windows, feature = "wincon"))]
+impl anstyle_wincon::WinconStream for &'_ mut Buffer {
+    fn write_colored(
+        &mut self,
+        fg: Option<anstyle::AnsiColor>,
+        bg: Option<anstyle::AnsiColor>,
+        data: &[u8],
+    ) -> std::io::Result<usize> {
+        (**self).write_colored(fg, bg, data)
     }
 }

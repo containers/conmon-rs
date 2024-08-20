@@ -11,9 +11,9 @@
 
 [package]
 edition = "2021"
-rust-version = "1.63"
+rust-version = "1.70"
 name = "tokio-macros"
-version = "2.3.0"
+version = "2.4.0"
 authors = ["Tokio Contributors <team@tokio.rs>"]
 description = """
 Tokio's proc macros.

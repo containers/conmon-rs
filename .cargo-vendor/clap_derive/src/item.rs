@@ -20,17 +20,17 @@ use quote::{format_ident, quote, quote_spanned, ToTokens};
 use syn::DeriveInput;
 use syn::{self, ext::IdentExt, spanned::Spanned, Attribute, Field, Ident, LitStr, Type, Variant};
 
-use crate::attr::*;
+use crate::attr::{AttrKind, AttrValue, ClapAttr, MagicAttrName};
 use crate::utils::{extract_doc_comment, format_doc_comment, inner_type, is_simple_ty, Sp, Ty};
 
 /// Default casing style for generated arguments.
-pub const DEFAULT_CASING: CasingStyle = CasingStyle::Kebab;
+pub(crate) const DEFAULT_CASING: CasingStyle = CasingStyle::Kebab;
 
 /// Default casing style for environment variables
-pub const DEFAULT_ENV_CASING: CasingStyle = CasingStyle::ScreamingSnake;
+pub(crate) const DEFAULT_ENV_CASING: CasingStyle = CasingStyle::ScreamingSnake;
 
 #[derive(Clone)]
-pub struct Item {
+pub(crate) struct Item {
     name: Name,
     casing: Sp<CasingStyle>,
     env_casing: Sp<CasingStyle>,
@@ -53,7 +53,7 @@ pub struct Item {
 }
 
 impl Item {
-    pub fn from_args_struct(input: &DeriveInput, name: Name) -> Result<Self, syn::Error> {
+    pub(crate) fn from_args_struct(input: &DeriveInput, name: Name) -> Result<Self, syn::Error> {
         let ident = input.ident.clone();
         let span = input.ident.span();
         let attrs = &input.attrs;
@@ -70,7 +70,10 @@ impl Item {
         Ok(res)
     }
 
-    pub fn from_subcommand_enum(input: &DeriveInput, name: Name) -> Result<Self, syn::Error> {
+    pub(crate) fn from_subcommand_enum(
+        input: &DeriveInput,
+        name: Name,
+    ) -> Result<Self, syn::Error> {
         let ident = input.ident.clone();
         let span = input.ident.span();
         let attrs = &input.attrs;
@@ -87,7 +90,7 @@ impl Item {
         Ok(res)
     }
 
-    pub fn from_value_enum(input: &DeriveInput, name: Name) -> Result<Self, syn::Error> {
+    pub(crate) fn from_value_enum(input: &DeriveInput, name: Name) -> Result<Self, syn::Error> {
         let ident = input.ident.clone();
         let span = input.ident.span();
         let attrs = &input.attrs;
@@ -113,7 +116,7 @@ impl Item {
         Ok(res)
     }
 
-    pub fn from_subcommand_variant(
+    pub(crate) fn from_subcommand_variant(
         variant: &Variant,
         struct_casing: Sp<CasingStyle>,
         env_casing: Sp<CasingStyle>,
@@ -167,7 +170,7 @@ impl Item {
         Ok(res)
     }
 
-    pub fn from_value_enum_variant(
+    pub(crate) fn from_value_enum_variant(
         variant: &Variant,
         argument_casing: Sp<CasingStyle>,
         env_casing: Sp<CasingStyle>,
@@ -193,7 +196,7 @@ impl Item {
         Ok(res)
     }
 
-    pub fn from_args_field(
+    pub(crate) fn from_args_field(
         field: &Field,
         struct_casing: Sp<CasingStyle>,
         env_casing: Sp<CasingStyle>,
@@ -360,7 +363,7 @@ impl Item {
                         .ty()
                         .cloned()
                         .unwrap_or_else(|| Sp::new(Ty::Other, self.kind.span()));
-                    let kind = Sp::new(Kind::FromGlobal(ty), attr.name.clone().span());
+                    let kind = Sp::new(Kind::FromGlobal(ty), attr.name.span());
                     Some(kind)
                 }
                 Some(MagicAttrName::Subcommand) if attr.value.is_none() => {
@@ -373,7 +376,7 @@ impl Item {
                         .ty()
                         .cloned()
                         .unwrap_or_else(|| Sp::new(Ty::Other, self.kind.span()));
-                    let kind = Sp::new(Kind::Subcommand(ty), attr.name.clone().span());
+                    let kind = Sp::new(Kind::Subcommand(ty), attr.name.span());
                     Some(kind)
                 }
                 Some(MagicAttrName::ExternalSubcommand) if attr.value.is_none() => {
@@ -381,7 +384,7 @@ impl Item {
                         let expr = attr.value_or_abort()?;
                         abort!(expr, "attribute `{}` does not accept a value", attr.name);
                     }
-                    let kind = Sp::new(Kind::ExternalSubcommand, attr.name.clone().span());
+                    let kind = Sp::new(Kind::ExternalSubcommand, attr.name.span());
                     Some(kind)
                 }
                 Some(MagicAttrName::Flatten) if attr.value.is_none() => {
@@ -394,15 +397,12 @@ impl Item {
                         .ty()
                         .cloned()
                         .unwrap_or_else(|| Sp::new(Ty::Other, self.kind.span()));
-                    let kind = Sp::new(Kind::Flatten(ty), attr.name.clone().span());
+                    let kind = Sp::new(Kind::Flatten(ty), attr.name.span());
                     Some(kind)
                 }
                 Some(MagicAttrName::Skip) if actual_attr_kind != AttrKind::Group => {
                     let expr = attr.value.clone();
-                    let kind = Sp::new(
-                        Kind::Skip(expr, self.kind.attr_kind()),
-                        attr.name.clone().span(),
-                    );
+                    let kind = Sp::new(Kind::Skip(expr, self.kind.attr_kind()), attr.name.span());
                     Some(kind)
                 }
                 _ => None,
@@ -504,11 +504,11 @@ impl Item {
                 Some(MagicAttrName::ValueEnum) if attr.value.is_none() => {
                     assert_attr_kind(attr, &[AttrKind::Arg])?;
 
-                    self.is_enum = true
+                    self.is_enum = true;
                 }
 
                 Some(MagicAttrName::VerbatimDocComment) if attr.value.is_none() => {
-                    self.verbatim_doc_comment = true
+                    self.verbatim_doc_comment = true;
                 }
 
                 Some(MagicAttrName::About) if attr.value.is_none() => {
@@ -574,26 +574,28 @@ impl Item {
                         .iter()
                         .any(|a| a.magic == Some(MagicAttrName::ValueEnum))
                     {
-                        quote_spanned!(attr.name.clone().span()=> {
-                            static DEFAULT_VALUE: clap::__derive_refs::once_cell::sync::Lazy<String> = clap::__derive_refs::once_cell::sync::Lazy::new(|| {
+                        quote_spanned!(attr.name.span()=> {
+                            static DEFAULT_VALUE: ::std::sync::OnceLock<String> = ::std::sync::OnceLock::new();
+                            let s = DEFAULT_VALUE.get_or_init(|| {
                                 let val: #ty = #val;
                                 clap::ValueEnum::to_possible_value(&val).unwrap().get_name().to_owned()
                             });
-                            let s: &'static str = &*DEFAULT_VALUE;
+                            let s: &'static str = &*s;
                             s
                         })
                     } else {
-                        quote_spanned!(attr.name.clone().span()=> {
-                            static DEFAULT_VALUE: clap::__derive_refs::once_cell::sync::Lazy<String> = clap::__derive_refs::once_cell::sync::Lazy::new(|| {
+                        quote_spanned!(attr.name.span()=> {
+                            static DEFAULT_VALUE: ::std::sync::OnceLock<String> = ::std::sync::OnceLock::new();
+                            let s = DEFAULT_VALUE.get_or_init(|| {
                                 let val: #ty = #val;
                                 ::std::string::ToString::to_string(&val)
                             });
-                            let s: &'static str = &*DEFAULT_VALUE;
+                            let s: &'static str = &*s;
                             s
                         })
                     };
 
-                    let raw_ident = Ident::new("default_value", attr.name.clone().span());
+                    let raw_ident = Ident::new("default_value", attr.name.span());
                     self.methods.push(Method::new(raw_ident, val));
                 }
 
@@ -630,7 +632,7 @@ impl Item {
                         .iter()
                         .any(|a| a.magic == Some(MagicAttrName::ValueEnum))
                     {
-                        quote_spanned!(attr.name.clone().span()=> {
+                        quote_spanned!(attr.name.span()=> {
                             {
                                 fn iter_to_vals<T>(iterable: impl IntoIterator<Item = T>) -> impl Iterator<Item=String>
                                 where
@@ -643,18 +645,15 @@ impl Item {
                                         })
                                 }
 
-                                static DEFAULT_STRINGS: clap::__derive_refs::once_cell::sync::Lazy<Vec<::std::string::String>> = clap::__derive_refs::once_cell::sync::Lazy::new(|| {
-                                    iter_to_vals(#expr).collect()
-                                });
-
-                                static DEFAULT_VALUES: clap::__derive_refs::once_cell::sync::Lazy<Vec<&str>> = clap::__derive_refs::once_cell::sync::Lazy::new(|| {
-                                    DEFAULT_STRINGS.iter().map(::std::string::String::as_str).collect()
-                                });
-                                DEFAULT_VALUES.iter().copied()
+                                static DEFAULT_STRINGS: ::std::sync::OnceLock<Vec<String>> = ::std::sync::OnceLock::new();
+                                static DEFAULT_VALUES: ::std::sync::OnceLock<Vec<&str>> = ::std::sync::OnceLock::new();
+                                DEFAULT_VALUES.get_or_init(|| {
+                                    DEFAULT_STRINGS.get_or_init(|| iter_to_vals(#expr).collect()).iter().map(::std::string::String::as_str).collect()
+                                }).iter().copied()
                             }
                         })
                     } else {
-                        quote_spanned!(attr.name.clone().span()=> {
+                        quote_spanned!(attr.name.span()=> {
                             {
                                 fn iter_to_vals<T>(iterable: impl IntoIterator<Item = T>) -> impl Iterator<Item=String>
                                 where
@@ -663,20 +662,17 @@ impl Item {
                                     iterable.into_iter().map(|val| val.borrow().to_string())
                                 }
 
-                                static DEFAULT_STRINGS: clap::__derive_refs::once_cell::sync::Lazy<Vec<::std::string::String>> = clap::__derive_refs::once_cell::sync::Lazy::new(|| {
-                                    iter_to_vals(#expr).collect()
-                                });
-
-                                static DEFAULT_VALUES: clap::__derive_refs::once_cell::sync::Lazy<Vec<&str>> = clap::__derive_refs::once_cell::sync::Lazy::new(|| {
-                                    DEFAULT_STRINGS.iter().map(::std::string::String::as_str).collect()
-                                });
-                                DEFAULT_VALUES.iter().copied()
+                                static DEFAULT_STRINGS: ::std::sync::OnceLock<Vec<String>> = ::std::sync::OnceLock::new();
+                                static DEFAULT_VALUES: ::std::sync::OnceLock<Vec<&str>> = ::std::sync::OnceLock::new();
+                                DEFAULT_VALUES.get_or_init(|| {
+                                    DEFAULT_STRINGS.get_or_init(|| iter_to_vals(#expr).collect()).iter().map(::std::string::String::as_str).collect()
+                                }).iter().copied()
                             }
                         })
                     };
 
                     self.methods.push(Method::new(
-                        Ident::new("default_values", attr.name.clone().span()),
+                        Ident::new("default_values", attr.name.span()),
                         val,
                     ));
                 }
@@ -706,26 +702,28 @@ impl Item {
                         .iter()
                         .any(|a| a.magic == Some(MagicAttrName::ValueEnum))
                     {
-                        quote_spanned!(attr.name.clone().span()=> {
-                            static DEFAULT_VALUE: clap::__derive_refs::once_cell::sync::Lazy<::std::ffi::OsString> = clap::__derive_refs::once_cell::sync::Lazy::new(|| {
+                        quote_spanned!(attr.name.span()=> {
+                            static DEFAULT_VALUE: ::std::sync::OnceLock<String> = ::std::sync::OnceLock::new();
+                            let s = DEFAULT_VALUE.get_or_init(|| {
                                 let val: #ty = #val;
                                 clap::ValueEnum::to_possible_value(&val).unwrap().get_name().to_owned()
                             });
-                            let s: &'static ::std::ffi::OsStr = &*DEFAULT_VALUE;
+                            let s: &'static str = &*s;
                             s
                         })
                     } else {
-                        quote_spanned!(attr.name.clone().span()=> {
-                            static DEFAULT_VALUE: clap::__derive_refs::once_cell::sync::Lazy<::std::ffi::OsString> = clap::__derive_refs::once_cell::sync::Lazy::new(|| {
+                        quote_spanned!(attr.name.span()=> {
+                            static DEFAULT_VALUE: ::std::sync::OnceLock<::std::ffi::OsString> = ::std::sync::OnceLock::new();
+                            let s = DEFAULT_VALUE.get_or_init(|| {
                                 let val: #ty = #val;
                                 ::std::ffi::OsString::from(val)
                             });
-                            let s: &'static ::std::ffi::OsStr = &*DEFAULT_VALUE;
+                            let s: &'static ::std::ffi::OsStr = &*s;
                             s
                         })
                     };
 
-                    let raw_ident = Ident::new("default_value", attr.name.clone().span());
+                    let raw_ident = Ident::new("default_value", attr.name.span());
                     self.methods.push(Method::new(raw_ident, val));
                 }
 
@@ -762,7 +760,7 @@ impl Item {
                         .iter()
                         .any(|a| a.magic == Some(MagicAttrName::ValueEnum))
                     {
-                        quote_spanned!(attr.name.clone().span()=> {
+                        quote_spanned!(attr.name.span()=> {
                             {
                                 fn iter_to_vals<T>(iterable: impl IntoIterator<Item = T>) -> impl Iterator<Item=::std::ffi::OsString>
                                 where
@@ -775,18 +773,15 @@ impl Item {
                                         })
                                 }
 
-                                static DEFAULT_OS_STRINGS: clap::__derive_refs::once_cell::sync::Lazy<Vec<::std::ffi::OsString>> = clap::__derive_refs::once_cell::sync::Lazy::new(|| {
-                                    iter_to_vals(#expr).collect()
-                                });
-
-                                static DEFAULT_VALUES: clap::__derive_refs::once_cell::sync::Lazy<Vec<&::std::ffi::OsStr>> = clap::__derive_refs::once_cell::sync::Lazy::new(|| {
-                                    DEFAULT_OS_STRINGS.iter().map(::std::ffi::OsString::as_os_str).collect()
-                                });
-                                DEFAULT_VALUES.iter().copied()
+                                static DEFAULT_STRINGS: ::std::sync::OnceLock<Vec<::std::ffi::OsString>> = ::std::sync::OnceLock::new();
+                                static DEFAULT_VALUES: ::std::sync::OnceLock<Vec<&::std::ffi::OsStr>> = ::std::sync::OnceLock::new();
+                                DEFAULT_VALUES.get_or_init(|| {
+                                    DEFAULT_STRINGS.get_or_init(|| iter_to_vals(#expr).collect()).iter().map(::std::ffi::OsString::as_os_str).collect()
+                                }).iter().copied()
                             }
                         })
                     } else {
-                        quote_spanned!(attr.name.clone().span()=> {
+                        quote_spanned!(attr.name.span()=> {
                             {
                                 fn iter_to_vals<T>(iterable: impl IntoIterator<Item = T>) -> impl Iterator<Item=::std::ffi::OsString>
                                 where
@@ -795,20 +790,17 @@ impl Item {
                                     iterable.into_iter().map(|val| val.borrow().into())
                                 }
 
-                                static DEFAULT_OS_STRINGS: clap::__derive_refs::once_cell::sync::Lazy<Vec<::std::ffi::OsString>> = clap::__derive_refs::once_cell::sync::Lazy::new(|| {
-                                    iter_to_vals(#expr).collect()
-                                });
-
-                                static DEFAULT_VALUES: clap::__derive_refs::once_cell::sync::Lazy<Vec<&::std::ffi::OsStr>> = clap::__derive_refs::once_cell::sync::Lazy::new(|| {
-                                    DEFAULT_OS_STRINGS.iter().map(::std::ffi::OsString::as_os_str).collect()
-                                });
-                                DEFAULT_VALUES.iter().copied()
+                                static DEFAULT_STRINGS: ::std::sync::OnceLock<Vec<::std::ffi::OsString>> = ::std::sync::OnceLock::new();
+                                static DEFAULT_VALUES: ::std::sync::OnceLock<Vec<&::std::ffi::OsStr>> = ::std::sync::OnceLock::new();
+                                DEFAULT_VALUES.get_or_init(|| {
+                                    DEFAULT_STRINGS.get_or_init(|| iter_to_vals(#expr).collect()).iter().map(::std::ffi::OsString::as_os_str).collect()
+                                }).iter().copied()
                             }
                         })
                     };
 
                     self.methods.push(Method::new(
-                        Ident::new("default_values", attr.name.clone().span()),
+                        Ident::new("default_values", attr.name.span()),
                         val,
                     ));
                 }
@@ -952,14 +944,14 @@ impl Item {
         Ok(())
     }
 
-    pub fn find_default_method(&self) -> Option<&Method> {
+    pub(crate) fn find_default_method(&self) -> Option<&Method> {
         self.methods
             .iter()
             .find(|m| m.name == "default_value" || m.name == "default_value_os")
     }
 
     /// generate methods from attributes on top of struct or enum
-    pub fn initial_top_level_methods(&self) -> TokenStream {
+    pub(crate) fn initial_top_level_methods(&self) -> TokenStream {
         let next_display_order = self.next_display_order.as_ref().into_iter();
         let next_help_heading = self.next_help_heading.as_ref().into_iter();
         quote!(
@@ -968,7 +960,7 @@ impl Item {
         )
     }
 
-    pub fn final_top_level_methods(&self) -> TokenStream {
+    pub(crate) fn final_top_level_methods(&self) -> TokenStream {
         let methods = &self.methods;
         let doc_comment = &self.doc_comment;
 
@@ -976,49 +968,49 @@ impl Item {
     }
 
     /// generate methods on top of a field
-    pub fn field_methods(&self) -> proc_macro2::TokenStream {
+    pub(crate) fn field_methods(&self) -> TokenStream {
         let methods = &self.methods;
         let doc_comment = &self.doc_comment;
         quote!( #(#doc_comment)* #(#methods)* )
     }
 
-    pub fn group_id(&self) -> TokenStream {
-        self.group_id.clone().raw()
+    pub(crate) fn group_id(&self) -> &Name {
+        &self.group_id
     }
 
-    pub fn group_methods(&self) -> TokenStream {
+    pub(crate) fn group_methods(&self) -> TokenStream {
         let group_methods = &self.group_methods;
         quote!( #(#group_methods)* )
     }
 
-    pub fn deprecations(&self) -> proc_macro2::TokenStream {
+    pub(crate) fn deprecations(&self) -> TokenStream {
         let deprecations = &self.deprecations;
         quote!( #(#deprecations)* )
     }
 
-    pub fn next_display_order(&self) -> TokenStream {
+    pub(crate) fn next_display_order(&self) -> TokenStream {
         let next_display_order = self.next_display_order.as_ref().into_iter();
         quote!( #(#next_display_order)* )
     }
 
-    pub fn next_help_heading(&self) -> TokenStream {
+    pub(crate) fn next_help_heading(&self) -> TokenStream {
         let next_help_heading = self.next_help_heading.as_ref().into_iter();
         quote!( #(#next_help_heading)* )
     }
 
-    pub fn id(&self) -> TokenStream {
-        self.name.clone().raw()
+    pub(crate) fn id(&self) -> &Name {
+        &self.name
     }
 
-    pub fn cased_name(&self) -> TokenStream {
+    pub(crate) fn cased_name(&self) -> TokenStream {
         self.name.clone().translate(*self.casing)
     }
 
-    pub fn value_name(&self) -> TokenStream {
+    pub(crate) fn value_name(&self) -> TokenStream {
         self.name.clone().translate(CasingStyle::ScreamingSnake)
     }
 
-    pub fn value_parser(&self, field_type: &Type) -> Method {
+    pub(crate) fn value_parser(&self, field_type: &Type) -> Method {
         self.value_parser
             .clone()
             .map(|p| {
@@ -1041,7 +1033,7 @@ impl Item {
             })
     }
 
-    pub fn action(&self, field_type: &Type) -> Method {
+    pub(crate) fn action(&self, field_type: &Type) -> Method {
         self.action
             .clone()
             .map(|p| p.resolve(field_type))
@@ -1060,29 +1052,29 @@ impl Item {
             })
     }
 
-    pub fn kind(&self) -> Sp<Kind> {
+    pub(crate) fn kind(&self) -> Sp<Kind> {
         self.kind.clone()
     }
 
-    pub fn is_positional(&self) -> bool {
+    pub(crate) fn is_positional(&self) -> bool {
         self.is_positional
     }
 
-    pub fn casing(&self) -> Sp<CasingStyle> {
+    pub(crate) fn casing(&self) -> Sp<CasingStyle> {
         self.casing
     }
 
-    pub fn env_casing(&self) -> Sp<CasingStyle> {
+    pub(crate) fn env_casing(&self) -> Sp<CasingStyle> {
         self.env_casing
     }
 
-    pub fn has_explicit_methods(&self) -> bool {
+    pub(crate) fn has_explicit_methods(&self) -> bool {
         self.methods
             .iter()
             .any(|m| m.name != "help" && m.name != "long_help")
     }
 
-    pub fn skip_group(&self) -> bool {
+    pub(crate) fn skip_group(&self) -> bool {
         self.skip_group
     }
 }
@@ -1120,20 +1112,20 @@ fn default_value_parser(inner_type: &Type, span: Span) -> Method {
 }
 
 #[derive(Clone)]
-pub enum Action {
+pub(crate) enum Action {
     Explicit(Method),
     Implicit(Ident),
 }
 
 impl Action {
-    pub fn resolve(self, _field_type: &Type) -> Method {
+    pub(crate) fn resolve(self, _field_type: &Type) -> Method {
         match self {
             Self::Explicit(method) => method,
             Self::Implicit(ident) => default_action(_field_type, ident.span()),
         }
     }
 
-    pub fn span(&self) -> Span {
+    pub(crate) fn span(&self) -> Span {
         match self {
             Self::Explicit(method) => method.name.span(),
             Self::Implicit(ident) => ident.span(),
@@ -1173,7 +1165,7 @@ fn default_action(field_type: &Type, span: Span) -> Method {
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
-pub enum Kind {
+pub(crate) enum Kind {
     Arg(Sp<Ty>),
     Command(Sp<Ty>),
     Value,
@@ -1185,7 +1177,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub fn name(&self) -> &'static str {
+    pub(crate) fn name(&self) -> &'static str {
         match self {
             Self::Arg(_) => "arg",
             Self::Command(_) => "command",
@@ -1198,7 +1190,7 @@ impl Kind {
         }
     }
 
-    pub fn attr_kind(&self) -> AttrKind {
+    pub(crate) fn attr_kind(&self) -> AttrKind {
         match self {
             Self::Arg(_) => AttrKind::Arg,
             Self::Command(_) => AttrKind::Command,
@@ -1211,7 +1203,7 @@ impl Kind {
         }
     }
 
-    pub fn ty(&self) -> Option<&Sp<Ty>> {
+    pub(crate) fn ty(&self) -> Option<&Sp<Ty>> {
         match self {
             Self::Arg(ty)
             | Self::Command(ty)
@@ -1224,13 +1216,13 @@ impl Kind {
 }
 
 #[derive(Clone)]
-pub struct Method {
+pub(crate) struct Method {
     name: Ident,
     args: TokenStream,
 }
 
 impl Method {
-    pub fn new(name: Ident, args: TokenStream) -> Self {
+    pub(crate) fn new(name: Ident, args: TokenStream) -> Self {
         Method { name, args }
     }
 
@@ -1267,7 +1259,7 @@ impl Method {
 }
 
 impl ToTokens for Method {
-    fn to_tokens(&self, ts: &mut proc_macro2::TokenStream) {
+    fn to_tokens(&self, ts: &mut TokenStream) {
         let Method { ref name, ref args } = self;
 
         let tokens = quote!( .#name(#args) );
@@ -1277,11 +1269,11 @@ impl ToTokens for Method {
 }
 
 #[derive(Clone)]
-pub struct Deprecation {
-    pub span: Span,
-    pub id: &'static str,
-    pub version: &'static str,
-    pub description: String,
+pub(crate) struct Deprecation {
+    pub(crate) span: Span,
+    pub(crate) id: &'static str,
+    pub(crate) version: &'static str,
+    pub(crate) description: String,
 }
 
 impl Deprecation {
@@ -1300,7 +1292,7 @@ impl Deprecation {
 }
 
 impl ToTokens for Deprecation {
-    fn to_tokens(&self, ts: &mut proc_macro2::TokenStream) {
+    fn to_tokens(&self, ts: &mut TokenStream) {
         let tokens = if cfg!(feature = "deprecated") {
             let Deprecation {
                 span,
@@ -1346,7 +1338,7 @@ fn assert_attr_kind(attr: &ClapAttr, possible_kind: &[AttrKind]) -> Result<(), s
 /// replace all `:` with `, ` when not inside the `<>`
 ///
 /// `"author1:author2:author3" => "author1, author2, author3"`
-/// `"author1 <http://website1.com>:author2" => "author1 <http://website1.com>, author2"
+/// `"author1 <http://website1.com>:author2" => "author1 <http://website1.com>, author2"`
 fn process_author_str(author: &str) -> String {
     let mut res = String::with_capacity(author.len());
     let mut inside_angle_braces = 0usize;
@@ -1370,7 +1362,7 @@ fn process_author_str(author: &str) -> String {
 
 /// Defines the casing for the attributes long representation.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum CasingStyle {
+pub(crate) enum CasingStyle {
     /// Indicate word boundaries with uppercase letter, excluding the first word.
     Camel,
     /// Keep all letters lowercase and indicate word boundaries with hyphens.
@@ -1391,7 +1383,9 @@ pub enum CasingStyle {
 
 impl CasingStyle {
     fn from_lit(name: &LitStr) -> Result<Sp<Self>, syn::Error> {
-        use self::CasingStyle::*;
+        use self::CasingStyle::{
+            Camel, Kebab, Lower, Pascal, ScreamingSnake, Snake, Upper, Verbatim,
+        };
 
         let normalized = name.value().to_upper_camel_case().to_lowercase();
         let cs = |kind| Sp::new(kind, name.span());
@@ -1412,24 +1406,14 @@ impl CasingStyle {
 }
 
 #[derive(Clone)]
-pub enum Name {
+pub(crate) enum Name {
     Derived(Ident),
     Assigned(TokenStream),
 }
 
 impl Name {
-    pub fn raw(self) -> TokenStream {
-        match self {
-            Name::Assigned(tokens) => tokens,
-            Name::Derived(ident) => {
-                let s = ident.unraw().to_string();
-                quote_spanned!(ident.span()=> #s)
-            }
-        }
-    }
-
-    pub fn translate(self, style: CasingStyle) -> TokenStream {
-        use CasingStyle::*;
+    pub(crate) fn translate(self, style: CasingStyle) -> TokenStream {
+        use CasingStyle::{Camel, Kebab, Lower, Pascal, ScreamingSnake, Snake, Upper, Verbatim};
 
         match self {
             Name::Assigned(tokens) => tokens,
@@ -1450,8 +1434,8 @@ impl Name {
         }
     }
 
-    pub fn translate_char(self, style: CasingStyle) -> TokenStream {
-        use CasingStyle::*;
+    pub(crate) fn translate_char(self, style: CasingStyle) -> TokenStream {
+        use CasingStyle::{Camel, Kebab, Lower, Pascal, ScreamingSnake, Snake, Upper, Verbatim};
 
         match self {
             Name::Assigned(tokens) => quote!( (#tokens).chars().next().unwrap() ),
@@ -1470,6 +1454,18 @@ impl Name {
 
                 let s = s.chars().next().unwrap();
                 quote_spanned!(ident.span()=> #s)
+            }
+        }
+    }
+}
+
+impl ToTokens for Name {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        match self {
+            Name::Assigned(t) => t.to_tokens(tokens),
+            Name::Derived(ident) => {
+                let s = ident.unraw().to_string();
+                quote_spanned!(ident.span()=> #s).to_tokens(tokens);
             }
         }
     }

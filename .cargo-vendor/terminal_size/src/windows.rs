@@ -1,16 +1,34 @@
 use super::{Height, Width};
 use std::os::windows::io::RawHandle;
 
-/// Returns the size of the terminal defaulting to STDOUT, if available.
+/// Returns the size of the terminal.
+///
+/// This function checks the stdout, stderr, and stdin streams (in that order).
+/// The size of the first stream that is a TTY will be returned.  If nothing
+/// is a TTY, then `None` is returned.
 ///
 /// Note that this returns the size of the actual command window, and
 /// not the overall size of the command window buffer
 pub fn terminal_size() -> Option<(Width, Height)> {
-    use windows_sys::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
 
-    let handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) as RawHandle };
-
-    terminal_size_using_handle(handle)
+    if let Some(size) =
+        terminal_size_using_handle(unsafe { GetStdHandle(STD_OUTPUT_HANDLE) as RawHandle })
+    {
+        Some(size)
+    } else if let Some(size) =
+        terminal_size_using_handle(unsafe { GetStdHandle(STD_ERROR_HANDLE) as RawHandle })
+    {
+        Some(size)
+    } else if let Some(size) =
+        terminal_size_using_handle(unsafe { GetStdHandle(STD_INPUT_HANDLE) as RawHandle })
+    {
+        Some(size)
+    } else {
+        None
+    }
 }
 
 /// Returns the size of the terminal using the given handle, if available.

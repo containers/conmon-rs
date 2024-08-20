@@ -10,9 +10,9 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2018"
+edition = "2021"
 name = "terminal_size"
-version = "0.2.6"
+version = "0.3.0"
 authors = ["Andrew Chin <achin@eminence32.net>"]
 description = "Gets the size of your Linux or Windows terminal"
 documentation = "https://docs.rs/crate/terminal_size"
@@ -28,7 +28,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/eminence/terminal-size"
 
 [target."cfg(not(windows))".dependencies.rustix]
-version = "0.37.0"
+version = "0.38.0"
 features = ["termios"]
 
 [target."cfg(windows)".dependencies.windows-sys]

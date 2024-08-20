@@ -11,15 +11,16 @@
 
 [package]
 edition = "2021"
-rust-version = "1.60"
+rust-version = "1.70"
 name = "prost-derive"
-version = "0.12.3"
+version = "0.12.6"
 authors = [
     "Dan Burkert <dan@danburkert.com>",
     "Lucio Franco <luciofranco14@gmail.com>",
+    "Casper Meijn <casper@meijn.net>",
     "Tokio Contributors <team@tokio.rs>",
 ]
-description = "A Protocol Buffers implementation for the Rust Language."
+description = "Generate encoding and decoding implementations for Prost annotated types."
 documentation = "https://docs.rs/prost-derive"
 readme = "README.md"
 license = "Apache-2.0"
@@ -32,7 +33,7 @@ proc_macro = true
 version = "1.0.1"
 
 [dependencies.itertools]
-version = ">=0.10, <0.12"
+version = ">=0.10, <=0.12"
 features = ["use_alloc"]
 default-features = false
 

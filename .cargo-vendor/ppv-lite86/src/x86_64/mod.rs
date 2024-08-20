@@ -2,7 +2,7 @@
 
 use crate::types::*;
 use core::arch::x86_64::{__m128i, __m256i};
-use zerocopy_derive::{AsBytes, FromBytes, FromZeroes};
+use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 mod sse2;
 

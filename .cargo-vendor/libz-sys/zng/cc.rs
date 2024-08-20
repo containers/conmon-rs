@@ -196,6 +196,7 @@ pub fn build_zlib_ng(target: &str, compat: bool) {
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let arch = env::var("CARGO_CFG_TARGET_ARCH").expect("failed to retrieve target arch");
+    let features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap();
 
     let is_linux_or_android = matches!(target_os.as_str(), "linux" | "android");
     if is_linux_or_android {
@@ -311,7 +312,11 @@ pub fn build_zlib_ng(target: &str, compat: bool) {
             }
 
             // neon
-            cfg.define("ARM_NEON", None);
+            // Fix armv7-unknown-linux-musleabi and arm-unknown-linux-musleabi by only
+            // passing in ARM_NEON if that target is enabled.
+            if features.split(",").any(|name| name == "neon") {
+                cfg.define("ARM_NEON", None);
+            }
 
             // NOTE: These intrinsics were only added in gcc 9.4, which is _relatively_
             // recent, and if the define is not set zlib-ng just provides its

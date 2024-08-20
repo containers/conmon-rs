@@ -12,12 +12,13 @@
 [package]
 edition = "2018"
 name = "libz-sys"
-version = "1.1.18"
+version = "1.1.19"
 authors = [
     "Alex Crichton <alex@alexcrichton.com>",
     "Josh Triplett <josh@joshtriplett.org>",
     "Sebastian Thiel <sebastian.thiel@icloud.com>",
 ]
+build = "build.rs"
 links = "z"
 include = [
     "LICENSE*",
@@ -34,7 +35,7 @@ include = [
     "src/zlib-ng/arch/generic/**.[ch]",
     "src/zlib-ng/arch/power/**.[ch]",
     "src/zlib-ng/arch/riscv/**.[ch]",
-    "src/zlib-ng/arch/s390x/**.[ch]",
+    "src/zlib-ng/arch/s390/**.[ch]",
     "src/zlib-ng/arch/x86/**.[ch]",
     "src/zlib-ng/*.[ch].in",
     "src/zlib-ng/*.pc.in",
@@ -43,6 +44,10 @@ include = [
     "src/zlib-ng/zlib.pc.cmakein",
     "src/zlib-ng/cmake",
 ]
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "Low-level bindings to the system libz library (also known as zlib)."
 readme = "README.md"
 keywords = [
@@ -55,6 +60,10 @@ categories = [
 ]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rust-lang/libz-sys"
+
+[lib]
+name = "libz_sys"
+path = "src/lib.rs"
 
 [dependencies.libc]
 version = "0.2.43"

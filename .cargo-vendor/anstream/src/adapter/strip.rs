@@ -118,7 +118,7 @@ fn next_str<'s>(bytes: &mut &'s [u8], state: &mut State) -> Option<&'s str> {
         if next_state != State::Anywhere {
             *state = next_state;
         }
-        is_printable_str(action, b)
+        is_printable_bytes(action, b)
     });
     let (_, next) = bytes.split_at(offset.unwrap_or(bytes.len()));
     *bytes = next;
@@ -126,7 +126,7 @@ fn next_str<'s>(bytes: &mut &'s [u8], state: &mut State) -> Option<&'s str> {
 
     let offset = bytes.iter().copied().position(|b| {
         let (_next_state, action) = state_change(State::Ground, b);
-        !is_printable_str(action, b)
+        !(is_printable_bytes(action, b) || is_utf8_continuation(b))
     });
     let (printable, next) = bytes.split_at(offset.unwrap_or(bytes.len()));
     *bytes = next;
@@ -145,25 +145,14 @@ fn next_str<'s>(bytes: &mut &'s [u8], state: &mut State) -> Option<&'s str> {
 
 #[inline]
 unsafe fn from_utf8_unchecked<'b>(bytes: &'b [u8], safety_justification: &'static str) -> &'b str {
-    if cfg!(debug_assertions) {
-        // Catch problems more quickly when testing
-        std::str::from_utf8(bytes).expect(safety_justification)
-    } else {
-        std::str::from_utf8_unchecked(bytes)
+    unsafe {
+        if cfg!(debug_assertions) {
+            // Catch problems more quickly when testing
+            std::str::from_utf8(bytes).expect(safety_justification)
+        } else {
+            std::str::from_utf8_unchecked(bytes)
+        }
     }
-}
-
-#[inline]
-fn is_printable_str(action: Action, byte: u8) -> bool {
-    // VT320 considered 0x7f to be `Print`able but we expect to be working in UTF-8 systems and not
-    // ISO Latin-1, making it DEL and non-printable
-    const DEL: u8 = 0x7f;
-    (action == Action::Print && byte != DEL)
-        || action == Action::BeginUtf8
-        // since we know the input is valid UTF-8, the only thing  we can do with
-        // continuations is to print them
-        || is_utf8_continuation(byte)
-        || (action == Action::Execute && byte.is_ascii_whitespace())
 }
 
 #[inline]
@@ -340,7 +329,7 @@ fn next_bytes<'s>(
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
-pub struct Utf8Parser {
+pub(crate) struct Utf8Parser {
     utf8_parser: utf8parse::Parser,
 }
 
@@ -453,7 +442,7 @@ mod test {
     fn test_strip_byte_multibyte() {
         let bytes = [240, 145, 141, 139];
         let expected = parser_strip(&bytes);
-        let actual = String::from_utf8(strip_byte(&bytes).to_vec()).unwrap();
+        let actual = String::from_utf8(strip_byte(&bytes).clone()).unwrap();
         assert_eq!(expected, actual);
     }
 
@@ -469,8 +458,17 @@ mod test {
     fn test_strip_byte_del() {
         let bytes = [0x7f];
         let expected = "";
-        let actual = String::from_utf8(strip_byte(&bytes).to_vec()).unwrap();
+        let actual = String::from_utf8(strip_byte(&bytes).clone()).unwrap();
         assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn test_strip_str_handles_broken_sequence() {
+        // valid utf8: \xc3\xb6 then \x1b then \xf0\x9f\x98\x80
+        let s = "ö\x1b😀hello😀goodbye";
+        let mut it = strip_str(s);
+        assert_eq!("ö", it.next().unwrap());
+        assert_eq!("ello😀goodbye", it.next().unwrap());
     }
 
     proptest! {
@@ -506,7 +504,7 @@ mod test {
             dbg!(&s);
             dbg!(s.as_bytes());
             let expected = parser_strip(s.as_bytes());
-            let actual = String::from_utf8(strip_byte(s.as_bytes()).to_vec()).unwrap();
+            let actual = String::from_utf8(strip_byte(s.as_bytes()).clone()).unwrap();
             assert_eq!(expected, actual);
         }
     }

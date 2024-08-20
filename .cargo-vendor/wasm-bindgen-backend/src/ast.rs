@@ -24,11 +24,13 @@ pub struct Program {
     /// rust structs
     pub structs: Vec<Struct>,
     /// custom typescript sections to be included in the definition file
-    pub typescript_custom_sections: Vec<String>,
+    pub typescript_custom_sections: Vec<LitOrExpr>,
     /// Inline JS snippets
     pub inline_js: Vec<String>,
     /// Path to wasm_bindgen
     pub wasm_bindgen: Path,
+    /// Path to js_sys
+    pub js_sys: Path,
     /// Path to wasm_bindgen_futures
     pub wasm_bindgen_futures: Path,
 }
@@ -44,6 +46,7 @@ impl Default for Program {
             typescript_custom_sections: Default::default(),
             inline_js: Default::default(),
             wasm_bindgen: syn::parse_quote! { wasm_bindgen },
+            js_sys: syn::parse_quote! { js_sys },
             wasm_bindgen_futures: syn::parse_quote! { wasm_bindgen_futures },
         }
     }
@@ -108,7 +111,7 @@ pub struct Export {
 
 /// The 3 types variations of `self`.
 #[cfg_attr(feature = "extra-traits", derive(Debug, PartialEq, Eq))]
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 pub enum MethodSelf {
     /// `self`
     ByValue,
@@ -160,10 +163,12 @@ pub enum ImportKind {
     Function(ImportFunction),
     /// Importing a static value
     Static(ImportStatic),
+    /// Importing a static string
+    String(ImportString),
     /// Importing a type/class
     Type(ImportType),
     /// Importing a JS enum
-    Enum(ImportEnum),
+    Enum(StringEnum),
 }
 
 /// A function being imported from JS
@@ -242,10 +247,10 @@ pub struct Operation {
 pub enum OperationKind {
     /// A standard method, nothing special
     Regular,
-    /// A method for getting the value of the provided Ident
-    Getter(Option<Ident>),
-    /// A method for setting the value of the provided Ident
-    Setter(Option<Ident>),
+    /// A method for getting the value of the provided Ident or String
+    Getter(Option<String>),
+    /// A method for setting the value of the provided Ident or String
+    Setter(Option<String>),
     /// A dynamically intercepted getter
     IndexingGetter,
     /// A dynamically intercepted setter
@@ -270,6 +275,28 @@ pub struct ImportStatic {
     pub js_name: String,
     /// Path to wasm_bindgen
     pub wasm_bindgen: Path,
+    /// [`true`] if using the new `thread_local` representation.
+    pub thread_local: bool,
+}
+
+/// The type of a static string being imported
+#[cfg_attr(feature = "extra-traits", derive(Debug, PartialEq, Eq))]
+#[derive(Clone)]
+pub struct ImportString {
+    /// The visibility of this static string in Rust
+    pub vis: syn::Visibility,
+    /// The type specified by the user, which we only use to show an error if the wrong type is used.
+    pub ty: syn::Type,
+    /// The name of the shim function used to access this static
+    pub shim: Ident,
+    /// The name of this static on the Rust side
+    pub rust_name: Ident,
+    /// Path to wasm_bindgen
+    pub wasm_bindgen: Path,
+    /// Path to js_sys
+    pub js_sys: Path,
+    /// The string to export.
+    pub string: String,
 }
 
 /// The metadata for a type being imported
@@ -302,10 +329,10 @@ pub struct ImportType {
     pub wasm_bindgen: Path,
 }
 
-/// The metadata for an Enum being imported
+/// The metadata for a String Enum
 #[cfg_attr(feature = "extra-traits", derive(Debug, PartialEq, Eq))]
 #[derive(Clone)]
-pub struct ImportEnum {
+pub struct StringEnum {
     /// The Rust enum's visibility
     pub vis: syn::Visibility,
     /// The Rust enum's identifiers
@@ -404,7 +431,7 @@ pub struct StructField {
     pub wasm_bindgen: Path,
 }
 
-/// Information about an Enum being exported
+/// The metadata for an Enum
 #[cfg_attr(feature = "extra-traits", derive(Debug, PartialEq, Eq))]
 #[derive(Clone)]
 pub struct Enum {
@@ -460,6 +487,16 @@ pub enum TypeLocation {
     ExportRet,
 }
 
+/// An enum representing either a literal value (`Lit`) or an expression (`syn::Expr`).
+#[cfg_attr(feature = "extra-traits", derive(Debug))]
+#[derive(Clone)]
+pub enum LitOrExpr {
+    /// Represents an expression that needs to be evaluated before it can be encoded
+    Expr(syn::Expr),
+    /// Represents a literal string that can be directly encoded.
+    Lit(String),
+}
+
 impl Export {
     /// Mangles a rust -> javascript export, so that the created Ident will be unique over function
     /// name and class name, if the function belongs to a javascript class.
@@ -492,6 +529,7 @@ impl ImportKind {
         match *self {
             ImportKind::Function(_) => true,
             ImportKind::Static(_) => false,
+            ImportKind::String(_) => false,
             ImportKind::Type(_) => false,
             ImportKind::Enum(_) => false,
         }
