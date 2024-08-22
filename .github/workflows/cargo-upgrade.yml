@@ -43,20 +43,6 @@ jobs:
           echo "\`\`\`" >> "$BODY_FILE"
           mv .tmp .cargo
           cargo vendor .cargo-vendor
-      - name: Select supported toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
-          default: true
-          override: true
-      - name: Upgrade indirect dependencies
-        shell: bash
-        run: |
-          set -euox pipefail
-          mv .cargo .tmp
-          cargo update
-          mv .tmp .cargo
-          cargo vendor .cargo-vendor
       - name: Check workspace
         id: create_pr
         run: |
