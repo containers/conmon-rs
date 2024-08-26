@@ -6,20 +6,31 @@ use self::progress::Progress;
 use anyhow::Result;
 use flate2::read::GzDecoder;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::ThreadPoolBuilder;
 use std::collections::BTreeSet;
+use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tar::Archive;
 use walkdir::{DirEntry, WalkDir};
 
-const REVISION: &str = "b10cfcd65fd7f7b1ab9beb34798b2108de003452";
+const REVISION: &str = "5069856495870486134dd2ca0b0e2516308c5c2a";
 
 #[rustfmt::skip]
 static EXCLUDE_FILES: &[&str] = &[
-    // TODO: explicit tail calls: `become _g()`
-    // https://github.com/dtolnay/syn/issues/1501
-    "tests/ui/explicit-tail-calls/return-lifetime-sub.rs",
+    // TODO: `unsafe static`, `safe fn`
+    // https://github.com/dtolnay/syn/issues/1675
+    "src/tools/rustfmt/tests/target/unsafe_extern_blocks.rs",
+    "tests/rustdoc/unsafe-extern-blocks.rs",
+    "tests/ui/rust-2024/unsafe-extern-blocks/safe-items.rs",
+
+    // TODO: unsafe attributes: `#[unsafe(path::to)]`
+    // https://github.com/dtolnay/syn/issues/1710
+    "src/tools/rust-analyzer/crates/parser/test_data/parser/inline/ok/0213_metas.rs",
+    "src/tools/rustfmt/tests/target/unsafe_attributes.rs",
+    "tests/ui/attributes/unsafe/unsafe-attributes.rs",
+    "tests/ui/rust-2024/unsafe-attributes/unsafe-attribute-marked.rs",
 
     // TODO: non-lifetime binders: `where for<'a, T> &'a Struct<T>: Trait`
     // https://github.com/dtolnay/syn/issues/1435
@@ -34,7 +45,9 @@ static EXCLUDE_FILES: &[&str] = &[
     // TODO: return type notation: `where T: Trait<method(): Send>`
     // https://github.com/dtolnay/syn/issues/1434
     "src/tools/rust-analyzer/crates/parser/test_data/parser/inline/ok/0208_associated_return_type_bounds.rs",
+    "src/tools/rustfmt/tests/target/return-type-notation.rs",
     "tests/ui/associated-type-bounds/return-type-notation/basic.rs",
+    "tests/ui/associated-type-bounds/return-type-notation/unpretty-parenthesized.rs",
     "tests/ui/feature-gates/feature-gate-return_type_notation.rs",
 
     // TODO: lazy type alias syntax with where-clause in trailing position
@@ -44,12 +57,110 @@ static EXCLUDE_FILES: &[&str] = &[
     // TODO: gen blocks and functions
     // https://github.com/dtolnay/syn/issues/1526
     "compiler/rustc_codegen_cranelift/example/gen_block_iterate.rs",
+    "tests/ui/coroutine/async-gen-deduce-yield.rs",
+    "tests/ui/coroutine/async-gen-yield-ty-is-unit.rs",
+    "tests/ui/coroutine/async_gen_fn_iter.rs",
+    "tests/ui/coroutine/gen_block_is_fused_iter.rs",
     "tests/ui/coroutine/gen_block_is_iter.rs",
     "tests/ui/coroutine/gen_block_iterate.rs",
+    "tests/ui/coroutine/gen_fn_iter.rs",
+    "tests/ui/coroutine/gen_fn_lifetime_capture.rs",
+    "tests/ui/coroutine/return-types-diverge.rs",
+    "tests/ui/higher-ranked/builtin-closure-like-bounds.rs",
+    "tests/ui/sanitizer/cfi-coroutine.rs",
 
-    // TODO: struct literal in match guard
-    // https://github.com/dtolnay/syn/issues/1527
-    "tests/ui/parser/struct-literal-in-match-guard.rs",
+    // TODO: `!` as a pattern
+    // https://github.com/dtolnay/syn/issues/1546
+    "tests/mir-opt/building/match/never_patterns.rs",
+    "tests/ui/rfcs/rfc-0000-never_patterns/diverges.rs",
+    "tests/ui/rfcs/rfc-0000-never_patterns/use-bindings.rs",
+
+    // TODO: async trait bounds: `impl async Fn()`
+    // https://github.com/dtolnay/syn/issues/1628
+    "src/tools/miri/tests/pass/async-closure-captures.rs",
+    "src/tools/miri/tests/pass/async-closure-drop.rs",
+    "src/tools/rust-analyzer/crates/parser/test_data/parser/inline/ok/0211_async_trait_bound.rs",
+    "src/tools/rust-analyzer/crates/parser/test_data/parser/inline/ok/0212_const_trait_bound.rs",
+    "src/tools/rustfmt/tests/target/asyncness.rs",
+    "tests/codegen/async-closure-debug.rs",
+    "tests/ui/async-await/async-closures/async-fn-mut-for-async-fn.rs",
+    "tests/ui/async-await/async-closures/async-fn-once-for-async-fn.rs",
+    "tests/ui/async-await/async-closures/auxiliary/foreign.rs",
+    "tests/ui/async-await/async-closures/brand.rs",
+    "tests/ui/async-await/async-closures/captures.rs",
+    "tests/ui/async-await/async-closures/constrained-but-no-upvars-yet.rs",
+    "tests/ui/async-await/async-closures/drop.rs",
+    "tests/ui/async-await/async-closures/force-move-due-to-inferred-kind.rs",
+    "tests/ui/async-await/async-closures/mangle.rs",
+    "tests/ui/async-await/async-closures/moro-example.rs",
+    "tests/ui/async-await/async-closures/move-is-async-fn.rs",
+    "tests/ui/async-await/async-closures/mut-ref-reborrow.rs",
+    "tests/ui/async-await/async-closures/no-borrow-from-env.rs",
+    "tests/ui/async-await/async-closures/overlapping-projs.rs",
+    "tests/ui/async-await/async-closures/precise-captures.rs",
+    "tests/ui/async-await/async-closures/refd.rs",
+    "tests/ui/async-await/async-closures/signature-deduction.rs",
+    "tests/ui/async-await/async-fn/edition-2015-not-async-bound.rs",
+    "tests/ui/async-await/async-fn/higher-ranked-async-fn.rs",
+    "tests/ui/async-await/async-fn/impl-trait.rs",
+    "tests/ui/async-await/async-fn/project.rs",
+    "tests/ui/async-await/async-fn/sugar.rs",
+
+    // TODO: mutable by-reference bindings (mut ref)
+    // https://github.com/dtolnay/syn/issues/1629
+    "src/tools/rustfmt/tests/source/mut_ref.rs",
+    "src/tools/rustfmt/tests/target/mut_ref.rs",
+    "tests/ui/mut/mut-ref.rs",
+
+    // TODO: postfix match
+    // https://github.com/dtolnay/syn/issues/1630
+    "src/tools/rustfmt/tests/source/postfix-match/pf-match.rs",
+    "src/tools/rustfmt/tests/target/postfix-match/pf-match.rs",
+    "tests/pretty/postfix-match/simple-matches.rs",
+    "tests/ui/match/postfix-match/no-unused-parens.rs",
+    "tests/ui/match/postfix-match/pf-match-chain.rs",
+    "tests/ui/match/postfix-match/postfix-match.rs",
+
+    // TODO: delegation
+    // https://github.com/dtolnay/syn/issues/1580
+    "tests/pretty/delegation.rs",
+    "tests/ui/delegation/body-identity-glob.rs",
+    "tests/ui/delegation/body-identity-list.rs",
+    "tests/ui/delegation/explicit-paths-in-traits-pass.rs",
+    "tests/ui/delegation/explicit-paths-pass.rs",
+    "tests/ui/delegation/explicit-paths-signature-pass.rs",
+    "tests/ui/delegation/fn-header.rs",
+    "tests/ui/delegation/glob-glob.rs",
+    "tests/ui/delegation/glob-override.rs",
+    "tests/ui/delegation/glob.rs",
+    "tests/ui/delegation/impl-trait.rs",
+    "tests/ui/delegation/list.rs",
+    "tests/ui/delegation/macro-inside-glob.rs",
+    "tests/ui/delegation/macro-inside-list.rs",
+    "tests/ui/delegation/method-call-priority.rs",
+    "tests/ui/delegation/parse.rs",
+    "tests/ui/delegation/rename.rs",
+    "tests/ui/delegation/self-coercion.rs",
+
+    // TODO: for await
+    // https://github.com/dtolnay/syn/issues/1631
+    "tests/ui/async-await/for-await-2015.rs",
+    "tests/ui/async-await/for-await-passthrough.rs",
+    "tests/ui/async-await/for-await.rs",
+
+    // TODO: const trait bound: `T: const Trait`
+    // https://github.com/dtolnay/syn/issues/1632
+    "tests/ui/generic-const-items/const-trait-impl.rs",
+    "tests/ui/rfcs/rfc-2632-const-trait-impl/const-fns-are-early-bound.rs",
+    "tests/ui/rfcs/rfc-2632-const-trait-impl/const-trait-bounds.rs",
+    "tests/ui/rfcs/rfc-2632-const-trait-impl/effects/minicore.rs",
+
+    // TODO: `|| .. .method()`
+    "src/tools/rust-analyzer/crates/parser/test_data/parser/inline/ok/0208_closure_range_method_call.rs",
+    "src/tools/rustfmt/tests/source/issue-4808.rs",
+
+    // Several of the above
+    "tests/ui/unpretty/expanded-exhaustive.rs",
 
     // Compile-fail expr parameter in const generic position: f::<1 + 2>()
     "tests/ui/const-generics/early/closing-args-token.rs",
@@ -63,12 +174,16 @@ static EXCLUDE_FILES: &[&str] = &[
 
     // Negative polarity trait bound: `where T: !Copy`
     "src/tools/rustfmt/tests/target/negative-bounds.rs",
+    "tests/ui/traits/negative-bounds/supertrait.rs",
 
     // Lifetime bound inside for<>: `T: ~const ?for<'a: 'b> Trait<'a>`
     "tests/ui/rfcs/rfc-2632-const-trait-impl/tilde-const-syntax.rs",
 
     // Const impl that is not a trait impl: `impl ~const T {}`
     "tests/ui/rfcs/rfc-2632-const-trait-impl/syntax.rs",
+
+    // Lifetimes and types out of order in angle bracketed path arguments
+    "tests/ui/parser/constraints-before-generic-args-syntactic-pass.rs",
 
     // Deprecated anonymous parameter syntax in traits
     "src/tools/rustfmt/tests/source/trait.rs",
@@ -146,6 +261,8 @@ static EXCLUDE_FILES: &[&str] = &[
 
     // Placeholder syntax for "throw expressions"
     "compiler/rustc_errors/src/translation.rs",
+    "compiler/rustc_expand/src/module.rs",
+    "compiler/rustc_infer/src/infer/need_type_info.rs",
     "src/tools/clippy/tests/ui/needless_return.rs",
     "src/tools/rust-analyzer/crates/parser/test_data/parser/inline/ok/0204_yeet_expr.rs",
     "tests/pretty/yeet-expr.rs",
@@ -181,6 +298,8 @@ static EXCLUDE_FILES: &[&str] = &[
     "src/tools/rustfmt/tests/coverage/target/comments.rs",
     "src/tools/rustfmt/tests/parser/issue-4126/invalid.rs",
     "src/tools/rustfmt/tests/parser/issue_4418.rs",
+    "src/tools/rustfmt/tests/parser/stashed-diag.rs",
+    "src/tools/rustfmt/tests/parser/stashed-diag2.rs",
     "src/tools/rustfmt/tests/parser/unclosed-delims/issue_4466.rs",
     "src/tools/rustfmt/tests/source/configs/disable_all_formatting/true.rs",
     "src/tools/rustfmt/tests/source/configs/spaces_around_ranges/false.rs",
@@ -219,6 +338,9 @@ static EXCLUDE_DIRS: &[&str] = &[
     // Inputs that used to crash rust-analyzer, but aren't necessarily supposed to parse
     "src/tools/rust-analyzer/crates/syntax/test_data/parser/fuzz-failures",
     "src/tools/rust-analyzer/crates/syntax/test_data/reparse/fuzz-failures",
+
+    // Inputs that crash rustc, making no claim about whether they are valid Rust
+    "tests/crashes",
 ];
 
 // Directories in which a .stderr implies the corresponding .rs is not expected
@@ -290,6 +412,25 @@ pub fn edition(path: &Path) -> &'static str {
     } else {
         "2021"
     }
+}
+
+#[allow(dead_code)]
+pub fn abort_after() -> usize {
+    match env::var("ABORT_AFTER_FAILURE") {
+        Ok(s) => s.parse().expect("failed to parse ABORT_AFTER_FAILURE"),
+        Err(_) => usize::MAX,
+    }
+}
+
+pub fn rayon_init() {
+    let stack_size = match env::var("RUST_MIN_STACK") {
+        Ok(s) => s.parse().expect("failed to parse RUST_MIN_STACK"),
+        Err(_) => 1024 * 1024 * if cfg!(debug_assertions) { 40 } else { 20 },
+    };
+    ThreadPoolBuilder::new()
+        .stack_size(stack_size)
+        .build_global()
+        .unwrap();
 }
 
 pub fn clone_rust() {
