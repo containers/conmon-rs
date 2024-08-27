@@ -117,7 +117,7 @@ pub struct Config {
 
     #[get = "pub"]
     #[arg(
-        default_value("http://localhost:4317"),
+        default_value("http://127.0.0.1:4317"),
         env(concat!(prefix!(), "TRACING_ENDPOINT")),
         long("tracing-endpoint"),
         short('t'),
