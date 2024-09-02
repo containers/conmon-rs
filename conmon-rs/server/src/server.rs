@@ -2,7 +2,7 @@
 
 use crate::{
     child_reaper::ChildReaper,
-    config::{Commands, Config, LogDriver, Verbosity},
+    config::{Commands, Config, LogDriver, LogLevel, Verbosity},
     container_io::{ContainerIO, ContainerIOType},
     fd_socket::FdSocket,
     init::{DefaultInit, Init},
@@ -311,6 +311,8 @@ pub(crate) struct GenerateRuntimeArgs<'a> {
 
 impl GenerateRuntimeArgs<'_> {
     const SYSTEMD_CGROUP_ARG: &'static str = "--systemd-cgroup";
+    const RUNTIME_CRUN: &'static str = "crun";
+    const LOG_LEVEL_FLAG_CRUN: &'static str = "--log-level";
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
     pub fn create_args(
@@ -319,7 +321,7 @@ impl GenerateRuntimeArgs<'_> {
         global_args: Reader,
         command_args: Reader,
     ) -> Result<Vec<String>> {
-        let mut args = vec![];
+        let mut args = self.default_args().context("build default runtime args")?;
 
         if let Some(rr) = self.config.runtime_root() {
             args.push(format!("--root={}", rr.display()));
@@ -357,15 +359,7 @@ impl GenerateRuntimeArgs<'_> {
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
     pub(crate) fn exec_sync_args(&self, command: Reader) -> Result<Vec<String>> {
-        let mut args = vec![];
-
-        if let Some(rr) = self.config.runtime_root() {
-            args.push(format!("--root={}", rr.display()));
-        }
-
-        if self.cgroup_manager == CgroupManager::Systemd {
-            args.push(Self::SYSTEMD_CGROUP_ARG.into());
-        }
+        let mut args = self.default_args().context("build default runtime args")?;
 
         args.push("exec".to_string());
         args.push("-d".to_string());
@@ -383,6 +377,42 @@ impl GenerateRuntimeArgs<'_> {
         }
 
         debug!("Exec args {:?}", args.join(" "));
+        Ok(args)
+    }
+
+    /// Build the default arguments for any provided runtime.
+    fn default_args(&self) -> Result<Vec<String>> {
+        let mut args = vec![];
+
+        if self
+            .config
+            .runtime()
+            .file_name()
+            .context("no filename in path")?
+            == Self::RUNTIME_CRUN
+        {
+            debug!("Found crun used as runtime");
+            args.push(format!("--log=journald:{}", self.id));
+
+            match self.config.log_level() {
+                &LogLevel::Debug | &LogLevel::Error => args.push(format!(
+                    "{}={}",
+                    Self::LOG_LEVEL_FLAG_CRUN,
+                    self.config.log_level()
+                )),
+                &LogLevel::Warn => args.push(format!("{}=warning", Self::LOG_LEVEL_FLAG_CRUN)),
+                _ => {}
+            }
+        }
+
+        if let Some(rr) = self.config.runtime_root() {
+            args.push(format!("--root={}", rr.display()));
+        }
+
+        if self.cgroup_manager == CgroupManager::Systemd {
+            args.push(Self::SYSTEMD_CGROUP_ARG.into());
+        }
+
         Ok(args)
     }
 }
