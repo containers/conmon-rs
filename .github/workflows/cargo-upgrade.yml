@@ -16,9 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
       - name: Setup Cache
-        uses: actions/cache@v4
+        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4.0.2
         with:
           path: |
             ~/.cargo/registry
@@ -26,7 +26,7 @@ jobs:
             target
           key: cargo-upgrade-${{ hashFiles('**/Cargo.lock') }}
       - name: Select latest toolchain
-        uses: actions-rs/toolchain@v1
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
         with:
           toolchain: stable
           default: true
@@ -50,7 +50,7 @@ jobs:
             echo "create_pr=true" >> "$GITHUB_OUTPUT"
           fi
       - name: Create PR if required
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@4320041ed380b20e97d388d56a7fb4f9b8c20e79 # v7.0.0
         if: ${{ steps.create_pr.outputs.create_pr == 'true' }}
         with:
           commit-message: Update cargo dependencies
