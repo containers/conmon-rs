@@ -25,7 +25,6 @@ linters:
     - errname
     - errorlint
     - exhaustive
-    - exportloopref
     - fatcontext
     - forbidigo
     - forcetypeassert
@@ -124,6 +123,9 @@ linters-settings:
     min-complexity: 50
   gocyclo:
     min-complexity: 50
+  gosec:
+    excludes:
+      - G115  # potential integer overflow
   nestif:
     min-complexity: 15
   errcheck:
