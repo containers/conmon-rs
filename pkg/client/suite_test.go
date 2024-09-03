@@ -344,7 +344,7 @@ func (rr *RuntimeRunner) RunCommand(args ...string) error {
 		return err
 	}
 	if stdoutString != "" {
-		fmt.Fprintf(GinkgoWriter, stdoutString+"\n")
+		fmt.Fprintf(GinkgoWriter, "%s\n", stdoutString)
 	}
 
 	return nil
