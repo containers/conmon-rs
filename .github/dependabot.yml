@@ -1,33 +1,33 @@
 version: 2
 updates:
-# TODO: does not support vendoring
-# - package-ecosystem: cargo
-#   directory: "/"
-#   schedule:
-#     interval: daily
-#     time: "11:00"
-#   open-pull-requests-limit: 10
-#   labels:
-#     - "release-note-none"
-#   allow:
-#   - dependency-type: direct
-#   - dependency-type: indirect
-#   groups:
-#     opentelemetry:
-#       patterns:
-#         - "opentelemetry*"
-#         - "tracing-opentelemetry"
-- package-ecosystem: gomod
-  directory: "/"
-  schedule:
-    interval: daily
-  open-pull-requests-limit: 10
-  labels:
-    - "release-note-none"
-- package-ecosystem: "github-actions"
-  directory: "/"
-  schedule:
-    interval: daily
-  open-pull-requests-limit: 10
-  labels:
-    - "release-note-none"
+  # TODO: does not support vendoring
+  # - package-ecosystem: cargo
+  #   directory: "/"
+  #   schedule:
+  #     interval: daily
+  #     time: "11:00"
+  #   open-pull-requests-limit: 10
+  #   labels:
+  #     - "release-note-none"
+  #   allow:
+  #   - dependency-type: direct
+  #   - dependency-type: indirect
+  #   groups:
+  #     opentelemetry:
+  #       patterns:
+  #         - "opentelemetry*"
+  #         - "tracing-opentelemetry"
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 10
+    labels:
+      - "release-note-none"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 10
+    labels:
+      - "release-note-none"

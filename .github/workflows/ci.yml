@@ -8,11 +8,11 @@ on:
       - main
 env:
   CARGO_TERM_COLOR: always
-  GO_VERSION: '1.23'
+  GO_VERSION: "1.23"
   ACTION_MSRV_TOOLCHAIN: 1.66.1
   # Latest available toolchain which does not break clippy and the unit tests
   ACTION_MSRV_NIGHTLY_TOOLCHAIN: nightly-2024-05-19
-  NIX_VERSION: '2.21.0'
+  NIX_VERSION: "2.21.0"
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -156,7 +156,7 @@ jobs:
       - uses: cachix/cachix-action@v15
         with:
           name: conmon-rs
-          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
           pushFilter: "(conmon-rs|cargo-vendor)"
       - run: nix-build nix/default-${{ matrix.arch }}.nix
       - run: file result/bin/conmonrs | grep static | grep stripped
@@ -299,9 +299,9 @@ jobs:
           command: test
           args: --no-fail-fast
         env:
-          CARGO_INCREMENTAL: '0'
-          RUSTFLAGS: '-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Zpanic_abort_tests'
-          RUSTDOCFLAGS: '-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Zpanic_abort_tests'
+          CARGO_INCREMENTAL: "0"
+          RUSTFLAGS: "-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Zpanic_abort_tests"
+          RUSTDOCFLAGS: "-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Zpanic_abort_tests"
       - name: Coverage
         uses: actions-rs/grcov@v0.1
         with:
@@ -409,3 +409,12 @@ jobs:
       - uses: crate-ci/typos@v1.24.3
         with:
           config: .github/typos.toml
+
+  prettier:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+      - uses: creyD/prettier_action@31355f8eef017f8aeba2e0bc09d8502b13dbbad1 # v4.3
+        with:
+          dry: true
+          prettier_options: --write .

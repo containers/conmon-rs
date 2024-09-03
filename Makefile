@@ -2,6 +2,7 @@ MAKEFILE_PATH := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 RUNTIME_PATH ?= "/usr/bin/runc"
 PROTO_PATH ?= "conmon-rs/common/proto"
 BINARY := conmonrs
+CONTAINER_RUNTIME ?= podman
 BUILD_DIR ?= .build
 GOTOOLS_GOPATH ?= $(BUILD_DIR)/gotools
 GOTOOLS_BINDIR ?= $(GOTOOLS_GOPATH)/bin
@@ -39,6 +40,15 @@ lint-go: .install.golangci-lint
 .PHONY: verify-dependencies
 verify-dependencies: $(GOTOOLS_BINDIR)/zeitgeist
 	$(GOTOOLS_BINDIR)/zeitgeist validate --local-only --base-path . --config dependencies.yaml
+
+.PHONY: verify-prettier
+verify-prettier: prettier ## Run prettier on the project.
+	./hack/tree_status.sh
+
+.PHONY: prettier
+prettier: ## Prettify supported files.
+	$(CONTAINER_RUNTIME) run -it --privileged -v ${PWD}:/w -w /w --entrypoint bash node:latest -c \
+		'npm install -g prettier && prettier -w .'
 
 unit:
 	cargo test --no-fail-fast
