@@ -2,7 +2,7 @@ name: cargo-upgrade
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * 0'  # At 00:00 on Sunday
+    - cron: "0 0 * * 0" # At 00:00 on Sunday
 env:
   CARGO_TERM_COLOR: always
   ACTION_MSRV_TOOLCHAIN: 1.66.1
@@ -54,7 +54,7 @@ jobs:
         if: ${{ steps.create_pr.outputs.create_pr == 'true' }}
         with:
           commit-message: Update cargo dependencies
-          title: 'Update cargo dependencies'
+          title: "Update cargo dependencies"
           body-path: ${{ env['BODY_FILE'] }}
           labels: kind/dependency-change, release-note-none, ok-to-test
           branch: cargo-deps
