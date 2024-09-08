@@ -9,9 +9,6 @@
 # will likely look very different (and much more reasonable).
 # See Cargo.toml.orig for the original contents.
 
-bin = []
-example = []
-
 [package]
 edition = "2021"
 rust-version = "1.65.0"
@@ -61,15 +58,6 @@ targets = ["x86_64-unknown-linux-gnu"]
 name = "time"
 path = "src/lib.rs"
 bench = false
-
-[[test]]
-name = "tests"
-path = "../tests/main.rs"
-
-[[bench]]
-name = "benchmarks"
-path = "../benchmarks/main.rs"
-harness = false
 
 [dependencies.itoa]
 version = "1.0.1"

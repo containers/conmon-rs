@@ -1,3 +1,11 @@
+## v0.19.4
+- Use the `noFinishNeeded` field to elide Finish messages when possible.
+
+## v0.19.3
+- Remove some unneeded fields in Answer and Import.
+- Use `let else` to improve readability.
+- Use a tighter size_hint estimate for Resolve messages.
+
 ## v0.19.2
 - Use size hint in new_outgoing_message(). Should improve performance somewhat.
 

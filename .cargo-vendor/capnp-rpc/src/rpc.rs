@@ -35,7 +35,7 @@ use futures::{future, Future, FutureExt, TryFutureExt};
 use std::cell::{Cell, RefCell};
 use std::cmp::Reverse;
 use std::collections::binary_heap::BinaryHeap;
-use std::collections::hash_map::HashMap;
+use std::collections::hash_map::{self, HashMap};
 use std::mem;
 use std::rc::{Rc, Weak};
 
@@ -154,6 +154,9 @@ where
 
     /// The local QuestionRef, set to None when it is destroyed.
     self_ref: Option<Weak<RefCell<QuestionRef<VatId>>>>,
+
+    /// If true, don't send a Finish message.
+    skip_finish: bool,
 }
 
 impl<VatId> Question<VatId> {
@@ -163,6 +166,7 @@ impl<VatId> Question<VatId> {
             param_exports: Vec::new(),
             is_tail_call: false,
             self_ref: None,
+            skip_finish: false,
         }
     }
 }
@@ -206,36 +210,34 @@ impl<VatId> QuestionRef<VatId> {
 impl<VatId> Drop for QuestionRef<VatId> {
     fn drop(&mut self) {
         let mut questions = self.connection_state.questions.borrow_mut();
-        match &mut questions.slots[self.id as usize] {
-            Some(q) => {
-                if let Ok(ref mut c) = *self.connection_state.connection.borrow_mut() {
-                    let mut message = c.new_outgoing_message(5);
-                    {
-                        let root: message::Builder = message.get_body().unwrap().init_as();
-                        let mut builder = root.init_finish();
-                        builder.set_question_id(self.id);
+        let Some(q) = &mut questions.slots[self.id as usize] else {
+            unreachable!()
+        };
+        if let Ok(ref mut c) = *self.connection_state.connection.borrow_mut() {
+            if !q.skip_finish {
+                let mut message = c.new_outgoing_message(5);
+                {
+                    let root: message::Builder = message.get_body().unwrap().init_as();
+                    let mut builder = root.init_finish();
+                    builder.set_question_id(self.id);
 
-                        // If we're still awaiting a return, then this request is being
-                        // canceled, and we're going to ignore any capabilities in the return
-                        // message, so set releaseResultCaps true. If we already received the
-                        // return, then we've already built local proxies for the caps and will
-                        // send Release messages when those are destroyed.
-                        builder.set_release_result_caps(q.is_awaiting_return);
-                    }
-                    let _ = message.send();
+                    // If we're still awaiting a return, then this request is being
+                    // canceled, and we're going to ignore any capabilities in the return
+                    // message, so set releaseResultCaps true. If we already received the
+                    // return, then we've already built local proxies for the caps and will
+                    // send Release messages when those are destroyed.
+                    builder.set_release_result_caps(q.is_awaiting_return);
                 }
+                let _ = message.send();
+            }
+        }
 
-                if q.is_awaiting_return {
-                    // Still waiting for return, so just remove the QuestionRef pointer from the table.
-                    q.self_ref = None;
-                } else {
-                    // Call has already returned, so we can now remove it from the table.
-                    questions.erase(self.id)
-                }
-            }
-            None => {
-                unreachable!()
-            }
+        if q.is_awaiting_return {
+            // Still waiting for return, so just remove the QuestionRef pointer from the table.
+            q.self_ref = None;
+        } else {
+            // Call has already returned, so we can now remove it from the table.
+            questions.erase(self.id)
         }
     }
 }
@@ -244,10 +246,6 @@ struct Answer<VatId>
 where
     VatId: 'static,
 {
-    // True from the point when the Call message is received to the point when both the `Finish`
-    // message has been received and the `Return` has been sent.
-    active: bool,
-
     return_has_been_sent: bool,
 
     // Send pipelined calls here.  Becomes null as soon as a `Finish` is received.
@@ -268,7 +266,6 @@ where
 impl<VatId> Answer<VatId> {
     fn new() -> Self {
         Self {
-            active: false,
             return_has_been_sent: false,
             pipeline: None,
             redirected_results: None,
@@ -302,8 +299,7 @@ pub struct Import<VatId>
 where
     VatId: 'static,
 {
-    // Becomes null when the import is destroyed.
-    import_client: Option<(Weak<RefCell<ImportClient<VatId>>>, usize)>,
+    import_client: Weak<RefCell<ImportClient<VatId>>>,
 
     // Either a copy of importClient, or, in the case of promises, the wrapping PromiseClient.
     // Becomes null when it is discarded *or* when the import is destroyed (e.g. the promise is
@@ -315,9 +311,9 @@ where
 }
 
 impl<VatId> Import<VatId> {
-    fn new() -> Self {
+    fn new(import_client: &Rc<RefCell<ImportClient<VatId>>>) -> Self {
         Self {
-            import_client: None,
+            import_client: Rc::downgrade(import_client),
             app_client: None,
             promise_client_to_resolve: None,
         }
@@ -420,6 +416,7 @@ where
     answers: RefCell<ImportTable<Answer<VatId>>>,
     imports: RefCell<ImportTable<Import<VatId>>>,
 
+    /// Exports keyed by ClientHook::get_ptr().
     exports_by_cap: RefCell<HashMap<usize, ExportId>>,
 
     embargoes: RefCell<ExportTable<Embargo>>,
@@ -555,27 +552,25 @@ impl<VatId> ConnectionState<VatId> {
 
         let connection = mem::replace(&mut *self.connection.borrow_mut(), Err(error.clone()));
 
-        match connection {
-            Ok(mut c) => {
-                let promise = c.shutdown(Err(error)).then(|r| match r {
-                    Ok(()) => Promise::ok(()),
-                    Err(e) => {
-                        if e.kind != ::capnp::ErrorKind::Disconnected {
-                            // Don't report disconnects as an error.
-                            Promise::err(e)
-                        } else {
-                            Promise::ok(())
-                        }
-                    }
-                });
-                match self.disconnect_fulfiller.borrow_mut().take() {
-                    None => unreachable!(),
-                    Some(fulfiller) => {
-                        let _ = fulfiller.send(Promise::from_future(promise.attach(c)));
-                    }
+        let Ok(mut c) = connection else {
+            unreachable!()
+        };
+        let promise = c.shutdown(Err(error)).then(|r| match r {
+            Ok(()) => Promise::ok(()),
+            Err(e) => {
+                if e.kind != ::capnp::ErrorKind::Disconnected {
+                    // Don't report disconnects as an error.
+                    Promise::err(e)
+                } else {
+                    Promise::ok(())
                 }
             }
-            Err(_) => unreachable!(),
+        });
+        match self.disconnect_fulfiller.borrow_mut().take() {
+            None => unreachable!(),
+            Some(fulfiller) => {
+                let _ = fulfiller.send(Promise::from_future(promise.attach(c)));
+            }
         }
     }
 
@@ -762,17 +757,17 @@ impl<VatId> ConnectionState<VatId> {
         };
 
         let slots = &mut connection_state.answers.borrow_mut().slots;
-        let answer = slots.entry(answer_id).or_insert_with(Answer::new);
-        if answer.active {
+        let hash_map::Entry::Vacant(slot) = slots.entry(answer_id) else {
             connection_state.release_exports(&result_exports)?;
             return Err(Error::failed("questionId is already in use".to_string()));
-        }
-        answer.active = true;
+        };
+        let mut answer = Answer::new();
         answer.return_has_been_sent = true;
         answer.result_exports = result_exports;
         answer.pipeline = Some(Box::new(SingleCapPipeline::new(
             connection_state.bootstrap_cap.clone(),
         )));
+        slot.insert(answer);
 
         let _ = response.send();
         Ok(())
@@ -782,20 +777,16 @@ impl<VatId> ConnectionState<VatId> {
         let mut exports_to_release = Vec::new();
         let answer_id = finish.get_question_id();
 
-        let mut erase = false;
         let answers_slots = &mut connection_state.answers.borrow_mut().slots;
-        match answers_slots.get_mut(&answer_id) {
-            None => {
-                return Err(Error::failed(format!(
-                    "Invalid question ID {answer_id} in Finish message."
-                )));
+        match answers_slots.entry(answer_id) {
+            hash_map::Entry::Vacant(_) => {
+                // The `Finish` message targets a question ID that isn't present in our answer table.
+                // Probably, we sent a `Return` with `noFinishNeeded = true`, but the other side didn't
+                // recognize this hint and sent a `Finish` anyway, or the `Finish` was already in-flight at
+                // the time we sent the `Return`. We can silently ignore this.
             }
-            Some(answer) => {
-                if !answer.active {
-                    return Err(Error::failed(format!(
-                        "'Finish' for invalid question ID {answer_id}."
-                    )));
-                }
+            hash_map::Entry::Occupied(mut entry) => {
+                let answer = entry.get_mut();
                 answer.received_finish.set(true);
 
                 if finish.get_release_result_caps() {
@@ -807,13 +798,9 @@ impl<VatId> ConnectionState<VatId> {
                 answer.call_completion_promise.take();
 
                 if answer.return_has_been_sent {
-                    erase = true;
+                    entry.remove();
                 }
             }
-        }
-
-        if erase {
-            answers_slots.remove(&answer_id);
         }
 
         connection_state.release_exports(&exports_to_release)?;
@@ -970,11 +957,10 @@ impl<VatId> ConnectionState<VatId> {
 
                 {
                     let slots = &mut connection_state.answers.borrow_mut().slots;
-                    let answer = slots.entry(question_id).or_insert(answer);
-                    if answer.active {
+                    let hash_map::Entry::Vacant(slot) = slots.entry(question_id) else {
                         return Err(Error::failed("questionId is already in use".to_string()));
-                    }
-                    answer.active = true;
+                    };
+                    slot.insert(answer);
                 }
 
                 let call_promise =
@@ -1029,6 +1015,9 @@ impl<VatId> ConnectionState<VatId> {
                 match questions.slots[question_id as usize] {
                     Some(ref mut question) => {
                         question.is_awaiting_return = false;
+                        if ret.get_no_finish_needed() {
+                            question.skip_finish = true;
+                        }
                         match question.self_ref {
                             Some(ref question_ref) => match ret.which()? {
                                 return_::Results(results) => {
@@ -1165,21 +1154,16 @@ impl<VatId> ConnectionState<VatId> {
     }
 
     fn answer_has_sent_return(&self, id: AnswerId, result_exports: Vec<ExportId>) {
-        let mut erase = false;
         let answers_slots = &mut self.answers.borrow_mut().slots;
-        if let Some(a) = answers_slots.get_mut(&id) {
-            a.return_has_been_sent = true;
-            if a.received_finish.get() {
-                erase = true;
-            } else {
-                a.result_exports = result_exports;
-            }
-        } else {
+        let hash_map::Entry::Occupied(mut entry) = answers_slots.entry(id) else {
             unreachable!()
-        }
-
-        if erase {
-            answers_slots.remove(&id);
+        };
+        let a = entry.get_mut();
+        a.return_has_been_sent = true;
+        if a.received_finish.get() {
+            entry.remove();
+        } else {
+            a.result_exports = result_exports;
         }
     }
 
@@ -1241,23 +1225,23 @@ impl<VatId> ConnectionState<VatId> {
                 let promised_answer = promised_answer?;
                 let question_id = promised_answer.get_question_id();
 
-                match self.answers.borrow().slots.get(&question_id) {
-                    None => Err(Error::failed(
-                        "PromisedAnswer.questionId is not a current question.".to_string(),
-                    )),
+                let pipeline = match self.answers.borrow().slots.get(&question_id) {
+                    None => Box::new(broken::Pipeline::new(Error::failed(
+                        "Pipeline call on a request that returned no capabilities or was already closed.".to_string(),
+                    ))) as Box<dyn PipelineHook>,
                     Some(base) => {
-                        let pipeline = match base.pipeline {
+                        match base.pipeline {
                             Some(ref pipeline) => pipeline.add_ref(),
                             None => Box::new(broken::Pipeline::new(Error::failed(
                                 "Pipeline call on a request that returned not capabilities or was \
                                  already closed."
                                     .to_string(),
                             ))) as Box<dyn PipelineHook>,
-                        };
-                        let ops = to_pipeline_ops(promised_answer.get_transform()?)?;
-                        Ok(pipeline.get_pipelined_cap(&ops))
+                        }
                     }
-                }
+                };
+                let ops = to_pipeline_ops(promised_answer.get_transform()?)?;
+                Ok(pipeline.get_pipelined_cap(&ops))
             }
         }
     }
@@ -1348,7 +1332,7 @@ impl<VatId> ConnectionState<VatId> {
                     }
 
                     // OK, we have to send a `Resolve` message.
-                    let mut message = connection_state.new_outgoing_message(100)?; // XXX size hint?
+                    let mut message = connection_state.new_outgoing_message(15)?;
                     {
                         let root: message::Builder = message.get_body()?.get_as()?;
                         let mut resolve = root.init_resolve();
@@ -1364,7 +1348,7 @@ impl<VatId> ConnectionState<VatId> {
                 }
                 Err(e) => {
                     // send error resolution
-                    let mut message = connection_state.new_outgoing_message(100)?; // XXX size hint?
+                    let mut message = connection_state.new_outgoing_message(15)?;
                     {
                         let root: message::Builder = message.get_body()?.get_as()?;
                         let mut resolve = root.init_resolve();
@@ -1399,14 +1383,10 @@ impl<VatId> ConnectionState<VatId> {
             if contains_key {
                 // We've already seen and exported this capability before.  Just up the refcount.
                 let export_id = state.exports_by_cap.borrow()[&ptr];
-                match state.exports.borrow_mut().find(export_id) {
-                    None => unreachable!(),
-                    Some(exp) => {
-                        descriptor.set_sender_hosted(export_id);
-                        exp.refcount += 1;
-                        Ok(Some(export_id))
-                    }
-                }
+                descriptor.set_sender_hosted(export_id);
+                // Should never fail because exports_by_cap should match exports.
+                state.exports.borrow_mut().find(export_id).unwrap().refcount += 1;
+                Ok(Some(export_id))
             } else {
                 // This is the first time we've seen this capability.
 
@@ -1463,72 +1443,61 @@ impl<VatId> ConnectionState<VatId> {
         let connection_state = state.clone();
 
         let import_client = {
-            let slots = &mut state.imports.borrow_mut().slots;
-            let v = slots.entry(import_id).or_insert_with(Import::new);
-            if v.import_client.is_some() {
-                v.import_client
-                    .as_ref()
-                    .unwrap()
-                    .0
+            match state.imports.borrow_mut().slots.entry(import_id) {
+                hash_map::Entry::Occupied(occ) => occ
+                    .get()
+                    .import_client
                     .upgrade()
-                    .expect("dangling ref to import client?")
-            } else {
-                let import_client = ImportClient::new(&connection_state, import_id);
-                v.import_client = Some((
-                    Rc::downgrade(&import_client),
-                    (&*import_client.borrow()) as *const _ as usize,
-                ));
-                import_client
+                    .expect("dangling ref to import client?"),
+                hash_map::Entry::Vacant(v) => {
+                    let import_client = ImportClient::new(&connection_state, import_id);
+                    v.insert(Import::new(&import_client));
+                    import_client
+                }
             }
         };
 
         // We just received a copy of this import ID, so the remote refcount has gone up.
         import_client.borrow_mut().add_remote_ref();
 
+        let mut tmp = state.imports.borrow_mut();
+        let Some(import) = tmp.slots.get_mut(&import_id) else {
+            unreachable!()
+        };
+
         if is_promise {
             // We need to construct a PromiseClient around this import, if we haven't already.
-            match state.imports.borrow_mut().slots.get_mut(&import_id) {
-                Some(import) => {
-                    match &import.app_client {
-                        Some(c) => {
-                            // Use the existing one.
-                            Box::new(c.upgrade().expect("dangling client ref?"))
-                        }
-                        None => {
-                            // Create a promise for this import's resolution.
-
-                            let client: Box<Client<VatId>> = Box::new(import_client.into());
-                            let client: Box<dyn ClientHook> = client;
-
-                            // XXX do I need something like this?
-                            // Make sure the import is not destroyed while this promise exists.
-                            //                            let promise = promise.attach(client.add_ref());
-
-                            let client =
-                                PromiseClient::new(&connection_state, client, Some(import_id));
-
-                            import.promise_client_to_resolve = Some(Rc::downgrade(&client));
-                            let client: Box<Client<VatId>> = Box::new(client.into());
-                            import.app_client = Some(client.downgrade());
-                            client
-                        }
-                    }
+            match &import.app_client {
+                Some(c) => {
+                    // Use the existing one.
+                    Box::new(c.upgrade().expect("dangling client ref?"))
                 }
                 None => {
-                    unreachable!()
+                    // Create a promise for this import's resolution.
+
+                    let client: Box<Client<VatId>> = Box::new(import_client.into());
+                    let client: Box<dyn ClientHook> = client;
+
+                    // Here the C++ implementation does something like:
+                    // ```
+                    //   // Make sure the import is not destroyed while this promise exists.
+                    //   let promise = promise.attach(client.add_ref());
+                    // ```
+                    // However, as far as I can tell that is unnecessary, because the
+                    // PromiseClient holds `client` until it resolves, after which point
+                    // there is no reason to keep the import alive.
+
+                    let client = PromiseClient::new(&connection_state, client, Some(import_id));
+
+                    import.promise_client_to_resolve = Some(Rc::downgrade(&client));
+                    let client: Box<Client<VatId>> = Box::new(client.into());
+                    import.app_client = Some(client.downgrade());
+                    client
                 }
             }
         } else {
             let client: Box<Client<VatId>> = Box::new(import_client.into());
-            match state.imports.borrow_mut().slots.get_mut(&import_id) {
-                Some(v) => {
-                    v.app_client = Some(client.downgrade());
-                }
-                None => {
-                    unreachable!()
-                }
-            };
-
+            import.app_client = Some(client.downgrade());
             client
         }
     }
@@ -1550,7 +1519,7 @@ impl<VatId> ConnectionState<VatId> {
                     Ok(Some(exp.client_hook.add_ref()))
                 } else {
                     Ok(Some(broken::new_cap(Error::failed(
-                        "invalid 'receivedHosted' export ID".to_string(),
+                        "invalid 'receiverHosted' export ID".to_string(),
                     ))))
                 }
             }
@@ -1558,11 +1527,9 @@ impl<VatId> ConnectionState<VatId> {
                 let promised_answer = receiver_answer?;
                 let question_id = promised_answer.get_question_id();
                 if let Some(answer) = state.answers.borrow().slots.get(&question_id) {
-                    if answer.active {
-                        if let Some(ref pipeline) = answer.pipeline {
-                            let ops = to_pipeline_ops(promised_answer.get_transform()?)?;
-                            return Ok(Some(pipeline.get_pipelined_cap(&ops)));
-                        }
+                    if let Some(ref pipeline) = answer.pipeline {
+                        let ops = to_pipeline_ops(promised_answer.get_transform()?)?;
+                        return Ok(Some(pipeline.get_pipelined_cap(&ops)));
                     }
                 }
                 Ok(Some(broken::new_cap(Error::failed(
@@ -2144,17 +2111,13 @@ impl Params {
 impl ParamsHook for Params {
     fn get(&self) -> ::capnp::Result<any_pointer::Reader> {
         let root: message::Reader = self.request.get_body()?.get_as()?;
-        match root.which()? {
-            message::Call(call) => {
-                use ::capnp::traits::Imbue;
-                let mut content = call?.get_params()?.get_content();
-                content.imbue(&self.cap_table);
-                Ok(content)
-            }
-            _ => {
-                unreachable!()
-            }
-        }
+        let message::Call(call) = root.which()? else {
+            unreachable!()
+        };
+        use ::capnp::traits::Imbue;
+        let mut content = call?.get_params()?.get_content();
+        content.imbue(&self.cap_table);
+        Ok(content)
     }
 }
 
@@ -2261,36 +2224,29 @@ impl<VatId> Drop for Results<VatId> {
 impl<VatId> ResultsHook for Results<VatId> {
     fn get(&mut self) -> ::capnp::Result<any_pointer::Builder> {
         use ::capnp::traits::ImbueMut;
-        if let Some(ref mut inner) = self.inner {
-            inner.ensure_initialized();
-            match inner.variant {
-                None => unreachable!(),
-                Some(ResultsVariant::Rpc(ref mut message, ref mut cap_table)) => {
-                    let root: message::Builder = message.get_body()?.get_as()?;
-                    match root.which()? {
-                        message::Return(ret) => match ret?.which()? {
-                            return_::Results(payload) => {
-                                let mut content = payload?.get_content();
-                                content.imbue_mut(cap_table);
-                                Ok(content)
-                            }
-                            _ => {
-                                unreachable!()
-                            }
-                        },
-                        _ => {
-                            unreachable!()
-                        }
-                    }
-                }
-                Some(ResultsVariant::LocallyRedirected(ref mut message, ref mut cap_table)) => {
-                    let mut result: any_pointer::Builder = message.get_root()?;
-                    result.imbue_mut(cap_table);
-                    Ok(result)
-                }
+        let Some(ref mut inner) = self.inner else {
+            unreachable!();
+        };
+        inner.ensure_initialized();
+        match inner.variant {
+            None => unreachable!(),
+            Some(ResultsVariant::Rpc(ref mut message, ref mut cap_table)) => {
+                let root: message::Builder = message.get_body()?.get_as()?;
+                let message::Return(ret) = root.which()? else {
+                    unreachable!();
+                };
+                let return_::Results(payload) = ret?.which()? else {
+                    unreachable!()
+                };
+                let mut content = payload?.get_content();
+                content.imbue_mut(cap_table);
+                Ok(content)
             }
-        } else {
-            unreachable!()
+            Some(ResultsVariant::LocallyRedirected(ref mut message, ref mut cap_table)) => {
+                let mut result: any_pointer::Builder = message.get_root()?;
+                result.imbue_mut(cap_table);
+                Ok(result)
+            }
         }
     }
 
@@ -2410,23 +2366,23 @@ impl ResultsDone {
                             (false, Ok(())) => {
                                 let exports = {
                                     let root: message::Builder = message.get_body()?.get_as()?;
-                                    match root.which()? {
-                                        message::Return(ret) => match ret?.which()? {
-                                            crate::rpc_capnp::return_::Results(Ok(payload)) => {
-                                                ConnectionState::write_descriptors(
-                                                    &connection_state,
-                                                    &cap_table,
-                                                    payload,
-                                                )
-                                            }
-                                            _ => {
-                                                unreachable!()
-                                            }
-                                        },
-                                        _ => {
-                                            unreachable!()
-                                        }
+                                    let message::Return(Ok(mut ret)) = root.which()? else {
+                                        unreachable!()
+                                    };
+                                    if cap_table.is_empty() {
+                                        ret.set_no_finish_needed(true);
+                                        finish_received.set(true);
                                     }
+                                    let crate::rpc_capnp::return_::Results(Ok(payload)) =
+                                        ret.which()?
+                                    else {
+                                        unreachable!()
+                                    };
+                                    ConnectionState::write_descriptors(
+                                        &connection_state,
+                                        &cap_table,
+                                        payload,
+                                    )
                                 };
 
                                 let (_promise, m) = message.send();
@@ -2505,21 +2461,15 @@ impl ResultsDoneHook for ResultsDone {
         match *self.inner {
             ResultsDoneVariant::Rpc(ref message, ref cap_table) => {
                 let root: message::Reader = message.get_root_as_reader()?;
-                match root.which()? {
-                    message::Return(ret) => match ret?.which()? {
-                        crate::rpc_capnp::return_::Results(payload) => {
-                            let mut content = payload?.get_content();
-                            content.imbue(cap_table);
-                            Ok(content)
-                        }
-                        _ => {
-                            unreachable!()
-                        }
-                    },
-                    _ => {
-                        unreachable!()
-                    }
-                }
+                let message::Return(ret) = root.which()? else {
+                    unreachable!();
+                };
+                let crate::rpc_capnp::return_::Results(payload) = ret?.which()? else {
+                    unreachable!();
+                };
+                let mut content = payload?.get_content();
+                content.imbue(cap_table);
+                Ok(content)
             }
             ResultsDoneVariant::LocallyRedirected(ref message, ref cap_table) => {
                 let mut result: any_pointer::Reader = message.get_root_as_reader()?;
@@ -2606,23 +2556,15 @@ impl<VatId> Drop for ImportClient<VatId> {
             .remove(&((self) as *const _ as usize))
             .is_some());
 
-        // Remove self from the import table, if the table is still pointing at us.
-        let mut remove = false;
-        if let Some(import) = connection_state.imports.borrow().slots.get(&self.import_id) {
-            if let Some((_, ptr)) = import.import_client {
-                if ptr == ((&*self) as *const _ as usize) {
-                    remove = true;
-                }
-            }
-        }
-
-        if remove {
-            connection_state
-                .imports
-                .borrow_mut()
-                .slots
-                .remove(&self.import_id);
-        }
+        // Remove the corresponding entry of the imports table.
+        // Note: the C++ implementation checks here pointer equality between self and
+        // the entry in the imports table, but as far as I can tell the check should
+        // always pass because of how we construct ImportClient in import().
+        connection_state
+            .imports
+            .borrow_mut()
+            .slots
+            .remove(&self.import_id);
 
         // Send a message releasing our remote references.
         let mut tmp = connection_state.connection.borrow_mut();
@@ -2828,16 +2770,12 @@ impl<VatId> Drop for PromiseClient<VatId> {
             // object may actually outlive the import.
             let slots = &mut self.connection_state.imports.borrow_mut().slots;
             if let Some(import) = slots.get_mut(&id) {
-                let mut drop_it = false;
                 if let Some(c) = &import.app_client {
                     if let Some(cs) = c.upgrade() {
                         if cs.get_ptr() == self_ptr {
-                            drop_it = true;
+                            import.app_client = None;
                         }
                     }
-                }
-                if drop_it {
-                    import.app_client = None;
                 }
             }
         }
