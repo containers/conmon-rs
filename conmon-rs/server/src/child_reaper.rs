@@ -96,6 +96,11 @@ impl ChildReaper {
             .spawn()
             .context("spawn child process: {}")?;
 
+        debug!(
+            "Running child on PID: {}",
+            child.id().map_or("unknown".into(), |x| x.to_string())
+        );
+
         // close file descriptors after spawn
         drop(additional_fds);
 
@@ -140,6 +145,7 @@ impl ChildReaper {
             // Wait to ensure that all children do not become zombies.
             Self::check_child_processes();
 
+            error!("Failed: {err_str}");
             bail!(err_str)
         }
 
