@@ -13,7 +13,7 @@ use nix::{
     errno::Errno,
     sys::{
         signal::{kill, Signal},
-        wait::{waitpid, WaitStatus},
+        wait::{waitpid, WaitPidFlag, WaitStatus},
     },
     unistd::{getpgid, Pid},
 };
@@ -137,6 +137,9 @@ impl ChildReaper {
             // meaning there is no other entity that could cancel the read_loops.
             token.cancel();
 
+            // Wait to ensure that all children do not become zombies.
+            Self::check_child_processes();
+
             bail!(err_str)
         }
 
@@ -147,6 +150,34 @@ impl ChildReaper {
             .context(format!("grandchild pid parse error {}", pidfile.display()))?;
 
         Ok((grandchild_pid, token))
+    }
+
+    fn check_child_processes() {
+        debug!("Checking child processes");
+        let pid = Pid::from_raw(-1);
+        loop {
+            match waitpid(pid, WaitPidFlag::WNOHANG.into()) {
+                Ok(WaitStatus::Exited(p, code)) => {
+                    debug!("PID {p} exited with status: {code}");
+                    break;
+                }
+                Ok(WaitStatus::StillAlive) => {
+                    debug!("PID {pid} is still in same state");
+                    break;
+                }
+                Ok(_) => {
+                    continue;
+                }
+                Err(Errno::EINTR) => {
+                    debug!("Retrying on EINTR for PID {pid}");
+                    continue;
+                }
+                Err(err) => {
+                    error!("Unable to waitpid on {:#}", err);
+                    break;
+                }
+            };
+        }
     }
 
     pub fn watch_grandchild(
