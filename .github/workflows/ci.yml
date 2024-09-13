@@ -27,11 +27,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
+        uses: dtolnay/rust-toolchain@7b1c307e0dcbda6122208f10795a713336a9b35a
         with:
           toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
-          default: true
-          override: true
           components: rustfmt
       - run: cargo build && git diff --exit-code
 
@@ -80,14 +78,12 @@ jobs:
           key: ${{ runner.os }}-cargo-release-static-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
+        uses: dtolnay/rust-toolchain@7b1c307e0dcbda6122208f10795a713336a9b35a
         with:
           # Ubuntu 22.04 glibc static is not compatible with rustc 1.58.1 (see
           # ACTION_MSRV_TOOLCHAIN). Means we now just use the latest one, since
           # the static builds are made for the community.
           toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
-          default: true
-          override: true
           components: rustfmt
       - run: make release-static
       - run: |
@@ -205,11 +201,9 @@ jobs:
           key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
+        uses: dtolnay/rust-toolchain@7b1c307e0dcbda6122208f10795a713336a9b35a
         with:
           toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
-          default: true
-          override: true
           components: rustfmt
       - name: Cargo doc
         run: cargo doc --no-deps
@@ -229,11 +223,9 @@ jobs:
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
+        uses: dtolnay/rust-toolchain@7b1c307e0dcbda6122208f10795a713336a9b35a
         with:
           toolchain: nightly
-          default: true
-          override: true
           components: clippy, rustfmt
       - name: Clippy Lint
         run: cargo +nightly clippy --all-targets --all-features -- -D warnings
@@ -253,11 +245,9 @@ jobs:
           key: ${{ runner.os }}-cargo-vendor-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
+        uses: dtolnay/rust-toolchain@7b1c307e0dcbda6122208f10795a713336a9b35a
         with:
           toolchain: stable
-          default: true
-          override: true
       - name: Vendor
         run: cargo vendor .cargo-vendor && git diff --exit-code
 
@@ -267,11 +257,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
       - name: Select Toolchain
-        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
+        uses: dtolnay/rust-toolchain@7b1c307e0dcbda6122208f10795a713336a9b35a
         with:
           toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
-          default: true
-          override: true
           components: rustfmt
       - name: Rustfmt
         run: cargo fmt && git diff --exit-code
@@ -283,22 +271,16 @@ jobs:
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1.0.7
+        uses: dtolnay/rust-toolchain@7b1c307e0dcbda6122208f10795a713336a9b35a
         with:
           toolchain: nightly
-          override: true
-      - name: Install rustfmt
-        shell: bash
-        run: rustup component add rustfmt
+          components: rustfmt
       - name: Unit tests
-        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1.0.3
-        with:
-          command: test
-          args: --no-fail-fast
+        run: cargo test --no-fail-fast
         env:
           CARGO_INCREMENTAL: "0"
-          RUSTFLAGS: "-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Zpanic_abort_tests"
-          RUSTDOCFLAGS: "-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Zpanic_abort_tests"
+          RUSTFLAGS: "-Zprofile -Ccodegen-units=1 -Clink-dead-code -Coverflow-checks=off -Zpanic_abort_tests"
+          RUSTDOCFLAGS: "-Zprofile -Ccodegen-units=1 -Clink-dead-code -Coverflow-checks=off -Zpanic_abort_tests"
       - name: Coverage
         uses: actions-rs/grcov@770fa904bcbfc50da498080d1511da7388e6ddc6 # v0.1.6
         with:
