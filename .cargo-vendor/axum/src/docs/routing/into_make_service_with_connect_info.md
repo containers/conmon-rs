@@ -17,16 +17,12 @@ use std::net::SocketAddr;
 let app = Router::new().route("/", get(handler));
 
 async fn handler(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> String {
-    format!("Hello {}", addr)
+    format!("Hello {addr}")
 }
 
 # async {
-axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
-    .serve(
-        app.into_make_service_with_connect_info::<SocketAddr>()
-    )
-    .await
-    .expect("server failed");
+let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 # };
 ```
 
@@ -36,16 +32,16 @@ You can implement custom a [`Connected`] like so:
 use axum::{
     extract::connect_info::{ConnectInfo, Connected},
     routing::get,
+    serve::IncomingStream,
     Router,
 };
-use hyper::server::conn::AddrStream;
 
 let app = Router::new().route("/", get(handler));
 
 async fn handler(
     ConnectInfo(my_connect_info): ConnectInfo<MyConnectInfo>,
 ) -> String {
-    format!("Hello {:?}", my_connect_info)
+    format!("Hello {my_connect_info:?}")
 }
 
 #[derive(Clone, Debug)]
@@ -53,8 +49,8 @@ struct MyConnectInfo {
     // ...
 }
 
-impl Connected<&AddrStream> for MyConnectInfo {
-    fn connect_info(target: &AddrStream) -> Self {
+impl Connected<IncomingStream<'_>> for MyConnectInfo {
+    fn connect_info(target: IncomingStream<'_>) -> Self {
         MyConnectInfo {
             // ...
         }
@@ -62,12 +58,8 @@ impl Connected<&AddrStream> for MyConnectInfo {
 }
 
 # async {
-axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
-    .serve(
-        app.into_make_service_with_connect_info::<MyConnectInfo>()
-    )
-    .await
-    .expect("server failed");
+let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+axum::serve(listener, app.into_make_service_with_connect_info::<MyConnectInfo>()).await.unwrap();
 # };
 ```
 

@@ -40,9 +40,7 @@ use tower_service::Service;
 ///     // Add middleware that inserts the state into all incoming request's
 ///     // extensions.
 ///     .layer(Extension(state));
-/// # async {
-/// # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-/// # };
+/// # let _: Router = app;
 /// ```
 ///
 /// If the extension is missing it will reject the request with a `500 Internal
@@ -89,8 +87,7 @@ where
                     "Extension of type `{}` was not found. Perhaps you forgot to add it? See `axum::Extension`.",
                     std::any::type_name::<T>()
                 ))
-            })
-            .map(|x| x.clone())?;
+            }).cloned()?;
 
         Ok(Extension(value))
     }
@@ -100,7 +97,7 @@ axum_core::__impl_deref!(Extension);
 
 impl<T> IntoResponseParts for Extension<T>
 where
-    T: Send + Sync + 'static,
+    T: Clone + Send + Sync + 'static,
 {
     type Error = Infallible;
 
@@ -112,7 +109,7 @@ where
 
 impl<T> IntoResponse for Extension<T>
 where
-    T: Send + Sync + 'static,
+    T: Clone + Send + Sync + 'static,
 {
     fn into_response(self) -> Response {
         let mut res = ().into_response();
