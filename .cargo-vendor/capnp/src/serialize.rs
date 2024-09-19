@@ -80,7 +80,7 @@ pub fn read_message_from_flat_slice<'a>(
 /// The slice is allowed to extend beyond the end of the message. On success, updates `slice` to point
 /// to the remaining bytes beyond the end of the message.
 ///
-/// Unlike read_message_from_flat_slice_no_alloc it does not do heap allocation
+/// Unlike [read_message_from_flat_slice], it does not do heap allocation.
 ///
 /// ALIGNMENT: If the "unaligned" feature is enabled, then there are no alignment requirements on `slice`.
 /// Otherwise, `slice` must be 8-byte aligned (attempts to read the message will trigger errors).
@@ -1012,7 +1012,7 @@ pub mod test {
 
     #[test]
     fn read_message_from_flat_slice_with_remainder() {
-        let segments = vec![
+        let segments = [
             vec![123, 0, 0, 0, 0, 0, 0, 0],
             vec![4, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0],
         ];
@@ -1044,7 +1044,7 @@ pub mod test {
 
     #[test]
     fn read_message_from_flat_slice_too_short() {
-        let segments = vec![
+        let segments = [
             vec![1, 0, 0, 0, 0, 0, 0, 0],
             vec![2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0],
         ];
