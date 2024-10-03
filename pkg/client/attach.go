@@ -270,7 +270,7 @@ func (c *ConmonClient) redirectResponseToOutputStreams(
 				return nil
 			}
 		}
-		if er == io.EOF || (cfg.ContainerStdin && !cfg.StopAfterStdinEOF) {
+		if er == io.EOF && cfg.ContainerStdin && !cfg.StopAfterStdinEOF {
 			return nil
 		}
 		if errors.Is(er, syscall.ECONNRESET) {
