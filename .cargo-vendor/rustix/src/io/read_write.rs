@@ -1,4 +1,4 @@
-//! `read` and `write`, optionally positioned, optionally vectored
+//! `read` and `write`, optionally positioned, optionally vectored.
 
 #![allow(unsafe_code)]
 
@@ -16,6 +16,9 @@ pub use backend::io::types::ReadWriteFlags;
 
 /// `read(fd, buf)`—Reads from a stream.
 ///
+/// This takes a `&mut [u8]` which Rust requires to contain initialized memory.
+/// To use an uninitialized buffer, use [`read_uninit`].
+///
 /// # References
 ///  - [POSIX]
 ///  - [Linux]
@@ -27,7 +30,7 @@ pub use backend::io::types::ReadWriteFlags;
 ///  - [illumos]
 ///  - [glibc]
 ///
-/// [POSIX]: https://pubs.opengroup.org/onlinepubs/9699919799/functions/read.html
+/// [POSIX]: https://pubs.opengroup.org/onlinepubs/9799919799/functions/read.html
 /// [Linux]: https://man7.org/linux/man-pages/man2/read.2.html
 /// [Apple]: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/read.2.html
 /// [FreeBSD]: https://man.freebsd.org/cgi/man.cgi?query=read&sektion=2
@@ -52,8 +55,9 @@ pub fn read_uninit<Fd: AsFd>(
     buf: &mut [MaybeUninit<u8>],
 ) -> io::Result<(&mut [u8], &mut [MaybeUninit<u8>])> {
     // Get number of initialized bytes.
-    let length =
-        unsafe { backend::io::syscalls::read(fd.as_fd(), buf.as_mut_ptr() as *mut u8, buf.len()) };
+    let length = unsafe {
+        backend::io::syscalls::read(fd.as_fd(), buf.as_mut_ptr().cast::<u8>(), buf.len())
+    };
 
     // Split into the initialized and uninitialized portions.
     Ok(unsafe { split_init(buf, length?) })
@@ -72,7 +76,7 @@ pub fn read_uninit<Fd: AsFd>(
 ///  - [illumos]
 ///  - [glibc]
 ///
-/// [POSIX]: https://pubs.opengroup.org/onlinepubs/9699919799/functions/write.html
+/// [POSIX]: https://pubs.opengroup.org/onlinepubs/9799919799/functions/write.html
 /// [Linux]: https://man7.org/linux/man-pages/man2/write.2.html
 /// [Apple]: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/write.2.html
 /// [FreeBSD]: https://man.freebsd.org/cgi/man.cgi?query=write&sektion=2
@@ -88,6 +92,9 @@ pub fn write<Fd: AsFd>(fd: Fd, buf: &[u8]) -> io::Result<usize> {
 
 /// `pread(fd, buf, offset)`—Reads from a file at a given position.
 ///
+/// This takes a `&mut [u8]` which Rust requires to contain initialized memory.
+/// To use an uninitialized buffer, use [`pread_uninit`].
+///
 /// # References
 ///  - [POSIX]
 ///  - [Linux]
@@ -98,7 +105,7 @@ pub fn write<Fd: AsFd>(fd: Fd, buf: &[u8]) -> io::Result<usize> {
 ///  - [DragonFly BSD]
 ///  - [illumos]
 ///
-/// [POSIX]: https://pubs.opengroup.org/onlinepubs/9699919799/functions/pread.html
+/// [POSIX]: https://pubs.opengroup.org/onlinepubs/9799919799/functions/pread.html
 /// [Linux]: https://man7.org/linux/man-pages/man2/pread.2.html
 /// [Apple]: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/pread.2.html
 /// [FreeBSD]: https://man.freebsd.org/cgi/man.cgi?query=pread&sektion=2
@@ -123,7 +130,7 @@ pub fn pread_uninit<Fd: AsFd>(
     offset: u64,
 ) -> io::Result<(&mut [u8], &mut [MaybeUninit<u8>])> {
     let length = unsafe {
-        backend::io::syscalls::pread(fd.as_fd(), buf.as_mut_ptr() as *mut u8, buf.len(), offset)
+        backend::io::syscalls::pread(fd.as_fd(), buf.as_mut_ptr().cast::<u8>(), buf.len(), offset)
     };
     Ok(unsafe { split_init(buf, length?) })
 }
@@ -144,7 +151,7 @@ pub fn pread_uninit<Fd: AsFd>(
 ///  - [DragonFly BSD]
 ///  - [illumos]
 ///
-/// [POSIX]: https://pubs.opengroup.org/onlinepubs/9699919799/functions/pwrite.html
+/// [POSIX]: https://pubs.opengroup.org/onlinepubs/9799919799/functions/pwrite.html
 /// [Linux]: https://man7.org/linux/man-pages/man2/pwrite.2.html
 /// [Apple]: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/pwrite.2.html
 /// [FreeBSD]: https://man.freebsd.org/cgi/man.cgi?query=pwrite&sektion=2
@@ -169,7 +176,7 @@ pub fn pwrite<Fd: AsFd>(fd: Fd, buf: &[u8], offset: u64) -> io::Result<usize> {
 ///  - [DragonFly BSD]
 ///  - [illumos]
 ///
-/// [POSIX]: https://pubs.opengroup.org/onlinepubs/9699919799/functions/readv.html
+/// [POSIX]: https://pubs.opengroup.org/onlinepubs/9799919799/functions/readv.html
 /// [Linux]: https://man7.org/linux/man-pages/man2/readv.2.html
 /// [Apple]: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/readv.2.html
 /// [FreeBSD]: https://man.freebsd.org/cgi/man.cgi?query=readv&sektion=2
@@ -195,7 +202,7 @@ pub fn readv<Fd: AsFd>(fd: Fd, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize>
 ///  - [DragonFly BSD]
 ///  - [illumos]
 ///
-/// [POSIX]: https://pubs.opengroup.org/onlinepubs/9699919799/functions/writev.html
+/// [POSIX]: https://pubs.opengroup.org/onlinepubs/9799919799/functions/writev.html
 /// [Linux]: https://man7.org/linux/man-pages/man2/writev.2.html
 /// [Apple]: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/writev.2.html
 /// [FreeBSD]: https://man.freebsd.org/cgi/man.cgi?query=writev&sektion=2
