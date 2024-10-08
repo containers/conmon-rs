@@ -1,3 +1,4 @@
+#![allow(clippy::needless_return)]
 #![doc = include_str!("../../../README.md")]
 #![doc = include_str!("../../../usage.md")]
 

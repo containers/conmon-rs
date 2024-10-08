@@ -80,7 +80,7 @@ impl Telemetry {
 /// Additional telemetry metadata to carry.
 struct Metadata<'a>(HashMap<&'a str, &'a str>);
 
-impl<'a> Extractor for Metadata<'a> {
+impl Extractor for Metadata<'_> {
     fn get(&self, key: &str) -> Option<&str> {
         self.0.get(key).copied()
     }
