@@ -1,3 +1,4 @@
+#![allow(clippy::needless_return)]
 use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
 use conmon_common::conmon_capnp::conmon;
 use futures::{AsyncReadExt, FutureExt};
