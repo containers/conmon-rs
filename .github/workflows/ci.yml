@@ -56,7 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
-      - uses: sigstore/cosign-installer@4959ce089c160fddf62f7b42464195ba1a56d382 # v3.6.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
       - run: scripts/get
 
   release-static:
@@ -90,7 +90,7 @@ jobs:
           mkdir ${{ github.sha }}
           mv target/x86_64-unknown-linux-gnu/release/conmonrs ${{ github.sha }}
       - run: ./${{ github.sha }}/conmonrs -v
-      - uses: sigstore/cosign-installer@4959ce089c160fddf62f7b42464195ba1a56d382 # v3.6.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
         if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
       - name: Sign binary
         if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
@@ -163,7 +163,7 @@ jobs:
       - run: |
           mkdir ${{ github.sha }}
           cp result/bin/conmonrs ${{ github.sha }}/conmonrs.${{ matrix.arch }}
-      - uses: sigstore/cosign-installer@4959ce089c160fddf62f7b42464195ba1a56d382 # v3.6.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
         if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
       - name: Sign binary
         if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
