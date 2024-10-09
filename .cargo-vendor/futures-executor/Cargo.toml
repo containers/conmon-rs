@@ -13,7 +13,12 @@
 edition = "2018"
 rust-version = "1.56"
 name = "futures-executor"
-version = "0.3.30"
+version = "0.3.31"
+build = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = """
 Executors for asynchronous tasks based on the futures-rs library.
 """
@@ -29,16 +34,28 @@ rustdoc-args = [
     "docsrs",
 ]
 
+[lib]
+name = "futures_executor"
+path = "src/lib.rs"
+
+[[test]]
+name = "local_pool"
+path = "tests/local_pool.rs"
+
+[[bench]]
+name = "thread_notify"
+path = "benches/thread_notify.rs"
+
 [dependencies.futures-core]
-version = "0.3.30"
+version = "0.3.31"
 default-features = false
 
 [dependencies.futures-task]
-version = "0.3.30"
+version = "0.3.31"
 default-features = false
 
 [dependencies.futures-util]
-version = "0.3.30"
+version = "0.3.31"
 default-features = false
 
 [dependencies.num_cpus]
@@ -58,3 +75,14 @@ thread-pool = [
     "std",
     "num_cpus",
 ]
+
+[lints.rust]
+missing_debug_implementations = "warn"
+rust_2018_idioms = "warn"
+single_use_lifetimes = "warn"
+unreachable_pub = "warn"
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = ["cfg(futures_sanitizer)"]
