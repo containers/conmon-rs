@@ -3,7 +3,7 @@
 use crate::__composite_rejection as composite_rejection;
 use crate::__define_rejection as define_rejection;
 
-use crate::BoxError;
+use crate::{BoxError, Error};
 
 composite_rejection! {
     /// Rejection type for extractors that buffer the request body. Used if the
@@ -19,7 +19,18 @@ impl FailedToBufferBody {
     where
         E: Into<BoxError>,
     {
-        match err.into().downcast::<http_body::LengthLimitError>() {
+        // two layers of boxes here because `with_limited_body`
+        // wraps the `http_body_util::Limited` in a `axum_core::Body`
+        // which also wraps the error type
+        let box_error = match err.into().downcast::<Error>() {
+            Ok(err) => err.into_inner(),
+            Err(err) => err,
+        };
+        let box_error = match box_error.downcast::<Error>() {
+            Ok(err) => err.into_inner(),
+            Err(err) => err,
+        };
+        match box_error.downcast::<http_body_util::LengthLimitError>() {
             Ok(err) => Self::LengthLimitError(LengthLimitError::from_err(err)),
             Err(err) => Self::UnknownBodyError(UnknownBodyError::from_err(err)),
         }
@@ -32,7 +43,7 @@ define_rejection! {
     /// Encountered some other error when buffering the body.
     ///
     /// This can  _only_ happen when you're using [`tower_http::limit::RequestBodyLimitLayer`] or
-    /// otherwise wrapping request bodies in [`http_body::Limited`].
+    /// otherwise wrapping request bodies in [`http_body_util::Limited`].
     pub struct LengthLimitError(Error);
 }
 

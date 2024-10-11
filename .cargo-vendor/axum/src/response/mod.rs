@@ -1,6 +1,6 @@
 #![doc = include_str!("../docs/response.md")]
 
-use crate::body::{Bytes, Full};
+use axum_core::body::Body;
 use http::{header, HeaderValue};
 
 mod redirect;
@@ -11,10 +11,6 @@ pub mod sse;
 #[doc(no_inline)]
 #[cfg(feature = "json")]
 pub use crate::Json;
-
-#[doc(no_inline)]
-#[cfg(feature = "headers")]
-pub use crate::TypedHeader;
 
 #[cfg(feature = "form")]
 #[doc(no_inline)]
@@ -44,7 +40,7 @@ pub struct Html<T>(pub T);
 
 impl<T> IntoResponse for Html<T>
 where
-    T: Into<Full<Bytes>>,
+    T: Into<Body>,
 {
     fn into_response(self) -> Response {
         (
@@ -67,7 +63,7 @@ impl<T> From<T> for Html<T> {
 #[cfg(test)]
 mod tests {
     use crate::extract::Extension;
-    use crate::{body::Body, routing::get, Router};
+    use crate::{routing::get, Router};
     use axum_core::response::IntoResponse;
     use http::HeaderMap;
     use http::{StatusCode, Uri};
@@ -99,7 +95,7 @@ mod tests {
             }
         }
 
-        _ = Router::<(), Body>::new()
+        _ = Router::<()>::new()
             .route("/", get(impl_trait_ok))
             .route("/", get(impl_trait_err))
             .route("/", get(impl_trait_both))
@@ -209,7 +205,7 @@ mod tests {
             )
         }
 
-        _ = Router::<(), Body>::new()
+        _ = Router::<()>::new()
             .route("/", get(status))
             .route("/", get(status_headermap))
             .route("/", get(status_header_array))

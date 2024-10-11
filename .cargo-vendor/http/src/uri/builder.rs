@@ -137,7 +137,6 @@ impl Builder {
     where
         F: FnOnce(Parts) -> Result<Parts, crate::Error>,
     {
-
         Builder {
             parts: self.parts.and_then(func),
         }
@@ -149,6 +148,14 @@ impl Default for Builder {
     fn default() -> Builder {
         Builder {
             parts: Ok(Parts::default()),
+        }
+    }
+}
+
+impl From<Uri> for Builder {
+    fn from(uri: Uri) -> Self {
+        Self {
+            parts: Ok(uri.into_parts()),
         }
     }
 }
@@ -193,5 +200,12 @@ mod tests {
             assert_eq!(uri.path(), "/foo");
             assert_eq!(uri.query(), Some(expected_query.as_str()));
         }
+    }
+
+    #[test]
+    fn build_from_uri() {
+        let original_uri = Uri::default();
+        let uri = Builder::from(original_uri.clone()).build().unwrap();
+        assert_eq!(original_uri, uri);
     }
 }

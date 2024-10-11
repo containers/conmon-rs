@@ -1,11 +1,16 @@
-# 0.2.12 (March 4, 2024)
+# 1.1.0 (March 4, 2024)
 
 * Add methods to allow trying to allocate in the `HeaderMap`, returning an error if oversize instead of panicking.
+* Add `Extensions::get_or_insert()` method.
+* Implement `From<Uri>` for `uri::Builder`.
 * Fix `HeaderName::from_lowercase` that could allow NUL bytes in some cases.
 
-# 0.2.11 (November 13, 2023)
+# 1.0.0 (November 15, 2023)
 
-* Fix MIRI error in `header::Iter`.
+- Implement `Clone` for `Request`, `Response`, and `Extensions`. This breaking change requires
+  that all extensions now implement `Clone`.
+- Add a default-on `std` feature. Disabling it currently is not supported.
+- Fix MIRI warnings in `HeaderMap::iter()`.
 
 # 0.2.10 (November 10, 2023)
 

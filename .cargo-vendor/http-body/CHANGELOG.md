@@ -1,6 +1,25 @@
-# 0.4.6 (December 8, 2023)
+# 1.0.1 (July 12, 2024)
 
-- Add `Collect` combinator (backported from http-body-util).
+- Include LICENSE file.
+
+# 1.0.0 (November 15, 2023)
+
+- Update `http` to 1.0.
+- Add `Frame::map_data()`.
+
+# 1.0.0-rc.2 (Dec 28, 2022)
+
+- Change return type of `Frame::into_data()` and `Frame::into_trailers()` methods to return `Result<T, Self>` instead of `Option<T>`.
+
+# 1.0.0-rc1 (Oct 25, 2022)
+
+- Body trait forward-compat redesign (#67).
+    - `poll_data`/`poll_trailers` removed in favor of `poll_frame`.
+    - New `Frame` type that represents http frames such as DATA and trailers, as
+        well as unknown frames for future implementations like h3.
+    - For more information on this change the proposal can be found
+        [here](https://github.com/hyperium/hyper/issues/2840).
+- Move adatpers and other utilities to `http-body-util`.
 
 # 0.4.5 (May 20, 2022)
 
