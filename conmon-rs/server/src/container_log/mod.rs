@@ -1,4 +1,11 @@
-use crate::{container_io::Pipe, cri_logger::CriLogger, json_logger::JsonLogger};
+mod cri;
+mod journald;
+mod json;
+
+use crate::{
+    container_io::Pipe, container_log::cri::CriLogger, container_log::journald::JournaldLogger,
+    container_log::json::JsonLogger,
+};
 use anyhow::Result;
 use capnp::struct_list::Reader;
 use conmon_common::conmon_capnp::conmon::log_driver::{Owned, Type};
@@ -16,6 +23,7 @@ pub struct ContainerLog {
 #[derive(Debug)]
 enum LogDriver {
     ContainerRuntimeInterface(CriLogger),
+    Journald(JournaldLogger),
     Json(JsonLogger),
 }
 
@@ -25,6 +33,7 @@ impl ContainerLog {
         Arc::new(RwLock::new(Self::default()))
     }
 
+    /// Create a new SharedContainerLog from an owned reader.
     pub fn from(reader: Reader<Owned>) -> Result<SharedContainerLog> {
         let drivers = reader
             .iter()
@@ -48,6 +57,13 @@ impl ContainerLog {
                             None
                         },
                     )?)),
+                    Type::Journald => Ok(LogDriver::Journald(JournaldLogger::new(
+                        if x.get_max_size() > 0 {
+                            Some(x.get_max_size() as usize)
+                        } else {
+                            None
+                        },
+                    )?)),
                 }
             })
             .collect::<Result<Vec<_>>>()?;
@@ -64,6 +80,7 @@ impl ContainerLog {
                         cri_logger.init().boxed()
                     }
                     LogDriver::Json(ref mut json_logger) => json_logger.init().boxed(),
+                    LogDriver::Journald(ref mut journald_logger) => journald_logger.init().boxed(),
                 })
                 .collect::<Vec<_>>(),
         )
@@ -83,6 +100,9 @@ impl ContainerLog {
                         cri_logger.reopen().boxed()
                     }
                     LogDriver::Json(ref mut json_logger) => json_logger.reopen().boxed(),
+                    LogDriver::Journald(ref mut journald_logger) => {
+                        journald_logger.reopen().boxed()
+                    }
                 })
                 .collect::<Vec<_>>(),
         )
@@ -109,6 +129,9 @@ impl ContainerLog {
                     match logger {
                         LogDriver::ContainerRuntimeInterface(cri_logger) => {
                             cri_logger.write(pipe, bytes).await
+                        }
+                        LogDriver::Journald(journald_logger) => {
+                            journald_logger.write(pipe, bytes).await
                         }
                         LogDriver::Json(json_logger) => json_logger.write(pipe, bytes).await,
                     }

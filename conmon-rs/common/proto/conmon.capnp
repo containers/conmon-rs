@@ -60,6 +60,8 @@ interface Conmon {
             containerRuntimeInterface @0;
             # The JSON logger, requires `path` to be set.
             json @1;
+            # The journald logger.
+            journald @2;
         }
     }
 
