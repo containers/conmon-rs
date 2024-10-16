@@ -12,7 +12,7 @@ macro_rules! prefix {
     };
 }
 
-#[derive(CopyGetters, Debug, Deserialize, Eq, Getters, Parser, PartialEq, Serialize, Setters)]
+#[derive(CopyGetters, Debug, Deserialize, Getters, Parser, PartialEq, Serialize, Setters)]
 #[serde(rename_all = "kebab-case")]
 #[command(
     after_help("More info at: https://github.com/containers/conmon-rs"),
@@ -125,6 +125,16 @@ pub struct Config {
     )]
     /// OpenTelemetry GRPC endpoint to be used for tracing.
     tracing_endpoint: String,
+
+    #[get_copy = "pub"]
+    #[arg(
+        default_value_t,
+        env(concat!(prefix!(), "SHUTDOWN_DELAY")),
+        long("shutdown-delay"),
+        value_name("DELAY"),
+    )]
+    /// Automatically stop conmon-rs after DELAY seconds of inactivity. (0 = disabled)
+    shutdown_delay: f64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Subcommand)]
