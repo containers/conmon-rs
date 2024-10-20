@@ -290,7 +290,7 @@ pub(crate) mod parsing {
         TypeReference, TypeSlice, TypeTraitObject, TypeTuple,
     };
     use crate::verbatim;
-    use proc_macro2::Span;
+    use proc_macro2::{Span, TokenTree};
 
     #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
     impl Parse for Type {
@@ -402,7 +402,15 @@ pub(crate) mod parsing {
                         }));
                         while let Some(plus) = input.parse()? {
                             bounds.push_punct(plus);
-                            bounds.push_value(input.parse()?);
+                            bounds.push_value({
+                                let allow_precise_capture = false;
+                                let allow_tilde_const = false;
+                                TypeParamBound::parse_single(
+                                    input,
+                                    allow_precise_capture,
+                                    allow_tilde_const,
+                                )?
+                            });
                         }
                         bounds
                     },
@@ -469,7 +477,15 @@ pub(crate) mod parsing {
                             bounds.push_value(first);
                             while let Some(plus) = input.parse()? {
                                 bounds.push_punct(plus);
-                                bounds.push_value(input.parse()?);
+                                bounds.push_value({
+                                    let allow_precise_capture = false;
+                                    let allow_tilde_const = false;
+                                    TypeParamBound::parse_single(
+                                        input,
+                                        allow_precise_capture,
+                                        allow_tilde_const,
+                                    )?
+                                });
                             }
                             bounds
                         },
@@ -532,7 +548,15 @@ pub(crate) mod parsing {
                         {
                             break;
                         }
-                        bounds.push_value(input.parse()?);
+                        bounds.push_value({
+                            let allow_precise_capture = false;
+                            let allow_tilde_const = false;
+                            TypeParamBound::parse_single(
+                                input,
+                                allow_precise_capture,
+                                allow_tilde_const,
+                            )?
+                        });
                     }
                 }
                 return Ok(Type::TraitObject(TypeTraitObject {
@@ -823,18 +847,26 @@ pub(crate) mod parsing {
             input: ParseStream,
             allow_plus: bool,
         ) -> Result<Punctuated<TypeParamBound, Token![+]>> {
-            let bounds = TypeParamBound::parse_multiple(input, allow_plus)?;
+            let allow_precise_capture = false;
+            let allow_tilde_const = false;
+            let bounds = TypeParamBound::parse_multiple(
+                input,
+                allow_plus,
+                allow_precise_capture,
+                allow_tilde_const,
+            )?;
             let mut last_lifetime_span = None;
             let mut at_least_one_trait = false;
             for bound in &bounds {
                 match bound {
-                    TypeParamBound::Trait(_) | TypeParamBound::Verbatim(_) => {
+                    TypeParamBound::Trait(_) => {
                         at_least_one_trait = true;
                         break;
                     }
                     TypeParamBound::Lifetime(lifetime) => {
                         last_lifetime_span = Some(lifetime.ident.span());
                     }
+                    TypeParamBound::Verbatim(_) => unreachable!(),
                 }
             }
             // Just lifetimes like `'a + 'b` is not a TraitObject.
@@ -863,17 +895,37 @@ pub(crate) mod parsing {
 
         pub(crate) fn parse(input: ParseStream, allow_plus: bool) -> Result<Self> {
             let impl_token: Token![impl] = input.parse()?;
-            let bounds = TypeParamBound::parse_multiple(input, allow_plus)?;
-            let mut last_lifetime_span = None;
+            let allow_precise_capture = true;
+            let allow_tilde_const = false;
+            let bounds = TypeParamBound::parse_multiple(
+                input,
+                allow_plus,
+                allow_precise_capture,
+                allow_tilde_const,
+            )?;
+            let mut last_nontrait_span = None;
             let mut at_least_one_trait = false;
             for bound in &bounds {
                 match bound {
-                    TypeParamBound::Trait(_) | TypeParamBound::Verbatim(_) => {
+                    TypeParamBound::Trait(_) => {
                         at_least_one_trait = true;
                         break;
                     }
                     TypeParamBound::Lifetime(lifetime) => {
-                        last_lifetime_span = Some(lifetime.ident.span());
+                        last_nontrait_span = Some(lifetime.ident.span());
+                    }
+                    TypeParamBound::Verbatim(verbatim) => {
+                        let mut tokens = verbatim.clone().into_iter();
+                        match tokens.next().unwrap() {
+                            TokenTree::Ident(ident) if ident == "use" => {
+                                last_nontrait_span = Some(tokens.last().unwrap().span());
+                            }
+                            _ => {
+                                // ~const Trait
+                                at_least_one_trait = true;
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -881,7 +933,7 @@ pub(crate) mod parsing {
                 let msg = "at least one trait must be specified";
                 return Err(error::new2(
                     impl_token.span,
-                    last_lifetime_span.unwrap(),
+                    last_nontrait_span.unwrap(),
                     msg,
                 ));
             }

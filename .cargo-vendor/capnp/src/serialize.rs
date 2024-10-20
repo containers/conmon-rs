@@ -20,8 +20,9 @@
 // THE SOFTWARE.
 
 //! Reading and writing of messages using the
-//! [standard stream framing](https://capnproto.org/encoding.html#serialization-over-a-stream),
-//! where each message is preceded by a segment table indicating the size of its segments.
+//! [standard stream framing](https://capnproto.org/encoding.html#serialization-over-a-stream).
+//!
+//! Each message is preceded by a segment table indicating the size of its segments.
 
 pub(crate) mod no_alloc_buffer_segments;
 pub use no_alloc_buffer_segments::{
@@ -42,6 +43,7 @@ pub const SEGMENTS_COUNT_LIMIT: usize = 512;
 type SliceSegments<'a> = BufferSegments<&'a [u8]>;
 
 /// Reads a serialized message (including a segment table) from a flat slice of bytes, without copying.
+///
 /// The slice is allowed to extend beyond the end of the message. On success, updates `slice` to point
 /// to the remaining bytes beyond the end of the message.
 ///
@@ -77,6 +79,7 @@ pub fn read_message_from_flat_slice<'a>(
 }
 
 /// Reads a serialized message (including a segment table) from a flat slice of bytes, without copying.
+///
 /// The slice is allowed to extend beyond the end of the message. On success, updates `slice` to point
 /// to the remaining bytes beyond the end of the message.
 ///
@@ -291,7 +294,9 @@ where
 }
 
 /// Like `read_message()`, but returns None instead of an error if there are zero bytes left in
-/// `read`. This is useful for reading a stream containing an unknown number of messages -- you
+/// `read`.
+///
+/// This is useful for reading a stream containing an unknown number of messages -- you
 /// call this function until it returns None.
 #[cfg(feature = "alloc")]
 pub fn try_read_message<R>(
@@ -312,6 +317,7 @@ where
 }
 
 /// Like `try_read_message()`, but does not allocate any memory.
+///
 /// Stores the message in `buffer`. Returns a `BufferNotLargeEnough`
 /// error if the buffer is not large enough.
 /// ALIGNMENT: If the "unaligned" feature is enabled, then there are no alignment requirements on `buffer`.
@@ -406,6 +412,7 @@ where
 }
 
 /// Like `read_message()`, but does not allocate.
+///
 /// Stores the message in `buffer`. Returns a `BufferNotLargeEnough`
 /// error if the buffer is not large enough.
 /// ALIGNMENT: If the "unaligned" feature is enabled, then there are no alignment requirements on `buffer`.
