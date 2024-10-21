@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.61"
 name = "ppv-lite86"
-version = "0.2.19"
+version = "0.2.20"
 authors = ["The CryptoCorrosion Contributors"]
 build = false
 autobins = false
@@ -40,10 +40,10 @@ path = "src/lib.rs"
 
 [dependencies.zerocopy]
 version = "0.7"
-features = ["simd"]
-
-[dependencies.zerocopy-derive]
-version = "0.7"
+features = [
+    "simd",
+    "derive",
+]
 
 [features]
 default = ["std"]

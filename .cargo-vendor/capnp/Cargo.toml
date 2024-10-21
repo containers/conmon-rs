@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.65.0"
 name = "capnp"
-version = "0.19.7"
+version = "0.19.8"
 authors = ["David Renshaw <dwrenshaw@gmail.com>"]
 build = false
 autobins = false

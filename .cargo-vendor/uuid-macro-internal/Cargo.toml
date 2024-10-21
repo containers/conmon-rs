@@ -12,10 +12,16 @@
 [package]
 edition = "2018"
 name = "uuid-macro-internal"
-version = "1.10.0"
+version = "1.11.0"
 authors = ["QnnOkabayashi"]
+build = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "Private implementation details of the uuid! macro."
 documentation = "https://docs.rs/uuid"
+readme = false
 categories = [
     "data-structures",
     "no-std",
@@ -26,6 +32,8 @@ license = "Apache-2.0 OR MIT"
 repository = "https://github.com/uuid-rs/uuid"
 
 [lib]
+name = "uuid_macro_internal"
+path = "src/lib.rs"
 proc-macro = true
 
 [dependencies.proc-macro2]

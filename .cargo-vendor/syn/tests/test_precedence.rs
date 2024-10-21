@@ -25,6 +25,7 @@
     clippy::manual_let_else,
     clippy::match_like_matches_macro,
     clippy::match_wildcard_for_single_variants,
+    clippy::needless_lifetimes,
     clippy::too_many_lines,
     clippy::uninlined_format_args
 )]
@@ -185,8 +186,8 @@ fn librustc_parse_and_rewrite(input: &str) -> Option<P<ast::Expr>> {
 
 fn librustc_parenthesize(mut librustc_expr: P<ast::Expr>) -> P<ast::Expr> {
     use rustc_ast::ast::{
-        AssocItem, AssocItemKind, Attribute, BinOpKind, Block, BorrowKind, BoundConstness, Expr,
-        ExprField, ExprKind, GenericArg, GenericBound, Local, LocalKind, Pat, Stmt, StmtKind,
+        AssocItem, AssocItemKind, Attribute, BinOpKind, Block, BoundConstness, Expr, ExprField,
+        ExprKind, GenericArg, GenericBound, Local, LocalKind, Pat, PolyTraitRef, Stmt, StmtKind,
         StructExpr, StructRest, TraitBoundModifiers, Ty,
     };
     use rustc_ast::mut_visit::{walk_flat_map_item, MutVisitor};
@@ -239,7 +240,7 @@ fn librustc_parenthesize(mut librustc_expr: P<ast::Expr>) -> P<ast::Expr> {
 
     fn noop_visit_expr<T: MutVisitor>(e: &mut Expr, vis: &mut T) {
         match &mut e.kind {
-            ExprKind::AddrOf(BorrowKind::Raw, ..) | ExprKind::Become(..) => {}
+            ExprKind::Become(..) => {}
             ExprKind::Struct(expr) => {
                 let StructExpr {
                     qself,
@@ -295,16 +296,17 @@ fn librustc_parenthesize(mut librustc_expr: P<ast::Expr>) -> P<ast::Expr> {
 
         fn visit_param_bound(&mut self, bound: &mut GenericBound, _ctxt: BoundKind) {
             match bound {
-                GenericBound::Trait(
-                    _,
-                    TraitBoundModifiers {
-                        constness: BoundConstness::Maybe(_),
-                        ..
-                    },
-                )
+                GenericBound::Trait(PolyTraitRef {
+                    modifiers:
+                        TraitBoundModifiers {
+                            constness: BoundConstness::Maybe(_),
+                            ..
+                        },
+                    ..
+                })
                 | GenericBound::Outlives(..)
                 | GenericBound::Use(..) => {}
-                GenericBound::Trait(ty, _modifier) => self.visit_poly_trait_ref(ty),
+                GenericBound::Trait(ty) => self.visit_poly_trait_ref(ty),
             }
         }
 

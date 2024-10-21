@@ -13,18 +13,23 @@
 edition = "2018"
 rust-version = "1.60.0"
 name = "uuid"
-version = "1.10.0"
+version = "1.11.0"
 authors = [
     "Ashley Mannix<ashleymannix@live.com.au>",
     "Dylan DPC<dylan.dpc@gmail.com>",
     "Hunar Roop Kahlon<hunar.roop@gmail.com>",
 ]
+build = false
 include = [
     "src",
     "README.md",
     "LICENSE-APACHE",
     "LICENSE-MIT",
 ]
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "A library to generate and parse UUIDs."
 homepage = "https://github.com/uuid-rs/uuid"
 documentation = "https://docs.rs/uuid"
@@ -79,6 +84,10 @@ features = [
     "v8",
 ]
 
+[lib]
+name = "uuid"
+path = "src/lib.rs"
+
 [dependencies.arbitrary]
 version = "1.1.3"
 optional = true
@@ -131,11 +140,11 @@ version = "2"
 optional = true
 
 [dependencies.uuid-macro-internal]
-version = "1.10.0"
+version = "1.11.0"
 optional = true
 
 [dependencies.zerocopy]
-version = "0.7"
+version = "0.8"
 features = ["derive"]
 optional = true
 
@@ -185,14 +194,14 @@ v6 = ["atomic"]
 v7 = ["rng"]
 v8 = []
 
-[target."cfg(all(target_arch = \"wasm32\", target_vendor = \"unknown\", target_os = \"unknown\"))".dependencies.wasm-bindgen]
+[target.'cfg(all(target_arch = "wasm32", target_vendor = "unknown", target_os = "unknown"))'.dependencies.wasm-bindgen]
 version = "0.2"
 optional = true
 
-[target."cfg(all(target_arch = \"wasm32\", target_vendor = \"unknown\", target_os = \"unknown\"))".dev-dependencies.wasm-bindgen-test]
+[target.'cfg(all(target_arch = "wasm32", target_vendor = "unknown", target_os = "unknown"))'.dev-dependencies.wasm-bindgen-test]
 version = "0.3"
 
-[target."cfg(target = \"wasm32-unknown-unknown\")".dev-dependencies.wasm-bindgen]
+[target.'cfg(target = "wasm32-unknown-unknown")'.dev-dependencies.wasm-bindgen]
 version = "0.2"
 
 [badges.is-it-maintained-issue-resolution]
@@ -207,3 +216,4 @@ status = "actively-developed"
 [lints.rust.unexpected_cfgs]
 level = "allow"
 priority = 0
+check-cfg = ["cfg(uuid_unstable)"]

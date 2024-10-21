@@ -4,7 +4,7 @@ use crate::types::*;
 use crate::{vec128_storage, vec256_storage, vec512_storage};
 use core::marker::PhantomData;
 use core::ops::*;
-use zerocopy_derive::{AsBytes, FromBytes, FromZeroes};
+use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 #[derive(Copy, Clone, Default, FromBytes, AsBytes, FromZeroes)]
 #[repr(transparent)]

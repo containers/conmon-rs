@@ -249,7 +249,7 @@
 //!   dynamic library libproc_macro from rustc toolchain.
 
 // Syn types in rustdoc of other crates get linked to here.
-#![doc(html_root_url = "https://docs.rs/syn/2.0.79")]
+#![doc(html_root_url = "https://docs.rs/syn/2.0.80")]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![allow(non_camel_case_types)]
@@ -284,11 +284,13 @@
     clippy::module_name_repetitions,
     clippy::must_use_candidate,
     clippy::needless_doctest_main,
+    clippy::needless_lifetimes,
     clippy::needless_pass_by_value,
     clippy::needless_update,
     clippy::never_loop,
     clippy::range_plus_one,
     clippy::redundant_else,
+    clippy::ref_option,
     clippy::return_self_not_must_use,
     clippy::similar_names,
     clippy::single_match_else,
@@ -361,7 +363,7 @@ pub use crate::error::{Error, Result};
 mod expr;
 #[cfg(feature = "full")]
 #[cfg_attr(docsrs, doc(cfg(feature = "full")))]
-pub use crate::expr::{Arm, Label, RangeLimits};
+pub use crate::expr::{Arm, Label, PointerMutability, RangeLimits};
 #[cfg(any(feature = "full", feature = "derive"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "full", feature = "derive"))))]
 pub use crate::expr::{
@@ -373,8 +375,8 @@ pub use crate::expr::{
 pub use crate::expr::{
     ExprArray, ExprAssign, ExprAsync, ExprAwait, ExprBlock, ExprBreak, ExprClosure, ExprConst,
     ExprContinue, ExprForLoop, ExprGroup, ExprIf, ExprInfer, ExprLet, ExprLoop, ExprMatch,
-    ExprRange, ExprRepeat, ExprReturn, ExprTry, ExprTryBlock, ExprTuple, ExprUnsafe, ExprWhile,
-    ExprYield,
+    ExprRange, ExprRawAddr, ExprRepeat, ExprReturn, ExprTry, ExprTryBlock, ExprTuple, ExprUnsafe,
+    ExprWhile, ExprYield,
 };
 
 #[cfg(feature = "parsing")]

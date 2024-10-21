@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.61"
 name = "syn"
-version = "2.0.79"
+version = "2.0.80"
 authors = ["David Tolnay <dtolnay@gmail.com>"]
 build = false
 include = [
@@ -25,6 +25,7 @@ include = [
     "/src/**",
     "/tests/**",
 ]
+autolib = false
 autobins = false
 autoexamples = false
 autotests = false
