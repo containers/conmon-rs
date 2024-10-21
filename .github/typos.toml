@@ -8,3 +8,8 @@ extend-ignore-re = [
 extend-ignore-re = [
     "ws",
 ]
+
+[files]
+extend-exclude = [
+    "go.mod"
+]

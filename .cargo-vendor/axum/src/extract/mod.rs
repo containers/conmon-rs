@@ -11,13 +11,14 @@ pub mod rejection;
 pub mod ws;
 
 mod host;
+pub(crate) mod nested_path;
 mod raw_form;
 mod raw_query;
 mod request_parts;
 mod state;
 
 #[doc(inline)]
-pub use axum_core::extract::{DefaultBodyLimit, FromRef, FromRequest, FromRequestParts};
+pub use axum_core::extract::{DefaultBodyLimit, FromRef, FromRequest, FromRequestParts, Request};
 
 #[cfg(feature = "macros")]
 pub use axum_macros::{FromRef, FromRequest, FromRequestParts};
@@ -26,10 +27,10 @@ pub use axum_macros::{FromRef, FromRequest, FromRequestParts};
 #[allow(deprecated)]
 pub use self::{
     host::Host,
+    nested_path::NestedPath,
     path::{Path, RawPathParams},
     raw_form::RawForm,
     raw_query::RawQuery,
-    request_parts::{BodyStream, RawBody},
     state::State,
 };
 
@@ -77,10 +78,6 @@ pub use self::request_parts::OriginalUri;
 #[doc(inline)]
 pub use self::ws::WebSocketUpgrade;
 
-#[cfg(feature = "headers")]
-#[doc(no_inline)]
-pub use crate::TypedHeader;
-
 // this is duplicated in `axum-extra/src/extract/form.rs`
 pub(super) fn has_content_type(headers: &HeaderMap, expected_content_type: &mime::Mime) -> bool {
     let content_type = if let Some(content_type) = headers.get(header::CONTENT_TYPE) {
@@ -107,7 +104,7 @@ mod tests {
         let app = Router::new().route("/", get(|body: String| async { body }));
 
         let client = TestClient::new(app);
-        let res = client.get("/").body("foo").send().await;
+        let res = client.get("/").body("foo").await;
         let body = res.text().await;
 
         assert_eq!(body, "foo");

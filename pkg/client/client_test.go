@@ -1,6 +1,7 @@
 package client_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/opencontainers/runtime-tools/generate"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 )
 
 var _ = Describe("ConmonClient", func() {
@@ -763,5 +766,140 @@ var _ = Describe("JournaldLogger", func() {
 				Expect(res).To(ContainSubstring("foo bar"))
 			})
 		}
+	})
+})
+
+var _ = Describe("StreamingServer", func() {
+	var (
+		tr  *testRunner
+		sut *client.ConmonClient
+	)
+
+	AfterEach(func() {
+		Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID)).To(Succeed())
+		if sut != nil {
+			Expect(sut.Shutdown()).To(Succeed())
+		}
+		Expect(os.RemoveAll(tr.tmpDir)).To(Succeed())
+	})
+
+	Describe("ServeExecContainer", func() {
+		for _, terminal := range []bool{true, false} {
+			It(testName("should succeed", terminal), func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+				sut = tr.configGivenEnv()
+				tr.createContainer(sut, terminal)
+				tr.startContainer(sut)
+
+				result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
+					ID:      tr.ctrID,
+					Command: []string{"/busybox", "sh", "-c", "echo -n stdout && echo -n stderr >&2"},
+					Tty:     terminal,
+					Stdout:  true,
+					Stderr:  true,
+				})
+
+				Expect(err).To(Succeed())
+				Expect(result.URL).NotTo(BeEmpty())
+
+				config := &rest.Config{TLSClientConfig: rest.TLSClientConfig{Insecure: true}}
+				executor, err := remotecommand.NewWebSocketExecutor(config, "GET", result.URL)
+				Expect(err).NotTo(HaveOccurred())
+
+				stdout := &bytes.Buffer{}
+				stderr := &bytes.Buffer{}
+
+				streamOptions := remotecommand.StreamOptions{
+					Stdout: stdout,
+					Stderr: stderr,
+					Tty:    terminal,
+				}
+				err = executor.StreamWithContext(context.Background(), streamOptions)
+				Expect(err).NotTo(HaveOccurred())
+
+				if terminal {
+					Expect(stdout.String()).To(Equal("stdoutstderr"))
+					Expect(stderr.Len()).To(BeZero())
+				} else {
+					Expect(stdout.String()).To(Equal("stdout"))
+					Expect(stderr.String()).To(Equal("stderr"))
+				}
+			})
+
+			It(testName("should fail if container does not exist", terminal), func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+				sut = tr.configGivenEnv()
+
+				result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
+					ID:      "wrong",
+					Command: []string{"/busybox", "sh", "-c", "echo -n stdout && echo -n stderr >&2"},
+					Tty:     terminal,
+					Stdout:  true,
+					Stderr:  true,
+				})
+
+				Expect(err).To(HaveOccurred())
+				Expect(result).To(BeNil())
+			})
+		}
+	})
+
+	Describe("ServeAttachContainer", func() {
+		const terminal = true
+
+		It(testName("should succeed", terminal), func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "watch", "-n0.5", "echo", "test"}, nil)
+			sut = tr.configGivenEnv()
+			tr.createContainer(sut, terminal)
+			tr.startContainer(sut)
+
+			result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
+				ID:     tr.ctrID,
+				Stdin:  true,
+				Stdout: true,
+				Stderr: true,
+			})
+
+			Expect(err).To(Succeed())
+			Expect(result.URL).NotTo(BeEmpty())
+
+			config := &rest.Config{TLSClientConfig: rest.TLSClientConfig{Insecure: true}}
+			executor, err := remotecommand.NewWebSocketExecutor(config, "GET", result.URL)
+			Expect(err).NotTo(HaveOccurred())
+
+			stdout := &bytes.Buffer{}
+			stderr := &bytes.Buffer{}
+
+			streamOptions := remotecommand.StreamOptions{
+				Stdout: stdout,
+				Stderr: stderr,
+				Tty:    terminal,
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+
+			err = executor.StreamWithContext(ctx, streamOptions)
+			Expect(err).To(HaveOccurred())
+			Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID)).To(Succeed())
+			Expect(stdout.String()).To(ContainSubstring("echo test"))
+			Expect(stderr.String()).To(BeEmpty())
+		})
+
+		It(testName("should fail if container does not exist", terminal), func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+			sut = tr.configGivenEnv()
+
+			result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
+				ID: "wrong",
+			})
+
+			Expect(err).To(HaveOccurred())
+			Expect(result).To(BeNil())
+		})
 	})
 })

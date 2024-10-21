@@ -16,7 +16,7 @@ axum is unique in that it doesn't have its own bespoke middleware system and
 instead integrates with [`tower`]. This means the ecosystem of [`tower`] and
 [`tower-http`] middleware all work with axum.
 
-While its not necessary to fully understand tower to write or use middleware
+While it's not necessary to fully understand tower to write or use middleware
 with axum, having at least a basic understanding of tower's concepts is
 recommended. See [tower's guides][tower-guides] for a general introduction.
 Reading the documentation for [`tower::ServiceBuilder`] is also recommended.
@@ -31,7 +31,7 @@ axum allows you to add middleware just about anywhere
 
 ## Applying multiple middleware
 
-Its recommended to use [`tower::ServiceBuilder`] to apply multiple middleware at
+It's recommended to use [`tower::ServiceBuilder`] to apply multiple middleware at
 once, instead of calling `layer` (or `route_layer`) repeatedly:
 
 ```rust
@@ -55,9 +55,7 @@ let app = Router::new()
             .layer(TraceLayer::new_for_http())
             .layer(Extension(State {}))
     );
-# async {
-# axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-# };
+# let _: Router = app;
 ```
 
 # Commonly used middleware
@@ -66,14 +64,11 @@ Some commonly used middleware are:
 
 - [`TraceLayer`](tower_http::trace) for high level tracing/logging.
 - [`CorsLayer`](tower_http::cors) for handling CORS.
-- [`CompressionLayer`](tower_http::compression) for automatic compression of
-  responses.
+- [`CompressionLayer`](tower_http::compression) for automatic compression of responses.
 - [`RequestIdLayer`](tower_http::request_id) and
   [`PropagateRequestIdLayer`](tower_http::request_id) set and propagate request
   ids.
-- [`TimeoutLayer`](tower::timeout::TimeoutLayer) for timeouts. Note this
-  requires using [`HandleErrorLayer`](crate::error_handling::HandleErrorLayer)
-  to convert timeouts to responses.
+- [`TimeoutLayer`](tower_http::timeout::TimeoutLayer) for timeouts.
 
 # Ordering
 
@@ -97,7 +92,7 @@ let app = Router::new()
     .layer(layer_one)
     .layer(layer_two)
     .layer(layer_three);
-# let _: Router<(), axum::body::Body> = app;
+# let _: Router = app;
 ```
 
 Think of the middleware as being layered like an onion where each new layer
@@ -133,9 +128,9 @@ That is:
 
 It's a little more complicated in practice because any middleware is free to
 return early and not call the next layer, for example if a request cannot be
-authorized, but its a useful mental model to have.
+authorized, but it's a useful mental model to have.
 
-As previously mentioned its recommended to add multiple middleware using
+As previously mentioned it's recommended to add multiple middleware using
 `tower::ServiceBuilder`, however this impacts ordering:
 
 ```rust
@@ -156,7 +151,7 @@ let app = Router::new()
             .layer(layer_two)
             .layer(layer_three),
     );
-# let _: Router<(), axum::body::Body> = app;
+# let _: Router = app;
 ```
 
 `ServiceBuilder` works by composing all layers into one such that they run top
@@ -223,7 +218,7 @@ A decent template for such a middleware could be:
 use axum::{
     response::Response,
     body::Body,
-    http::Request,
+    extract::Request,
 };
 use futures_util::future::BoxFuture;
 use tower::{Service, Layer};
@@ -245,9 +240,9 @@ struct MyMiddleware<S> {
     inner: S,
 }
 
-impl<S> Service<Request<Body>> for MyMiddleware<S>
+impl<S> Service<Request> for MyMiddleware<S>
 where
-    S: Service<Request<Body>, Response = Response> + Send + 'static,
+    S: Service<Request, Response = Response> + Send + 'static,
     S::Future: Send + 'static,
 {
     type Response = S::Response;
@@ -259,7 +254,7 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, request: Request<Body>) -> Self::Future {
+    fn call(&mut self, request: Request) -> Self::Future {
         let future = self.inner.call(request);
         Box::pin(async move {
             let response: Response = future.await?;
@@ -267,6 +262,21 @@ where
         })
     }
 }
+```
+
+Note that your error type being defined as `S::Error` means that your middleware typically _returns no errors_. As a principle always try to return a response and try not to bail out with a custom error type. For example, if a 3rd party library you are using inside your new middleware returns its own specialized error type, try to convert it to some reasonable response and return `Ok` with that response.
+
+If you choose to implement a custom error type such as `type Error = BoxError` (a boxed opaque error), or any other error type that is not `Infallible`, you must use a `HandleErrorLayer`, here is an example using a `ServiceBuilder`:
+
+```ignore
+ServiceBuilder::new()
+        .layer(HandleErrorLayer::new(|_: BoxError| async {
+            // because Axum uses infallible errors, you must handle your custom error type from your middleware here
+            StatusCode::BAD_REQUEST
+        }))
+        .layer(
+             // <your actual layer which DOES return an error>
+        );
 ```
 
 ## `tower::Service` and custom futures
@@ -319,9 +329,7 @@ let app = Router::new()
             }))
             .layer(TimeoutLayer::new(Duration::from_secs(10)))
     );
-# async {
-# axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-# };
+# let _: Router = app;
 ```
 
 See [`error_handling`](crate::error_handling) for more details on axum's error
@@ -376,9 +384,7 @@ let app = Router::new().route("/", get(handler));
 let app = ServiceBuilder::new()
     .layer(some_backpressure_sensitive_middleware)
     .service(app);
-# async {
-# axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-# };
+# let _: Router = app;
 ```
 
 However when applying middleware around your whole application in this way
@@ -406,8 +412,7 @@ use axum::{
     routing::get,
     middleware::{self, Next},
     response::Response,
-    extract::State,
-    http::Request,
+    extract::{State, Request},
 };
 use tower::{Layer, Service};
 use std::task::{Context, Poll};
@@ -477,17 +482,17 @@ State can be passed from middleware to handlers using [request extensions]:
 ```rust
 use axum::{
     Router,
-    http::{Request, StatusCode},
+    http::StatusCode,
     routing::get,
     response::{IntoResponse, Response},
     middleware::{self, Next},
-    extract::Extension,
+    extract::{Request, Extension},
 };
 
 #[derive(Clone)]
 struct CurrentUser { /* ... */ }
 
-async fn auth<B>(mut req: Request<B>, next: Next<B>) -> Result<Response, StatusCode> {
+async fn auth(mut req: Request, next: Next) -> Result<Response, StatusCode> {
     let auth_header = req.headers()
         .get(http::header::AUTHORIZATION)
         .and_then(|header| header.to_str().ok());
@@ -523,7 +528,7 @@ async fn handler(
 let app = Router::new()
     .route("/", get(handler))
     .route_layer(middleware::from_fn(auth));
-# let _: Router<()> = app;
+# let _: Router = app;
 ```
 
 [Response extensions] can also be used but note that request extensions are not
@@ -546,16 +551,16 @@ use axum::{
     ServiceExt, // for `into_make_service`
     response::Response,
     middleware::Next,
-    http::Request,
+    extract::Request,
 };
 
-async fn rewrite_request_uri<B>(req: Request<B>, next: Next<B>) -> Response {
+fn rewrite_request_uri<B>(req: Request<B>) -> Request<B> {
     // ...
-    # next.run(req).await
+    # req
 }
 
 // this can be any `tower::Layer`
-let middleware = axum::middleware::from_fn(rewrite_request_uri);
+let middleware = tower::util::MapRequestLayer::new(rewrite_request_uri);
 
 let app = Router::new();
 
@@ -564,10 +569,8 @@ let app = Router::new();
 let app_with_middleware = middleware.layer(app);
 
 # async {
-axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
-    .serve(app_with_middleware.into_make_service())
-    .await
-    .unwrap();
+let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+axum::serve(listener, app_with_middleware.into_make_service()).await.unwrap();
 # };
 ```
 

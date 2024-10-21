@@ -1,5 +1,4 @@
-use http::HeaderMap;
-use http_body::{Body, SizeHint};
+use http_body::{Body, Frame, SizeHint};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -11,18 +10,11 @@ impl Body for Mock {
     type Data = ::std::io::Cursor<Vec<u8>>;
     type Error = ();
 
-    fn poll_data(
+    fn poll_frame(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         Poll::Ready(None)
-    }
-
-    fn poll_trailers(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<HeaderMap>, Self::Error>> {
-        Poll::Ready(Ok(None))
     }
 
     fn size_hint(&self) -> SizeHint {
@@ -70,9 +62,8 @@ fn is_end_stream_default_false() {
         size_hint: SizeHint::default(),
     };
 
-    assert_eq!(
-        false,
-        Pin::new(&mut mock).is_end_stream(),
+    assert!(
+        !Pin::new(&mut mock).is_end_stream(),
         "size_hint = {:?}",
         mock.size_hint.clone()
     );

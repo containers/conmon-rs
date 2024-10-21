@@ -22,9 +22,7 @@
 //!
 //!     Sse::new(stream).keep_alive(KeepAlive::default())
 //! }
-//! # async {
-//! # hyper::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-//! # };
+//! # let _: Router = app;
 //! ```
 
 use crate::{
@@ -32,7 +30,7 @@ use crate::{
     BoxError,
 };
 use axum_core::{
-    body,
+    body::Body,
     response::{IntoResponse, Response},
 };
 use bytes::{BufMut, BytesMut};
@@ -40,6 +38,7 @@ use futures_util::{
     ready,
     stream::{Stream, TryStream},
 };
+use http_body::Frame;
 use pin_project_lite::pin_project;
 use std::{
     fmt,
@@ -104,7 +103,7 @@ where
                 (http::header::CONTENT_TYPE, mime::TEXT_EVENT_STREAM.as_ref()),
                 (http::header::CACHE_CONTROL, "no-cache"),
             ],
-            body::boxed(Body {
+            Body::new(SseBody {
                 event_stream: SyncWrapper::new(self.stream),
                 keep_alive: self.keep_alive.map(KeepAliveStream::new),
             }),
@@ -114,7 +113,7 @@ where
 }
 
 pin_project! {
-    struct Body<S> {
+    struct SseBody<S> {
         #[pin]
         event_stream: SyncWrapper<S>,
         #[pin]
@@ -122,23 +121,23 @@ pin_project! {
     }
 }
 
-impl<S, E> HttpBody for Body<S>
+impl<S, E> HttpBody for SseBody<S>
 where
     S: Stream<Item = Result<Event, E>>,
 {
     type Data = Bytes;
     type Error = E;
 
-    fn poll_data(
+    fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let this = self.project();
 
         match this.event_stream.get_pin_mut().poll_next(cx) {
             Poll::Pending => {
                 if let Some(keep_alive) = this.keep_alive.as_pin_mut() {
-                    keep_alive.poll_event(cx).map(|e| Some(Ok(e)))
+                    keep_alive.poll_event(cx).map(|e| Some(Ok(Frame::data(e))))
                 } else {
                     Poll::Pending
                 }
@@ -147,18 +146,11 @@ where
                 if let Some(keep_alive) = this.keep_alive.as_pin_mut() {
                     keep_alive.reset();
                 }
-                Poll::Ready(Some(Ok(event.finalize())))
+                Poll::Ready(Some(Ok(Frame::data(event.finalize()))))
             }
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
             Poll::Ready(None) => Poll::Ready(None),
         }
-    }
-
-    fn poll_trailers(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<http::HeaderMap>, Self::Error>> {
-        Poll::Ready(Ok(None))
     }
 }
 
@@ -171,9 +163,9 @@ pub struct Event {
 }
 
 impl Event {
-    /// Set the event's data data field(s) (`data:<content>`)
+    /// Set the event's data data field(s) (`data: <content>`)
     ///
-    /// Newlines in `data` will automatically be broken across `data:` fields.
+    /// Newlines in `data` will automatically be broken across `data: ` fields.
     ///
     /// This corresponds to [`MessageEvent`'s data field].
     ///
@@ -202,7 +194,7 @@ impl Event {
         self
     }
 
-    /// Set the event's data field to a value serialized as unformatted JSON (`data:<content>`).
+    /// Set the event's data field to a value serialized as unformatted JSON (`data: <content>`).
     ///
     /// This corresponds to [`MessageEvent`'s data field].
     ///
@@ -212,7 +204,7 @@ impl Event {
     ///
     /// [`MessageEvent`'s data field]: https://developer.mozilla.org/en-US/docs/Web/API/MessageEvent/data
     #[cfg(feature = "json")]
-    pub fn json_data<T>(mut self, data: T) -> serde_json::Result<Event>
+    pub fn json_data<T>(mut self, data: T) -> Result<Event, axum_core::Error>
     where
         T: serde::Serialize,
     {
@@ -220,8 +212,8 @@ impl Event {
             panic!("Called `EventBuilder::json_data` multiple times");
         }
 
-        self.buffer.extend_from_slice(b"data:");
-        serde_json::to_writer((&mut self.buffer).writer(), &data)?;
+        self.buffer.extend_from_slice(b"data: ");
+        serde_json::to_writer((&mut self.buffer).writer(), &data).map_err(axum_core::Error::new)?;
         self.buffer.put_u8(b'\n');
 
         self.flags.insert(EventFlags::HAS_DATA);
@@ -358,10 +350,7 @@ impl Event {
         );
         self.buffer.extend_from_slice(name.as_bytes());
         self.buffer.put_u8(b':');
-        // Prevent values that start with spaces having that space stripped
-        if value.starts_with(b" ") {
-            self.buffer.put_u8(b' ');
-        }
+        self.buffer.put_u8(b' ');
         self.buffer.extend_from_slice(value);
         self.buffer.put_u8(b'\n');
     }
@@ -372,13 +361,29 @@ impl Event {
     }
 }
 
-bitflags::bitflags! {
-    #[derive(Default)]
-    struct EventFlags: u8 {
-        const HAS_DATA  = 0b0001;
-        const HAS_EVENT = 0b0010;
-        const HAS_RETRY = 0b0100;
-        const HAS_ID    = 0b1000;
+#[derive(Default, Debug, Copy, Clone, PartialEq)]
+struct EventFlags(u8);
+
+impl EventFlags {
+    const HAS_DATA: Self = Self::from_bits(0b0001);
+    const HAS_EVENT: Self = Self::from_bits(0b0010);
+    const HAS_RETRY: Self = Self::from_bits(0b0100);
+    const HAS_ID: Self = Self::from_bits(0b1000);
+
+    const fn bits(&self) -> u8 {
+        self.0
+    }
+
+    const fn from_bits(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    const fn contains(&self, other: Self) -> bool {
+        self.bits() & other.bits() == other.bits()
+    }
+
+    fn insert(&mut self, other: Self) {
+        *self = Self::from_bits(self.bits() | other.bits());
     }
 }
 
@@ -516,7 +521,7 @@ mod tests {
     #[test]
     fn leading_space_is_not_stripped() {
         let no_leading_space = Event::default().data("\tfoobar");
-        assert_eq!(&*no_leading_space.finalize(), b"data:\tfoobar\n\n");
+        assert_eq!(&*no_leading_space.finalize(), b"data: \tfoobar\n\n");
 
         let leading_space = Event::default().data(" foobar");
         assert_eq!(&*leading_space.finalize(), b"data:  foobar\n\n");
@@ -543,7 +548,7 @@ mod tests {
         );
 
         let client = TestClient::new(app);
-        let mut stream = client.get("/").send().await;
+        let mut stream = client.get("/").await;
 
         assert_eq!(stream.headers()["content-type"], "text/event-stream");
         assert_eq!(stream.headers()["cache-control"], "no-cache");
@@ -554,13 +559,13 @@ mod tests {
 
         let event_fields = parse_event(&stream.chunk_text().await.unwrap());
         assert_eq!(event_fields.get("data").unwrap(), "{\"foo\":\"bar\"}");
-        assert!(event_fields.get("comment").is_none());
+        assert!(!event_fields.contains_key("comment"));
 
         let event_fields = parse_event(&stream.chunk_text().await.unwrap());
         assert_eq!(event_fields.get("event").unwrap(), "three");
         assert_eq!(event_fields.get("retry").unwrap(), "30000");
         assert_eq!(event_fields.get("id").unwrap(), "unique-id");
-        assert!(event_fields.get("comment").is_none());
+        assert!(!event_fields.contains_key("comment"));
 
         assert!(stream.chunk_text().await.is_none());
     }
@@ -585,7 +590,7 @@ mod tests {
         );
 
         let client = TestClient::new(app);
-        let mut stream = client.get("/").send().await;
+        let mut stream = client.get("/").await;
 
         for _ in 0..5 {
             // first message should be an event
@@ -622,7 +627,7 @@ mod tests {
         );
 
         let client = TestClient::new(app);
-        let mut stream = client.get("/").send().await;
+        let mut stream = client.get("/").await;
 
         // first message should be an event
         let event_fields = parse_event(&stream.chunk_text().await.unwrap());
@@ -665,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn memchr_spliting() {
+    fn memchr_splitting() {
         assert_eq!(
             memchr_split(2, &[]).collect::<Vec<_>>(),
             [&[]] as [&[u8]; 1]

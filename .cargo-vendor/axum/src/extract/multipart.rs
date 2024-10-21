@@ -2,19 +2,21 @@
 //!
 //! See [`Multipart`] for more details.
 
-use super::{BodyStream, FromRequest};
-use crate::body::{Bytes, HttpBody};
-use crate::BoxError;
+use super::{FromRequest, Request};
+use crate::body::Bytes;
 use async_trait::async_trait;
-use axum_core::__composite_rejection as composite_rejection;
-use axum_core::__define_rejection as define_rejection;
-use axum_core::response::{IntoResponse, Response};
-use axum_core::RequestExt;
+use axum_core::{
+    __composite_rejection as composite_rejection, __define_rejection as define_rejection,
+    response::{IntoResponse, Response},
+    RequestExt,
+};
 use futures_util::stream::Stream;
-use http::header::{HeaderMap, CONTENT_TYPE};
-use http::{Request, StatusCode};
-use std::error::Error;
+use http::{
+    header::{HeaderMap, CONTENT_TYPE},
+    StatusCode,
+};
 use std::{
+    error::Error,
     fmt,
     pin::Pin,
     task::{Context, Poll},
@@ -48,10 +50,15 @@ use std::{
 /// }
 ///
 /// let app = Router::new().route("/upload", post(upload));
-/// # async {
-/// # axum::Server::bind(&"".parse().unwrap()).serve(app.into_make_service()).await.unwrap();
-/// # };
+/// # let _: Router = app;
 /// ```
+///
+/// # Large Files
+///
+/// For security reasons, by default, `Multipart` limits the request body size to 2MB.
+/// See [`DefaultBodyLimit`][default-body-limit] for how to configure this limit.
+///
+/// [default-body-limit]: crate::extract::DefaultBodyLimit
 #[cfg_attr(docsrs, doc(cfg(feature = "multipart")))]
 #[derive(Debug)]
 pub struct Multipart {
@@ -59,23 +66,16 @@ pub struct Multipart {
 }
 
 #[async_trait]
-impl<S, B> FromRequest<S, B> for Multipart
+impl<S> FromRequest<S> for Multipart
 where
-    B: HttpBody + Send + 'static,
-    B::Data: Into<Bytes>,
-    B::Error: Into<BoxError>,
     S: Send + Sync,
 {
     type Rejection = MultipartRejection;
 
-    async fn from_request(req: Request<B>, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: Request, _state: &S) -> Result<Self, Self::Rejection> {
         let boundary = parse_boundary(req.headers()).ok_or(InvalidBoundary)?;
-        let stream_result = match req.with_limited_body() {
-            Ok(limited) => BodyStream::from_request(limited, state).await,
-            Err(unlimited) => BodyStream::from_request(unlimited, state).await,
-        };
-        let stream = stream_result.unwrap_or_else(|err| match err {});
-        let multipart = multer::Multipart::new(stream, boundary);
+        let stream = req.with_limited_body().into_body();
+        let multipart = multer::Multipart::new(stream.into_data_stream(), boundary);
         Ok(Self { inner: multipart })
     }
 }
@@ -248,7 +248,7 @@ fn status_code_from_multer_error(err: &multer::Error) -> StatusCode {
             if err
                 .downcast_ref::<crate::Error>()
                 .and_then(|err| err.source())
-                .and_then(|err| err.downcast_ref::<http_body::LengthLimitError>())
+                .and_then(|err| err.downcast_ref::<http_body_util::LengthLimitError>())
                 .is_some()
             {
                 return StatusCode::PAYLOAD_TOO_LARGE;
@@ -274,12 +274,13 @@ impl std::error::Error for MultipartError {
 
 impl IntoResponse for MultipartError {
     fn into_response(self) -> Response {
+        let body = self.body_text();
         axum_core::__log_rejection!(
             rejection_type = Self,
-            body_text = self.body_text(),
+            body_text = body,
             status = self.status(),
         );
-        (self.status(), self.body_text()).into_response()
+        (self.status(), body).into_response()
     }
 }
 
@@ -310,7 +311,7 @@ mod tests {
     use axum_core::extract::DefaultBodyLimit;
 
     use super::*;
-    use crate::{body::Body, response::IntoResponse, routing::post, test_helpers::*, Router};
+    use crate::{routing::post, test_helpers::*, Router};
 
     #[crate::test]
     async fn content_type_with_encoding() {
@@ -323,6 +324,7 @@ mod tests {
 
             assert_eq!(field.file_name().unwrap(), FILE_NAME);
             assert_eq!(field.content_type().unwrap(), CONTENT_TYPE);
+            assert_eq!(field.headers()["foo"], "bar");
             assert_eq!(field.bytes().await.unwrap(), BYTES);
 
             assert!(multipart.next_field().await.unwrap().is_none());
@@ -337,16 +339,22 @@ mod tests {
             reqwest::multipart::Part::bytes(BYTES)
                 .file_name(FILE_NAME)
                 .mime_str(CONTENT_TYPE)
-                .unwrap(),
+                .unwrap()
+                .headers(reqwest::header::HeaderMap::from_iter([(
+                    reqwest::header::HeaderName::from_static("foo"),
+                    reqwest::header::HeaderValue::from_static("bar"),
+                )])),
         );
 
-        client.post("/").multipart(form).send().await;
+        client.post("/").multipart(form).await;
     }
 
     // No need for this to be a #[test], we just want to make sure it compiles
     fn _multipart_from_request_limited() {
         async fn handler(_: Multipart) {}
-        let _app: Router<(), http_body::Limited<Body>> = Router::new().route("/", post(handler));
+        let _app: Router = Router::new()
+            .route("/", post(handler))
+            .layer(tower_http::limit::RequestBodyLimitLayer::new(1024));
     }
 
     #[crate::test]
@@ -369,7 +377,7 @@ mod tests {
         let form =
             reqwest::multipart::Form::new().part("file", reqwest::multipart::Part::bytes(BYTES));
 
-        let res = client.post("/").multipart(form).send().await;
+        let res = client.post("/").multipart(form).await;
         assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 }
