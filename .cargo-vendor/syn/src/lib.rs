@@ -249,7 +249,7 @@
 //!   dynamic library libproc_macro from rustc toolchain.
 
 // Syn types in rustdoc of other crates get linked to here.
-#![doc(html_root_url = "https://docs.rs/syn/2.0.80")]
+#![doc(html_root_url = "https://docs.rs/syn/2.0.85")]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![allow(non_camel_case_types)]
@@ -401,6 +401,9 @@ pub use crate::generics::{
     PredicateType, TraitBound, TraitBoundModifier, TypeParam, TypeParamBound, WhereClause,
     WherePredicate,
 };
+#[cfg(feature = "full")]
+#[cfg_attr(docsrs, doc(cfg(feature = "full")))]
+pub use crate::generics::{CapturedParam, PreciseCapture};
 #[cfg(all(any(feature = "full", feature = "derive"), feature = "printing"))]
 #[cfg_attr(
     docsrs,
@@ -886,31 +889,8 @@ pub mod __private;
 ///
 /// [`syn::parse2`]: parse2
 ///
-/// # Examples
-///
-/// ```
-/// # extern crate proc_macro;
-/// #
-/// use proc_macro::TokenStream;
-/// use quote::quote;
-/// use syn::DeriveInput;
-///
-/// # const IGNORE_TOKENS: &str = stringify! {
-/// #[proc_macro_derive(MyMacro)]
-/// # };
-/// pub fn my_macro(input: TokenStream) -> TokenStream {
-///     // Parse the tokens into a syntax tree
-///     let ast: DeriveInput = syn::parse(input).unwrap();
-///
-///     // Build the output, possibly using quasi-quotation
-///     let expanded = quote! {
-///         /* ... */
-///     };
-///
-///     // Convert into a token stream and return it
-///     expanded.into()
-/// }
-/// ```
+/// This function enforces that the input is fully parsed. If there are any
+/// unparsed tokens at the end of the stream, an error is returned.
 #[cfg(all(feature = "parsing", feature = "proc-macro"))]
 #[cfg_attr(docsrs, doc(cfg(all(feature = "parsing", feature = "proc-macro"))))]
 pub fn parse<T: parse::Parse>(tokens: proc_macro::TokenStream) -> Result<T> {
@@ -919,9 +899,6 @@ pub fn parse<T: parse::Parse>(tokens: proc_macro::TokenStream) -> Result<T> {
 
 /// Parse a proc-macro2 token stream into the chosen syntax tree node.
 ///
-/// This function will check that the input is fully parsed. If there are
-/// any unparsed tokens at the end of the stream, an error is returned.
-///
 /// This function parses a `proc_macro2::TokenStream` which is commonly useful
 /// when the input comes from a node of the Syn syntax tree, for example the
 /// body tokens of a [`Macro`] node. When in a procedural macro parsing the
@@ -929,6 +906,9 @@ pub fn parse<T: parse::Parse>(tokens: proc_macro::TokenStream) -> Result<T> {
 /// instead.
 ///
 /// [`syn::parse`]: parse()
+///
+/// This function enforces that the input is fully parsed. If there are any
+/// unparsed tokens at the end of the stream, an error is returned.
 #[cfg(feature = "parsing")]
 #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
 pub fn parse2<T: parse::Parse>(tokens: proc_macro2::TokenStream) -> Result<T> {
@@ -936,6 +916,9 @@ pub fn parse2<T: parse::Parse>(tokens: proc_macro2::TokenStream) -> Result<T> {
 }
 
 /// Parse a string of Rust code into the chosen syntax tree node.
+///
+/// This function enforces that the input is fully parsed. If there are any
+/// unparsed tokens at the end of the stream, an error is returned.
 ///
 /// # Hygiene
 ///
