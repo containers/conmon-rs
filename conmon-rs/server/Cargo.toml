@@ -8,7 +8,7 @@ name = "conmonrs"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0.91"
+anyhow = "1.0.92"
 capnp = "0.19.8"
 capnp-rpc = "0.19.5"
 clap = { version = "4.3.24", features = ["color", "cargo", "deprecated", "derive", "deprecated", "env", "string", "unicode", "wrap_help"] }
@@ -31,7 +31,7 @@ opentelemetry-semantic-conventions = "0.15.0"
 prctl = "1.0.0"
 regex = "1.11.1"
 sendfd = { version = "0.4.3", features = ["tokio"] }
-serde = { version = "1.0.213", features = ["derive"] }
+serde = { version = "1.0.214", features = ["derive"] }
 serde_json = "1.0.132"
 shadow-rs = "0.31.1"
 signal-hook = "0.3.17"
