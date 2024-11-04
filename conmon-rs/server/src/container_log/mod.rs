@@ -121,7 +121,7 @@ impl ContainerLog {
             .drivers
             .iter_mut()
             .map(|x| {
-                async fn box_future<'a, T: AsyncBufRead + Unpin + Clone>(
+                async fn box_future<T: AsyncBufRead + Unpin + Clone>(
                     logger: &mut LogDriver,
                     pipe: Pipe,
                     bytes: T,
