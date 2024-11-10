@@ -17,7 +17,7 @@ use crate::fs::Access;
 #[cfg(not(any(
     apple,
     netbsdlike,
-    solarish,
+    target_os = "solaris",
     target_os = "dragonfly",
     target_os = "espidf",
     target_os = "haiku",
@@ -29,7 +29,6 @@ use crate::fs::Advice;
 use crate::fs::AtFlags;
 #[cfg(not(any(
     netbsdlike,
-    solarish,
     target_os = "dragonfly",
     target_os = "espidf",
     target_os = "nto",
@@ -596,14 +595,9 @@ pub(crate) fn stat(path: &CStr) -> io::Result<Stat> {
         )
     ))]
     {
-        match crate::fs::statx(
-            crate::fs::CWD,
-            path,
-            AtFlags::empty(),
-            StatxFlags::BASIC_STATS,
-        ) {
+        match crate::fs::statx(CWD, path, AtFlags::empty(), StatxFlags::BASIC_STATS) {
             Ok(x) => statx_to_stat(x),
-            Err(io::Errno::NOSYS) => statat_old(crate::fs::CWD, path, AtFlags::empty()),
+            Err(io::Errno::NOSYS) => statat_old(CWD, path, AtFlags::empty()),
             Err(err) => Err(err),
         }
     }
@@ -637,13 +631,13 @@ pub(crate) fn lstat(path: &CStr) -> io::Result<Stat> {
     ))]
     {
         match crate::fs::statx(
-            crate::fs::CWD,
+            CWD,
             path,
             AtFlags::SYMLINK_NOFOLLOW,
             StatxFlags::BASIC_STATS,
         ) {
             Ok(x) => statx_to_stat(x),
-            Err(io::Errno::NOSYS) => statat_old(crate::fs::CWD, path, AtFlags::SYMLINK_NOFOLLOW),
+            Err(io::Errno::NOSYS) => statat_old(CWD, path, AtFlags::SYMLINK_NOFOLLOW),
             Err(err) => Err(err),
         }
     }
@@ -1196,7 +1190,7 @@ pub(crate) fn copy_file_range(
 #[cfg(not(any(
     apple,
     netbsdlike,
-    solarish,
+    target_os = "solaris",
     target_os = "dragonfly",
     target_os = "espidf",
     target_os = "haiku",
@@ -1614,7 +1608,6 @@ fn futimens_old(fd: BorrowedFd<'_>, times: &Timestamps) -> io::Result<()> {
 #[cfg(not(any(
     apple,
     netbsdlike,
-    solarish,
     target_os = "dragonfly",
     target_os = "espidf",
     target_os = "nto",
