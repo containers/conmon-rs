@@ -5,13 +5,13 @@ go 1.23
 require (
 	capnproto.org/go/capnp/v3 v3.0.1-alpha.2
 	github.com/blang/semver/v4 v4.0.0
-	github.com/containers/common v0.60.4
+	github.com/containers/common v0.61.0
 	github.com/containers/storage v1.56.0
 	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.21.0
 	github.com/onsi/gomega v1.35.1
 	github.com/opencontainers/runc v1.2.1
-	github.com/opencontainers/runtime-tools v0.9.1-0.20230914150019-408c51e934dc
+	github.com/opencontainers/runtime-tools v0.9.1-0.20241001195557-6c9570a1678f
 	github.com/sirupsen/logrus v1.9.3
 	go.opentelemetry.io/otel v1.32.0
 	go.opentelemetry.io/otel/trace v1.32.0
@@ -38,9 +38,9 @@ require (
 	github.com/xeipuuv/gojsonpointer v0.0.0-20190905194746-02993c407bfb // indirect
 	go.opentelemetry.io/otel/metric v1.32.0 // indirect
 	golang.org/x/net v0.30.0 // indirect
-	golang.org/x/sync v0.8.0 // indirect
-	golang.org/x/sys v0.26.0 // indirect
-	golang.org/x/text v0.19.0 // indirect
+	golang.org/x/sync v0.9.0 // indirect
+	golang.org/x/sys v0.27.0 // indirect
+	golang.org/x/text v0.20.0 // indirect
 	golang.org/x/tools v0.26.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
