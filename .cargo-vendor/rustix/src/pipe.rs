@@ -71,7 +71,7 @@ pub const PIPE_BUF: usize = c::PIPE_BUF;
 /// [OpenBSD]: https://man.openbsd.org/pipe.2
 /// [DragonFly BSD]: https://man.dragonflybsd.org/?command=pipe&section=2
 /// [illumos]: https://illumos.org/man/2/pipe
-/// [glibc]: https://www.gnu.org/software/libc/manual/html_node/Creating-a-Pipe.html
+/// [glibc]: https://sourceware.org/glibc/manual/latest/html_node/Creating-a-Pipe.html
 #[inline]
 pub fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     backend::pipe::syscalls::pipe()
@@ -204,10 +204,14 @@ pub fn tee<FdIn: AsFd, FdOut: AsFd>(
 #[cfg(linux_kernel)]
 #[inline]
 pub fn fcntl_getpipe_size<Fd: AsFd>(fd: Fd) -> io::Result<usize> {
-    backend::pipe::syscalls::fcntl_getpipe_sz(fd.as_fd())
+    backend::pipe::syscalls::fcntl_getpipe_size(fd.as_fd())
 }
 
 /// `fnctl(fd, F_SETPIPE_SZ)`—Set the buffer capacity of a pipe.
+///
+/// The OS may decide to use a larger size than `size`. To know the precise
+/// size, call [`fcntl_getpipe_size`] after setting the size. In future
+/// versions of rustix, this function will return the new size.
 ///
 /// # References
 ///  - [Linux]
@@ -216,5 +220,5 @@ pub fn fcntl_getpipe_size<Fd: AsFd>(fd: Fd) -> io::Result<usize> {
 #[cfg(linux_kernel)]
 #[inline]
 pub fn fcntl_setpipe_size<Fd: AsFd>(fd: Fd, size: usize) -> io::Result<()> {
-    backend::pipe::syscalls::fcntl_setpipe_sz(fd.as_fd(), size)
+    backend::pipe::syscalls::fcntl_setpipe_size(fd.as_fd(), size)
 }
