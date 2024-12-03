@@ -19,6 +19,7 @@ authors = [
     "Time contributors",
 ]
 build = false
+autolib = false
 autobins = false
 autoexamples = false
 autotests = false
