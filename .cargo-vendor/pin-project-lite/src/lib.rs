@@ -13,8 +13,6 @@ Add this to your `Cargo.toml`:
 pin-project-lite = "0.2"
 ```
 
-*Compiler support: requires rustc 1.37+*
-
 ## Examples
 
 [`pin_project!`] macro creates a projection type covering all the fields of
@@ -106,12 +104,13 @@ pin-project supports this by [`UnsafeUnpin`][unsafe-unpin]. (`!Unpin` is support
 
 pin-project supports this.
 
-[not-unpin]: https://docs.rs/pin-project/1/pin_project/attr.pin_project.html#unpin
-[not-unpin-lite]: https://docs.rs/pin-project-lite/0.2/pin_project_lite/macro.pin_project.html#unpin
+[not-unpin]: https://docs.rs/pin-project/latest/pin_project/attr.pin_project.html#unpin
 [pin-project]: https://github.com/taiki-e/pin-project
-[unsafe-unpin]: https://docs.rs/pin-project/1/pin_project/attr.pin_project.html#unsafeunpin
+[unsafe-unpin]: https://docs.rs/pin-project/latest/pin_project/attr.pin_project.html#unsafeunpin
 
 <!-- tidy:crate-doc:end -->
+
+[not-unpin-lite]: pin_project#unpin
 */
 
 #![no_std]
@@ -1207,7 +1206,7 @@ macro_rules! __pin_project_make_unpin_impl {
         // this would cause an E0446 (private type in public interface).
         //
         // When RFC 2145 is implemented (rust-lang/rust#48054),
-        // this will become a lint, rather then a hard error.
+        // this will become a lint, rather than a hard error.
         //
         // As a workaround for this, we generate a new struct, containing all of the pinned
         // fields from our #[pin_project] type. This struct is declared within
@@ -1222,7 +1221,7 @@ macro_rules! __pin_project_make_unpin_impl {
         //
         // See also https://github.com/taiki-e/pin-project/pull/53.
         #[allow(non_snake_case)]
-        $vis struct __Origin <'__pin, $($impl_generics)*>
+        $vis struct __Origin<'__pin, $($impl_generics)*>
         $(where
             $($where_clause)*)?
         {
@@ -1231,7 +1230,8 @@ macro_rules! __pin_project_make_unpin_impl {
         }
         impl <'__pin, $($impl_generics)*> $crate::__private::Unpin for $ident <$($ty_generics)*>
         where
-            __Origin <'__pin, $($ty_generics)*>: $crate::__private::Unpin
+            $crate::__private::PinnedFieldsOf<__Origin<'__pin, $($ty_generics)*>>:
+                $crate::__private::Unpin
             $(, $($where_clause)*)?
         {
         }
@@ -1675,23 +1675,37 @@ pub mod __private {
         ptr,
     };
 
+    // Workaround for issue on unstable negative_impls feature that allows unsound overlapping Unpin
+    // implementations and rustc bug that leaks unstable negative_impls into stable.
+    // See https://github.com/taiki-e/pin-project/issues/340#issuecomment-2432146009 for details.
+    #[doc(hidden)]
+    pub type PinnedFieldsOf<T> =
+        <PinnedFieldsOfHelperStruct<T> as PinnedFieldsOfHelperTrait>::Actual;
+    // We cannot use <Option<T> as IntoIterator>::Item or similar since we should allow ?Sized in T.
+    #[doc(hidden)]
+    pub trait PinnedFieldsOfHelperTrait {
+        type Actual: ?Sized;
+    }
+    #[doc(hidden)]
+    pub struct PinnedFieldsOfHelperStruct<T: ?Sized>(T);
+    impl<T: ?Sized> PinnedFieldsOfHelperTrait for PinnedFieldsOfHelperStruct<T> {
+        type Actual = T;
+    }
+
     // This is an internal helper struct used by `pin_project!`.
     #[doc(hidden)]
     pub struct AlwaysUnpin<T: ?Sized>(PhantomData<T>);
-
     impl<T: ?Sized> Unpin for AlwaysUnpin<T> {}
 
     // This is an internal helper used to ensure a value is dropped.
     #[doc(hidden)]
     pub struct UnsafeDropInPlaceGuard<T: ?Sized>(*mut T);
-
     impl<T: ?Sized> UnsafeDropInPlaceGuard<T> {
         #[doc(hidden)]
         pub unsafe fn new(ptr: *mut T) -> Self {
             Self(ptr)
         }
     }
-
     impl<T: ?Sized> Drop for UnsafeDropInPlaceGuard<T> {
         fn drop(&mut self) {
             // SAFETY: the caller of `UnsafeDropInPlaceGuard::new` must guarantee
@@ -1709,14 +1723,12 @@ pub mod __private {
         target: *mut T,
         value: ManuallyDrop<T>,
     }
-
     impl<T> UnsafeOverwriteGuard<T> {
         #[doc(hidden)]
         pub unsafe fn new(target: *mut T, value: T) -> Self {
             Self { target, value: ManuallyDrop::new(value) }
         }
     }
-
     impl<T> Drop for UnsafeOverwriteGuard<T> {
         fn drop(&mut self) {
             // SAFETY: the caller of `UnsafeOverwriteGuard::new` must guarantee

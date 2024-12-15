@@ -1,3 +1,37 @@
+# 0.3.19 (November 29, 2024)
+
+[ [crates.io][crate-0.3.19] ] | [ [docs.rs][docs-0.3.19] ]
+
+This release updates the `tracing` dependency to [v0.1.41][tracing-0.1.41] and
+the `tracing-serde` dependency to [v0.2.0][tracing-serde-0.2.0].
+
+### Added
+
+- Add `set_span_events` to `fmt::Subscriber` ([#2962])
+- **tracing**: Allow `&[u8]` to be recorded as event/span field ([#2954])
+
+### Changed
+
+- Set `log` max level when reloading ([#1270])
+- Bump MSRV to 1.63 ([#2793])
+- Use const `thread_local`s when possible ([#2838])
+- Don't gate `with_ansi()` on the "ansi" feature ([#3020])
+- Updated tracing-serde to 0.2.0 ([#3160])
+
+[#1270]: https://github.com/tokio-rs/tracing/pull/1270
+[#2793]: https://github.com/tokio-rs/tracing/pull/2793
+[#2838]: https://github.com/tokio-rs/tracing/pull/2838
+[#2954]: https://github.com/tokio-rs/tracing/pull/2954
+[#2962]: https://github.com/tokio-rs/tracing/pull/2962
+[#3020]: https://github.com/tokio-rs/tracing/pull/3020
+[#3160]: https://github.com/tokio-rs/tracing/pull/3160
+[tracing-0.1.41]:
+    https://github.com/tokio-rs/tracing/releases/tag/tracing-0.1.41
+[tracing-serde-0.2.0]:
+    https://github.com/tokio-rs/tracing/releases/tag/tracing-serde-0.2.0
+[docs-0.3.19]: https://docs.rs/tracing-subscriber/0.3.19/tracing_subscriber/
+[crate-0.3.19]: https://crates.io/crates/tracing-subscriber/0.3.19
+
 # 0.3.18 (November 13, 2023)
 
 This release of `tracing-subscriber` adds support for the [`NO_COLOR`] environment
@@ -972,7 +1006,7 @@ Thanks to @bdonlan and @jeromegn for contributing to this release!
 ### Changed
 
 - **filter**: `LevelFilter` is now a re-export of the
-  `tracing_core::LevelFilter` type, it can now be used interchangably with the
+  `tracing_core::LevelFilter` type, it can now be used interchangeably with the
   versions in `tracing` and `tracing-core` (#853)
 - **filter**: Significant performance improvements when comparing `LevelFilter`s
   and `Level`s (#853)
@@ -1175,7 +1209,7 @@ tuning in this release!
 
 - **fmt**: Fixed empty `{}` printed after spans with no fields (f079f2d)
 - **fmt**: Fixed inconsistent formatting when ANSI colors are disabled (506a482)
-- **fmt**: Fixed mis-aligned levels when ANSI colors are disabled (eba1adb)
+- **fmt**: Fixed misaligned levels when ANSI colors are disabled (eba1adb)
 - Fixed warnings on nightly Rust compilers (#558)
 
 # 0.2.0-alpha.5 (January 31, 2020)
@@ -1262,9 +1296,9 @@ tuning in this release!
   changes in subsequent alpha. (#420, #425)
 - **BREAKING**: Removed `Filter`. Use `EnvFilter` instead (#434)
 
-### Contributers
+### Contributors
 
-Thanks to all the contributers to this release!
+Thanks to all the contributors to this release!
 
 - @pimeys for #377 and #415
 
@@ -1290,9 +1324,9 @@ Thanks to all the contributers to this release!
   order to initialize the global logger. Only `tracing-log` needs to be
   specified now (#400).
 
-### Contributers
+### Contributors
 
-Thanks to all the contributers to this release!
+Thanks to all the contributors to this release!
 
 - @emschwartz for #385, #387, #400 and #401
 - @bIgBV for #388
