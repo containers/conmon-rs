@@ -26,7 +26,7 @@ jobs:
             target
           key: cargo-upgrade-${{ hashFiles('**/Cargo.lock') }}
       - name: Select latest toolchain
-        uses: dtolnay/rust-toolchain@315e265cd78dad1e1dcf3a5074f6d6c47029d5aa
+        uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
         with:
           toolchain: stable
       - name: Install cargo-edit
