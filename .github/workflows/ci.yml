@@ -27,7 +27,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@315e265cd78dad1e1dcf3a5074f6d6c47029d5aa
+        uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
         with:
           toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
           components: rustfmt
@@ -78,7 +78,7 @@ jobs:
           key: ${{ runner.os }}-cargo-release-static-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@315e265cd78dad1e1dcf3a5074f6d6c47029d5aa
+        uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
         with:
           # Ubuntu 22.04 glibc static is not compatible with rustc 1.58.1 (see
           # ACTION_MSRV_TOOLCHAIN). Means we now just use the latest one, since
@@ -201,7 +201,7 @@ jobs:
           key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@315e265cd78dad1e1dcf3a5074f6d6c47029d5aa
+        uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
         with:
           toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
           components: rustfmt
@@ -223,7 +223,7 @@ jobs:
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@315e265cd78dad1e1dcf3a5074f6d6c47029d5aa
+        uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
         with:
           toolchain: nightly
           components: clippy, rustfmt
@@ -245,7 +245,7 @@ jobs:
           key: ${{ runner.os }}-cargo-vendor-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@315e265cd78dad1e1dcf3a5074f6d6c47029d5aa
+        uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
         with:
           toolchain: stable
       - name: Vendor
@@ -257,7 +257,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@315e265cd78dad1e1dcf3a5074f6d6c47029d5aa
+        uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
         with:
           toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
           components: rustfmt
