@@ -102,6 +102,26 @@ impl<S: 'static> OwnedTasks<S> {
         (join, notified)
     }
 
+    /// Bind a task that isn't safe to transfer across thread boundaries.
+    ///
+    /// # Safety
+    /// Only use this in `LocalRuntime` where the task cannot move
+    pub(crate) unsafe fn bind_local<T>(
+        &self,
+        task: T,
+        scheduler: S,
+        id: super::Id,
+    ) -> (JoinHandle<T::Output>, Option<Notified<S>>)
+    where
+        S: Schedule,
+        T: Future + 'static,
+        T::Output: 'static,
+    {
+        let (task, notified, join) = super::new_task(task, scheduler, id);
+        let notified = unsafe { self.bind_inner(task, notified) };
+        (join, notified)
+    }
+
     /// The part of `bind` that's the same for every type of future.
     unsafe fn bind_inner(&self, task: Task<S>, notified: Notified<S>) -> Option<Notified<S>>
     where
@@ -166,8 +186,14 @@ impl<S: 'static> OwnedTasks<S> {
         self.list.shard_size()
     }
 
-    pub(crate) fn active_tasks_count(&self) -> usize {
+    pub(crate) fn num_alive_tasks(&self) -> usize {
         self.list.len()
+    }
+
+    cfg_64bit_metrics! {
+        pub(crate) fn spawned_tasks_count(&self) -> u64 {
+            self.list.added()
+        }
     }
 
     pub(crate) fn remove(&self, task: &Task<S>) -> Option<Task<S>> {

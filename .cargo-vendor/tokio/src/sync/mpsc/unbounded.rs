@@ -165,7 +165,7 @@ impl<T> UnboundedReceiver<T> {
     /// }
     /// ```
     pub async fn recv(&mut self) -> Option<T> {
-        use crate::future::poll_fn;
+        use std::future::poll_fn;
 
         poll_fn(|cx| self.poll_recv(cx)).await
     }
@@ -239,7 +239,7 @@ impl<T> UnboundedReceiver<T> {
     /// }
     /// ```
     pub async fn recv_many(&mut self, buffer: &mut Vec<T>, limit: usize) -> usize {
-        use crate::future::poll_fn;
+        use std::future::poll_fn;
         poll_fn(|cx| self.chan.recv_many(cx, buffer, limit)).await
     }
 
@@ -319,6 +319,16 @@ impl<T> UnboundedReceiver<T> {
         crate::future::block_on(self.recv())
     }
 
+    /// Variant of [`Self::recv_many`] for blocking contexts.
+    ///
+    /// The same conditions as in [`Self::blocking_recv`] apply.
+    #[track_caller]
+    #[cfg(feature = "sync")]
+    #[cfg_attr(docsrs, doc(alias = "recv_many_blocking"))]
+    pub fn blocking_recv_many(&mut self, buffer: &mut Vec<T>, limit: usize) -> usize {
+        crate::future::block_on(self.recv_many(buffer, limit))
+    }
+
     /// Closes the receiving half of a channel, without dropping it.
     ///
     /// This prevents any further messages from being sent on the channel while
@@ -348,7 +358,7 @@ impl<T> UnboundedReceiver<T> {
     ///     assert!(!rx.is_closed());
     ///
     ///     rx.close();
-    ///     
+    ///
     ///     assert!(rx.is_closed());
     /// }
     /// ```
@@ -497,6 +507,16 @@ impl<T> UnboundedReceiver<T> {
         limit: usize,
     ) -> Poll<usize> {
         self.chan.recv_many(cx, buffer, limit)
+    }
+
+    /// Returns the number of [`UnboundedSender`] handles.
+    pub fn sender_strong_count(&self) -> usize {
+        self.chan.sender_strong_count()
+    }
+
+    /// Returns the number of [`WeakUnboundedSender`] handles.
+    pub fn sender_weak_count(&self) -> usize {
+        self.chan.sender_weak_count()
     }
 }
 
