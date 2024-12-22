@@ -5,6 +5,7 @@
 //! The object contains an unsigned 64-bit integer counter
 //! that is maintained by the kernel.
 use std::io::{self, Read, Result, Write};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -108,6 +109,12 @@ impl FromRawFd for EventFd {
     }
 }
 
+impl AsFd for EventFd {
+    fn as_fd(&self) -> BorrowedFd {
+        self.0.as_fd()
+    }
+}
+
 impl AsyncRead for EventFd {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -122,7 +129,7 @@ impl AsyncRead for EventFd {
                 Ok(Ok(len)) => {
                     buf.advance(len);
                     return Poll::Ready(Ok(()));
-                },
+                }
                 Ok(Err(err)) => return Poll::Ready(Err(err)),
                 Err(_would_block) => continue,
             }

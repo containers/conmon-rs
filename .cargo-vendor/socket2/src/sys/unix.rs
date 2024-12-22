@@ -18,6 +18,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
     feature = "all",
     any(
         target_os = "ios",
+        target_os = "visionos",
         target_os = "macos",
         target_os = "tvos",
         target_os = "watchos",
@@ -31,6 +32,7 @@ use std::num::NonZeroU32;
         target_os = "android",
         target_os = "freebsd",
         target_os = "ios",
+        target_os = "visionos",
         target_os = "linux",
         target_os = "macos",
         target_os = "tvos",
@@ -46,6 +48,7 @@ use std::os::unix::ffi::OsStrExt;
         target_os = "android",
         target_os = "freebsd",
         target_os = "ios",
+        target_os = "visionos",
         target_os = "linux",
         target_os = "macos",
         target_os = "tvos",
@@ -63,6 +66,7 @@ use std::{io, slice};
 
 #[cfg(not(any(
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "tvos",
     target_os = "watchos",
@@ -160,6 +164,7 @@ pub(crate) use libc::IP_RECVTOS;
 pub(crate) use libc::IP_TOS;
 #[cfg(not(any(
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "tvos",
     target_os = "watchos",
@@ -167,6 +172,7 @@ pub(crate) use libc::IP_TOS;
 pub(crate) use libc::SO_LINGER;
 #[cfg(any(
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "tvos",
     target_os = "watchos",
@@ -202,6 +208,7 @@ pub(crate) use libc::{
     target_os = "haiku",
     target_os = "illumos",
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "netbsd",
     target_os = "nto",
@@ -217,6 +224,7 @@ pub(crate) use libc::{IPV6_ADD_MEMBERSHIP, IPV6_DROP_MEMBERSHIP};
     target_os = "haiku",
     target_os = "illumos",
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "netbsd",
     target_os = "openbsd",
@@ -236,6 +244,7 @@ pub(crate) use libc::{
         target_os = "fuchsia",
         target_os = "illumos",
         target_os = "ios",
+        target_os = "visionos",
         target_os = "linux",
         target_os = "macos",
         target_os = "netbsd",
@@ -250,6 +259,7 @@ pub(crate) type Bool = c_int;
 
 #[cfg(any(
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "nto",
     target_os = "tvos",
@@ -259,6 +269,7 @@ use libc::TCP_KEEPALIVE as KEEPALIVE_TIME;
 #[cfg(not(any(
     target_os = "haiku",
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "nto",
     target_os = "openbsd",
@@ -284,6 +295,7 @@ macro_rules! syscall {
 /// Maximum size of a buffer passed to system call like `recv` and `send`.
 #[cfg(not(any(
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "tvos",
     target_os = "watchos",
@@ -300,6 +312,7 @@ const MAX_BUF_LEN: usize = ssize_t::MAX as usize;
 // both platforms.
 #[cfg(any(
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "tvos",
     target_os = "watchos",
@@ -339,6 +352,7 @@ type IovLen = usize;
     target_os = "hurd",
     target_os = "illumos",
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "netbsd",
     target_os = "nto",
@@ -1234,6 +1248,7 @@ pub(crate) fn set_tcp_keepalive(fd: Socket, keepalive: &TcpKeepalive) -> io::Res
         target_os = "hurd",
         target_os = "illumos",
         target_os = "ios",
+        target_os = "visionos",
         target_os = "linux",
         target_os = "macos",
         target_os = "netbsd",
@@ -1391,6 +1406,47 @@ pub(crate) const fn to_mreqn(
     }
 }
 
+#[cfg(all(
+    feature = "all",
+    any(target_os = "android", target_os = "fuchsia", target_os = "linux")
+))]
+pub(crate) fn original_dst(fd: Socket) -> io::Result<SockAddr> {
+    // Safety: `getsockopt` initialises the `SockAddr` for us.
+    unsafe {
+        SockAddr::try_init(|storage, len| {
+            syscall!(getsockopt(
+                fd,
+                libc::SOL_IP,
+                libc::SO_ORIGINAL_DST,
+                storage.cast(),
+                len
+            ))
+        })
+    }
+    .map(|(_, addr)| addr)
+}
+
+/// Get the value for the `IP6T_SO_ORIGINAL_DST` option on this socket.
+///
+/// This value contains the original destination IPv6 address of the connection
+/// redirected using `ip6tables` `REDIRECT` or `TPROXY`.
+#[cfg(all(feature = "all", any(target_os = "android", target_os = "linux")))]
+pub(crate) fn original_dst_ipv6(fd: Socket) -> io::Result<SockAddr> {
+    // Safety: `getsockopt` initialises the `SockAddr` for us.
+    unsafe {
+        SockAddr::try_init(|storage, len| {
+            syscall!(getsockopt(
+                fd,
+                libc::SOL_IPV6,
+                libc::IP6T_SO_ORIGINAL_DST,
+                storage.cast(),
+                len
+            ))
+        })
+    }
+    .map(|(_, addr)| addr)
+}
+
 /// Unix only API.
 impl crate::Socket {
     /// Accept a new incoming connection from this listener.
@@ -1462,6 +1518,7 @@ impl crate::Socket {
     #[cfg_attr(
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos"
@@ -1498,6 +1555,7 @@ impl crate::Socket {
         feature = "all",
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos",
@@ -1509,6 +1567,7 @@ impl crate::Socket {
             feature = "all",
             any(
                 target_os = "ios",
+                target_os = "visionos",
                 target_os = "macos",
                 target_os = "tvos",
                 target_os = "watchos",
@@ -1521,6 +1580,7 @@ impl crate::Socket {
 
     #[cfg(any(
         target_os = "ios",
+        target_os = "visionos",
         target_os = "macos",
         target_os = "tvos",
         target_os = "watchos",
@@ -1957,6 +2017,7 @@ impl crate::Socket {
         feature = "all",
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos",
@@ -1968,6 +2029,7 @@ impl crate::Socket {
             feature = "all",
             any(
                 target_os = "ios",
+                target_os = "visionos",
                 target_os = "macos",
                 target_os = "tvos",
                 target_os = "watchos",
@@ -1993,6 +2055,7 @@ impl crate::Socket {
         feature = "all",
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos",
@@ -2004,6 +2067,7 @@ impl crate::Socket {
             feature = "all",
             any(
                 target_os = "ios",
+                target_os = "visionos",
                 target_os = "macos",
                 target_os = "tvos",
                 target_os = "watchos",
@@ -2029,6 +2093,7 @@ impl crate::Socket {
         feature = "all",
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos",
@@ -2040,6 +2105,7 @@ impl crate::Socket {
             feature = "all",
             any(
                 target_os = "ios",
+                target_os = "visionos",
                 target_os = "macos",
                 target_os = "tvos",
                 target_os = "watchos",
@@ -2060,6 +2126,7 @@ impl crate::Socket {
         feature = "all",
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos",
@@ -2071,6 +2138,7 @@ impl crate::Socket {
             feature = "all",
             any(
                 target_os = "ios",
+                target_os = "visionos",
                 target_os = "macos",
                 target_os = "tvos",
                 target_os = "watchos",
@@ -2088,6 +2156,7 @@ impl crate::Socket {
         feature = "all",
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos",
@@ -2099,6 +2168,7 @@ impl crate::Socket {
             feature = "all",
             any(
                 target_os = "ios",
+                target_os = "visionos",
                 target_os = "macos",
                 target_os = "tvos",
                 target_os = "watchos",
@@ -2119,6 +2189,7 @@ impl crate::Socket {
         feature = "all",
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos",
@@ -2130,6 +2201,7 @@ impl crate::Socket {
             feature = "all",
             any(
                 target_os = "ios",
+                target_os = "visionos",
                 target_os = "macos",
                 target_os = "tvos",
                 target_os = "watchos",
@@ -2371,62 +2443,6 @@ impl crate::Socket {
         }
     }
 
-    /// Get the value for the `SO_ORIGINAL_DST` option on this socket.
-    ///
-    /// This value contains the original destination IPv4 address of the connection
-    /// redirected using `iptables` `REDIRECT` or `TPROXY`.
-    #[cfg(all(
-        feature = "all",
-        any(target_os = "android", target_os = "fuchsia", target_os = "linux")
-    ))]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(all(
-            feature = "all",
-            any(target_os = "android", target_os = "fuchsia", target_os = "linux")
-        )))
-    )]
-    pub fn original_dst(&self) -> io::Result<SockAddr> {
-        // Safety: `getsockopt` initialises the `SockAddr` for us.
-        unsafe {
-            SockAddr::try_init(|storage, len| {
-                syscall!(getsockopt(
-                    self.as_raw(),
-                    libc::SOL_IP,
-                    libc::SO_ORIGINAL_DST,
-                    storage.cast(),
-                    len
-                ))
-            })
-        }
-        .map(|(_, addr)| addr)
-    }
-
-    /// Get the value for the `IP6T_SO_ORIGINAL_DST` option on this socket.
-    ///
-    /// This value contains the original destination IPv6 address of the connection
-    /// redirected using `ip6tables` `REDIRECT` or `TPROXY`.
-    #[cfg(all(feature = "all", any(target_os = "android", target_os = "linux")))]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(all(feature = "all", any(target_os = "android", target_os = "linux"))))
-    )]
-    pub fn original_dst_ipv6(&self) -> io::Result<SockAddr> {
-        // Safety: `getsockopt` initialises the `SockAddr` for us.
-        unsafe {
-            SockAddr::try_init(|storage, len| {
-                syscall!(getsockopt(
-                    self.as_raw(),
-                    libc::SOL_IPV6,
-                    libc::IP6T_SO_ORIGINAL_DST,
-                    storage.cast(),
-                    len
-                ))
-            })
-        }
-        .map(|(_, addr)| addr)
-    }
-
     /// Copies data between a `file` and this socket using the `sendfile(2)`
     /// system call. Because this copying is done within the kernel,
     /// `sendfile()` is more efficient than the combination of `read(2)` and
@@ -2453,6 +2469,7 @@ impl crate::Socket {
             target_os = "android",
             target_os = "freebsd",
             target_os = "ios",
+            target_os = "visionos",
             target_os = "linux",
             target_os = "macos",
             target_os = "tvos",
@@ -2468,6 +2485,7 @@ impl crate::Socket {
                 target_os = "android",
                 target_os = "freebsd",
                 target_os = "ios",
+                target_os = "visionos",
                 target_os = "linux",
                 target_os = "macos",
                 target_os = "tvos",
@@ -2491,6 +2509,7 @@ impl crate::Socket {
         feature = "all",
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos",
