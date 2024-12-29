@@ -90,39 +90,53 @@ impl EnvGetter for StdEnvGetter {
 /// Attempts to find a tool within an MSVC installation using the Windows
 /// registry as a point to search from.
 ///
-/// The `target` argument is the target that the tool should work for (e.g.
-/// compile or link for) and the `tool` argument is the tool to find (e.g.
-/// `cl.exe` or `link.exe`).
+/// The `arch_or_target` argument is the architecture or the Rust target
+/// triple that the tool should work for (e.g. compile or link for). The
+/// supported architecture names are:
+/// - `"i586"`
+/// - `"i686"`
+/// - `"x86_64"`
+/// - `"arm"`
+/// - `"thumbv7a"`
+/// - `"aarch64"`
+/// - `"arm64ec"`
+///
+/// The `tool` argument is the tool to find (e.g. `cl.exe` or `link.exe`).
 ///
 /// This function will return `None` if the tool could not be found, or it will
 /// return `Some(cmd)` which represents a command that's ready to execute the
 /// tool with the appropriate environment variables set.
 ///
-/// Note that this function always returns `None` for non-MSVC targets.
-pub fn find(target: &str, tool: &str) -> Option<Command> {
-    find_tool(target, tool).map(|c| c.to_command())
+/// Note that this function always returns `None` for non-MSVC targets (if a
+/// full target name was specified).
+pub fn find(arch_or_target: &str, tool: &str) -> Option<Command> {
+    find_tool(arch_or_target, tool).map(|c| c.to_command())
 }
 
 /// Similar to the `find` function above, this function will attempt the same
 /// operation (finding a MSVC tool in a local install) but instead returns a
 /// `Tool` which may be introspected.
-pub fn find_tool(target: &str, tool: &str) -> Option<Tool> {
-    find_tool_inner(target, tool, &StdEnvGetter)
+pub fn find_tool(arch_or_target: &str, tool: &str) -> Option<Tool> {
+    let full_arch = if let Some((full_arch, rest)) = arch_or_target.split_once("-") {
+        // The logic is all tailored for MSVC, if the target is not that then
+        // bail out early.
+        if !rest.contains("msvc") {
+            return None;
+        }
+        full_arch
+    } else {
+        arch_or_target
+    };
+    find_tool_inner(full_arch, tool, &StdEnvGetter)
 }
 
 pub(crate) fn find_tool_inner(
-    target: &str,
+    full_arch: &str,
     tool: &str,
     env_getter: &dyn EnvGetter,
 ) -> Option<Tool> {
-    // This logic is all tailored for MSVC, if we're not that then bail out
-    // early.
-    if !target.contains("msvc") {
-        return None;
-    }
-
-    // Split the target to get the arch.
-    let target = TargetArch(target.split_once('-')?.0);
+    // We only need the arch.
+    let target = TargetArch(full_arch);
 
     // Looks like msbuild isn't located in the same location as other tools like
     // cl.exe and lib.exe.
@@ -339,20 +353,69 @@ mod impl_ {
         }
     }
 
+    /// Checks to see if the target's arch matches the VS environment. Returns `None` if the
+    /// environment is unknown.
+    fn is_vscmd_target(target: TargetArch<'_>, env_getter: &dyn EnvGetter) -> Option<bool> {
+        is_vscmd_target_env(target, env_getter).or_else(|| is_vscmd_target_cl(target, env_getter))
+    }
+
     /// Checks to see if the `VSCMD_ARG_TGT_ARCH` environment variable matches the
     /// given target's arch. Returns `None` if the variable does not exist.
-    fn is_vscmd_target(target: TargetArch<'_>, env_getter: &dyn EnvGetter) -> Option<bool> {
+    fn is_vscmd_target_env(target: TargetArch<'_>, env_getter: &dyn EnvGetter) -> Option<bool> {
         let vscmd_arch = env_getter.get_env("VSCMD_ARG_TGT_ARCH")?;
-        // Convert the Rust target arch to its VS arch equivalent.
-        let arch = match target.into() {
-            "x86_64" => "x64",
-            "aarch64" | "arm64ec" => "arm64",
-            "i686" | "i586" => "x86",
-            "thumbv7a" => "arm",
+        if let Some(arch) = vsarch_from_target(target) {
+            Some(arch == vscmd_arch.as_ref())
+        } else {
+            Some(false)
+        }
+    }
+
+    /// Checks if the cl.exe target matches the given target's arch. Returns `None` if anything
+    /// fails.
+    fn is_vscmd_target_cl(target: TargetArch<'_>, env_getter: &dyn EnvGetter) -> Option<bool> {
+        let cmd_target = vscmd_target_cl(env_getter)?;
+        Some(vsarch_from_target(target) == Some(cmd_target))
+    }
+
+    /// Convert the Rust target arch to its VS arch equivalent.
+    fn vsarch_from_target(target: TargetArch<'_>) -> Option<&'static str> {
+        match target.into() {
+            "x86_64" => Some("x64"),
+            "aarch64" | "arm64ec" => Some("arm64"),
+            "i686" | "i586" => Some("x86"),
+            "thumbv7a" => Some("arm"),
             // An unrecognized arch.
-            _ => return Some(false),
-        };
-        Some(vscmd_arch.as_ref() == arch)
+            _ => None,
+        }
+    }
+
+    /// Detect the target architecture of `cl.exe`` in the current path, and return `None` if this
+    /// fails for any reason.
+    fn vscmd_target_cl(env_getter: &dyn EnvGetter) -> Option<&'static str> {
+        let cl_exe = env_getter.get_env("PATH").and_then(|path| {
+            env::split_paths(&path)
+                .map(|p| p.join("cl.exe"))
+                .find(|p| p.exists())
+        })?;
+        let mut cl = Command::new(cl_exe);
+        cl.stderr(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null());
+
+        let out = cl.output().ok()?;
+        let cl_arch = out
+            .stderr
+            .split(|&b| b == b'\n' || b == b'\r')
+            .next()?
+            .rsplit(|&b| b == b' ')
+            .next()?;
+
+        match cl_arch {
+            b"x64" => Some("x64"),
+            b"x86" => Some("x86"),
+            b"ARM64" => Some("arm64"),
+            b"ARM" => Some("arm"),
+            _ => None,
+        }
     }
 
     /// Attempt to find the tool using environment variables set by vcvars.
@@ -361,14 +424,21 @@ mod impl_ {
         target: TargetArch<'_>,
         env_getter: &dyn EnvGetter,
     ) -> Option<Tool> {
-        // Early return if the environment doesn't contain a VC install.
-        env_getter.get_env("VCINSTALLDIR")?;
-        let vs_install_dir: PathBuf = env_getter.get_env("VSINSTALLDIR")?.into();
+        // Early return if the environment isn't one that is known to have compiler toolsets in PATH
+        // `VCINSTALLDIR` is set from vcvarsall.bat (developer command prompt)
+        // `VSTEL_MSBuildProjectFullPath` is set by msbuild when invoking custom build steps
+        // NOTE: `VisualStudioDir` used to be used but this isn't set when invoking msbuild from the commandline
+        if env_getter.get_env("VCINSTALLDIR").is_none()
+            && env_getter.get_env("VSTEL_MSBuildProjectFullPath").is_none()
+        {
+            return None;
+        }
 
         // If the vscmd target differs from the requested target then
         // attempt to get the tool using the VS install directory.
         if is_vscmd_target(target, env_getter) == Some(false) {
             // We will only get here with versions 15+.
+            let vs_install_dir: PathBuf = env_getter.get_env("VSINSTALLDIR")?.into();
             tool_from_vs15plus_instance(tool, target, &vs_install_dir, env_getter)
         } else {
             // Fallback to simply using the current environment.

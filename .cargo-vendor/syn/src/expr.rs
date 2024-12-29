@@ -904,7 +904,7 @@ impl Expr {
     #[cfg(feature = "parsing")]
     #[cfg_attr(docsrs, doc(cfg(feature = "parsing")))]
     pub fn peek(input: ParseStream) -> bool {
-        input.peek(Ident::peek_any) // value name or keyword
+        input.peek(Ident::peek_any) && !input.peek(Token![as]) // value name or keyword
             || input.peek(token::Paren) // tuple
             || input.peek(token::Bracket) // array
             || input.peek(token::Brace) // block
@@ -1032,6 +1032,16 @@ impl IdentFragment for Member {
         match self {
             Member::Named(m) => Some(m.span()),
             Member::Unnamed(m) => Some(m.span),
+        }
+    }
+}
+
+#[cfg(any(feature = "parsing", feature = "printing"))]
+impl Member {
+    pub(crate) fn is_named(&self) -> bool {
+        match self {
+            Member::Named(_) => true,
+            Member::Unnamed(_) => false,
         }
     }
 }
@@ -2318,10 +2328,7 @@ pub(crate) mod parsing {
             let brace_token = braced!(content in input);
             attr::parsing::parse_inner(&content, &mut attrs)?;
 
-            let mut arms = Vec::new();
-            while !content.is_empty() {
-                arms.push(content.call(Arm::parse)?);
-            }
+            let arms = Arm::parse_multiple(&content)?;
 
             Ok(ExprMatch {
                 attrs,
@@ -2860,6 +2867,7 @@ pub(crate) mod parsing {
                 || input.peek(Token![,])
                 || input.peek(Token![;])
                 || input.peek(Token![.]) && !input.peek(Token![..])
+                || input.peek(Token![=>])
                 || !allow_struct.0 && input.peek(token::Brace))
         {
             Ok(None)
@@ -2932,6 +2940,17 @@ pub(crate) mod parsing {
             } else {
                 Err(input.error("expected identifier or integer"))
             }
+        }
+    }
+
+    #[cfg(feature = "full")]
+    impl Arm {
+        pub(crate) fn parse_multiple(input: ParseStream) -> Result<Vec<Self>> {
+            let mut arms = Vec::new();
+            while !input.is_empty() {
+                arms.push(input.call(Arm::parse)?);
+            }
+            Ok(arms)
         }
     }
 
@@ -3019,15 +3038,6 @@ pub(crate) mod parsing {
         }
 
         Ok(!trailing_dot)
-    }
-
-    impl Member {
-        pub(crate) fn is_named(&self) -> bool {
-            match self {
-                Member::Named(_) => true,
-                Member::Unnamed(_) => false,
-            }
-        }
     }
 
     #[cfg(feature = "full")]
@@ -3271,9 +3281,9 @@ pub(crate) mod printing {
         e.eq_token.to_tokens(tokens);
         print_subexpression(
             &e.right,
-            fixup.trailing_precedence(&e.right) < Precedence::Assign,
+            fixup.precedence(&e.right) < Precedence::Assign,
             tokens,
-            fixup.subsequent_subexpression(),
+            fixup.rightmost_subexpression(),
         );
     }
 
@@ -3319,7 +3329,7 @@ pub(crate) mod printing {
     fn print_expr_binary(e: &ExprBinary, tokens: &mut TokenStream, fixup: FixupContext) {
         outer_attrs_to_tokens(&e.attrs, tokens);
 
-        let left_fixup = fixup.leftmost_subexpression_with_begin_operator(
+        let left_fixup = fixup.leftmost_subexpression_with_operator(
             #[cfg(feature = "full")]
             match &e.op {
                 BinOp::Sub(_)
@@ -3339,8 +3349,8 @@ pub(crate) mod printing {
         );
 
         let binop_prec = Precedence::of_binop(&e.op);
-        let left_prec = left_fixup.leading_precedence(&e.left);
-        let right_prec = fixup.trailing_precedence(&e.right);
+        let left_prec = left_fixup.precedence(&e.left);
+        let right_prec = fixup.precedence(&e.right);
         let (left_needs_group, right_needs_group) = match binop_prec {
             Precedence::Assign => (left_prec <= Precedence::Range, right_prec < binop_prec),
             Precedence::Compare => (left_prec <= binop_prec, right_prec <= binop_prec),
@@ -3353,7 +3363,7 @@ pub(crate) mod printing {
             &e.right,
             right_needs_group,
             tokens,
-            fixup.subsequent_subexpression(),
+            fixup.rightmost_subexpression(),
         );
     }
 
@@ -3390,7 +3400,7 @@ pub(crate) mod printing {
                 //                     ^---------------------------------^
                 e.label.is_none() && classify::expr_leading_label(value),
                 tokens,
-                fixup.subsequent_subexpression(),
+                fixup.rightmost_subexpression(),
             );
         }
     }
@@ -3405,22 +3415,17 @@ pub(crate) mod printing {
     fn print_expr_call(e: &ExprCall, tokens: &mut TokenStream, fixup: FixupContext) {
         outer_attrs_to_tokens(&e.attrs, tokens);
 
-        let call_precedence = if let Expr::Field(_) = &*e.func {
-            Precedence::MIN
-        } else {
-            Precedence::Unambiguous
-        };
-        let func_fixup = fixup.leftmost_subexpression_with_begin_operator(
+        let func_fixup = fixup.leftmost_subexpression_with_operator(
             #[cfg(feature = "full")]
             true,
             false,
         );
-        print_subexpression(
-            &e.func,
-            func_fixup.leading_precedence(&e.func) < call_precedence,
-            tokens,
-            func_fixup,
-        );
+        let needs_group = if let Expr::Field(func) = &*e.func {
+            func.member.is_named()
+        } else {
+            func_fixup.precedence(&e.func) < Precedence::Unambiguous
+        };
+        print_subexpression(&e.func, needs_group, tokens, func_fixup);
 
         e.paren_token.surround(tokens, |tokens| {
             e.args.to_tokens(tokens);
@@ -3460,7 +3465,9 @@ pub(crate) mod printing {
             self.inputs.to_tokens(tokens);
             self.or2_token.to_tokens(tokens);
             self.output.to_tokens(tokens);
-            if matches!(self.output, ReturnType::Default) || matches!(*self.body, Expr::Block(_)) {
+            if matches!(self.output, ReturnType::Default)
+                || matches!(&*self.body, Expr::Block(body) if body.attrs.is_empty() && body.label.is_none())
+            {
                 self.body.to_tokens(tokens);
             } else {
                 token::Brace::default().surround(tokens, |tokens| {
@@ -3587,14 +3594,14 @@ pub(crate) mod printing {
 
     fn print_expr_index(e: &ExprIndex, tokens: &mut TokenStream, fixup: FixupContext) {
         outer_attrs_to_tokens(&e.attrs, tokens);
-        let obj_fixup = fixup.leftmost_subexpression_with_begin_operator(
+        let obj_fixup = fixup.leftmost_subexpression_with_operator(
             #[cfg(feature = "full")]
             true,
             false,
         );
         print_subexpression(
             &e.expr,
-            obj_fixup.leading_precedence(&e.expr) < Precedence::Unambiguous,
+            obj_fixup.precedence(&e.expr) < Precedence::Unambiguous,
             tokens,
             obj_fixup,
         );
@@ -3748,20 +3755,21 @@ pub(crate) mod printing {
     fn print_expr_range(e: &ExprRange, tokens: &mut TokenStream, fixup: FixupContext) {
         outer_attrs_to_tokens(&e.attrs, tokens);
         if let Some(start) = &e.start {
+            let start_fixup = fixup.leftmost_subexpression_with_operator(true, false);
             print_subexpression(
                 start,
-                Precedence::of(start) <= Precedence::Range,
+                start_fixup.precedence(start) <= Precedence::Range,
                 tokens,
-                fixup.leftmost_subexpression(),
+                start_fixup,
             );
         }
         e.limits.to_tokens(tokens);
         if let Some(end) = &e.end {
             print_subexpression(
                 end,
-                fixup.trailing_precedence(end) <= Precedence::Range,
+                fixup.precedence(end) <= Precedence::Range,
                 tokens,
-                fixup.subsequent_subexpression(),
+                fixup.rightmost_subexpression(),
             );
         }
     }
@@ -3782,9 +3790,9 @@ pub(crate) mod printing {
         e.mutability.to_tokens(tokens);
         print_subexpression(
             &e.expr,
-            fixup.trailing_precedence(&e.expr) < Precedence::Prefix,
+            fixup.precedence(&e.expr) < Precedence::Prefix,
             tokens,
-            fixup.subsequent_subexpression(),
+            fixup.rightmost_subexpression(),
         );
     }
 
@@ -3801,9 +3809,9 @@ pub(crate) mod printing {
         e.mutability.to_tokens(tokens);
         print_subexpression(
             &e.expr,
-            fixup.trailing_precedence(&e.expr) < Precedence::Prefix,
+            fixup.precedence(&e.expr) < Precedence::Prefix,
             tokens,
-            fixup.subsequent_subexpression(),
+            fixup.rightmost_subexpression(),
         );
     }
 
@@ -3833,7 +3841,7 @@ pub(crate) mod printing {
         outer_attrs_to_tokens(&e.attrs, tokens);
         e.return_token.to_tokens(tokens);
         if let Some(expr) = &e.expr {
-            print_expr(expr, tokens, fixup.subsequent_subexpression());
+            print_expr(expr, tokens, fixup.rightmost_subexpression());
         }
     }
 
@@ -3911,9 +3919,9 @@ pub(crate) mod printing {
         e.op.to_tokens(tokens);
         print_subexpression(
             &e.expr,
-            fixup.trailing_precedence(&e.expr) < Precedence::Prefix,
+            fixup.precedence(&e.expr) < Precedence::Prefix,
             tokens,
-            fixup.subsequent_subexpression(),
+            fixup.rightmost_subexpression(),
         );
     }
 
@@ -3958,7 +3966,7 @@ pub(crate) mod printing {
         outer_attrs_to_tokens(&e.attrs, tokens);
         e.yield_token.to_tokens(tokens);
         if let Some(expr) = &e.expr {
-            print_expr(expr, tokens, fixup.subsequent_subexpression());
+            print_expr(expr, tokens, fixup.rightmost_subexpression());
         }
     }
 

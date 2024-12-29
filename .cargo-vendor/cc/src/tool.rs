@@ -5,7 +5,7 @@ use std::{
     ffi::{OsStr, OsString},
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::RwLock,
 };
 
@@ -158,29 +158,33 @@ impl Tool {
             cargo_output.print_debug(&stdout);
 
             // https://gitlab.kitware.com/cmake/cmake/-/blob/69a2eeb9dff5b60f2f1e5b425002a0fd45b7cadb/Modules/CMakeDetermineCompilerId.cmake#L267-271
-            let accepts_cl_style_flags = run(Command::new(path).arg("-?"), path, &{
-                // the errors are not errors!
-                let mut cargo_output = cargo_output.clone();
-                cargo_output.warnings = cargo_output.debug;
-                cargo_output.output = OutputKind::Discard;
-                cargo_output
-            })
-            .is_ok();
+            // stdin is set to null to ensure that the help output is never paginated.
+            let accepts_cl_style_flags =
+                run(Command::new(path).arg("-?").stdin(Stdio::null()), path, &{
+                    // the errors are not errors!
+                    let mut cargo_output = cargo_output.clone();
+                    cargo_output.warnings = cargo_output.debug;
+                    cargo_output.output = OutputKind::Discard;
+                    cargo_output
+                })
+                .is_ok();
 
             let clang = stdout.contains(r#""clang""#);
             let gcc = stdout.contains(r#""gcc""#);
+            let emscripten = stdout.contains(r#""emscripten""#);
+            let vxworks = stdout.contains(r#""VxWorks""#);
 
-            match (clang, accepts_cl_style_flags, gcc) {
-                (clang_cl, true, _) => Ok(ToolFamily::Msvc { clang_cl }),
-                (true, false, _) => Ok(ToolFamily::Clang {
+            match (clang, accepts_cl_style_flags, gcc, emscripten, vxworks) {
+                (clang_cl, true, _, false, false) => Ok(ToolFamily::Msvc { clang_cl }),
+                (true, _, _, _, false) | (_, _, _, true, false) => Ok(ToolFamily::Clang {
                     zig_cc: is_zig_cc(path, cargo_output),
                 }),
-                (false, false, true) => Ok(ToolFamily::Gnu),
-                (false, false, false) => {
-                    cargo_output.print_warning(&"Compiler family detection failed since it does not define `__clang__`, `__GNUC__` or `_MSC_VER`, fallback to treating it as GNU");
+                (false, false, true, _, false) | (_, _, _, _, true) => Ok(ToolFamily::Gnu),
+                (false, false, false, false, false) => {
+                    cargo_output.print_warning(&"Compiler family detection failed since it does not define `__clang__`, `__GNUC__`, `__EMSCRIPTEN__` or `__VXWORKS__`, also does not accept cl style flag `-?`, fallback to treating it as GNU");
                     Err(Error::new(
                         ErrorKind::ToolFamilyMacroNotFound,
-                        "Expects macro `__clang__`, `__GNUC__` or `_MSC_VER`, but found none",
+                        "Expects macro `__clang__`, `__GNUC__` or `__EMSCRIPTEN__`, `__VXWORKS__` or accepts cl style flag `-?`, but found none",
                     ))
                 }
             }

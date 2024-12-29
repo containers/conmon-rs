@@ -51,7 +51,7 @@ cfg_os_poll! {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "hermit"))]
 cfg_os_poll! {
     mod unix;
     #[allow(unused_imports)]
@@ -79,10 +79,5 @@ cfg_not_os_poll! {
         mod unix;
         #[cfg(feature = "os-ext")]
         pub use self::unix::SourceFd;
-    }
-
-    #[cfg(unix)]
-    cfg_net! {
-        pub use self::unix::SocketAddr;
     }
 }
