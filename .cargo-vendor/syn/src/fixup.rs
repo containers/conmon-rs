@@ -2,6 +2,7 @@ use crate::classify;
 use crate::expr::Expr;
 use crate::precedence::Precedence;
 
+#[cfg_attr(test, derive(PartialEq, Debug))]
 pub(crate) struct FixupContext {
     // Print expression such that it can be parsed back as a statement
     // consisting of the original expression.
@@ -93,21 +94,21 @@ pub(crate) struct FixupContext {
 
     // This is the difference between:
     //
-    //     let _ = 1 + return 1;  // no parens if rightmost subexpression
-    //
-    //     let _ = 1 + (return 1) + 1;  // needs parens
-    //
-    #[cfg(feature = "full")]
-    parenthesize_exterior_jump: bool,
-
-    // This is the difference between:
-    //
     //     let _ = (return) - 1;  // without paren, this would return -1
     //
     //     let _ = return + 1;  // no paren because '+' cannot begin expr
     //
     #[cfg(feature = "full")]
     next_operator_can_begin_expr: bool,
+
+    // This is the difference between:
+    //
+    //     let _ = 1 + return 1;  // no parens if rightmost subexpression
+    //
+    //     let _ = 1 + (return 1) + 1;  // needs parens
+    //
+    #[cfg(feature = "full")]
+    next_operator_can_continue_expr: bool,
 
     // This is the difference between:
     //
@@ -134,9 +135,9 @@ impl FixupContext {
         #[cfg(feature = "full")]
         parenthesize_exterior_struct_lit: false,
         #[cfg(feature = "full")]
-        parenthesize_exterior_jump: false,
-        #[cfg(feature = "full")]
         next_operator_can_begin_expr: false,
+        #[cfg(feature = "full")]
+        next_operator_can_continue_expr: false,
         next_operator_can_begin_generics: false,
     };
 
@@ -195,7 +196,10 @@ impl FixupContext {
             leftmost_subexpression_in_match_arm: self.match_arm
                 || self.leftmost_subexpression_in_match_arm,
             #[cfg(feature = "full")]
-            parenthesize_exterior_jump: true,
+            next_operator_can_begin_expr: false,
+            #[cfg(feature = "full")]
+            next_operator_can_continue_expr: true,
+            next_operator_can_begin_generics: false,
             ..self
         }
     }
@@ -215,7 +219,10 @@ impl FixupContext {
             #[cfg(feature = "full")]
             leftmost_subexpression_in_match_arm: false,
             #[cfg(feature = "full")]
-            parenthesize_exterior_jump: true,
+            next_operator_can_begin_expr: false,
+            #[cfg(feature = "full")]
+            next_operator_can_continue_expr: true,
+            next_operator_can_begin_generics: false,
             ..self
         }
     }
@@ -223,7 +230,7 @@ impl FixupContext {
     /// Transform this fixup into the one that should apply when printing a
     /// leftmost subexpression followed by punctuation that is legal as the
     /// first token of an expression.
-    pub fn leftmost_subexpression_with_begin_operator(
+    pub fn leftmost_subexpression_with_operator(
         self,
         #[cfg(feature = "full")] next_operator_can_begin_expr: bool,
         next_operator_can_begin_generics: bool,
@@ -236,15 +243,18 @@ impl FixupContext {
         }
     }
 
-    /// Transform this fixup into the one that should apply when printing any
-    /// subexpression that is neither a leftmost subexpression nor surrounded in
-    /// delimiters.
+    /// Transform this fixup into the one that should apply when printing the
+    /// rightmost subexpression of the current expression.
     ///
-    /// This is for any subexpression that has a different first token than the
-    /// current expression, and is not surrounded by a paren/bracket/brace. For
-    /// example the `$b` in `$a + $b` and `-$b`, but not the one in `[$b]` or
-    /// `$a.f($b)`.
-    pub fn subsequent_subexpression(self) -> Self {
+    /// The rightmost subexpression is any subexpression that has a different
+    /// first token than the current expression, but has the same last token.
+    ///
+    /// For example in `$a + $b` and `-$b`, the subexpression `$b` is a
+    /// rightmost subexpression.
+    ///
+    /// Not every expression has a rightmost subexpression. For example neither
+    /// `[$b]` nor `$a.f($b)` have one.
+    pub fn rightmost_subexpression(self) -> Self {
         FixupContext {
             #[cfg(feature = "full")]
             stmt: false,
@@ -285,12 +295,12 @@ impl FixupContext {
     #[cfg(feature = "full")]
     pub fn needs_group_as_let_scrutinee(self, expr: &Expr) -> bool {
         self.parenthesize_exterior_struct_lit && classify::confusable_with_adjacent_block(expr)
-            || self.trailing_precedence(expr) < Precedence::Let
+            || self.precedence(expr) < Precedence::Let
     }
 
-    /// Determines the effective precedence of a left subexpression. Some
-    /// expressions have lower precedence when adjacent to particular operators.
-    pub fn leading_precedence(self, expr: &Expr) -> Precedence {
+    /// Determines the effective precedence of a subexpression. Some expressions
+    /// have higher or lower precedence when adjacent to particular operators.
+    pub fn precedence(self, expr: &Expr) -> Precedence {
         #[cfg(feature = "full")]
         if self.next_operator_can_begin_expr {
             // Decrease precedence of value-less jumps when followed by an
@@ -300,15 +310,8 @@ impl FixupContext {
                 return Precedence::Jump;
             }
         }
-        self.precedence(expr)
-    }
-
-    /// Determines the effective precedence of a right subexpression. Some
-    /// expressions have higher precedence on the right side of a binary
-    /// operator than on the left.
-    pub fn trailing_precedence(self, expr: &Expr) -> Precedence {
         #[cfg(feature = "full")]
-        if !self.parenthesize_exterior_jump {
+        if !self.next_operator_can_continue_expr {
             match expr {
                 // Increase precedence of expressions that extend to the end of
                 // current statement or group.
@@ -323,10 +326,6 @@ impl FixupContext {
                 _ => {}
             }
         }
-        self.precedence(expr)
-    }
-
-    fn precedence(self, expr: &Expr) -> Precedence {
         if self.next_operator_can_begin_generics {
             if let Expr::Cast(cast) = expr {
                 if classify::trailing_unparameterized_path(&cast.ty) {
@@ -343,5 +342,35 @@ impl Copy for FixupContext {}
 impl Clone for FixupContext {
     fn clone(&self) -> Self {
         *self
+    }
+}
+
+#[cfg(feature = "full")]
+#[test]
+fn test_leftmost_rightmost_invariant() {
+    const BITS: usize = 8;
+
+    for bits in 0u16..1 << BITS {
+        let mut i = 0;
+        let mut bit = || {
+            let mask = 1 << i;
+            i += 1;
+            (bits & mask) != 0
+        };
+        let fixup = FixupContext {
+            stmt: bit(),
+            leftmost_subexpression_in_stmt: bit(),
+            match_arm: bit(),
+            leftmost_subexpression_in_match_arm: bit(),
+            parenthesize_exterior_struct_lit: bit(),
+            next_operator_can_begin_expr: bit(),
+            next_operator_can_continue_expr: bit(),
+            next_operator_can_begin_generics: bit(),
+        };
+        assert_eq!(i, BITS);
+        assert_eq!(
+            fixup.leftmost_subexpression().rightmost_subexpression(),
+            fixup.rightmost_subexpression().leftmost_subexpression(),
+        );
     }
 }

@@ -12,16 +12,25 @@
 [package]
 edition = "2018"
 name = "tokio-eventfd"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["Alexander Polakov <plhk@sdf.org>"]
+build = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "Linux eventfd for tokio"
 documentation = "https://docs.rs/tokio-eventfd"
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/polachok/tokio-eventfd"
 
+[lib]
+name = "tokio_eventfd"
+path = "src/lib.rs"
+
 [dependencies.futures-lite]
-version = "1.11"
+version = "2.5"
 
 [dependencies.libc]
 version = "0.2"
