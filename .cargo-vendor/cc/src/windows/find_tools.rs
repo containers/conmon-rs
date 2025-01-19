@@ -28,18 +28,38 @@ use crate::ToolFamily;
 
 const MSVC_FAMILY: ToolFamily = ToolFamily::Msvc { clang_cl: false };
 
-#[derive(Copy, Clone)]
-struct TargetArch<'a>(pub &'a str);
-
-impl PartialEq<&str> for TargetArch<'_> {
-    fn eq(&self, other: &&str) -> bool {
-        self.0 == *other
-    }
+/// The target provided by the user.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum TargetArch {
+    X86,
+    X64,
+    Arm,
+    Arm64,
+    Arm64ec,
 }
+impl TargetArch {
+    /// Parse the `TargetArch` from a str. Returns `None` if the arch is unrecognized.
+    fn new(arch: &str) -> Option<Self> {
+        // NOTE: Keep up to date with docs in [`find`].
+        match arch {
+            "x64" | "x86_64" => Some(Self::X64),
+            "arm64" | "aarch64" => Some(Self::Arm64),
+            "arm64ec" => Some(Self::Arm64ec),
+            "x86" | "i686" | "i586" => Some(Self::X86),
+            "arm" | "thumbv7a" => Some(Self::Arm),
+            _ => None,
+        }
+    }
 
-impl<'a> From<TargetArch<'a>> for &'a str {
-    fn from(target: TargetArch<'a>) -> Self {
-        target.0
+    #[cfg(windows)]
+    /// Gets the Visual Studio name for the architecture.
+    fn as_vs_arch(&self) -> &'static str {
+        match self {
+            Self::X64 => "x64",
+            Self::Arm64 | Self::Arm64ec => "arm64",
+            Self::X86 => "x86",
+            Self::Arm => "arm",
+        }
     }
 }
 
@@ -90,39 +110,51 @@ impl EnvGetter for StdEnvGetter {
 /// Attempts to find a tool within an MSVC installation using the Windows
 /// registry as a point to search from.
 ///
-/// The `target` argument is the target that the tool should work for (e.g.
-/// compile or link for) and the `tool` argument is the tool to find (e.g.
-/// `cl.exe` or `link.exe`).
+/// The `arch_or_target` argument is the architecture or the Rust target
+/// triple that the tool should work for (e.g. compile or link for). The
+/// supported architecture names are:
+/// - `"x64"` or `"x86_64"`
+/// - `"arm64"` or `"aarch64"`
+/// - `"arm64ec"`
+/// - `"x86"`, `"i586"` or `"i686"`
+/// - `"arm"` or `"thumbv7a"`
+///
+/// The `tool` argument is the tool to find (e.g. `cl.exe` or `link.exe`).
 ///
 /// This function will return `None` if the tool could not be found, or it will
 /// return `Some(cmd)` which represents a command that's ready to execute the
 /// tool with the appropriate environment variables set.
 ///
-/// Note that this function always returns `None` for non-MSVC targets.
-pub fn find(target: &str, tool: &str) -> Option<Command> {
-    find_tool(target, tool).map(|c| c.to_command())
+/// Note that this function always returns `None` for non-MSVC targets (if a
+/// full target name was specified).
+pub fn find(arch_or_target: &str, tool: &str) -> Option<Command> {
+    find_tool(arch_or_target, tool).map(|c| c.to_command())
 }
 
 /// Similar to the `find` function above, this function will attempt the same
 /// operation (finding a MSVC tool in a local install) but instead returns a
 /// `Tool` which may be introspected.
-pub fn find_tool(target: &str, tool: &str) -> Option<Tool> {
-    find_tool_inner(target, tool, &StdEnvGetter)
+pub fn find_tool(arch_or_target: &str, tool: &str) -> Option<Tool> {
+    let full_arch = if let Some((full_arch, rest)) = arch_or_target.split_once("-") {
+        // The logic is all tailored for MSVC, if the target is not that then
+        // bail out early.
+        if !rest.contains("msvc") {
+            return None;
+        }
+        full_arch
+    } else {
+        arch_or_target
+    };
+    find_tool_inner(full_arch, tool, &StdEnvGetter)
 }
 
 pub(crate) fn find_tool_inner(
-    target: &str,
+    full_arch: &str,
     tool: &str,
     env_getter: &dyn EnvGetter,
 ) -> Option<Tool> {
-    // This logic is all tailored for MSVC, if we're not that then bail out
-    // early.
-    if !target.contains("msvc") {
-        return None;
-    }
-
-    // Split the target to get the arch.
-    let target = TargetArch(target.split_once('-')?.0);
+    // We only need the arch.
+    let target = TargetArch::new(full_arch)?;
 
     // Looks like msbuild isn't located in the same location as other tools like
     // cl.exe and lib.exe.
@@ -263,7 +295,7 @@ mod impl_ {
         /// # SAFETY
         ///
         /// The caller must ensure that the function signature matches the actual function.
-        /// The easiest way to do this is to add an entry to windows_sys_no_link.list and use the
+        /// The easiest way to do this is to add an entry to `windows_sys_no_link.list` and use the
         /// generated function for `func_signature`.
         ///
         /// The function returned cannot be used after the handle is dropped.
@@ -339,36 +371,76 @@ mod impl_ {
         }
     }
 
+    /// Checks to see if the target's arch matches the VS environment. Returns `None` if the
+    /// environment is unknown.
+    fn is_vscmd_target(target: TargetArch, env_getter: &dyn EnvGetter) -> Option<bool> {
+        is_vscmd_target_env(target, env_getter).or_else(|| is_vscmd_target_cl(target, env_getter))
+    }
+
     /// Checks to see if the `VSCMD_ARG_TGT_ARCH` environment variable matches the
     /// given target's arch. Returns `None` if the variable does not exist.
-    fn is_vscmd_target(target: TargetArch<'_>, env_getter: &dyn EnvGetter) -> Option<bool> {
+    fn is_vscmd_target_env(target: TargetArch, env_getter: &dyn EnvGetter) -> Option<bool> {
         let vscmd_arch = env_getter.get_env("VSCMD_ARG_TGT_ARCH")?;
-        // Convert the Rust target arch to its VS arch equivalent.
-        let arch = match target.into() {
-            "x86_64" => "x64",
-            "aarch64" | "arm64ec" => "arm64",
-            "i686" | "i586" => "x86",
-            "thumbv7a" => "arm",
-            // An unrecognized arch.
-            _ => return Some(false),
-        };
-        Some(vscmd_arch.as_ref() == arch)
+        Some(target.as_vs_arch() == vscmd_arch.as_ref())
+    }
+
+    /// Checks if the cl.exe target matches the given target's arch. Returns `None` if anything
+    /// fails.
+    fn is_vscmd_target_cl(target: TargetArch, env_getter: &dyn EnvGetter) -> Option<bool> {
+        let cmd_target = vscmd_target_cl(env_getter)?;
+        Some(target.as_vs_arch() == cmd_target)
+    }
+
+    /// Detect the target architecture of `cl.exe` in the current path, and return `None` if this
+    /// fails for any reason.
+    fn vscmd_target_cl(env_getter: &dyn EnvGetter) -> Option<&'static str> {
+        let cl_exe = env_getter.get_env("PATH").and_then(|path| {
+            env::split_paths(&path)
+                .map(|p| p.join("cl.exe"))
+                .find(|p| p.exists())
+        })?;
+        let mut cl = Command::new(cl_exe);
+        cl.stderr(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null());
+
+        let out = cl.output().ok()?;
+        let cl_arch = out
+            .stderr
+            .split(|&b| b == b'\n' || b == b'\r')
+            .next()?
+            .rsplit(|&b| b == b' ')
+            .next()?;
+
+        match cl_arch {
+            b"x64" => Some("x64"),
+            b"x86" => Some("x86"),
+            b"ARM64" => Some("arm64"),
+            b"ARM" => Some("arm"),
+            _ => None,
+        }
     }
 
     /// Attempt to find the tool using environment variables set by vcvars.
     pub(super) fn find_msvc_environment(
         tool: &str,
-        target: TargetArch<'_>,
+        target: TargetArch,
         env_getter: &dyn EnvGetter,
     ) -> Option<Tool> {
-        // Early return if the environment doesn't contain a VC install.
-        env_getter.get_env("VCINSTALLDIR")?;
-        let vs_install_dir: PathBuf = env_getter.get_env("VSINSTALLDIR")?.into();
+        // Early return if the environment isn't one that is known to have compiler toolsets in PATH
+        // `VCINSTALLDIR` is set from vcvarsall.bat (developer command prompt)
+        // `VSTEL_MSBuildProjectFullPath` is set by msbuild when invoking custom build steps
+        // NOTE: `VisualStudioDir` used to be used but this isn't set when invoking msbuild from the commandline
+        if env_getter.get_env("VCINSTALLDIR").is_none()
+            && env_getter.get_env("VSTEL_MSBuildProjectFullPath").is_none()
+        {
+            return None;
+        }
 
         // If the vscmd target differs from the requested target then
         // attempt to get the tool using the VS install directory.
         if is_vscmd_target(target, env_getter) == Some(false) {
             // We will only get here with versions 15+.
+            let vs_install_dir: PathBuf = env_getter.get_env("VSINSTALLDIR")?.into();
             tool_from_vs15plus_instance(tool, target, &vs_install_dir, env_getter)
         } else {
             // Fallback to simply using the current environment.
@@ -383,13 +455,13 @@ mod impl_ {
         }
     }
 
-    fn find_msbuild_vs17(target: TargetArch<'_>, env_getter: &dyn EnvGetter) -> Option<Tool> {
+    fn find_msbuild_vs17(target: TargetArch, env_getter: &dyn EnvGetter) -> Option<Tool> {
         find_tool_in_vs16plus_path(r"MSBuild\Current\Bin\MSBuild.exe", target, "17", env_getter)
     }
 
     #[allow(bare_trait_objects)]
     fn vs16plus_instances(
-        target: TargetArch<'_>,
+        target: TargetArch,
         version: &'static str,
         env_getter: &dyn EnvGetter,
     ) -> Box<Iterator<Item = PathBuf>> {
@@ -412,7 +484,7 @@ mod impl_ {
 
     fn find_tool_in_vs16plus_path(
         tool: &str,
-        target: TargetArch<'_>,
+        target: TargetArch,
         version: &'static str,
         env_getter: &dyn EnvGetter,
     ) -> Option<Tool> {
@@ -423,10 +495,10 @@ mod impl_ {
                     return None;
                 }
                 let mut tool = Tool::with_family(path, MSVC_FAMILY);
-                if target == "x86_64" {
+                if target == TargetArch::X64 {
                     tool.env.push(("Platform".into(), "X64".into()));
                 }
-                if target == "aarch64" || target == "arm64ec" {
+                if matches!(target, TargetArch::Arm64 | TargetArch::Arm64ec) {
                     tool.env.push(("Platform".into(), "ARM64".into()));
                 }
                 Some(tool)
@@ -434,7 +506,7 @@ mod impl_ {
             .next()
     }
 
-    fn find_msbuild_vs16(target: TargetArch<'_>, env_getter: &dyn EnvGetter) -> Option<Tool> {
+    fn find_msbuild_vs16(target: TargetArch, env_getter: &dyn EnvGetter) -> Option<Tool> {
         find_tool_in_vs16plus_path(r"MSBuild\Current\Bin\MSBuild.exe", target, "16", env_getter)
     }
 
@@ -450,10 +522,7 @@ mod impl_ {
     //
     // However, on ARM64 this method doesn't work because VS Installer fails to register COM component on ARM64.
     // Hence, as the last resort we try to use vswhere.exe to list available instances.
-    fn vs15plus_instances(
-        target: TargetArch<'_>,
-        env_getter: &dyn EnvGetter,
-    ) -> Option<VsInstances> {
+    fn vs15plus_instances(target: TargetArch, env_getter: &dyn EnvGetter) -> Option<VsInstances> {
         vs15plus_instances_using_com()
             .or_else(|| vs15plus_instances_using_vswhere(target, env_getter))
     }
@@ -468,7 +537,7 @@ mod impl_ {
     }
 
     fn vs15plus_instances_using_vswhere(
-        target: TargetArch<'_>,
+        target: TargetArch,
         env_getter: &dyn EnvGetter,
     ) -> Option<VsInstances> {
         let program_files_path = env_getter
@@ -484,11 +553,10 @@ mod impl_ {
             return None;
         }
 
-        let tools_arch = match target.into() {
-            "i586" | "i686" | "x86_64" => Some("x86.x64"),
-            "arm" | "thumbv7a" => Some("ARM"),
-            "aarch64" | "arm64ec" => Some("ARM64"),
-            _ => None,
+        let tools_arch = match target {
+            TargetArch::X86 | TargetArch::X64 => Some("x86.x64"),
+            TargetArch::Arm => Some("ARM"),
+            TargetArch::Arm64 | TargetArch::Arm64ec => Some("ARM64"),
         };
 
         let vswhere_output = Command::new(vswhere_path)
@@ -523,7 +591,7 @@ mod impl_ {
 
     pub(super) fn find_msvc_15plus(
         tool: &str,
-        target: TargetArch<'_>,
+        target: TargetArch,
         env_getter: &dyn EnvGetter,
     ) -> Option<Tool> {
         let iter = vs15plus_instances(target, env_getter)?;
@@ -547,7 +615,7 @@ mod impl_ {
     // [more reliable]: https://github.com/rust-lang/cc-rs/pull/331
     fn find_tool_in_vs15_path(
         tool: &str,
-        target: TargetArch<'_>,
+        target: TargetArch,
         env_getter: &dyn EnvGetter,
     ) -> Option<Tool> {
         let mut path = match vs15plus_instances(target, env_getter) {
@@ -571,9 +639,9 @@ mod impl_ {
 
         path.map(|path| {
             let mut tool = Tool::with_family(path, MSVC_FAMILY);
-            if target == "x86_64" {
+            if target == TargetArch::X64 {
                 tool.env.push(("Platform".into(), "X64".into()));
-            } else if target == "aarch64" {
+            } else if matches!(target, TargetArch::Arm64 | TargetArch::Arm64ec) {
                 tool.env.push(("Platform".into(), "ARM64".into()));
             }
             tool
@@ -582,7 +650,7 @@ mod impl_ {
 
     fn tool_from_vs15plus_instance(
         tool: &str,
-        target: TargetArch<'_>,
+        target: TargetArch,
         instance_path: &Path,
         env_getter: &dyn EnvGetter,
     ) -> Option<Tool> {
@@ -613,7 +681,7 @@ mod impl_ {
     }
 
     fn vs15plus_vc_paths(
-        target: TargetArch<'_>,
+        target_arch: TargetArch,
         instance_path: &Path,
         env_getter: &dyn EnvGetter,
     ) -> Option<(PathBuf, PathBuf, PathBuf, PathBuf, Option<PathBuf>, PathBuf)> {
@@ -635,13 +703,13 @@ mod impl_ {
             }
             _ => return None,
         };
-        let target = lib_subdir(target)?;
+        let target_dir = target_arch.as_vs_arch();
         // The directory layout here is MSVC/bin/Host$host/$target/
         let path = instance_path.join(r"VC\Tools\MSVC").join(version);
         // We use the first available host architecture that can build for the target
         let (host_path, host) = hosts.iter().find_map(|&x| {
             let candidate = path.join("bin").join(format!("Host{}", x));
-            if candidate.join(target).exists() {
+            if candidate.join(target_dir).exists() {
                 Some((candidate, x))
             } else {
                 None
@@ -649,7 +717,7 @@ mod impl_ {
         })?;
         // This is the path to the toolchain for a particular target, running
         // on a given host
-        let bin_path = host_path.join(target);
+        let bin_path = host_path.join(target_dir);
         // But! we also need PATH to contain the target directory for the host
         // architecture, because it contains dlls like mspdb140.dll compiled for
         // the host architecture.
@@ -659,8 +727,9 @@ mod impl_ {
         } else {
             "lib"
         };
-        let lib_path = path.join(lib_fragment).join(target);
-        let alt_lib_path = (target == "arm64ec").then(|| path.join(lib_fragment).join("arm64ec"));
+        let lib_path = path.join(lib_fragment).join(target_dir);
+        let alt_lib_path =
+            (target_arch == TargetArch::Arm64ec).then(|| path.join(lib_fragment).join("arm64ec"));
         let include_path = path.join("include");
         Some((
             path,
@@ -716,9 +785,9 @@ mod impl_ {
             .unwrap_or_default()
     }
 
-    fn atl_paths(target: TargetArch<'_>, path: &Path) -> Option<(PathBuf, PathBuf)> {
+    fn atl_paths(target: TargetArch, path: &Path) -> Option<(PathBuf, PathBuf)> {
         let atl_path = path.join("atlmfc");
-        let sub = lib_subdir(target)?;
+        let sub = target.as_vs_arch();
         if atl_path.exists() {
             Some((atl_path.join("lib").join(sub), atl_path.join("include")))
         } else {
@@ -730,7 +799,7 @@ mod impl_ {
     // the Windows 10 SDK or Windows 8.1 SDK.
     pub(super) fn find_msvc_14(
         tool: &str,
-        target: TargetArch<'_>,
+        target: TargetArch,
         env_getter: &dyn EnvGetter,
     ) -> Option<Tool> {
         let vcdir = get_vc_dir("14.0")?;
@@ -739,12 +808,8 @@ mod impl_ {
         Some(tool.into_tool(env_getter))
     }
 
-    fn add_sdks(
-        tool: &mut MsvcTool,
-        target: TargetArch<'_>,
-        env_getter: &dyn EnvGetter,
-    ) -> Option<()> {
-        let sub = lib_subdir(target)?;
+    fn add_sdks(tool: &mut MsvcTool, target: TargetArch, env_getter: &dyn EnvGetter) -> Option<()> {
+        let sub = target.as_vs_arch();
         let (ucrt, ucrt_version) = get_ucrt_dir()?;
 
         let host = match host_arch() {
@@ -801,7 +866,7 @@ mod impl_ {
 
     // Given a possible MSVC installation directory, we look for the linker and
     // then add the MSVC library path.
-    fn get_tool(tool: &str, path: &Path, target: TargetArch<'_>) -> Option<MsvcTool> {
+    fn get_tool(tool: &str, path: &Path, target: TargetArch) -> Option<MsvcTool> {
         bin_subdir(target)
             .into_iter()
             .map(|(sub, host)| {
@@ -817,7 +882,7 @@ mod impl_ {
                 tool
             })
             .filter_map(|mut tool| {
-                let sub = vc_lib_subdir(target)?;
+                let sub = vc_lib_subdir(target);
                 tool.libs.push(path.join("lib").join(sub));
                 tool.include.push(path.join("include"));
                 let atlmfc_path = path.join("atlmfc");
@@ -939,36 +1004,25 @@ mod impl_ {
     // linkers that can target the architecture we desire. The 64-bit host
     // linker is preferred, and hence first, due to 64-bit allowing it more
     // address space to work with and potentially being faster.
-    fn bin_subdir(target: TargetArch<'_>) -> Vec<(&'static str, &'static str)> {
-        match (target.into(), host_arch()) {
-            ("i586", X86) | ("i686", X86) => vec![("", "")],
-            ("i586", X86_64) | ("i686", X86_64) => vec![("amd64_x86", "amd64"), ("", "")],
-            ("x86_64", X86) => vec![("x86_amd64", "")],
-            ("x86_64", X86_64) => vec![("amd64", "amd64"), ("x86_amd64", "")],
-            ("arm", X86) | ("thumbv7a", X86) => vec![("x86_arm", "")],
-            ("arm", X86_64) | ("thumbv7a", X86_64) => vec![("amd64_arm", "amd64"), ("x86_arm", "")],
+    fn bin_subdir(target: TargetArch) -> Vec<(&'static str, &'static str)> {
+        match (target, host_arch()) {
+            (TargetArch::X86, X86) => vec![("", "")],
+            (TargetArch::X86, X86_64) => vec![("amd64_x86", "amd64"), ("", "")],
+            (TargetArch::X64, X86) => vec![("x86_amd64", "")],
+            (TargetArch::X64, X86_64) => vec![("amd64", "amd64"), ("x86_amd64", "")],
+            (TargetArch::Arm, X86) => vec![("x86_arm", "")],
+            (TargetArch::Arm, X86_64) => vec![("amd64_arm", "amd64"), ("x86_arm", "")],
             _ => vec![],
         }
     }
 
-    fn lib_subdir(target: TargetArch<'_>) -> Option<&'static str> {
-        match target.into() {
-            "i586" | "i686" => Some("x86"),
-            "x86_64" => Some("x64"),
-            "arm" | "thumbv7a" => Some("arm"),
-            "aarch64" | "arm64ec" => Some("arm64"),
-            _ => None,
-        }
-    }
-
     // MSVC's x86 libraries are not in a subfolder
-    fn vc_lib_subdir(target: TargetArch<'_>) -> Option<&'static str> {
-        match target.into() {
-            "i586" | "i686" => Some(""),
-            "x86_64" => Some("amd64"),
-            "arm" | "thumbv7a" => Some("arm"),
-            "aarch64" => Some("arm64"),
-            _ => None,
+    fn vc_lib_subdir(target: TargetArch) -> &'static str {
+        match target {
+            TargetArch::X86 => "",
+            TargetArch::X64 => "amd64",
+            TargetArch::Arm => "arm",
+            TargetArch::Arm64 | TargetArch::Arm64ec => "arm64",
         }
     }
 
@@ -1034,19 +1088,19 @@ mod impl_ {
     pub(super) fn has_msbuild_version(version: &str, env_getter: &dyn EnvGetter) -> bool {
         match version {
             "17.0" => {
-                find_msbuild_vs17(TargetArch("x86_64"), env_getter).is_some()
-                    || find_msbuild_vs17(TargetArch("i686"), env_getter).is_some()
-                    || find_msbuild_vs17(TargetArch("aarch64"), env_getter).is_some()
+                find_msbuild_vs17(TargetArch::X64, env_getter).is_some()
+                    || find_msbuild_vs17(TargetArch::X86, env_getter).is_some()
+                    || find_msbuild_vs17(TargetArch::Arm64, env_getter).is_some()
             }
             "16.0" => {
-                find_msbuild_vs16(TargetArch("x86_64"), env_getter).is_some()
-                    || find_msbuild_vs16(TargetArch("i686"), env_getter).is_some()
-                    || find_msbuild_vs16(TargetArch("aarch64"), env_getter).is_some()
+                find_msbuild_vs16(TargetArch::X64, env_getter).is_some()
+                    || find_msbuild_vs16(TargetArch::X86, env_getter).is_some()
+                    || find_msbuild_vs16(TargetArch::Arm64, env_getter).is_some()
             }
             "15.0" => {
-                find_msbuild_vs15(TargetArch("x86_64"), env_getter).is_some()
-                    || find_msbuild_vs15(TargetArch("i686"), env_getter).is_some()
-                    || find_msbuild_vs15(TargetArch("aarch64"), env_getter).is_some()
+                find_msbuild_vs15(TargetArch::X64, env_getter).is_some()
+                    || find_msbuild_vs15(TargetArch::X86, env_getter).is_some()
+                    || find_msbuild_vs15(TargetArch::Arm64, env_getter).is_some()
             }
             "14.0" => LOCAL_MACHINE
                 .open(&OsString::from(format!(
@@ -1058,16 +1112,16 @@ mod impl_ {
         }
     }
 
-    pub(super) fn find_devenv(target: TargetArch<'_>, env_getter: &dyn EnvGetter) -> Option<Tool> {
+    pub(super) fn find_devenv(target: TargetArch, env_getter: &dyn EnvGetter) -> Option<Tool> {
         find_devenv_vs15(target, env_getter)
     }
 
-    fn find_devenv_vs15(target: TargetArch<'_>, env_getter: &dyn EnvGetter) -> Option<Tool> {
+    fn find_devenv_vs15(target: TargetArch, env_getter: &dyn EnvGetter) -> Option<Tool> {
         find_tool_in_vs15_path(r"Common7\IDE\devenv.exe", target, env_getter)
     }
 
     // see http://stackoverflow.com/questions/328017/path-to-msbuild
-    pub(super) fn find_msbuild(target: TargetArch<'_>, env_getter: &dyn EnvGetter) -> Option<Tool> {
+    pub(super) fn find_msbuild(target: TargetArch, env_getter: &dyn EnvGetter) -> Option<Tool> {
         // VS 15 (2017) changed how to locate msbuild
         if let Some(r) = find_msbuild_vs17(target, env_getter) {
             Some(r)
@@ -1080,11 +1134,11 @@ mod impl_ {
         }
     }
 
-    fn find_msbuild_vs15(target: TargetArch<'_>, env_getter: &dyn EnvGetter) -> Option<Tool> {
+    fn find_msbuild_vs15(target: TargetArch, env_getter: &dyn EnvGetter) -> Option<Tool> {
         find_tool_in_vs15_path(r"MSBuild\15.0\Bin\MSBuild.exe", target, env_getter)
     }
 
-    fn find_old_msbuild(target: TargetArch<'_>) -> Option<Tool> {
+    fn find_old_msbuild(target: TargetArch) -> Option<Tool> {
         let key = r"SOFTWARE\Microsoft\MSBuild\ToolsVersions";
         LOCAL_MACHINE
             .open(key.as_ref())
@@ -1096,7 +1150,7 @@ mod impl_ {
                 let mut path = PathBuf::from(path);
                 path.push("MSBuild.exe");
                 let mut tool = Tool::with_family(path, MSVC_FAMILY);
-                if target == "x86_64" {
+                if target == TargetArch::X64 {
                     tool.env.push(("Platform".into(), "X64".into()));
                 }
                 tool
@@ -1115,21 +1169,21 @@ mod impl_ {
     /// Finding msbuild.exe tool under unix system is not currently supported.
     /// Maybe can check it using an environment variable looks like `MSBUILD_BIN`.
     #[inline(always)]
-    pub(super) fn find_msbuild(_target: TargetArch<'_>, _: &dyn EnvGetter) -> Option<Tool> {
+    pub(super) fn find_msbuild(_target: TargetArch, _: &dyn EnvGetter) -> Option<Tool> {
         None
     }
 
     // Finding devenv.exe tool under unix system is not currently supported.
     // Maybe can check it using an environment variable looks like `DEVENV_BIN`.
     #[inline(always)]
-    pub(super) fn find_devenv(_target: TargetArch<'_>, _: &dyn EnvGetter) -> Option<Tool> {
+    pub(super) fn find_devenv(_target: TargetArch, _: &dyn EnvGetter) -> Option<Tool> {
         None
     }
 
     /// Attempt to find the tool using environment variables set by vcvars.
     pub(super) fn find_msvc_environment(
         tool: &str,
-        _target: TargetArch<'_>,
+        _target: TargetArch,
         env_getter: &dyn EnvGetter,
     ) -> Option<Tool> {
         // Early return if the environment doesn't contain a VC install.
@@ -1160,7 +1214,7 @@ mod impl_ {
     #[inline(always)]
     pub(super) fn find_msvc_15plus(
         _tool: &str,
-        _target: TargetArch<'_>,
+        _target: TargetArch,
         _: &dyn EnvGetter,
     ) -> Option<Tool> {
         None
@@ -1171,7 +1225,7 @@ mod impl_ {
     #[inline(always)]
     pub(super) fn find_msvc_14(
         _tool: &str,
-        _target: TargetArch<'_>,
+        _target: TargetArch,
         _: &dyn EnvGetter,
     ) -> Option<Tool> {
         None

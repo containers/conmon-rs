@@ -38,7 +38,7 @@
 //!
 //! ```toml
 //! [dependencies.uuid]
-//! version = "1.11.0"
+//! version = "1.12.0"
 //! features = [
 //!     "v4",                # Lets you generate random UUIDs
 //!     "fast-rng",          # Use a faster (but still sufficiently random) RNG
@@ -138,7 +138,7 @@
 //!
 //! ```toml
 //! [dependencies.uuid]
-//! version = "1.11.0"
+//! version = "1.12.0"
 //! features = [
 //!     "v4",
 //!     "v7",
@@ -153,7 +153,7 @@
 //!
 //! ```toml
 //! [dependencies.uuid]
-//! version = "1.11.0"
+//! version = "1.12.0"
 //! default-features = false
 //! ```
 //!
@@ -211,7 +211,7 @@
 #![doc(
     html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
     html_favicon_url = "https://www.rust-lang.org/favicon.ico",
-    html_root_url = "https://docs.rs/uuid/1.11.0"
+    html_root_url = "https://docs.rs/uuid/1.12.0"
 )]
 
 #[cfg(any(feature = "std", test))]
@@ -222,11 +222,9 @@ extern crate std;
 #[macro_use]
 extern crate core as std;
 
-#[cfg(all(uuid_unstable, feature = "zerocopy"))]
-use zerocopy::{IntoBytes, FromBytes, Immutable, KnownLayout, Unaligned};
-
 mod builder;
 mod error;
+mod non_nil;
 mod parser;
 
 pub mod fmt;
@@ -281,7 +279,7 @@ pub mod __macro_support {
 
 use crate::std::convert;
 
-pub use crate::{builder::Builder, error::Error};
+pub use crate::{builder::Builder, error::Error, non_nil::NonNilUuid};
 
 /// A 128-bit (16 byte) buffer containing the UUID.
 ///
@@ -436,15 +434,16 @@ pub enum Variant {
 ///
 /// The `Uuid` type is always guaranteed to be have the same ABI as [`Bytes`].
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(transparent)]
+// NOTE: Also check `NonNilUuid` when ading new derives here
 #[cfg_attr(
     all(uuid_unstable, feature = "zerocopy"),
-    derive(IntoBytes, FromBytes, KnownLayout, Immutable, Unaligned)
+    derive(zerocopy::IntoBytes, zerocopy::FromBytes, zerocopy::KnownLayout, zerocopy::Immutable, zerocopy::Unaligned)
 )]
 #[cfg_attr(
     feature = "borsh",
     derive(borsh_derive::BorshDeserialize, borsh_derive::BorshSerialize)
 )]
-#[repr(transparent)]
 #[cfg_attr(
     feature = "bytemuck",
     derive(bytemuck::Zeroable, bytemuck::Pod, bytemuck::TransparentWrapper)

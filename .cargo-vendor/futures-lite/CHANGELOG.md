@@ -1,3 +1,50 @@
+# Version 2.6.0
+
+- Add `Stream::map_while()` combinator. (#116)
+- Add list of excluded features to crate documentation. (#112)
+- Update docs for `AsyncRead::read_exact` (#121)
+
+# Version 2.5.0
+
+- Remove `Unpin` bound from the `Lines` I/O adapter. (#113)
+
+# Version 2.4.0
+
+- Add a "fuse" method that makes it so a `Future` returns `Poll::Pending`
+  forever after it returns `Poll::Pending` once. (#101)
+- Add a "stop_after_future" function that allows for running a `Stream` until a
+  `Future` completes. (#103)
+- Make it so `Zip`/`TryZip` drop completed futures. (#106)
+
+# Version 2.3.0
+
+- Add `StreamExt::drain` for draining objects from a `Stream` without waiting (#70).
+
+# Version 2.2.0
+
+- Relax `Unpin` bounds on `io::copy`. (#87)
+- Implement `size_hint` for `stream::Filter`. (#88)
+- Relax MSRV to 1.60. (#90)
+
+# Version 2.1.0
+
+- Make it so `read_line` and other futures use a naive implementation of byte
+  searching unless the `memchr` feature is enabled. This prevents needing to
+  compile the `memchr` crate unless it is desired. (#77)
+
+# Version 2.0.1
+
+- Remove dependency on the `waker-fn` crate. (#81)
+
+# Version 2.0.0
+
+- **Breaking:** Expose `future::{ready, pending}` from `core` instead of defining
+  our own. (#73)
+- **Breaking:** The `TryZip` and `Zip` combinators are modified to have a cleaner
+  API, where generic constraints are not necessary on the structure itself at the
+  cost of additional generics. (#74)
+- Add a way to use racey futures on `no_std` by providing your own seed. (#75)
+
 # Version 1.13.0
 
 - Unbind Debug implementations of BufReader and BufWriter. (#49)

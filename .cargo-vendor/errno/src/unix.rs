@@ -75,7 +75,6 @@ extern "C" {
         any(
             target_os = "openbsd",
             target_os = "netbsd",
-            target_os = "bitrig",
             target_os = "android",
             target_os = "espidf",
             target_env = "newlib"
@@ -92,7 +91,8 @@ extern "C" {
             target_os = "linux",
             target_os = "hurd",
             target_os = "redox",
-            target_os = "dragonfly"
+            target_os = "dragonfly",
+            target_os = "emscripten",
         ),
         link_name = "__errno_location"
     )]
