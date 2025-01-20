@@ -6,8 +6,8 @@ github.com/colega/zeropool v0.0.0-20230505084239-6fb4a4f75381 h1:d5EKgQfRQvO97jn
 github.com/colega/zeropool v0.0.0-20230505084239-6fb4a4f75381/go.mod h1:OU76gHeRo8xrzGJU3F3I1CqX1ekM8dfJw0+wPeMwnp0=
 github.com/containers/common v0.61.0 h1:j/84PTqZIKKYy42OEJsZmjZ4g4Kq2ERuC3tqp2yWdh4=
 github.com/containers/common v0.61.0/go.mod h1:NGRISq2vTFPSbhNqj6MLwyes4tWSlCnqbJg7R77B8xc=
-github.com/containers/storage v1.56.0 h1:DZ9KSkj6M2tvj/4bBoaJu3QDHRl35BwsZ4kmLJS97ZI=
-github.com/containers/storage v1.56.0/go.mod h1:c6WKowcAlED/DkWGNuL9bvGYqIWCVy7isRMdCSKWNjk=
+github.com/containers/storage v1.56.1 h1:gDZj/S6Zxus4Xx42X6iNB3ODXuh0qoOdH/BABfrvcKo=
+github.com/containers/storage v1.56.1/go.mod h1:c6WKowcAlED/DkWGNuL9bvGYqIWCVy7isRMdCSKWNjk=
 github.com/coreos/go-systemd/v22 v22.5.0 h1:RrqgGjYQKalulkV8NGVIfkXQf6YYmOyiJKk8iXXhfZs=
 github.com/coreos/go-systemd/v22 v22.5.0/go.mod h1:Y58oyj3AT4RCenI/lSvhwexgC+NSVTIJ3seZv2GcEnc=
 github.com/cyphar/filepath-securejoin v0.3.5 h1:L81NHjquoQmcPgXcttUS9qTSR/+bXry6pbSINQGpjj4=
