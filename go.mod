@@ -13,8 +13,8 @@ require (
 	github.com/opencontainers/runc v1.2.3
 	github.com/opencontainers/runtime-tools v0.9.1-0.20241001195557-6c9570a1678f
 	github.com/sirupsen/logrus v1.9.3
-	go.opentelemetry.io/otel v1.33.0
-	go.opentelemetry.io/otel/trace v1.33.0
+	go.opentelemetry.io/otel v1.34.0
+	go.opentelemetry.io/otel/trace v1.34.0
 )
 
 require (
@@ -37,7 +37,7 @@ require (
 	github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 // indirect
 	github.com/xeipuuv/gojsonpointer v0.0.0-20190905194746-02993c407bfb // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
-	go.opentelemetry.io/otel/metric v1.33.0 // indirect
+	go.opentelemetry.io/otel/metric v1.34.0 // indirect
 	golang.org/x/net v0.33.0 // indirect
 	golang.org/x/sync v0.10.0 // indirect
 	golang.org/x/sys v0.28.0 // indirect
