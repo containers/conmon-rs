@@ -5,7 +5,7 @@ go 1.23
 require (
 	capnproto.org/go/capnp/v3 v3.0.1-alpha.2
 	github.com/blang/semver/v4 v4.0.0
-	github.com/containers/common v0.61.0
+	github.com/containers/common v0.61.1
 	github.com/containers/storage v1.56.1
 	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.22.1
