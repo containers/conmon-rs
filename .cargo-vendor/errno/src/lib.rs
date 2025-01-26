@@ -120,7 +120,7 @@ fn check_description() {
         "Incorrect function."
     } else if cfg!(target_os = "illumos") {
         "Not owner"
-    } else if cfg!(target_os = "wasi") {
+    } else if cfg!(target_os = "wasi") || cfg!(target_os = "emscripten") {
         "Argument list too long"
     } else if cfg!(target_os = "haiku") {
         "Operation not allowed"
@@ -130,6 +130,8 @@ fn check_description() {
 
     let errno_code = if cfg!(target_os = "haiku") {
         -2147483633
+    } else if cfg!(target_os = "hurd") {
+        1073741825
     } else {
         1
     };
