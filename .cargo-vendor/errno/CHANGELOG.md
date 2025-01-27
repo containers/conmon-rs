@@ -1,5 +1,16 @@
 # [Unreleased]
 
+# [0.3.10] - 2024-11-29
+
+- Update to windows-sys 0.59
+  [#98](https://github.com/lambda-fairy/rust-errno/pull/98)
+
+- Support emscripten
+  [#100](https://github.com/lambda-fairy/rust-errno/pull/100)
+
+- Remove Bitrig support
+  [#99](https://github.com/lambda-fairy/rust-errno/pull/99)
+
 # [0.3.9] - 2024-05-07
 
 - Add visionOS support
@@ -88,7 +99,8 @@
 - Optionally support no_std
   [#31](https://github.com/lambda-fairy/rust-errno/pull/31)
 
-[Unreleased]: https://github.com/lambda-fairy/rust-errno/compare/v0.3.9...HEAD
+[Unreleased]: https://github.com/lambda-fairy/rust-errno/compare/v0.3.10...HEAD
+[0.3.10]: https://github.com/lambda-fairy/rust-errno/compare/v0.3.9...v0.3.10
 [0.3.9]: https://github.com/lambda-fairy/rust-errno/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/lambda-fairy/rust-errno/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/lambda-fairy/rust-errno/compare/v0.3.6...v0.3.7

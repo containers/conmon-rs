@@ -337,10 +337,8 @@ cfg_rt! {
     mod yield_now;
     pub use yield_now::yield_now;
 
-    cfg_unstable! {
-        mod consume_budget;
-        pub use consume_budget::consume_budget;
-    }
+    mod consume_budget;
+    pub use consume_budget::consume_budget;
 
     mod local;
     pub use local::{spawn_local, LocalSet, LocalEnterGuard};
@@ -361,9 +359,7 @@ cfg_rt! {
     #[cfg(tokio_unstable)]
     pub mod join_set;
 
-    cfg_unstable! {
-        pub use crate::runtime::task::{Id, id, try_id};
-    }
+    pub use crate::runtime::task::{Id, id, try_id};
 
     cfg_trace! {
         mod builder;
