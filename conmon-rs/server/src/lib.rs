@@ -16,6 +16,7 @@ mod config;
 mod container_io;
 mod container_log;
 mod fd_socket;
+mod inactivity;
 mod init;
 mod journal;
 mod listener;
