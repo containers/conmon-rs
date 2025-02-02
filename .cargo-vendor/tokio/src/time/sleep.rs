@@ -6,7 +6,7 @@ use pin_project_lite::pin_project;
 use std::future::Future;
 use std::panic::Location;
 use std::pin::Pin;
-use std::task::{self, Poll};
+use std::task::{self, ready, Poll};
 
 /// Waits until `deadline` is reached.
 ///
@@ -267,6 +267,7 @@ impl Sleep {
 
             let location = location.expect("should have location if tracing");
             let resource_span = tracing::trace_span!(
+                parent: None,
                 "runtime.resource",
                 concrete_type = "Sleep",
                 kind = "timer",
@@ -446,7 +447,7 @@ impl Future for Sleep {
         let _ao_poll_span = self.inner.ctx.async_op_poll_span.clone().entered();
         match ready!(self.as_mut().poll_elapsed(cx)) {
             Ok(()) => Poll::Ready(()),
-            Err(e) => panic!("timer error: {}", e),
+            Err(e) => panic!("timer error: {e}"),
         }
     }
 }

@@ -30,7 +30,7 @@
 //!
 //! ![performance](https://raw.githubusercontent.com/dtolnay/itoa/master/performance.png)
 
-#![doc(html_root_url = "https://docs.rs/itoa/1.0.13")]
+#![doc(html_root_url = "https://docs.rs/itoa/1.0.14")]
 #![no_std]
 #![allow(
     clippy::cast_lossless,
@@ -118,7 +118,9 @@ pub trait Integer: private::Sealed {
 
 // Seal to prevent downstream implementations of the Integer trait.
 mod private {
+    #[doc(hidden)]
     pub trait Sealed: Copy {
+        #[doc(hidden)]
         type Buffer: 'static;
         fn write(self, buf: &mut Self::Buffer) -> &str;
     }

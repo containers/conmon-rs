@@ -35,7 +35,7 @@ assert_eq!(*foo.private(), 2);
 You can use `cargo-expand` to generate the output. Here are the functions that the above generates (Replicate with `cargo expand --example simple`):
 
 ```rust,ignore
-use getset::{Getters, MutGetters, CopyGetters, Setters};
+use getset::{Getters, MutGetters, CopyGetters, Setters, WithSetters};
 pub struct Foo<T>
 where
     T: Copy + Clone + Default,
@@ -107,7 +107,7 @@ precedence.
 
 ```rust
 mod submodule {
-    use getset::{Getters, MutGetters, CopyGetters, Setters};
+    use getset::{Getters, MutGetters, CopyGetters, Setters, WithSetters};
     #[derive(Getters, CopyGetters, Default)]
     #[getset(get_copy = "pub")] // By default add a pub getting for all fields.
     pub struct Foo {
@@ -129,7 +129,7 @@ For some purposes, it's useful to have the `get_` prefix on the getters for
 either legacy of compatibility reasons. It is done with `with_prefix`.
 
 ```rust
-use getset::{Getters, MutGetters, CopyGetters, Setters};
+use getset::{Getters, MutGetters, CopyGetters, Setters, WithSetters};
 
 #[derive(Getters, Default)]
 pub struct Foo {
@@ -146,10 +146,10 @@ Skipping setters and getters generation for a field when struct level attribute 
 is possible with `#[getset(skip)]`.
 
 ```rust
-use getset::{CopyGetters, Setters};
+use getset::{CopyGetters, Setters, WithSetters};
 
-#[derive(CopyGetters, Setters)]
-#[getset(get_copy, set)]
+#[derive(CopyGetters, Setters, WithSetters)]
+#[getset(get_copy, set, set_with)]
 pub struct Foo {
     // If the field was not skipped, the compiler would complain about moving
     // a non-copyable type in copy getter.
@@ -171,7 +171,34 @@ impl Foo {
         self.skipped = val.to_string();
         self
     }
+
+    fn with_skipped(mut self, val: &str) -> Self {
+        self.skipped = val.to_string();
+        self
+    }
 }
+```
+
+For a unary struct (a tuple struct with a single field),
+the macro generates the `get`, `get_mut`, and `set` functions to
+provide a getter, a mutable getter, and a setter, respectively.
+
+```rust
+use getset::{Getters, MutGetters, CopyGetters, Setters};
+
+#[derive(Setters, Getters, MutGetters)]
+struct UnaryTuple(#[getset(set, get, get_mut)] i32);
+
+let mut tup = UnaryTuple(42);
+assert_eq!(tup.get(), &42);
+assert_eq!(tup.get_mut(), &mut 42);
+tup.set(43);
+assert_eq!(tup.get(), &43);
+
+#[derive(CopyGetters)]
+struct CopyUnaryTuple(#[getset(get_copy)] i32);
+
+let tup = CopyUnaryTuple(42);
 ```
 */
 
@@ -235,6 +262,18 @@ pub fn setters(input: TokenStream) -> TokenStream {
     produce(&ast, &params).into()
 }
 
+#[proc_macro_derive(WithSetters, attributes(set_with, getset))]
+#[proc_macro_error]
+pub fn with_setters(input: TokenStream) -> TokenStream {
+    let ast = parse_macro_input!(input as DeriveInput);
+    let params = GenParams {
+        mode: GenMode::SetWith,
+        global_attr: parse_global_attr(&ast.attrs, GenMode::SetWith),
+    };
+
+    produce(&ast, &params).into()
+}
+
 fn parse_global_attr(attrs: &[syn::Attribute], mode: GenMode) -> Option<Meta> {
     attrs.iter().filter_map(|v| parse_attr(v, mode)).last()
 }
@@ -256,6 +295,7 @@ fn parse_attr(attr: &syn::Attribute, mode: GenMode) -> Option<syn::Meta> {
                     || meta.path().is_ident("get_copy")
                     || meta.path().is_ident("get_mut")
                     || meta.path().is_ident("set")
+                    || meta.path().is_ident("set_with")
                     || meta.path().is_ident("skip"))
                 {
                     abort!(meta.path().span(), "unknown setter or getter")
@@ -305,11 +345,27 @@ fn produce(ast: &DeriveInput, params: &GenParams) -> TokenStream2 {
 
     // Is it a struct?
     if let syn::Data::Struct(DataStruct { ref fields, .. }) = ast.data {
-        let generated = fields.iter().map(|f| generate::implement(f, params));
+        // Handle unary struct
+        if matches!(fields, syn::Fields::Unnamed(_)) {
+            if fields.len() != 1 {
+                abort_call_site!("Only support unary struct!");
+            }
+            // This unwrap is safe because we know there is exactly one field
+            let field = fields.iter().next().unwrap();
+            let generated = generate::implement_for_unnamed(field, params);
 
-        quote! {
-            impl #impl_generics #name #ty_generics #where_clause {
-                #(#generated)*
+            quote! {
+                impl #impl_generics #name #ty_generics #where_clause {
+                    #generated
+                }
+            }
+        } else {
+            let generated = fields.iter().map(|f| generate::implement(f, params));
+
+            quote! {
+                impl #impl_generics #name #ty_generics #where_clause {
+                    #(#generated)*
+                }
             }
         }
     } else {

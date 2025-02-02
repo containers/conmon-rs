@@ -541,7 +541,7 @@ impl AddressFamily {
     #[cfg(solarish)]
     pub const NBS: Self = Self(c::AF_NBS as _);
     /// `AF_NCA`
-    #[cfg(solarish)]
+    #[cfg(target_os = "illumos")]
     pub const NCA: Self = Self(c::AF_NCA as _);
     /// `AF_NDD`
     #[cfg(target_os = "aix")]
@@ -1809,8 +1809,11 @@ fn test_sizes() {
     #[cfg(linux_kernel)]
     assert_eq_size!(UCred, libc::ucred);
 
+    // Linux added fields to `xdp_umem_reg` so it's bigger now.
+    /*
     #[cfg(target_os = "linux")]
     assert_eq_size!(super::xdp::XdpUmemReg, c::xdp_umem_reg);
+    */
     #[cfg(target_os = "linux")]
     assert_eq_size!(super::xdp::XdpOptions, c::xdp_options);
     #[cfg(target_os = "linux")]

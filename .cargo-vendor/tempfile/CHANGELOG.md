@@ -1,9 +1,21 @@
 # Changelog
 
+## 3.16.0
+
+- Update `getrandom` to `0.3.0` (thanks to @paolobarbolini).
+- Allow `windows-sys` versions `0.59.x` in addition to `0.59.0` (thanks @ErichDonGubler).
+- Improved security documentation (thanks to @n0toose for collaborating with me on this).
+
+## 3.15.0
+
+Re-seed the per-thread RNG from system randomness when we repeatedly fail to create temporary files (#314). This resolves a potential DoS vector (#178) while avoiding `getrandom` in the common case where it's necessary. The feature is optional but enabled by default via the `getrandom` feature.
+
+For libc-free builds, you'll either need to disable this feature or opt-in to a different [`getrandom` backend](https://github.com/rust-random/getrandom?tab=readme-ov-file#opt-in-backends).
+
 ## 3.14.0
 
 - Make the wasip2 target work (requires tempfile's "nightly" feature to be enabled). [#305](https://github.com/Stebalien/tempfile/pull/305).
-- Allow older windows-sys versions [#304](https://github.com/Stebalien/tempfile/pull/305).
+- Allow older windows-sys versions [#304](https://github.com/Stebalien/tempfile/pull/304).
 
 ## 3.13.0
 

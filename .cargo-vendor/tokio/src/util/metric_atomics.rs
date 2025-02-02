@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 cfg_64bit_metrics! {
     use std::sync::atomic::AtomicU64;
@@ -43,5 +43,39 @@ impl MetricAtomicU64 {
         // on platforms without 64-bit atomics, fetch-add returns unit
         pub(crate) fn add(&self, _value: u64, _ordering: Ordering) {  }
         pub(crate) fn new(_value: u64) -> Self { Self { } }
+    }
+}
+
+#[cfg_attr(not(all(tokio_unstable, feature = "rt")), allow(dead_code))]
+/// `AtomicUsize` for use in metrics.
+///
+/// This exposes simplified APIs for use in metrics & uses `std::sync` instead of Loom to avoid polluting loom logs with metric information.
+#[derive(Debug, Default)]
+pub(crate) struct MetricAtomicUsize {
+    value: AtomicUsize,
+}
+
+#[cfg_attr(not(all(tokio_unstable, feature = "rt")), allow(dead_code))]
+impl MetricAtomicUsize {
+    pub(crate) fn new(value: usize) -> Self {
+        Self {
+            value: AtomicUsize::new(value),
+        }
+    }
+
+    pub(crate) fn load(&self, ordering: Ordering) -> usize {
+        self.value.load(ordering)
+    }
+
+    pub(crate) fn store(&self, val: usize, ordering: Ordering) {
+        self.value.store(val, ordering)
+    }
+
+    pub(crate) fn increment(&self) -> usize {
+        self.value.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) fn decrement(&self) -> usize {
+        self.value.fetch_sub(1, Ordering::Relaxed)
     }
 }
