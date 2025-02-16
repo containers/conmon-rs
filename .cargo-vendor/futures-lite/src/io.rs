@@ -62,8 +62,8 @@ const DEFAULT_BUF_SIZE: usize = 8 * 1024;
 /// ```
 pub async fn copy<R, W>(reader: R, writer: W) -> Result<u64>
 where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    R: AsyncRead,
+    W: AsyncWrite,
 {
     pin_project! {
         struct CopyFuture<R, W> {
@@ -78,7 +78,7 @@ where
     impl<R, W> Future for CopyFuture<R, W>
     where
         R: AsyncBufRead,
-        W: AsyncWrite + Unpin,
+        W: AsyncWrite,
     {
         type Output = Result<u64>;
 
@@ -1622,7 +1622,7 @@ pub trait AsyncBufReadExt: AsyncBufRead {
     /// let n = reader.read_until(b'\n', &mut buf).await?;
     /// # std::io::Result::Ok(()) });
     /// ```
-    fn read_until<'a>(&'a mut self, byte: u8, buf: &'a mut Vec<u8>) -> ReadUntilFuture<'_, Self>
+    fn read_until<'a>(&'a mut self, byte: u8, buf: &'a mut Vec<u8>) -> ReadUntilFuture<'a, Self>
     where
         Self: Unpin,
     {
@@ -1655,7 +1655,7 @@ pub trait AsyncBufReadExt: AsyncBufRead {
     /// let n = reader.read_line(&mut line).await?;
     /// # std::io::Result::Ok(()) });
     /// ```
-    fn read_line<'a>(&'a mut self, buf: &'a mut String) -> ReadLineFuture<'_, Self>
+    fn read_line<'a>(&'a mut self, buf: &'a mut String) -> ReadLineFuture<'a, Self>
     where
         Self: Unpin,
     {
@@ -1692,7 +1692,7 @@ pub trait AsyncBufReadExt: AsyncBufRead {
     /// ```
     fn lines(self) -> Lines<Self>
     where
-        Self: Unpin + Sized,
+        Self: Sized,
     {
         Lines {
             reader: self,
@@ -1811,7 +1811,7 @@ fn read_until_internal<R: AsyncBufReadExt + ?Sized>(
         let (done, used) = {
             let available = ready!(reader.as_mut().poll_fill_buf(cx))?;
 
-            if let Some(i) = memchr::memchr(byte, available) {
+            if let Some(i) = memchr(byte, available) {
                 buf.extend_from_slice(&available[..=i]);
                 (true, i + 1)
             } else {
@@ -2069,8 +2069,6 @@ pub trait AsyncReadExt: AsyncRead {
     }
 
     /// Reads the exact number of bytes required to fill `buf`.
-    ///
-    /// On success, returns the total number of bytes read.
     ///
     /// # Examples
     ///
@@ -2698,9 +2696,7 @@ impl<R1: AsyncBufRead, R2: AsyncBufRead> AsyncBufRead for Chain<R1, R2> {
         let this = self.project();
         if !*this.done_first {
             match ready!(this.first.poll_fill_buf(cx)) {
-                Ok(buf) if buf.is_empty() => {
-                    *this.done_first = true;
-                }
+                Ok([]) => *this.done_first = true,
                 Ok(buf) => return Poll::Ready(Ok(buf)),
                 Err(err) => return Poll::Ready(Err(err)),
             }
@@ -3090,4 +3086,13 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteHalf<T> {
         let mut inner = self.0.lock().unwrap();
         Pin::new(&mut *inner).poll_close(cx)
     }
+}
+
+#[cfg(feature = "memchr")]
+use memchr::memchr;
+
+/// Unoptimized memchr fallback.
+#[cfg(not(feature = "memchr"))]
+fn memchr(needle: u8, haystack: &[u8]) -> Option<usize> {
+    haystack.iter().position(|&b| b == needle)
 }

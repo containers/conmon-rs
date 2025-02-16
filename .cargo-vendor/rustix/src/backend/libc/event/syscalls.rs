@@ -5,7 +5,7 @@ use crate::backend::c;
 use crate::backend::conv::ret;
 use crate::backend::conv::ret_c_int;
 #[cfg(feature = "alloc")]
-#[cfg(any(linux_kernel, solarish, target_os = "redox"))]
+#[cfg(any(linux_kernel, target_os = "illumos", target_os = "redox"))]
 use crate::backend::conv::ret_u32;
 #[cfg(solarish)]
 use crate::event::port::Event;
@@ -22,7 +22,7 @@ use crate::event::PollFd;
 use crate::io;
 #[cfg(solarish)]
 use crate::utils::as_mut_ptr;
-#[cfg(any(linux_kernel, solarish, target_os = "redox"))]
+#[cfg(any(linux_kernel, target_os = "illumos", target_os = "redox"))]
 use crate::utils::as_ptr;
 #[cfg(any(
     all(feature = "alloc", bsd),
@@ -314,12 +314,19 @@ pub(crate) fn port_getn(
     events: &mut Vec<Event>,
     mut nget: u32,
 ) -> io::Result<()> {
+    // `port_getn` special-cases a max value of 0 to be a query that returns
+    // the number of events. We don't want to do the `set_len` in that case, so
+    // so bail out early if needed.
+    if events.capacity() == 0 {
+        return Ok(());
+    }
+
     let timeout = timeout.map_or(null_mut(), as_mut_ptr);
     unsafe {
         ret(c::port_getn(
             borrowed_fd(port),
             events.as_mut_ptr().cast(),
-            events.len().try_into().unwrap(),
+            events.capacity().try_into().unwrap(),
             &mut nget,
             timeout,
         ))?;
@@ -331,6 +338,24 @@ pub(crate) fn port_getn(
     }
 
     Ok(())
+}
+
+#[cfg(solarish)]
+pub(crate) fn port_getn_query(port: BorrowedFd<'_>) -> io::Result<u32> {
+    let mut nget: u32 = 0;
+
+    // Pass a `max` of 0 to query the number of available events.
+    unsafe {
+        ret(c::port_getn(
+            borrowed_fd(port),
+            null_mut(),
+            0,
+            &mut nget,
+            null_mut(),
+        ))?;
+    }
+
+    Ok(nget)
 }
 
 #[cfg(solarish)]
@@ -351,13 +376,13 @@ pub(crate) fn pause() {
 }
 
 #[inline]
-#[cfg(any(linux_kernel, solarish, target_os = "redox"))]
+#[cfg(any(linux_kernel, target_os = "illumos", target_os = "redox"))]
 pub(crate) fn epoll_create(flags: super::epoll::CreateFlags) -> io::Result<OwnedFd> {
     unsafe { ret_owned_fd(c::epoll_create1(bitflags_bits!(flags))) }
 }
 
 #[inline]
-#[cfg(any(linux_kernel, solarish, target_os = "redox"))]
+#[cfg(any(linux_kernel, target_os = "illumos", target_os = "redox"))]
 pub(crate) fn epoll_add(
     epoll: BorrowedFd<'_>,
     source: BorrowedFd<'_>,
@@ -378,7 +403,7 @@ pub(crate) fn epoll_add(
 }
 
 #[inline]
-#[cfg(any(linux_kernel, solarish, target_os = "redox"))]
+#[cfg(any(linux_kernel, target_os = "illumos", target_os = "redox"))]
 pub(crate) fn epoll_mod(
     epoll: BorrowedFd<'_>,
     source: BorrowedFd<'_>,
@@ -396,7 +421,7 @@ pub(crate) fn epoll_mod(
 }
 
 #[inline]
-#[cfg(any(linux_kernel, solarish, target_os = "redox"))]
+#[cfg(any(linux_kernel, target_os = "illumos", target_os = "redox"))]
 pub(crate) fn epoll_del(epoll: BorrowedFd<'_>, source: BorrowedFd<'_>) -> io::Result<()> {
     unsafe {
         ret(c::epoll_ctl(
@@ -410,7 +435,7 @@ pub(crate) fn epoll_del(epoll: BorrowedFd<'_>, source: BorrowedFd<'_>) -> io::Re
 
 #[inline]
 #[cfg(feature = "alloc")]
-#[cfg(any(linux_kernel, solarish, target_os = "redox"))]
+#[cfg(any(linux_kernel, target_os = "illumos", target_os = "redox"))]
 pub(crate) fn epoll_wait(
     epoll: BorrowedFd<'_>,
     events: &mut [MaybeUninit<crate::event::epoll::Event>],
