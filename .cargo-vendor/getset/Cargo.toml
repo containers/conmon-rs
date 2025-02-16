@@ -12,11 +12,17 @@
 [package]
 edition = "2018"
 name = "getset"
-version = "0.1.3"
+version = "0.1.4"
 authors = [
     "Ana Hobden <ana@hoverbear.org>",
     "John Baublitz <john.m.baublitz@gmail.com",
 ]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = """
 Getset, we're ready to go!
 
@@ -35,7 +41,49 @@ license = "MIT"
 repository = "https://github.com/jbaublitz/getset"
 
 [lib]
+name = "getset"
+path = "src/lib.rs"
 proc-macro = true
+
+[[example]]
+name = "simple"
+path = "examples/simple.rs"
+
+[[test]]
+name = "copy_getters"
+path = "tests/copy_getters.rs"
+
+[[test]]
+name = "getset"
+path = "tests/getset.rs"
+
+[[test]]
+name = "getters"
+path = "tests/getters.rs"
+
+[[test]]
+name = "mut_getters"
+path = "tests/mut_getters.rs"
+
+[[test]]
+name = "raw_identifiers"
+path = "tests/raw_identifiers.rs"
+
+[[test]]
+name = "setters"
+path = "tests/setters.rs"
+
+[[test]]
+name = "skip"
+path = "tests/skip.rs"
+
+[[test]]
+name = "unary_tuple"
+path = "tests/unary_tuple.rs"
+
+[[test]]
+name = "with_setters"
+path = "tests/with_setters.rs"
 
 [dependencies.proc-macro-error2]
 version = "2"
