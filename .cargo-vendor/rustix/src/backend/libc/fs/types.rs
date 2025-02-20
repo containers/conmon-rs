@@ -334,7 +334,7 @@ bitflags! {
         /// Note that rustix and/or libc will automatically set this flag when appropriate on
         /// `open(2)` and friends, thus typical users do not need to care about it.
         /// It will may be reported in return of `fcntl_getfl`, though.
-        #[cfg(any(linux_kernel, target_os = "illumos"))]
+        #[cfg(any(linux_kernel, solarish))]
         const LARGEFILE = bitcast!(c::O_LARGEFILE);
 
         /// <https://docs.rs/bitflags/*/bitflags/#externally-defined-flags>
@@ -949,22 +949,49 @@ bitflags! {
 ///
 /// [`flock`]: crate::fs::flock
 /// [`fcntl_lock`]: crate::fs::fcntl_lock
+// Solaris doesn't support `flock` and doesn't define `LOCK_SH` etc., but we
+// reuse this `FlockOperation` enum for `fcntl_lock`, so on Solaris we use
+// our own made-up integer values.
 #[cfg(not(any(target_os = "espidf", target_os = "vita", target_os = "wasi")))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum FlockOperation {
     /// `LOCK_SH`
+    #[cfg(not(target_os = "solaris"))]
     LockShared = bitcast!(c::LOCK_SH),
+    /// `LOCK_SH`
+    #[cfg(target_os = "solaris")]
+    LockShared = bitcast!(1),
     /// `LOCK_EX`
+    #[cfg(not(target_os = "solaris"))]
     LockExclusive = bitcast!(c::LOCK_EX),
+    /// `LOCK_EX`
+    #[cfg(target_os = "solaris")]
+    LockExclusive = bitcast!(2),
     /// `LOCK_UN`
+    #[cfg(not(target_os = "solaris"))]
     Unlock = bitcast!(c::LOCK_UN),
+    /// `LOCK_UN`
+    #[cfg(target_os = "solaris")]
+    Unlock = bitcast!(8),
     /// `LOCK_SH | LOCK_NB`
+    #[cfg(not(target_os = "solaris"))]
     NonBlockingLockShared = bitcast!(c::LOCK_SH | c::LOCK_NB),
+    /// `LOCK_SH | LOCK_NB`
+    #[cfg(target_os = "solaris")]
+    NonBlockingLockShared = bitcast!(1 | 4),
     /// `LOCK_EX | LOCK_NB`
+    #[cfg(not(target_os = "solaris"))]
     NonBlockingLockExclusive = bitcast!(c::LOCK_EX | c::LOCK_NB),
+    /// `LOCK_EX | LOCK_NB`
+    #[cfg(target_os = "solaris")]
+    NonBlockingLockExclusive = bitcast!(2 | 4),
     /// `LOCK_UN | LOCK_NB`
+    #[cfg(not(target_os = "solaris"))]
     NonBlockingUnlock = bitcast!(c::LOCK_UN | c::LOCK_NB),
+    /// `LOCK_UN | LOCK_NB`
+    #[cfg(target_os = "solaris")]
+    NonBlockingUnlock = bitcast!(8 | 4),
 }
 
 /// `struct stat` for use with [`statat`] and [`fstat`].

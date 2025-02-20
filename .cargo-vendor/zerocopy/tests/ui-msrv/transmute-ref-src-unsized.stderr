@@ -5,11 +5,11 @@ error[E0277]: the size for values of type `[u8]` cannot be known at compilation 
    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
    |
    = help: the trait `Sized` is not implemented for `[u8]`
-note: required by a bound in `AssertIsAsBytes`
+note: required by `AssertSrcIsSized`
   --> tests/ui-msrv/transmute-ref-src-unsized.rs:16:31
    |
 16 | const SRC_UNSIZED: &[u8; 1] = transmute_ref!(&[0u8][..]);
-   |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `AssertIsAsBytes`
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^
    = note: this error originates in the macro `transmute_ref` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: the size for values of type `[u8]` cannot be known at compilation time
@@ -19,11 +19,11 @@ error[E0277]: the size for values of type `[u8]` cannot be known at compilation 
    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
    |
    = help: the trait `Sized` is not implemented for `[u8]`
-note: required by a bound in `AssertIsAsBytes`
+note: required by a bound in `AssertSrcIsSized`
   --> tests/ui-msrv/transmute-ref-src-unsized.rs:16:31
    |
 16 | const SRC_UNSIZED: &[u8; 1] = transmute_ref!(&[0u8][..]);
-   |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `AssertIsAsBytes`
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `AssertSrcIsSized`
    = note: this error originates in the macro `transmute_ref` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: the size for values of type `[u8]` cannot be known at compilation time
@@ -58,11 +58,6 @@ error[E0277]: the size for values of type `[u8]` cannot be known at compilation 
    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
    |
    = help: the trait `Sized` is not implemented for `[u8]`
-note: required by a bound in `AlignOf::<T>::into_t`
-  --> src/macro_util.rs
-   |
-   | impl<T> AlignOf<T> {
-   |      ^ required by this bound in `AlignOf::<T>::into_t`
    = note: this error originates in the macro `$crate::assert_align_gt_eq` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: the size for values of type `[u8]` cannot be known at compilation time
@@ -83,7 +78,7 @@ error[E0277]: the size for values of type `[u8]` cannot be known at compilation 
    |
    = help: the trait `Sized` is not implemented for `[u8]`
 note: required by a bound in `AlignOf`
-  --> src/macro_util.rs
+  --> src/util/macro_util.rs
    |
    | pub struct AlignOf<T> {
    |                    ^ required by this bound in `AlignOf`
@@ -96,11 +91,11 @@ error[E0277]: the size for values of type `[u8]` cannot be known at compilation 
    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
    |
    = help: the trait `Sized` is not implemented for `[u8]`
-note: required by a bound in `MaxAlignsOf::<T, U>::new`
-  --> src/macro_util.rs
+note: required by `MaxAlignsOf::<T, U>::new`
+  --> src/util/macro_util.rs
    |
-   | impl<T, U> MaxAlignsOf<T, U> {
-   |      ^ required by this bound in `MaxAlignsOf::<T, U>::new`
+   |     pub fn new(_t: T, _u: U) -> MaxAlignsOf<T, U> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = note: this error originates in the macro `$crate::assert_align_gt_eq` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: the size for values of type `[u8]` cannot be known at compilation time
@@ -111,7 +106,7 @@ error[E0277]: the size for values of type `[u8]` cannot be known at compilation 
    |
    = help: the trait `Sized` is not implemented for `[u8]`
 note: required by a bound in `MaxAlignsOf`
-  --> src/macro_util.rs
+  --> src/util/macro_util.rs
    |
    | pub union MaxAlignsOf<T, U> {
    |                       ^ required by this bound in `MaxAlignsOf`
@@ -125,7 +120,7 @@ error[E0277]: the size for values of type `[u8]` cannot be known at compilation 
    |
    = help: the trait `Sized` is not implemented for `[u8]`
 note: required by a bound in `MaxAlignsOf`
-  --> src/macro_util.rs
+  --> src/util/macro_util.rs
    |
    | pub union MaxAlignsOf<T, U> {
    |                       ^ required by this bound in `MaxAlignsOf`
@@ -139,7 +134,7 @@ error[E0277]: the size for values of type `[u8]` cannot be known at compilation 
    |
    = help: the trait `Sized` is not implemented for `[u8]`
 note: required by a bound in `AlignOf`
-  --> src/macro_util.rs
+  --> src/util/macro_util.rs
    |
    | pub struct AlignOf<T> {
    |                    ^ required by this bound in `AlignOf`
@@ -152,8 +147,22 @@ error[E0277]: the size for values of type `[u8]` cannot be known at compilation 
    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
    |
    = help: the trait `Sized` is not implemented for `[u8]`
+note: required by a bound in `MaxAlignsOf`
+  --> src/util/macro_util.rs
+   |
+   | pub union MaxAlignsOf<T, U> {
+   |                       ^ required by this bound in `MaxAlignsOf`
+   = note: this error originates in the macro `$crate::assert_align_gt_eq` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the size for values of type `[u8]` cannot be known at compilation time
+  --> tests/ui-msrv/transmute-ref-src-unsized.rs:16:31
+   |
+16 | const SRC_UNSIZED: &[u8; 1] = transmute_ref!(&[0u8][..]);
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^ doesn't have a size known at compile-time
+   |
+   = help: the trait `Sized` is not implemented for `[u8]`
 note: required by a bound in `transmute_ref`
-  --> src/macro_util.rs
+  --> src/util/macro_util.rs
    |
    | pub const unsafe fn transmute_ref<'dst, 'src: 'dst, Src: 'src, Dst: 'dst>(
    |                                                     ^^^ required by this bound in `transmute_ref`

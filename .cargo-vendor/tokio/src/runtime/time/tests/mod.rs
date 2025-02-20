@@ -54,10 +54,7 @@ fn single_timer() {
             );
             pin!(entry);
 
-            block_on(futures::future::poll_fn(|cx| {
-                entry.as_mut().poll_elapsed(cx)
-            }))
-            .unwrap();
+            block_on(std::future::poll_fn(|cx| entry.as_mut().poll_elapsed(cx))).unwrap();
         });
 
         thread::yield_now();
@@ -126,10 +123,7 @@ fn change_waker() {
                 .as_mut()
                 .poll_elapsed(&mut Context::from_waker(futures::task::noop_waker_ref()));
 
-            block_on(futures::future::poll_fn(|cx| {
-                entry.as_mut().poll_elapsed(cx)
-            }))
-            .unwrap();
+            block_on(std::future::poll_fn(|cx| entry.as_mut().poll_elapsed(cx))).unwrap();
         });
 
         thread::yield_now();
@@ -167,10 +161,7 @@ fn reset_future() {
             entry.as_mut().reset(start + Duration::from_secs(2), true);
 
             // shouldn't complete before 2s
-            block_on(futures::future::poll_fn(|cx| {
-                entry.as_mut().poll_elapsed(cx)
-            }))
-            .unwrap();
+            block_on(std::future::poll_fn(|cx| entry.as_mut().poll_elapsed(cx))).unwrap();
 
             finished_early_.store(true, Ordering::Relaxed);
         });
@@ -266,4 +257,18 @@ fn poll_process_levels_targeted() {
     assert!(e1.as_mut().poll_elapsed(&mut context).is_pending());
     handle.process_at_time(0, 192);
     handle.process_at_time(0, 192);
+}
+
+#[test]
+#[cfg(not(loom))]
+fn instant_to_tick_max() {
+    use crate::runtime::time::entry::MAX_SAFE_MILLIS_DURATION;
+
+    let rt = rt(true);
+    let handle = rt.handle().inner.driver().time();
+
+    let start_time = handle.time_source.start_time();
+    let long_future = start_time + std::time::Duration::from_millis(MAX_SAFE_MILLIS_DURATION + 1);
+
+    assert!(handle.time_source.instant_to_tick(long_future) <= MAX_SAFE_MILLIS_DURATION);
 }
