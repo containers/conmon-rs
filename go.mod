@@ -10,7 +10,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.22.2
 	github.com/onsi/gomega v1.36.2
-	github.com/opencontainers/runc v1.2.5
+	github.com/opencontainers/runc v1.2.6
 	github.com/opencontainers/runtime-tools v0.9.1-0.20241108202711-f7e3563b0271
 	github.com/sirupsen/logrus v1.9.3
 	go.opentelemetry.io/otel v1.34.0
