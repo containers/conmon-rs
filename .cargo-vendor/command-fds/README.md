@@ -10,6 +10,8 @@ A library for passing arbitrary file descriptors when spawning child processes.
 ```rust
 use command_fds::{CommandFdExt, FdMapping};
 use std::fs::File;
+use std::io::stdin;
+use std::os::fd::AsFd;
 use std::os::unix::io::AsRawFd;
 use std::process::Command;
 
@@ -23,12 +25,12 @@ command
     .fd_mappings(vec![
         // Map `file` as FD 3 in the child process.
         FdMapping {
-            parent_fd: file.as_raw_fd(),
+            parent_fd: file.into(),
             child_fd: 3,
         },
         // Map this process's stdin as FD 5 in the child process.
         FdMapping {
-            parent_fd: 0,
+            parent_fd: stdin().as_fd().try_clone_to_owned().unwrap(),
             child_fd: 5,
         },
     ])

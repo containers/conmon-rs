@@ -8,46 +8,51 @@ Getters are generated as `fn field(&self) -> &type`, while setters are generated
 These macros are not intended to be used on fields which require custom logic inside of their setters and getters. Just write your own in that case!
 
 ```rust
-use getset::{CopyGetters, Getters, MutGetters, Setters};
+use std::sync::Arc;
 
-#[derive(Getters, Setters, MutGetters, CopyGetters, Default)]
+use getset::{CloneGetters, CopyGetters, Getters, MutGetters, Setters, WithSetters};
+
+#[derive(Getters, Setters, WithSetters, MutGetters, CopyGetters, CloneGetters, Default)]
 pub struct Foo<T>
 where
     T: Copy + Clone + Default,
 {
     /// Doc comments are supported!
     /// Multiline, even.
-    #[getset(get, set, get_mut)]
+    #[getset(get, set, get_mut, set_with)]
     private: T,
 
     /// Doc comments are supported!
     /// Multiline, even.
-    #[getset(get_copy = "pub", set = "pub", get_mut = "pub")]
+    #[getset(get_copy = "pub", set = "pub", get_mut = "pub", set_with = "pub")]
     public: T,
-}
 
-let mut foo = Foo::default();
-foo.set_private(1);
-(*foo.private_mut()) += 1;
-assert_eq!(*foo.private(), 2);
+    /// Arc supported through CloneGetters
+    #[getset(get_clone = "pub", set = "pub", get_mut = "pub", set_with = "pub")]
+    arc: Arc<u16>,
+}
 ```
 
 You can use `cargo-expand` to generate the output. Here are the functions that the above generates (Replicate with `cargo expand --example simple`):
 
 ```rust,ignore
-use getset::{Getters, MutGetters, CopyGetters, Setters};
+use std::sync::Arc;
+use getset::{CloneGetters, CopyGetters, Getters, MutGetters, Setters, WithSetters};
 pub struct Foo<T>
 where
     T: Copy + Clone + Default,
 {
     /// Doc comments are supported!
     /// Multiline, even.
-    #[getset(get, get, get_mut)]
+    #[getset(get, set, get_mut, set_with)]
     private: T,
     /// Doc comments are supported!
     /// Multiline, even.
-    #[getset(get_copy = "pub", set = "pub", get_mut = "pub")]
+    #[getset(get_copy = "pub", set = "pub", get_mut = "pub", set_with = "pub")]
     public: T,
+    /// Arc supported through CloneGetters
+    #[getset(get_clone = "pub", set = "pub", get_mut = "pub", set_with = "pub")]
+    arc: Arc<u16>,
 }
 impl<T> Foo<T>
 where
@@ -67,8 +72,46 @@ where
     /// Doc comments are supported!
     /// Multiline, even.
     #[inline(always)]
+    fn set_private(&mut self, val: T) -> &mut Self {
+        self.private = val;
+        self
+    }
+    /// Doc comments are supported!
+    /// Multiline, even.
+    #[inline(always)]
     pub fn set_public(&mut self, val: T) -> &mut Self {
         self.public = val;
+        self
+    }
+    /// Arc supported through CloneGetters
+    #[inline(always)]
+    pub fn set_arc(&mut self, val: Arc<u16>) -> &mut Self {
+        self.arc = val;
+        self
+    }
+}
+impl<T> Foo<T>
+where
+    T: Copy + Clone + Default,
+{
+    /// Doc comments are supported!
+    /// Multiline, even.
+    #[inline(always)]
+    fn with_private(mut self, val: T) -> Self {
+        self.private = val;
+        self
+    }
+    /// Doc comments are supported!
+    /// Multiline, even.
+    #[inline(always)]
+    pub fn with_public(mut self, val: T) -> Self {
+        self.public = val;
+        self
+    }
+    /// Arc supported through CloneGetters
+    #[inline(always)]
+    pub fn with_arc(mut self, val: Arc<u16>) -> Self {
+        self.arc = val;
         self
     }
 }
@@ -88,6 +131,11 @@ where
     pub fn public_mut(&mut self) -> &mut T {
         &mut self.public
     }
+    /// Arc supported through CloneGetters
+    #[inline(always)]
+    pub fn arc_mut(&mut self) -> &mut Arc<u16> {
+        &mut self.arc
+    }
 }
 impl<T> Foo<T>
 where
@@ -100,6 +148,16 @@ where
         self.public
     }
 }
+impl<T> Foo<T>
+where
+    T: Copy + Clone + Default,
+{
+    /// Arc supported through CloneGetters
+    #[inline(always)]
+    pub fn arc(&self) -> Arc<u16> {
+        self.arc.clone()
+    }
+}
 ```
 
 Attributes can be set on struct level for all fields in struct as well. Field level attributes take
@@ -107,7 +165,7 @@ precedence.
 
 ```rust
 mod submodule {
-    use getset::{Getters, MutGetters, CopyGetters, Setters};
+    use getset::{Getters, MutGetters, CopyGetters, Setters, WithSetters};
     #[derive(Getters, CopyGetters, Default)]
     #[getset(get_copy = "pub")] // By default add a pub getting for all fields.
     pub struct Foo {
@@ -129,7 +187,7 @@ For some purposes, it's useful to have the `get_` prefix on the getters for
 either legacy of compatibility reasons. It is done with `with_prefix`.
 
 ```rust
-use getset::{Getters, MutGetters, CopyGetters, Setters};
+use getset::{Getters, MutGetters, CopyGetters, Setters, WithSetters};
 
 #[derive(Getters, Default)]
 pub struct Foo {
@@ -146,10 +204,10 @@ Skipping setters and getters generation for a field when struct level attribute 
 is possible with `#[getset(skip)]`.
 
 ```rust
-use getset::{CopyGetters, Setters};
+use getset::{CopyGetters, Setters, WithSetters};
 
-#[derive(CopyGetters, Setters)]
-#[getset(get_copy, set)]
+#[derive(CopyGetters, Setters, WithSetters)]
+#[getset(get_copy, set, set_with)]
 pub struct Foo {
     // If the field was not skipped, the compiler would complain about moving
     // a non-copyable type in copy getter.
@@ -171,7 +229,34 @@ impl Foo {
         self.skipped = val.to_string();
         self
     }
+
+    fn with_skipped(mut self, val: &str) -> Self {
+        self.skipped = val.to_string();
+        self
+    }
 }
+```
+
+For a unary struct (a tuple struct with a single field),
+the macro generates the `get`, `get_mut`, and `set` functions to
+provide a getter, a mutable getter, and a setter, respectively.
+
+```rust
+use getset::{Getters, MutGetters, CopyGetters, Setters};
+
+#[derive(Setters, Getters, MutGetters)]
+struct UnaryTuple(#[getset(set, get, get_mut)] i32);
+
+let mut tup = UnaryTuple(42);
+assert_eq!(tup.get(), &42);
+assert_eq!(tup.get_mut(), &mut 42);
+tup.set(43);
+assert_eq!(tup.get(), &43);
+
+#[derive(CopyGetters)]
+struct CopyUnaryTuple(#[getset(get_copy)] i32);
+
+let tup = CopyUnaryTuple(42);
 ```
 */
 
@@ -194,6 +279,18 @@ pub fn getters(input: TokenStream) -> TokenStream {
     let params = GenParams {
         mode: GenMode::Get,
         global_attr: parse_global_attr(&ast.attrs, GenMode::Get),
+    };
+
+    produce(&ast, &params).into()
+}
+
+#[proc_macro_derive(CloneGetters, attributes(get_clone, with_prefix, getset))]
+#[proc_macro_error]
+pub fn clone_getters(input: TokenStream) -> TokenStream {
+    let ast = parse_macro_input!(input as DeriveInput);
+    let params = GenParams {
+        mode: GenMode::GetClone,
+        global_attr: parse_global_attr(&ast.attrs, GenMode::GetClone),
     };
 
     produce(&ast, &params).into()
@@ -235,8 +332,20 @@ pub fn setters(input: TokenStream) -> TokenStream {
     produce(&ast, &params).into()
 }
 
+#[proc_macro_derive(WithSetters, attributes(set_with, getset))]
+#[proc_macro_error]
+pub fn with_setters(input: TokenStream) -> TokenStream {
+    let ast = parse_macro_input!(input as DeriveInput);
+    let params = GenParams {
+        mode: GenMode::SetWith,
+        global_attr: parse_global_attr(&ast.attrs, GenMode::SetWith),
+    };
+
+    produce(&ast, &params).into()
+}
+
 fn parse_global_attr(attrs: &[syn::Attribute], mode: GenMode) -> Option<Meta> {
-    attrs.iter().filter_map(|v| parse_attr(v, mode)).last()
+    attrs.iter().filter_map(|v| parse_attr(v, mode)).next_back()
 }
 
 fn parse_attr(attr: &syn::Attribute, mode: GenMode) -> Option<syn::Meta> {
@@ -253,9 +362,11 @@ fn parse_attr(attr: &syn::Attribute, mode: GenMode) -> Option<syn::Meta> {
             .into_iter()
             .inspect(|meta| {
                 if !(meta.path().is_ident("get")
+                    || meta.path().is_ident("get_clone")
                     || meta.path().is_ident("get_copy")
                     || meta.path().is_ident("get_mut")
                     || meta.path().is_ident("set")
+                    || meta.path().is_ident("set_with")
                     || meta.path().is_ident("skip"))
                 {
                     abort!(meta.path().span(), "unknown setter or getter")
@@ -305,11 +416,27 @@ fn produce(ast: &DeriveInput, params: &GenParams) -> TokenStream2 {
 
     // Is it a struct?
     if let syn::Data::Struct(DataStruct { ref fields, .. }) = ast.data {
-        let generated = fields.iter().map(|f| generate::implement(f, params));
+        // Handle unary struct
+        if matches!(fields, syn::Fields::Unnamed(_)) {
+            if fields.len() != 1 {
+                abort_call_site!("Only support unary struct!");
+            }
+            // This unwrap is safe because we know there is exactly one field
+            let field = fields.iter().next().unwrap();
+            let generated = generate::implement_for_unnamed(field, params);
 
-        quote! {
-            impl #impl_generics #name #ty_generics #where_clause {
-                #(#generated)*
+            quote! {
+                impl #impl_generics #name #ty_generics #where_clause {
+                    #generated
+                }
+            }
+        } else {
+            let generated = fields.iter().map(|f| generate::implement(f, params));
+
+            quote! {
+                impl #impl_generics #name #ty_generics #where_clause {
+                    #(#generated)*
+                }
             }
         }
     } else {

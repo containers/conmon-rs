@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use command_fds::{CommandFdExt, FdMapping};
-use std::fs::{read_dir, read_link, File};
+use std::fs::{File, read_dir, read_link};
 use std::io::stdin;
 use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;

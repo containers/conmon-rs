@@ -1,7 +1,7 @@
 //! Feature tests for OS functionality
 pub use self::os::*;
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(any(linux_android, target_os = "emscripten"))]
 mod os {
     use crate::sys::utsname::uname;
     use crate::Result;
@@ -92,18 +92,18 @@ mod os {
     }
 
     #[test]
-    pub fn test_parsing_kernel_version() {
+    fn test_parsing_kernel_version() {
         assert!(kernel_version().unwrap() > 0);
     }
 }
 
 #[cfg(any(
-        target_os = "dragonfly",    // Since ???
-        target_os = "freebsd",      // Since 10.0
+        freebsdlike,                // FreeBSD since 10.0 DragonFlyBSD since ???
+        netbsdlike,                 // NetBSD since 6.0 OpenBSD since 5.7
+        target_os = "hurd",         // Since glibc 2.28
         target_os = "illumos",      // Since ???
-        target_os = "netbsd",       // Since 6.0
-        target_os = "openbsd",      // Since 5.7
         target_os = "redox",        // Since 1-july-2020
+        target_os = "cygwin",
 ))]
 mod os {
     /// Check if the OS supports atomic close-on-exec for sockets
@@ -114,8 +114,7 @@ mod os {
 
 #[cfg(any(
     target_os = "aix",
-    target_os = "macos",
-    target_os = "ios",
+    apple_targets,
     target_os = "fuchsia",
     target_os = "haiku",
     target_os = "solaris"

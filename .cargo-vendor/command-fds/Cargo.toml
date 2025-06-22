@@ -10,10 +10,16 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2018"
+edition = "2024"
 name = "command-fds"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["Andrew Walbran <qwandor@google.com>"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "A library for passing arbitrary file descriptors when spawning child processes."
 readme = "README.md"
 keywords = [
@@ -27,12 +33,24 @@ categories = ["os::unix-apis"]
 license = "Apache-2.0"
 repository = "https://github.com/google/command-fds/"
 
+[features]
+default = []
+tokio = ["tokio-crate"]
+
+[lib]
+name = "command_fds"
+path = "src/lib.rs"
+
+[[example]]
+name = "spawn"
+path = "examples/spawn.rs"
+
 [dependencies.nix]
-version = "0.27.0"
+version = "0.30.1"
 features = ["fs"]
 
 [dependencies.thiserror]
-version = "1.0.24"
+version = "2.0.3"
 
 [dependencies.tokio-crate]
 version = "1.32.0"
@@ -40,7 +58,3 @@ features = ["process"]
 optional = true
 default-features = false
 package = "tokio"
-
-[features]
-default = []
-tokio = ["tokio-crate"]

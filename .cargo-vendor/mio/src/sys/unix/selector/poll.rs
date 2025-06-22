@@ -3,17 +3,21 @@
 // Permission to use this code has been granted by original author:
 // https://github.com/tokio-rs/mio/pull/1602#issuecomment-1218441031
 
-use crate::sys::unix::selector::LOWEST_FD;
-use crate::sys::unix::waker::WakerInternal;
-use crate::{Interest, Token};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
-use std::os::unix::io::{AsRawFd, RawFd};
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(not(target_os = "hermit"))]
+use std::os::fd::{AsRawFd, RawFd};
+// TODO: once <https://github.com/rust-lang/rust/issues/126198> is fixed this
+// can use `std::os::fd` and be merged with the above.
+#[cfg(target_os = "hermit")]
+use std::os::hermit::io::{AsRawFd, RawFd};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use std::{cmp, fmt, io};
+
+use crate::sys::unix::waker::Waker as WakerInternal;
+use crate::{Interest, Token};
 
 /// Unique id for use as `SelectorId`.
 #[cfg(debug_assertions)]
@@ -34,9 +38,6 @@ impl Selector {
     }
 
     pub fn try_clone(&self) -> io::Result<Selector> {
-        // Just to keep the compiler happy :)
-        let _ = LOWEST_FD;
-
         let state = self.state.clone();
 
         Ok(Selector { state })
@@ -71,6 +72,7 @@ impl Selector {
     pub fn wake(&self, token: Token) -> io::Result<()> {
         self.state.wake(token)
     }
+
     cfg_io_source! {
         #[cfg(debug_assertions)]
         pub fn id(&self) -> usize {
@@ -159,7 +161,7 @@ struct FdData {
 
 impl SelectorState {
     pub fn new() -> io::Result<SelectorState> {
-        let notify_waker = WakerInternal::new()?;
+        let notify_waker = WakerInternal::new_unregistered()?;
 
         Ok(Self {
             fds: Mutex::new(Fds {
@@ -263,9 +265,9 @@ impl SelectorState {
                             closed_raw_fds.push(poll_fd.fd);
                         }
 
-                        // Remove the interest which just got triggered
-                        // the IoSourceState/WakerRegistrar used with this selector will add back
-                        // the interest using reregister.
+                        // Remove the interest which just got triggered the IoSourceState's do_io
+                        // wrapper used with this selector will add back the interest using
+                        // reregister.
                         poll_fd.events &= !poll_fd.revents;
 
                         // Minor optimization to potentially avoid looping n times where n is the
@@ -504,7 +506,7 @@ fn poll(fds: &mut [PollFd], timeout: Option<Duration>) -> io::Result<usize> {
         #[cfg(target_pointer_width = "32")]
         const MAX_SAFE_TIMEOUT: u128 = 1789569;
         #[cfg(not(target_pointer_width = "32"))]
-        const MAX_SAFE_TIMEOUT: u128 = libc::c_int::max_value() as u128;
+        const MAX_SAFE_TIMEOUT: u128 = libc::c_int::MAX as u128;
 
         let timeout = timeout
             .map(|to| {
@@ -544,10 +546,12 @@ pub struct Event {
 pub type Events = Vec<Event>;
 
 pub mod event {
-    use crate::sys::unix::selector::poll::POLLRDHUP;
+    use std::fmt;
+
     use crate::sys::Event;
     use crate::Token;
-    use std::fmt;
+
+    use super::POLLRDHUP;
 
     pub fn token(event: &Event) -> Token {
         event.token
@@ -618,6 +622,25 @@ pub mod event {
             .field("token", &event.token)
             .field("events", &EventsDetails(event.events))
             .finish()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Waker {
+    selector: Selector,
+    token: Token,
+}
+
+impl Waker {
+    pub(crate) fn new(selector: &Selector, token: Token) -> io::Result<Waker> {
+        Ok(Waker {
+            selector: selector.try_clone()?,
+            token,
+        })
+    }
+
+    pub(crate) fn wake(&self) -> io::Result<()> {
+        self.selector.wake(self.token)
     }
 }
 

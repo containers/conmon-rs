@@ -4,12 +4,15 @@ use nix::errno::*;
 use nix::fcntl::{open, readlink, OFlag};
 #[cfg(not(target_os = "redox"))]
 use nix::fcntl::{openat, readlinkat, renameat};
+
+#[cfg(target_os = "linux")]
+use nix::fcntl::{openat2, OpenHow, ResolveFlag};
+
 #[cfg(all(
     target_os = "linux",
     target_env = "gnu",
     any(
         target_arch = "x86_64",
-        target_arch = "x32",
         target_arch = "powerpc",
         target_arch = "s390x"
     )
@@ -18,7 +21,7 @@ use nix::fcntl::{renameat2, RenameFlags};
 #[cfg(not(target_os = "redox"))]
 use nix::sys::stat::Mode;
 #[cfg(not(target_os = "redox"))]
-use nix::unistd::{close, read};
+use nix::unistd::read;
 #[cfg(not(target_os = "redox"))]
 use std::fs::File;
 #[cfg(not(target_os = "redox"))]
@@ -50,11 +53,63 @@ fn test_openat() {
     .unwrap();
 
     let mut buf = [0u8; 1024];
-    assert_eq!(4, read(fd, &mut buf).unwrap());
+    assert_eq!(4, read(&fd, &mut buf).unwrap());
     assert_eq!(CONTENTS, &buf[0..4]);
+}
 
-    close(fd).unwrap();
-    close(dirfd).unwrap();
+#[test]
+#[cfg(target_os = "linux")]
+// QEMU does not handle openat well enough to satisfy this test
+// https://gitlab.com/qemu-project/qemu/-/issues/829
+#[cfg_attr(qemu, ignore)]
+fn test_openat2() {
+    const CONTENTS: &[u8] = b"abcd";
+    let mut tmp = NamedTempFile::new().unwrap();
+    tmp.write_all(CONTENTS).unwrap();
+
+    let dirfd =
+        open(tmp.path().parent().unwrap(), OFlag::empty(), Mode::empty())
+            .unwrap();
+
+    let fd = openat2(
+        dirfd,
+        tmp.path().file_name().unwrap(),
+        OpenHow::new()
+            .flags(OFlag::O_RDONLY)
+            .mode(Mode::empty())
+            .resolve(ResolveFlag::RESOLVE_BENEATH),
+    )
+    .unwrap();
+
+    let mut buf = [0u8; 1024];
+    assert_eq!(4, read(&fd, &mut buf).unwrap());
+    assert_eq!(CONTENTS, &buf[0..4]);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+// QEMU does not handle openat well enough to satisfy this test
+// https://gitlab.com/qemu-project/qemu/-/issues/829
+#[cfg_attr(qemu, ignore)]
+fn test_openat2_forbidden() {
+    let mut tmp = NamedTempFile::new().unwrap();
+    tmp.write_all(b"let me out").unwrap();
+
+    let dirfd =
+        open(tmp.path().parent().unwrap(), OFlag::empty(), Mode::empty())
+            .unwrap();
+
+    let escape_attempt =
+        tmp.path().parent().unwrap().join("../../../hello.txt");
+
+    let res = openat2(
+        dirfd,
+        &escape_attempt,
+        OpenHow::new()
+            .flags(OFlag::O_RDONLY)
+            .resolve(ResolveFlag::RESOLVE_BENEATH),
+    );
+    assert_eq!(res.unwrap_err(), Errno::EXDEV);
 }
 
 #[test]
@@ -68,13 +123,11 @@ fn test_renameat() {
     let new_dir = tempfile::tempdir().unwrap();
     let new_dirfd =
         open(new_dir.path(), OFlag::empty(), Mode::empty()).unwrap();
-    renameat(Some(old_dirfd), "old", Some(new_dirfd), "new").unwrap();
+    renameat(&old_dirfd, "old", &new_dirfd, "new").unwrap();
     assert_eq!(
-        renameat(Some(old_dirfd), "old", Some(new_dirfd), "new").unwrap_err(),
+        renameat(&old_dirfd, "old", &new_dirfd, "new").unwrap_err(),
         Errno::ENOENT
     );
-    close(old_dirfd).unwrap();
-    close(new_dirfd).unwrap();
     assert!(new_dir.path().join("new").exists());
 }
 
@@ -84,7 +137,6 @@ fn test_renameat() {
     target_env = "gnu",
     any(
         target_arch = "x86_64",
-        target_arch = "x32",
         target_arch = "powerpc",
         target_arch = "s390x"
     )
@@ -98,27 +150,13 @@ fn test_renameat2_behaves_like_renameat_with_no_flags() {
     let new_dir = tempfile::tempdir().unwrap();
     let new_dirfd =
         open(new_dir.path(), OFlag::empty(), Mode::empty()).unwrap();
-    renameat2(
-        Some(old_dirfd),
-        "old",
-        Some(new_dirfd),
-        "new",
-        RenameFlags::empty(),
-    )
-    .unwrap();
+    renameat2(&old_dirfd, "old", &new_dirfd, "new", RenameFlags::empty())
+        .unwrap();
     assert_eq!(
-        renameat2(
-            Some(old_dirfd),
-            "old",
-            Some(new_dirfd),
-            "new",
-            RenameFlags::empty()
-        )
-        .unwrap_err(),
+        renameat2(&old_dirfd, "old", &new_dirfd, "new", RenameFlags::empty())
+            .unwrap_err(),
         Errno::ENOENT
     );
-    close(old_dirfd).unwrap();
-    close(new_dirfd).unwrap();
     assert!(new_dir.path().join("new").exists());
 }
 
@@ -128,7 +166,6 @@ fn test_renameat2_behaves_like_renameat_with_no_flags() {
     target_env = "gnu",
     any(
         target_arch = "x86_64",
-        target_arch = "x32",
         target_arch = "powerpc",
         target_arch = "s390x"
     )
@@ -151,9 +188,9 @@ fn test_renameat2_exchange() {
         new_f.write_all(b"new").unwrap();
     }
     renameat2(
-        Some(old_dirfd),
+        &old_dirfd,
         "old",
-        Some(new_dirfd),
+        &new_dirfd,
         "new",
         RenameFlags::RENAME_EXCHANGE,
     )
@@ -166,8 +203,6 @@ fn test_renameat2_exchange() {
     let mut old_f = File::open(&old_path).unwrap();
     old_f.read_to_string(&mut buf).unwrap();
     assert_eq!(buf, "new");
-    close(old_dirfd).unwrap();
-    close(new_dirfd).unwrap();
 }
 
 #[test]
@@ -176,7 +211,6 @@ fn test_renameat2_exchange() {
     target_env = "gnu",
     any(
         target_arch = "x86_64",
-        target_arch = "x32",
         target_arch = "powerpc",
         target_arch = "s390x"
     )
@@ -194,17 +228,15 @@ fn test_renameat2_noreplace() {
     File::create(new_path).unwrap();
     assert_eq!(
         renameat2(
-            Some(old_dirfd),
+            &old_dirfd,
             "old",
-            Some(new_dirfd),
+            &new_dirfd,
             "new",
             RenameFlags::RENAME_NOREPLACE
         )
         .unwrap_err(),
         Errno::EEXIST
     );
-    close(old_dirfd).unwrap();
-    close(new_dirfd).unwrap();
     assert!(new_dir.path().join("new").exists());
     assert!(old_dir.path().join("old").exists());
 }
@@ -234,17 +266,15 @@ fn test_readlink() {
 /// The from_offset should be updated by the call to reflect
 /// the 3 bytes read (6).
 #[cfg(any(
-        target_os = "linux",
+        linux_android,
         // Not available until FreeBSD 13.0
         all(target_os = "freebsd", fbsd14),
-        target_os = "android"
 ))]
 #[test]
 // QEMU does not support copy_file_range. Skip under qemu
 #[cfg_attr(qemu, ignore)]
 fn test_copy_file_range() {
     use nix::fcntl::copy_file_range;
-    use std::os::unix::io::AsFd;
 
     const CONTENTS: &[u8] = b"foobarbaz";
 
@@ -255,14 +285,7 @@ fn test_copy_file_range() {
     tmp1.flush().unwrap();
 
     let mut from_offset: i64 = 3;
-    copy_file_range(
-        tmp1.as_fd(),
-        Some(&mut from_offset),
-        tmp2.as_fd(),
-        None,
-        3,
-    )
-    .unwrap();
+    copy_file_range(&tmp1, Some(&mut from_offset), &tmp2, None, 3).unwrap();
 
     let mut res: String = String::new();
     tmp2.rewind().unwrap();
@@ -272,15 +295,14 @@ fn test_copy_file_range() {
     assert_eq!(from_offset, 6);
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(linux_android)]
 mod linux_android {
     use libc::loff_t;
     use std::io::prelude::*;
     use std::io::IoSlice;
-    use std::os::unix::prelude::*;
 
     use nix::fcntl::*;
-    use nix::unistd::{close, pipe, read, write};
+    use nix::unistd::{pipe, read, write};
 
     use tempfile::tempfile;
     #[cfg(target_os = "linux")]
@@ -296,25 +318,16 @@ mod linux_android {
 
         let (rd, wr) = pipe().unwrap();
         let mut offset: loff_t = 5;
-        let res = splice(
-            tmp.as_raw_fd(),
-            Some(&mut offset),
-            wr,
-            None,
-            2,
-            SpliceFFlags::empty(),
-        )
-        .unwrap();
+        let res =
+            splice(tmp, Some(&mut offset), wr, None, 2, SpliceFFlags::empty())
+                .unwrap();
 
         assert_eq!(2, res);
 
         let mut buf = [0u8; 1024];
-        assert_eq!(2, read(rd, &mut buf).unwrap());
+        assert_eq!(2, read(&rd, &mut buf).unwrap());
         assert_eq!(b"f1", &buf[0..2]);
         assert_eq!(7, offset);
-
-        close(rd).unwrap();
-        close(wr).unwrap();
     }
 
     #[test]
@@ -323,24 +336,20 @@ mod linux_android {
         let (rd2, wr2) = pipe().unwrap();
 
         write(wr1, b"abc").unwrap();
-        let res = tee(rd1, wr2, 2, SpliceFFlags::empty()).unwrap();
+        let res = tee(rd1.try_clone().unwrap(), wr2, 2, SpliceFFlags::empty())
+            .unwrap();
 
         assert_eq!(2, res);
 
         let mut buf = [0u8; 1024];
 
         // Check the tee'd bytes are at rd2.
-        assert_eq!(2, read(rd2, &mut buf).unwrap());
+        assert_eq!(2, read(&rd2, &mut buf).unwrap());
         assert_eq!(b"ab", &buf[0..2]);
 
         // Check all the bytes are still at rd1.
-        assert_eq!(3, read(rd1, &mut buf).unwrap());
+        assert_eq!(3, read(&rd1, &mut buf).unwrap());
         assert_eq!(b"abc", &buf[0..3]);
-
-        close(rd1).unwrap();
-        close(wr1).unwrap();
-        close(rd2).unwrap();
-        close(wr2).unwrap();
     }
 
     #[test]
@@ -357,11 +366,8 @@ mod linux_android {
 
         // Check the bytes can be read at rd.
         let mut buf = [0u8; 32];
-        assert_eq!(6, read(rd, &mut buf).unwrap());
+        assert_eq!(6, read(&rd, &mut buf).unwrap());
         assert_eq!(b"abcdef", &buf[0..6]);
-
-        close(rd).unwrap();
-        close(wr).unwrap();
     }
 
     #[cfg(target_os = "linux")]
@@ -369,12 +375,11 @@ mod linux_android {
     fn test_fallocate() {
         let tmp = NamedTempFile::new().unwrap();
 
-        let fd = tmp.as_raw_fd();
-        fallocate(fd, FallocateFlags::empty(), 0, 100).unwrap();
+        fallocate(&tmp, FallocateFlags::empty(), 0, 100).unwrap();
 
         // Check if we read exactly 100 bytes
         let mut buf = [0u8; 200];
-        assert_eq!(100, read(fd, &mut buf).unwrap());
+        assert_eq!(100, read(&tmp, &mut buf).unwrap());
     }
 
     // The tests below are disabled for the listed targets
@@ -391,7 +396,6 @@ mod linux_android {
 
         let tmp = NamedTempFile::new().unwrap();
 
-        let fd = tmp.as_raw_fd();
         let statfs = nix::sys::statfs::fstatfs(tmp.as_file()).unwrap();
         if statfs.filesystem_type() == nix::sys::statfs::OVERLAYFS_SUPER_MAGIC {
             // OverlayFS is a union file system.  It returns one inode value in
@@ -399,7 +403,7 @@ mod linux_android {
             // skip the test.
             skip!("/proc/locks does not work on overlayfs");
         }
-        let inode = fstat(fd).expect("fstat failed").st_ino as usize;
+        let inode = fstat(&tmp).expect("fstat failed").st_ino as usize;
 
         let mut flock: libc::flock = unsafe {
             mem::zeroed() // required for Linux/mips
@@ -409,14 +413,15 @@ mod linux_android {
         flock.l_start = 0;
         flock.l_len = 0;
         flock.l_pid = 0;
-        fcntl(fd, FcntlArg::F_OFD_SETLKW(&flock)).expect("write lock failed");
+        fcntl(&tmp, FcntlArg::F_OFD_SETLKW(&flock)).expect("write lock failed");
         assert_eq!(
             Some(("OFDLCK".to_string(), "WRITE".to_string())),
             lock_info(inode)
         );
 
         flock.l_type = libc::F_UNLCK as libc::c_short;
-        fcntl(fd, FcntlArg::F_OFD_SETLKW(&flock)).expect("write unlock failed");
+        fcntl(&tmp, FcntlArg::F_OFD_SETLKW(&flock))
+            .expect("write unlock failed");
         assert_eq!(None, lock_info(inode));
     }
 
@@ -429,7 +434,6 @@ mod linux_android {
 
         let tmp = NamedTempFile::new().unwrap();
 
-        let fd = tmp.as_raw_fd();
         let statfs = nix::sys::statfs::fstatfs(tmp.as_file()).unwrap();
         if statfs.filesystem_type() == nix::sys::statfs::OVERLAYFS_SUPER_MAGIC {
             // OverlayFS is a union file system.  It returns one inode value in
@@ -437,7 +441,7 @@ mod linux_android {
             // skip the test.
             skip!("/proc/locks does not work on overlayfs");
         }
-        let inode = fstat(fd).expect("fstat failed").st_ino as usize;
+        let inode = fstat(&tmp).expect("fstat failed").st_ino as usize;
 
         let mut flock: libc::flock = unsafe {
             mem::zeroed() // required for Linux/mips
@@ -447,14 +451,15 @@ mod linux_android {
         flock.l_start = 0;
         flock.l_len = 0;
         flock.l_pid = 0;
-        fcntl(fd, FcntlArg::F_OFD_SETLKW(&flock)).expect("read lock failed");
+        fcntl(&tmp, FcntlArg::F_OFD_SETLKW(&flock)).expect("read lock failed");
         assert_eq!(
             Some(("OFDLCK".to_string(), "READ".to_string())),
             lock_info(inode)
         );
 
         flock.l_type = libc::F_UNLCK as libc::c_short;
-        fcntl(fd, FcntlArg::F_OFD_SETLKW(&flock)).expect("read unlock failed");
+        fcntl(&tmp, FcntlArg::F_OFD_SETLKW(&flock))
+            .expect("read unlock failed");
         assert_eq!(None, lock_info(inode));
     }
 
@@ -481,8 +486,7 @@ mod linux_android {
 }
 
 #[cfg(any(
-    target_os = "linux",
-    target_os = "android",
+    linux_android,
     target_os = "emscripten",
     target_os = "fuchsia",
     target_os = "wasi",
@@ -490,60 +494,47 @@ mod linux_android {
     target_os = "freebsd"
 ))]
 mod test_posix_fadvise {
-
     use nix::errno::Errno;
     use nix::fcntl::*;
     use nix::unistd::pipe;
-    use std::os::unix::io::{AsRawFd, RawFd};
     use tempfile::NamedTempFile;
 
     #[test]
     fn test_success() {
         let tmp = NamedTempFile::new().unwrap();
-        let fd = tmp.as_raw_fd();
-        posix_fadvise(fd, 0, 100, PosixFadviseAdvice::POSIX_FADV_WILLNEED)
+        posix_fadvise(&tmp, 0, 100, PosixFadviseAdvice::POSIX_FADV_WILLNEED)
             .expect("posix_fadvise failed");
     }
 
     #[test]
     fn test_errno() {
         let (rd, _wr) = pipe().unwrap();
-        let res = posix_fadvise(
-            rd as RawFd,
-            0,
-            100,
-            PosixFadviseAdvice::POSIX_FADV_WILLNEED,
-        );
+        let res =
+            posix_fadvise(&rd, 0, 100, PosixFadviseAdvice::POSIX_FADV_WILLNEED);
         assert_eq!(res, Err(Errno::ESPIPE));
     }
 }
 
 #[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "dragonfly",
+    linux_android,
+    freebsdlike,
     target_os = "emscripten",
     target_os = "fuchsia",
     target_os = "wasi",
-    target_os = "freebsd"
 ))]
 mod test_posix_fallocate {
 
     use nix::errno::Errno;
     use nix::fcntl::*;
     use nix::unistd::pipe;
-    use std::{
-        io::Read,
-        os::unix::io::{AsRawFd, RawFd},
-    };
+    use std::io::Read;
     use tempfile::NamedTempFile;
 
     #[test]
     fn success() {
         const LEN: usize = 100;
         let mut tmp = NamedTempFile::new().unwrap();
-        let fd = tmp.as_raw_fd();
-        let res = posix_fallocate(fd, 0, LEN as libc::off_t);
+        let res = posix_fallocate(&tmp, 0, LEN as libc::off_t);
         match res {
             Ok(_) => {
                 let mut data = [1u8; LEN];
@@ -565,10 +556,265 @@ mod test_posix_fallocate {
     #[test]
     fn errno() {
         let (rd, _wr) = pipe().unwrap();
-        let err = posix_fallocate(rd as RawFd, 0, 100).unwrap_err();
+        let err = posix_fallocate(&rd, 0, 100).unwrap_err();
         match err {
             Errno::EINVAL | Errno::ENODEV | Errno::ESPIPE | Errno::EBADF => (),
             errno => panic!("unexpected errno {errno}",),
         }
     }
+}
+
+#[cfg(any(target_os = "dragonfly", target_os = "netbsd", apple_targets))]
+#[test]
+fn test_f_get_path() {
+    use nix::fcntl::*;
+    use std::path::PathBuf;
+
+    let tmp = NamedTempFile::new().unwrap();
+    let mut path = PathBuf::new();
+    let res =
+        fcntl(&tmp, FcntlArg::F_GETPATH(&mut path)).expect("get path failed");
+    assert_ne!(res, -1);
+    assert_eq!(
+        path.as_path().canonicalize().unwrap(),
+        tmp.path().canonicalize().unwrap()
+    );
+}
+
+#[cfg(apple_targets)]
+#[test]
+fn test_f_preallocate() {
+    use nix::fcntl::*;
+
+    let tmp = NamedTempFile::new().unwrap();
+    let mut st: libc::fstore_t = unsafe { std::mem::zeroed() };
+
+    st.fst_flags = libc::F_ALLOCATECONTIG as libc::c_uint;
+    st.fst_posmode = libc::F_PEOFPOSMODE;
+    st.fst_length = 1024;
+    let res = fcntl(tmp, FcntlArg::F_PREALLOCATE(&mut st))
+        .expect("preallocation failed");
+
+    assert_eq!(res, 0);
+    assert!(st.fst_bytesalloc > 0);
+}
+
+#[cfg(apple_targets)]
+#[test]
+fn test_f_get_path_nofirmlink() {
+    use nix::fcntl::*;
+    use std::path::PathBuf;
+
+    let tmp = NamedTempFile::new().unwrap();
+    let mut path = PathBuf::new();
+    let res = fcntl(&tmp, FcntlArg::F_GETPATH_NOFIRMLINK(&mut path))
+        .expect("get path failed");
+    let mut tmpstr = String::from("/System/Volumes/Data");
+    tmpstr.push_str(
+        &tmp.path()
+            .canonicalize()
+            .unwrap()
+            .into_os_string()
+            .into_string()
+            .unwrap(),
+    );
+    assert_ne!(res, -1);
+    assert_eq!(
+        path.as_path()
+            .canonicalize()
+            .unwrap()
+            .into_os_string()
+            .into_string()
+            .unwrap(),
+        tmpstr
+    );
+}
+
+#[cfg(all(target_os = "freebsd", target_arch = "x86_64"))]
+#[test]
+fn test_f_kinfo() {
+    use nix::fcntl::*;
+    use std::path::PathBuf;
+
+    let tmp = NamedTempFile::new().unwrap();
+    // With TMPDIR set with UFS, the vnode name is not entered
+    // into the name cache thus path is always empty.
+    // Therefore, we reopen the tempfile a second time for the test
+    // to pass.
+    let tmp2 = File::open(tmp.path()).unwrap();
+    let mut path = PathBuf::new();
+    let res =
+        fcntl(&tmp2, FcntlArg::F_KINFO(&mut path)).expect("get path failed");
+    assert_ne!(res, -1);
+    assert_eq!(path, tmp.path());
+}
+
+/// Test `Flock` and associated functions.
+///
+#[cfg(not(any(target_os = "redox", target_os = "solaris")))]
+mod test_flock {
+    use nix::fcntl::*;
+    use tempfile::NamedTempFile;
+
+    /// Verify that `Flock::lock()` correctly obtains a lock, and subsequently unlocks upon drop.
+    #[test]
+    fn lock_and_drop() {
+        // Get 2 `File` handles to same underlying file.
+        let file1 = NamedTempFile::new().unwrap();
+        let file2 = file1.reopen().unwrap();
+        let file1 = file1.into_file();
+
+        // Lock first handle
+        let lock1 = Flock::lock(file1, FlockArg::LockExclusive).unwrap();
+
+        // Attempt to lock second handle
+        let file2 = match Flock::lock(file2, FlockArg::LockExclusiveNonblock) {
+            Ok(_) => panic!("Expected second exclusive lock to fail."),
+            Err((f, _)) => f,
+        };
+
+        // Drop first lock
+        std::mem::drop(lock1);
+
+        // Attempt to lock second handle again (but successfully)
+        if Flock::lock(file2, FlockArg::LockExclusiveNonblock).is_err() {
+            panic!("Expected locking to be successful.");
+        }
+    }
+
+    /// An exclusive lock can be downgraded
+    #[test]
+    fn downgrade() {
+        let file1 = NamedTempFile::new().unwrap();
+        let file2 = file1.reopen().unwrap();
+        let file1 = file1.into_file();
+
+        // Lock first handle
+        let lock1 = Flock::lock(file1, FlockArg::LockExclusive).unwrap();
+
+        // Attempt to lock second handle
+        let file2 = Flock::lock(file2, FlockArg::LockSharedNonblock)
+            .unwrap_err()
+            .0;
+
+        // Downgrade the lock
+        lock1.relock(FlockArg::LockShared).unwrap();
+
+        // Attempt to lock second handle again (but successfully)
+        Flock::lock(file2, FlockArg::LockSharedNonblock)
+            .expect("Expected locking to be successful.");
+    }
+
+    /// Verify that `Flock::unlock()` correctly obtains unlocks.
+    #[test]
+    fn unlock() {
+        // Get 2 `File` handles to same underlying file.
+        let file1 = NamedTempFile::new().unwrap();
+        let file2 = file1.reopen().unwrap();
+        let file1 = file1.into_file();
+
+        // Lock first handle
+        let lock1 = Flock::lock(file1, FlockArg::LockExclusive).unwrap();
+
+        // Unlock and retain file so any erroneous flocks also remain present.
+        let _file1 = lock1.unlock().unwrap();
+
+        // Attempt to lock second handle.
+        if Flock::lock(file2, FlockArg::LockExclusiveNonblock).is_err() {
+            panic!("Expected locking to be successful.");
+        }
+    }
+
+    /// A shared lock can be upgraded
+    #[test]
+    fn upgrade() {
+        let file1 = NamedTempFile::new().unwrap();
+        let file2 = file1.reopen().unwrap();
+        let file3 = file1.reopen().unwrap();
+        let file1 = file1.into_file();
+
+        // Lock first handle
+        let lock1 = Flock::lock(file1, FlockArg::LockShared).unwrap();
+
+        // Attempt to lock second handle
+        {
+            Flock::lock(file2, FlockArg::LockSharedNonblock)
+                .expect("Locking should've succeeded");
+        }
+
+        // Upgrade the lock
+        lock1.relock(FlockArg::LockExclusive).unwrap();
+
+        // Acquiring an additional shared lock should fail
+        Flock::lock(file3, FlockArg::LockSharedNonblock)
+            .expect_err("Should not have been able to lock the file");
+    }
+}
+
+#[cfg(apple_targets)]
+#[test]
+fn test_f_rdadvise() {
+    use nix::fcntl::*;
+
+    let contents = vec![1; 1024];
+    let mut buf = [0; 1024];
+    let mut tmp = NamedTempFile::new().unwrap();
+    tmp.write_all(&contents).unwrap();
+    let fd = open(tmp.path(), OFlag::empty(), Mode::empty()).unwrap();
+    let rad = libc::radvisory {
+        ra_offset: 0,
+        ra_count: contents.len() as _,
+    };
+    let res = fcntl(&tmp, FcntlArg::F_RDADVISE(rad)).expect("rdadivse failed");
+    assert_ne!(res, -1);
+    assert_eq!(contents.len(), read(&fd, &mut buf).unwrap());
+    assert_eq!(contents, &buf[0..contents.len()]);
+}
+
+#[cfg(apple_targets)]
+#[test]
+fn test_f_log2phys() {
+    use nix::fcntl::*;
+
+    const CONTENTS: &[u8] = b"abcd";
+    let mut tmp = NamedTempFile::new().unwrap();
+    tmp.write_all(CONTENTS).unwrap();
+    let mut offset: libc::off_t = 0;
+    let mut res = fcntl(&tmp, FcntlArg::F_LOG2PHYS(&mut offset))
+        .expect("log2phys failed");
+    assert_ne!(res, -1);
+    assert_ne!(offset, 0);
+    let mut info: libc::log2phys = unsafe { std::mem::zeroed() };
+    info.l2p_contigbytes = CONTENTS.len() as _;
+    info.l2p_devoffset = 3;
+    res = fcntl(&tmp, FcntlArg::F_LOG2PHYS_EXT(&mut info))
+        .expect("log2phys failed");
+    assert_ne!(res, -1);
+    assert_ne!({ info.l2p_devoffset }, 3);
+}
+
+#[cfg(apple_targets)]
+#[test]
+fn test_f_transferextents() {
+    use nix::fcntl::*;
+    use std::os::fd::AsRawFd;
+
+    let tmp1 = NamedTempFile::new().unwrap();
+    let tmp2 = NamedTempFile::new().unwrap();
+    let res = fcntl(&tmp1, FcntlArg::F_TRANSFEREXTENTS(tmp2.as_raw_fd()))
+        .expect("transferextents failed");
+    assert_ne!(res, -1);
+}
+
+#[cfg(target_os = "freebsd")]
+#[test]
+fn test_f_readahead() {
+    use nix::fcntl::*;
+
+    let tmp = NamedTempFile::new().unwrap();
+    let mut res = fcntl(&tmp, FcntlArg::F_READAHEAD(1_000_000))
+        .expect("read ahead failed");
+    assert_ne!(res, -1);
+    res = fcntl(&tmp, FcntlArg::F_READAHEAD(-1024)).expect("read ahead failed");
+    assert_ne!(res, -1);
 }

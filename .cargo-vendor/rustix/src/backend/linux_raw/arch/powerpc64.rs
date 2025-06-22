@@ -10,7 +10,7 @@
 //! architectures.
 
 use crate::backend::reg::{
-    ArgReg, FromAsm, RetReg, SyscallNumber, ToAsm, A0, A1, A2, A3, A4, A5, R0,
+    ArgReg, FromAsm, RetReg, SyscallNumber, ToAsm as _, A0, A1, A2, A3, A4, A5, R0,
 };
 use core::arch::asm;
 
@@ -96,6 +96,7 @@ pub(in crate::backend) unsafe fn syscall1_readonly(
 pub(in crate::backend) unsafe fn syscall1_noreturn(nr: SyscallNumber<'_>, a0: ArgReg<'_, A0>) -> ! {
     asm!(
         "sc",
+        "trap",
         in("r0") nr.to_asm(),
         in("r3") a0.to_asm(),
         options(nostack, noreturn)

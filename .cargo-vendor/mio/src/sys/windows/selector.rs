@@ -50,7 +50,7 @@ impl AfdGroup {
 }
 
 cfg_io_source! {
-    const POLL_GROUP__MAX_GROUP_SIZE: usize = 32;
+    const POLL_GROUP_MAX_GROUP_SIZE: usize = 32;
 
     impl AfdGroup {
         pub fn acquire(&self) -> io::Result<Arc<Afd>> {
@@ -59,7 +59,7 @@ cfg_io_source! {
                 self._alloc_afd_group(&mut afd_group)?;
             } else {
                 // + 1 reference in Vec
-                if Arc::strong_count(afd_group.last().unwrap()) > POLL_GROUP__MAX_GROUP_SIZE  {
+                if Arc::strong_count(afd_group.last().unwrap()) > POLL_GROUP_MAX_GROUP_SIZE  {
                     self._alloc_afd_group(&mut afd_group)?;
                 }
             }
@@ -665,7 +665,7 @@ cfg_io_source! {
         ] {
             if let Ok(base_socket) = try_get_base_socket(raw_socket, ioctl) {
                 // Since we know now that we're dealing with an LSP (otherwise
-                // SIO_BASE_HANDLE would't have failed), only return any result
+                // SIO_BASE_HANDLE wouldn't have failed), only return any result
                 // when it is different from the original `raw_socket`.
                 if base_socket != raw_socket {
                     return Ok(base_socket);

@@ -142,7 +142,7 @@ fn recv_with_fd(socket: RawFd, bs: &mut [u8], mut fds: &mut [RawFd]) -> io::Resu
                 let data_offset = ptr_offset_from(data_ptr, cmsg_header as *const _);
                 debug_assert!(data_offset >= 0);
                 let data_byte_count = (*cmsg_header).cmsg_len as usize - data_offset as usize;
-                debug_assert!((*cmsg_header).cmsg_len as isize > data_offset);
+                debug_assert!((*cmsg_header).cmsg_len as isize >= data_offset);
                 debug_assert!(data_byte_count % mem::size_of::<RawFd>() == 0);
                 let rawfd_count = (data_byte_count / mem::size_of::<RawFd>()) as isize;
                 let fd_ptr = data_ptr as *const RawFd;
@@ -191,7 +191,9 @@ impl SendWithFd for tokio::net::UnixStream {
     /// Neither is guaranteed to be received by the other end in a single chunk and
     /// may arrive entirely independently.
     fn send_with_fd(&self, bytes: &[u8], fds: &[RawFd]) -> io::Result<usize> {
-        self.try_io(Interest::WRITABLE, || send_with_fd(self.as_raw_fd(), bytes, fds))
+        self.try_io(Interest::WRITABLE, || {
+            send_with_fd(self.as_raw_fd(), bytes, fds)
+        })
     }
 }
 
@@ -228,7 +230,9 @@ impl SendWithFd for tokio::net::UnixDatagram {
     /// time, however the receiver end may not receive the full message if its buffers are too
     /// small.
     fn send_with_fd(&self, bytes: &[u8], fds: &[RawFd]) -> io::Result<usize> {
-        self.try_io(Interest::WRITABLE, || send_with_fd(self.as_raw_fd(), bytes, fds))
+        self.try_io(Interest::WRITABLE, || {
+            send_with_fd(self.as_raw_fd(), bytes, fds)
+        })
     }
 }
 
@@ -252,7 +256,9 @@ impl RecvWithFd for tokio::net::UnixStream {
     /// data. In other words, it is not required that this receives the bytes and file descriptors
     /// that were sent with a single `send_with_fd` call by somebody else.
     fn recv_with_fd(&self, bytes: &mut [u8], fds: &mut [RawFd]) -> io::Result<(usize, usize)> {
-        self.try_io(Interest::READABLE, || recv_with_fd(self.as_raw_fd(), bytes, fds))
+        self.try_io(Interest::READABLE, || {
+            recv_with_fd(self.as_raw_fd(), bytes, fds)
+        })
     }
 }
 
@@ -300,7 +306,9 @@ impl RecvWithFd for tokio::net::UnixDatagram {
     /// the `fds` buffer. If the sender sends `fds.len()` descriptors, but prefaces the descriptors
     /// with some other ancilliary data, then some file descriptors may be truncated as well.
     fn recv_with_fd(&self, bytes: &mut [u8], fds: &mut [RawFd]) -> io::Result<(usize, usize)> {
-        self.try_io(Interest::READABLE, || recv_with_fd(self.as_raw_fd(), bytes, fds))
+        self.try_io(Interest::READABLE, || {
+            recv_with_fd(self.as_raw_fd(), bytes, fds)
+        })
     }
 }
 
@@ -440,5 +448,27 @@ mod tests {
         if let Ok(_) = l.send_with_fd(&sent_bytes[..], &[0xffi32][..]) {
             panic!("expected an error when sending a junk file descriptor");
         }
+    }
+
+    #[test]
+    fn sending_empty_fds_works() {
+        let (l, r) = net::UnixStream::pair().expect("create UnixStream pair");
+        let sent_bytes = b"hello world!";
+        let sent_fds = [];
+
+        assert_eq!(
+            l.send_with_fd(&sent_bytes[..], &sent_fds[..])
+                .expect("send should be successful"),
+            sent_bytes.len()
+        );
+
+        let mut recv_bytes = [0; 128];
+        let mut recv_fds = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+        assert_eq!(
+            r.recv_with_fd(&mut recv_bytes, &mut recv_fds)
+                .expect("recv should be successful"),
+            (sent_bytes.len(), sent_fds.len())
+        );
     }
 }

@@ -123,6 +123,8 @@
 //! currently default `Dispatch`. This is used primarily by `tracing`
 //! instrumentation.
 //!
+use core::ptr::addr_of;
+
 use crate::{
     callsite, span,
     subscriber::{self, NoSubscriber, Subscriber},
@@ -144,12 +146,6 @@ use crate::stdlib::{
     error,
 };
 
-#[cfg(feature = "alloc")]
-use alloc::sync::{Arc, Weak};
-
-#[cfg(feature = "alloc")]
-use core::ops::Deref;
-
 /// `Dispatch` trace data to a [`Subscriber`].
 #[derive(Clone)]
 pub struct Dispatch {
@@ -159,7 +155,7 @@ pub struct Dispatch {
 /// `WeakDispatch` is a version of [`Dispatch`] that holds a non-owning reference
 /// to a [`Subscriber`].
 ///
-/// The Subscriber` may be accessed by calling [`WeakDispatch::upgrade`],
+/// The `Subscriber` may be accessed by calling [`WeakDispatch::upgrade`],
 /// which returns an `Option<Dispatch>`. If all [`Dispatch`] clones that point
 /// at the `Subscriber` have been dropped, [`WeakDispatch::upgrade`] will return
 /// `None`. Otherwise, it will return `Some(Dispatch)`.
@@ -187,9 +183,11 @@ enum Kind<T> {
 
 #[cfg(feature = "std")]
 thread_local! {
-    static CURRENT_STATE: State = State {
-        default: RefCell::new(None),
-        can_enter: Cell::new(true),
+    static CURRENT_STATE: State = const {
+        State {
+            default: RefCell::new(None),
+            can_enter: Cell::new(true),
+        }
     };
 }
 
@@ -246,14 +244,13 @@ pub struct DefaultGuard(Option<Dispatch>);
 ///
 /// <pre class="ignore" style="white-space:normal;font:inherit;">
 ///     <strong>Note</strong>: This function required the Rust standard library.
-///     <code>no_std</code> users should use <a href="../fn.set_global_default.html">
+///     <code>no_std</code> users should use <a href="fn.set_global_default.html">
 ///     <code>set_global_default</code></a> instead.
 /// </pre>
 ///
 /// [span]: super::span
 /// [`Subscriber`]: super::subscriber::Subscriber
 /// [`Event`]: super::event::Event
-/// [`set_global_default`]: super::set_global_default
 #[cfg(feature = "std")]
 #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub fn with_default<T>(dispatcher: &Dispatch, f: impl FnOnce() -> T) -> T {
@@ -270,11 +267,11 @@ pub fn with_default<T>(dispatcher: &Dispatch, f: impl FnOnce() -> T) -> T {
 ///
 /// <pre class="ignore" style="white-space:normal;font:inherit;">
 ///     <strong>Note</strong>: This function required the Rust standard library.
-///     <code>no_std</code> users should use <a href="../fn.set_global_default.html">
+///     <code>no_std</code> users should use <a href="fn.set_global_default.html">
 ///     <code>set_global_default</code></a> instead.
 /// </pre>
 ///
-/// [`set_global_default`]: super::set_global_default
+/// [`set_global_default`]: set_global_default
 #[cfg(feature = "std")]
 #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 #[must_use = "Dropping the guard unregisters the dispatcher."]
@@ -455,7 +452,7 @@ fn get_global() -> &'static Dispatch {
     unsafe {
         // This is safe given the invariant that setting the global dispatcher
         // also sets `GLOBAL_INIT` to `INITIALIZED`.
-        &GLOBAL_DISPATCH
+        &*addr_of!(GLOBAL_DISPATCH)
     }
 }
 
@@ -678,7 +675,7 @@ impl Dispatch {
     /// [`Subscriber`]: super::subscriber::Subscriber
     /// [`drop_span`]: super::subscriber::Subscriber::drop_span
     /// [`new_span`]: super::subscriber::Subscriber::new_span
-    /// [`try_close`]: Entered::try_close()
+    /// [`try_close`]: Self::try_close()
     #[inline]
     #[deprecated(since = "0.1.2", note = "use `Dispatch::try_close` instead")]
     pub fn drop_span(&self, id: span::Id) {
@@ -881,7 +878,7 @@ impl<'a> Entered<'a> {
 }
 
 #[cfg(feature = "std")]
-impl<'a> Drop for Entered<'a> {
+impl Drop for Entered<'_> {
     #[inline]
     fn drop(&mut self) {
         self.0.can_enter.set(true);

@@ -10,19 +10,33 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2018"
+edition = "2021"
 rust-version = "1.57"
 name = "wasm-bindgen-macro-support"
-version = "0.2.92"
+version = "0.2.100"
 authors = ["The wasm-bindgen Developers"]
+build = false
+include = [
+    "/LICENSE-*",
+    "/src",
+]
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = """
 The part of the implementation of the `#[wasm_bindgen]` attribute that is not in the shared backend crate
 """
 homepage = "https://rustwasm.github.io/wasm-bindgen/"
 documentation = "https://docs.rs/wasm-bindgen"
+readme = false
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rustwasm/wasm-bindgen/tree/master/crates/macro-support"
-resolver = "2"
+
+[lib]
+name = "wasm_bindgen_macro_support"
+path = "src/lib.rs"
 
 [dependencies.proc-macro2]
 version = "1.0"
@@ -34,16 +48,23 @@ version = "1.0"
 version = "2.0"
 features = [
     "visit",
+    "visit-mut",
     "full",
 ]
 
 [dependencies.wasm-bindgen-backend]
-version = "=0.2.92"
+version = "=0.2.100"
 
 [dependencies.wasm-bindgen-shared]
-version = "=0.2.92"
+version = "=0.2.100"
 
 [features]
 extra-traits = ["syn/extra-traits"]
-spans = ["wasm-bindgen-backend/spans"]
 strict-macro = []
+
+[lints.clippy]
+large_enum_variant = "allow"
+new_without_default = "allow"
+overly_complex_bool_expr = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"

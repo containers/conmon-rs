@@ -10,11 +10,21 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2018"
+edition = "2021"
 rust-version = "1.57"
 name = "wasm-bindgen-macro"
-version = "0.2.92"
+version = "0.2.100"
 authors = ["The wasm-bindgen Developers"]
+build = false
+include = [
+    "/LICENSE-*",
+    "/src",
+]
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = """
 Definition of the `#[wasm_bindgen]` attribute, an internal dependency
 """
@@ -23,31 +33,28 @@ documentation = "https://docs.rs/wasm-bindgen"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rustwasm/wasm-bindgen/tree/master/crates/macro"
-resolver = "2"
 
 [lib]
+name = "wasm_bindgen_macro"
+path = "src/lib.rs"
 proc-macro = true
 
 [dependencies.quote]
 version = "1.0"
 
 [dependencies.wasm-bindgen-macro-support]
-version = "=0.2.92"
+version = "=0.2.100"
 
 [dev-dependencies.trybuild]
 version = "1.0"
 
-[dev-dependencies.wasm-bindgen]
-version = "0.2.92"
-
-[dev-dependencies.wasm-bindgen-futures]
-version = "0.4.42"
-
-[dev-dependencies.web-sys]
-version = "0.3.69"
-features = ["Worker"]
-
 [features]
-spans = ["wasm-bindgen-macro-support/spans"]
 strict-macro = ["wasm-bindgen-macro-support/strict-macro"]
 xxx_debug_only_print_generated_code = []
+
+[lints.clippy]
+large_enum_variant = "allow"
+new_without_default = "allow"
+overly_complex_bool_expr = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"

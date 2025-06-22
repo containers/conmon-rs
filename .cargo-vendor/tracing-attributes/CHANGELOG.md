@@ -1,3 +1,52 @@
+# 0.1.30 (June 17, 2025)
+
+### Fixed
+
+- Fix `tracing::instrument` regression around shadowing ([#3311])
+
+[#3311]: https://github.com/tokio-rs/tracing/pull/3311
+
+# 0.1.29 (June 6, 2025)
+
+### Changed
+
+- Bump MSRV to 1.65 ([#3033])
+
+### Fixed
+
+- Let `dead_code` lint work on `#[instrument]`ed functions ([#3108])
+- Globally qualify attribute paths ([#3126])
+
+[#3033]: https://github.com/tokio-rs/tracing/pull/3033
+[#3108]: https://github.com/tokio-rs/tracing/pull/3108
+[#3126]: https://github.com/tokio-rs/tracing/pull/3126
+
+# 0.1.28 (November 26, 2024)
+
+### Changed
+
+- Bump MSRV to 1.63 ([#2793])
+
+### Fixed
+
+- Added missing RecordTypes for instrument ([#2781])
+- Change order of async and unsafe modifier ([#2864])
+- Extract match scrutinee ([#2880])
+- Allow field path segments to be keywords ([#2925])
+- Support const values for `target` and `name` ([#2941])
+
+### Documented
+
+- Fix backporting error in attributes ([#2780])
+
+[#2780]: https://github.com/tokio-rs/tracing/pull/2780
+[#2781]: https://github.com/tokio-rs/tracing/pull/2781
+[#2793]: https://github.com/tokio-rs/tracing/pull/2793
+[#2864]: https://github.com/tokio-rs/tracing/pull/2864
+[#2880]: https://github.com/tokio-rs/tracing/pull/2880
+[#2925]: https://github.com/tokio-rs/tracing/pull/2925
+[#2941]: https://github.com/tokio-rs/tracing/pull/2941
+
 # 0.1.27 (October 13, 2023)
 
 ### Changed

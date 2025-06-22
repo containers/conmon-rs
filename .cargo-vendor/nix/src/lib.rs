@@ -12,6 +12,7 @@
 //! * `dir` - Stuff relating to directory iteration
 //! * `env` - Manipulate environment variables
 //! * `event` - Event-driven APIs, like `kqueue` and `epoll`
+//! * `fanotify` - Linux's `fanotify` filesystem events monitoring API
 //! * `feature` - Query characteristics of the OS at runtime
 //! * `fs` - File system functionality
 //! * `hostname` - Get and set the system's hostname
@@ -33,6 +34,7 @@
 //! * `sched` - Manipulate process's scheduling
 //! * `socket` - Sockets, whether for networking or local use
 //! * `signal` - Send and receive signals to processes
+//! * `syslog` - System logging
 //! * `term` - Terminal control APIs
 //! * `time` - Query the operating system's clocks
 //! * `ucontext` - User thread context
@@ -41,11 +43,13 @@
 //! * `zerocopy` - APIs like `sendfile` and `copy_file_range`
 #![crate_name = "nix"]
 #![cfg(unix)]
-#![cfg_attr(docsrs, doc(cfg(all())))]
 #![allow(non_camel_case_types)]
-#![cfg_attr(test, deny(warnings))]
+// A clear document is a good document no matter if it has a summary in its
+// first paragraph or not.
+#![allow(clippy::too_long_first_doc_paragraph)]
 #![recursion_limit = "500"]
 #![deny(unused)]
+#![deny(unexpected_cfgs)]
 #![allow(unused_macros)]
 #![cfg_attr(
     not(all(
@@ -54,6 +58,7 @@
         feature = "dir",
         feature = "env",
         feature = "event",
+        feature = "fanotify",
         feature = "feature",
         feature = "fs",
         feature = "hostname",
@@ -75,6 +80,7 @@
         feature = "sched",
         feature = "socket",
         feature = "signal",
+        feature = "syslog",
         feature = "term",
         feature = "time",
         feature = "ucontext",
@@ -90,6 +96,12 @@
 #![warn(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(clippy::cast_ptr_alignment)]
+#![deny(unsafe_op_in_unsafe_fn)]
+// I found the change suggested by this rules could hurt code readability. I cannot
+// remeber every type's default value, in such cases, it forces me to open
+// the std doc to insepct the Default value, which is unnecessary with
+// `.unwrap_or(value)`.
+#![allow(clippy::unwrap_or_default)]
 
 // Re-exported external crates
 pub use libc;
@@ -116,30 +128,22 @@ feature! {
     #[deny(missing_docs)]
     pub mod features;
 }
-#[allow(missing_docs)]
 pub mod fcntl;
 feature! {
     #![feature = "net"]
 
-    #[cfg(any(target_os = "android",
-              target_os = "dragonfly",
-              target_os = "freebsd",
-              target_os = "ios",
-              target_os = "linux",
-              target_os = "macos",
-              target_os = "netbsd",
-              target_os = "illumos",
-              target_os = "openbsd"))]
+    #[cfg(any(linux_android,
+              bsd,
+              solarish))]
     #[deny(missing_docs)]
     pub mod ifaddrs;
     #[cfg(not(target_os = "redox"))]
     #[deny(missing_docs)]
     pub mod net;
 }
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(linux_android)]
 feature! {
     #![feature = "kmod"]
-    #[allow(missing_docs)]
     pub mod kmod;
 }
 feature! {
@@ -147,9 +151,8 @@ feature! {
     pub mod mount;
 }
 #[cfg(any(
-    target_os = "dragonfly",
-    target_os = "freebsd",
-    target_os = "linux",
+    freebsdlike,
+    all(target_os = "linux", not(target_env = "ohos")),
     target_os = "netbsd"
 ))]
 feature! {
@@ -173,7 +176,6 @@ feature! {
 pub mod sys;
 feature! {
     #![feature = "time"]
-    #[allow(missing_docs)]
     pub mod time;
 }
 // This can be implemented for other platforms as soon as libc
@@ -192,8 +194,27 @@ feature! {
     #[allow(missing_docs)]
     pub mod ucontext;
 }
-#[allow(missing_docs)]
 pub mod unistd;
+
+#[cfg(any(feature = "poll", feature = "event"))]
+mod poll_timeout;
+
+#[cfg(any(
+    target_os = "freebsd",
+    target_os = "haiku",
+    target_os = "linux",
+    target_os = "netbsd",
+    apple_targets
+))]
+feature! {
+    #![feature = "process"]
+    pub mod spawn;
+}
+
+feature! {
+    #![feature = "syslog"]
+    pub mod syslog;
+}
 
 use std::ffi::{CStr, CString, OsStr};
 use std::mem::MaybeUninit;
@@ -215,7 +236,7 @@ pub type Result<T> = result::Result<T, Errno>;
 /// * `Eq`
 /// * Small size
 /// * Represents all of the system's errnos, instead of just the most common
-/// ones.
+///   ones.
 pub type Error = Errno;
 
 /// Common trait used to represent file system paths by many Nix functions.
@@ -299,7 +320,7 @@ impl NixPath for [u8] {
         F: FnOnce(&CStr) -> T,
     {
         // The real PATH_MAX is typically 4096, but it's statistically unlikely to have a path
-        // longer than ~300 bytes. See the the PR description to get stats for your own machine.
+        // longer than ~300 bytes. See the PR description to get stats for your own machine.
         // https://github.com/nix-rust/nix/pull/1656
         //
         // By being smaller than a memory page, we also avoid the compiler inserting a probe frame:
@@ -311,7 +332,7 @@ impl NixPath for [u8] {
         }
 
         let mut buf = MaybeUninit::<[u8; MAX_STACK_ALLOCATION]>::uninit();
-        let buf_ptr = buf.as_mut_ptr() as *mut u8;
+        let buf_ptr = buf.as_mut_ptr().cast();
 
         unsafe {
             ptr::copy_nonoverlapping(self.as_ptr(), buf_ptr, self.len());
@@ -370,5 +391,23 @@ impl NixPath for PathBuf {
         F: FnOnce(&CStr) -> T,
     {
         self.as_os_str().with_nix_path(f)
+    }
+}
+
+/// Like `NixPath::with_nix_path()`, but allow the `path` argument to be optional.
+///
+/// A NULL pointer will be provided if `path.is_none()`.
+#[cfg(any(
+    all(apple_targets, feature = "mount"),
+    all(linux_android, any(feature = "mount", feature = "fanotify"))
+))]
+pub(crate) fn with_opt_nix_path<P, T, F>(path: Option<&P>, f: F) -> Result<T>
+where
+    P: ?Sized + NixPath,
+    F: FnOnce(*const libc::c_char) -> T,
+{
+    match path {
+        Some(path) => path.with_nix_path(|p_str| f(p_str.as_ptr())),
+        None => Ok(f(ptr::null())),
     }
 }

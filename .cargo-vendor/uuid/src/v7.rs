@@ -31,7 +31,8 @@ impl Uuid {
     /// # Examples
     ///
     /// A v7 UUID can be created from a unix [`Timestamp`] plus a 128 bit
-    /// random number. When supplied as such, the data will be
+    /// random number. When supplied as such, the data will be combined
+    /// to ensure uniqueness and sortability at millisecond granularity.
     ///
     /// ```rust
     /// # use uuid::{Uuid, Timestamp, NoContext};
@@ -101,20 +102,12 @@ mod tests {
 
     use crate::{std::string::ToString, ClockSequence, NoContext, Variant, Version};
 
-    #[cfg(all(
-        target_arch = "wasm32",
-        target_vendor = "unknown",
-        target_os = "unknown"
-    ))]
+    #[cfg(all(target_arch = "wasm32", any(target_os = "unknown", target_os = "none")))]
     use wasm_bindgen_test::*;
 
     #[test]
     #[cfg_attr(
-        all(
-            target_arch = "wasm32",
-            target_vendor = "unknown",
-            target_os = "unknown"
-        ),
+        all(target_arch = "wasm32", any(target_os = "unknown", target_os = "none")),
         wasm_bindgen_test
     )]
     fn test_new() {
@@ -138,11 +131,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        all(
-            target_arch = "wasm32",
-            target_vendor = "unknown",
-            target_os = "unknown"
-        ),
+        all(target_arch = "wasm32", any(target_os = "unknown", target_os = "none")),
         wasm_bindgen_test
     )]
     #[cfg(feature = "std")]
@@ -155,11 +144,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        all(
-            target_arch = "wasm32",
-            target_vendor = "unknown",
-            target_os = "unknown"
-        ),
+        all(target_arch = "wasm32", any(target_os = "unknown", target_os = "none")),
         wasm_bindgen_test
     )]
     fn test_sorting() {
@@ -178,11 +163,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        all(
-            target_arch = "wasm32",
-            target_vendor = "unknown",
-            target_os = "unknown"
-        ),
+        all(target_arch = "wasm32", any(target_os = "unknown", target_os = "none")),
         wasm_bindgen_test
     )]
     fn test_new_timestamp_roundtrip() {
@@ -200,11 +181,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        all(
-            target_arch = "wasm32",
-            target_vendor = "unknown",
-            target_os = "unknown"
-        ),
+        all(target_arch = "wasm32", any(target_os = "unknown", target_os = "none")),
         wasm_bindgen_test
     )]
     fn test_new_max_context() {

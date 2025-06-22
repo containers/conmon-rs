@@ -29,10 +29,10 @@ impl Uuid {
     /// * [UUID Version 5 in RFC 9562](https://www.ietf.org/rfc/rfc9562.html#section-5.5)
     /// * [Name-Based UUID Generation in RFC 9562](https://www.ietf.org/rfc/rfc9562.html#section-6.5)
     ///
-    /// [`NAMESPACE_DNS`]: struct.Uuid.html#associatedconst.NAMESPACE_DNS
-    /// [`NAMESPACE_OID`]: struct.Uuid.html#associatedconst.NAMESPACE_OID
-    /// [`NAMESPACE_URL`]: struct.Uuid.html#associatedconst.NAMESPACE_URL
-    /// [`NAMESPACE_X500`]: struct.Uuid.html#associatedconst.NAMESPACE_X500
+    /// [`NAMESPACE_DNS`]: struct.Uuid.html#associatedconstant.NAMESPACE_DNS
+    /// [`NAMESPACE_OID`]: struct.Uuid.html#associatedconstant.NAMESPACE_OID
+    /// [`NAMESPACE_URL`]: struct.Uuid.html#associatedconstant.NAMESPACE_URL
+    /// [`NAMESPACE_X500`]: struct.Uuid.html#associatedconstant.NAMESPACE_X500
     pub fn new_v5(namespace: &Uuid, name: &[u8]) -> Uuid {
         crate::Builder::from_sha1_bytes(crate::sha1::hash(namespace.as_bytes(), name)).into_uuid()
     }
@@ -42,11 +42,7 @@ impl Uuid {
 mod tests {
     use super::*;
 
-    #[cfg(all(
-        target_arch = "wasm32",
-        target_vendor = "unknown",
-        target_os = "unknown"
-    ))]
+    #[cfg(all(target_arch = "wasm32", any(target_os = "unknown", target_os = "none")))]
     use wasm_bindgen_test::*;
 
     use crate::{std::string::ToString, Variant, Version};
@@ -136,11 +132,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        all(
-            target_arch = "wasm32",
-            target_vendor = "unknown",
-            target_os = "unknown"
-        ),
+        all(target_arch = "wasm32", any(target_os = "unknown", target_os = "none")),
         wasm_bindgen_test
     )]
     fn test_get_version() {
@@ -152,11 +144,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        all(
-            target_arch = "wasm32",
-            target_vendor = "unknown",
-            target_os = "unknown"
-        ),
+        all(target_arch = "wasm32", any(target_os = "unknown", target_os = "none")),
         wasm_bindgen_test
     )]
     fn test_hyphenated() {
@@ -169,11 +157,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        all(
-            target_arch = "wasm32",
-            target_vendor = "unknown",
-            target_os = "unknown"
-        ),
+        all(target_arch = "wasm32", any(target_os = "unknown", target_os = "none")),
         wasm_bindgen_test
     )]
     fn test_new() {

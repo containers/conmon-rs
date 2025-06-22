@@ -18,9 +18,12 @@ use std::net::{Ipv4Addr, Ipv6Addr};
     feature = "all",
     any(
         target_os = "ios",
+        target_os = "visionos",
         target_os = "macos",
         target_os = "tvos",
         target_os = "watchos",
+        target_os = "illumos",
+        target_os = "solaris",
     )
 ))]
 use std::num::NonZeroU32;
@@ -31,6 +34,7 @@ use std::num::NonZeroU32;
         target_os = "android",
         target_os = "freebsd",
         target_os = "ios",
+        target_os = "visionos",
         target_os = "linux",
         target_os = "macos",
         target_os = "tvos",
@@ -46,6 +50,7 @@ use std::os::unix::ffi::OsStrExt;
         target_os = "android",
         target_os = "freebsd",
         target_os = "ios",
+        target_os = "visionos",
         target_os = "linux",
         target_os = "macos",
         target_os = "tvos",
@@ -63,9 +68,11 @@ use std::{io, slice};
 
 #[cfg(not(any(
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "tvos",
     target_os = "watchos",
+    target_os = "cygwin",
 )))]
 use libc::ssize_t;
 use libc::{in6_addr, in_addr};
@@ -118,6 +125,24 @@ pub(crate) use libc::SO_OOBINLINE;
 // Used in `Socket`.
 #[cfg(not(target_os = "nto"))]
 pub(crate) use libc::ipv6_mreq as Ipv6Mreq;
+#[cfg(all(
+    feature = "all",
+    not(any(
+        target_os = "dragonfly",
+        target_os = "fuchsia",
+        target_os = "hurd",
+        target_os = "illumos",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "redox",
+        target_os = "solaris",
+        target_os = "haiku",
+        target_os = "espidf",
+        target_os = "vita",
+        target_os = "cygwin",
+    ))
+))]
+pub(crate) use libc::IPV6_RECVHOPLIMIT;
 #[cfg(not(any(
     target_os = "dragonfly",
     target_os = "fuchsia",
@@ -148,6 +173,7 @@ pub(crate) use libc::IP_HDRINCL;
     target_os = "nto",
     target_os = "espidf",
     target_os = "vita",
+    target_os = "cygwin",
 )))]
 pub(crate) use libc::IP_RECVTOS;
 #[cfg(not(any(
@@ -160,6 +186,7 @@ pub(crate) use libc::IP_RECVTOS;
 pub(crate) use libc::IP_TOS;
 #[cfg(not(any(
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "tvos",
     target_os = "watchos",
@@ -167,12 +194,13 @@ pub(crate) use libc::IP_TOS;
 pub(crate) use libc::SO_LINGER;
 #[cfg(any(
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "tvos",
     target_os = "watchos",
 ))]
 pub(crate) use libc::SO_LINGER_SEC as SO_LINGER;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "cygwin"))]
 pub(crate) use libc::SO_PASSCRED;
 pub(crate) use libc::{
     ip_mreq as IpMreq, linger, IPPROTO_IP, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, IPV6_MULTICAST_IF,
@@ -202,6 +230,7 @@ pub(crate) use libc::{
     target_os = "haiku",
     target_os = "illumos",
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "netbsd",
     target_os = "nto",
@@ -217,6 +246,7 @@ pub(crate) use libc::{IPV6_ADD_MEMBERSHIP, IPV6_DROP_MEMBERSHIP};
     target_os = "haiku",
     target_os = "illumos",
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "netbsd",
     target_os = "openbsd",
@@ -236,11 +266,13 @@ pub(crate) use libc::{
         target_os = "fuchsia",
         target_os = "illumos",
         target_os = "ios",
+        target_os = "visionos",
         target_os = "linux",
         target_os = "macos",
         target_os = "netbsd",
         target_os = "tvos",
         target_os = "watchos",
+        target_os = "cygwin",
     )
 ))]
 pub(crate) use libc::{TCP_KEEPCNT, TCP_KEEPINTVL};
@@ -250,6 +282,7 @@ pub(crate) type Bool = c_int;
 
 #[cfg(any(
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "nto",
     target_os = "tvos",
@@ -259,6 +292,7 @@ use libc::TCP_KEEPALIVE as KEEPALIVE_TIME;
 #[cfg(not(any(
     target_os = "haiku",
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "nto",
     target_os = "openbsd",
@@ -284,9 +318,11 @@ macro_rules! syscall {
 /// Maximum size of a buffer passed to system call like `recv` and `send`.
 #[cfg(not(any(
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "tvos",
     target_os = "watchos",
+    target_os = "cygwin",
 )))]
 const MAX_BUF_LEN: usize = ssize_t::MAX as usize;
 
@@ -300,9 +336,11 @@ const MAX_BUF_LEN: usize = ssize_t::MAX as usize;
 // both platforms.
 #[cfg(any(
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "tvos",
     target_os = "watchos",
+    target_os = "cygwin",
 ))]
 const MAX_BUF_LEN: usize = c_int::MAX as usize - 1;
 
@@ -339,6 +377,7 @@ type IovLen = usize;
     target_os = "hurd",
     target_os = "illumos",
     target_os = "ios",
+    target_os = "visionos",
     target_os = "macos",
     target_os = "netbsd",
     target_os = "nto",
@@ -348,6 +387,7 @@ type IovLen = usize;
     target_os = "watchos",
     target_os = "espidf",
     target_os = "vita",
+    target_os = "cygwin",
 ))]
 type IovLen = c_int;
 
@@ -406,7 +446,8 @@ impl Type {
             target_os = "illumos",
             target_os = "linux",
             target_os = "netbsd",
-            target_os = "openbsd"
+            target_os = "openbsd",
+            target_os = "cygwin",
         )
     ))]
     #[cfg_attr(
@@ -444,6 +485,7 @@ impl Type {
             target_os = "openbsd",
             target_os = "redox",
             target_os = "solaris",
+            target_os = "cygwin",
         )
     ))]
     #[cfg_attr(
@@ -481,6 +523,7 @@ impl Type {
         target_os = "openbsd",
         target_os = "redox",
         target_os = "solaris",
+        target_os = "cygwin",
     ))]
     pub(crate) const fn _cloexec(self) -> Type {
         Type(self.0 | libc::SOCK_CLOEXEC)
@@ -598,10 +641,16 @@ impl RecvFlags {
     /// on the local host.
     ///
     /// On Unix this corresponds to the `MSG_DONTROUTE` flag.
-    #[cfg(all(feature = "all", any(target_os = "android", target_os = "linux")))]
+    #[cfg(all(
+        feature = "all",
+        any(target_os = "android", target_os = "linux", target_os = "cygwin"),
+    ))]
     #[cfg_attr(
         docsrs,
-        doc(cfg(all(feature = "all", any(target_os = "android", target_os = "linux"))))
+        doc(cfg(all(
+            feature = "all",
+            any(target_os = "android", target_os = "linux", target_os = "cygwin")
+        )))
     )]
     pub const fn is_dontroute(self) -> bool {
         self.0 & libc::MSG_DONTROUTE != 0
@@ -619,7 +668,10 @@ impl std::fmt::Debug for RecvFlags {
         s.field("is_truncated", &self.is_truncated());
         #[cfg(all(feature = "all", any(target_os = "android", target_os = "linux")))]
         s.field("is_confirm", &self.is_confirm());
-        #[cfg(all(feature = "all", any(target_os = "android", target_os = "linux")))]
+        #[cfg(all(
+            feature = "all",
+            any(target_os = "android", target_os = "linux", target_os = "cygwin"),
+        ))]
         s.field("is_dontroute", &self.is_dontroute());
         s.finish()
     }
@@ -799,7 +851,7 @@ impl SockAddr {
                     // Abstract addresses only exist on Linux.
                     // NOTE: although Fuchsia does define `AF_UNIX` it's not actually implemented.
                     // See https://github.com/rust-lang/socket2/pull/403#discussion_r1123557978
-                    || (cfg!(not(any(target_os = "linux", target_os = "android")))
+                    || (cfg!(not(any(target_os = "linux", target_os = "android", target_os = "cygwin")))
                     && storage.sun_path[0] == 0)
             })
             .unwrap_or_default()
@@ -872,14 +924,14 @@ impl SockAddr {
     pub fn as_abstract_namespace(&self) -> Option<&[u8]> {
         // NOTE: although Fuchsia does define `AF_UNIX` it's not actually implemented.
         // See https://github.com/rust-lang/socket2/pull/403#discussion_r1123557978
-        #[cfg(any(target_os = "linux", target_os = "android"))]
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "cygwin"))]
         {
             self.as_sockaddr_un().and_then(|storage| {
                 (self.len() > offset_of_path(storage) as _ && storage.sun_path[0] == 0)
                     .then(|| self.path_bytes(storage, true))
             })
         }
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "cygwin")))]
         None
     }
 }
@@ -1234,11 +1286,13 @@ pub(crate) fn set_tcp_keepalive(fd: Socket, keepalive: &TcpKeepalive) -> io::Res
         target_os = "hurd",
         target_os = "illumos",
         target_os = "ios",
+        target_os = "visionos",
         target_os = "linux",
         target_os = "macos",
         target_os = "netbsd",
         target_os = "tvos",
         target_os = "watchos",
+        target_os = "cygwin",
     ))]
     {
         if let Some(interval) = keepalive.interval {
@@ -1372,6 +1426,7 @@ pub(crate) fn from_in6_addr(addr: in6_addr) -> Ipv6Addr {
     target_os = "nto",
     target_os = "espidf",
     target_os = "vita",
+    target_os = "cygwin",
 )))]
 pub(crate) const fn to_mreqn(
     multiaddr: &Ipv4Addr,
@@ -1389,6 +1444,47 @@ pub(crate) const fn to_mreqn(
             imr_ifindex: 0,
         },
     }
+}
+
+#[cfg(all(
+    feature = "all",
+    any(target_os = "android", target_os = "fuchsia", target_os = "linux")
+))]
+pub(crate) fn original_dst(fd: Socket) -> io::Result<SockAddr> {
+    // Safety: `getsockopt` initialises the `SockAddr` for us.
+    unsafe {
+        SockAddr::try_init(|storage, len| {
+            syscall!(getsockopt(
+                fd,
+                libc::SOL_IP,
+                libc::SO_ORIGINAL_DST,
+                storage.cast(),
+                len
+            ))
+        })
+    }
+    .map(|(_, addr)| addr)
+}
+
+/// Get the value for the `IP6T_SO_ORIGINAL_DST` option on this socket.
+///
+/// This value contains the original destination IPv6 address of the connection
+/// redirected using `ip6tables` `REDIRECT` or `TPROXY`.
+#[cfg(all(feature = "all", any(target_os = "android", target_os = "linux")))]
+pub(crate) fn original_dst_ipv6(fd: Socket) -> io::Result<SockAddr> {
+    // Safety: `getsockopt` initialises the `SockAddr` for us.
+    unsafe {
+        SockAddr::try_init(|storage, len| {
+            syscall!(getsockopt(
+                fd,
+                libc::SOL_IPV6,
+                libc::IP6T_SO_ORIGINAL_DST,
+                storage.cast(),
+                len
+            ))
+        })
+    }
+    .map(|(_, addr)| addr)
 }
 
 /// Unix only API.
@@ -1412,6 +1508,7 @@ impl crate::Socket {
             target_os = "linux",
             target_os = "netbsd",
             target_os = "openbsd",
+            target_os = "cygwin",
         )
     ))]
     #[cfg_attr(
@@ -1443,6 +1540,7 @@ impl crate::Socket {
         target_os = "linux",
         target_os = "netbsd",
         target_os = "openbsd",
+        target_os = "cygwin",
     ))]
     pub(crate) fn _accept4(&self, flags: c_int) -> io::Result<(crate::Socket, SockAddr)> {
         // Safety: `accept4` initialises the `SockAddr` for us.
@@ -1462,6 +1560,7 @@ impl crate::Socket {
     #[cfg_attr(
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos"
@@ -1493,11 +1592,37 @@ impl crate::Socket {
         }
     }
 
+    /// Sets `SO_PEERCRED` to null on the socket.
+    ///
+    /// This is a Cygwin extension.
+    ///
+    /// Normally the Unix domain sockets of Cygwin are implemented by TCP sockets,
+    /// so it performs a handshake on `connect` and `accept` to verify the remote
+    /// connection and exchange peer cred info. At the time of writing, this
+    /// means that `connect` on a Unix domain socket will block until the server
+    /// calls `accept` on Cygwin. This behavior is inconsistent with most other
+    /// platforms, and this option can be used to disable that.
+    ///
+    /// See also: the [mailing list](https://inbox.sourceware.org/cygwin/TYCPR01MB10926FF8926CA63704867ADC8F8AA2@TYCPR01MB10926.jpnprd01.prod.outlook.com/)
+    #[cfg(target_os = "cygwin")]
+    #[cfg(any(doc, target_os = "cygwin"))]
+    pub fn set_no_peercred(&self) -> io::Result<()> {
+        syscall!(setsockopt(
+            self.as_raw(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            ptr::null_mut(),
+            0,
+        ))
+        .map(|_| ())
+    }
+
     /// Sets `SO_NOSIGPIPE` on the socket.
     #[cfg(all(
         feature = "all",
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos",
@@ -1509,6 +1634,7 @@ impl crate::Socket {
             feature = "all",
             any(
                 target_os = "ios",
+                target_os = "visionos",
                 target_os = "macos",
                 target_os = "tvos",
                 target_os = "watchos",
@@ -1521,6 +1647,7 @@ impl crate::Socket {
 
     #[cfg(any(
         target_os = "ios",
+        target_os = "visionos",
         target_os = "macos",
         target_os = "tvos",
         target_os = "watchos",
@@ -1577,6 +1704,7 @@ impl crate::Socket {
             target_os = "freebsd",
             target_os = "fuchsia",
             target_os = "linux",
+            target_os = "cygwin",
         )
     ))]
     #[cfg_attr(
@@ -1769,13 +1897,23 @@ impl crate::Socket {
     /// [`set_quickack`]: crate::Socket::set_quickack
     #[cfg(all(
         feature = "all",
-        any(target_os = "android", target_os = "fuchsia", target_os = "linux")
+        any(
+            target_os = "android",
+            target_os = "fuchsia",
+            target_os = "linux",
+            target_os = "cygwin",
+        )
     ))]
     #[cfg_attr(
         docsrs,
         doc(cfg(all(
             feature = "all",
-            any(target_os = "android", target_os = "fuchsia", target_os = "linux")
+            any(
+                target_os = "android",
+                target_os = "fuchsia",
+                target_os = "linux",
+                target_os = "cygwin"
+            )
         )))
     )]
     pub fn quickack(&self) -> io::Result<bool> {
@@ -1793,13 +1931,23 @@ impl crate::Socket {
     /// internal protocol processing and factors such as delayed ack timeouts occurring and data transfer.
     #[cfg(all(
         feature = "all",
-        any(target_os = "android", target_os = "fuchsia", target_os = "linux")
+        any(
+            target_os = "android",
+            target_os = "fuchsia",
+            target_os = "linux",
+            target_os = "cygwin",
+        )
     ))]
     #[cfg_attr(
         docsrs,
         doc(cfg(all(
             feature = "all",
-            any(target_os = "android", target_os = "fuchsia", target_os = "linux")
+            any(
+                target_os = "android",
+                target_os = "fuchsia",
+                target_os = "linux",
+                target_os = "cygwin"
+            )
         )))
     )]
     pub fn set_quickack(&self, quickack: bool) -> io::Result<()> {
@@ -1957,6 +2105,7 @@ impl crate::Socket {
         feature = "all",
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos",
@@ -1968,6 +2117,7 @@ impl crate::Socket {
             feature = "all",
             any(
                 target_os = "ios",
+                target_os = "visionos",
                 target_os = "macos",
                 target_os = "tvos",
                 target_os = "watchos",
@@ -1993,9 +2143,12 @@ impl crate::Socket {
         feature = "all",
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos",
+            target_os = "illumos",
+            target_os = "solaris",
         )
     ))]
     #[cfg_attr(
@@ -2004,6 +2157,7 @@ impl crate::Socket {
             feature = "all",
             any(
                 target_os = "ios",
+                target_os = "visionos",
                 target_os = "macos",
                 target_os = "tvos",
                 target_os = "watchos",
@@ -2029,9 +2183,12 @@ impl crate::Socket {
         feature = "all",
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos",
+            target_os = "illumos",
+            target_os = "solaris",
         )
     ))]
     #[cfg_attr(
@@ -2040,6 +2197,7 @@ impl crate::Socket {
             feature = "all",
             any(
                 target_os = "ios",
+                target_os = "visionos",
                 target_os = "macos",
                 target_os = "tvos",
                 target_os = "watchos",
@@ -2060,9 +2218,12 @@ impl crate::Socket {
         feature = "all",
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos",
+            target_os = "illumos",
+            target_os = "solaris",
         )
     ))]
     #[cfg_attr(
@@ -2071,6 +2232,7 @@ impl crate::Socket {
             feature = "all",
             any(
                 target_os = "ios",
+                target_os = "visionos",
                 target_os = "macos",
                 target_os = "tvos",
                 target_os = "watchos",
@@ -2088,6 +2250,7 @@ impl crate::Socket {
         feature = "all",
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos",
@@ -2099,6 +2262,7 @@ impl crate::Socket {
             feature = "all",
             any(
                 target_os = "ios",
+                target_os = "visionos",
                 target_os = "macos",
                 target_os = "tvos",
                 target_os = "watchos",
@@ -2119,9 +2283,12 @@ impl crate::Socket {
         feature = "all",
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos",
+            target_os = "illumos",
+            target_os = "solaris",
         )
     ))]
     #[cfg_attr(
@@ -2130,6 +2297,7 @@ impl crate::Socket {
             feature = "all",
             any(
                 target_os = "ios",
+                target_os = "visionos",
                 target_os = "macos",
                 target_os = "tvos",
                 target_os = "watchos",
@@ -2180,14 +2348,14 @@ impl crate::Socket {
     /// [`set_reuse_port`]: crate::Socket::set_reuse_port
     #[cfg(all(
         feature = "all",
-        not(any(target_os = "solaris", target_os = "illumos"))
+        not(any(target_os = "solaris", target_os = "illumos", target_os = "cygwin"))
     ))]
     #[cfg_attr(
         docsrs,
         doc(cfg(all(
             feature = "all",
             unix,
-            not(any(target_os = "solaris", target_os = "illumos"))
+            not(any(target_os = "solaris", target_os = "illumos", target_os = "cygwin"))
         )))
     )]
     pub fn reuse_port(&self) -> io::Result<bool> {
@@ -2204,14 +2372,14 @@ impl crate::Socket {
     /// there's a socket already listening on this port.
     #[cfg(all(
         feature = "all",
-        not(any(target_os = "solaris", target_os = "illumos"))
+        not(any(target_os = "solaris", target_os = "illumos", target_os = "cygwin"))
     ))]
     #[cfg_attr(
         docsrs,
         doc(cfg(all(
             feature = "all",
             unix,
-            not(any(target_os = "solaris", target_os = "illumos"))
+            not(any(target_os = "solaris", target_os = "illumos", target_os = "cygwin"))
         )))
     )]
     pub fn set_reuse_port(&self, reuse: bool) -> io::Result<()> {
@@ -2371,62 +2539,6 @@ impl crate::Socket {
         }
     }
 
-    /// Get the value for the `SO_ORIGINAL_DST` option on this socket.
-    ///
-    /// This value contains the original destination IPv4 address of the connection
-    /// redirected using `iptables` `REDIRECT` or `TPROXY`.
-    #[cfg(all(
-        feature = "all",
-        any(target_os = "android", target_os = "fuchsia", target_os = "linux")
-    ))]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(all(
-            feature = "all",
-            any(target_os = "android", target_os = "fuchsia", target_os = "linux")
-        )))
-    )]
-    pub fn original_dst(&self) -> io::Result<SockAddr> {
-        // Safety: `getsockopt` initialises the `SockAddr` for us.
-        unsafe {
-            SockAddr::try_init(|storage, len| {
-                syscall!(getsockopt(
-                    self.as_raw(),
-                    libc::SOL_IP,
-                    libc::SO_ORIGINAL_DST,
-                    storage.cast(),
-                    len
-                ))
-            })
-        }
-        .map(|(_, addr)| addr)
-    }
-
-    /// Get the value for the `IP6T_SO_ORIGINAL_DST` option on this socket.
-    ///
-    /// This value contains the original destination IPv6 address of the connection
-    /// redirected using `ip6tables` `REDIRECT` or `TPROXY`.
-    #[cfg(all(feature = "all", any(target_os = "android", target_os = "linux")))]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(all(feature = "all", any(target_os = "android", target_os = "linux"))))
-    )]
-    pub fn original_dst_ipv6(&self) -> io::Result<SockAddr> {
-        // Safety: `getsockopt` initialises the `SockAddr` for us.
-        unsafe {
-            SockAddr::try_init(|storage, len| {
-                syscall!(getsockopt(
-                    self.as_raw(),
-                    libc::SOL_IPV6,
-                    libc::IP6T_SO_ORIGINAL_DST,
-                    storage.cast(),
-                    len
-                ))
-            })
-        }
-        .map(|(_, addr)| addr)
-    }
-
     /// Copies data between a `file` and this socket using the `sendfile(2)`
     /// system call. Because this copying is done within the kernel,
     /// `sendfile()` is more efficient than the combination of `read(2)` and
@@ -2453,6 +2565,7 @@ impl crate::Socket {
             target_os = "android",
             target_os = "freebsd",
             target_os = "ios",
+            target_os = "visionos",
             target_os = "linux",
             target_os = "macos",
             target_os = "tvos",
@@ -2468,6 +2581,7 @@ impl crate::Socket {
                 target_os = "android",
                 target_os = "freebsd",
                 target_os = "ios",
+                target_os = "visionos",
                 target_os = "linux",
                 target_os = "macos",
                 target_os = "tvos",
@@ -2491,6 +2605,7 @@ impl crate::Socket {
         feature = "all",
         any(
             target_os = "ios",
+            target_os = "visionos",
             target_os = "macos",
             target_os = "tvos",
             target_os = "watchos",
@@ -2604,13 +2719,23 @@ impl crate::Socket {
     /// approximately 49.71 days.
     #[cfg(all(
         feature = "all",
-        any(target_os = "android", target_os = "fuchsia", target_os = "linux")
+        any(
+            target_os = "android",
+            target_os = "fuchsia",
+            target_os = "linux",
+            target_os = "cygwin",
+        )
     ))]
     #[cfg_attr(
         docsrs,
         doc(cfg(all(
             feature = "all",
-            any(target_os = "android", target_os = "fuchsia", target_os = "linux")
+            any(
+                target_os = "android",
+                target_os = "fuchsia",
+                target_os = "linux",
+                target_os = "cygwin"
+            )
         )))
     )]
     pub fn set_tcp_user_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
@@ -2634,13 +2759,23 @@ impl crate::Socket {
     /// [`set_tcp_user_timeout`]: crate::Socket::set_tcp_user_timeout
     #[cfg(all(
         feature = "all",
-        any(target_os = "android", target_os = "fuchsia", target_os = "linux")
+        any(
+            target_os = "android",
+            target_os = "fuchsia",
+            target_os = "linux",
+            target_os = "cygwin",
+        )
     ))]
     #[cfg_attr(
         docsrs,
         doc(cfg(all(
             feature = "all",
-            any(target_os = "android", target_os = "fuchsia", target_os = "linux")
+            any(
+                target_os = "android",
+                target_os = "fuchsia",
+                target_os = "linux",
+                target_os = "cygwin"
+            )
         )))
     )]
     pub fn tcp_user_timeout(&self) -> io::Result<Option<Duration>> {
@@ -2716,7 +2851,8 @@ impl crate::Socket {
             target_os = "linux",
             target_os = "macos",
             target_os = "netbsd",
-            target_os = "openbsd"
+            target_os = "openbsd",
+            target_os = "cygwin",
         )
     ))]
     #[cfg_attr(
@@ -2756,7 +2892,8 @@ impl crate::Socket {
             target_os = "linux",
             target_os = "macos",
             target_os = "netbsd",
-            target_os = "openbsd"
+            target_os = "openbsd",
+            target_os = "cygwin",
         )
     ))]
     #[cfg_attr(

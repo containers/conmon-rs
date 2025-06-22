@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.63"
 name = "tempfile"
-version = "3.14.0"
+version = "3.20.0"
 authors = [
     "Steven Allen <steven@stebalien.com>",
     "The Rust Project Developers",
@@ -21,6 +21,7 @@ authors = [
     "Jason White <me@jasonwhite.io>",
 ]
 build = false
+autolib = false
 autobins = false
 autoexamples = false
 autotests = false
@@ -36,6 +37,14 @@ keywords = [
 ]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Stebalien/tempfile"
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--generate-link-to-definition"]
+
+[features]
+default = ["getrandom"]
+nightly = []
+unstable-windows-keep-open-tempfile = []
 
 [lib]
 name = "tempfile"
@@ -61,9 +70,6 @@ path = "tests/tempdir.rs"
 name = "tempfile"
 path = "tests/tempfile.rs"
 
-[dependencies.cfg-if]
-version = "1"
-
 [dependencies.fastrand]
 version = "2.1.1"
 
@@ -75,15 +81,17 @@ default-features = false
 [dev-dependencies.doc-comment]
 version = "0.3"
 
-[features]
-nightly = []
-
 [target.'cfg(any(unix, target_os = "wasi"))'.dependencies.rustix]
-version = "0.38.39"
+version = "1.0.0"
 features = ["fs"]
 
+[target.'cfg(any(unix, windows, target_os = "wasi"))'.dependencies.getrandom]
+version = "0.3.0"
+optional = true
+default-features = false
+
 [target."cfg(windows)".dependencies.windows-sys]
-version = ">=0.52,<=0.59"
+version = ">=0.52,<0.60"
 features = [
     "Win32_Storage_FileSystem",
     "Win32_Foundation",

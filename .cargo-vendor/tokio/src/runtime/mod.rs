@@ -36,7 +36,7 @@
 //!             loop {
 //!                 let n = match socket.read(&mut buf).await {
 //!                     // socket closed
-//!                     Ok(n) if n == 0 => return,
+//!                     Ok(0) => return,
 //!                     Ok(n) => n,
 //!                     Err(e) => {
 //!                         println!("failed to read from socket; err = {:?}", e);
@@ -84,7 +84,7 @@
 //!                 loop {
 //!                     let n = match socket.read(&mut buf).await {
 //!                         // socket closed
-//!                         Ok(n) if n == 0 => return,
+//!                         Ok(0) => return,
 //!                         Ok(n) => n,
 //!                         Err(e) => {
 //!                             println!("failed to read from socket; err = {:?}", e);
@@ -310,7 +310,7 @@
 //! [`event_interval`]: crate::runtime::Builder::event_interval
 //! [`disable_lifo_slot`]: crate::runtime::Builder::disable_lifo_slot
 //! [the lifo slot optimization]: crate::runtime::Builder::disable_lifo_slot
-//! [coop budget]: crate::task#cooperative-scheduling
+//! [coop budget]: crate::task::coop#cooperative-scheduling
 //! [`worker_mean_poll_time`]: crate::runtime::RuntimeMetrics::worker_mean_poll_time
 
 // At the top due to macros
@@ -320,8 +320,6 @@
 mod tests;
 
 pub(crate) mod context;
-
-pub(crate) mod coop;
 
 pub(crate) mod park;
 
@@ -372,6 +370,9 @@ cfg_rt! {
 
         pub use self::builder::UnhandledPanic;
         pub use crate::util::rand::RngSeed;
+
+        mod local_runtime;
+        pub use local_runtime::{LocalRuntime, LocalOptions};
     }
 
     cfg_taskdump! {
@@ -379,11 +380,27 @@ cfg_rt! {
         pub use dump::Dump;
     }
 
+    mod task_hooks;
+    pub(crate) use task_hooks::{TaskHooks, TaskCallback};
+    cfg_unstable! {
+        pub use task_hooks::TaskMeta;
+    }
+    #[cfg(not(tokio_unstable))]
+    pub(crate) use task_hooks::TaskMeta;
+
     mod handle;
     pub use handle::{EnterGuard, Handle, TryCurrentError};
 
     mod runtime;
     pub use runtime::{Runtime, RuntimeFlavor};
+
+    /// Boundary value to prevent stack overflow caused by a large-sized
+    /// Future being placed in the stack.
+    pub(crate) const BOX_FUTURE_THRESHOLD: usize = if cfg!(debug_assertions)  {
+        2048
+    } else {
+        16384
+    };
 
     mod thread_id;
     pub(crate) use thread_id::ThreadId;
@@ -392,7 +409,7 @@ cfg_rt! {
     pub use metrics::RuntimeMetrics;
 
     cfg_unstable_metrics! {
-        pub use metrics::HistogramScale;
+        pub use metrics::{HistogramScale, HistogramConfiguration, LogHistogram, LogHistogramBuilder, InvalidHistogramConfiguration} ;
 
         cfg_net! {
             pub(crate) use metrics::IoDriverMetrics;

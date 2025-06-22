@@ -1,16 +1,16 @@
 #[cfg(all(
     target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "x86"),
-    target_env = "gnu"
+    target_env = "gnu",
+    any(target_arch = "x86_64", target_arch = "x86")
 ))]
 use memoffset::offset_of;
 use nix::errno::Errno;
 use nix::sys::ptrace;
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(linux_android)]
 use nix::sys::ptrace::Options;
 use nix::unistd::getpid;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(linux_android)]
 use std::mem;
 
 use crate::*;
@@ -28,7 +28,7 @@ fn test_ptrace() {
 
 // Just make sure ptrace_setoptions can be called at all, for now.
 #[test]
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(linux_android)]
 fn test_ptrace_setoptions() {
     require_capability!("test_ptrace_setoptions", CAP_SYS_PTRACE);
     let err = ptrace::setoptions(getpid(), Options::PTRACE_O_TRACESYSGOOD)
@@ -38,7 +38,7 @@ fn test_ptrace_setoptions() {
 
 // Just make sure ptrace_getevent can be called at all, for now.
 #[test]
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(linux_android)]
 fn test_ptrace_getevent() {
     require_capability!("test_ptrace_getevent", CAP_SYS_PTRACE);
     let err = ptrace::getevent(getpid()).unwrap_err();
@@ -47,7 +47,7 @@ fn test_ptrace_getevent() {
 
 // Just make sure ptrace_getsiginfo can be called at all, for now.
 #[test]
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(linux_android)]
 fn test_ptrace_getsiginfo() {
     require_capability!("test_ptrace_getsiginfo", CAP_SYS_PTRACE);
     if let Err(Errno::EOPNOTSUPP) = ptrace::getsiginfo(getpid()) {
@@ -57,7 +57,7 @@ fn test_ptrace_getsiginfo() {
 
 // Just make sure ptrace_setsiginfo can be called at all, for now.
 #[test]
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(linux_android)]
 fn test_ptrace_setsiginfo() {
     require_capability!("test_ptrace_setsiginfo", CAP_SYS_PTRACE);
     let siginfo = unsafe { mem::zeroed() };
@@ -179,8 +179,18 @@ fn test_ptrace_interrupt() {
 // ptrace::{setoptions, getregs} are only available in these platforms
 #[cfg(all(
     target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "x86"),
-    target_env = "gnu"
+    any(
+        all(
+            target_env = "gnu",
+            any(
+                target_arch = "x86_64",
+                target_arch = "x86",
+                target_arch = "aarch64",
+                target_arch = "riscv64"
+            )
+        ),
+        all(target_env = "musl", target_arch = "aarch64")
+    )
 ))]
 #[test]
 fn test_ptrace_syscall() {
@@ -226,12 +236,21 @@ fn test_ptrace_syscall() {
             let get_syscall_id =
                 || ptrace::getregs(child).unwrap().orig_eax as libc::c_long;
 
+            #[cfg(target_arch = "aarch64")]
+            let get_syscall_id =
+                || ptrace::getregs(child).unwrap().regs[8] as libc::c_long;
+
+            #[cfg(target_arch = "riscv64")]
+            let get_syscall_id =
+                || ptrace::getregs(child).unwrap().a7 as libc::c_long;
+
             // this duplicates `get_syscall_id` for the purpose of testing `ptrace::read_user`.
             #[cfg(target_arch = "x86_64")]
             let rax_offset = offset_of!(libc::user_regs_struct, orig_rax);
             #[cfg(target_arch = "x86")]
             let rax_offset = offset_of!(libc::user_regs_struct, orig_eax);
 
+            #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
             let get_syscall_from_user_area = || {
                 // Find the offset of `user.regs.rax` (or `user.regs.eax` for x86)
                 let rax_offset = offset_of!(libc::user, regs) + rax_offset;
@@ -246,6 +265,7 @@ fn test_ptrace_syscall() {
                 Ok(WaitStatus::PtraceSyscall(child))
             );
             assert_eq!(get_syscall_id(), ::libc::SYS_kill);
+            #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
             assert_eq!(get_syscall_from_user_area(), ::libc::SYS_kill);
 
             // kill exit
@@ -255,6 +275,7 @@ fn test_ptrace_syscall() {
                 Ok(WaitStatus::PtraceSyscall(child))
             );
             assert_eq!(get_syscall_id(), ::libc::SYS_kill);
+            #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
             assert_eq!(get_syscall_from_user_area(), ::libc::SYS_kill);
 
             // receive signal
@@ -271,5 +292,121 @@ fn test_ptrace_syscall() {
                 Ok(WaitStatus::Signaled(child, Signal::SIGTERM, false))
             );
         }
+    }
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(
+        all(
+            target_env = "gnu",
+            any(
+                target_arch = "x86_64",
+                target_arch = "x86",
+                target_arch = "aarch64",
+                target_arch = "riscv64"
+            )
+        ),
+        all(target_env = "musl", target_arch = "aarch64")
+    )
+))]
+#[test]
+fn test_ptrace_regsets() {
+    use nix::sys::ptrace::{self, getregset, regset, setregset};
+    use nix::sys::signal::*;
+    use nix::sys::wait::{waitpid, WaitStatus};
+    use nix::unistd::fork;
+    use nix::unistd::ForkResult::*;
+
+    require_capability!("test_ptrace_regsets", CAP_SYS_PTRACE);
+
+    let _m = crate::FORK_MTX.lock();
+
+    match unsafe { fork() }.expect("Error: Fork Failed") {
+        Child => {
+            ptrace::traceme().unwrap();
+            // As recommended by ptrace(2), raise SIGTRAP to pause the child
+            // until the parent is ready to continue
+            loop {
+                raise(Signal::SIGTRAP).unwrap();
+            }
+        }
+
+        Parent { child } => {
+            assert_eq!(
+                waitpid(child, None),
+                Ok(WaitStatus::Stopped(child, Signal::SIGTRAP))
+            );
+            let mut regstruct =
+                getregset::<regset::NT_PRSTATUS>(child).unwrap();
+            let mut fpregstruct =
+                getregset::<regset::NT_PRFPREG>(child).unwrap();
+
+            #[cfg(target_arch = "x86_64")]
+            let (reg, fpreg) =
+                (&mut regstruct.r15, &mut fpregstruct.st_space[5]);
+            #[cfg(target_arch = "x86")]
+            let (reg, fpreg) =
+                (&mut regstruct.edx, &mut fpregstruct.st_space[5]);
+            #[cfg(target_arch = "aarch64")]
+            let (reg, fpreg) =
+                (&mut regstruct.regs[16], &mut fpregstruct.vregs[5]);
+            #[cfg(target_arch = "riscv64")]
+            let (reg, fpreg) = (&mut regstruct.t1, &mut fpregstruct.__f[5]);
+
+            *reg = 0xdeadbeefu32 as _;
+            *fpreg = 0xfeedfaceu32 as _;
+            let _ = setregset::<regset::NT_PRSTATUS>(child, regstruct);
+            regstruct = getregset::<regset::NT_PRSTATUS>(child).unwrap();
+            let _ = setregset::<regset::NT_PRFPREG>(child, fpregstruct);
+            fpregstruct = getregset::<regset::NT_PRFPREG>(child).unwrap();
+
+            #[cfg(target_arch = "x86_64")]
+            let (reg, fpreg) = (regstruct.r15, fpregstruct.st_space[5]);
+            #[cfg(target_arch = "x86")]
+            let (reg, fpreg) = (regstruct.edx, fpregstruct.st_space[5]);
+            #[cfg(target_arch = "aarch64")]
+            let (reg, fpreg) = (regstruct.regs[16], fpregstruct.vregs[5]);
+            #[cfg(target_arch = "riscv64")]
+            let (reg, fpreg) = (regstruct.t1, fpregstruct.__f[5]);
+            assert_eq!(reg, 0xdeadbeefu32 as _);
+            assert_eq!(fpreg, 0xfeedfaceu32 as _);
+
+            ptrace::cont(child, Some(Signal::SIGKILL)).unwrap();
+            match waitpid(child, None) {
+                Ok(WaitStatus::Signaled(pid, Signal::SIGKILL, _))
+                    if pid == child => {}
+                _ => panic!("The process should have been killed"),
+            }
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn test_ptrace_syscall_info() {
+    use nix::sys::ptrace;
+    use nix::sys::wait::{waitpid, WaitStatus};
+    use nix::unistd::fork;
+    use nix::unistd::ForkResult::*;
+
+    require_capability!("test_ptrace_syscall_info", CAP_SYS_PTRACE);
+
+    let _m = crate::FORK_MTX.lock();
+    match unsafe { fork() }.expect("Error: Fork Failed") {
+        Child => {
+            ptrace::traceme().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            unsafe {
+                ::libc::_exit(0);
+            }
+        }
+        Parent { child } => loop {
+            if let Ok(WaitStatus::Exited(_, 0)) = waitpid(child, None) {
+                break;
+            }
+            let si = ptrace::syscall_info(child).unwrap();
+            assert!(si.op >= libc::PTRACE_SYSCALL_INFO_ENTRY);
+        },
     }
 }

@@ -6,7 +6,11 @@
 //! In short, this crate aims to be more enjoyable than [futures] but still fully compatible with
 //! it.
 //!
+//! The API for this crate is intentionally constrained. Please consult the [features list] for
+//! APIs that are occluded from this crate.
+//!
 //! [futures]: https://docs.rs/futures
+//! [features list]: https://github.com/smol-rs/futures-lite/blob/master/FEATURES.md
 //!
 //! # Examples
 //!
@@ -24,6 +28,12 @@
 #![warn(missing_docs, missing_debug_implementations, rust_2018_idioms)]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(clippy::needless_borrow)] // suggest code that doesn't work on MSRV
+#![doc(
+    html_favicon_url = "https://raw.githubusercontent.com/smol-rs/smol/master/assets/images/logo_fullsize_transparent.png"
+)]
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/smol-rs/smol/master/assets/images/logo_fullsize_transparent.png"
+)]
 
 #[cfg(feature = "std")]
 #[doc(no_inline)]

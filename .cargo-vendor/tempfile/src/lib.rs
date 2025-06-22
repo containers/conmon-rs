@@ -1,7 +1,13 @@
-//! Temporary files and directories.
+//! This is a library for creating temporary files and directories that are automatically deleted
+//! when no longer referenced (i.e., on drop).
 //!
-//! - Use the [`tempfile()`] function for temporary files
-//! - Use the [`tempdir()`] function for temporary directories.
+//! - Use [`tempfile()`] when you need a real [`std::fs::File`] but don't need to refer to it
+//!   by-path.
+//! - Use [`NamedTempFile::new()`] when you need a _named_ temporary file that can be refered to its
+//!   path.
+//! - Use [`tempdir()`] when you need a temporary directory that will be recursively deleted on drop.
+//! - Use [`spooled_tempfile()`] when you need an in-memory buffer that will ultimately be backed by
+//!   a temporary file if it gets too large.
 //!
 //! # Design
 //!
@@ -9,26 +15,71 @@
 //! [`tempfile()`] relies on the OS to remove the temporary file once the last handle is closed.
 //! [`TempDir`] and [`NamedTempFile`] both rely on Rust destructors for cleanup.
 //!
-//! When choosing between the temporary file variants, prefer `tempfile`
-//! unless you either need to know the file's path or to be able to persist it.
-//!
 //! ## Resource Leaking
 //!
-//! `tempfile` will (almost) never fail to cleanup temporary resources. However `TempDir` and `NamedTempFile` will
-//! fail if their destructors don't run. This is because `tempfile` relies on the OS to cleanup the
-//! underlying file, while `TempDir` and `NamedTempFile` rely on rust destructors to do so.
-//! Destructors may fail to run if the process exits through an unhandled signal interrupt (like `SIGINT`),
-//! or if the instance is declared statically (like with [`lazy_static`]), among other possible
-//! reasons.
+//! `tempfile` will (almost) never fail to cleanup temporary resources. However `TempDir` and
+//! `NamedTempFile` will fail if their destructors don't run. This is because `tempfile` relies on
+//! the OS to cleanup the underlying file, while `TempDir` and `NamedTempFile` rely on rust
+//! destructors to do so. Destructors may fail to run if the process exits through an unhandled
+//! signal interrupt (like `SIGINT`), or if the instance is declared statically (like with
+//! [`lazy_static`]), among other possible reasons.
+//!
+//! ## Unexpected File Deletion
+//!
+//! Most operating systems periodically clean up temporary files that haven't been accessed recently
+//! (often on the order of multiple days). This issue does not affect unnamed temporary files but
+//! can invalidate the paths associated with named temporary files on Unix-like systems because the
+//! temporary file can be unlinked from the filesystem while still open and in-use. See the
+//! [temporary file cleaner](#temporary-file-cleaners) section for more security implications.
 //!
 //! ## Security
+//!
+//! This section discusses security issues relevant to Unix-like operating systems that use shared
+//! temporary directories by default. Importantly, it's not relevant for Windows or macOS as both
+//! operating systems use private per-user temporary directories by default.
+//!
+//! Applications can mitigate the issues described below by using [`env::override_temp_dir`] to
+//! change the default temporary directory but should do so if and only if default the temporary
+//! directory ([`env::temp_dir`]) is unsuitable (is world readable, world writable, managed by a
+//! temporary file cleaner, etc.).
+//!
+//! ### Temporary File Cleaners
 //!
 //! In the presence of pathological temporary file cleaner, relying on file paths is unsafe because
 //! a temporary file cleaner could delete the temporary file which an attacker could then replace.
 //!
-//! `tempfile` doesn't rely on file paths so this isn't an issue. However, `NamedTempFile` does
-//! rely on file paths for _some_ operations. See the security documentation on
-//! the `NamedTempFile` type for more information.
+//! This isn't an issue for [`tempfile`] as it doesn't rely on file paths. However, [`NamedTempFile`]
+//! and temporary directories _do_ rely on file paths for _some_ operations. See the security
+//! documentation on the [`NamedTempFile`] and the [`TempDir`] types for more information.
+//!
+//! Mitigation:
+//!
+//! - This is rarely an issue for short-lived files as temporary file cleaners usually only remove
+//!   temporary files that haven't been modified or accessed within many (10-30) days.
+//! - Very long lived temporary files should be placed in directories not managed by temporary file
+//!   cleaners.
+//!
+//! ### Access Permissions
+//!
+//! Temporary _files_ created with this library are private by default on all operating systems.
+//! However, temporary _directories_ are created with the default permissions and will therefore be
+//! world-readable by default unless the user has changed their umask and/or default temporary
+//! directory.
+//!
+//! ### Denial of Service
+//!
+//! If the file-name randomness ([`Builder::rand_bytes`]) is too small and/or this crate is built
+//! without the `getrandom` feature, it may be possible for an attacker to predict the random file
+//! names chosen by this library, preventing temporary file creation by creating temporary files
+//! with these predicted file names. By default, this library mitigates this denial of service
+//! attack by:
+//!
+//! 1. Defaulting to 6 random characters per temporary file forcing an attacker to create billions
+//!    of files before random collisions are expected (at which point you probably have larger
+//!    problems).
+//! 2. Re-seeding the random filename generator from system randomness after 3 failed attempts to
+//!    create temporary a file (when the `getrandom` feature is enabled as it is by default on all
+//!    major platforms).
 //!
 //! ## Early drop pitfall
 //!
@@ -147,7 +198,7 @@
 #[cfg(doctest)]
 doc_comment::doctest!("../README.md");
 
-const NUM_RETRIES: u32 = 1 << 31;
+const NUM_RETRIES: u32 = 65536;
 const NUM_RAND_CHARS: usize = 6;
 
 use std::ffi::OsStr;
@@ -167,9 +218,9 @@ pub use crate::dir::{tempdir, tempdir_in, TempDir};
 pub use crate::file::{
     tempfile, tempfile_in, NamedTempFile, PathPersistError, PersistError, TempPath,
 };
-pub use crate::spooled::{spooled_tempfile, SpooledData, SpooledTempFile};
+pub use crate::spooled::{spooled_tempfile, spooled_tempfile_in, SpooledData, SpooledTempFile};
 
-/// Create a new temporary file or directory with custom parameters.
+/// Create a new temporary file or directory with custom options.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Builder<'a, 'b> {
     random_len: usize,
@@ -177,10 +228,10 @@ pub struct Builder<'a, 'b> {
     suffix: &'b OsStr,
     append: bool,
     permissions: Option<std::fs::Permissions>,
-    keep: bool,
+    disable_cleanup: bool,
 }
 
-impl<'a, 'b> Default for Builder<'a, 'b> {
+impl Default for Builder<'_, '_> {
     fn default() -> Self {
         Builder {
             random_len: crate::NUM_RAND_CHARS,
@@ -188,7 +239,7 @@ impl<'a, 'b> Default for Builder<'a, 'b> {
             suffix: OsStr::new(""),
             append: false,
             permissions: None,
-            keep: false,
+            disable_cleanup: false,
         }
     }
 }
@@ -346,7 +397,7 @@ impl<'a, 'b> Builder<'a, 'b> {
     ///
     /// # Security
     ///
-    /// By default, the permissions of tempfiles on unix are set for it to be
+    /// By default, the permissions of tempfiles on Unix are set for it to be
     /// readable and writable by the owner only, yielding the greatest amount
     /// of security.
     /// As this method allows to widen the permissions, security would be
@@ -366,7 +417,7 @@ impl<'a, 'b> Builder<'a, 'b> {
     /// ## Windows and others
     ///
     /// This setting is unsupported and trying to set a file or directory read-only
-    /// will cause an error to be returned..
+    /// will return an error.
     ///
     /// # Examples
     ///
@@ -414,11 +465,20 @@ impl<'a, 'b> Builder<'a, 'b> {
         self
     }
 
-    /// Set the file/folder to be kept even when the [`NamedTempFile`]/[`TempDir`] goes out of
-    /// scope.
+    /// Disable cleanup of the file/folder to even when the [`NamedTempFile`]/[`TempDir`] goes out
+    /// of scope. Prefer [`NamedTempFile::keep`] and `[`TempDir::keep`] where possible,
+    /// `disable_cleanup` is provided for testing & debugging.
     ///
     /// By default, the file/folder is automatically cleaned up in the destructor of
-    /// [`NamedTempFile`]/[`TempDir`]. When `keep` is set to `true`, this behavior is supressed.
+    /// [`NamedTempFile`]/[`TempDir`]. When `disable_cleanup` is set to `true`, this behavior is
+    /// suppressed. If you wish to disable cleanup after creating a temporary file/directory, call
+    /// [`NamedTempFile::disable_cleanup`] or [`TempDir::disable_cleanup`].
+    ///
+    /// # Warnings
+    ///
+    /// On some platforms (for now, only Windows), temporary files are marked with a special
+    /// "temporary file" (`FILE_ATTRIBUTE_TEMPORARY`) attribute. Disabling cleanup _will not_ unset
+    /// this attribute while calling [`NamedTempFile::keep`] will.
     ///
     /// # Examples
     ///
@@ -426,13 +486,19 @@ impl<'a, 'b> Builder<'a, 'b> {
     /// use tempfile::Builder;
     ///
     /// let named_tempfile = Builder::new()
-    ///     .keep(true)
+    ///     .disable_cleanup(true)
     ///     .tempfile()?;
     /// # Ok::<(), std::io::Error>(())
     /// ```
-    pub fn keep(&mut self, keep: bool) -> &mut Self {
-        self.keep = keep;
+    pub fn disable_cleanup(&mut self, disable_cleanup: bool) -> &mut Self {
+        self.disable_cleanup = disable_cleanup;
         self
+    }
+
+    /// Deprecated alias for [`Builder::disable_cleanup`].
+    #[deprecated = "Use Builder::disable_cleanup"]
+    pub fn keep(&mut self, keep: bool) -> &mut Self {
+        self.disable_cleanup(keep)
     }
 
     /// Create the named temporary file.
@@ -500,7 +566,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                     path,
                     OpenOptions::new().append(self.append),
                     self.permissions.as_ref(),
-                    self.keep,
+                    self.disable_cleanup,
                 )
             },
         )
@@ -556,17 +622,13 @@ impl<'a, 'b> Builder<'a, 'b> {
     ///
     /// [resource-leaking]: struct.TempDir.html#resource-leaking
     pub fn tempdir_in<P: AsRef<Path>>(&self, dir: P) -> io::Result<TempDir> {
-        let storage;
-        let mut dir = dir.as_ref();
-        if !dir.is_absolute() {
-            let cur_dir = std::env::current_dir()?;
-            storage = cur_dir.join(dir);
-            dir = &storage;
-        }
-
-        util::create_helper(dir, self.prefix, self.suffix, self.random_len, |path| {
-            dir::create(path, self.permissions.as_ref(), self.keep)
-        })
+        util::create_helper(
+            dir.as_ref(),
+            self.prefix,
+            self.suffix,
+            self.random_len,
+            |path| dir::create(path, self.permissions.as_ref(), self.disable_cleanup),
+        )
     }
 
     /// Attempts to create a temporary file (or file-like object) using the
@@ -690,7 +752,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             move |path| {
                 Ok(NamedTempFile::from_parts(
                     f(&path)?,
-                    TempPath::new(path, self.keep),
+                    TempPath::new(path, self.disable_cleanup),
                 ))
             },
         )

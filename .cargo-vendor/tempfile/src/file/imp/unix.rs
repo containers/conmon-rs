@@ -1,14 +1,7 @@
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io;
-cfg_if::cfg_if! {
-    if #[cfg(not(target_os = "wasi"))] {
-        use std::os::unix::fs::MetadataExt;
-    } else {
-        #[cfg(feature = "nightly")]
-        use std::os::wasi::fs::MetadataExt;
-    }
-}
+
 use crate::util;
 use std::path::Path;
 
@@ -88,6 +81,11 @@ fn create_unix(dir: &Path) -> io::Result<File> {
 
 #[cfg(any(not(target_os = "wasi"), feature = "nightly"))]
 pub fn reopen(file: &File, path: &Path) -> io::Result<File> {
+    #[cfg(not(target_os = "wasi"))]
+    use std::os::unix::fs::MetadataExt;
+    #[cfg(target_os = "wasi")]
+    use std::os::wasi::fs::MetadataExt;
+
     let new_file = OpenOptions::new().read(true).write(true).open(path)?;
     let old_meta = file.metadata()?;
     let new_meta = new_file.metadata()?;
@@ -113,9 +111,17 @@ pub fn persist(old_path: &Path, new_path: &Path, overwrite: bool) -> io::Result<
     if overwrite {
         rename(old_path, new_path)?;
     } else {
-        // On Linux, use `renameat_with` to avoid overwriting an existing name,
-        // if the kernel and the filesystem support it.
-        #[cfg(any(target_os = "android", target_os = "linux"))]
+        // On Linux and apple operating systems, use `renameat_with` to avoid overwriting an
+        // existing name, if the kernel and the filesystem support it.
+        #[cfg(any(
+            target_os = "android",
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "visionos",
+            target_os = "watchos",
+        ))]
         {
             use rustix::fs::{renameat_with, RenameFlags, CWD};
             use rustix::io::Errno;

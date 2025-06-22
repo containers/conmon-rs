@@ -1,24 +1,26 @@
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{stdout, Read, Write};
 use std::os::unix::prelude::*;
 use std::path::Path;
 
-use libc::{_exit, STDOUT_FILENO};
+use libc::_exit;
 use nix::fcntl::{open, OFlag};
 use nix::pty::*;
 use nix::sys::stat;
 use nix::sys::termios::*;
+use nix::sys::wait::WaitStatus;
 use nix::unistd::{pause, write};
 
 /// Test equivalence of `ptsname` and `ptsname_r`
 #[test]
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(linux_android)]
 fn test_ptsname_equivalence() {
     let _m = crate::PTSNAME_MTX.lock();
 
-    // Open a new PTTY master
+    // Open a new PTY master
     let master_fd = posix_openpt(OFlag::O_RDWR).unwrap();
     assert!(master_fd.as_raw_fd() > 0);
+    assert!(master_fd.as_fd().as_raw_fd() == master_fd.as_raw_fd());
 
     // Get the name of the slave
     let slave_name = unsafe { ptsname(&master_fd) }.unwrap();
@@ -29,7 +31,7 @@ fn test_ptsname_equivalence() {
 /// Test data copying of `ptsname`
 // TODO need to run in a subprocess, since ptsname is non-reentrant
 #[test]
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(linux_android)]
 fn test_ptsname_copy() {
     let _m = crate::PTSNAME_MTX.lock();
 
@@ -47,7 +49,7 @@ fn test_ptsname_copy() {
 
 /// Test data copying of `ptsname_r`
 #[test]
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(linux_android)]
 fn test_ptsname_r_copy() {
     // Open a new PTTY master
     let master_fd = posix_openpt(OFlag::O_RDWR).unwrap();
@@ -61,7 +63,7 @@ fn test_ptsname_r_copy() {
 
 /// Test that `ptsname` returns different names for different devices
 #[test]
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(linux_android)]
 fn test_ptsname_unique() {
     let _m = crate::PTSNAME_MTX.lock();
 
@@ -96,7 +98,7 @@ fn open_ptty_pair() -> (PtyMaster, File) {
         open(Path::new(&slave_name), OFlag::O_RDWR, stat::Mode::empty())
             .unwrap();
 
-    #[cfg(target_os = "illumos")]
+    #[cfg(solarish)]
     // TODO: rewrite using ioctl!
     #[allow(clippy::comparison_chain)]
     {
@@ -106,20 +108,23 @@ fn open_ptty_pair() -> (PtyMaster, File) {
         // after opening a device path returned from ptsname().
         let ptem = b"ptem\0";
         let ldterm = b"ldterm\0";
-        let r = unsafe { ioctl(slave_fd, I_FIND, ldterm.as_ptr()) };
+        let r = unsafe { ioctl(slave_fd.as_raw_fd(), I_FIND, ldterm.as_ptr()) };
         if r < 0 {
             panic!("I_FIND failure");
         } else if r == 0 {
-            if unsafe { ioctl(slave_fd, I_PUSH, ptem.as_ptr()) } < 0 {
+            if unsafe { ioctl(slave_fd.as_raw_fd(), I_PUSH, ptem.as_ptr()) } < 0
+            {
                 panic!("I_PUSH ptem failure");
             }
-            if unsafe { ioctl(slave_fd, I_PUSH, ldterm.as_ptr()) } < 0 {
+            if unsafe { ioctl(slave_fd.as_raw_fd(), I_PUSH, ldterm.as_ptr()) }
+                < 0
+            {
                 panic!("I_PUSH ldterm failure");
             }
         }
     }
 
-    let slave = unsafe { File::from_raw_fd(slave_fd) };
+    let slave = File::from(slave_fd);
 
     (master, slave)
 }
@@ -143,6 +148,7 @@ fn make_raw<Fd: AsFd>(fd: Fd) {
 
 /// Test `io::Read` on the PTTY master
 #[test]
+#[cfg(not(target_os = "solaris"))]
 fn test_read_ptty_pair() {
     let (mut master, mut slave) = open_ptty_pair();
     make_raw(&slave);
@@ -185,7 +191,7 @@ fn test_openpty() {
     // Writing to one should be readable on the other one
     let string = "foofoofoo\n";
     let mut buf = [0u8; 10];
-    write(pty.master.as_raw_fd(), string.as_bytes()).unwrap();
+    write(&pty.master, string.as_bytes()).unwrap();
     crate::read_exact(&pty.slave, &mut buf);
 
     assert_eq!(&buf, string.as_bytes());
@@ -199,7 +205,7 @@ fn test_openpty() {
     let string2 = "barbarbarbar\n";
     let echoed_string2 = "barbarbarbar\r\n";
     let mut buf = [0u8; 14];
-    write(pty.slave.as_raw_fd(), string2.as_bytes()).unwrap();
+    write(&pty.slave, string2.as_bytes()).unwrap();
     crate::read_exact(&pty.master, &mut buf);
 
     assert_eq!(&buf, echoed_string2.as_bytes());
@@ -224,7 +230,7 @@ fn test_openpty_with_termios() {
     // Writing to one should be readable on the other one
     let string = "foofoofoo\n";
     let mut buf = [0u8; 10];
-    write(pty.master.as_raw_fd(), string.as_bytes()).unwrap();
+    write(&pty.master, string.as_bytes()).unwrap();
     crate::read_exact(&pty.slave, &mut buf);
 
     assert_eq!(&buf, string.as_bytes());
@@ -237,7 +243,7 @@ fn test_openpty_with_termios() {
     let string2 = "barbarbarbar\n";
     let echoed_string2 = "barbarbarbar\n";
     let mut buf = [0u8; 13];
-    write(pty.slave.as_raw_fd(), string2.as_bytes()).unwrap();
+    write(&pty.slave, string2.as_bytes()).unwrap();
     crate::read_exact(&pty.master, &mut buf);
 
     assert_eq!(&buf, echoed_string2.as_bytes());
@@ -247,7 +253,6 @@ fn test_openpty_with_termios() {
 fn test_forkpty() {
     use nix::sys::signal::*;
     use nix::sys::wait::wait;
-    use nix::unistd::ForkResult::*;
     // forkpty calls openpty which uses ptname(3) internally.
     let _m0 = crate::PTSNAME_MTX.lock();
     // forkpty spawns a child process
@@ -255,21 +260,22 @@ fn test_forkpty() {
 
     let string = "naninani\n";
     let echoed_string = "naninani\r\n";
-    let pty = unsafe { forkpty(None, None).unwrap() };
-    match pty.fork_result {
-        Child => {
-            write(STDOUT_FILENO, string.as_bytes()).unwrap();
+    let res = unsafe { forkpty(None, None).unwrap() };
+    match res {
+        ForkptyResult::Child => {
+            write(stdout(), string.as_bytes()).unwrap();
             pause(); // we need the child to stay alive until the parent calls read
             unsafe {
                 _exit(0);
             }
         }
-        Parent { child } => {
+        ForkptyResult::Parent { child, master } => {
             let mut buf = [0u8; 10];
             assert!(child.as_raw() > 0);
-            crate::read_exact(&pty.master, &mut buf);
+            crate::read_exact(&master, &mut buf);
             kill(child, SIGTERM).unwrap();
-            wait().unwrap(); // keep other tests using generic wait from getting our child
+            let status = wait().unwrap(); // keep other tests using generic wait from getting our child
+            assert_eq!(status, WaitStatus::Signaled(child, SIGTERM, false));
             assert_eq!(&buf, echoed_string.as_bytes());
         }
     }

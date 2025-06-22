@@ -1,8 +1,9 @@
 use crate::JsValue;
-use std::cell::Cell;
-use std::slice;
-use std::vec::Vec;
-use std::cmp::max;
+
+use alloc::slice;
+use alloc::vec::Vec;
+use core::cell::Cell;
+use core::cmp::max;
 
 externs! {
     #[link(wasm_import_module = "__wbindgen_externref_xform__")]
@@ -98,16 +99,27 @@ impl Slab {
 }
 
 fn internal_error(msg: &str) -> ! {
-    if cfg!(debug_assertions) {
-        super::throw_str(msg)
-    } else {
-        std::process::abort()
+    cfg_if::cfg_if! {
+        if #[cfg(debug_assertions)] {
+            super::throw_str(msg)
+        } else if #[cfg(feature = "std")] {
+            std::process::abort();
+        } else if #[cfg(all(
+            target_arch = "wasm32",
+            any(target_os = "unknown", target_os = "none")
+        ))] {
+            core::arch::wasm32::unreachable();
+        } else {
+            unreachable!()
+        }
     }
 }
 
 // Management of `externref` is always thread local since an `externref` value
 // can't cross threads in wasm. Indices as a result are always thread-local.
-std::thread_local!(pub static HEAP_SLAB: Cell<Slab> = Cell::new(Slab::new()));
+#[cfg_attr(target_feature = "atomics", thread_local)]
+static HEAP_SLAB: crate::__rt::LazyCell<Cell<Slab>> =
+    crate::__rt::LazyCell::new(|| Cell::new(Slab::new()));
 
 #[no_mangle]
 pub extern "C" fn __externref_table_alloc() -> usize {
@@ -160,7 +172,3 @@ pub unsafe extern "C" fn __externref_heap_live_count() -> u32 {
         })
         .unwrap_or_else(|_| internal_error("tls access failure"))
 }
-
-// see comment in module above this in `link_mem_intrinsics`
-#[inline(never)]
-pub fn link_intrinsics() {}

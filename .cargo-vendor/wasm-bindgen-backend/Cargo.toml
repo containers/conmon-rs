@@ -10,28 +10,39 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2018"
+edition = "2021"
 rust-version = "1.57"
 name = "wasm-bindgen-backend"
-version = "0.2.92"
+version = "0.2.100"
 authors = ["The wasm-bindgen Developers"]
+build = false
+include = [
+    "/LICENSE-*",
+    "/src",
+]
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = """
 Backend code generation of the wasm-bindgen tool
 """
 homepage = "https://rustwasm.github.io/wasm-bindgen/"
 documentation = "https://docs.rs/wasm-bindgen-backend"
+readme = false
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rustwasm/wasm-bindgen/tree/master/crates/backend"
-resolver = "2"
+
+[lib]
+name = "wasm_bindgen_backend"
+path = "src/lib.rs"
 
 [dependencies.bumpalo]
 version = "3.0.0"
 
 [dependencies.log]
 version = "0.4"
-
-[dependencies.once_cell]
-version = "1.12"
 
 [dependencies.proc-macro2]
 version = "1.0"
@@ -44,8 +55,14 @@ version = "2.0"
 features = ["full"]
 
 [dependencies.wasm-bindgen-shared]
-version = "=0.2.92"
+version = "=0.2.100"
 
 [features]
 extra-traits = ["syn/extra-traits"]
-spans = []
+
+[lints.clippy]
+large_enum_variant = "allow"
+new_without_default = "allow"
+overly_complex_bool_expr = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"

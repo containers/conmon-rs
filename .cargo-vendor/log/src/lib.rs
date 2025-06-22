@@ -143,9 +143,13 @@
 //!     * [flexi_logger]
 //!     * [call_logger]
 //!     * [structured-logger]
+//!     * [clang_log]
+//!     * [ftail]
 //! * Complex configurable frameworks:
 //!     * [log4rs]
+//!     * [logforth]
 //!     * [fern]
+//!     * [spdlog-rs]
 //! * Adaptors for other facilities:
 //!     * [syslog]
 //!     * [slog-stdlog]
@@ -288,7 +292,7 @@
 //! configured in your `Cargo.toml`.
 //!
 //! * `std` allows use of `std` crate instead of the default `core`. Enables using `std::error` and
-//! `set_boxed_logger` functionality.
+//!   `set_boxed_logger` functionality.
 //! * `serde` enables support for serialization and deserialization of `Level` and `LevelFilter`.
 //!
 //! ```toml
@@ -321,7 +325,9 @@
 //! [syslog]: https://docs.rs/syslog/*/syslog/
 //! [slog-stdlog]: https://docs.rs/slog-stdlog/*/slog_stdlog/
 //! [log4rs]: https://docs.rs/log4rs/*/log4rs/
+//! [logforth]: https://docs.rs/logforth/*/logforth/
 //! [fern]: https://docs.rs/fern/*/fern/
+//! [spdlog-rs]: https://docs.rs/spdlog-rs/*/spdlog/
 //! [systemd-journal-logger]: https://docs.rs/systemd-journal-logger/*/systemd_journal_logger/
 //! [android_log]: https://docs.rs/android_log/*/android_log/
 //! [win_dbg_logger]: https://docs.rs/win_dbg_logger/*/win_dbg_logger/
@@ -332,11 +338,13 @@
 //! [logcontrol-log]: https://docs.rs/logcontrol-log/*/logcontrol_log/
 //! [log_err]: https://docs.rs/log_err/*/log_err/
 //! [log-reload]: https://docs.rs/log-reload/*/log_reload/
+//! [clang_log]: https://docs.rs/clang_log/latest/clang_log
+//! [ftail]: https://docs.rs/ftail/latest/ftail
 
 #![doc(
     html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
     html_favicon_url = "https://www.rust-lang.org/favicon.ico",
-    html_root_url = "https://docs.rs/log/0.4.22"
+    html_root_url = "https://docs.rs/log/0.4.27"
 )]
 #![warn(missing_docs)]
 #![deny(missing_debug_implementations, unconditional_recursion)]
@@ -1027,7 +1035,7 @@ impl<'a> RecordBuilder<'a> {
     }
 }
 
-impl<'a> Default for RecordBuilder<'a> {
+impl Default for RecordBuilder<'_> {
     fn default() -> Self {
         Self::new()
     }
@@ -1156,7 +1164,7 @@ impl<'a> MetadataBuilder<'a> {
     }
 }
 
-impl<'a> Default for MetadataBuilder<'a> {
+impl Default for MetadataBuilder<'_> {
     fn default() -> Self {
         Self::new()
     }
@@ -1196,7 +1204,7 @@ pub trait Log: Sync + Send {
     fn flush(&self);
 }
 
-// Just used as a dummy initial value for LOGGER
+/// A dummy initial value for LOGGER.
 struct NopLogger;
 
 impl Log for NopLogger {

@@ -13,12 +13,18 @@
 edition = "2018"
 rust-version = "1.63.0"
 name = "tracing-subscriber"
-version = "0.3.18"
+version = "0.3.19"
 authors = [
     "Eliza Weisman <eliza@buoyant.io>",
     "David Barsky <me@davidbarsky.com>",
     "Tokio Contributors <team@tokio.rs>",
 ]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = """
 Utilities for implementing and composing `tracing` subscribers.
 """
@@ -46,20 +52,116 @@ rustdoc-args = [
     "docsrs",
 ]
 
+[lib]
+name = "tracing_subscriber"
+path = "src/lib.rs"
+
+[[test]]
+name = "cached_layer_filters_dont_break_other_layers"
+path = "tests/cached_layer_filters_dont_break_other_layers.rs"
+
+[[test]]
+name = "duplicate_spans"
+path = "tests/duplicate_spans.rs"
+
+[[test]]
+name = "env_filter"
+path = "tests/env_filter/main.rs"
+
+[[test]]
+name = "event_enabling"
+path = "tests/event_enabling.rs"
+
+[[test]]
+name = "field_filter"
+path = "tests/field_filter.rs"
+
+[[test]]
+name = "filter_log"
+path = "tests/filter_log.rs"
+
+[[test]]
+name = "fmt_max_level_hint"
+path = "tests/fmt_max_level_hint.rs"
+
+[[test]]
+name = "hinted_layer_filters_dont_break_other_layers"
+path = "tests/hinted_layer_filters_dont_break_other_layers.rs"
+
+[[test]]
+name = "layer_filter_interests_are_cached"
+path = "tests/layer_filter_interests_are_cached.rs"
+
+[[test]]
+name = "layer_filters"
+path = "tests/layer_filters/main.rs"
+
+[[test]]
+name = "multiple_layer_filter_interests_cached"
+path = "tests/multiple_layer_filter_interests_cached.rs"
+
+[[test]]
+name = "option"
+path = "tests/option.rs"
+
+[[test]]
+name = "option_filter_interest_caching"
+path = "tests/option_filter_interest_caching.rs"
+
+[[test]]
+name = "registry_max_level_hint"
+path = "tests/registry_max_level_hint.rs"
+
+[[test]]
+name = "registry_with_subscriber"
+path = "tests/registry_with_subscriber.rs"
+
+[[test]]
+name = "reload"
+path = "tests/reload.rs"
+
+[[test]]
+name = "reload_max_log_level"
+path = "tests/reload_max_log_level.rs"
+
+[[test]]
+name = "same_len_filters"
+path = "tests/same_len_filters.rs"
+
+[[test]]
+name = "unhinted_layer_filters_dont_break_other_layers"
+path = "tests/unhinted_layer_filters_dont_break_other_layers.rs"
+
+[[test]]
+name = "utils"
+path = "tests/utils.rs"
+
+[[test]]
+name = "vec"
+path = "tests/vec.rs"
+
+[[test]]
+name = "vec_subscriber_filter_interests_cached"
+path = "tests/vec_subscriber_filter_interests_cached.rs"
+
+[[bench]]
+name = "enter"
+path = "benches/enter.rs"
+harness = false
+
 [[bench]]
 name = "filter"
+path = "benches/filter.rs"
 harness = false
 
 [[bench]]
 name = "filter_log"
+path = "benches/filter_log.rs"
 harness = false
 
 [[bench]]
 name = "fmt"
-harness = false
-
-[[bench]]
-name = "enter"
+path = "benches/fmt.rs"
 harness = false
 
 [dependencies.chrono]
@@ -123,7 +225,7 @@ features = ["formatting"]
 optional = true
 
 [dependencies.tracing]
-version = "0.1.35"
+version = "0.1.41"
 optional = true
 default-features = false
 
@@ -141,7 +243,7 @@ optional = true
 default-features = false
 
 [dependencies.tracing-serde]
-version = "0.1.3"
+version = "0.2.0"
 optional = true
 
 [dev-dependencies.criterion]
@@ -171,7 +273,7 @@ features = [
 ]
 
 [dev-dependencies.tracing]
-version = "0.1.35"
+version = "0.1.41"
 
 [dev-dependencies.tracing-futures]
 version = "0.2.0"
@@ -215,6 +317,7 @@ json = [
     "serde_json",
 ]
 local-time = ["time/local-offset"]
+nu-ansi-term = ["dep:nu-ansi-term"]
 registry = [
     "sharded-slab",
     "thread_local",
@@ -244,3 +347,11 @@ package = "valuable"
 
 [badges.maintenance]
 status = "experimental"
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = [
+    "cfg(flaky_tests)",
+    "cfg(tracing_unstable)",
+]

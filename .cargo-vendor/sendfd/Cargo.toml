@@ -12,12 +12,18 @@
 [package]
 edition = "2015"
 name = "sendfd"
-version = "0.4.3"
+version = "0.4.4"
 authors = [
     "Simonas Kazlauskas <simonas@standard.ai>",
     "Bernardo Meurer <bernardo@standard.ai>",
     "Léo Gaspard <leo@standard.ai>",
 ]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "Send file descriptors along with data over UNIX domain sockets"
 documentation = "https://docs.rs/sendfd"
 readme = "README.mkd"
@@ -31,6 +37,10 @@ rustdoc-args = [
     "--cfg",
     "sendfd_docs",
 ]
+
+[lib]
+name = "sendfd"
+path = "src/lib.rs"
 
 [dependencies.libc]
 version = "0.2"

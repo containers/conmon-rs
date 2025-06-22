@@ -3,7 +3,7 @@ use tokio::process::Command;
 use tokio_crate as tokio;
 
 use crate::{
-    map_fds, preserve_fds, validate_child_fds, CommandFdExt, FdMapping, FdMappingCollision,
+    CommandFdExt, FdMapping, FdMappingCollision, map_fds, preserve_fds, validate_child_fds,
 };
 
 impl CommandFdExt for Command {

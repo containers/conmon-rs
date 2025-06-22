@@ -8,7 +8,6 @@
 use super::types::RawUname;
 use crate::backend::c;
 use crate::backend::conv::{c_int, ret, ret_infallible, slice};
-#[cfg(any(target_os = "linux", target_os = "android"))]
 use crate::fd::BorrowedFd;
 use crate::ffi::CStr;
 use crate::io;
@@ -37,6 +36,12 @@ pub(crate) fn sysinfo() -> Sysinfo {
 pub(crate) fn sethostname(name: &[u8]) -> io::Result<()> {
     let (ptr, len) = slice(name);
     unsafe { ret(syscall_readonly!(__NR_sethostname, ptr, len)) }
+}
+
+#[inline]
+pub(crate) fn setdomainname(name: &[u8]) -> io::Result<()> {
+    let (ptr, len) = slice(name);
+    unsafe { ret(syscall_readonly!(__NR_setdomainname, ptr, len)) }
 }
 
 #[inline]

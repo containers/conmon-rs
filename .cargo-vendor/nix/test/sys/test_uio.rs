@@ -1,10 +1,9 @@
 use nix::sys::uio::*;
 use nix::unistd::*;
-use rand::distributions::Alphanumeric;
-use rand::{thread_rng, Rng};
+use rand::distr::Alphanumeric;
+use rand::{rng, Rng};
 use std::fs::OpenOptions;
 use std::io::IoSlice;
-use std::os::unix::io::{FromRawFd, OwnedFd};
 use std::{cmp, iter};
 
 #[cfg(not(target_os = "redox"))]
@@ -15,10 +14,12 @@ use tempfile::tempdir;
 use tempfile::tempfile;
 
 #[test]
+// On Solaris sometimes wrtitev() returns EINVAL.
+#[cfg(not(target_os = "solaris"))]
 fn test_writev() {
     let mut to_write = Vec::with_capacity(16 * 128);
     for _ in 0..16 {
-        let s: String = thread_rng()
+        let s: String = rng()
             .sample_iter(&Alphanumeric)
             .map(char::from)
             .take(128)
@@ -34,7 +35,7 @@ fn test_writev() {
         let slice_len = if left <= 64 {
             left
         } else {
-            thread_rng().gen_range(64..cmp::min(256, left))
+            rng().random_range(64..cmp::min(256, left))
         };
         let b = &to_write[consumed..consumed + slice_len];
         iovecs.push(IoSlice::new(b));
@@ -44,28 +45,23 @@ fn test_writev() {
     // FileDesc will close its filedesc (reader).
     let mut read_buf: Vec<u8> = iter::repeat(0u8).take(128 * 16).collect();
 
-    // Temporary workaround to cope with the existing RawFd pipe(2), should be
-    // removed when pipe(2) becomes I/O-safe.
-    let writer = unsafe { OwnedFd::from_raw_fd(writer) };
-
     // Blocking io, should write all data.
     let write_res = writev(&writer, &iovecs);
     let written = write_res.expect("couldn't write");
     // Check whether we written all data
     assert_eq!(to_write.len(), written);
-    let read_res = read(reader, &mut read_buf[..]);
+    let read_res = read(&reader, &mut read_buf[..]);
     let read = read_res.expect("couldn't read");
     // Check we have read as much as we written
     assert_eq!(read, written);
     // Check equality of written and read data
     assert_eq!(&to_write, &read_buf);
-    close(reader).expect("closed reader");
 }
 
 #[test]
 #[cfg(not(target_os = "redox"))]
 fn test_readv() {
-    let s: String = thread_rng()
+    let s: String = rng()
         .sample_iter(&Alphanumeric)
         .map(char::from)
         .take(128)
@@ -78,7 +74,7 @@ fn test_readv() {
         let vec_len = if left <= 64 {
             left
         } else {
-            thread_rng().gen_range(64..cmp::min(256, left))
+            rng().random_range(64..cmp::min(256, left))
         };
         let v: Vec<u8> = iter::repeat(0u8).take(vec_len).collect();
         storage.push(v);
@@ -92,10 +88,6 @@ fn test_readv() {
     // Blocking io, should write all data.
     write(writer, &to_write).expect("write failed");
 
-    // Temporary workaround to cope with the existing RawFd pipe(2), should be
-    // removed when pipe(2) becomes I/O-safe.
-    let reader = unsafe { OwnedFd::from_raw_fd(reader) };
-
     let read = readv(&reader, &mut iovecs[..]).expect("read failed");
     // Check whether we've read all data
     assert_eq!(to_write.len(), read);
@@ -108,7 +100,6 @@ fn test_readv() {
     assert_eq!(read_buf.len(), to_write.len());
     // Check equality of written and read data
     assert_eq!(&read_buf, &to_write);
-    close(writer).expect("couldn't close writer");
 }
 
 #[test]
@@ -150,7 +141,12 @@ fn test_pread() {
 }
 
 #[test]
-#[cfg(not(any(target_os = "redox", target_os = "haiku")))]
+#[cfg(not(any(
+    target_os = "redox",
+    target_os = "haiku",
+    target_os = "solaris",
+    target_os = "cygwin"
+)))]
 fn test_pwritev() {
     use std::io::Read;
 
@@ -185,7 +181,12 @@ fn test_pwritev() {
 }
 
 #[test]
-#[cfg(not(any(target_os = "redox", target_os = "haiku")))]
+#[cfg(not(any(
+    target_os = "redox",
+    target_os = "haiku",
+    target_os = "solaris",
+    target_os = "cygwin"
+)))]
 fn test_preadv() {
     use std::io::Write;
 
@@ -241,10 +242,10 @@ fn test_process_vm_readv() {
     let (r, w) = pipe().unwrap();
     match unsafe { fork() }.expect("Error: Fork Failed") {
         Parent { child } => {
-            close(w).unwrap();
+            drop(w);
             // wait for child
-            read(r, &mut [0u8]).unwrap();
-            close(r).unwrap();
+            read(&r, &mut [0u8]).unwrap();
+            drop(r);
 
             let ptr = vector.as_ptr() as usize;
             let remote_iov = RemoteIoVec { base: ptr, len: 5 };
@@ -263,12 +264,11 @@ fn test_process_vm_readv() {
             assert_eq!(20u8, buf.iter().sum());
         }
         Child => {
-            let _ = close(r);
+            drop(r);
             for i in &mut vector {
                 *i += 1;
             }
             let _ = write(w, b"\0");
-            let _ = close(w);
             loop {
                 pause();
             }

@@ -8,6 +8,7 @@
 #![allow(
     clippy::arc_with_non_send_sync,
     clippy::cast_lossless,
+    clippy::elidable_lifetime_names,
     clippy::let_underscore_untyped,
     clippy::manual_let_else,
     clippy::match_like_matches_macro,
@@ -58,19 +59,22 @@ mod librustc_parse {
     extern crate rustc_span;
 
     use crate::repo;
-    use rustc_data_structures::sync::Lrc;
     use rustc_error_messages::FluentBundle;
-    use rustc_errors::{emitter::Emitter, translation::Translate, DiagCtxt, DiagInner};
+    use rustc_errors::emitter::Emitter;
+    use rustc_errors::registry::Registry;
+    use rustc_errors::translation::Translate;
+    use rustc_errors::{DiagCtxt, DiagInner};
     use rustc_session::parse::ParseSess;
     use rustc_span::source_map::{FilePathMapping, SourceMap};
     use rustc_span::FileName;
     use std::path::Path;
+    use std::sync::Arc;
 
     pub fn bench(path: &Path, content: &str) -> Result<(), ()> {
         struct SilentEmitter;
 
         impl Emitter for SilentEmitter {
-            fn emit_diagnostic(&mut self, _diag: DiagInner) {}
+            fn emit_diagnostic(&mut self, _diag: DiagInner, _registry: &Registry) {}
             fn source_map(&self) -> Option<&SourceMap> {
                 None
             }
@@ -87,7 +91,7 @@ mod librustc_parse {
 
         let edition = repo::edition(path).parse().unwrap();
         rustc_span::create_session_if_not_set_then(edition, |_| {
-            let source_map = Lrc::new(SourceMap::new(FilePathMapping::empty()));
+            let source_map = Arc::new(SourceMap::new(FilePathMapping::empty()));
             let emitter = Box::new(SilentEmitter);
             let handler = DiagCtxt::new(emitter);
             let sess = ParseSess::with_dcx(handler, source_map);
@@ -97,7 +101,7 @@ mod librustc_parse {
             if let Err(diagnostic) = parser.parse_crate_mod() {
                 diagnostic.cancel();
                 return Err(());
-            };
+            }
             Ok(())
         })
     }

@@ -6,15 +6,11 @@ use proc_macro2::{Group, Ident, Literal, Punct, Span, TokenStream, TokenTree};
 use std::ffi::{CStr, CString};
 
 /// Types that can be interpolated inside a `quote!` invocation.
-///
-/// [`quote!`]: macro.quote.html
 pub trait ToTokens {
     /// Write `self` to the given `TokenStream`.
     ///
     /// The token append methods provided by the [`TokenStreamExt`] extension
     /// trait may be useful for implementing `ToTokens`.
-    ///
-    /// [`TokenStreamExt`]: trait.TokenStreamExt.html
     ///
     /// # Example
     ///
@@ -75,13 +71,13 @@ pub trait ToTokens {
     }
 }
 
-impl<'a, T: ?Sized + ToTokens> ToTokens for &'a T {
+impl<T: ?Sized + ToTokens> ToTokens for &T {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         (**self).to_tokens(tokens);
     }
 }
 
-impl<'a, T: ?Sized + ToTokens> ToTokens for &'a mut T {
+impl<T: ?Sized + ToTokens> ToTokens for &mut T {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         (**self).to_tokens(tokens);
     }

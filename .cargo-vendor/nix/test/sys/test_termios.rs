@@ -1,18 +1,27 @@
-use std::os::unix::io::{AsFd, AsRawFd};
+use std::os::unix::io::AsFd;
 use tempfile::tempfile;
 
 use nix::errno::Errno;
 use nix::fcntl;
 use nix::pty::openpty;
-use nix::sys::termios::{self, tcgetattr, LocalFlags, OutputFlags};
+use nix::sys::termios::{self, tcgetattr, BaudRate, LocalFlags, OutputFlags};
 use nix::unistd::{read, write};
 
 /// Helper function analogous to `std::io::Write::write_all`, but for `Fd`s
 fn write_all<Fd: AsFd>(f: Fd, buf: &[u8]) {
     let mut len = 0;
     while len < buf.len() {
-        len += write(f.as_fd().as_raw_fd(), &buf[len..]).unwrap();
+        len += write(f.as_fd(), &buf[len..]).unwrap();
     }
+}
+
+#[test]
+fn test_baudrate_try_from() {
+    assert_eq!(Ok(BaudRate::B0), BaudRate::try_from(libc::B0));
+    #[cfg(not(target_os = "haiku"))]
+    BaudRate::try_from(999999999).expect_err("assertion failed");
+    #[cfg(target_os = "haiku")]
+    BaudRate::try_from(99).expect_err("assertion failed");
 }
 
 // Test tcgetattr on a terminal
@@ -71,6 +80,7 @@ fn test_output_flags() {
 
 // Test modifying local flags
 #[test]
+#[cfg(not(target_os = "solaris"))]
 fn test_local_flags() {
     // openpty uses ptname(3) internally
     let _m = crate::PTSNAME_MTX.lock();
@@ -91,10 +101,10 @@ fn test_local_flags() {
     let pty = openpty(None, &termios).unwrap();
 
     // Set the master is in nonblocking mode or reading will never return.
-    let flags = fcntl::fcntl(pty.master.as_raw_fd(), fcntl::F_GETFL).unwrap();
+    let flags = fcntl::fcntl(&pty.master, fcntl::F_GETFL).unwrap();
     let new_flags =
         fcntl::OFlag::from_bits_truncate(flags) | fcntl::OFlag::O_NONBLOCK;
-    fcntl::fcntl(pty.master.as_raw_fd(), fcntl::F_SETFL(new_flags)).unwrap();
+    fcntl::fcntl(pty.master.as_fd(), fcntl::F_SETFL(new_flags)).unwrap();
 
     // Write into the master
     let string = "foofoofoo\r";
@@ -102,6 +112,6 @@ fn test_local_flags() {
 
     // Try to read from the master, which should not have anything as echoing was disabled.
     let mut buf = [0u8; 10];
-    let read = read(pty.master.as_raw_fd(), &mut buf).unwrap_err();
+    let read = read(&pty.master, &mut buf).unwrap_err();
     assert_eq!(read, Errno::EAGAIN);
 }

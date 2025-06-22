@@ -10,11 +10,22 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2018"
+edition = "2021"
 rust-version = "1.57"
 name = "wasm-bindgen"
-version = "0.2.92"
+version = "0.2.100"
 authors = ["The wasm-bindgen Developers"]
+build = "build.rs"
+include = [
+    "/build.rs",
+    "/LICENSE-*",
+    "/src",
+]
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = """
 Easy support for interacting between JS and Rust.
 """
@@ -24,16 +35,25 @@ readme = "README.md"
 categories = ["wasm"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rustwasm/wasm-bindgen"
-resolver = "2"
 
 [package.metadata.docs.rs]
 features = ["serde-serialize"]
 
 [lib]
+name = "wasm_bindgen"
+path = "src/lib.rs"
 test = false
 
 [dependencies.cfg-if]
 version = "1.0.0"
+
+[dependencies.once_cell]
+version = "1.12"
+default-features = false
+
+[dependencies.rustversion]
+version = "1.0"
+optional = true
 
 [dependencies.serde]
 version = "1.0"
@@ -44,39 +64,43 @@ version = "1.0"
 optional = true
 
 [dependencies.wasm-bindgen-macro]
-version = "=0.2.92"
+version = "=0.2.100"
+
+[dev-dependencies.once_cell]
+version = "1"
 
 [features]
 default = [
-    "spans",
     "std",
+    "msrv",
 ]
 enable-interning = ["std"]
-gg-alloc = ["wasm-bindgen-test/gg-alloc"]
+gg-alloc = []
+msrv = ["rustversion"]
 serde-serialize = [
     "serde",
     "serde_json",
     "std",
 ]
-spans = ["wasm-bindgen-macro/spans"]
+spans = []
 std = []
 strict-macro = ["wasm-bindgen-macro/strict-macro"]
 xxx_debug_only_print_generated_code = ["wasm-bindgen-macro/xxx_debug_only_print_generated_code"]
 
-[target."cfg(target_arch = \"wasm32\")".dev-dependencies.js-sys]
-version = "0.3.69"
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies.paste]
+version = "1"
 
-[target."cfg(target_arch = \"wasm32\")".dev-dependencies.serde_derive]
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies.serde_derive]
 version = "1.0"
 
-[target."cfg(target_arch = \"wasm32\")".dev-dependencies.wasm-bindgen-futures]
-version = "=0.4.42"
+[lints.clippy]
+large_enum_variant = "allow"
+new_without_default = "allow"
+overly_complex_bool_expr = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
 
-[target."cfg(target_arch = \"wasm32\")".dev-dependencies.wasm-bindgen-test]
-version = "=0.3.42"
-
-[target."cfg(target_arch = \"wasm32\")".dev-dependencies.wasm-bindgen-test-crate-a]
-version = "0.1"
-
-[target."cfg(target_arch = \"wasm32\")".dev-dependencies.wasm-bindgen-test-crate-b]
-version = "0.1"
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = ["cfg(wasm_bindgen_unstable_test_coverage)"]

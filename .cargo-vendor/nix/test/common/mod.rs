@@ -2,18 +2,18 @@ use cfg_if::cfg_if;
 
 #[macro_export]
 macro_rules! skip {
-    ($($reason: expr),+) => {
+    ($($reason: expr),+) => {{
         use ::std::io::{self, Write};
 
         let stderr = io::stderr();
         let mut handle = stderr.lock();
         writeln!(handle, $($reason),+).unwrap();
         return;
-    }
+    }}
 }
 
 cfg_if! {
-    if #[cfg(any(target_os = "android", target_os = "linux"))] {
+    if #[cfg(linux_android)] {
         #[macro_export] macro_rules! require_capability {
             ($name:expr, $capname:ident) => {
                 use ::caps::{Capability, CapSet, has_cap};
@@ -37,8 +37,8 @@ cfg_if! {
 #[macro_export]
 macro_rules! require_mount {
     ($name:expr) => {
-        use ::sysctl::{CtlValue, Sysctl};
         use nix::unistd::Uid;
+        use sysctl::{CtlValue, Sysctl};
 
         let ctl = ::sysctl::Ctl::new("vfs.usermount").unwrap();
         if !Uid::current().is_root() && CtlValue::Int(0) == ctl.value().unwrap()
@@ -51,7 +51,7 @@ macro_rules! require_mount {
     };
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(linux_android)]
 #[macro_export]
 macro_rules! skip_if_cirrus {
     ($reason:expr) => {
@@ -65,7 +65,7 @@ macro_rules! skip_if_cirrus {
 #[macro_export]
 macro_rules! skip_if_jailed {
     ($name:expr) => {
-        use ::sysctl::{CtlValue, Sysctl};
+        use sysctl::{CtlValue, Sysctl};
 
         let ctl = ::sysctl::Ctl::new("security.jail.jailed").unwrap();
         if let CtlValue::Int(1) = ctl.value().unwrap() {
@@ -87,7 +87,7 @@ macro_rules! skip_if_not_root {
 }
 
 cfg_if! {
-    if #[cfg(any(target_os = "android", target_os = "linux"))] {
+    if #[cfg(linux_android)] {
         #[macro_export] macro_rules! skip_if_seccomp {
             ($name:expr) => {
                 if let Ok(s) = std::fs::read_to_string("/proc/self/status") {

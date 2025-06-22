@@ -1,8 +1,8 @@
 // You can run this example from the root of the mio repo:
 // cargo run --example tcp_listenfd_server --features="os-poll net"
 // or with wasi:
-// cargo +nightly build --target wasm32-wasi  --example tcp_listenfd_server --features="os-poll net"
-// wasmtime run --tcplisten 127.0.0.1:9000 --env 'LISTEN_FDS=1' target/wasm32-wasi/debug/examples/tcp_listenfd_server.wasm
+// cargo +nightly build --target wasm32-wasip1  --example tcp_listenfd_server --features="os-poll net"
+// wasmtime run --tcplisten 127.0.0.1:9000 --env 'LISTEN_FDS=1' target/wasm32-wasip1/debug/examples/tcp_listenfd_server.wasm
 
 use mio::event::Event;
 use mio::net::{TcpListener, TcpStream};
@@ -19,10 +19,8 @@ const DATA: &[u8] = b"Hello world!\n";
 
 #[cfg(not(windows))]
 fn get_first_listen_fd_listener() -> Option<std::net::TcpListener> {
-    #[cfg(unix)]
-    use std::os::unix::io::FromRawFd;
-    #[cfg(target_os = "wasi")]
-    use std::os::wasi::io::FromRawFd;
+    #[cfg(any(unix, target_os = "hermit", target_os = "wasi"))]
+    use std::os::fd::FromRawFd;
 
     let stdlistener = unsafe { std::net::TcpListener::from_raw_fd(3) };
     stdlistener.set_nonblocking(true).unwrap();

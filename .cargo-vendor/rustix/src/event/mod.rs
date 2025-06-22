@@ -1,6 +1,6 @@
 //! Event operations.
 
-#[cfg(any(linux_kernel, solarish, target_os = "redox"))]
+#[cfg(any(linux_kernel, target_os = "illumos", target_os = "redox"))]
 pub mod epoll;
 #[cfg(any(
     linux_kernel,
@@ -9,7 +9,7 @@ pub mod epoll;
     target_os = "espidf"
 ))]
 mod eventfd;
-#[cfg(all(feature = "alloc", bsd))]
+#[cfg(bsd)]
 pub mod kqueue;
 #[cfg(not(any(windows, target_os = "redox", target_os = "wasi")))]
 mod pause;
@@ -19,6 +19,7 @@ pub mod port;
 #[cfg(any(bsd, linux_kernel, windows, target_os = "wasi"))]
 mod select;
 
+pub use crate::timespec::{Nsecs, Secs, Timespec};
 #[cfg(any(
     linux_kernel,
     target_os = "freebsd",

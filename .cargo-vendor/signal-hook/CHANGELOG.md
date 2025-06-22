@@ -1,3 +1,33 @@
+# signal-hook-1.3.18
+
+* Release the special-case removal of AIX for top-level signal-hook too (#169,
+  #176).
+
+# signal-hook-async-std-0.3.0
+
+* Bump async-std to 0.2 (#172).
+
+# signal-hook-registry-1.4.5
+
+* Fix windows build (#174).
+
+# signal-hook-registry-1.4.4
+
+* Get rid of a warning.
+
+# signal-hook-registry-1.4.3
+
+* Remove special-case for AIX (#169).
+
+# signal-hook-mio-0.2.4
+
+* Support for mio 1.0
+
+# signal-hook-registry-1.4.2
+
+* NQX support (experimental/not guaranteed to work) (#158)
+  - By disabling `SA_RESTART` on that platform, not supported there.
+
 # 0.3.17
 
 * Fix race condition leading into a panic in SignalsInfo::forever (#148).

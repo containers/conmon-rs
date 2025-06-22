@@ -39,13 +39,13 @@ macro_rules! doc {
         /// 2. Aggregate the `<async expression>`s from each branch, including the
         ///    disabled ones. If the branch is disabled, `<async expression>` is still
         ///    evaluated, but the resulting future is not polled.
-        /// 3. Concurrently await on the results for all remaining `<async expression>`s.
-        /// 4. Once an `<async expression>` returns a value, attempt to apply the value
-        ///    to the provided `<pattern>`, if the pattern matches, evaluate `<handler>`
-        ///    and return. If the pattern **does not** match, disable the current branch
-        ///    and for the remainder of the current call to `select!`. Continue from step 3.
-        /// 5. If **all** branches are disabled, evaluate the `else` expression. If no
-        ///    else branch is provided, panic.
+        /// 3. If **all** branches are disabled: go to step 6.
+        /// 4. Concurrently await on the results for all remaining `<async expression>`s.
+        /// 5. Once an `<async expression>` returns a value, attempt to apply the value to the
+        ///    provided `<pattern>`. If the pattern matches, evaluate the `<handler>` and return.
+        ///    If the pattern **does not** match, disable the current branch for the remainder of
+        ///    the current call to `select!`. Continue from step 3.
+        /// 6. Evaluate the `else` expression. If no else expression is provided, panic.
         ///
         /// # Runtime characteristics
         ///
@@ -398,6 +398,153 @@ macro_rules! doc {
         ///     }
         /// }
         /// ```
+        /// # Alternatives from the Ecosystem
+        ///
+        /// The `select!` macro is a powerful tool for managing multiple asynchronous
+        /// branches, enabling tasks to run concurrently within the same thread. However,
+        /// its use can introduce challenges, particularly around cancellation safety, which
+        /// can lead to subtle and hard-to-debug errors. For many use cases, ecosystem
+        /// alternatives may be preferable as they mitigate these concerns by offering
+        /// clearer syntax, more predictable control flow, and reducing the need to manually
+        /// handle issues like fuse semantics or cancellation safety.
+        ///
+        /// ## Merging Streams
+        ///
+        /// For cases where `loop { select! { ... } }` is used to poll multiple tasks,
+        /// stream merging offers a concise alternative, inherently handle cancellation-safe
+        /// processing, removing the risk of data loss. Libraries such as [`tokio_stream`],
+        /// [`futures::stream`] and [`futures_concurrency`] provide tools for merging
+        /// streams and handling their outputs sequentially.
+        ///
+        /// [`tokio_stream`]: https://docs.rs/tokio-stream/latest/tokio_stream/
+        /// [`futures::stream`]: https://docs.rs/futures/latest/futures/stream/
+        /// [`futures_concurrency`]: https://docs.rs/futures-concurrency/latest/futures_concurrency/
+        ///
+        /// ### Example with `select!`
+        ///
+        /// ```
+        /// struct File;
+        /// struct Channel;
+        /// struct Socket;
+        ///
+        /// impl Socket {
+        ///     async fn read_packet(&mut self) -> Vec<u8> {
+        ///         vec![]
+        ///     }
+        /// }
+        ///
+        /// async fn read_send(_file: &mut File, _channel: &mut Channel) {
+        ///     // do work that is not cancel safe
+        /// }
+        ///
+        /// #[tokio::main]
+        /// async fn main() {
+        ///     // open our IO types
+        ///     let mut file = File;
+        ///     let mut channel = Channel;
+        ///     let mut socket = Socket;
+        ///
+        ///     loop {
+        ///         tokio::select! {
+        ///             _ = read_send(&mut file, &mut channel) => { /* ... */ },
+        ///             _data = socket.read_packet() => { /* ... */ }
+        ///             _ = futures::future::ready(()) => break
+        ///         }
+        ///     }
+        /// }
+        ///
+        /// ```
+        ///
+        /// ### Moving to `merge`
+        ///
+        /// By using merge, you can unify multiple asynchronous tasks into a single stream,
+        /// eliminating the need to manage tasks manually and reducing the risk of
+        /// unintended behavior like data loss.
+        ///
+        /// ```
+        /// use std::pin::pin;
+        ///
+        /// use futures::stream::unfold;
+        /// use tokio_stream::StreamExt;
+        ///
+        /// struct File;
+        /// struct Channel;
+        /// struct Socket;
+        ///
+        /// impl Socket {
+        ///     async fn read_packet(&mut self) -> Vec<u8> {
+        ///         vec![]
+        ///     }
+        /// }
+        ///
+        /// async fn read_send(_file: &mut File, _channel: &mut Channel) {
+        ///     // do work that is not cancel safe
+        /// }
+        ///
+        /// enum Message {
+        ///     Stop,
+        ///     Sent,
+        ///     Data(Vec<u8>),
+        /// }
+        ///
+        /// #[tokio::main]
+        /// async fn main() {
+        ///     // open our IO types
+        ///     let file = File;
+        ///     let channel = Channel;
+        ///     let socket = Socket;
+        ///
+        ///     let a = unfold((file, channel), |(mut file, mut channel)| async {
+        ///         read_send(&mut file, &mut channel).await;
+        ///         Some((Message::Sent, (file, channel)))
+        ///     });
+        ///     let b = unfold(socket, |mut socket| async {
+        ///         let data = socket.read_packet().await;
+        ///         Some((Message::Data(data), socket))
+        ///     });
+        ///     let c = tokio_stream::iter([Message::Stop]);
+        ///
+        ///     let mut s = pin!(a.merge(b).merge(c));
+        ///     while let Some(msg) = s.next().await {
+        ///         match msg {
+        ///             Message::Data(_data) => { /* ... */ }
+        ///             Message::Sent => continue,
+        ///             Message::Stop => break,
+        ///         }
+        ///     }
+        /// }
+        /// ```
+        ///
+        /// ## Racing Futures
+        ///
+        /// If you need to wait for the first completion among several asynchronous tasks,
+        /// ecosystem utilities such as
+        /// [`futures`](https://docs.rs/futures/latest/futures/),
+        /// [`futures-lite`](https://docs.rs/futures-lite/latest/futures_lite/) or
+        /// [`futures-concurrency`](https://docs.rs/futures-concurrency/latest/futures_concurrency/)
+        /// provide streamlined syntax for racing futures:
+        ///
+        /// - [`futures_concurrency::future::Race`](https://docs.rs/futures-concurrency/latest/futures_concurrency/future/trait.Race.html)
+        /// - [`futures::select`](https://docs.rs/futures/latest/futures/macro.select.html)
+        /// - [`futures::stream::select_all`](https://docs.rs/futures/latest/futures/stream/select_all/index.html) (for streams)
+        /// - [`futures_lite::future::or`](https://docs.rs/futures-lite/latest/futures_lite/future/fn.or.html)
+        /// - [`futures_lite::future::race`](https://docs.rs/futures-lite/latest/futures_lite/future/fn.race.html)
+        ///
+        /// ```
+        /// use futures_concurrency::future::Race;
+        ///
+        /// #[tokio::main]
+        /// async fn main() {
+        ///     let task_a = async { Ok("ok") };
+        ///     let task_b = async { Err("error") };
+        ///     let result = (task_a, task_b).race().await;
+        ///
+        ///     match result {
+        ///         Ok(output) => println!("First task completed with: {output}"),
+        ///         Err(err) => eprintln!("Error occurred: {err}"),
+        ///     }
+        /// }
+        /// ```
         #[macro_export]
         #[cfg_attr(docsrs, doc(cfg(feature = "macros")))]
         $select
@@ -489,13 +636,22 @@ doc! {macro_rules! select {
         // Create a scope to separate polling from handling the output. This
         // adds borrow checker flexibility when using the macro.
         let mut output = {
+            // Store each future directly first (that is, without wrapping the future in a call to
+            // `IntoFuture::into_future`). This allows the `$fut` expression to make use of
+            // temporary lifetime extension.
+            //
+            // https://doc.rust-lang.org/1.58.1/reference/destructors.html#temporary-lifetime-extension
+            let futures_init = ($( $fut, )+);
+
             // Safety: Nothing must be moved out of `futures`. This is to
             // satisfy the requirement of `Pin::new_unchecked` called below.
             //
             // We can't use the `pin!` macro for this because `futures` is a
             // tuple and the standard library provides no way to pin-project to
             // the fields of a tuple.
-            let mut futures = ( $( $fut , )+ );
+            let mut futures = ($( $crate::macros::support::IntoFuture::into_future(
+                        $crate::count_field!( futures_init.$($skip)* )
+            ),)+);
 
             // This assignment makes sure that the `poll_fn` closure only has a
             // reference to the futures, instead of taking ownership of them.
@@ -504,6 +660,10 @@ doc! {macro_rules! select {
             let mut futures = &mut futures;
 
             $crate::macros::support::poll_fn(|cx| {
+                // Return `Pending` when the task budget is depleted since budget-aware futures
+                // are going to yield anyway and other futures will not cooperate.
+                ::std::task::ready!($crate::macros::support::poll_budget_available(cx));
+
                 // Track if any branch returns pending. If no branch completes
                 // **or** returns pending, this implies that all branches are
                 // disabled.
@@ -851,6 +1011,206 @@ macro_rules! count {
     };
     (_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
         64
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! count_field {
+    ($var:ident. ) => {
+        $var.0
+    };
+    ($var:ident. _) => {
+        $var.1
+    };
+    ($var:ident. _ _) => {
+        $var.2
+    };
+    ($var:ident. _ _ _) => {
+        $var.3
+    };
+    ($var:ident. _ _ _ _) => {
+        $var.4
+    };
+    ($var:ident. _ _ _ _ _) => {
+        $var.5
+    };
+    ($var:ident. _ _ _ _ _ _) => {
+        $var.6
+    };
+    ($var:ident. _ _ _ _ _ _ _) => {
+        $var.7
+    };
+    ($var:ident. _ _ _ _ _ _ _ _) => {
+        $var.8
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _) => {
+        $var.9
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _) => {
+        $var.10
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.11
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.12
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.13
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.14
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.15
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.16
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.17
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.18
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.19
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.20
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.21
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.22
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.23
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.24
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.25
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.26
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.27
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.28
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.29
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.30
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.31
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.32
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.33
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.34
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.35
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.36
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.37
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.38
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.39
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.40
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.41
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.42
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.43
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.44
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.45
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.46
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.47
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.48
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.49
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.50
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.51
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.52
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.53
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.54
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.55
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.56
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.57
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.58
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.59
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.60
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.61
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.62
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.63
+    };
+    ($var:ident. _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) => {
+        $var.64
     };
 }
 

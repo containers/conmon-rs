@@ -56,7 +56,7 @@ Make sure you activated the full features of the tokio crate on Cargo.toml:
 
 ```toml
 [dependencies]
-tokio = { version = "1.38.1", features = ["full"] }
+tokio = { version = "1.45.1", features = ["full"] }
 ```
 Then, on your main.rs:
 
@@ -78,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 let n = match socket.read(&mut buf).await {
                     // socket closed
-                    Ok(n) if n == 0 => return,
+                    Ok(0) => return,
                     Ok(n) => n,
                     Err(e) => {
                         eprintln!("failed to read from socket; err = {:?}", e);
@@ -186,12 +186,13 @@ When updating this, also update:
 
 Tokio will keep a rolling MSRV (minimum supported rust version) policy of **at
 least** 6 months. When increasing the MSRV, the new Rust version must have been
-released at least six months ago. The current MSRV is 1.63.
+released at least six months ago. The current MSRV is 1.70.
 
 Note that the MSRV is not increased automatically, and only as part of a minor
 release. The MSRV history for past minor releases can be found below:
 
- * 1.30 to now - Rust 1.63
+ * 1.39 to now  - Rust 1.70
+ * 1.30 to 1.38 - Rust 1.63
  * 1.27 to 1.29 - Rust 1.56
  * 1.17 to 1.26 - Rust 1.49
  * 1.15 to 1.16 - Rust 1.46
@@ -204,8 +205,8 @@ works with the MSRV of that minor release.
 
 ## Release schedule
 
-Tokio doesn't follow a fixed release schedule, but we typically make one to two
-new minor releases each month. We make patch releases for bugfixes as necessary.
+Tokio doesn't follow a fixed release schedule, but we typically make one minor
+release each month. We make patch releases for bugfixes as necessary.
 
 ## Bug patching policy
 
@@ -215,8 +216,8 @@ warrants a patch release with a fix for the bug, it will be backported and
 released as a new patch release for each LTS minor version. Our current LTS
 releases are:
 
- * `1.32.x` - LTS release until September 2024. (MSRV 1.63)
- * `1.36.x` - LTS release until March 2025. (MSRV 1.63)
+ * `1.38.x` - LTS release until July 2025. (MSRV 1.63)
+ * `1.43.x` - LTS release until March 2026. (MSRV 1.70)
 
 Each LTS release will continue to receive backported fixes for at least a year.
 If you wish to use a fixed minor release in your project, we recommend that you
@@ -226,7 +227,7 @@ To use a fixed minor version, you can specify the version with a tilde. For
 example, to specify that you wish to use the newest `1.32.x` patch release, you
 can use the following dependency specification:
 ```text
-tokio = { version = "~1.32", features = [...] }
+tokio = { version = "~1.38", features = [...] }
 ```
 
 ### Previous LTS releases
@@ -236,6 +237,8 @@ tokio = { version = "~1.32", features = [...] }
  * `1.18.x` - LTS release until June 2023.
  * `1.20.x` - LTS release until September 2023.
  * `1.25.x` - LTS release until March 2024.
+ * `1.32.x` - LTS release until September 2024.
+ * `1.36.x` - LTS release until March 2025.
 
 ## License
 

@@ -1,12 +1,16 @@
 use std::fmt;
 use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::net::{self, Shutdown, SocketAddr};
-#[cfg(unix)]
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
-#[cfg(target_os = "wasi")]
-use std::os::wasi::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+#[cfg(any(unix, target_os = "wasi"))]
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+// TODO: once <https://github.com/rust-lang/rust/issues/126198> is fixed this
+// can use `std::os::fd` and be merged with the above.
+#[cfg(target_os = "hermit")]
+use std::os::hermit::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 #[cfg(windows)]
-use std::os::windows::io::{AsRawSocket, FromRawSocket, IntoRawSocket, RawSocket};
+use std::os::windows::io::{
+    AsRawSocket, AsSocket, BorrowedSocket, FromRawSocket, IntoRawSocket, OwnedSocket, RawSocket,
+};
 
 use crate::io_source::IoSource;
 #[cfg(not(target_os = "wasi"))]
@@ -68,12 +72,15 @@ impl TcpStream {
     ///  1. Call `TcpStream::connect`
     ///  2. Register the returned stream with at least [write interest].
     ///  3. Wait for a (writable) event.
-    ///  4. Check `TcpStream::peer_addr`. If it returns `libc::EINPROGRESS` or
+    ///  4. Check `TcpStream::take_error`. If it returns an error, then
+    ///     something went wrong. If it returns `Ok(None)`, then proceed to
+    ///     step 5.
+    ///  5. Check `TcpStream::peer_addr`. If it returns `libc::EINPROGRESS` or
     ///     `ErrorKind::NotConnected` it means the stream is not yet connected,
     ///     go back to step 3. If it returns an address it means the stream is
-    ///     connected, go to step 5. If another error is returned something
+    ///     connected, go to step 6. If another error is returned something
     ///     went wrong.
-    ///  5. Now the stream can be used.
+    ///  6. Now the stream can be used.
     ///
     /// This may return a `WouldBlock` in which case the socket connection
     /// cannot be completed immediately, it usually means there are insufficient
@@ -83,7 +90,7 @@ impl TcpStream {
     #[cfg(not(target_os = "wasi"))]
     pub fn connect(addr: SocketAddr) -> io::Result<TcpStream> {
         let socket = new_for_addr(addr)?;
-        #[cfg(unix)]
+        #[cfg(any(unix, target_os = "hermit"))]
         let stream = unsafe { TcpStream::from_raw_fd(socket) };
         #[cfg(windows)]
         let stream = unsafe { TcpStream::from_raw_socket(socket as _) };
@@ -227,8 +234,8 @@ impl TcpStream {
     /// #
     /// # fn main() -> Result<(), Box<dyn Error>> {
     /// use std::io;
-    /// #[cfg(unix)]
-    /// use std::os::unix::io::AsRawFd;
+    /// #[cfg(any(unix, target_os = "wasi"))]
+    /// use std::os::fd::AsRawFd;
     /// #[cfg(windows)]
     /// use std::os::windows::io::AsRawSocket;
     /// use mio::net::TcpStream;
@@ -345,21 +352,21 @@ impl fmt::Debug for TcpStream {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "hermit", target_os = "wasi"))]
 impl IntoRawFd for TcpStream {
     fn into_raw_fd(self) -> RawFd {
         self.inner.into_inner().into_raw_fd()
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "hermit", target_os = "wasi"))]
 impl AsRawFd for TcpStream {
     fn as_raw_fd(&self) -> RawFd {
         self.inner.as_raw_fd()
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "hermit", target_os = "wasi"))]
 impl FromRawFd for TcpStream {
     /// Converts a `RawFd` to a `TcpStream`.
     ///
@@ -369,6 +376,33 @@ impl FromRawFd for TcpStream {
     /// non-blocking mode.
     unsafe fn from_raw_fd(fd: RawFd) -> TcpStream {
         TcpStream::from_std(FromRawFd::from_raw_fd(fd))
+    }
+}
+
+#[cfg(any(unix, target_os = "hermit", target_os = "wasi"))]
+impl From<TcpStream> for OwnedFd {
+    fn from(tcp_stream: TcpStream) -> Self {
+        tcp_stream.inner.into_inner().into()
+    }
+}
+
+#[cfg(any(unix, target_os = "hermit", target_os = "wasi"))]
+impl AsFd for TcpStream {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.inner.as_fd()
+    }
+}
+
+#[cfg(any(unix, target_os = "hermit", target_os = "wasi"))]
+impl From<OwnedFd> for TcpStream {
+    /// Converts a `RawFd` to a `TcpStream`.
+    ///
+    /// # Notes
+    ///
+    /// The caller is responsible for ensuring that the socket is in
+    /// non-blocking mode.
+    fn from(fd: OwnedFd) -> Self {
+        TcpStream::from_std(From::from(fd))
     }
 }
 
@@ -399,29 +433,47 @@ impl FromRawSocket for TcpStream {
     }
 }
 
-#[cfg(target_os = "wasi")]
-impl IntoRawFd for TcpStream {
-    fn into_raw_fd(self) -> RawFd {
-        self.inner.into_inner().into_raw_fd()
+#[cfg(windows)]
+impl From<TcpStream> for OwnedSocket {
+    fn from(tcp_stream: TcpStream) -> Self {
+        tcp_stream.inner.into_inner().into()
     }
 }
 
-#[cfg(target_os = "wasi")]
-impl AsRawFd for TcpStream {
-    fn as_raw_fd(&self) -> RawFd {
-        self.inner.as_raw_fd()
+#[cfg(windows)]
+impl AsSocket for TcpStream {
+    fn as_socket(&self) -> BorrowedSocket<'_> {
+        self.inner.as_socket()
     }
 }
 
-#[cfg(target_os = "wasi")]
-impl FromRawFd for TcpStream {
-    /// Converts a `RawFd` to a `TcpStream`.
+#[cfg(windows)]
+impl From<OwnedSocket> for TcpStream {
+    /// Converts a `RawSocket` to a `TcpStream`.
     ///
     /// # Notes
     ///
     /// The caller is responsible for ensuring that the socket is in
     /// non-blocking mode.
-    unsafe fn from_raw_fd(fd: RawFd) -> TcpStream {
-        TcpStream::from_std(FromRawFd::from_raw_fd(fd))
+    fn from(socket: OwnedSocket) -> Self {
+        TcpStream::from_std(From::from(socket))
+    }
+}
+
+impl From<TcpStream> for net::TcpStream {
+    fn from(stream: TcpStream) -> Self {
+        // Safety: This is safe since we are extracting the raw fd from a well-constructed
+        // mio::net::TcpStream which ensures that we actually pass in a valid file
+        // descriptor/socket
+        unsafe {
+            #[cfg(any(unix, target_os = "hermit", target_os = "wasi"))]
+            {
+                net::TcpStream::from_raw_fd(stream.into_raw_fd())
+            }
+            #[cfg(windows)]
+            {
+                net::TcpStream::from_raw_socket(stream.into_raw_socket())
+            }
+        }
     }
 }

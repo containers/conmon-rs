@@ -1,26 +1,18 @@
 //! Mount file systems
-#[cfg(any(target_os = "android", target_os = "linux"))]
-#[cfg_attr(docsrs, doc(cfg(all())))]
+#[cfg(linux_android)]
 mod linux;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
+#[cfg(linux_android)]
 pub use self::linux::*;
 
-#[cfg(any(
-    target_os = "dragonfly",
-    target_os = "freebsd",
-    target_os = "macos",
-    target_os = "netbsd",
-    target_os = "openbsd"
-))]
-#[cfg_attr(docsrs, doc(cfg(all())))]
-mod bsd;
+#[cfg(bsd_without_apple)]
+mod bsd_without_apple;
 
-#[cfg(any(
-    target_os = "dragonfly",
-    target_os = "freebsd",
-    target_os = "macos",
-    target_os = "netbsd",
-    target_os = "openbsd"
-))]
-pub use self::bsd::*;
+#[cfg(bsd_without_apple)]
+pub use self::bsd_without_apple::*;
+
+#[cfg(apple_targets)]
+mod apple;
+
+#[cfg(apple_targets)]
+pub use self::apple::*;

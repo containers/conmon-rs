@@ -39,6 +39,12 @@ categories = ["date-and-time"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/time-rs/time"
 
+[features]
+formatting = []
+large-dates = []
+parsing = []
+serde = []
+
 [lib]
 name = "time_macros"
 path = "src/lib.rs"
@@ -47,9 +53,3 @@ proc-macro = true
 [dependencies.time-core]
 version = "=0.1.1"
 path = "../time-core"
-
-[features]
-formatting = []
-large-dates = []
-parsing = []
-serde = []

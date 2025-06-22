@@ -249,7 +249,7 @@
 //!   dynamic library libproc_macro from rustc toolchain.
 
 // Syn types in rustdoc of other crates get linked to here.
-#![doc(html_root_url = "https://docs.rs/syn/2.0.89")]
+#![doc(html_root_url = "https://docs.rs/syn/2.0.104")]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![allow(non_camel_case_types)]
@@ -264,9 +264,11 @@
     clippy::derivable_impls,
     clippy::diverging_sub_expression,
     clippy::doc_markdown,
+    clippy::elidable_lifetime_names,
     clippy::enum_glob_use,
     clippy::expl_impl_clone_on_copy,
     clippy::explicit_auto_deref,
+    clippy::fn_params_excessive_bools,
     clippy::if_not_else,
     clippy::inherent_to_string,
     clippy::into_iter_without_iter,
@@ -277,7 +279,6 @@
     clippy::manual_let_else,
     clippy::manual_map,
     clippy::match_like_matches_macro,
-    clippy::match_on_vec_items,
     clippy::match_same_arms,
     clippy::match_wildcard_for_single_variants, // clippy bug: https://github.com/rust-lang/rust-clippy/issues/6984
     clippy::missing_errors_doc,
@@ -307,6 +308,7 @@
     clippy::used_underscore_binding,
     clippy::wildcard_imports,
 )]
+#![allow(unknown_lints, mismatched_lifetime_syntaxes)]
 
 extern crate self as syn;
 

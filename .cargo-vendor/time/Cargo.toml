@@ -55,6 +55,44 @@ rustdoc-args = [
 ]
 targets = ["x86_64-unknown-linux-gnu"]
 
+[features]
+alloc = ["serde?/alloc"]
+default = ["std"]
+formatting = [
+    "dep:itoa",
+    "std",
+    "time-macros?/formatting",
+]
+large-dates = ["time-macros?/large-dates"]
+local-offset = [
+    "std",
+    "dep:libc",
+    "dep:num_threads",
+]
+macros = ["dep:time-macros"]
+parsing = ["time-macros?/parsing"]
+quickcheck = [
+    "dep:quickcheck",
+    "alloc",
+]
+rand = ["dep:rand"]
+serde = [
+    "dep:serde",
+    "time-macros?/serde",
+]
+serde-human-readable = [
+    "serde",
+    "formatting",
+    "parsing",
+]
+serde-well-known = [
+    "serde",
+    "formatting",
+    "parsing",
+]
+std = ["alloc"]
+wasm-bindgen = ["dep:js-sys"]
+
 [lib]
 name = "time"
 path = "src/lib.rs"
@@ -109,44 +147,6 @@ version = "1.0.126"
 [dev-dependencies.time-macros]
 version = "=0.2.10"
 path = "../time-macros"
-
-[features]
-alloc = ["serde?/alloc"]
-default = ["std"]
-formatting = [
-    "dep:itoa",
-    "std",
-    "time-macros?/formatting",
-]
-large-dates = ["time-macros?/large-dates"]
-local-offset = [
-    "std",
-    "dep:libc",
-    "dep:num_threads",
-]
-macros = ["dep:time-macros"]
-parsing = ["time-macros?/parsing"]
-quickcheck = [
-    "dep:quickcheck",
-    "alloc",
-]
-rand = ["dep:rand"]
-serde = [
-    "dep:serde",
-    "time-macros?/serde",
-]
-serde-human-readable = [
-    "serde",
-    "formatting",
-    "parsing",
-]
-serde-well-known = [
-    "serde",
-    "formatting",
-    "parsing",
-]
-std = ["alloc"]
-wasm-bindgen = ["dep:js-sys"]
 
 [target."cfg(__ui_tests)".dev-dependencies.trybuild]
 version = "1.0.68"

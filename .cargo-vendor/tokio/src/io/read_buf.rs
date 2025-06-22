@@ -39,9 +39,11 @@ impl<'a> ReadBuf<'a> {
         }
     }
 
-    /// Creates a new `ReadBuf` from a fully uninitialized buffer.
+    /// Creates a new `ReadBuf` from a buffer that may be uninitialized.
     ///
-    /// Use `assume_init` if part of the buffer is known to be already initialized.
+    /// The internal cursor will mark the entire buffer as uninitialized. If
+    /// the buffer is known to be partially initialized, then use `assume_init`
+    /// to move the internal cursor.
     #[inline]
     pub fn uninit(buf: &'a mut [MaybeUninit<u8>]) -> ReadBuf<'a> {
         ReadBuf {
@@ -248,7 +250,9 @@ impl<'a> ReadBuf<'a> {
     pub fn put_slice(&mut self, buf: &[u8]) {
         assert!(
             self.remaining() >= buf.len(),
-            "buf.len() must fit in remaining()"
+            "buf.len() must fit in remaining(); buf.len() = {}, remaining() = {}",
+            buf.len(),
+            self.remaining()
         );
 
         let amt = buf.len();

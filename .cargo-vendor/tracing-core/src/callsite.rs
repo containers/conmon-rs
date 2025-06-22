@@ -93,7 +93,7 @@
 //! [always]: crate::subscriber::Interest::always
 //! [sometimes]: crate::subscriber::Interest::sometimes
 //! [never]: crate::subscriber::Interest::never
-//! [`Dispatch`]: crate::dispatch::Dispatch
+//! [`Dispatch`]: crate::dispatcher::Dispatch
 //! [macros]: https://docs.rs/tracing/latest/tracing/#macros
 //! [instrument]: https://docs.rs/tracing/latest/tracing/attr.instrument.html
 use crate::stdlib::{
@@ -235,8 +235,6 @@ pub fn rebuild_interest_cache() {
 /// [`Callsite`]: crate::callsite::Callsite
 /// [reg-docs]: crate::callsite#registering-callsites
 pub fn register(callsite: &'static dyn Callsite) {
-    rebuild_callsite_interest(callsite, &DISPATCHERS.rebuilder());
-
     // Is this a `DefaultCallsite`? If so, use the fancy linked list!
     if callsite.private_type_id(private::Private(())).0 == TypeId::of::<DefaultCallsite>() {
         let callsite = unsafe {
@@ -248,10 +246,11 @@ pub fn register(callsite: &'static dyn Callsite) {
             &*(callsite as *const dyn Callsite as *const DefaultCallsite)
         };
         CALLSITES.push_default(callsite);
-        return;
+    } else {
+        CALLSITES.push_dyn(callsite);
     }
 
-    CALLSITES.push_dyn(callsite);
+    rebuild_callsite_interest(callsite, &DISPATCHERS.rebuilder());
 }
 
 static CALLSITES: Callsites = Callsites {
@@ -302,7 +301,7 @@ impl DefaultCallsite {
     /// See the [documentation on callsite registration][reg-docs] for details
     /// on the global callsite registry.
     ///
-    /// [`Callsite`]: crate::callsite::Callsite
+    /// [`tracing_core::callsite::register`]: crate::callsite::register
     /// [reg-docs]: crate::callsite#registering-callsites
     #[inline(never)]
     // This only happens once (or if the cached interest value was corrupted).
@@ -317,8 +316,8 @@ impl DefaultCallsite {
         ) {
             Ok(_) => {
                 // Okay, we advanced the state, try to register the callsite.
-                rebuild_callsite_interest(self, &DISPATCHERS.rebuilder());
                 CALLSITES.push_default(self);
+                rebuild_callsite_interest(self, &DISPATCHERS.rebuilder());
                 self.registration.store(Self::REGISTERED, Ordering::Release);
             }
             // Great, the callsite is already registered! Just load its

@@ -8,7 +8,7 @@ capnp = "0.19.8"
 capnp-rpc = "0.19.5"
 conmon-common = { path = "../common" }
 futures = "0.3.31"
-log = { version = "0.4.22", features = ["serde", "std"] }
-serde = { version = "1.0.215", features = ["derive"] }
-tokio = { version = "1.38.1", features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
+log = { version = "0.4.27", features = ["serde", "std"] }
+serde = { version = "1.0.219", features = ["derive"] }
+tokio = { version = "1.38.2", features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
 tokio-util = { version = "0.7.11", features = ["compat"] }

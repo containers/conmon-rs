@@ -10,9 +10,10 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
+edition = "2021"
 rust-version = "1.63"
 name = "libc"
-version = "0.2.164"
+version = "0.2.174"
 authors = ["The Rust Project Developers"]
 build = "build.rs"
 exclude = [
@@ -21,15 +22,12 @@ exclude = [
     "/.cirrus.yml",
     "/triagebot.toml",
 ]
+autolib = false
 autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = """
-Raw FFI bindings to platform libraries like libc.
-"""
-homepage = "https://github.com/rust-lang/libc"
-documentation = "https://docs.rs/libc/"
+description = "Raw FFI bindings to platform libraries like libc."
 readme = "README.md"
 keywords = [
     "libc",
@@ -49,10 +47,7 @@ repository = "https://github.com/rust-lang/libc"
 [package.metadata.docs.rs]
 cargo-args = ["-Zbuild-std=core"]
 default-target = "x86_64-unknown-linux-gnu"
-features = [
-    "const-extern-fn",
-    "extra_traits",
-]
+features = ["extra_traits"]
 targets = [
     "aarch64-apple-darwin",
     "aarch64-apple-ios",
@@ -81,7 +76,6 @@ targets = [
     "armv7-wrs-vxworks-eabihf",
     "armv7r-none-eabi",
     "armv7r-none-eabihf",
-    "i586-pc-windows-msvc",
     "i586-unknown-linux-gnu",
     "i586-unknown-linux-musl",
     "i686-linux-android",
@@ -110,6 +104,7 @@ targets = [
     "powerpc-unknown-netbsd",
     "powerpc-wrs-vxworks",
     "powerpc-wrs-vxworks-spe",
+    "powerpc64-ibm-aix",
     "powerpc64-unknown-freebsd",
     "powerpc64-unknown-linux-gnu",
     "powerpc64-wrs-vxworks",
@@ -163,6 +158,18 @@ targets = [
     "x86_64-wrs-vxworks",
 ]
 
+[features]
+align = []
+const-extern-fn = []
+default = ["std"]
+extra_traits = []
+rustc-dep-of-std = [
+    "align",
+    "rustc-std-workspace-core",
+]
+std = []
+use_std = ["std"]
+
 [lib]
 name = "libc"
 path = "src/lib.rs"
@@ -175,14 +182,19 @@ path = "tests/const_fn.rs"
 version = "1.0.0"
 optional = true
 
-[features]
-align = []
-const-extern-fn = []
-default = ["std"]
-extra_traits = []
-rustc-dep-of-std = [
-    "align",
-    "rustc-std-workspace-core",
-]
-std = []
-use_std = ["std"]
+[lints.clippy]
+expl_impl_clone_on_copy = "allow"
+explicit_iter_loop = "warn"
+identity_op = "allow"
+manual_assert = "warn"
+map_unwrap_or = "warn"
+missing_safety_doc = "allow"
+non_minimal_cfg = "allow"
+ptr_as_ptr = "warn"
+uninlined_format_args = "allow"
+unnecessary_cast = "allow"
+unnecessary_semicolon = "warn"
+used_underscore_binding = "allow"
+
+[lints.rust]
+unused_qualifications = "allow"

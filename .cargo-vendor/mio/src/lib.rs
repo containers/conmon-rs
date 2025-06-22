@@ -40,6 +40,9 @@
 //!
 //! The available features are described in the [`features`] module.
 
+#[cfg(all(target_family = "wasm", not(target_os = "wasi")))]
+compile_error!("This wasm target is unsupported by mio. If using Tokio, disable the net feature.");
+
 // macros used internally
 #[macro_use]
 mod macros;
@@ -81,6 +84,14 @@ pub mod unix {
 
         pub use crate::sys::pipe::{new, Receiver, Sender};
     }
+
+    pub use crate::sys::SourceFd;
+}
+
+#[cfg(all(target_os = "hermit", feature = "os-ext"))]
+#[cfg_attr(docsrs, doc(cfg(all(target_os = "hermit", feature = "os-ext"))))]
+pub mod hermit {
+    //! Hermit only extensions.
 
     pub use crate::sys::SourceFd;
 }

@@ -12,11 +12,17 @@
 [package]
 edition = "2018"
 name = "signal-hook"
-version = "0.3.17"
+version = "0.3.18"
 authors = [
     "Michal 'vorner' Vaner <vorner@vorner.cz>",
     "Thomas Himmelstoss <thimm@posteo.de>",
 ]
+build = "build.rs"
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "Unix signal handling"
 documentation = "https://docs.rs/signal-hook"
 readme = "README.md"
@@ -35,18 +41,8 @@ rustdoc-args = [
     "docsrs",
 ]
 
-[dependencies.libc]
-version = "^0.2"
-
-[dependencies.signal-hook-registry]
-version = "^1.4"
-
-[dev-dependencies.serial_test]
-version = "^0.7"
-
-[build-dependencies.cc]
-version = "^1"
-optional = true
+[badges.maintenance]
+status = "actively-developed"
 
 [features]
 channel = []
@@ -62,5 +58,35 @@ extended-siginfo = [
 extended-siginfo-raw = ["cc"]
 iterator = ["channel"]
 
-[badges.maintenance]
-status = "actively-developed"
+[lib]
+name = "signal_hook"
+path = "src/lib.rs"
+
+[[example]]
+name = "print"
+path = "examples/print.rs"
+
+[[test]]
+name = "default"
+path = "tests/default.rs"
+
+[[test]]
+name = "iterator"
+path = "tests/iterator.rs"
+
+[[test]]
+name = "shutdown"
+path = "tests/shutdown.rs"
+
+[dependencies.libc]
+version = "^0.2"
+
+[dependencies.signal-hook-registry]
+version = "^1.4"
+
+[dev-dependencies.serial_test]
+version = "^0.7"
+
+[build-dependencies.cc]
+version = "^1"
+optional = true

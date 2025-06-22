@@ -44,7 +44,7 @@ const INVALID: *mut c_void = 1 as *mut c_void;
 macro_rules! weak {
     ($vis:vis fn $name:ident($($t:ty),*) -> $ret:ty) => (
         #[allow(non_upper_case_globals)]
-        $vis static $name: $crate::weak::Weak<unsafe extern fn($($t),*) -> $ret> =
+        $vis static $name: $crate::weak::Weak<unsafe extern "C" fn($($t),*) -> $ret> =
             $crate::weak::Weak::new(concat!(stringify!($name), '\0'));
     )
 }
@@ -74,13 +74,14 @@ impl<F> Weak<F> {
                 NULL => None,
                 addr => {
                     let func = mem::transmute_copy::<*mut c_void, F>(&addr);
-                    // The caller is presumably going to read through this value
-                    // (by calling the function we've dlsymed). This means we'd
-                    // need to have loaded it with at least C11's consume
-                    // ordering in order to be guaranteed that the data we read
-                    // from the pointer isn't from before the pointer was
-                    // stored. Rust has no equivalent to memory_order_consume,
-                    // so we use an acquire fence (sorry, ARM).
+                    // The caller is presumably going to read through this
+                    // value (by calling the function we've dlsymed). This
+                    // means we'd need to have loaded it with at least C11's
+                    // consume ordering in order to be guaranteed that the data
+                    // we read from the pointer isn't from before the pointer
+                    // was stored. Rust has no equivalent to
+                    // memory_order_consume, so we use an acquire fence (sorry,
+                    // ARM).
                     //
                     // Now, in practice this likely isn't needed even on CPUs
                     // where relaxed and consume mean different things. The

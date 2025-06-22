@@ -4,6 +4,7 @@ use tracing_attributes::instrument;
 use tracing_mock::*;
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_test::{block_on_future, PollN};
 
 use std::convert::TryFrom;
 use std::num::TryFromIntError;
@@ -14,6 +15,7 @@ fn err() -> Result<u8, TryFromIntError> {
 }
 
 #[instrument(err)]
+#[allow(dead_code)]
 fn err_suspicious_else() -> Result<u8, TryFromIntError> {
     {}
     u8::try_from(1234)
@@ -159,7 +161,7 @@ fn impl_trait_return_type() {
     let (subscriber, handle) = subscriber::mock()
         .new_span(
             span.clone()
-                .with_field(expect::field("x").with_value(&10usize).only()),
+                .with_fields(expect::field("x").with_value(&10usize).only()),
         )
         .enter(span.clone())
         .exit(span.clone())

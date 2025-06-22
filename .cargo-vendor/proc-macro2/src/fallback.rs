@@ -125,21 +125,32 @@ fn push_token_from_proc_macro(mut vec: RcVecMut<TokenTree>, token: TokenTree) {
 // Nonrecursive to prevent stack overflow.
 impl Drop for TokenStream {
     fn drop(&mut self) {
-        let mut inner = match self.inner.get_mut() {
-            Some(inner) => inner,
+        let mut stack = Vec::new();
+        let mut current = match self.inner.get_mut() {
+            Some(inner) => inner.take().into_iter(),
             None => return,
         };
-        while let Some(token) = inner.pop() {
-            let group = match token {
-                TokenTree::Group(group) => group.inner,
-                _ => continue,
-            };
-            #[cfg(wrap_proc_macro)]
-            let group = match group {
-                crate::imp::Group::Fallback(group) => group,
-                crate::imp::Group::Compiler(_) => continue,
-            };
-            inner.extend(group.stream.take_inner());
+        loop {
+            while let Some(token) = current.next() {
+                let group = match token {
+                    TokenTree::Group(group) => group.inner,
+                    _ => continue,
+                };
+                #[cfg(wrap_proc_macro)]
+                let group = match group {
+                    crate::imp::Group::Fallback(group) => group,
+                    crate::imp::Group::Compiler(_) => continue,
+                };
+                let mut group = group;
+                if let Some(inner) = group.stream.inner.get_mut() {
+                    stack.push(current);
+                    current = inner.take().into_iter();
+                }
+            }
+            match stack.pop() {
+                Some(next) => current = next,
+                None => return,
+            }
         }
     }
 }
@@ -300,34 +311,6 @@ impl IntoIterator for TokenStream {
     }
 }
 
-#[cfg(procmacro2_semver_exempt)]
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct SourceFile {
-    path: PathBuf,
-}
-
-#[cfg(procmacro2_semver_exempt)]
-impl SourceFile {
-    /// Get the path to this source file as a string.
-    pub(crate) fn path(&self) -> PathBuf {
-        self.path.clone()
-    }
-
-    pub(crate) fn is_real(&self) -> bool {
-        false
-    }
-}
-
-#[cfg(procmacro2_semver_exempt)]
-impl Debug for SourceFile {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("SourceFile")
-            .field("path", &self.path())
-            .field("is_real", &self.is_real())
-            .finish()
-    }
-}
-
 #[cfg(all(span_locations, not(fuzzing)))]
 thread_local! {
     static SOURCE_MAP: RefCell<SourceMap> = RefCell::new(SourceMap {
@@ -473,14 +456,14 @@ impl SourceMap {
     }
 
     #[cfg(procmacro2_semver_exempt)]
-    fn filepath(&self, span: Span) -> PathBuf {
+    fn filepath(&self, span: Span) -> String {
         for (i, file) in self.files.iter().enumerate() {
             if file.span_within(span) {
-                return PathBuf::from(if i == 0 {
+                return if i == 0 {
                     "<unspecified>".to_owned()
                 } else {
                     format!("<parsed string {}>", i)
-                });
+                };
             }
         }
         unreachable!("Invalid span with no related FileInfo!");
@@ -544,21 +527,6 @@ impl Span {
         other
     }
 
-    #[cfg(procmacro2_semver_exempt)]
-    pub(crate) fn source_file(&self) -> SourceFile {
-        #[cfg(fuzzing)]
-        return SourceFile {
-            path: PathBuf::from("<unspecified>"),
-        };
-
-        #[cfg(not(fuzzing))]
-        SOURCE_MAP.with(|sm| {
-            let sm = sm.borrow();
-            let path = sm.filepath(*self);
-            SourceFile { path }
-        })
-    }
-
     #[cfg(span_locations)]
     pub(crate) fn byte_range(&self) -> Range<usize> {
         #[cfg(fuzzing)]
@@ -598,6 +566,23 @@ impl Span {
             let fi = sm.fileinfo(*self);
             fi.offset_line_column(self.hi as usize)
         })
+    }
+
+    #[cfg(procmacro2_semver_exempt)]
+    pub(crate) fn file(&self) -> String {
+        #[cfg(fuzzing)]
+        return "<unspecified>".to_owned();
+
+        #[cfg(not(fuzzing))]
+        SOURCE_MAP.with(|sm| {
+            let sm = sm.borrow();
+            sm.filepath(*self)
+        })
+    }
+
+    #[cfg(procmacro2_semver_exempt)]
+    pub(crate) fn local_file(&self) -> Option<PathBuf> {
+        None
     }
 
     #[cfg(not(span_locations))]
