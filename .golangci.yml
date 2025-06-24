@@ -1,9 +1,8 @@
----
+version: "2"
 run:
   concurrency: 6
-  timeout: 5m
 linters:
-  disable-all: true
+  default: none
   enable:
     - asasalint
     - asciicheck
@@ -25,11 +24,11 @@ linters:
     - errname
     - errorlint
     - exhaustive
+    - exptostd
     - fatcontext
     - forbidigo
     - forcetypeassert
     - funlen
-    - gci
     - ginkgolinter
     - gocheckcompilerdirectives
     - gochecknoinits
@@ -40,18 +39,15 @@ linters:
     - gocyclo
     - godot
     - godox
-    - gofmt
-    - gofumpt
     - goheader
-    - goimports
     - gomoddirectives
     - gomodguard
     - goprintffuncname
     - gosec
-    - gosimple
     - gosmopolitan
     - govet
     - grouper
+    - iface
     - importas
     - inamedparam
     - ineffassign
@@ -69,6 +65,7 @@ linters:
     - nakedret
     - nestif
     - nilerr
+    - nilnesserr
     - nilnil
     - nlreturn
     - noctx
@@ -80,65 +77,88 @@ linters:
     - promlinter
     - protogetter
     - reassign
+    - recvcheck
     - revive
     - rowserrcheck
     - sloglint
     - spancheck
     - sqlclosecheck
     - staticcheck
-    - stylecheck
     - tagalign
     - tagliatelle
-    - tenv
     - testableexamples
     - testifylint
     - testpackage
     - thelper
     - tparallel
-    - typecheck
     - unconvert
     - unparam
     - unused
     - usestdlibvars
+    - usetesting
     - varnamelen
     - wastedassign
     - whitespace
     - wrapcheck
+    - wsl
     - zerologlint
     # - depguard
     # - exhaustruct
+    # - funcorder
     # - gochecknoglobals
     # - nonamedreturns
     # - paralleltest
-    # - wsl
-linters-settings:
-  funlen:
-    lines: 155
-    statements: 50
-  varnamelen:
-    min-name-length: 1
-  cyclop:
-    max-complexity: 35
-  gocognit:
-    min-complexity: 50
-  gocyclo:
-    min-complexity: 50
-  gosec:
-    excludes:
-      - G115 # potential integer overflow
-  nestif:
-    min-complexity: 15
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
-  revive:
-    rules:
-      - name: dot-imports
-        disabled: true
-  godox:
-    keywords:
-      - BUG
-      - FIXME
-      - HACK
-  gocritic:
-    enable-all: true
+  settings:
+    cyclop:
+      max-complexity: 35
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    funlen:
+      lines: 155
+      statements: 50
+    gocognit:
+      min-complexity: 50
+    gocritic:
+      enable-all: true
+    gocyclo:
+      min-complexity: 50
+    godox:
+      keywords:
+        - BUG
+        - FIXME
+        - HACK
+    gosec:
+      excludes:
+        - G115
+    nestif:
+      min-complexity: 15
+    revive:
+      rules:
+        - name: dot-imports
+          disabled: true
+    varnamelen:
+      min-name-length: 1
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

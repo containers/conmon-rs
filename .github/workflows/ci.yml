@@ -8,7 +8,7 @@ on:
       - main
 env:
   CARGO_TERM_COLOR: always
-  GO_VERSION: "1.23"
+  GO_VERSION: "1.24"
   ACTION_MSRV_TOOLCHAIN: 1.87.0
   NIX_VERSION: "2.21.0"
 jobs:
@@ -49,7 +49,7 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
       - uses: golangci/golangci-lint-action@971e284b6050e8a5849b72094c50ab08da042db8 # v6.1.1
         with:
-          version: v1.60.3
+          version: v2.1.6
           only-new-issues: true
 
   get-script:
