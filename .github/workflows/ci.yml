@@ -27,7 +27,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         with:
           toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
           components: rustfmt
@@ -78,7 +78,7 @@ jobs:
           key: ${{ runner.os }}-cargo-release-static-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         with:
           # Ubuntu 22.04 glibc static is not compatible with rustc 1.58.1 (see
           # ACTION_MSRV_TOOLCHAIN). Means we now just use the latest one, since
@@ -201,7 +201,7 @@ jobs:
           key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         with:
           toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
           components: rustfmt
@@ -223,7 +223,7 @@ jobs:
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         with:
           toolchain: nightly
           components: clippy, rustfmt
@@ -236,7 +236,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         with:
           toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
           components: rustfmt
