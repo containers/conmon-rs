@@ -8,8 +8,8 @@ use crate::{
     telemetry::Telemetry,
     version::Version,
 };
-use anyhow::{format_err, Context};
-use capnp::{capability::Promise, Error};
+use anyhow::{Context, format_err};
+use capnp::{Error, capability::Promise};
 use capnp_rpc::pry;
 use conmon_common::conmon_capnp::conmon;
 use std::{
@@ -18,23 +18,23 @@ use std::{
     time::Duration,
 };
 use tokio::time::Instant;
-use tracing::{debug, debug_span, error, Instrument};
+use tracing::{Instrument, debug, debug_span, error};
 use uuid::Uuid;
 
 macro_rules! pry_err {
-    ($x:expr) => {
+    ($x:expr_2021) => {
         pry!(capnp_err!($x))
     };
 }
 
 macro_rules! capnp_err {
-    ($x:expr) => {
+    ($x:expr_2021) => {
         $x.map_err(|e| Error::failed(format!("{:#}", e)))
     };
 }
 
 macro_rules! new_root_span {
-    ($name:expr, $container_id:expr) => {
+    ($name:expr_2021, $container_id:expr_2021) => {
         debug_span!(
             $name,
             container_id = $container_id,
@@ -45,26 +45,30 @@ macro_rules! new_root_span {
 
 /// capnp_text_list takes text_list as an input and outputs list of text.
 macro_rules! capnp_text_list {
-    ($x:expr) => {
+    ($x:expr_2021) => {
         pry!(pry!($x).iter().collect::<Result<Vec<_>, _>>())
     };
 }
 
 macro_rules! capnp_vec_str {
-    ($x:expr) => {
-        pry!(capnp_text_list!($x)
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Result<Vec<_>, _>>())
+    ($x:expr_2021) => {
+        pry!(
+            capnp_text_list!($x)
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Result<Vec<_>, _>>()
+        )
     };
 }
 
 macro_rules! capnp_vec_path {
-    ($x:expr) => {
-        pry!(capnp_text_list!($x)
-            .iter()
-            .map(|s| s.to_str().map(|x| PathBuf::from(x)))
-            .collect::<Result<Vec<_>, _>>())
+    ($x:expr_2021) => {
+        pry!(
+            capnp_text_list!($x)
+                .iter()
+                .map(|s| s.to_str().map(|x| PathBuf::from(x)))
+                .collect::<Result<Vec<_>, _>>()
+        )
     };
 }
 

@@ -1,5 +1,8 @@
-use shadow_rs::SdResult;
+use shadow_rs::{BuildPattern, ShadowBuilder};
 
-fn main() -> SdResult<()> {
-    shadow_rs::new()
+fn main() {
+    ShadowBuilder::builder()
+        .build_pattern(BuildPattern::RealTime)
+        .build()
+        .unwrap();
 }

@@ -2,7 +2,7 @@ use crate::{
     attach::SharedContainerAttach, container_log::SharedContainerLog, streams::Streams,
     terminal::Terminal,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use getset::{Getters, MutGetters};
 use nix::errno::Errno;
 use std::{
@@ -16,8 +16,8 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     select,
     sync::{
-        mpsc::{UnboundedReceiver, UnboundedSender},
         RwLock,
+        mpsc::{UnboundedReceiver, UnboundedSender},
     },
     time::{self, Instant},
 };
@@ -279,7 +279,7 @@ impl ContainerIO {
                     }
                 }
 
-                Err(e) => match Errno::from_i32(e.raw_os_error().context("get OS error")?) {
+                Err(e) => match Errno::from_raw(e.raw_os_error().context("get OS error")?) {
                     Errno::EIO => {
                         debug!("Stopping read loop");
                         attach

@@ -2,11 +2,11 @@
 name = "conmon-common"
 # Version listed below is also used by .packit.sh
 version = "0.6.6"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-capnp = "0.19.8"
+capnp = "0.21.1"
 
 [build-dependencies]
-capnp = "0.19.8"
-capnpc = "0.19.0"
+capnp = "0.21.1"
+capnpc = "0.21.0"

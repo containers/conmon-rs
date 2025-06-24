@@ -39,7 +39,7 @@
 use crate::listener::{Listener, SeqpacketListener};
 use anyhow::Result;
 use std::{
-    collections::{hash_map, HashMap},
+    collections::{HashMap, hash_map},
     io::{IoSliceMut, Write},
     mem,
     num::Wrapping,
@@ -48,8 +48,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::{runtime::Handle, sync::Mutex as AsyncMutex, task};
-use tokio_seqpacket::{ancillary::OwnedAncillaryMessage, UnixSeqpacket};
-use tracing::{debug_span, Instrument};
+use tokio_seqpacket::{UnixSeqpacket, ancillary::OwnedAncillaryMessage};
+use tracing::{Instrument, debug_span};
 
 #[derive(Debug, Default)]
 pub struct FdSocket {
@@ -129,13 +129,16 @@ struct ListenerGuard(Arc<FdSocket>);
 
 impl Drop for ListenerGuard {
     fn drop(&mut self) {
-        if let Ok(handle) = Handle::try_current() {
-            let fd_socket = self.0.clone();
-            handle.spawn(async move {
-                *fd_socket.server.lock().await = None;
-            });
-        } else {
-            *self.0.server.blocking_lock() = None;
+        match Handle::try_current() {
+            Ok(handle) => {
+                let fd_socket = self.0.clone();
+                handle.spawn(async move {
+                    *fd_socket.server.lock().await = None;
+                });
+            }
+            _ => {
+                *self.0.server.blocking_lock() = None;
+            }
         }
     }
 }

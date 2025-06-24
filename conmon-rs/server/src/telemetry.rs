@@ -5,13 +5,13 @@ use capnp::struct_list::Reader;
 use clap::crate_name;
 use conmon_common::conmon_capnp::conmon;
 use nix::unistd::gethostname;
-use opentelemetry::{global, propagation::Extractor, KeyValue};
+use opentelemetry::{KeyValue, global, propagation::Extractor};
 use opentelemetry_otlp::{ExportConfig, WithExportConfig};
 use opentelemetry_sdk::{
+    Resource,
     propagation::TraceContextPropagator,
     runtime::Tokio,
     trace::{self, Tracer},
-    Resource,
 };
 use opentelemetry_semantic_conventions::resource::{HOST_NAME, PROCESS_PID, SERVICE_NAME};
 use std::{collections::HashMap, process};

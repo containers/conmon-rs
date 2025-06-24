@@ -12,29 +12,29 @@ use crate::{
     telemetry::Telemetry,
     version::Version,
 };
-use anyhow::{format_err, Context, Result};
+use anyhow::{Context, Result, format_err};
 use capnp::text_list::Reader;
-use capnp_rpc::{rpc_twoparty_capnp::Side, twoparty, RpcSystem};
+use capnp_rpc::{RpcSystem, rpc_twoparty_capnp::Side, twoparty};
 use conmon_common::conmon_capnp::conmon::{self, CgroupManager};
 use futures::{AsyncReadExt, FutureExt};
 use getset::Getters;
 use nix::{
-    errno,
+    errno::Errno,
     libc::_exit,
     sys::signal::Signal,
-    unistd::{fork, ForkResult},
+    unistd::{ForkResult, fork},
 };
 use opentelemetry::trace::FutureExt as OpenTelemetryFutureExt;
 use std::{fs::File, io::Write, path::Path, process, str::FromStr, sync::Arc};
 use tokio::{
     fs,
     runtime::{Builder, Handle},
-    signal::unix::{signal, SignalKind},
+    signal::unix::{SignalKind, signal},
     sync::oneshot,
     task::{self, LocalSet},
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use tracing::{debug, debug_span, info, Instrument};
+use tracing::{Instrument, debug, debug_span, info};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, prelude::*};
 use twoparty::VatNetwork;
@@ -123,7 +123,7 @@ impl Server {
 
         // now that we've forked, set self to childreaper
         prctl::set_child_subreaper(true)
-            .map_err(errno::from_i32)
+            .map_err(Errno::from_raw)
             .context("set child subreaper")?;
 
         let enable_tracing = self.config().enable_tracing();

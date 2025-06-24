@@ -18,6 +18,8 @@ prepare_system() {
     sudo ufw disable
 
     # enable necessary kernel modules
+    sudo modprobe br_netfilter
+    sudo sysctl -p /etc/sysctl.conf
     sudo ip6tables --list >/dev/null
 
     # enable necessary sysctls

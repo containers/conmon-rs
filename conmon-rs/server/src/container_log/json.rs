@@ -63,6 +63,7 @@ impl JsonLogger {
             let bytes = log_str.as_bytes();
             self.bytes_written += bytes.len();
 
+            #[allow(clippy::collapsible_if)]
             if let Some(max_size) = self.max_log_size {
                 if self.bytes_written > max_size {
                     self.reopen().await?;
