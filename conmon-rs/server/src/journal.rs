@@ -1,4 +1,4 @@
-use libsystemd::logging::{journal_print, Priority};
+use libsystemd::logging::{Priority, journal_print};
 use std::{
     io::{self, Error, ErrorKind, Write},
     str,
@@ -6,7 +6,7 @@ use std::{
 use tracing_subscriber::fmt::writer::MakeWriter;
 
 macro_rules! io_err {
-    ($x:expr) => {
+    ($x:expr_2021) => {
         $x.map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?
     };
 }

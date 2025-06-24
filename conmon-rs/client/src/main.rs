@@ -1,5 +1,5 @@
 #![allow(clippy::needless_return)]
-use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
+use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
 use conmon_common::conmon_capnp::conmon;
 use futures::{AsyncReadExt, FutureExt};
 use tokio::net::UnixStream;

@@ -9,7 +9,7 @@ use crate::{
 use anyhow::Result;
 use capnp::struct_list::Reader;
 use conmon_common::conmon_capnp::conmon::log_driver::{Owned, Type};
-use futures::{future::join_all, FutureExt};
+use futures::{FutureExt, future::join_all};
 use std::sync::Arc;
 use tokio::{io::AsyncBufRead, sync::RwLock};
 
@@ -76,11 +76,9 @@ impl ContainerLog {
             self.drivers
                 .iter_mut()
                 .map(|x| match x {
-                    LogDriver::ContainerRuntimeInterface(ref mut cri_logger) => {
-                        cri_logger.init().boxed()
-                    }
-                    LogDriver::Json(ref mut json_logger) => json_logger.init().boxed(),
-                    LogDriver::Journald(ref mut journald_logger) => journald_logger.init().boxed(),
+                    LogDriver::ContainerRuntimeInterface(cri_logger) => cri_logger.init().boxed(),
+                    LogDriver::Json(json_logger) => json_logger.init().boxed(),
+                    LogDriver::Journald(journald_logger) => journald_logger.init().boxed(),
                 })
                 .collect::<Vec<_>>(),
         )
@@ -96,13 +94,9 @@ impl ContainerLog {
             self.drivers
                 .iter_mut()
                 .map(|x| match x {
-                    LogDriver::ContainerRuntimeInterface(ref mut cri_logger) => {
-                        cri_logger.reopen().boxed()
-                    }
-                    LogDriver::Json(ref mut json_logger) => json_logger.reopen().boxed(),
-                    LogDriver::Journald(ref mut journald_logger) => {
-                        journald_logger.reopen().boxed()
-                    }
+                    LogDriver::ContainerRuntimeInterface(cri_logger) => cri_logger.reopen().boxed(),
+                    LogDriver::Json(json_logger) => json_logger.reopen().boxed(),
+                    LogDriver::Journald(journald_logger) => journald_logger.reopen().boxed(),
                 })
                 .collect::<Vec<_>>(),
         )

@@ -4,7 +4,7 @@ use crate::{
     container_io::{ContainerIO, ContainerIOType, SharedContainerIO},
     oom_watcher::OOMWatcher,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use command_fds::{CommandFdExt, FdMapping};
 use getset::{CopyGetters, Getters, Setters};
 use libc::pid_t;
@@ -12,10 +12,10 @@ use multimap::MultiMap;
 use nix::{
     errno::Errno,
     sys::{
-        signal::{kill, Signal},
-        wait::{waitpid, WaitPidFlag, WaitStatus},
+        signal::{Signal, kill},
+        wait::{WaitPidFlag, WaitStatus, waitpid},
     },
-    unistd::{getpgid, Pid},
+    unistd::{Pid, getpgid},
 };
 use std::{
     ffi::OsStr,
@@ -35,7 +35,7 @@ use tokio::{
     time::{self, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, debug_span, error, warn, Instrument};
+use tracing::{Instrument, debug, debug_span, error, warn};
 
 #[derive(Debug, Default, Getters)]
 pub struct ChildReaper {
@@ -107,7 +107,7 @@ impl ChildReaper {
         let token = CancellationToken::new();
 
         match container_io.typ_mut() {
-            ContainerIOType::Terminal(ref mut terminal) => {
+            ContainerIOType::Terminal(terminal) => {
                 terminal
                     .wait_connected(stdin, token.clone())
                     .await
@@ -250,6 +250,8 @@ pub fn kill_grandchild(raw_pid: u32, s: Signal) {
         // If process_group is 1, we will end up calling
         // kill(-1), which kills everything conmon is allowed to.
         let pgid = i32::from(pgid);
+
+        #[allow(clippy::collapsible_if)]
         if pgid > 1 {
             if let Err(e) = kill(Pid::from_raw(-pgid), s) {
                 error!(

@@ -1,6 +1,6 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use lazy_static::lazy_static;
-use nix::sys::statfs::{statfs, FsType};
+use nix::sys::statfs::{FsType, statfs};
 use notify::{Error, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::Regex;
 use std::{
@@ -10,12 +10,12 @@ use std::{
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, ErrorKind},
-    sync::mpsc::{channel, Receiver, Sender},
+    sync::mpsc::{Receiver, Sender, channel},
     task::{self, JoinHandle},
 };
 use tokio_eventfd::EventFd;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, debug_span, error, trace, Instrument};
+use tracing::{Instrument, debug, debug_span, error, trace};
 
 #[cfg(all(target_os = "linux", target_env = "musl"))]
 pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as u64);
@@ -159,11 +159,11 @@ impl OOMWatcher {
             }
             _ = oom_event_fd.read(&mut buffer) => {
                 debug!("Got oom event");
-                if let Err(e) = Self::write_oom_files(exit_paths).await {
+                match Self::write_oom_files(exit_paths).await { Err(e) => {
                     error!("Writing oom files failed: {:#}", e);
-                } else {
+                } _ => {
                     debug!("Successfully wrote oom files");
-                }
+                }}
                 let _ = tx.try_send(OOMEvent{ oom: true });
             }
         }

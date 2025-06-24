@@ -1,13 +1,13 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use capnp::enum_list::Reader;
 use conmon_common::conmon_capnp::conmon;
 use getset::{CopyGetters, Getters};
 use libc::pid_t;
 use nix::{
-    mount::{mount, umount, MsFlags},
-    sched::{unshare, CloneFlags},
-    sys::signal::{kill, Signal},
-    unistd::{fork, setresgid, setresuid, ForkResult, Gid, Pid, Uid},
+    mount::{MsFlags, mount, umount},
+    sched::{CloneFlags, unshare},
+    sys::signal::{Signal, kill},
+    unistd::{ForkResult, Gid, Pid, Uid, fork, setresgid, setresuid},
 };
 use once_cell::sync::OnceCell;
 use signal_hook::{consts::TERM_SIGNALS, iterator::Signals};
@@ -17,7 +17,7 @@ use std::{
     io::{Read, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    process::{exit, Command},
+    process::{Command, exit},
 };
 use strum::{AsRefStr, Display, EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 use tracing::{debug, info, trace, warn};

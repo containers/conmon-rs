@@ -11,7 +11,7 @@ dependencies:
         match: GO_VERSION
 
   - name: rust
-    version: 1.66.1
+    version: 1.87.0
     refPaths:
       - path: .github/workflows/ci.yml
         match: ACTION_MSRV_TOOLCHAIN
