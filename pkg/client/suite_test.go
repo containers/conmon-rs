@@ -48,8 +48,10 @@ func TestConmonClient(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
+
 		maxRSSKB = rssInt
 	}
+
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "ConmonClient")
 }
@@ -113,6 +115,7 @@ func (tr *testRunner) createRuntimeConfigWithProcessArgs(
 	Expect(generateRuntimeConfigWithProcessArgs(
 		tr.tmpDir, tmpRootfs, terminal, processArgs, changeSpec,
 	)).To(Succeed())
+
 	tr.rr = rr
 	tr.ctrID = ctrID
 	tr.tmpRootfs = tmpRootfs
@@ -236,16 +239,19 @@ func vmRSSGivenPID(pid uint32) uint32 {
 	scanner := bufio.NewScanner(f)
 
 	var rss string
+
 	for scanner.Scan() {
 		if !strings.Contains(scanner.Text(), "VmRSS:") {
 			continue
 		}
+
 		parts := strings.Fields(scanner.Text())
 		Expect(parts).To(HaveLen(3))
 		rss = parts[1]
 
 		break
 	}
+
 	rssU64, err := strconv.ParseUint(rss, 10, 32)
 	Expect(err).To(Succeed())
 
@@ -256,12 +262,15 @@ func cacheBusyBox() error {
 	if _, err := os.Stat(busyboxDest); err == nil {
 		return nil
 	}
+
 	if err := os.MkdirAll(busyboxDestDir, 0o755); err != nil && !os.IsExist(err) {
 		return fmt.Errorf("create busybox dest dir: %w", err)
 	}
+
 	if err := downloadFile(busyboxSource, busyboxDest); err != nil {
 		return fmt.Errorf("download busybox: %w", err)
 	}
+
 	if err := os.Chmod(busyboxDest, 0o777); err != nil {
 		return fmt.Errorf("change busybox permissions: %w", err)
 	}
@@ -284,15 +293,19 @@ func downloadFile(url, path string) error {
 	// Get the data
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+
 	c := http.Client{Timeout: time.Minute}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
+
 	resp, err := c.Do(req)
 	if err != nil {
 		return fmt.Errorf("get URL: %w", err)
 	}
+
 	defer resp.Body.Close()
 
 	// Write the body to file
@@ -316,17 +329,21 @@ func generateRuntimeConfigWithProcessArgs(
 	changeSpec func(generate.Generator),
 ) error {
 	configPath := filepath.Join(bundlePath, "config.json")
+
 	g, err := generate.New("linux")
 	if err != nil {
 		return fmt.Errorf("create linux config: %w", err)
 	}
+
 	g.SetProcessCwd("/")
 	g.SetProcessTerminal(terminal)
 	g.SetProcessArgs(processArgs)
 	g.SetRootPath(rootfs)
+
 	if changeSpec != nil {
 		changeSpec(g)
 	}
+
 	if unshare.IsRootless() {
 		specconv.ToRootless(g.Config)
 	}
@@ -343,6 +360,7 @@ func (rr *RuntimeRunner) RunCommand(args ...string) error {
 	if err != nil {
 		return err
 	}
+
 	if stdoutString != "" {
 		fmt.Fprintf(GinkgoWriter, "%s\n", stdoutString)
 	}
@@ -357,10 +375,12 @@ func (rr *RuntimeRunner) RunCommandCheckOutput(pattern string, args ...string) e
 	if err != nil {
 		return err
 	}
+
 	match, err := regexp.MatchString(pattern, stdoutString)
 	if err != nil {
 		return fmt.Errorf("match regex pattern: %w", err)
 	}
+
 	if !match {
 		return fmt.Errorf("expected %s to be a substr of %s: %w", pattern, stdoutString, errNoMatch)
 	}
@@ -370,11 +390,13 @@ func (rr *RuntimeRunner) RunCommandCheckOutput(pattern string, args ...string) e
 
 func (rr *RuntimeRunner) runCommand(args ...string) (string, error) {
 	var stdout bytes.Buffer
+
 	var stderr bytes.Buffer
 
 	cmd := exec.Command(runtimePath, append(rr.runtimeRootArgs(), args...)...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("run command: %w", err)
 	}
@@ -407,9 +429,11 @@ func testAttach(
 	wg.Add(2)
 
 	command := "/busybox echo -n " + testString
+
 	go func() {
 		defer wg.Done()
 		defer GinkgoRecover()
+
 		pipe := ""
 		if useStdErr {
 			pipe = " >&2"
@@ -432,6 +456,7 @@ func testAttach(
 	go func() {
 		defer wg.Done()
 		defer GinkgoRecover()
+
 		err := sut.AttachContainer(context.Background(), cfg)
 		// The test races with itself, and sometimes is EOF and sometimes passes
 		if !errors.Is(err, io.ErrClosedPipe) {
@@ -458,11 +483,13 @@ func verifyBuffer(reader io.Reader, terminal bool, command, expected string) {
 
 	fullExpectedBuffer := command + "\r\n" + expected + "/ # \x1b[6n"
 	str := ""
+
 	for {
 		str += readSection()
 		if len(str) < len(fullExpectedBuffer) {
 			continue
 		}
+
 		Expect(str).To(Equal(fullExpectedBuffer))
 
 		return
