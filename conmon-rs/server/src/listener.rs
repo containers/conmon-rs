@@ -149,9 +149,10 @@ mod tests {
         mock.expect_bind().returning(|_| permission_denied());
 
         let sut = new_sut(mock);
-        assert!(sut
-            .bind_long_path(PathBuf::from("foo").join("bar"))
-            .is_err());
+        assert!(
+            sut.bind_long_path(PathBuf::from("foo").join("bar"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -167,10 +168,12 @@ mod tests {
             sut.shorten_socket_path(PathBuf::from("/foo").join(last))?;
 
         assert!(res_file_path.ends_with(last));
-        assert!(res_file_path
-            .display()
-            .to_string()
-            .contains(&res_parent.as_raw_fd().to_string()));
+        assert!(
+            res_file_path
+                .display()
+                .to_string()
+                .contains(&res_parent.as_raw_fd().to_string())
+        );
 
         Ok(())
     }

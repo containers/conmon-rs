@@ -1,6 +1,6 @@
-use anyhow::{bail, Result};
-use libc::{c_char, c_int, setlocale, LC_ALL};
-use nix::sys::stat::{umask, Mode};
+use anyhow::{Result, bail};
+use libc::{LC_ALL, c_char, c_int, setlocale};
+use nix::sys::stat::{Mode, umask};
 use std::{
     ffi::CString,
     fs::File,
@@ -139,7 +139,7 @@ mod tests {
 
         mock.expect_create_file()
             .with(eq("/proc/self/oom_score_adj"))
-            .returning(|_: &str| Err(io::Error::new(ErrorKind::Other, "")));
+            .returning(|_: &str| Err(io::Error::other("")));
 
         let sut = new_sut(mock);
         let res = sut.set_oom_score("-1000");
@@ -157,7 +157,7 @@ mod tests {
 
         mock.expect_write_all_file()
             .withf(|_, x| x == "-1000".as_bytes())
-            .returning(|_, _| Err(io::Error::new(ErrorKind::Other, "")));
+            .returning(|_, _| Err(io::Error::other("")));
 
         let sut = new_sut(mock);
         let res = sut.set_oom_score("-1000");

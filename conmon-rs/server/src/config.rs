@@ -1,5 +1,5 @@
 //! Configuration related structures
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use getset::{CopyGetters, Getters, Setters};
 use serde::{Deserialize, Serialize};
@@ -312,7 +312,7 @@ impl Config {
         if self
             .runtime()
             .to_str()
-            .context(format!("{} does not parse as string", RUNTIME_FLAG))?
+            .context(format!("{RUNTIME_FLAG} does not parse as string"))?
             .trim()
             .is_empty()
         {
@@ -323,7 +323,7 @@ impl Config {
         if self
             .runtime_dir()
             .to_str()
-            .context(format!("{} does not parse as string", RUNTIME_DIR_FLAG))?
+            .context(format!("{RUNTIME_DIR_FLAG} does not parse as string"))?
             .trim()
             .is_empty()
         {

@@ -24,7 +24,6 @@ with pkgs; rustPlatform.buildRustPackage {
     "-Clink-args=-L${libunwind}/lib"
   ];
   stripAllList = [ "bin" ];
-  cargoVendorDir = ".cargo-vendor";
   cargoLock = {
     lockFile = lib.cleanSource ./.. + "/Cargo.lock";
     allowBuiltinFetchGit = true;

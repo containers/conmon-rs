@@ -6,7 +6,7 @@
 /// assert_eq!(lock!(mutex).pop(), Some(42));
 /// ```
 macro_rules! lock {
-    ($mutex:expr) => {
+    ($mutex:expr_2021) => {
         $mutex.lock().map_err(|e| anyhow::anyhow!("{e}"))?
     };
 }

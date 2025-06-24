@@ -13,7 +13,7 @@ use tokio::{
     task,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, debug_span, error, Instrument};
+use tracing::{Instrument, debug, debug_span, error};
 
 #[derive(Debug, Getters)]
 pub struct Streams {
@@ -113,7 +113,7 @@ impl Streams {
 mod tests {
     use super::*;
     use crate::container_log::ContainerLog;
-    use anyhow::{bail, Context};
+    use anyhow::{Context, bail};
     use std::{process::Stdio, str::from_utf8};
     use tokio::process::Command;
 

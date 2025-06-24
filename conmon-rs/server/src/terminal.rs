@@ -6,9 +6,9 @@ use crate::{
     container_log::SharedContainerLog,
     listener::{DefaultListener, Listener},
 };
-use anyhow::{format_err, Context as _, Result};
+use anyhow::{Context as _, Result, format_err};
 use getset::{Getters, MutGetters, Setters};
-use libc::{winsize, TIOCSWINSZ};
+use libc::{TIOCSWINSZ, winsize};
 use nix::{
     fcntl::{self, FcntlArg, OFlag},
     sys::termios::{self, OutputFlags, SetArg},
@@ -22,18 +22,18 @@ use std::{
     },
     path::PathBuf,
     pin::Pin,
-    sync::{mpsc::Sender as StdSender, Arc, Weak},
-    task::{ready, Context, Poll},
+    sync::{Arc, Weak, mpsc::Sender as StdSender},
+    task::{Context, Poll, ready},
 };
 use tokio::{
     fs,
-    io::{unix::AsyncFd, AsyncRead, AsyncWrite, AsyncWriteExt, Interest, ReadBuf},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, Interest, ReadBuf, unix::AsyncFd},
     net::UnixStream,
     sync::mpsc::{self, Receiver, Sender, UnboundedReceiver},
     task,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, debug_span, error, trace, Instrument};
+use tracing::{Instrument, debug, debug_span, error, trace};
 
 #[derive(Debug, Getters, MutGetters, Setters)]
 pub struct Terminal {
@@ -308,9 +308,9 @@ struct TerminalFd(AsyncFd<std::fs::File>);
 
 impl TerminalFd {
     fn new(fd: OwnedFd) -> io::Result<Self> {
-        let flags = fcntl::fcntl(fd.as_raw_fd(), FcntlArg::F_GETFL)?;
+        let flags = fcntl::fcntl(&fd, FcntlArg::F_GETFL)?;
         let flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
-        fcntl::fcntl(fd.as_raw_fd(), FcntlArg::F_SETFL(flags))?;
+        fcntl::fcntl(&fd, FcntlArg::F_SETFL(flags))?;
         AsyncFd::new(fd.into()).map(Self)
     }
 }
@@ -322,7 +322,7 @@ impl AsRawFd for TerminalFd {
 }
 
 impl AsFd for TerminalFd {
-    fn as_fd(&self) -> BorrowedFd {
+    fn as_fd(&self) -> BorrowedFd<'_> {
         self.0.as_fd()
     }
 }

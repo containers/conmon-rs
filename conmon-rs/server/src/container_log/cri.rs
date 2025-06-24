@@ -96,8 +96,11 @@ impl CriLogger {
 
             if let Some(max_log_size) = self.max_log_size() {
                 trace!(
-                    "Verifying log size: max_log_size = {}, bytes_written = {},  bytes_to_be_written = {}, new_bytes_written = {}", 
-                    max_log_size, self.bytes_written(),  bytes_to_be_written, new_bytes_written,
+                    "Verifying log size: max_log_size = {}, bytes_written = {},  bytes_to_be_written = {}, new_bytes_written = {}",
+                    max_log_size,
+                    self.bytes_written(),
+                    bytes_to_be_written,
+                    new_bytes_written,
                 );
 
                 if new_bytes_written > max_log_size {
@@ -204,7 +207,7 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::NamedTempFile;
-    use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
     #[tokio::test]
     async fn write_stdout_success() -> Result<()> {

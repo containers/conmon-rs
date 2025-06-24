@@ -12,16 +12,3 @@ lto = true
 opt-level = "z"
 incremental = true
 codegen-units = 1
-
-[patch.crates-io]
-# Use this time-rs fork to fix the build issues with newer Rust. It's identical
-# to v0.3.23 version of the crate, except:
-#   https://github.com/saschagrunert/time/commit/22f9ac760e36ca965a7205056f719d5db8d153c1
-# TODO: Remove when we can use newer Rust versions than v1.66.1
-time = { git = 'https://github.com/saschagrunert/time', rev = '22f9ac760e36ca965a7205056f719d5db8d153c1' }
-
-# Use this nix fork to fix the build issues with s390x. It's identical
-# to v0.27.1 version of the crate, except:
-#   https://github.com/saschagrunert/nix/commit/43e48dfde7f9bcbf2052bbdf2fc0d6f276761557
-# TODO: Remove when we can use newer Rust versions than v1.66.1
-nix = { git = 'https://github.com/saschagrunert/nix', rev = '43e48dfde7f9bcbf2052bbdf2fc0d6f276761557' }
