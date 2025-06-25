@@ -15,6 +15,7 @@ use crate::{
 use anyhow::{Context, Result, format_err};
 use capnp::text_list::Reader;
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp::Side, twoparty};
+use clap::crate_name;
 use conmon_common::conmon_capnp::conmon::{self, CgroupManager};
 use futures::{AsyncReadExt, FutureExt};
 use getset::Getters;
@@ -24,7 +25,8 @@ use nix::{
     sys::signal::Signal,
     unistd::{ForkResult, fork},
 };
-use opentelemetry::trace::FutureExt as OpenTelemetryFutureExt;
+use opentelemetry::trace::{FutureExt as OpenTelemetryFutureExt, TracerProvider};
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use std::{fs::File, io::Write, path::Path, process, str::FromStr, sync::Arc};
 use tokio::{
     fs,
@@ -53,6 +55,10 @@ pub struct Server {
     /// Fd socket instance.
     #[getset(get = "pub(crate)")]
     fd_socket: Arc<FdSocket>,
+
+    /// OpenTelemetry tracer instance.
+    #[getset(get = "pub(crate)")]
+    tracer: Option<SdkTracerProvider>,
 }
 
 impl Server {
@@ -62,6 +68,7 @@ impl Server {
             config: Default::default(),
             reaper: Default::default(),
             fd_socket: Default::default(),
+            tracer: Default::default(),
         };
 
         if let Some(v) = server.config().version() {
@@ -126,13 +133,13 @@ impl Server {
             .map_err(Errno::from_raw)
             .context("set child subreaper")?;
 
-        let enable_tracing = self.config().enable_tracing();
+        let tracer = self.tracer().clone();
 
         let rt = Builder::new_multi_thread().enable_all().build()?;
         rt.block_on(self.spawn_tasks())?;
 
-        if enable_tracing {
-            Telemetry::shutdown();
+        if let Some(tracer) = tracer {
+            tracer.shutdown().context("shutdown tracer")?;
         }
 
         rt.shutdown_background();
@@ -148,13 +155,18 @@ impl Server {
         init.set_oom_score("-1000")
     }
 
-    fn init_logging(&self) -> Result<()> {
+    fn init_logging(&mut self) -> Result<()> {
         let level = LevelFilter::from_str(self.config().log_level().as_ref())
             .context("convert log level filter")?;
 
         let telemetry_layer = if self.config().enable_tracing() {
-            Telemetry::layer(self.config().tracing_endpoint())
-                .context("build telemetry layer")?
+            let tracer = Telemetry::layer(self.config().tracing_endpoint())
+                .context("build telemetry layer")?;
+
+            self.tracer = Some(tracer.clone());
+
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer.tracer(crate_name!()))
                 .into()
         } else {
             None
@@ -193,7 +205,7 @@ impl Server {
     }
 
     /// Spawns all required tokio tasks.
-    async fn spawn_tasks(self) -> Result<()> {
+    async fn spawn_tasks(mut self) -> Result<()> {
         self.init_logging().context("init logging")?;
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
