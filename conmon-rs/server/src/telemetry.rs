@@ -6,36 +6,26 @@ use clap::crate_name;
 use conmon_common::conmon_capnp::conmon;
 use nix::unistd::gethostname;
 use opentelemetry::{KeyValue, global, propagation::Extractor};
-use opentelemetry_otlp::{ExportConfig, WithExportConfig};
-use opentelemetry_sdk::{
-    Resource,
-    propagation::TraceContextPropagator,
-    runtime::Tokio,
-    trace::{self, Tracer},
-};
-use opentelemetry_semantic_conventions::resource::{HOST_NAME, PROCESS_PID, SERVICE_NAME};
+use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+use opentelemetry_sdk::{Resource, propagation::TraceContextPropagator, trace::SdkTracerProvider};
+use opentelemetry_semantic_conventions::resource::{HOST_NAME, PROCESS_PID};
 use std::{collections::HashMap, process};
-use tracing::{Span, Subscriber};
-use tracing_opentelemetry::{OpenTelemetryLayer, OpenTelemetrySpanExt};
-use tracing_subscriber::registry::LookupSpan;
+use tracing::Span;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// The main structure of this module.
 pub struct Telemetry;
 
 impl Telemetry {
     /// Return the telemetry layer if tracing is enabled.
-    pub fn layer<T>(endpoint: &str) -> Result<OpenTelemetryLayer<T, Tracer>>
-    where
-        T: Subscriber + for<'span> LookupSpan<'span>,
-    {
+    pub fn layer(endpoint: &str) -> Result<SdkTracerProvider> {
         global::set_text_map_propagator(TraceContextPropagator::new());
 
-        let exporter = opentelemetry_otlp::new_exporter()
-            .tonic()
-            .with_export_config(ExportConfig {
-                endpoint: endpoint.into(),
-                ..Default::default()
-            });
+        let exporter = SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .build()
+            .context("build exporter")?;
 
         let hostname = gethostname()
             .context("get hostname")?
@@ -43,23 +33,20 @@ impl Telemetry {
             .context("convert hostname to string")?
             .to_string();
 
-        let tracer = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_exporter(exporter)
-            .with_trace_config(trace::config().with_resource(Resource::new(vec![
-                KeyValue::new(SERVICE_NAME, crate_name!()),
-                KeyValue::new(PROCESS_PID, process::id() as i64),
-                KeyValue::new(HOST_NAME, hostname),
-            ])))
-            .install_batch(Tokio)
-            .context("install tracer")?;
+        let tracer = SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(
+                Resource::builder()
+                    .with_service_name(crate_name!())
+                    .with_attributes([
+                        KeyValue::new(PROCESS_PID, process::id() as i64),
+                        KeyValue::new(HOST_NAME, hostname),
+                    ])
+                    .build(),
+            )
+            .build();
 
-        Ok(tracing_opentelemetry::layer().with_tracer(tracer))
-    }
-
-    /// Shutdown the global tracer provider.
-    pub fn shutdown() {
-        global::shutdown_tracer_provider();
+        Ok(tracer)
     }
 
     /// Set a new parent context from the provided slice data.
