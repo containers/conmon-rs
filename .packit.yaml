@@ -32,8 +32,9 @@ jobs:
       - fedora-latest-stable-aarch64
       - fedora-40-x86_64
       - fedora-40-aarch64
-      - epel-9-x86_64
-      - epel-9-aarch64
+      # TODO: Reenable once they have a stable Rust version for edition 2024
+      # - epel-9-x86_64
+      # - epel-9-aarch64
     additional_repos:
       - "copr://rhcontainerbot/podman-next"
 
