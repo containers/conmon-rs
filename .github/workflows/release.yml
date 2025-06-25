@@ -40,6 +40,6 @@ jobs:
         env:
           CI_TAG: ${{ steps.branch-name.outputs.tag }}
       - name: Release
-        uses: softprops/action-gh-release@7b4da11513bf3f43f9999e90eabced41ab8bb048 # v2.2.0
+        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
         with:
           files: "*.tar.gz"
