@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, bail};
 use lazy_static::lazy_static;
 use nix::sys::statfs::{FsType, statfs};
-use notify::{Error, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{
+    Error, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+    event::{AccessKind, AccessMode},
+};
 use regex::Regex;
 use std::{
     os::unix::prelude::AsRawFd,
@@ -11,7 +14,7 @@ use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, ErrorKind},
     sync::mpsc::{Receiver, Sender, channel},
-    task::{self, JoinHandle},
+    task,
 };
 use tokio_eventfd::EventFd;
 use tokio_util::sync::CancellationToken;
@@ -50,9 +53,7 @@ lazy_static! {
 }
 
 pub struct OOMWatcher {
-    pid: u32,
     token: CancellationToken,
-    task: JoinHandle<()>,
 }
 
 #[derive(Debug)]
@@ -69,33 +70,28 @@ impl OOMWatcher {
     ) -> OOMWatcher {
         let exit_paths = exit_paths.to_owned();
         let token = token.clone();
-        let task = {
-            let stop = token.clone();
-            task::spawn(
-                async move {
-                    if let Err(e) = if *IS_CGROUP_V2 {
-                        Self::oom_handling_cgroup_v2(stop, pid, &exit_paths, tx)
-                            .await
-                            .context("setup cgroupv2 oom handling")
-                    } else {
-                        Self::oom_handling_cgroup_v1(stop, pid, &exit_paths, tx)
-                            .await
-                            .context("setup cgroupv1 oom handling")
-                    } {
-                        error!("Failed to watch OOM: {:#}", e)
-                    }
+        let stop = token.clone();
+        task::spawn(
+            async move {
+                if let Err(e) = if *IS_CGROUP_V2 {
+                    Self::oom_handling_cgroup_v2(stop, pid, &exit_paths, tx)
+                        .await
+                        .context("setup cgroupv2 oom handling")
+                } else {
+                    Self::oom_handling_cgroup_v1(stop, pid, &exit_paths, tx)
+                        .await
+                        .context("setup cgroupv1 oom handling")
+                } {
+                    error!("Failed to watch OOM: {:#}", e);
                 }
-                .instrument(debug_span!("cgroup_handling")),
-            )
-        };
-        OOMWatcher { pid, token, task }
+            }
+            .instrument(debug_span!("cgroup_handling")),
+        );
+        OOMWatcher { token }
     }
 
     pub async fn stop(self) {
         self.token.cancel();
-        if let Err(e) = self.task.await {
-            error!(pid = self.pid, "Stop failed: {:#}", e);
-        }
     }
 
     async fn oom_handling_cgroup_v1(
@@ -242,7 +238,10 @@ impl OOMWatcher {
                         }
                         // It is still possible to miss an OOM event here if the memory events file
                         // got removed between the notify event below and the token cancellation.
-                        Err(e) => debug!("Checking for last resort OOM failed: {:#}", e),
+                        Err(e) => {
+                            debug!("Checking for last resort OOM failed: {:#}", e);
+                            break;
+                        }
                     }
 
                     break;
@@ -250,6 +249,10 @@ impl OOMWatcher {
                 Some(res) = rx.recv() => {
                     match res {
                         Ok(event) => {
+                            // Skip access events since they're not if any interest
+                            if event.kind == EventKind::Access(AccessKind::Open(AccessMode::Any)) {
+                                continue;
+                            }
                             debug!("Got OOM file event: {:?}", event);
                             if event.kind.is_remove() {
                                 debug!("Got remove event");
