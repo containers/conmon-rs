@@ -104,6 +104,11 @@ impl SharedContainerAttach {
         }
         Ok(())
     }
+
+    /// Retrieve the stdin sender.
+    pub fn stdin(&self) -> &Sender<Vec<u8>> {
+        &self.read_half_tx
+    }
 }
 
 #[derive(Clone, Debug)]

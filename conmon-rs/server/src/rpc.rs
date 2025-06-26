@@ -466,4 +466,159 @@ impl conmon::Server for Server {
             .instrument(debug_span!("promise")),
         )
     }
+
+    fn serve_exec_container(
+        &mut self,
+        params: conmon::ServeExecContainerParams,
+        mut results: conmon::ServeExecContainerResults,
+    ) -> Promise<(), capnp::Error> {
+        debug!("Got a serve exec container request");
+        let req = pry!(pry!(params.get()).get_request());
+
+        let span = debug_span!(
+            "serve_exec_container",
+            uuid = Uuid::new_v4().to_string().as_str()
+        );
+        let _enter = span.enter();
+        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+
+        let id = pry_err!(pry_err!(req.get_id()).to_string());
+
+        // Validate that the container actually exists
+        pry_err!(self.reaper().get(&id));
+
+        let command = capnp_vec_str!(req.get_command());
+        let (tty, stdin, stdout, stderr) = (
+            req.get_tty(),
+            req.get_stdin(),
+            req.get_stdout(),
+            req.get_stderr(),
+        );
+
+        let streaming_server = self.streaming_server().clone();
+        let child_reaper = self.reaper().clone();
+        let container_io = pry_err!(ContainerIO::new(tty, ContainerLog::new()));
+        let config = self.config().clone();
+        let cgroup_manager = pry!(req.get_cgroup_manager());
+
+        Promise::from_future(
+            async move {
+                capnp_err!(
+                    streaming_server
+                        .write()
+                        .await
+                        .start_if_required()
+                        .await
+                        .context("start streaming server if required")
+                )?;
+
+                let url = streaming_server
+                    .read()
+                    .await
+                    .exec_url(
+                        child_reaper,
+                        container_io,
+                        config,
+                        cgroup_manager,
+                        id,
+                        command,
+                        stdin,
+                        stdout,
+                        stderr,
+                    )
+                    .await;
+
+                results.get().init_response().set_url(&url);
+                Ok(())
+            }
+            .instrument(debug_span!("promise")),
+        )
+    }
+
+    fn serve_attach_container(
+        &mut self,
+        params: conmon::ServeAttachContainerParams,
+        mut results: conmon::ServeAttachContainerResults,
+    ) -> Promise<(), capnp::Error> {
+        debug!("Got a serve attach container request");
+        let req = pry!(pry!(params.get()).get_request());
+
+        let span = debug_span!(
+            "serve_attach_container",
+            uuid = Uuid::new_v4().to_string().as_str()
+        );
+        let _enter = span.enter();
+        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+
+        let id = pry_err!(pry_err!(req.get_id()).to_str());
+        let (stdin, stdout, stderr) = (req.get_stdin(), req.get_stdout(), req.get_stderr());
+
+        let streaming_server = self.streaming_server().clone();
+        let child = pry_err!(self.reaper().get(id));
+
+        Promise::from_future(
+            async move {
+                capnp_err!(
+                    streaming_server
+                        .write()
+                        .await
+                        .start_if_required()
+                        .await
+                        .context("start streaming server")
+                )?;
+
+                let url = streaming_server
+                    .read()
+                    .await
+                    .attach_url(child, stdin, stdout, stderr)
+                    .await;
+
+                results.get().init_response().set_url(&url);
+                Ok(())
+            }
+            .instrument(debug_span!("promise")),
+        )
+    }
+
+    fn serve_port_forward_container(
+        &mut self,
+        params: conmon::ServePortForwardContainerParams,
+        mut results: conmon::ServePortForwardContainerResults,
+    ) -> Promise<(), capnp::Error> {
+        debug!("Got a serve port forward container request");
+        let req = pry!(pry!(params.get()).get_request());
+
+        let span = debug_span!(
+            "serve_port_forward_container",
+            uuid = Uuid::new_v4().to_string().as_str()
+        );
+        let _enter = span.enter();
+        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+
+        let net_ns_path = pry_err!(pry_err!(req.get_net_ns_path()).to_string());
+        let streaming_server = self.streaming_server().clone();
+
+        Promise::from_future(
+            async move {
+                capnp_err!(
+                    streaming_server
+                        .write()
+                        .await
+                        .start_if_required()
+                        .await
+                        .context("start streaming server if required")
+                )?;
+
+                let url = streaming_server
+                    .read()
+                    .await
+                    .port_forward_url(net_ns_path)
+                    .await;
+
+                results.get().init_response().set_url(&url);
+                Ok(())
+            }
+            .instrument(debug_span!("promise")),
+        )
+    }
 }

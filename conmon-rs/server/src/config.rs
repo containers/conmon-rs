@@ -12,7 +12,9 @@ macro_rules! prefix {
     };
 }
 
-#[derive(CopyGetters, Debug, Deserialize, Eq, Getters, Parser, PartialEq, Serialize, Setters)]
+#[derive(
+    Clone, CopyGetters, Debug, Deserialize, Eq, Getters, Parser, PartialEq, Serialize, Setters,
+)]
 #[serde(rename_all = "kebab-case")]
 #[command(
     after_help("More info at: https://github.com/containers/conmon-rs"),
