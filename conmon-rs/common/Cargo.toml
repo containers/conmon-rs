@@ -8,5 +8,5 @@ edition = "2024"
 capnp = "0.21.1"
 
 [build-dependencies]
-capnp = "0.21.1"
-capnpc = "0.21.0"
+capnp = { version = "0.21.1", default-features = false }
+capnpc = { version = "0.21.0", default-features = false }
