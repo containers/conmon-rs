@@ -4,11 +4,11 @@ version = "0.6.6"
 edition = "2024"
 
 [dependencies]
-capnp = "0.21.1"
-capnp-rpc = "0.21.0"
+capnp = { version = "0.21.1", default-features = false }
+capnp-rpc = { version = "0.21.0", default-features = false }
 conmon-common = { path = "../common" }
-futures = "0.3.31"
-log = { version = "0.4.27", features = ["serde", "std"] }
-serde = { version = "1.0.219", features = ["derive"] }
-tokio = { version = "1.45.1", features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
-tokio-util = { version = "0.7.15", features = ["compat"] }
+futures = { version = "0.3.31", default-features = false }
+log = { version = "0.4.27", default-features = false, features = ["serde", "std"] }
+serde = { version = "1.0.219", default-features = false, features = ["derive"] }
+tokio = { version = "1.45.1", default-features = false, features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
+tokio-util = { version = "0.7.15", default-features = false, features = ["compat"] }
