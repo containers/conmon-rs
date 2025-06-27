@@ -15,7 +15,7 @@ use axum::{
     },
     http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
 };
 use conmon_common::conmon_capnp::conmon::CgroupManager;
 use futures::{
@@ -180,6 +180,10 @@ impl StreamingServer {
             .route(&Self::path_for(EXEC_PATH), get(Self::handle))
             .route(&Self::path_for(ATTACH_PATH), get(Self::handle))
             .route(&Self::path_for(PORT_FORWARD_PATH), get(Self::handle))
+            // for allowing proper error handling on wrong protocol usage (spdy instead of websocket)
+            .route(&Self::path_for(EXEC_PATH), post(Self::handle))
+            .route(&Self::path_for(ATTACH_PATH), post(Self::handle))
+            .route(&Self::path_for(PORT_FORWARD_PATH), post(Self::handle))
             .fallback(Self::fallback)
             .with_state(state)
             .layer(
