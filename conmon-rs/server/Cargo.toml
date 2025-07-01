@@ -14,7 +14,7 @@ axum = { version = "0.8.4", default-features = false, features = ["http2", "toki
 capnp = { version = "0.21.1", default-features = false }
 capnp-rpc = { version = "0.21.0", default-features = false }
 clap = { version = "4.5.40", default-features = false, features = ["color", "cargo", "deprecated", "derive", "deprecated", "env", "error-context", "help", "std", "string", "suggestions", "unicode", "usage", "wrap_help"] }
-command-fds = { version = "0.3.1", default-features = false, features = ["tokio"] }
+command-fds = { version = "0.3.2", default-features = false, features = ["tokio"] }
 conmon-common = { path = "../common" }
 futures = { version = "0.3.31", default-features = false, features = ["executor"] }
 getset = { version = "0.1.6", default-features = false }
