@@ -82,6 +82,11 @@ impl Server {
             process::exit(0);
         }
 
+        if let Some(v) = server.config().version_json() {
+            Version::new(v == Verbosity::Full).print_json()?;
+            process::exit(0);
+        }
+
         if let Some(Commands::Pause {
             base_path,
             pod_id,

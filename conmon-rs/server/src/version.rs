@@ -3,12 +3,14 @@
 #![allow(clippy::uninlined_format_args)]
 #![allow(clippy::needless_raw_string_hashes)]
 
+use anyhow::{Context, Result};
 use getset::CopyGetters;
+use serde::Serialize;
 use shadow_rs::shadow;
 
 shadow!(build);
 
-#[derive(CopyGetters, Debug, Default, Eq, PartialEq)]
+#[derive(CopyGetters, Debug, Default, Eq, PartialEq, Serialize)]
 #[getset(get_copy = "pub")]
 /// The version structure.
 pub struct Version {
@@ -77,6 +79,15 @@ impl Version {
             println!("\ncargo tree: {}", self.cargo_tree());
         }
     }
+
+    /// Print the version information as JSON to stdout.
+    pub fn print_json(&self) -> Result<()> {
+        println!(
+            "{}",
+            serde_json::to_string(&self).context("serialize result")?
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -102,5 +113,21 @@ mod tests {
     fn version_test_verbose() {
         let v = Version::new(true);
         assert_eq!(v.cargo_tree(), build::CARGO_TREE);
+    }
+
+    #[test]
+    fn version_test_json() -> Result<()> {
+        let v = Version::new(false);
+        assert_eq!(v.version(), build::PKG_VERSION);
+        assert_eq!(v.tag(), build::TAG);
+        assert_eq!(v.commit(), build::COMMIT_HASH);
+        assert_eq!(v.build_date(), build::BUILD_TIME);
+        assert_eq!(v.target(), build::BUILD_TARGET);
+        assert_eq!(v.rust_version(), build::RUST_VERSION);
+        assert_eq!(v.cargo_version(), build::CARGO_VERSION);
+        assert!(v.cargo_tree().is_empty());
+
+        v.print_json()?;
+        Ok(())
     }
 }
