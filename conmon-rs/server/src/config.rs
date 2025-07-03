@@ -40,6 +40,20 @@ pub struct Config {
     /// Show version information, specify "full" for verbose output.
     version: Option<Verbosity>,
 
+    #[get_copy = "pub"]
+    #[arg(
+        default_missing_value("default"),
+        env(concat!(prefix!(), "VERSION_JSON")),
+        long("version-json"),
+        visible_alias("vj"),
+        short('j'),
+        num_args(0..=1),
+        value_enum,
+        value_name("VERBOSITY")
+    )]
+    /// Show version information as parsable JSON, specify "full" for verbose output.
+    version_json: Option<Verbosity>,
+
     #[get = "pub"]
     #[arg(
         default_value_t,
