@@ -10,6 +10,7 @@ aliases:
     # - kolyshkin
   cri-o-reviewers:
     - kwilczynski
+    - bitoku
     # - wgahnagl
     # - QiWang19
     # - klihub
