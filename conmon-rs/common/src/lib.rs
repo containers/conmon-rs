@@ -1,5 +1,6 @@
 #![allow(clippy::all)]
 pub mod conmon_capnp {
+    #![allow(unused_parens)]
     include!(concat!(env!("OUT_DIR"), "/proto/conmon_capnp.rs"));
 }
 
