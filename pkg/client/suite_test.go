@@ -230,10 +230,12 @@ func (tr *testRunner) configGivenEnv() *client.ConmonClient {
 
 func vmRSSGivenPID(pid uint32) uint32 {
 	const procPath = "/proc"
+
 	procEntry := filepath.Join(procPath, strconv.Itoa(int(pid)), "status")
 
 	f, err := os.Open(procEntry)
 	Expect(err).To(Succeed())
+
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)

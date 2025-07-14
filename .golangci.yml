@@ -4,6 +4,7 @@ run:
 linters:
   default: none
   enable:
+    - arangolint
     - asasalint
     - asciicheck
     - bidichk
@@ -18,6 +19,7 @@ linters:
     - dupl
     - dupword
     - durationcheck
+    - embeddedstructfieldcheck
     - err113
     - errcheck
     - errchkjson
@@ -100,15 +102,20 @@ linters:
     - wastedassign
     - whitespace
     - wrapcheck
-    - wsl
+    - wsl_v5
     - zerologlint
     # - depguard
     # - exhaustruct
     # - funcorder
     # - gochecknoglobals
+    # - noinlineerr
     # - nonamedreturns
     # - paralleltest
   settings:
+    wsl_v5:
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2
     cyclop:
       max-complexity: 35
     errcheck:

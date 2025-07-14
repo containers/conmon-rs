@@ -19,7 +19,7 @@ dependencies:
         match: ACTION_MSRV_TOOLCHAIN
 
   - name: golangci-lint
-    version: 2.1.6
+    version: 2.2.2
     refPaths:
       - path: .github/workflows/ci.yml
         match: version
