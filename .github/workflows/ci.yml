@@ -9,7 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   GO_VERSION: "1.24"
-  ACTION_MSRV_TOOLCHAIN: 1.87.0
+  ACTION_MSRV_TOOLCHAIN: 1.88.0
   NIX_VERSION: "2.21.0"
 jobs:
   build:
