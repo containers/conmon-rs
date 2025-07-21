@@ -34,7 +34,7 @@ prctl = { version = "1.0.0", default-features = false }
 regex = { version = "1.11.1", default-features = false }
 sendfd = { version = "0.4.4", default-features = false, features = ["tokio"] }
 serde = { version = "1.0.219", default-features = false, features = ["derive"] }
-serde_json = { version = "1.0.140", default-features = false, features = ["std"] }
+serde_json = { version = "1.0.141", default-features = false, features = ["std"] }
 shadow-rs = { version = "1.2.0", default-features = false }
 signal-hook = { version = "0.3.18", default-features = false, features = ["iterator"] }
 strum = { version = "0.27.1", default-features = false, features = ["derive"] }
