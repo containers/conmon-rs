@@ -39,7 +39,7 @@ dependencies:
         match: JAEGER_IMG
 
   - name: nix
-    version: 2.21.0
+    version: 2.30.1
     refPaths:
       - path: .github/workflows/ci.yml
         match: NIX_VERSION
