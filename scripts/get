@@ -11,6 +11,7 @@ COMMIT=
 TAG=
 NO_EXEC=
 OUTPUT=conmonrs
+GITHUB_TOKEN=${GITHUB_TOKEN:-}
 
 usage() {
     printf "Usage: %s [ -t SHA ] [-l TAG ] [-a ARCH] [ -h ]\n\n" "$(basename "$0")"
@@ -88,7 +89,11 @@ verify_requirements() {
 }
 
 curl_retry() {
-    curl -sSfL --retry 5 --retry-delay 3 "$@"
+    ARGS=(-sSfL --retry 5 --retry-delay 3)
+    if [[ $GITHUB_TOKEN != "" && $1 == *".github.com/"* ]]; then
+        ARGS+=(--header "Authorization: Bearer $GITHUB_TOKEN")
+    fi
+    curl "${ARGS[@]}" "$@"
 }
 
 download_binary() {
