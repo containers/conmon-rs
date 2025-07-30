@@ -20,7 +20,7 @@ use tokio::{
     time::{self, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error};
+use tracing::{debug, error, trace};
 
 /// A shared container IO abstraction.
 #[derive(Debug, Clone)]
@@ -163,7 +163,7 @@ impl ContainerIO {
         match self.typ() {
             ContainerIOType::Terminal(t) => {
                 if let Some(message_rx) = t.message_rx() {
-                    let (_, fake_rx) = async_channel::unbounded();
+                    let (_, fake_rx) = async_channel::bounded(10);
                     Ok((message_rx.clone(), fake_rx))
                 } else {
                     bail!("called before message receiver was registered")
@@ -267,18 +267,15 @@ impl ContainerIO {
                         .await
                         .context("write to attach endpoints")?;
 
-                    if !message_tx.is_closed() {
-                        message_tx
-                            .send(Message::Done)
-                            .await
-                            .context("send done message")?;
-                    }
+                    message_tx
+                        .force_send(Message::Done)
+                        .context("send done message")?;
 
                     return Ok(());
                 }
 
                 Ok(n) => {
-                    debug!("Read {} bytes", n);
+                    trace!("Read {} bytes", n);
                     let data = &buf[..n];
 
                     let mut locked_logger = logger.write().await;
@@ -292,12 +289,9 @@ impl ContainerIO {
                         .await
                         .context("write to attach endpoints")?;
 
-                    if !message_tx.is_closed() {
-                        message_tx
-                            .send(Message::Data(data.into(), pipe))
-                            .await
-                            .context("send data message")?;
-                    }
+                    message_tx
+                        .force_send(Message::Data(data.into(), pipe))
+                        .context("send data message")?;
                 }
 
                 Err(e) => match Errno::from_raw(e.raw_os_error().context("get OS error")?) {
@@ -308,12 +302,10 @@ impl ContainerIO {
                             .await
                             .context("write to attach endpoints")?;
 
-                        if !message_tx.is_closed() {
-                            message_tx
-                                .send(Message::Done)
-                                .await
-                                .context("send done message")?;
-                        }
+                        message_tx
+                            .force_send(Message::Done)
+                            .context("send done message")?;
+
                         return Ok(());
                     }
                     Errno::EBADF => bail!(e),
