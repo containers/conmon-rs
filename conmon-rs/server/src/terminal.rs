@@ -119,7 +119,7 @@ impl Terminal {
 
         let attach_clone = self.attach.clone();
         let logger_clone = self.logger.clone();
-        let (message_tx, message_rx) = async_channel::unbounded();
+        let (message_tx, message_rx) = async_channel::bounded(10);
         self.message_rx = Some(message_rx);
 
         task::spawn({
