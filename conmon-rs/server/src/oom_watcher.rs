@@ -309,12 +309,8 @@ impl OOMWatcher {
                 }
             }
         }
-        watcher
-            .unwatch(&memory_events_file_path)
-            .context("unwatch memory events file")?;
 
         debug!("Done watching for ooms");
-
         Ok(())
     }
 
