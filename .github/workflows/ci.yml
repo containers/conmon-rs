@@ -300,6 +300,48 @@ jobs:
           sudo chown -R $(id -u):$(id -g) ~/go/pkg/mod
           sudo chown -R $(id -u):$(id -g) ~/.cache/go-build
 
+  test-scalability:
+    needs: release-static
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Setup Rust and Golang Cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-cargo-test-scalability-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/go.sum') }}
+      - name: Setup Testfiles Cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            /tmp/conmon-test-images
+          key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/files_test.go') }}
+      - run: rm -rf target/x86_64-unknown-linux-gnu/release/conmonrs
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: conmonrs
+          path: target/x86_64-unknown-linux-gnu/release
+      - run: chmod +x target/x86_64-unknown-linux-gnu/release/conmonrs
+      - run: .github/install-deps
+      - name: create symlink
+        run: sudo ln -f -s $(go env GOROOT)/bin/* /usr/bin/
+      - name: Scalability tests
+        run: sudo -E RUNTIME_PATH="/usr/sbin/runc" make scalability-static
+      - name: Chown cache
+        run: |
+          sudo chown -R $(id -u):$(id -g) ~/go/pkg/mod
+          sudo chown -R $(id -u):$(id -g) ~/.cache/go-build
+
   test-critest:
     needs: release-static
     runs-on: ubuntu-latest

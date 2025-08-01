@@ -13,6 +13,7 @@ PREFIX ?= /usr
 CI_TAG ?=
 GOLANGCI_LINT_VERSION := v2.2.2
 ZEITGEIST_VERSION := v0.4.4
+MAX_RSS_KB ?= 5600
 
 COLOR:=\\033[36m
 NOCOLOR:=\\033[0m
@@ -62,8 +63,8 @@ unit: ## Run the unit tests.
 integration: .install.ginkgo release ## Run the integration tests using the release binary.
 	export CONMON_BINARY="$(MAKEFILE_PATH)target/release/$(BINARY)" && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
-	export MAX_RSS_KB=10240 && \
-	"$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
+	export MAX_RSS_KB=$(MAX_RSS_KB) && \
+	"$(GOTOOLS_BINDIR)/ginkgo" --skip Scalability $(TEST_FLAGS) $(GINKGO_FLAGS)
 
 .PHONY: integration-static
 integration-static: .install.ginkgo ## Run the integration tests using the static release binary.
@@ -72,8 +73,25 @@ integration-static: .install.ginkgo ## Run the integration tests using the stati
 		$(MAKE) release-static; \
 	fi && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
-	export MAX_RSS_KB=5600 && \
-	"$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
+	export MAX_RSS_KB=$(MAX_RSS_KB) && \
+	"$(GOTOOLS_BINDIR)/ginkgo" --skip Scalability $(TEST_FLAGS) $(GINKGO_FLAGS)
+
+.PHONY: scalability
+scalability: .install.ginkgo release ## Run the scalability tests using the release binary.
+	export CONMON_BINARY="$(MAKEFILE_PATH)target/release/$(BINARY)" && \
+	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
+	export MAX_RSS_KB=$(MAX_RSS_KB) && \
+	"$(GOTOOLS_BINDIR)/ginkgo" --focus Scalability $(TEST_FLAGS) $(GINKGO_FLAGS)
+
+.PHONY: scalability-static
+scalability-static: .install.ginkgo ## Run the scalability tests using the static release binary.
+	export CONMON_BINARY="$(MAKEFILE_PATH)target/x86_64-unknown-linux-gnu/release/$(BINARY)" && \
+	if [ ! -f "$$CONMON_BINARY" ]; then \
+		$(MAKE) release-static; \
+	fi && \
+	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
+	export MAX_RSS_KB=$(MAX_RSS_KB) && \
+	"$(GOTOOLS_BINDIR)/ginkgo" --focus Scalability $(TEST_FLAGS) $(GINKGO_FLAGS)
 
 ##@ Verify targets:
 
