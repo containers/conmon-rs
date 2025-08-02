@@ -45,7 +45,7 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	AfterEach(func() {
-		Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID)).To(Succeed())
+		Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID())).To(Succeed())
 		if sut != nil {
 			Expect(sut.Shutdown()).To(Succeed())
 		}
@@ -109,7 +109,7 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfig(terminal)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer(tr.ctrID())
 				Expect(fileContents(tr.exitPath())).To(Equal("0"))
 			})
 
@@ -129,11 +129,11 @@ var _ = Describe("ConmonClient", func() {
 
 			It(testName("should execute cleanup command when container exits", terminal), func() {
 				tr = newTestRunner()
-				filepath := fmt.Sprintf("%s/conmon-client-test%s", os.TempDir(), tr.ctrID)
+				filepath := fmt.Sprintf("%s/conmon-client-test%s", os.TempDir(), tr.ctrID())
 				tr.createRuntimeConfig(terminal)
 				sut = tr.configGivenEnv()
-				tr.createContainerWithConfig(sut, &client.CreateContainerConfig{
-					ID:           tr.ctrID,
+				tr.createContainerWithConfig(sut, tr.ctrID(), &client.CreateContainerConfig{
+					ID:           tr.ctrID(),
 					BundlePath:   tr.tmpDir,
 					Terminal:     terminal,
 					ExitPaths:    []string{tr.exitPath()},
@@ -144,7 +144,7 @@ var _ = Describe("ConmonClient", func() {
 					}},
 					CleanupCmd: []string{"touch", filepath},
 				})
-				tr.startContainer(sut)
+				tr.startContainer(tr.ctrID())
 				Expect(fileContents(filepath)).To(BeEmpty())
 			})
 
@@ -153,7 +153,7 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"invalid"}, nil)
 				sut = tr.configGivenEnv()
 				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
-					ID:         tr.ctrID,
+					ID:         tr.ctrID(),
 					BundlePath: tr.tmpDir,
 					Terminal:   terminal,
 					LogDrivers: []client.ContainerLogDriver{{
@@ -185,7 +185,7 @@ var _ = Describe("ConmonClient", func() {
 				err := sut.SetWindowSizeContainer(
 					context.Background(),
 					&client.SetWindowSizeContainerConfig{
-						ID: tr.ctrID,
+						ID: tr.ctrID(),
 						Size: &resize.TerminalSize{
 							Width:  10,
 							Height: 20,
@@ -214,7 +214,7 @@ var _ = Describe("ConmonClient", func() {
 				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer(tr.ctrID())
 
 				for range 10 {
 					if _, err := os.Stat(tr.oomExitPath()); err == nil {
@@ -234,10 +234,10 @@ var _ = Describe("ConmonClient", func() {
 					nil,
 				)
 				sut = tr.configGivenEnv()
-				cfg := tr.defaultConfig(terminal)
+				cfg := tr.defaultConfig(terminal, tr.ctrID())
 				cfg.LogDrivers[0].MaxSize = 50
-				tr.createContainerWithConfig(sut, cfg)
-				tr.startContainer(sut)
+				tr.createContainerWithConfig(sut, tr.ctrID(), cfg)
+				tr.startContainer(tr.ctrID())
 
 				logs := fileContents(tr.logPath())
 				Expect(logs).NotTo(ContainSubstring("hello"))
@@ -251,10 +251,10 @@ var _ = Describe("ConmonClient", func() {
 				)
 				logFile := MustFile(filepath.Join(tr.tmpDir, "runtime-log"))
 				sut = tr.configGivenEnv()
-				cfg := tr.defaultConfig(terminal)
+				cfg := tr.defaultConfig(terminal, tr.ctrID())
 				cfg.GlobalArgs = []string{"--log", logFile, "--debug"}
-				tr.createContainerWithConfig(sut, cfg)
-				tr.startContainer(sut)
+				tr.createContainerWithConfig(sut, tr.ctrID(), cfg)
+				tr.startContainer(tr.ctrID())
 
 				logs := fileContents(logFile)
 				Expect(logs).NotTo(BeEmpty())
@@ -269,7 +269,7 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "30"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer(tr.ctrID())
 
 				var wg sync.WaitGroup
 				for i := range 10 {
@@ -278,7 +278,7 @@ var _ = Describe("ConmonClient", func() {
 						defer GinkgoRecover()
 						defer wg.Done()
 						result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
-							ID:       tr.ctrID,
+							ID:       tr.ctrID(),
 							Command:  []string{"/busybox", "echo", "-n", "hello", "world", strconv.Itoa(i)},
 							Terminal: terminal,
 							Timeout:  timeoutUnlimited,
@@ -297,7 +297,7 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "600"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer(tr.ctrID())
 
 				pid := sut.PID()
 				rssBefore := vmRSSGivenPID(pid)
@@ -305,7 +305,7 @@ var _ = Describe("ConmonClient", func() {
 
 				for i := range 25 {
 					result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
-						ID:       tr.ctrID,
+						ID:       tr.ctrID(),
 						Command:  []string{"/busybox", "echo", "-n", "hello", "world", strconv.Itoa(i)},
 						Terminal: terminal,
 						Timeout:  timeoutUnlimited,
@@ -332,10 +332,10 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer(tr.ctrID())
 
 				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
-					ID:       tr.ctrID,
+					ID:       tr.ctrID(),
 					Command:  []string{"/busybox", "echo", "-n", "hello", "world"},
 					Timeout:  timeoutUnlimited,
 					Terminal: terminal,
@@ -347,7 +347,7 @@ var _ = Describe("ConmonClient", func() {
 				Expect(result.Stderr).To(BeEmpty())
 
 				err = sut.ReopenLogContainer(context.Background(), &client.ReopenLogContainerConfig{
-					ID: tr.ctrID,
+					ID: tr.ctrID(),
 				})
 				Expect(err).To(Succeed())
 				logs := fileContents(tr.logPath())
@@ -359,10 +359,10 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer(tr.ctrID())
 
 				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
-					ID:       tr.ctrID,
+					ID:       tr.ctrID(),
 					Command:  []string{"/busybox", "echo", "-n", "hello", "world"},
 					Timeout:  10,
 					Terminal: terminal,
@@ -379,10 +379,10 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer(tr.ctrID())
 
 				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
-					ID:       tr.ctrID,
+					ID:       tr.ctrID(),
 					Command:  []string{"/busybox", "invalid"},
 					Timeout:  timeoutUnlimited,
 					Terminal: terminal,
@@ -409,10 +409,10 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "20"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer(tr.ctrID())
 
 				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
-					ID:       tr.ctrID,
+					ID:       tr.ctrID(),
 					Command:  []string{"/busybox", "sleep", "5"},
 					Timeout:  3,
 					Terminal: terminal,
@@ -451,13 +451,13 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer(tr.ctrID())
 
 				stdinReader, stdinWriter := io.Pipe()
 				stdReader, stdWriter := io.Pipe()
 
 				cfg := &client.AttachConfig{
-					ID:                tr.ctrID,
+					ID:                tr.ctrID(),
 					SocketPath:        filepath.Join(tr.tmpDir, "attach"),
 					StopAfterStdinEOF: true,
 					Streams: client.AttachStreams{
@@ -494,7 +494,7 @@ var _ = Describe("ConmonClient", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			type traceData struct {
-				Data []interface{} `json:"data"`
+				Data []any `json:"data"`
 			}
 			traces := &traceData{}
 			Expect(json.Unmarshal(body, traces)).NotTo(HaveOccurred())
@@ -509,7 +509,7 @@ var _ = Describe("ConmonClient", func() {
 
 			sut = tr.configGivenEnv()
 			tr.createContainer(sut, false)
-			tr.startContainer(sut)
+			tr.startContainer(tr.ctrID())
 
 			for range 100 {
 				if hasTraces() {
@@ -678,6 +678,34 @@ var _ = Describe("ConmonClient", func() {
 	})
 })
 
+var _ = Describe("Scalability", func() {
+	var tr *testRunner
+	var sut *client.ConmonClient
+
+	AfterEach(func() {
+		Expect(os.RemoveAll(tr.tmpDir)).To(Succeed())
+		Expect(sut.Shutdown()).To(Succeed())
+	})
+
+	DescribeTable("multi container", func(terminal bool, ctrCount int) {
+		tr = newTestRunner()
+		tr.createMultiContainerRuntimeConfigWithProcessArgs(terminal, uint(ctrCount), []string{"/busybox", "ls"}, nil)
+		sut = tr.configGivenEnv()
+		tr.createAllContainers(sut, terminal)
+		tr.startAllcontainers()
+
+		rss := vmRSSGivenPID(sut.PID())
+		GinkgoWriter.Println("VmRSS for server is", rss)
+		// allow around 100KiB per container
+		Expect(rss).To(BeNumerically("<", maxRSSKB+ctrCount*100))
+	},
+		Entry("without terminal and 10 containers", false, 10),
+		Entry("with terminal and 10 containers", true, 10),
+		Entry("without terminal and 100 containers", false, 100),
+		Entry("with terminal and 100 containers", true, 100),
+	)
+})
+
 var _ = Describe("JSONLogger", func() {
 	var tr *testRunner
 	var sut *client.ConmonClient
@@ -701,7 +729,7 @@ var _ = Describe("JSONLogger", func() {
 
 				sut = tr.configGivenEnv()
 				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
-					ID:         tr.ctrID,
+					ID:         tr.ctrID(),
 					BundlePath: tr.tmpDir,
 					Terminal:   terminal,
 					LogDrivers: []client.ContainerLogDriver{{
@@ -710,7 +738,7 @@ var _ = Describe("JSONLogger", func() {
 					}},
 				})
 				Expect(err).NotTo(HaveOccurred())
-				tr.startContainer(sut)
+				tr.startContainer(tr.ctrID())
 
 				logContent, err := os.ReadFile(tr.logPath())
 				Expect(err).NotTo(HaveOccurred())
@@ -748,13 +776,13 @@ var _ = Describe("JournaldLogger", func() {
 
 				sut = tr.configGivenEnv()
 				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
-					ID:         tr.ctrID,
+					ID:         tr.ctrID(),
 					BundlePath: tr.tmpDir,
 					Terminal:   terminal,
 					LogDrivers: []client.ContainerLogDriver{{Type: client.LogDriverTypeJournald}},
 				})
 				Expect(err).NotTo(HaveOccurred())
-				tr.startContainer(sut)
+				tr.startContainer(tr.ctrID())
 
 				// Verify the journal logs
 				cmd := exec.Command("journalctl", "-n2", "_COMM=conmonrs")
@@ -776,7 +804,7 @@ var _ = Describe("StreamingServer", func() {
 	)
 
 	AfterEach(func() {
-		Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID)).To(Succeed())
+		Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID())).To(Succeed())
 		if sut != nil {
 			Expect(sut.Shutdown()).To(Succeed())
 		}
@@ -790,10 +818,10 @@ var _ = Describe("StreamingServer", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer(tr.ctrID())
 
 				result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
-					ID:      tr.ctrID,
+					ID:      tr.ctrID(),
 					Command: []string{"/busybox", "sh", "-c", "echo -n stdout && echo -n stderr >&2"},
 					Tty:     terminal,
 					Stdout:  true,
@@ -854,10 +882,10 @@ var _ = Describe("StreamingServer", func() {
 			tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "watch", "-n0.5", "echo", "test"}, nil)
 			sut = tr.configGivenEnv()
 			tr.createContainer(sut, terminal)
-			tr.startContainer(sut)
+			tr.startContainer(tr.ctrID())
 
 			result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
-				ID:     tr.ctrID,
+				ID:     tr.ctrID(),
 				Stdin:  true,
 				Stdout: true,
 				Stderr: true,
@@ -884,7 +912,7 @@ var _ = Describe("StreamingServer", func() {
 
 			err = executor.StreamWithContext(ctx, streamOptions)
 			Expect(err).To(HaveOccurred())
-			Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID)).To(Succeed())
+			Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID())).To(Succeed())
 			Expect(stdout.String()).To(ContainSubstring("echo test"))
 			Expect(stderr.String()).To(BeEmpty())
 		})

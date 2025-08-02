@@ -76,10 +76,15 @@ var _ = AfterSuite(func() {
 	}
 })
 
+type testCtr struct {
+	tmpRootfs, id string
+}
+
 type testRunner struct {
-	tmpDir, tmpRootfs, ctrID string
-	enableTracing            bool
-	rr                       *RuntimeRunner
+	ctrs          []testCtr
+	tmpDir        string
+	enableTracing bool
+	rr            *RuntimeRunner
 }
 
 func newTestRunner() *testRunner {
@@ -95,31 +100,43 @@ func (tr *testRunner) createRuntimeConfig(terminal bool) {
 func (tr *testRunner) createRuntimeConfigWithProcessArgs(
 	terminal bool, processArgs []string, changeSpec func(generate.Generator),
 ) {
-	rr := &RuntimeRunner{
+	tr.createMultiContainerRuntimeConfigWithProcessArgs(terminal, 1, processArgs, changeSpec)
+}
+
+func (tr *testRunner) createMultiContainerRuntimeConfigWithProcessArgs(
+	terminal bool, ctrs uint, processArgs []string, changeSpec func(generate.Generator),
+) {
+	tr.rr = &RuntimeRunner{
 		runtimeRoot: MustDirInTempDir(tr.tmpDir, "root"),
 	}
+	MustFile(tr.logPath())
 
 	// Save busy box binary if we don't have it.
 	Expect(cacheBusyBox()).To(Succeed())
 
-	// generate container ID.
-	ctrID := stringid.GenerateNonCryptoID()
+	for range ctrs {
+		// generate container ID.
+		ctrID := stringid.GenerateNonCryptoID()
 
-	// Create Rootfs.
-	tmpRootfs := MustDirInTempDir(tr.tmpDir, "rootfs")
+		// Create Rootfs.
+		tmpRootfs, err := os.MkdirTemp(tr.tmpDir, "rootfs-*")
+		Expect(err).NotTo(HaveOccurred())
 
-	// Link busybox binary to rootfs.
-	Expect(os.Link(busyboxDest, filepath.Join(tmpRootfs, "busybox"))).To(Succeed())
+		// Link busybox binary to rootfs.
+		Expect(os.Link(busyboxDest, filepath.Join(tmpRootfs, "busybox"))).To(Succeed())
 
-	// Finally, create config.json.
-	Expect(generateRuntimeConfigWithProcessArgs(
-		tr.tmpDir, tmpRootfs, terminal, processArgs, changeSpec,
-	)).To(Succeed())
+		// Finally, create config.json.
+		Expect(generateRuntimeConfigWithProcessArgs(
+			tr.tmpDir, tmpRootfs, terminal, processArgs, changeSpec,
+		)).To(Succeed())
 
-	tr.rr = rr
-	tr.ctrID = ctrID
-	tr.tmpRootfs = tmpRootfs
-	MustFile(tr.logPath())
+		tr.ctrs = append(tr.ctrs, testCtr{id: ctrID, tmpRootfs: tmpRootfs})
+	}
+}
+
+// ctrID returns the first container ID.
+func (tr *testRunner) ctrID() string {
+	return tr.ctrs[0].id
 }
 
 func (tr *testRunner) logPath() string {
@@ -141,9 +158,9 @@ func fileContents(path string) string {
 	return string(contents)
 }
 
-func (tr *testRunner) defaultConfig(terminal bool) *client.CreateContainerConfig {
+func (tr *testRunner) defaultConfig(terminal bool, ctrID string) *client.CreateContainerConfig {
 	return &client.CreateContainerConfig{
-		ID:           tr.ctrID,
+		ID:           ctrID,
 		BundlePath:   tr.tmpDir,
 		Terminal:     terminal,
 		Stdin:        true,
@@ -160,21 +177,36 @@ func (tr *testRunner) defaultConfig(terminal bool) *client.CreateContainerConfig
 }
 
 func (tr *testRunner) createContainer(sut *client.ConmonClient, terminal bool) {
-	tr.createContainerWithConfig(sut, tr.defaultConfig(terminal))
+	ctrID := tr.ctrs[0].id
+	tr.createContainerWithConfig(sut, ctrID, tr.defaultConfig(terminal, ctrID))
 }
 
-func (tr *testRunner) createContainerWithConfig(sut *client.ConmonClient, cfg *client.CreateContainerConfig) {
+func (tr *testRunner) createAllContainers(sut *client.ConmonClient, terminal bool) {
+	for _, ctr := range tr.ctrs {
+		tr.createContainerWithConfig(sut, ctr.id, tr.defaultConfig(terminal, ctr.id))
+	}
+}
+
+func (tr *testRunner) createContainerWithConfig(
+	sut *client.ConmonClient, ctrID string, cfg *client.CreateContainerConfig,
+) {
 	resp, err := sut.CreateContainer(context.Background(), cfg)
 	Expect(err).To(Succeed())
 	Expect(resp.PID).NotTo(BeEquivalentTo(0))
 	Eventually(func() error {
-		return tr.rr.RunCommandCheckOutput(tr.ctrID, "list")
+		return tr.rr.RunCommandCheckOutput(ctrID, "list")
 	}, time.Second*5).Should(Succeed())
 }
 
-func (tr *testRunner) startContainer(*client.ConmonClient) {
+func (tr *testRunner) startAllcontainers() {
+	for _, ctr := range tr.ctrs {
+		tr.startContainer(ctr.id)
+	}
+}
+
+func (tr *testRunner) startContainer(ctrID string) {
 	// Start the container
-	Expect(tr.rr.RunCommand("start", tr.ctrID)).To(Succeed())
+	Expect(tr.rr.RunCommand("start", ctrID)).To(Succeed())
 
 	// Wait for container to be running
 	Eventually(func() error {
