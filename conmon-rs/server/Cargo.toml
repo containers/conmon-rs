@@ -24,7 +24,7 @@ libsystemd = { version = "0.7.2", default-features = false }
 memchr = { version = "2.7.5", default-features = false }
 multimap = { version = "0.10.1", default-features = false }
 nix = { version = "0.30.1", default-features = false, features = ["fs", "hostname", "mount", "sched", "signal", "socket", "term", "user"] }
-notify = { version = "8.1.0", default-features = false }
+notify = { version = "8.2.0", default-features = false }
 once_cell = { version = "1.21.3", default-features = false }
 opentelemetry = { version = "0.30.0", default-features = false }
 opentelemetry_sdk = { version = "0.30.0", default-features = false, features = ["rt-tokio"] }
