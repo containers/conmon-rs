@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"syscall"
@@ -432,16 +433,15 @@ func validateLogDriver(driver LogDriver) error {
 	return validateStringSlice(
 		"log driver",
 		string(driver),
+		string(LogDriverNone),
 		string(LogDriverStdout),
 		string(LogDriverSystemd),
 	)
 }
 
 func validateStringSlice(typ, given string, possibleValues ...string) error {
-	for _, possibleValue := range possibleValues {
-		if given == possibleValue {
-			return nil
-		}
+	if slices.Contains(possibleValues, given) {
+		return nil
 	}
 
 	return fmt.Errorf("%w: %s %q", errInvalidValue, typ, given)
