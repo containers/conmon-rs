@@ -297,6 +297,9 @@ pub enum Verbosity {
 #[strum(serialize_all = "lowercase")]
 /// Available log drivers.
 pub enum LogDriver {
+    /// Use no log driver.
+    None,
+
     /// Use stdout as log driver.
     Stdout,
 

@@ -186,6 +186,7 @@ impl Server {
         let registry = tracing_subscriber::registry().with(telemetry_layer);
 
         match self.config().log_driver() {
+            LogDriver::None => {}
             LogDriver::Stdout => {
                 let layer = tracing_subscriber::fmt::layer()
                     .with_target(true)
