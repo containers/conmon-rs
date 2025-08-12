@@ -9,7 +9,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   GO_VERSION: "1.24"
-  ACTION_MSRV_TOOLCHAIN: 1.88.0
   NIX_VERSION: "2.30.1"
 jobs:
   build:
@@ -29,7 +28,7 @@ jobs:
       - name: Select Toolchain
         uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         with:
-          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
+          toolchain: stable
           components: rustfmt
       - run: cargo build && git diff --exit-code
 
@@ -80,10 +79,7 @@ jobs:
       - name: Select Toolchain
         uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         with:
-          # Ubuntu 22.04 glibc static is not compatible with rustc 1.58.1 (see
-          # ACTION_MSRV_TOOLCHAIN). Means we now just use the latest one, since
-          # the static builds are made for the community.
-          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
+          toolchain: stable
           components: rustfmt
       - run: make release-static
       - run: |
@@ -203,7 +199,7 @@ jobs:
       - name: Select Toolchain
         uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         with:
-          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
+          toolchain: stable
           components: rustfmt
       - name: Cargo doc
         run: cargo doc --no-deps
@@ -238,7 +234,7 @@ jobs:
       - name: Select Toolchain
         uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         with:
-          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
+          toolchain: stable
           components: rustfmt
       - name: Rustfmt
         run: cargo fmt && git diff --exit-code

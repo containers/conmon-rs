@@ -10,14 +10,6 @@ dependencies:
       - path: .github/workflows/release.yml
         match: GO_VERSION
 
-  - name: rust
-    version: 1.88.0
-    refPaths:
-      - path: .github/workflows/ci.yml
-        match: ACTION_MSRV_TOOLCHAIN
-      - path: .github/workflows/release.yml
-        match: ACTION_MSRV_TOOLCHAIN
-
   - name: golangci-lint
     version: 2.2.2
     refPaths:
