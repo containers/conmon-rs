@@ -1692,6 +1692,9 @@ func (c *ConmonClient) attachHeaptrack(config *ConmonServerConfig, pid uint32) {
 	c.logger.Debugf("Running heaptrack via: %s %s", entrypoint, strings.Join(args, " "))
 
 	cmd := exec.Command(entrypoint, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
 	if err := cmd.Run(); err != nil {
 		c.logger.Errorf("Unable to run heaptrack: %v", err)
 	}
