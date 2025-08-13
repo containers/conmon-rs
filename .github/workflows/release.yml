@@ -8,7 +8,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   GO_VERSION: "1.24"
-  ACTION_MSRV_TOOLCHAIN: 1.88.0
 
 jobs:
   build:
@@ -31,7 +30,7 @@ jobs:
       - name: Select Toolchain
         uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         with:
-          toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN'] }}
+          toolchain: stable
           components: rustfmt
       - name: Build
         run: cargo build
