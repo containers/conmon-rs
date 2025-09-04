@@ -7,7 +7,7 @@ toolchain go1.24.4
 require (
 	capnproto.org/go/capnp/v3 v3.1.0-alpha.1
 	github.com/blang/semver/v4 v4.0.0
-	github.com/containers/common v0.64.1
+	github.com/containers/common v0.64.2
 	github.com/containers/storage v1.59.1
 	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.25.2
