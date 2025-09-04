@@ -103,7 +103,7 @@ jobs:
         if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
         with:
           credentials_json: ${{ secrets.GCS_CRIO_SA }}
-      - uses: google-github-actions/upload-cloud-storage@7c73f5d6eae167341002e9c946f7479a609c588e # v2.2.3
+      - uses: google-github-actions/upload-cloud-storage@6397bd7208e18d13ba2619ee21b9873edc94427a # v3.0.0
         if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
         with:
           path: ${{ github.sha }}
@@ -122,7 +122,7 @@ jobs:
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           credentials_json: ${{ secrets.GCS_CRIO_SA }}
-      - uses: google-github-actions/upload-cloud-storage@7c73f5d6eae167341002e9c946f7479a609c588e # v2.2.3
+      - uses: google-github-actions/upload-cloud-storage@6397bd7208e18d13ba2619ee21b9873edc94427a # v3.0.0
         with:
           path: .
           glob: latest-*.txt
@@ -176,7 +176,7 @@ jobs:
         if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
         with:
           credentials_json: ${{ secrets.GCS_CRIO_SA }}
-      - uses: google-github-actions/upload-cloud-storage@7c73f5d6eae167341002e9c946f7479a609c588e # v2.2.3
+      - uses: google-github-actions/upload-cloud-storage@6397bd7208e18d13ba2619ee21b9873edc94427a # v3.0.0
         if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
         with:
           path: ${{ github.sha }}
