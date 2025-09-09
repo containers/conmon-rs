@@ -11,7 +11,7 @@ TEST_FLAGS ?=
 PACKAGE_NAME ?= $(shell cargo metadata --no-deps --format-version 1 | jq -r '.packages[2] | [ .name, .version ] | join("-v")')
 PREFIX ?= /usr
 CI_TAG ?=
-GOLANGCI_LINT_VERSION := v2.2.2
+GOLANGCI_LINT_VERSION := v2.4.0
 ZEITGEIST_VERSION := v0.4.4
 
 COLOR:=\\033[36m
