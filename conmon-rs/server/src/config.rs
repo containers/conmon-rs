@@ -213,6 +213,7 @@ pub enum Commands {
     Clone,
     Copy,
     Debug,
+    Default,
     Deserialize,
     Display,
     EnumIter,
@@ -233,6 +234,7 @@ pub enum LogLevel {
     /// Debug level, less verbose than trace.
     Debug,
 
+    #[default]
     /// Info level, less verbose than debug.
     Info,
 
@@ -244,12 +246,6 @@ pub enum LogLevel {
 
     /// Disable logging.
     Off,
-}
-
-impl Default for LogLevel {
-    fn default() -> Self {
-        Self::Info
-    }
 }
 
 #[derive(
@@ -283,6 +279,7 @@ pub enum Verbosity {
     Clone,
     Copy,
     Debug,
+    Default,
     Deserialize,
     Display,
     EnumIter,
@@ -303,14 +300,9 @@ pub enum LogDriver {
     /// Use stdout as log driver.
     Stdout,
 
+    #[default]
     /// Use systemd journald as log driver
     Systemd,
-}
-
-impl Default for LogDriver {
-    fn default() -> Self {
-        Self::Systemd
-    }
 }
 
 impl Default for Config {
