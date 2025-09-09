@@ -10,7 +10,7 @@ require (
 	github.com/containers/common v0.64.2
 	github.com/containers/storage v1.59.1
 	github.com/google/uuid v1.6.0
-	github.com/onsi/ginkgo/v2 v2.25.2
+	github.com/onsi/ginkgo/v2 v2.25.3
 	github.com/onsi/gomega v1.38.2
 	github.com/opencontainers/runc v1.3.1
 	github.com/opencontainers/runtime-tools v0.9.1-0.20250523060157-0ea5ed0382a2
