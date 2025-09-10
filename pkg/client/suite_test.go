@@ -62,7 +62,7 @@ var _ = AfterSuite(func() {
 	Expect(goroutines.WriteTo(os.Stdout, 1)).To(Succeed())
 
 	By("Verifying that no conmonrs processes are still running in the background")
-	cmd := exec.Command("ps", "aux")
+	cmd := exec.CommandContext(context.Background(), "ps", "aux")
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	Expect(cmd.Run()).To(Succeed())
@@ -395,7 +395,7 @@ func (rr *RuntimeRunner) runCommand(args ...string) (string, error) {
 
 	var stderr bytes.Buffer
 
-	cmd := exec.Command(runtimePath, append(rr.runtimeRootArgs(), args...)...)
+	cmd := exec.CommandContext(context.Background(), runtimePath, append(rr.runtimeRootArgs(), args...)...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
