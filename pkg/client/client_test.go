@@ -17,14 +17,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containers/common/pkg/resize"
 	"github.com/containers/conmon-rs/pkg/client"
-	"github.com/containers/storage/pkg/idtools"
-	"github.com/containers/storage/pkg/unshare"
 	"github.com/google/uuid"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/opencontainers/runtime-tools/generate"
+	"go.podman.io/common/pkg/resize"
+	"go.podman.io/storage/pkg/idtools"
+	"go.podman.io/storage/pkg/unshare"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 )
