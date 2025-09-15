@@ -33,7 +33,7 @@ opentelemetry-otlp = { version = "0.30.0", default-features = false, features = 
 opentelemetry-semantic-conventions = { version = "0.30.0", default-features = false, features = ["semconv_experimental"] }
 prctl = { version = "1.0.0", default-features = false }
 sendfd = { version = "0.4.4", default-features = false, features = ["tokio"] }
-serde = { version = "1.0.219", default-features = false, features = ["derive"] }
+serde = { version = "1.0.223", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.143", default-features = false, features = ["std"] }
 shadow-rs = { version = "1.3.0", default-features = false }
 signal-hook = { version = "0.3.18", default-features = false, features = ["iterator"] }
