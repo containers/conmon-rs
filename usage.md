@@ -65,7 +65,7 @@ spec:
           path: /etc/crio/crio.conf.d/99-conmonrs.conf
 ```
 
-The same can be done for the `master` role or any other confiured runtime like
+The same can be done for the `master` role or any other configured runtime like
 `crun`.
 
 ### Using a custom conmonrs version
