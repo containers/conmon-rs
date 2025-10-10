@@ -47,7 +47,7 @@ tower-http = { version = "0.6.6", default-features = false, features = ["trace"]
 tracing = { version = "0.1.41", default-features = false }
 tracing-opentelemetry = { version = "0.31.0", default-features = false }
 tracing-subscriber = { version = "0.3.20", default-features = false, features = ["fmt"] }
-tz-rs = { version = "0.7.0", default-features = false, features = ["std"] }
+tz-rs = { version = "0.7.1", default-features = false, features = ["std"] }
 uuid = { version = "1.18.1", default-features = false, features = ["v4", "fast-rng", "macro-diagnostics"] }
 
 [build-dependencies]
