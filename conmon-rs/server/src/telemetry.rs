@@ -58,7 +58,7 @@ impl Telemetry {
 
         let metadata = Metadata(capnp_util::into_map(reader)?);
         let ctx = global::get_text_map_propagator(|prop| prop.extract(&metadata));
-        Span::current().set_parent(ctx);
+        let _ = Span::current().set_parent(ctx);
 
         Ok(())
     }
