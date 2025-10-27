@@ -3,7 +3,7 @@ module github.com/containers/conmon-rs
 go 1.25
 
 require (
-	capnproto.org/go/capnp/v3 v3.1.0-alpha.1
+	capnproto.org/go/capnp/v3 v3.1.0-alpha.2
 	github.com/blang/semver/v4 v4.0.0
 	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.27.1
