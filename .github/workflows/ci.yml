@@ -280,7 +280,7 @@ jobs:
             /tmp/conmon-test-images
           key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/files_test.go') }}
       - run: rm -rf target/x86_64-unknown-linux-gnu/release/conmonrs
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           name: conmonrs
           path: target/x86_64-unknown-linux-gnu/release
@@ -305,7 +305,7 @@ jobs:
       - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
           go-version-file: go.mod
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           name: conmonrs
           path: target/x86_64-unknown-linux-musl/release
