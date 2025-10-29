@@ -334,7 +334,11 @@ dependencies = [
 name = "conmon-common"
 version = "0.7.1"
 dependencies = [
+<<<<<<< HEAD
  "capnp 0.21.7",
+=======
+ "capnp 0.23.0",
+>>>>>>> dependabot/cargo/capnp-0.23.0
  "capnpc",
 ]
 
@@ -345,7 +349,11 @@ dependencies = [
  "anyhow",
  "async-channel",
  "axum",
+<<<<<<< HEAD
  "capnp 0.21.7",
+=======
+ "capnp 0.23.0",
+>>>>>>> dependabot/cargo/capnp-0.23.0
  "capnp-rpc",
  "clap",
  "command-fds",
@@ -392,7 +400,11 @@ dependencies = [
 name = "conmonrs-cli"
 version = "0.7.1"
 dependencies = [
+<<<<<<< HEAD
  "capnp 0.21.7",
+=======
+ "capnp 0.23.0",
+>>>>>>> dependabot/cargo/capnp-0.23.0
  "capnp-rpc",
  "conmon-common",
  "futures",
