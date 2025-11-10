@@ -162,7 +162,7 @@ var _ = Describe("ConmonClient", func() {
 					}},
 				})
 				Expect(err).NotTo(Succeed())
-				Expect(err.Error()).To(ContainSubstring(`executable file not found in $PATH"`))
+				Expect(err.Error()).To(ContainSubstring(`not found in $PATH`))
 			})
 
 			It(testName("should handle long run dir", terminal), func() {
