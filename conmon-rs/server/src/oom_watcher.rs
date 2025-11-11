@@ -216,7 +216,22 @@ impl OOMWatcher {
         );
 
         let memory_events_file_path = subsystem_path.join("memory.events");
-        let mut last_counter: u64 = 0;
+
+        // Read the initial OOM counter to establish a baseline
+        // This ensures we only detect OOMs that occur during this container's lifetime
+        let mut last_counter: u64 = match Self::check_for_oom(&memory_events_file_path, 0).await {
+            Ok((counter, _)) => {
+                debug!("Initial OOM counter: {}", counter);
+                counter
+            }
+            Err(e) => {
+                debug!(
+                    "Could not read initial OOM counter: {:#}, starting from 0",
+                    e
+                );
+                0
+            }
+        };
 
         let path = memory_events_file_path.to_str();
         debug!(path, "Setup cgroup v2 handling");
@@ -226,35 +241,73 @@ impl OOMWatcher {
             .watch(&memory_events_file_path, RecursiveMode::NonRecursive)
             .context("watch memory events file")?;
 
+        // For crun with sub-cgroups, also watch the parent's memory.events
+        // since that's where OOM events are recorded
+        if let Some(parent) = subsystem_path.parent() {
+            let parent_memory_events = parent.join("memory.events");
+            if parent_memory_events.exists() {
+                debug!(
+                    "Also watching parent memory.events: {}",
+                    parent_memory_events.display()
+                );
+                if let Err(e) = watcher.watch(&parent_memory_events, RecursiveMode::NonRecursive) {
+                    debug!("Could not watch parent memory.events: {:#}", e);
+                }
+            }
+        }
+
         loop {
             tokio::select! {
                 _ = token.cancelled() => {
                     debug!("Loop cancelled");
-                    if let Err(e) = tx.try_send(OOMEvent{ oom: false }) {
-                        error!("try_send failed: {:#}", e);
-                    };
 
                     debug!("Last resort check for OOM");
+                    let mut found_oom = false;
                     match Self::check_for_oom(&memory_events_file_path, last_counter).await {
                         Ok((counter, is_oom)) => {
-                            if !is_oom {
-                                debug!("No OOM found in event");
-                                break;
+                            if is_oom {
+                                debug!("Found OOM event count {counter}");
+                                found_oom = true;
+                            } else {
+                                debug!("No OOM found in current cgroup");
                             }
-                            debug!("Found OOM event count {counter}");
-                            if let Err(e) = Self::write_oom_files(exit_paths).await {
-                                error!("Writing OOM files failed: {:#}", e)
-                            }
-                            if let Err(e) = tx.try_send(OOMEvent{ oom: true }) {
-                                error!("Try send failed: {:#}", e)
-                            };
                         }
                         // It is still possible to miss an OOM event here if the memory events file
                         // got removed between the notify event below and the token cancellation.
+                        // In this case, check the parent cgroup for OOM events (for crun with sub-cgroups)
                         Err(e) => {
-                            debug!("Checking for last resort OOM failed: {:#}", e);
-                            break;
+                            debug!("Checking for last resort OOM failed: {:#}, trying parent cgroup", e);
+                            if let Some(parent) = subsystem_path.parent() {
+                                let parent_memory_events = parent.join("memory.events");
+                                debug!("Checking parent memory.events: {}", parent_memory_events.display());
+                                // Check if there's ANY OOM event in the parent (counter > 0)
+                                // This is a last resort check when the child cgroup is unavailable
+                                match Self::check_for_oom(&parent_memory_events, 0).await {
+                                    Ok((counter, is_oom)) => {
+                                        if is_oom {
+                                            debug!("Found OOM event in parent cgroup, count {counter}");
+                                            found_oom = true;
+                                        } else {
+                                            debug!("No OOM found in parent cgroup either");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        debug!("Failed to check parent cgroup for OOM: {:#}", e);
+                                    }
+                                }
+                            }
                         }
+                    }
+
+                    if found_oom {
+                        if let Err(e) = Self::write_oom_files(exit_paths).await {
+                            error!("Writing OOM files failed: {:#}", e)
+                        }
+                        if let Err(e) = tx.try_send(OOMEvent{ oom: true }) {
+                            error!("Try send failed: {:#}", e)
+                        };
+                    } else if let Err(e) = tx.try_send(OOMEvent{ oom: false }) {
+                        error!("try_send failed: {:#}", e);
                     }
 
                     break;
@@ -274,40 +327,64 @@ impl OOMWatcher {
                                 };
                                 break
                             }
+                            // Check both child and parent cgroups for OOM events
+                            let mut found_oom = false;
+                            let mut oom_counter = 0;
+
                             match Self::check_for_oom(&memory_events_file_path, last_counter).await {
                                 Ok((counter, is_oom)) => {
-                                    if !is_oom {
-                                        debug!("No OOM found in event");
-                                        continue;
+                                    if is_oom {
+                                        debug!("Found OOM event in child cgroup, count {}", counter);
+                                        found_oom = true;
+                                        oom_counter = counter;
                                     }
-                                    debug!("Found OOM event count {}", counter);
-                                    if let Err(e) = Self::write_oom_files(exit_paths).await {
-                                        error!("Writing OOM files failed: {:#}", e);
-                                    }
-                                    last_counter = counter;
-                                    match tx.try_send(OOMEvent{ oom: true }) {
-                                        Ok(_) => break,
-                                        Err(e) => error!("try_send failed: {:#}", e)
-                                    };
                                 }
                                 Err(e) => {
-                                    error!("Checking for OOM failed: {:#}", e);
-
-                                    let mut oom = false;
-                                    if Self::file_not_found(&memory_events_file_path).await {
-                                        debug!("Assuming memory slice removal race, still reporting one OOM event");
-                                        if let Err(e) = Self::write_oom_files(exit_paths).await {
-                                            error!("Writing OOM files failed: {:#}", e);
-                                        }
-                                        last_counter = 1;
-                                        oom = true;
-                                    }
-
-                                    match tx.try_send(OOMEvent{ oom }) {
-                                        Ok(_) => break,
-                                        Err(e) => error!("try_send failed: {:#}", e)
-                                    };
+                                    debug!("Checking child cgroup for OOM failed: {:#}", e);
                                 }
+                            }
+
+                            // Also check parent cgroup (for crun with sub-cgroups)
+                            if !found_oom
+                                && let Some(parent) = subsystem_path.parent()
+                            {
+                                let parent_memory_events = parent.join("memory.events");
+                                match Self::check_for_oom(&parent_memory_events, 0).await {
+                                    Ok((counter, is_oom)) => {
+                                        if is_oom {
+                                            debug!("Found OOM event in parent cgroup, count {}", counter);
+                                            found_oom = true;
+                                            oom_counter = counter;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        debug!("Checking parent cgroup for OOM failed: {:#}", e);
+                                    }
+                                }
+                            }
+
+                            if found_oom {
+                                debug!("Writing OOM files");
+                                if let Err(e) = Self::write_oom_files(exit_paths).await {
+                                    error!("Writing OOM files failed: {:#}", e);
+                                }
+                                last_counter = oom_counter;
+                                match tx.try_send(OOMEvent{ oom: true }) {
+                                    Ok(_) => break,
+                                    Err(e) => error!("try_send failed: {:#}", e)
+                                };
+                            } else if Self::file_not_found(&memory_events_file_path).await {
+                                debug!("Assuming memory slice removal race, still reporting one OOM event");
+                                if let Err(e) = Self::write_oom_files(exit_paths).await {
+                                    error!("Writing OOM files failed: {:#}", e);
+                                }
+                                last_counter = 1;
+                                match tx.try_send(OOMEvent{ oom: true }) {
+                                    Ok(_) => break,
+                                    Err(e) => error!("try_send failed: {:#}", e)
+                                };
+                            } else {
+                                debug!("No OOM found in event");
                             };
                         },
                         Err(e) => {
@@ -384,8 +461,25 @@ impl OOMWatcher {
                 tokio::spawn(
                     async move {
                         debug!("Writing OOM file: {}", path.display());
-                        if let Err(e) = File::create(&path).await {
-                            error!("Could not write oom file to {}: {:#}", path.display(), e);
+                        match File::create(&path).await {
+                            Ok(file) => {
+                                // Ensure the file is synced to disk
+                                if let Err(e) = file.sync_all().await {
+                                    error!(
+                                        "Could not sync oom file to {}: {:#}",
+                                        path.display(),
+                                        e
+                                    );
+                                } else {
+                                    debug!(
+                                        "Successfully wrote and synced OOM file: {}",
+                                        path.display()
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                error!("Could not create oom file at {}: {:#}", path.display(), e);
+                            }
                         }
                     }
                     .instrument(debug_span!("write_oom_file")),

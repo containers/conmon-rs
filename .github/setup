@@ -48,10 +48,10 @@ install_crio() {
     cat <<EOT | sudo tee /etc/crio/crio.conf.d/10-crun.conf
 [crio.runtime]
 log_level = "debug"
-default_runtime = "runc"
+default_runtime = "crun"
 
-[crio.runtime.runtimes.runc]
-runtime_path = "/usr/libexec/crio/runc"
+[crio.runtime.runtimes.crun]
+runtime_path = "/usr/libexec/crio/crun"
 runtime_type = "pod"
 monitor_path = "/usr/libexec/crio/conmonrs"
 EOT
@@ -59,7 +59,7 @@ EOT
     sudo systemctl enable --now crio.service
 
     # Validate if the correct config is being loaded
-    sudo crio status config | grep -q 'default_runtime = "runc"'
+    sudo crio status config | grep -q 'default_runtime = "crun"'
     sudo crio status config | grep -q 'runtime_type = "pod"'
 }
 

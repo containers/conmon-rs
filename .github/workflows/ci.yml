@@ -6,6 +6,9 @@ on:
       - "*"
     branches:
       - main
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 env:
   CARGO_TERM_COLOR: always
   NIX_VERSION: "2.30.1"
@@ -289,7 +292,7 @@ jobs:
       - name: create symlink
         run: sudo ln -f -s $(go env GOROOT)/bin/* /usr/bin/
       - name: Integration tests
-        run: sudo -E RUNTIME_PATH="/usr/sbin/runc" make integration-static
+        run: sudo -E RUNTIME_PATH="/usr/bin/crun" make integration-static
       - name: Chown cache
         run: |
           sudo chown -R $(id -u):$(id -g) ~/go/pkg/mod
