@@ -153,7 +153,7 @@ impl Server {
             tracer.shutdown().context("shutdown tracer")?;
         }
 
-        rt.shutdown_background();
+        rt.shutdown_timeout(std::time::Duration::from_secs(15));
         Ok(())
     }
 
@@ -252,16 +252,13 @@ impl Server {
     ) -> Result<()> {
         let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigint = signal(SignalKind::interrupt())?;
-        let handled_sig: Signal;
 
         tokio::select! {
             _ = sigterm.recv() => {
                 info!("Received SIGTERM");
-                handled_sig = Signal::SIGTERM;
             }
             _ = sigint.recv() => {
                 info!("Received SIGINT");
-                handled_sig = Signal::SIGINT;
             }
         }
 
@@ -270,8 +267,9 @@ impl Server {
         }
 
         debug!("Starting grandchildren cleanup task");
+        // Always use SIGKILL to ensure immediate termination of container processes
         reaper
-            .kill_grandchildren(handled_sig)
+            .kill_grandchildren(Signal::SIGKILL)
             .context("unable to kill grandchildren")?;
 
         debug!("Sending shutdown message");
