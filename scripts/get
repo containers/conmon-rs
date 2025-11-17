@@ -132,8 +132,7 @@ download_binary() {
 
         FILES=(
             "conmonrs.$ARCH"
-            "conmonrs.$ARCH.sig"
-            "conmonrs.$ARCH.cert"
+            "conmonrs.$ARCH.bundle"
         )
         for FILE in "${FILES[@]}"; do
             curl_retry "$BASE_URL/$COMMIT/$FILE" -o "$FILE"
@@ -146,8 +145,7 @@ download_binary() {
             --certificate-github-workflow-name ci \
             --certificate-github-workflow-repository "$SLUG" \
             --certificate-github-workflow-ref "$GIT_REF" \
-            --signature "${FILES[1]}" \
-            --certificate "${FILES[2]}"
+            --bundle "${FILES[1]}"
 
         popd >/dev/null
         mv "$TMPDIR/${FILES[0]}" "$OUTPUT"
