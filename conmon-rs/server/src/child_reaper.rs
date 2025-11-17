@@ -364,10 +364,11 @@ impl ReapableChild {
                 });
 
                 let closure = async {
-                    if let Ok(code) = wait_for_exit_code.await {
+                    let (code, oom) = tokio::join!(wait_for_exit_code, oom_rx.recv());
+                    if let Ok(code) = code {
                         exit_code = code;
                     }
-                    if let Some(event) = oom_rx.recv().await {
+                    if let Some(event) = oom {
                         oomed = event.oom;
                     }
                 };

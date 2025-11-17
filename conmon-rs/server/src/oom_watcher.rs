@@ -180,11 +180,11 @@ impl OOMWatcher {
         let (tx, rx) = channel(1);
 
         let watcher = notify::recommended_watcher(move |res: Result<Event, Error>| {
-            futures::executor::block_on(async {
-                if let Err(e) = tx.send(res).await {
-                    error!("Unable to send event result: {:#}", e)
-                }
-            })
+            // Use try_send to avoid blocking the notify watcher's callback thread
+            // if the receiver isn't being polled yet or the channel is full
+            if let Err(e) = tx.try_send(res) {
+                error!("Unable to send event result: {:#}", e)
+            }
         })
         .context("get recommended watcher")?;
 
