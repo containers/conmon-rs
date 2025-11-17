@@ -7,7 +7,7 @@ dependencies:
         match: go
 
   - name: golangci-lint
-    version: 2.4.0
+    version: 2.6.2
     refPaths:
       - path: .github/workflows/ci.yml
         match: version
@@ -15,19 +15,19 @@ dependencies:
         match: GOLANGCI_LINT_VERSION
 
   - name: zeitgeist
-    version: 0.4.4
+    version: 0.5.4
     refPaths:
       - path: Makefile
         match: ZEITGEIST_VERSION
 
   - name: jaeger
-    version: 2.8.0
+    version: 2.11.0
     refPaths:
       - path: contrib/tracing/start
         match: JAEGER_IMG
 
   - name: nix
-    version: 2.30.1
+    version: 2.32.4
     refPaths:
       - path: .github/workflows/ci.yml
         match: NIX_VERSION

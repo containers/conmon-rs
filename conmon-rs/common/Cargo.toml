@@ -1,7 +1,7 @@
 [package]
 name = "conmon-common"
 # Version listed below is also used by .packit.sh
-version = "0.7.1"
+version = "0.7.3"
 edition = "2024"
 
 [dependencies]

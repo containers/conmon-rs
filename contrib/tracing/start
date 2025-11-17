@@ -5,7 +5,7 @@ set -uo pipefail
 # shellcheck source=stop
 source "$(dirname "${BASH_SOURCE[0]}")"/stop
 
-JAEGER_IMG="cr.jaegertracing.io/jaegertracing/jaeger:2.8.0"
+JAEGER_IMG="cr.jaegertracing.io/jaegertracing/jaeger:2.11.0"
 
 echo "Starting $JAEGER_CTR"
 "$CONTAINER_RUNTIME" run -d --rm --network host --name "$JAEGER_CTR" "$JAEGER_IMG"
