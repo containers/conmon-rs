@@ -500,7 +500,7 @@ var _ = Describe("ConmonClient", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			type traceData struct {
-				Data []interface{} `json:"data"`
+				Data []any `json:"data"`
 			}
 			traces := &traceData{}
 			Expect(json.Unmarshal(body, traces)).NotTo(HaveOccurred())
