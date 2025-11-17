@@ -95,6 +95,7 @@ jobs:
         run: |
           cd ${{ github.sha }}
           cosign sign-blob -y conmonrs \
+            --bundle conmonrs.bundle \
             --output-signature conmonrs.sig \
             --output-certificate conmonrs.cert
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
@@ -168,6 +169,7 @@ jobs:
         run: |
           cd ${{ github.sha }}
           cosign sign-blob -y conmonrs.${{ matrix.arch }} \
+            --bundle conmonrs.${{ matrix.arch }}.bundle \
             --output-signature conmonrs.${{ matrix.arch }}.sig \
             --output-certificate conmonrs.${{ matrix.arch }}.cert
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
