@@ -55,5 +55,5 @@ shadow-rs = { version = "1.4.0", default-features = false, features = ["build"] 
 dashmap = { version = "6.1.0", default-features = false }
 
 [dev-dependencies]
-mockall = { version = "0.13.1", default-features = false }
+mockall = { version = "0.14.0", default-features = false }
 time = { version = "0.3.44", default-features = false, features = ["parsing", "std"] }
