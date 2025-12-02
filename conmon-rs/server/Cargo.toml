@@ -48,7 +48,7 @@ tracing = { version = "0.1.43", default-features = false }
 tracing-opentelemetry = { version = "0.32.0", default-features = false }
 tracing-subscriber = { version = "0.3.22", default-features = false, features = ["fmt"] }
 tz-rs = { version = "0.7.1", default-features = false, features = ["std"] }
-uuid = { version = "1.18.1", default-features = false, features = ["v4", "fast-rng", "macro-diagnostics"] }
+uuid = { version = "1.19.0", default-features = false, features = ["v4", "fast-rng", "macro-diagnostics"] }
 
 [build-dependencies]
 shadow-rs = { version = "1.4.0", default-features = false, features = ["build"] }
