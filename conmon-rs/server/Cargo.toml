@@ -44,7 +44,7 @@ tokio-eventfd = { version = "0.2.2", default-features = false }
 tokio-seqpacket = { version = "0.8.1", default-features = false }
 tokio-util = { version = "0.7.17", default-features = false, features = ["compat"] }
 tower-http = { version = "0.6.8", default-features = false, features = ["trace"] }
-tracing = { version = "0.1.43", default-features = false }
+tracing = { version = "0.1.44", default-features = false }
 tracing-opentelemetry = { version = "0.32.0", default-features = false }
 tracing-subscriber = { version = "0.3.22", default-features = false, features = ["fmt"] }
 tz-rs = { version = "0.7.1", default-features = false, features = ["std"] }
