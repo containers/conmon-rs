@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 capnp = { version = "0.21.7", default-features = false }
-capnp-rpc = { version = "0.21.0", default-features = false }
+capnp-rpc = { version = "0.25.0", default-features = false }
 conmon-common = { path = "../common" }
 futures = { version = "0.3.31", default-features = false }
 log = { version = "0.4.29", default-features = false, features = ["serde", "std"] }
