@@ -10,7 +10,7 @@ require (
 	github.com/onsi/gomega v1.39.0
 	github.com/opencontainers/runc v1.4.0
 	github.com/opencontainers/runtime-tools v0.9.1-0.20251205004911-5e639034dcdc
-	github.com/sirupsen/logrus v1.9.3
+	github.com/sirupsen/logrus v1.9.4
 	go.opentelemetry.io/otel v1.39.0
 	go.opentelemetry.io/otel/trace v1.39.0
 	go.podman.io/common v0.66.1
