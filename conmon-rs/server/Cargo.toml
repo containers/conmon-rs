@@ -35,7 +35,7 @@ prctl = { version = "1.0.0", default-features = false }
 sendfd = { version = "0.4.4", default-features = false, features = ["tokio"] }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.149", default-features = false, features = ["std"] }
-shadow-rs = { version = "1.6.0", default-features = false }
+shadow-rs = { version = "1.7.0", default-features = false }
 signal-hook = { version = "0.4.3", default-features = false, features = ["iterator"] }
 strum = { version = "0.27.2", default-features = false, features = ["derive"] }
 tempfile = { version = "3.23.0", default-features = false }
@@ -51,7 +51,7 @@ tz-rs = { version = "0.7.2", default-features = false, features = ["std"] }
 uuid = { version = "1.20.0", default-features = false, features = ["v4", "fast-rng", "macro-diagnostics"] }
 
 [build-dependencies]
-shadow-rs = { version = "1.6.0", default-features = false, features = ["build"] }
+shadow-rs = { version = "1.7.0", default-features = false, features = ["build"] }
 dashmap = { version = "6.1.0", default-features = false }
 
 [dev-dependencies]
