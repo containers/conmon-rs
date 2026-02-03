@@ -4,9 +4,11 @@ extend-ignore-re = [
     "const schema_[0-9a-f]+ = \"(\\\\?.|[^\"\\\\])*\"( \\+\\s+\"(\\\\?.|[^\"\\\\])*\")+",
     "ans",
     "typ",
+    "consts",
 ]
 [type.rust]
 extend-ignore-re = [
     "typ",
     "ws",
+    "consts",
 ]
