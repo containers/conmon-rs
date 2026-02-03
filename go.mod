@@ -7,7 +7,7 @@ require (
 	github.com/blang/semver/v4 v4.0.0
 	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.28.1
-	github.com/onsi/gomega v1.39.0
+	github.com/onsi/gomega v1.39.1
 	github.com/opencontainers/runc v1.4.0
 	github.com/opencontainers/runtime-tools v0.9.1-0.20251205004911-5e639034dcdc
 	github.com/sirupsen/logrus v1.9.4
