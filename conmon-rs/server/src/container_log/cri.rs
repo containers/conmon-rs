@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use getset::{CopyGetters, Getters, Setters};
 use memchr::memchr;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
@@ -30,6 +31,15 @@ pub struct CriLogger {
     #[getset(get_copy, set)]
     /// Current bytes written to the log file.
     bytes_written: usize,
+
+    /// Reusable buffer for line reading to reduce allocations
+    line_buf: Vec<u8>,
+
+    /// Cached timestamp string to avoid repeated formatting
+    cached_timestamp: String,
+
+    /// Last time the cached timestamp was updated
+    last_timestamp_update: Instant,
 }
 
 impl CriLogger {
@@ -42,6 +52,9 @@ impl CriLogger {
             file: None,
             max_log_size,
             bytes_written: 0,
+            line_buf: Vec::with_capacity(256), // Pre-allocate for typical log lines
+            cached_timestamp: String::new(),
+            last_timestamp_update: Instant::now(),
         })
     }
 
@@ -59,20 +72,32 @@ impl CriLogger {
     {
         let mut reader = BufReader::new(bytes);
 
-        // Get the RFC3339 timestamp
-        let local_tz = TimeZone::local().context("get local timezone")?;
-        let timestamp = DateTime::now(local_tz.as_ref())
-            .context("get local datetime")?
-            .to_string();
-        let min_log_len = timestamp
+        // Update cached timestamp if it's been more than 100ms or if empty (first use)
+        let now = Instant::now();
+        if self.cached_timestamp.is_empty()
+            || now.duration_since(self.last_timestamp_update) >= Duration::from_millis(100)
+        {
+            let local_tz = TimeZone::local().context("get local timezone")?;
+            self.cached_timestamp = DateTime::now(local_tz.as_ref())
+                .context("get local datetime")?
+                .to_string();
+            self.last_timestamp_update = now;
+        }
+
+        let min_log_len = self
+            .cached_timestamp
             .len()
             .checked_add(10) // len of " stdout " + "P "
             .context("min log line len exceeds usize")?;
 
         loop {
-            // Read the line
-            let mut line_buf = Vec::with_capacity(min_log_len);
-            let (read, partial) = Self::read_line(&mut reader, &mut line_buf).await?;
+            // Read the line - reuse buffer with clear instead of allocating
+            self.line_buf.clear();
+            if self.line_buf.capacity() < min_log_len {
+                self.line_buf
+                    .reserve(min_log_len - self.line_buf.capacity());
+            }
+            let (read, partial) = Self::read_line(&mut reader, &mut self.line_buf).await?;
 
             if read == 0 {
                 break;
@@ -113,7 +138,7 @@ impl CriLogger {
 
             // Write the timestamp
             let file = self.file.as_mut().context(Self::ERR_UNINITIALIZED)?;
-            file.write_all(timestamp.as_bytes()).await?;
+            file.write_all(self.cached_timestamp.as_bytes()).await?;
 
             // Add the pipe name
             match pipe {
@@ -129,7 +154,7 @@ impl CriLogger {
             }
 
             // Output the actual contents
-            file.write_all(&line_buf).await?;
+            file.write_all(&self.line_buf).await?;
 
             // Output a newline for partial
             if partial {
