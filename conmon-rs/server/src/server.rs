@@ -146,7 +146,15 @@ impl Server {
 
         let tracer = self.tracer().clone();
 
-        let rt = Builder::new_multi_thread().enable_all().build()?;
+        let worker_threads = num_cpus::get().min(4);
+        debug!(
+            "Configuring Tokio runtime with {} worker threads",
+            worker_threads
+        );
+        let rt = Builder::new_multi_thread()
+            .worker_threads(worker_threads)
+            .enable_all()
+            .build()?;
         rt.block_on(self.spawn_tasks())?;
 
         if let Some(tracer) = tracer {
