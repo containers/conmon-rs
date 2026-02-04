@@ -206,7 +206,9 @@ impl ContainerIO {
         time_to_timeout: Option<Instant>,
         receiver: &mut Receiver<Message>,
     ) -> (Vec<u8>, bool) {
-        let mut stdio = vec![];
+        // Pre-allocate with reasonable capacity to avoid reallocations
+        // Start with 64KB which handles most exec_sync outputs without reallocation
+        let mut stdio = Vec::with_capacity(64 * 1024);
         let mut timed_out = false;
         loop {
             let msg = if let Some(time_to_timeout) = time_to_timeout {
@@ -284,13 +286,15 @@ impl ContainerIO {
                         .await
                         .context("write to log file")?;
 
+                    // Convert to Vec once and clone for second use to avoid double allocation
+                    let data_vec: Vec<u8> = data.into();
                     attach
-                        .write(Message::Data(data.into(), pipe))
+                        .write(Message::Data(data_vec.clone(), pipe))
                         .await
                         .context("write to attach endpoints")?;
 
                     message_tx
-                        .force_send(Message::Data(data.into(), pipe))
+                        .force_send(Message::Data(data_vec, pipe))
                         .context("send data message")?;
                 }
 
