@@ -56,4 +56,4 @@ dashmap = { version = "6.1.0", default-features = false }
 
 [dev-dependencies]
 mockall = { version = "0.14.0", default-features = false }
-time = { version = "0.3.46", default-features = false, features = ["parsing", "std"] }
+time = { version = "0.3.47", default-features = false, features = ["parsing", "std"] }
