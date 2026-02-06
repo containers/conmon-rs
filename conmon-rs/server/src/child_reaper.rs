@@ -48,10 +48,8 @@ const FIRST_FD_AFTER_STDIO: RawFd = 3;
 
 impl ChildReaper {
     pub fn get(&self, id: &str) -> Result<ReapableChild> {
-        let locked_grandchildren = &self.grandchildren().clone();
-        let lock = lock!(locked_grandchildren);
+        let lock = lock!(self.grandchildren());
         let r = lock.get(id).context("child not available")?.clone();
-        drop(lock);
         Ok(r)
     }
 
