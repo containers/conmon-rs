@@ -14,7 +14,7 @@ require (
 	go.opentelemetry.io/otel v1.40.0
 	go.opentelemetry.io/otel/trace v1.40.0
 	go.podman.io/common v0.66.1
-	go.podman.io/storage v1.61.0
+	go.podman.io/storage v1.62.0
 	k8s.io/client-go v0.35.0
 )
 
