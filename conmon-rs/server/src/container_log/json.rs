@@ -1,13 +1,22 @@
 use crate::container_io::Pipe;
 use anyhow::{Context, Result};
 use getset::{CopyGetters, Getters, Setters};
-use serde_json::json;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
 };
 use tracing::debug;
+
+/// Log entry structure for JSON serialization
+#[derive(Serialize)]
+struct LogEntry<'a> {
+    timestamp: u64, // Unix timestamp in seconds
+    pipe: &'a str,
+    message: &'a str,
+}
 
 #[derive(Debug, CopyGetters, Getters, Setters)]
 pub struct JsonLogger {
@@ -22,6 +31,12 @@ pub struct JsonLogger {
 
     #[getset(get_copy, set)]
     bytes_written: usize,
+
+    /// Reusable buffer for line reading to reduce allocations
+    line_buf: Vec<u8>,
+
+    /// Reusable buffer for JSON serialization
+    json_buf: Vec<u8>,
 }
 
 impl JsonLogger {
@@ -33,6 +48,8 @@ impl JsonLogger {
             file: None,
             max_log_size,
             bytes_written: 0,
+            line_buf: Vec::with_capacity(256), // Pre-allocate for typical log lines
+            json_buf: Vec::with_capacity(512), // Pre-allocate for JSON output
         })
     }
 
@@ -47,21 +64,35 @@ impl JsonLogger {
         T: AsyncBufRead + Unpin,
     {
         let mut reader = BufReader::new(bytes);
-        let mut line_buf = Vec::new();
 
-        while reader.read_until(b'\n', &mut line_buf).await? > 0 {
-            let log_entry = json!({
-                "timestamp": format!("{:?}", std::time::SystemTime::now()),
-                "pipe": match pipe {
-                    Pipe::StdOut => "stdout",
-                    Pipe::StdErr => "stderr",
-                },
-                "message": String::from_utf8_lossy(&line_buf).trim().to_string()
-            });
+        while reader.read_until(b'\n', &mut self.line_buf).await? > 0 {
+            // Get Unix timestamp in seconds (more efficient than Debug format)
+            let timestamp = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
 
-            let log_str = log_entry.to_string();
-            let bytes = log_str.as_bytes();
-            self.bytes_written += bytes.len();
+            let pipe_str = match pipe {
+                Pipe::StdOut => "stdout",
+                Pipe::StdErr => "stderr",
+            };
+
+            // Convert message to UTF-8, trim whitespace
+            let message = String::from_utf8_lossy(&self.line_buf);
+            let message_trimmed = message.trim();
+
+            // Create log entry struct
+            let log_entry = LogEntry {
+                timestamp,
+                pipe: pipe_str,
+                message: message_trimmed,
+            };
+
+            // Serialize directly to reusable buffer to avoid String allocation
+            self.json_buf.clear();
+            serde_json::to_writer(&mut self.json_buf, &log_entry).context("serialize log entry")?;
+
+            self.bytes_written += self.json_buf.len() + 1; // +1 for newline
 
             #[allow(clippy::collapsible_if)]
             if let Some(max_size) = self.max_log_size {
@@ -72,12 +103,13 @@ impl JsonLogger {
             }
 
             let file = self.file.as_mut().context(Self::ERR_UNINITIALIZED)?;
-            file.write_all(bytes).await?;
+            file.write_all(&self.json_buf).await?;
             file.write_all(b"\n").await?;
-            self.flush().await?;
-            line_buf.clear();
+            self.line_buf.clear();
         }
 
+        // Flush once at the end instead of per-line to reduce syscall overhead
+        self.flush().await?;
         Ok(())
     }
 
