@@ -577,8 +577,6 @@ impl StreamingServer {
         _sender: &mut SplitSink<WebSocket, Message>,
         mut _in_rx: UnboundedReceiver<Vec<u8>>,
     ) -> Result<()> {
-        unimplemented!(
-            "Requires SPDY protocol implementation from https://github.com/moby/spdystream"
-        )
+        todo!("Requires SPDY protocol implementation from https://github.com/moby/spdystream")
     }
 }
