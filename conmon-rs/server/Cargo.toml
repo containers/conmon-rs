@@ -7,6 +7,16 @@ edition = "2024"
 name = "conmonrs"
 path = "src/main.rs"
 
+[features]
+default = []
+telemetry = [
+    "opentelemetry",
+    "opentelemetry_sdk",
+    "opentelemetry-otlp",
+    "opentelemetry-semantic-conventions",
+    "tracing-opentelemetry",
+]
+
 [dependencies]
 anyhow = { version = "1.0.101", default-features = false }
 async-channel = { version = "2.5.0", default-features = false, features = ["std"] }
@@ -28,10 +38,10 @@ nix = { version = "0.30.1", default-features = false, features = ["fs", "hostnam
 notify = { version = "8.2.0", default-features = false }
 num_cpus = { version = "1.17.0", default-features = false }
 once_cell = { version = "1.21.3", default-features = false }
-opentelemetry = { version = "0.31.0", default-features = false }
-opentelemetry_sdk = { version = "0.31.0", default-features = false, features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.31.0", default-features = false, features = ["grpc-tonic", "trace"] }
-opentelemetry-semantic-conventions = { version = "0.31.0", default-features = false, features = ["semconv_experimental"] }
+opentelemetry = { version = "0.31.0", default-features = false, optional = true }
+opentelemetry_sdk = { version = "0.31.0", default-features = false, features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.31.0", default-features = false, features = ["grpc-tonic", "trace"], optional = true }
+opentelemetry-semantic-conventions = { version = "0.31.0", default-features = false, features = ["semconv_experimental"], optional = true }
 prctl = { version = "1.0.0", default-features = false }
 sendfd = { version = "0.4.4", default-features = false, features = ["tokio"] }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
@@ -46,7 +56,7 @@ tokio-seqpacket = { version = "0.8.1", default-features = false }
 tokio-util = { version = "0.7.18", default-features = false, features = ["compat"] }
 tower-http = { version = "0.6.8", default-features = false, features = ["trace"] }
 tracing = { version = "0.1.44", default-features = false }
-tracing-opentelemetry = { version = "0.32.1", default-features = false }
+tracing-opentelemetry = { version = "0.32.1", default-features = false, optional = true }
 tracing-subscriber = { version = "0.3.22", default-features = false, features = ["fmt"] }
 tz-rs = { version = "0.7.3", default-features = false, features = ["std"] }
 uuid = { version = "1.20.0", default-features = false, features = ["v4", "fast-rng", "macro-diagnostics"] }

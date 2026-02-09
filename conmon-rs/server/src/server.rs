@@ -16,7 +16,6 @@ use crate::{
 use anyhow::{Context, Result, format_err};
 use capnp::text_list::Reader;
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp::Side, twoparty};
-use clap::crate_name;
 use conmon_common::conmon_capnp::conmon::{self, CgroupManager};
 use futures::{AsyncReadExt, FutureExt};
 use getset::Getters;
@@ -26,8 +25,18 @@ use nix::{
     sys::signal::Signal,
     unistd::{ForkResult, fork},
 };
+
+#[cfg(feature = "telemetry")]
+use clap::crate_name;
+
+#[cfg(feature = "telemetry")]
 use opentelemetry::trace::{FutureExt as OpenTelemetryFutureExt, TracerProvider};
+
+#[cfg(feature = "telemetry")]
 use opentelemetry_sdk::trace::SdkTracerProvider;
+
+#[cfg(not(feature = "telemetry"))]
+use crate::telemetry::NoopTracerProvider;
 use std::{fs::File, io::Write, path::Path, process, str::FromStr, sync::Arc};
 use tokio::{
     fs,
@@ -38,7 +47,10 @@ use tokio::{
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{Instrument, debug, debug_span, info};
+
+#[cfg(feature = "telemetry")]
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
 use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, prelude::*};
 use twoparty::VatNetwork;
 
@@ -59,7 +71,13 @@ pub struct Server {
 
     /// OpenTelemetry tracer instance.
     #[getset(get = "pub(crate)")]
+    #[cfg(feature = "telemetry")]
     tracer: Option<SdkTracerProvider>,
+
+    /// No-op tracer when telemetry is disabled.
+    #[getset(get = "pub(crate)")]
+    #[cfg(not(feature = "telemetry"))]
+    tracer: Option<NoopTracerProvider>,
 
     /// Streaming server instance.
     #[getset(get = "pub(crate)")]
@@ -178,46 +196,90 @@ impl Server {
         let level = LevelFilter::from_str(self.config().log_level().as_ref())
             .context("convert log level filter")?;
 
-        let telemetry_layer = if self.config().enable_tracing() {
-            let tracer = Telemetry::layer(self.config().tracing_endpoint())
-                .context("build telemetry layer")?;
+        // Initialize logging with or without telemetry based on feature flag
+        #[cfg(feature = "telemetry")]
+        {
+            let telemetry_layer = if self.config().enable_tracing() {
+                let tracer = Telemetry::layer(self.config().tracing_endpoint())
+                    .context("build telemetry layer")?;
 
-            self.tracer = Some(tracer.clone());
+                self.tracer = Some(tracer.clone());
 
-            tracing_opentelemetry::layer()
-                .with_tracer(tracer.tracer(crate_name!()))
-                .into()
-        } else {
-            None
-        };
+                tracing_opentelemetry::layer()
+                    .with_tracer(tracer.tracer(crate_name!()))
+                    .into()
+            } else {
+                None
+            };
 
-        let registry = tracing_subscriber::registry().with(telemetry_layer);
+            let registry = tracing_subscriber::registry().with(telemetry_layer);
 
-        match self.config().log_driver() {
-            LogDriver::None => {}
-            LogDriver::Stdout => {
-                let layer = tracing_subscriber::fmt::layer()
-                    .with_target(true)
-                    .with_line_number(true)
-                    .with_filter(level);
-                registry
-                    .with(layer)
-                    .try_init()
-                    .context("init stdout fmt layer")?;
-                info!("Using stdout logger");
+            match self.config().log_driver() {
+                LogDriver::None => {}
+                LogDriver::Stdout => {
+                    let layer = tracing_subscriber::fmt::layer()
+                        .with_target(true)
+                        .with_line_number(true)
+                        .with_filter(level);
+                    registry
+                        .with(layer)
+                        .try_init()
+                        .context("init stdout fmt layer")?;
+                    info!("Using stdout logger");
+                }
+                LogDriver::Systemd => {
+                    let layer = tracing_subscriber::fmt::layer()
+                        .with_target(true)
+                        .with_line_number(true)
+                        .without_time()
+                        .with_writer(Journal)
+                        .with_filter(level);
+                    registry
+                        .with(layer)
+                        .try_init()
+                        .context("init journald fmt layer")?;
+                    info!("Using systemd/journald logger");
+                }
             }
-            LogDriver::Systemd => {
-                let layer = tracing_subscriber::fmt::layer()
-                    .with_target(true)
-                    .with_line_number(true)
-                    .without_time()
-                    .with_writer(Journal)
-                    .with_filter(level);
-                registry
-                    .with(layer)
-                    .try_init()
-                    .context("init journald fmt layer")?;
-                info!("Using systemd/journald logger");
+        }
+
+        #[cfg(not(feature = "telemetry"))]
+        {
+            // Store no-op tracer if tracing is enabled (for API compatibility)
+            if self.config().enable_tracing() {
+                let tracer = Telemetry::layer(self.config().tracing_endpoint())
+                    .context("build telemetry layer")?;
+                self.tracer = Some(tracer);
+            }
+
+            let registry = tracing_subscriber::registry();
+
+            match self.config().log_driver() {
+                LogDriver::None => {}
+                LogDriver::Stdout => {
+                    let layer = tracing_subscriber::fmt::layer()
+                        .with_target(true)
+                        .with_line_number(true)
+                        .with_filter(level);
+                    registry
+                        .with(layer)
+                        .try_init()
+                        .context("init stdout fmt layer")?;
+                    info!("Using stdout logger");
+                }
+                LogDriver::Systemd => {
+                    let layer = tracing_subscriber::fmt::layer()
+                        .with_target(true)
+                        .with_line_number(true)
+                        .without_time()
+                        .with_writer(Journal)
+                        .with_filter(level);
+                    registry
+                        .with(layer)
+                        .try_init()
+                        .context("init journald fmt layer")?;
+                    info!("Using systemd/journald logger");
+                }
             }
         }
         info!("Set log level to: {}", self.config().log_level());
@@ -234,20 +296,20 @@ impl Server {
         let reaper = self.reaper.clone();
 
         let signal_handler_span = debug_span!("signal_handler");
-        task::spawn(
-            Self::start_signal_handler(reaper, socket, fd_socket, shutdown_tx)
-                .with_context(signal_handler_span.context())
-                .instrument(signal_handler_span),
-        );
+        task::spawn({
+            let fut = Self::start_signal_handler(reaper, socket, fd_socket, shutdown_tx);
+            #[cfg(feature = "telemetry")]
+            let fut = fut.with_context(signal_handler_span.context());
+            fut.instrument(signal_handler_span)
+        });
 
         let backend_span = debug_span!("backend");
         task::spawn_blocking(move || {
-            Handle::current().block_on(
-                LocalSet::new()
-                    .run_until(self.start_backend(shutdown_rx))
-                    .with_context(backend_span.context())
-                    .instrument(backend_span),
-            )
+            let local_set = LocalSet::new();
+            let fut = local_set.run_until(self.start_backend(shutdown_rx));
+            #[cfg(feature = "telemetry")]
+            let fut = fut.with_context(backend_span.context());
+            Handle::current().block_on(fut.instrument(backend_span))
         })
         .await?
     }
