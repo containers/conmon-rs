@@ -19,9 +19,9 @@ use capnp_rpc::{RpcSystem, rpc_twoparty_capnp::Side, twoparty};
 use conmon_common::conmon_capnp::conmon::{self, CgroupManager};
 use futures::{AsyncReadExt, FutureExt};
 use getset::Getters;
+use libc::_exit;
 use nix::{
     errno::Errno,
-    libc::_exit,
     sys::signal::Signal,
     unistd::{ForkResult, fork},
 };
@@ -158,9 +158,10 @@ impl Server {
         }
 
         // now that we've forked, set self to childreaper
-        prctl::set_child_subreaper(true)
-            .map_err(Errno::from_raw)
-            .context("set child subreaper")?;
+        let ret = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+        if ret != 0 {
+            return Err(Errno::last()).context("set child subreaper");
+        }
 
         let tracer = self.tracer().clone();
 
@@ -171,6 +172,7 @@ impl Server {
         );
         let rt = Builder::new_multi_thread()
             .worker_threads(worker_threads)
+            .thread_stack_size(512 * 1024)
             .enable_all()
             .build()?;
         rt.block_on(self.spawn_tasks())?;

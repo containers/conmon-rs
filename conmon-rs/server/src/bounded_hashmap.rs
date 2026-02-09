@@ -101,7 +101,7 @@ where
 {
     fn default() -> Self {
         Self {
-            cache: LruCache::new(NonZeroUsize::new(1000).unwrap()),
+            cache: LruCache::new(NonZeroUsize::new(25).unwrap()),
             max_duration: Duration::new(60 * 60, 0), // 1 hour
         }
     }

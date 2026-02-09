@@ -166,7 +166,7 @@ impl ContainerIO {
         match self.typ() {
             ContainerIOType::Terminal(t) => {
                 if let Some(message_rx) = t.message_rx() {
-                    let (_, fake_rx) = async_channel::bounded(10);
+                    let (_, fake_rx) = async_channel::bounded(1);
                     Ok((message_rx.clone(), fake_rx))
                 } else {
                     bail!("called before message receiver was registered")
@@ -289,15 +289,16 @@ impl ContainerIO {
                         .await
                         .context("write to log file")?;
 
-                    // Convert to Vec once and clone for second use to avoid double allocation
-                    let data_vec: Vec<u8> = data.into();
-                    attach
-                        .write(Message::Data(data_vec.clone(), pipe))
-                        .await
-                        .context("write to attach endpoints")?;
+                    // Only clone data for attach if there are active attach clients
+                    if attach.has_readers() {
+                        attach
+                            .write(Message::Data(data.into(), pipe))
+                            .await
+                            .context("write to attach endpoints")?;
+                    }
 
                     message_tx
-                        .force_send(Message::Data(data_vec, pipe))
+                        .force_send(Message::Data(data.into(), pipe))
                         .context("send data message")?;
                 }
 

@@ -6,12 +6,12 @@ use getset::{CopyGetters, Getters, Setters};
 use memchr::memchr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
 };
 use tracing::{debug, trace};
-use tz::{DateTime, TimeZone};
 
 #[derive(Debug, CopyGetters, Getters, Setters)]
 /// The main structure used for container log handling.
@@ -77,10 +77,10 @@ impl CriLogger {
         if self.cached_timestamp.is_empty()
             || now.duration_since(self.last_timestamp_update) >= Duration::from_millis(100)
         {
-            let local_tz = TimeZone::local().context("get local timezone")?;
-            self.cached_timestamp = DateTime::now(local_tz.as_ref())
-                .context("get local datetime")?
-                .to_string();
+            let now_dt = OffsetDateTime::now_local()
+                .or_else(|_| Ok::<_, time::error::Format>(OffsetDateTime::now_utc()))
+                .context("get local datetime")?;
+            self.cached_timestamp = now_dt.format(&Rfc3339).context("format datetime")?;
             self.last_timestamp_update = now;
         }
 

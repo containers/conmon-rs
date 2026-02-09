@@ -1,11 +1,11 @@
 //! Child process reaping and management.
+use crate::fd_mapping::{CommandFdExt, FdMapping};
 use crate::{
     child::Child,
     container_io::{ContainerIO, ContainerIOType, SharedContainerIO},
     oom_watcher::OOMWatcher,
 };
 use anyhow::{Context, Result, bail};
-use command_fds::{CommandFdExt, FdMapping};
 use getset::{CopyGetters, Getters, Setters};
 use libc::pid_t;
 use multimap::MultiMap;
