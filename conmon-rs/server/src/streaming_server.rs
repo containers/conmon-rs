@@ -76,7 +76,7 @@ enum Session {
 struct ExecSession {
     child_reaper: Arc<ChildReaper>,
     container_io: ContainerIO,
-    server_config: Config,
+    server_config: Arc<Config>,
     cgroup_manager: CgroupManager,
     container_id: String,
     command: Vec<String>,
@@ -216,7 +216,7 @@ impl StreamingServer {
         &self,
         child_reaper: Arc<ChildReaper>,
         container_io: ContainerIO,
-        server_config: Config,
+        server_config: Arc<Config>,
         cgroup_manager: CgroupManager,
         container_id: String,
         command: Vec<String>,

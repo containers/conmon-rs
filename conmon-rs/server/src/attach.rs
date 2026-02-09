@@ -233,8 +233,8 @@ impl Attach {
         token: CancellationToken,
         stop_after_stdin_eof: bool,
     ) -> Result<()> {
+        let mut buf = vec![0; Self::PACKET_BUF_SIZE];
         loop {
-            let mut buf = vec![0; Self::PACKET_BUF_SIZE];
             // In situations we're processing output directly from the I/O streams
             // we need a mechanism to figure out when to stop that doesn't involve reading the
             // number of bytes read.
@@ -245,11 +245,10 @@ impl Attach {
                 n = read_half.read(&mut buf) => {
                     match n {
                         Ok(n) if n > 0 => {
-                            if let Some(first_zero_idx) = buf.iter().position(|&x| x == 0) {
-                                buf.resize(first_zero_idx, 0);
-                            }
-                            debug!("Read {} stdin bytes from client", buf.len());
-                            tx.send(buf).context("send data message")?;
+                            let end = buf[..n].iter().position(|&x| x == 0).unwrap_or(n);
+                            let data = buf[..end].to_vec();
+                            debug!("Read {} stdin bytes from client", data.len());
+                            tx.send(data).context("send data message")?;
                         }
                         Err(e) => match Errno::from_raw(e.raw_os_error().context("get OS error")?) {
                             Errno::EIO => {

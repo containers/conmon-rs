@@ -191,13 +191,13 @@ impl ChildReaper {
     ) -> Result<Receiver<ExitChannelData>> {
         let locked_grandchildren = &self.grandchildren().clone();
         let mut map = lock!(locked_grandchildren);
-        let mut reapable_grandchild = ReapableChild::from_child(&child);
+        let pid = child.pid;
+        let (id, mut reapable_grandchild) = ReapableChild::from_child(child);
 
         let (exit_tx, exit_rx) = reapable_grandchild.watch()?;
 
-        map.insert(child.id().clone(), reapable_grandchild);
+        map.insert(id, reapable_grandchild);
         let cleanup_grandchildren = locked_grandchildren.clone();
-        let pid = child.pid();
 
         task::spawn(
             async move {
@@ -264,7 +264,7 @@ pub fn kill_grandchild(raw_pid: u32, s: Signal) {
     }
 }
 
-type TaskHandle = Arc<Mutex<Option<Vec<JoinHandle<()>>>>>;
+type TaskHandle = Arc<Mutex<Vec<JoinHandle<()>>>>;
 
 #[derive(Clone, CopyGetters, Debug, Getters, Setters)]
 pub struct ReapableChild {
@@ -306,24 +306,27 @@ pub struct ExitChannelData {
 }
 
 impl ReapableChild {
-    pub fn from_child(child: &Child) -> Self {
-        Self {
-            exit_paths: child.exit_paths().clone(),
-            oom_exit_paths: child.oom_exit_paths().clone(),
-            pid: child.pid(),
-            io: child.io().clone(),
-            timeout: *child.timeout(),
-            token: child.token().clone(),
-            task: None,
-            cleanup_cmd: child.cleanup_cmd().to_vec(),
-        }
+    pub fn from_child(child: Child) -> (String, Self) {
+        (
+            child.id,
+            Self {
+                exit_paths: child.exit_paths,
+                oom_exit_paths: child.oom_exit_paths,
+                pid: child.pid,
+                io: child.io,
+                timeout: child.timeout,
+                token: child.token,
+                task: None,
+                cleanup_cmd: child.cleanup_cmd,
+            },
+        )
     }
 
     pub async fn close(&self) -> Result<()> {
         debug!("Waiting for tasks to close");
-        if let Some(t) = self.task.clone() {
-            let tasks = lock!(t).take().context("no tasks available")?;
-            for t in tasks.into_iter() {
+        if let Some(t) = self.task.as_ref() {
+            let tasks: Vec<_> = std::mem::take(&mut *lock!(t));
+            for t in tasks {
                 debug!("Task await");
                 if let Err(e) = t.await {
                     warn!("Unable to wait for task: {:#}", e)
@@ -386,14 +389,7 @@ impl ReapableChild {
                     oomed,
                     timed_out,
                 };
-                debug!(
-                    "Write to exit paths: {}",
-                    exit_paths
-                        .iter()
-                        .map(|x| x.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
+                debug!(?exit_paths, "Write to exit paths");
                 if let Err(e) = Self::write_to_exit_paths(exit_code, &exit_paths).await {
                     error!(pid, "Could not write exit paths: {:#}", e);
                 }
@@ -411,11 +407,7 @@ impl ReapableChild {
             .instrument(debug_span!("watch", pid)),
         );
 
-        let tasks = Arc::new(Mutex::new(Some(Vec::new())));
-        lock!(tasks)
-            .as_mut()
-            .context("no tasks available")?
-            .push(task);
+        let tasks = Arc::new(Mutex::new(vec![task]));
         self.task = Some(tasks);
 
         Ok((exit_tx, exit_rx))

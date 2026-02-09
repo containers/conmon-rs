@@ -210,8 +210,8 @@ impl ContainerIO {
         receiver: &mut Receiver<Message>,
     ) -> (Vec<u8>, bool) {
         // Pre-allocate with reasonable capacity to avoid reallocations
-        // Start with 64KB which handles most exec_sync outputs without reallocation
-        let mut stdio = Vec::with_capacity(64 * 1024);
+        // Start with 4KB which handles most exec_sync outputs; Vec doubling handles growth
+        let mut stdio = Vec::with_capacity(4096);
         let mut timed_out = false;
         loop {
             let msg = if let Some(time_to_timeout) = time_to_timeout {
