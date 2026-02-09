@@ -8,7 +8,6 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use getset::{CopyGetters, Getters, Setters};
 use libc::pid_t;
-use multimap::MultiMap;
 use nix::{
     errno::Errno,
     sys::{
@@ -18,6 +17,7 @@ use nix::{
     unistd::{Pid, getpgid},
 };
 use std::{
+    collections::HashMap,
     ffi::OsStr,
     fmt::{Debug, Write},
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
@@ -35,12 +35,12 @@ use tokio::{
     time::{self, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, debug_span, error, warn};
+use tracing::{Instrument, debug, debug_span, error};
 
 #[derive(Debug, Default, Getters)]
 pub struct ChildReaper {
     #[getset(get)]
-    grandchildren: Arc<Mutex<MultiMap<String, ReapableChild>>>,
+    grandchildren: Arc<Mutex<HashMap<String, Vec<ReapableChild>>>>,
 }
 
 /// first usable file descriptor after stdin, stdout and stderr
@@ -49,7 +49,11 @@ const FIRST_FD_AFTER_STDIO: RawFd = 3;
 impl ChildReaper {
     pub fn get(&self, id: &str) -> Result<ReapableChild> {
         let lock = lock!(self.grandchildren());
-        let r = lock.get(id).context("child not available")?.clone();
+        let r = lock
+            .get(id)
+            .and_then(|v| v.last())
+            .context("child not available")?
+            .clone();
         Ok(r)
     }
 
@@ -149,9 +153,9 @@ impl ChildReaper {
 
         let grandchild_pid = fs::read_to_string(pidfile)
             .await
-            .context(format!("grandchild pid read error {}", pidfile.display()))?
+            .with_context(|| format!("grandchild pid read error {}", pidfile.display()))?
             .parse::<u32>()
-            .context(format!("grandchild pid parse error {}", pidfile.display()))?;
+            .with_context(|| format!("grandchild pid parse error {}", pidfile.display()))?;
 
         Ok((grandchild_pid, token))
     }
@@ -189,14 +193,17 @@ impl ChildReaper {
         child: Child,
         leak_fds: Vec<OwnedFd>,
     ) -> Result<Receiver<ExitChannelData>> {
-        let locked_grandchildren = &self.grandchildren().clone();
-        let mut map = lock!(locked_grandchildren);
         let pid = child.pid;
         let (id, mut reapable_grandchild) = ReapableChild::from_child(child);
 
+        // Create channels outside the lock to minimize contention
         let (exit_tx, exit_rx) = reapable_grandchild.watch()?;
 
-        map.insert(id, reapable_grandchild);
+        let locked_grandchildren = self.grandchildren();
+        {
+            let mut map = lock!(locked_grandchildren);
+            map.entry(id).or_default().push(reapable_grandchild);
+        }
         let cleanup_grandchildren = locked_grandchildren.clone();
 
         task::spawn(
@@ -211,30 +218,48 @@ impl ChildReaper {
     }
 
     fn forget_grandchild(
-        locked_grandchildren: &Arc<Mutex<MultiMap<String, ReapableChild>>>,
+        locked_grandchildren: &Arc<Mutex<HashMap<String, Vec<ReapableChild>>>>,
         grandchild_pid: u32,
     ) -> Result<()> {
-        lock!(locked_grandchildren).retain(|_, v| v.pid != grandchild_pid);
+        let mut map = lock!(locked_grandchildren);
+        for children in map.values_mut() {
+            if let Some(pos) = children.iter().position(|v| v.pid == grandchild_pid) {
+                children.swap_remove(pos);
+                return Ok(());
+            }
+        }
         Ok(())
     }
 
-    pub fn kill_grandchildren(&self, s: Signal) -> Result<()> {
+    pub async fn kill_grandchildren(&self, s: Signal) -> Result<()> {
         debug!("Killing grandchildren");
-        let grandchildren = lock!(self.grandchildren);
-        let grandchildren_iter = grandchildren.iter();
-        for (_, grandchild) in grandchildren_iter {
-            let span = debug_span!("kill_grandchild", pid = grandchild.pid);
+        // Collect only PIDs and task handles to avoid cloning entire ReapableChild
+        let children: Vec<_> = {
+            let map = lock!(self.grandchildren);
+            map.values()
+                .flatten()
+                .map(|gc| (gc.pid, gc.task.clone()))
+                .collect()
+        };
+        for (pid, task) in children {
+            let span = debug_span!("kill_grandchild", pid);
             let _enter = span.enter();
             debug!("Killing single grandchild");
-            kill_grandchild(grandchild.pid, s);
-            futures::executor::block_on(
-                async {
-                    if let Err(e) = grandchild.close().await {
-                        error!("Unable to close grandchild: {:#}", e)
+            kill_grandchild(pid, s);
+            if let Some(t) = task {
+                let handle = lock!(t).take();
+                if let Some(handle) = handle {
+                    let close_span = debug_span!("close", signal = s.as_str());
+                    async {
+                        debug!("Waiting for task to close");
+                        if let Err(e) = handle.await {
+                            error!("Unable to close grandchild: {:#}", e)
+                        }
                     }
+                    .instrument(close_span)
+                    .await;
                 }
-                .instrument(debug_span!("close", signal = s.as_str())),
-            );
+            }
             debug!("Done killing single grandchild");
         }
         debug!("Done killing all grandchildren");
@@ -264,7 +289,7 @@ pub fn kill_grandchild(raw_pid: u32, s: Signal) {
     }
 }
 
-type TaskHandle = Arc<Mutex<Vec<JoinHandle<()>>>>;
+type TaskHandle = Arc<Mutex<Option<JoinHandle<()>>>>;
 
 #[derive(Clone, CopyGetters, Debug, Getters, Setters)]
 pub struct ReapableChild {
@@ -320,22 +345,6 @@ impl ReapableChild {
                 cleanup_cmd: child.cleanup_cmd,
             },
         )
-    }
-
-    pub async fn close(&self) -> Result<()> {
-        debug!("Waiting for tasks to close");
-        if let Some(t) = self.task.as_ref() {
-            let tasks: Vec<_> = std::mem::take(&mut *lock!(t));
-            for t in tasks {
-                debug!("Task await");
-                if let Err(e) = t.await {
-                    warn!("Unable to wait for task: {:#}", e)
-                }
-                debug!("Task finished");
-            }
-        }
-        debug!("All tasks done");
-        Ok(())
     }
 
     fn watch(&mut self) -> Result<(Sender<ExitChannelData>, Receiver<ExitChannelData>)> {
@@ -407,8 +416,7 @@ impl ReapableChild {
             .instrument(debug_span!("watch", pid)),
         );
 
-        let tasks = Arc::new(Mutex::new(vec![task]));
-        self.task = Some(tasks);
+        self.task = Some(Arc::new(Mutex::new(Some(task))));
 
         Ok((exit_tx, exit_rx))
     }
@@ -465,36 +473,26 @@ impl ReapableChild {
     }
 
     async fn write_to_exit_paths(code: i32, paths: &[PathBuf]) -> Result<()> {
-        let paths = paths.to_owned();
-        let tasks: Vec<_> = paths
-            .into_iter()
-            .map(|path_buf| {
-                let path = path_buf.display().to_string();
-                tokio::spawn(
-                    async move {
-                        let code_str = format!("{code}");
-                        debug!("Creating exit file");
-                        if let Ok(mut fp) = File::create(&path_buf).await {
-                            debug!(code, "Writing exit code to file");
-                            if let Err(e) = fp.write_all(code_str.as_bytes()).await {
-                                error!("Could not write exit file to path: {:#}", e);
-                            }
-                            debug!("Flushing file");
-                            if let Err(e) = fp.flush().await {
-                                error!("Unable to flush {}: {:#}", path_buf.display(), e);
-                            }
-                            debug!("Done writing exit file");
-                        }
+        let code_str = format!("{code}");
+        for path_buf in paths {
+            let span = debug_span!("write_exit_path", path = %path_buf.display());
+            async {
+                debug!("Creating exit file");
+                if let Ok(mut fp) = File::create(path_buf).await {
+                    debug!(code, "Writing exit code to file");
+                    if let Err(e) = fp.write_all(code_str.as_bytes()).await {
+                        error!("Could not write exit file to path: {:#}", e);
                     }
-                    .instrument(debug_span!("write_exit_path", path)),
-                )
-            })
-            .collect();
-
-        for task in tasks {
-            task.await?;
+                    debug!("Flushing file");
+                    if let Err(e) = fp.flush().await {
+                        error!("Unable to flush {}: {:#}", path_buf.display(), e);
+                    }
+                    debug!("Done writing exit file");
+                }
+            }
+            .instrument(span)
+            .await;
         }
-
         Ok(())
     }
 }

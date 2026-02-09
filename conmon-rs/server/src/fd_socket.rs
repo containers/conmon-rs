@@ -49,7 +49,7 @@ use std::{
 };
 use tokio::{runtime::Handle, sync::Mutex as AsyncMutex, task};
 use tokio_seqpacket::{UnixSeqpacket, ancillary::OwnedAncillaryMessage};
-use tracing::{Instrument, debug_span};
+use tracing::{Instrument, debug, debug_span};
 
 #[derive(Debug, Default)]
 pub struct FdSocket {
@@ -107,13 +107,13 @@ impl State {
                 }
             }
         }
-        println!("add {slot}: {:?}", self.fds);
+        debug!("add {slot}: {:?}", self.fds);
         self.last = slot;
         slot.0
     }
 
     fn take(&mut self, slot: u64) -> Result<OwnedFd> {
-        println!("take {slot}: {:?}", self.fds);
+        debug!("take {slot}: {:?}", self.fds);
         self.fds
             .remove(&slot)
             .ok_or_else(|| anyhow::anyhow!("no file descriptor in slot {slot}"))
@@ -157,11 +157,11 @@ impl Drop for ConnectionGuard {
 impl ConnectionGuard {
     fn close(&mut self) -> Result<()> {
         let mut state = lock!(self.fd_socket.state);
-        println!("close... {state:?}");
+        debug!("close... {state:?}");
         for slot in mem::take(&mut self.slots) {
             state.fds.remove(&slot);
         }
-        println!("closed: {state:?}");
+        debug!("closed: {state:?}");
         Ok(())
     }
 }

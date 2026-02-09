@@ -477,7 +477,7 @@ impl StreamingServer {
                         match msg_type {
                             STDIN_BYTE => {
                                 trace!("Got stdin message of len {}", payload.len());
-                                attach.stdin().send(payload.to_vec()).context("send to attach session")?;
+                                attach.stdin().send(Arc::from(payload)).context("send to attach session")?;
                             },
                             RESIZE_BYTE => {
                                 let e = serde_json::from_slice::<ResizeEvent>(payload).context("unmarshal resize event")?;
@@ -541,7 +541,7 @@ impl StreamingServer {
                         match msg_type {
                             STDIN_BYTE => {
                                 trace!("Got stdin message of len {}", payload.len());
-                                attach.stdin().send(payload.to_vec()).context("send to attach session")?;
+                                attach.stdin().send(Arc::from(payload)).context("send to attach session")?;
                             },
                             RESIZE_BYTE => {
                                 let e = serde_json::from_slice::<ResizeEvent>(payload).context("unmarshal resize event")?;

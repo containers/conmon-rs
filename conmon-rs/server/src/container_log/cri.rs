@@ -201,7 +201,7 @@ impl CriLogger {
                 .mode(0o600)
                 .open(&path)
                 .await
-                .context(format!("open log file path '{}'", path.as_ref().display()))?,
+                .with_context(|| format!("open log file path '{}'", path.as_ref().display()))?,
         ))
     }
 
