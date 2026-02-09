@@ -73,7 +73,7 @@ impl Terminal {
         let path_clone = path.clone();
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let (connected_tx, connected_rx) = mpsc::channel(1);
+        let (connected_tx, connected_rx) = mpsc::channel(10);
 
         task::spawn(
             async move {
@@ -119,7 +119,7 @@ impl Terminal {
 
         let attach_clone = self.attach.clone();
         let logger_clone = self.logger.clone();
-        let (message_tx, message_rx) = async_channel::bounded(10);
+        let (message_tx, message_rx) = async_channel::bounded(100);
         self.message_rx = Some(message_rx);
 
         task::spawn({

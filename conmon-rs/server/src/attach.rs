@@ -38,8 +38,8 @@ pub struct SharedContainerAttach {
 
 impl Default for SharedContainerAttach {
     fn default() -> Self {
-        let (read_half_tx, read_half_rx) = broadcast::channel(4);
-        let (write_half_tx, _) = broadcast::channel(4);
+        let (read_half_tx, read_half_rx) = broadcast::channel(2);
+        let (write_half_tx, _) = broadcast::channel(2);
         Self {
             read_half_rx,
             read_half_tx,

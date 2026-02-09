@@ -39,8 +39,8 @@ impl Streams {
     pub fn new(logger: SharedContainerLog, attach: SharedContainerAttach) -> Result<Self> {
         debug!("Creating new IO streams");
 
-        let (message_tx_stdout, message_rx_stdout) = async_channel::bounded(10);
-        let (message_tx_stderr, message_rx_stderr) = async_channel::bounded(10);
+        let (message_tx_stdout, message_rx_stdout) = async_channel::bounded(100);
+        let (message_tx_stderr, message_rx_stderr) = async_channel::bounded(100);
 
         Ok(Self {
             logger,
