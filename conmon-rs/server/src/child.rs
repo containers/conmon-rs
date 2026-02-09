@@ -1,34 +1,18 @@
 use crate::container_io::SharedContainerIO;
-use getset::{CopyGetters, Getters};
 use std::path::PathBuf;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, CopyGetters, Getters)]
+#[derive(Debug)]
 pub struct Child {
-    #[getset(get = "pub")]
-    id: String,
-
-    #[getset(get_copy = "pub")]
-    pid: u32,
-
-    #[getset(get = "pub")]
-    exit_paths: Vec<PathBuf>,
-
-    #[getset(get = "pub")]
-    oom_exit_paths: Vec<PathBuf>,
-
-    #[getset(get = "pub")]
-    timeout: Option<Instant>,
-
-    #[getset(get = "pub")]
-    io: SharedContainerIO,
-
-    #[getset(get = "pub")]
-    cleanup_cmd: Vec<String>,
-
-    #[getset(get = "pub")]
-    token: CancellationToken,
+    pub(crate) id: String,
+    pub(crate) pid: u32,
+    pub(crate) exit_paths: Vec<PathBuf>,
+    pub(crate) oom_exit_paths: Vec<PathBuf>,
+    pub(crate) timeout: Option<Instant>,
+    pub(crate) io: SharedContainerIO,
+    pub(crate) cleanup_cmd: Vec<String>,
+    pub(crate) token: CancellationToken,
 }
 
 impl Child {

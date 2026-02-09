@@ -59,7 +59,7 @@ use twoparty::VatNetwork;
 pub struct Server {
     /// Server configuration.
     #[getset(get = "pub(crate)")]
-    config: Config,
+    config: Arc<Config>,
 
     /// Child reaper instance.
     #[getset(get = "pub(crate)")]
@@ -88,7 +88,7 @@ impl Server {
     /// Create a new `Server` instance.
     pub fn new() -> Result<Self> {
         let server = Self {
-            config: Default::default(),
+            config: Arc::new(Config::default()),
             reaper: Default::default(),
             fd_socket: Default::default(),
             tracer: Default::default(),
