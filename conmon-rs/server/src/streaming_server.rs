@@ -28,11 +28,11 @@ use tokio::{
     net::TcpListener,
     sync::{
         RwLock,
-        mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+        mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender},
     },
     task::{self, JoinHandle},
 };
-use tower_http::trace::{DefaultMakeSpan, TraceLayer};
+use tower_http::trace::TraceLayer;
 use tracing::{debug, debug_span, error, info, trace, warn};
 use uuid::Uuid;
 
@@ -186,10 +186,7 @@ impl StreamingServer {
             .route(&Self::path_for(PORT_FORWARD_PATH), post(Self::handle))
             .fallback(Self::fallback)
             .with_state(state)
-            .layer(
-                TraceLayer::new_for_http()
-                    .make_span_with(DefaultMakeSpan::default().include_headers(true)),
-            );
+            .layer(TraceLayer::new_for_http());
         axum::serve(listener, router)
             .await
             .context("start streaming server")
@@ -285,7 +282,7 @@ impl StreamingServer {
         Path(token): Path<Uuid>,
         AxumState(state): AxumState<Arc<RwLock<State>>>,
     ) -> impl IntoResponse {
-        let span = debug_span!("handle_common", token = token.to_string().as_str());
+        let span = debug_span!("handle_common", %token);
         let _enter = span.enter();
 
         info!("Got request for token: {token}");
@@ -307,7 +304,7 @@ impl StreamingServer {
     /// Handle a single websocket connection.
     async fn handle_websocket(socket: WebSocket, session: Session) {
         let (sender, receiver) = socket.split();
-        let (stdin_tx, stdin_rx) = unbounded_channel();
+        let (stdin_tx, stdin_rx) = mpsc::channel(16);
 
         let mut send_task = Self::write_task(sender, stdin_rx, session).await;
         let mut recv_task = Self::read_task(receiver, stdin_tx).await;
@@ -335,7 +332,7 @@ impl StreamingServer {
     /// Build a common write task based on the session type.
     async fn write_task(
         mut sender: SplitSink<WebSocket, Message>,
-        stdin_rx: UnboundedReceiver<Vec<u8>>,
+        stdin_rx: MpscReceiver<Vec<u8>>,
         session: Session,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
@@ -368,11 +365,11 @@ impl StreamingServer {
     /// Build a common read task.
     async fn read_task(
         mut receiver: SplitStream<WebSocket>,
-        mut stdin_tx: UnboundedSender<Vec<u8>>,
+        stdin_tx: MpscSender<Vec<u8>>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             while let Some(Ok(msg)) = receiver.next().await {
-                if Self::read_message(msg, &mut stdin_tx).is_break() {
+                if Self::read_message(msg, &stdin_tx).await.is_break() {
                     break;
                 }
             }
@@ -380,11 +377,11 @@ impl StreamingServer {
     }
 
     /// Read a single message and return the control flow decision.
-    fn read_message(msg: Message, stdin_tx: &mut UnboundedSender<Vec<u8>>) -> ControlFlow<(), ()> {
+    async fn read_message(msg: Message, stdin_tx: &MpscSender<Vec<u8>>) -> ControlFlow<(), ()> {
         match msg {
             Message::Binary(data) if !data.is_empty() => {
                 debug!("Got {} binary bytes", data.len());
-                if let Err(e) = stdin_tx.send(data.into()) {
+                if let Err(e) = stdin_tx.send(data.into()).await {
                     error!("Unable to send stdin data: {e}");
                 }
             }
@@ -412,7 +409,7 @@ impl StreamingServer {
     async fn exec_loop(
         mut session: ExecSession,
         sender: &mut SplitSink<WebSocket, Message>,
-        mut stdin_rx: UnboundedReceiver<Vec<u8>>,
+        mut stdin_rx: MpscReceiver<Vec<u8>>,
     ) -> Result<()> {
         let pidfile = ContainerIO::temp_file_name(
             Some(session.server_config.runtime_dir()),
@@ -447,9 +444,10 @@ impl StreamingServer {
             .await
             .context("create new child process")?;
 
+        let container_id = session.container_id;
         let io = SharedContainerIO::new(session.container_io);
         let child = Child::new(
-            session.container_id.clone(),
+            container_id,
             grandchild_pid,
             vec![],
             vec![],
@@ -469,36 +467,40 @@ impl StreamingServer {
             .await
             .context("retrieve stdout and stderr channels")?;
 
+        let attach = io.attach().await;
+
         loop {
             tokio::select! {
-                Some(mut data) = stdin_rx.recv()  => if session.stdin {
+                Some(data) = stdin_rx.recv()  => if session.stdin {
                     // First element is the message type indicator
-                    match data.remove(0) {
-                        STDIN_BYTE => {
-                            trace!("Got stdin message of len {}", data.len());
-                            io.attach().await.stdin().send(data).context("send to attach session")?;
-                        },
-                        RESIZE_BYTE => {
-                            let e = serde_json::from_slice::<ResizeEvent>(&data).context("unmarshal resize event")?;
-                            trace!("Got resize message: {e:?}");
-                            io.resize(e.width, e.height).await.context("resize terminal")?;
-                        },
-                        CLOSE_BYTE => {
-                            info!("Got close message");
-                            break
-                        },
-                        x => warn!("Unknown start byte for stdin: {x}"),
-                    };
+                    if let Some((&msg_type, payload)) = data.split_first() {
+                        match msg_type {
+                            STDIN_BYTE => {
+                                trace!("Got stdin message of len {}", payload.len());
+                                attach.stdin().send(payload.to_vec()).context("send to attach session")?;
+                            },
+                            RESIZE_BYTE => {
+                                let e = serde_json::from_slice::<ResizeEvent>(payload).context("unmarshal resize event")?;
+                                trace!("Got resize message: {e:?}");
+                                io.resize(e.width, e.height).await.context("resize terminal")?;
+                            },
+                            CLOSE_BYTE => {
+                                info!("Got close message");
+                                break
+                            },
+                            x => warn!("Unknown start byte for stdin: {x}"),
+                        }
+                    }
                 },
 
-                Ok(IOMessage::Data(mut data, _)) = stdout_rx.recv() => if session.stdout {
-                    data.insert(0, STDOUT_BYTE);
-                    sender.send(Message::Binary(data.into())).await.context("send to stdout")?;
+                Ok(IOMessage::Data(data, _)) = stdout_rx.recv() => if session.stdout {
+                    Self::frame_and_send(STDOUT_BYTE, &data, sender).await
+                        .context("send to stdout")?;
                 },
 
-                Ok(IOMessage::Data(mut data, _)) = stderr_rx.recv() => if session.stderr {
-                    data.insert(0, STDERR_BYTE);
-                    sender.send(Message::Binary(data.into())).await.context("send to stderr")?;
+                Ok(IOMessage::Data(data, _)) = stderr_rx.recv() => if session.stderr {
+                    Self::frame_and_send(STDERR_BYTE, &data, sender).await
+                        .context("send to stderr")?;
                 },
 
                 Ok(exit_data) = exit_rx.recv() => {
@@ -520,7 +522,7 @@ impl StreamingServer {
     async fn attach_loop(
         session: AttachSession,
         sender: &mut SplitSink<WebSocket, Message>,
-        mut stdin_rx: UnboundedReceiver<Vec<u8>>,
+        mut stdin_rx: MpscReceiver<Vec<u8>>,
     ) -> Result<()> {
         let io = session.child.io();
 
@@ -529,36 +531,40 @@ impl StreamingServer {
             .await
             .context("retrieve stdout and stderr channels")?;
 
+        let attach = io.attach().await;
+
         loop {
             tokio::select! {
-                Some(mut data) = stdin_rx.recv()  => if session.stdin {
+                Some(data) = stdin_rx.recv()  => if session.stdin {
                     // First element is the message type indicator
-                    match data.remove(0) {
-                        STDIN_BYTE => {
-                            trace!("Got stdin message of len {}", data.len());
-                            io.attach().await.stdin().send(data).context("send to attach session")?;
-                        },
-                        RESIZE_BYTE => {
-                            let e = serde_json::from_slice::<ResizeEvent>(&data).context("unmarshal resize event")?;
-                            trace!("Got resize message: {e:?}");
-                            io.resize(e.width, e.height).await.context("resize terminal")?;
-                        },
-                        CLOSE_BYTE => {
-                            info!("Got close message");
-                            break
-                        },
-                        x => warn!("Unknown start byte for stdin: {x}"),
-                    };
+                    if let Some((&msg_type, payload)) = data.split_first() {
+                        match msg_type {
+                            STDIN_BYTE => {
+                                trace!("Got stdin message of len {}", payload.len());
+                                attach.stdin().send(payload.to_vec()).context("send to attach session")?;
+                            },
+                            RESIZE_BYTE => {
+                                let e = serde_json::from_slice::<ResizeEvent>(payload).context("unmarshal resize event")?;
+                                trace!("Got resize message: {e:?}");
+                                io.resize(e.width, e.height).await.context("resize terminal")?;
+                            },
+                            CLOSE_BYTE => {
+                                info!("Got close message");
+                                break
+                            },
+                            x => warn!("Unknown start byte for stdin: {x}"),
+                        }
+                    }
                 },
 
-                Ok(IOMessage::Data(mut data, _)) = stdout_rx.recv() => if session.stdout {
-                    data.insert(0, STDOUT_BYTE);
-                    sender.send(Message::Binary(data.into())).await.context("send to stdout")?;
+                Ok(IOMessage::Data(data, _)) = stdout_rx.recv() => if session.stdout {
+                    Self::frame_and_send(STDOUT_BYTE, &data, sender).await
+                        .context("send to stdout")?;
                 },
 
-                Ok(IOMessage::Data(mut data, _)) = stderr_rx.recv() => if session.stderr {
-                    data.insert(0, STDERR_BYTE);
-                    sender.send(Message::Binary(data.into())).await.context("send to stderr")?;
+                Ok(IOMessage::Data(data, _)) = stderr_rx.recv() => if session.stderr {
+                    Self::frame_and_send(STDERR_BYTE, &data, sender).await
+                        .context("send to stderr")?;
                 },
 
                 _ = session.child.token().cancelled() => {
@@ -575,8 +581,23 @@ impl StreamingServer {
     async fn port_forward_loop(
         _session: PortForwardSession,
         _sender: &mut SplitSink<WebSocket, Message>,
-        mut _in_rx: UnboundedReceiver<Vec<u8>>,
+        mut _in_rx: MpscReceiver<Vec<u8>>,
     ) -> Result<()> {
         todo!("Requires SPDY protocol implementation from https://github.com/moby/spdystream")
+    }
+
+    /// Prepend a stream type byte and send the data over WebSocket.
+    async fn frame_and_send(
+        stream_byte: u8,
+        data: &[u8],
+        sender: &mut SplitSink<WebSocket, Message>,
+    ) -> Result<()> {
+        let mut framed = Vec::with_capacity(1 + data.len());
+        framed.push(stream_byte);
+        framed.extend_from_slice(data);
+        sender
+            .send(Message::Binary(framed.into()))
+            .await
+            .context("send framed data")
     }
 }

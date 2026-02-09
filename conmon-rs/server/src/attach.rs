@@ -105,6 +105,11 @@ impl SharedContainerAttach {
         Ok(())
     }
 
+    /// Check if there are any active attach readers.
+    pub fn has_readers(&self) -> bool {
+        self.write_half_tx.receiver_count() > 0
+    }
+
     /// Retrieve the stdin sender.
     pub fn stdin(&self) -> &Sender<Vec<u8>> {
         &self.read_half_tx
@@ -300,15 +305,16 @@ impl Attach {
                     return Ok(());
                 }
                 Message::Data(buf, pipe) => {
+                    let p = match pipe {
+                        Pipe::StdOut => 2,
+                        Pipe::StdErr => 3,
+                    };
                     let packets = buf
                         .chunks(Self::PACKET_BUF_SIZE - 1)
                         .map(|x| {
-                            let mut y = x.to_vec();
-                            let p = match pipe {
-                                Pipe::StdOut => 2,
-                                Pipe::StdErr => 3,
-                            };
-                            y.insert(0, p);
+                            let mut y = Vec::with_capacity(1 + x.len());
+                            y.push(p);
+                            y.extend_from_slice(x);
                             y
                         })
                         .collect::<Vec<_>>();

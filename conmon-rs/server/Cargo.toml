@@ -21,21 +21,20 @@ telemetry = [
 anyhow = { version = "1.0.101", default-features = false }
 async-channel = { version = "2.5.0", default-features = false, features = ["std"] }
 axum = { version = "0.8.8", default-features = false, features = ["http2", "tokio", "ws"] }
-capnp = { version = "0.21.7", default-features = false }
-capnp-rpc = { version = "0.21.0", default-features = false }
-clap = { version = "4.5.57", default-features = false, features = ["color", "cargo", "deprecated", "derive", "deprecated", "env", "error-context", "help", "std", "string", "suggestions", "unicode", "usage", "wrap_help"] }
-command-fds = { version = "0.3.2", default-features = false, features = ["tokio"] }
+capnp = { version = "0.25.0", default-features = false }
+capnp-rpc = { version = "0.25.0", default-features = false }
+clap = { version = "4.5.57", default-features = false, features = ["cargo", "derive", "env", "error-context", "help", "std", "usage"] }
 conmon-common = { path = "../common" }
 futures = { version = "0.3.31", default-features = false, features = ["executor"] }
 getset = { version = "0.1.6", default-features = false }
 lazy_static = { version = "1.5.0", default-features = false }
-libc = { version = "0.2.175", default-features = false }
+libc = { version = "0.2.180", default-features = false }
 libsystemd = { version = "0.7.2", default-features = false }
 linereader = { version = "0.4.0", default-features = false }
 lru = { version = "0.16.3", default-features = false }
-memchr = { version = "2.7.6", default-features = false }
+memchr = { version = "2.8.0", default-features = false }
 multimap = { version = "0.10.1", default-features = false }
-nix = { version = "0.30.1", default-features = false, features = ["fs", "hostname", "mount", "sched", "signal", "socket", "term", "user"] }
+nix = { version = "0.31.1", default-features = false, features = ["fs", "hostname", "mount", "sched", "signal", "socket", "term", "user"] }
 notify = { version = "8.2.0", default-features = false }
 num_cpus = { version = "1.17.0", default-features = false }
 once_cell = { version = "1.21.3", default-features = false }
@@ -43,14 +42,13 @@ opentelemetry = { version = "0.31.0", default-features = false, optional = true 
 opentelemetry_sdk = { version = "0.31.0", default-features = false, features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.31.0", default-features = false, features = ["grpc-tonic", "trace"], optional = true }
 opentelemetry-semantic-conventions = { version = "0.31.0", default-features = false, features = ["semconv_experimental"], optional = true }
-prctl = { version = "1.0.0", default-features = false }
 sendfd = { version = "0.4.4", default-features = false, features = ["tokio"] }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.149", default-features = false, features = ["std"] }
 shadow-rs = { version = "1.7.0", default-features = false }
 signal-hook = { version = "0.4.3", default-features = false, features = ["iterator"] }
 strum = { version = "0.27.2", default-features = false, features = ["derive"] }
-tempfile = { version = "3.23.0", default-features = false }
+tempfile = { version = "3.24.0", default-features = false }
 tokio = { version = "1.49.0", default-features = false, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "time"] }
 tokio-eventfd = { version = "0.2.2", default-features = false }
 tokio-seqpacket = { version = "0.8.1", default-features = false }
@@ -59,7 +57,7 @@ tower-http = { version = "0.6.8", default-features = false, features = ["trace"]
 tracing = { version = "0.1.44", default-features = false }
 tracing-opentelemetry = { version = "0.32.1", default-features = false, optional = true }
 tracing-subscriber = { version = "0.3.22", default-features = false, features = ["fmt"] }
-tz-rs = { version = "0.7.3", default-features = false, features = ["std"] }
+time = { version = "0.3.47", default-features = false, features = ["formatting", "local-offset", "parsing", "std"] }
 uuid = { version = "1.20.0", default-features = false, features = ["v4", "fast-rng", "macro-diagnostics"] }
 
 [build-dependencies]
@@ -68,4 +66,3 @@ dashmap = { version = "6.1.0", default-features = false }
 
 [dev-dependencies]
 mockall = { version = "0.14.0", default-features = false }
-time = { version = "0.3.47", default-features = false, features = ["parsing", "std"] }

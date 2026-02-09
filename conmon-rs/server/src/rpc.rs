@@ -14,7 +14,9 @@ use capnp_rpc::pry;
 use conmon_common::conmon_capnp::conmon;
 use std::{
     path::{Path, PathBuf},
-    process, str,
+    process,
+    rc::Rc,
+    str,
     time::Duration,
 };
 use tokio::time::Instant;
@@ -72,10 +74,11 @@ macro_rules! capnp_vec_path {
     };
 }
 
+#[allow(refining_impl_trait_reachable)]
 impl conmon::Server for Server {
     /// Retrieve version information from the server.
     fn version(
-        &mut self,
+        self: Rc<Server>,
         params: conmon::VersionParams,
         mut results: conmon::VersionResults,
     ) -> Promise<(), capnp::Error> {
@@ -103,7 +106,7 @@ impl conmon::Server for Server {
 
     /// Create a new container for the provided parameters.
     fn create_container(
-        &mut self,
+        self: Rc<Server>,
         params: conmon::CreateContainerParams,
         mut results: conmon::CreateContainerResults,
     ) -> Promise<(), capnp::Error> {
@@ -204,7 +207,7 @@ impl conmon::Server for Server {
 
     /// Execute a command in sync inside of a container.
     fn exec_sync_container(
-        &mut self,
+        self: Rc<Server>,
         params: conmon::ExecSyncContainerParams,
         mut results: conmon::ExecSyncContainerResults,
     ) -> Promise<(), capnp::Error> {
@@ -306,7 +309,7 @@ impl conmon::Server for Server {
 
     /// Attach to a running container.
     fn attach_container(
-        &mut self,
+        self: Rc<Server>,
         params: conmon::AttachContainerParams,
         _: conmon::AttachContainerResults,
     ) -> Promise<(), capnp::Error> {
@@ -345,7 +348,7 @@ impl conmon::Server for Server {
 
     /// Rotate all log drivers for a running container.
     fn reopen_log_container(
-        &mut self,
+        self: Rc<Server>,
         params: conmon::ReopenLogContainerParams,
         _: conmon::ReopenLogContainerResults,
     ) -> Promise<(), capnp::Error> {
@@ -368,7 +371,7 @@ impl conmon::Server for Server {
 
     /// Adjust the window size of a container running inside of a terminal.
     fn set_window_size_container(
-        &mut self,
+        self: Rc<Server>,
         params: conmon::SetWindowSizeContainerParams,
         _: conmon::SetWindowSizeContainerResults,
     ) -> Promise<(), capnp::Error> {
@@ -393,7 +396,7 @@ impl conmon::Server for Server {
 
     /// Create a new set of namespaces.
     fn create_namespaces(
-        &mut self,
+        self: Rc<Server>,
         params: conmon::CreateNamespacesParams,
         mut results: conmon::CreateNamespacesResults,
     ) -> Promise<(), capnp::Error> {
@@ -436,7 +439,7 @@ impl conmon::Server for Server {
     }
 
     fn start_fd_socket(
-        &mut self,
+        self: Rc<Server>,
         params: conmon::StartFdSocketParams,
         mut results: conmon::StartFdSocketResults,
     ) -> Promise<(), capnp::Error> {
@@ -468,7 +471,7 @@ impl conmon::Server for Server {
     }
 
     fn serve_exec_container(
-        &mut self,
+        self: Rc<Server>,
         params: conmon::ServeExecContainerParams,
         mut results: conmon::ServeExecContainerResults,
     ) -> Promise<(), capnp::Error> {
@@ -536,7 +539,7 @@ impl conmon::Server for Server {
     }
 
     fn serve_attach_container(
-        &mut self,
+        self: Rc<Server>,
         params: conmon::ServeAttachContainerParams,
         mut results: conmon::ServeAttachContainerResults,
     ) -> Promise<(), capnp::Error> {
@@ -581,7 +584,7 @@ impl conmon::Server for Server {
     }
 
     fn serve_port_forward_container(
-        &mut self,
+        self: Rc<Server>,
         params: conmon::ServePortForwardContainerParams,
         mut results: conmon::ServePortForwardContainerResults,
     ) -> Promise<(), capnp::Error> {

@@ -16,6 +16,7 @@ mod child_reaper;
 mod config;
 mod container_io;
 mod container_log;
+mod fd_mapping;
 mod fd_socket;
 mod init;
 mod journal;
