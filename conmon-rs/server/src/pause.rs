@@ -177,10 +177,10 @@ impl Pause {
 
     /// Retrieve the pause PID path for a base and pod ID.
     fn pause_pid_path<T: AsRef<Path>>(base_path: T, pod_id: &str) -> PathBuf {
-        base_path
-            .as_ref()
-            .join("conmonrs")
-            .join(format!("{pod_id}.pid"))
+        let mut path = base_path.as_ref().join("conmonrs");
+        path.push(pod_id);
+        path.set_extension("pid");
+        path
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -296,9 +296,9 @@ impl Pause {
 
     /// Write user or group ID mappings.
     fn write_mappings(mappings: &[String], pid: Pid, is_group: bool) -> Result<()> {
-        let path = PathBuf::from("/proc")
-            .join(pid.to_string())
-            .join(if is_group { "gid_map" } else { "uid_map" });
+        let mut path = PathBuf::from("/proc");
+        path.push(pid.as_raw().to_string());
+        path.push(if is_group { "gid_map" } else { "uid_map" });
 
         let mut file = File::options()
             .write(true)
