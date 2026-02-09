@@ -22,6 +22,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, trace};
 
+/// Buffer size for reading container I/O streams
+const READ_BUFFER_SIZE: usize = 4096;
+
 /// A shared container IO abstraction.
 #[derive(Debug, Clone)]
 pub struct SharedContainerIO(Arc<RwLock<ContainerIO>>);
@@ -257,7 +260,7 @@ impl ContainerIO {
     where
         T: AsyncRead + Unpin,
     {
-        let mut buf = vec![0; 1024];
+        let mut buf = vec![0; READ_BUFFER_SIZE];
 
         loop {
             match reader.read(&mut buf).await {

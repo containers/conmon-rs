@@ -413,7 +413,9 @@ impl GenerateRuntimeArgs<'_> {
         global_args: Reader,
         command_args: Reader,
     ) -> Result<Vec<String>> {
-        let mut args = self.default_args().context("build default runtime args")?;
+        // Pre-allocate capacity for typical arg count to reduce reallocations
+        let mut args = Vec::with_capacity(16);
+        args.extend(self.default_args().context("build default runtime args")?);
 
         if let Some(rr) = self.config.runtime_root() {
             args.push(format!("--root={}", rr.display()));
@@ -427,13 +429,12 @@ impl GenerateRuntimeArgs<'_> {
             args.push(arg?.to_string()?);
         }
 
-        args.extend([
-            "create".to_string(),
-            "--bundle".to_string(),
-            bundle_path.display().to_string(),
-            "--pid-file".to_string(),
-            self.pidfile.display().to_string(),
-        ]);
+        // Use static strings where possible to avoid allocations
+        args.push("create".into());
+        args.push("--bundle".into());
+        args.push(bundle_path.display().to_string());
+        args.push("--pid-file".into());
+        args.push(self.pidfile.display().to_string());
 
         for arg in command_args {
             args.push(arg?.to_string()?);
@@ -464,7 +465,9 @@ impl GenerateRuntimeArgs<'_> {
     }
 
     pub(crate) fn exec_sync_args_without_command(&self) -> Result<Vec<String>> {
-        let mut args = self.default_args().context("build default runtime args")?;
+        // Pre-allocate capacity for typical arg count
+        let mut args = Vec::with_capacity(12);
+        args.extend(self.default_args().context("build default runtime args")?);
 
         if let Some(rr) = self.config.runtime_root() {
             args.push(format!("--root={}", rr.display()));
@@ -474,12 +477,13 @@ impl GenerateRuntimeArgs<'_> {
             args.push(Self::SYSTEMD_CGROUP_ARG.into());
         }
 
-        args.push("exec".to_string());
-        args.push("-d".to_string());
+        // Use static strings to avoid allocations
+        args.push("exec".into());
+        args.push("-d".into());
 
         if let ContainerIOType::Terminal(terminal) = self.container_io.typ() {
             args.push(format!("--console-socket={}", terminal.path().display()));
-            args.push("--tty".to_string());
+            args.push("--tty".into());
         }
 
         args.push(format!("--pid-file={}", self.pidfile.display()));
