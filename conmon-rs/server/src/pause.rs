@@ -280,10 +280,12 @@ impl Pause {
 
         // We bind all namespaces, if not unshared then we use the host namespace.
         for namespace in Namespace::iter() {
-            namespace.bind(base_path, pod_id).context(format!(
-                "bind namespace to path: {}",
-                namespace.path(base_path, pod_id).display(),
-            ))?;
+            namespace.bind(base_path, pod_id).with_context(|| {
+                format!(
+                    "bind namespace to path: {}",
+                    namespace.path(base_path, pod_id).display(),
+                )
+            })?;
         }
 
         // Notify that all mounts are created

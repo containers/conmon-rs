@@ -323,7 +323,7 @@ impl Config {
         if self
             .runtime()
             .to_str()
-            .context(format!("{RUNTIME_FLAG} does not parse as string"))?
+            .with_context(|| format!("{RUNTIME_FLAG} does not parse as string"))?
             .trim()
             .is_empty()
         {
@@ -334,7 +334,7 @@ impl Config {
         if self
             .runtime_dir()
             .to_str()
-            .context(format!("{RUNTIME_DIR_FLAG} does not parse as string"))?
+            .with_context(|| format!("{RUNTIME_DIR_FLAG} does not parse as string"))?
             .trim()
             .is_empty()
         {

@@ -7,7 +7,7 @@ dependencies:
         match: go
 
   - name: golangci-lint
-    version: 2.6.2
+    version: 2.8.0
     refPaths:
       - path: .github/workflows/ci.yml
         match: version

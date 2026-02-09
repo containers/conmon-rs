@@ -40,7 +40,7 @@ macro_rules! new_root_span {
         debug_span!(
             $name,
             container_id = $container_id,
-            uuid = Uuid::new_v4().to_string().as_str()
+            uuid = %Uuid::new_v4()
         )
     };
 }
@@ -85,7 +85,7 @@ impl conmon::Server for Server {
         debug!("Got a version request");
         let req = pry!(pry!(params.get()).get_request());
 
-        let span = debug_span!("version", uuid = Uuid::new_v4().to_string().as_str());
+        let span = debug_span!("version", uuid = %Uuid::new_v4());
         let _enter = span.enter();
         pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
 
@@ -447,7 +447,7 @@ impl conmon::Server for Server {
 
         let span = debug_span!(
             "start_fd_socket",
-            uuid = Uuid::new_v4().to_string().as_str()
+            uuid = %Uuid::new_v4()
         );
         let _enter = span.enter();
         pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
@@ -480,7 +480,7 @@ impl conmon::Server for Server {
 
         let span = debug_span!(
             "serve_exec_container",
-            uuid = Uuid::new_v4().to_string().as_str()
+            uuid = %Uuid::new_v4()
         );
         let _enter = span.enter();
         pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
@@ -548,7 +548,7 @@ impl conmon::Server for Server {
 
         let span = debug_span!(
             "serve_attach_container",
-            uuid = Uuid::new_v4().to_string().as_str()
+            uuid = %Uuid::new_v4()
         );
         let _enter = span.enter();
         pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
@@ -593,7 +593,7 @@ impl conmon::Server for Server {
 
         let span = debug_span!(
             "serve_port_forward_container",
-            uuid = Uuid::new_v4().to_string().as_str()
+            uuid = %Uuid::new_v4()
         );
         let _enter = span.enter();
         pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));

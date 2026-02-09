@@ -36,14 +36,18 @@ where
     {
         let path = path.as_ref();
 
-        let parent = path.parent().context(format!(
-            "tried to specify / as socket to bind to: {}",
-            path.display()
-        ))?;
-        let name = path.file_name().context(format!(
-            "tried to specify '..' as socket to bind to: {}",
-            path.display(),
-        ))?;
+        let parent = path.parent().with_context(|| {
+            format!(
+                "tried to specify / as socket to bind to: {}",
+                path.display()
+            )
+        })?;
+        let name = path.file_name().with_context(|| {
+            format!(
+                "tried to specify '..' as socket to bind to: {}",
+                path.display(),
+            )
+        })?;
 
         self.imp
             .create_dir_all(parent)

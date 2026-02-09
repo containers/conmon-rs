@@ -148,9 +148,7 @@ impl Server {
         if !self.config().skip_fork() {
             match unsafe { fork()? } {
                 ForkResult::Parent { child, .. } => {
-                    let child_str = format!("{child}");
-                    File::create(self.config().conmon_pidfile())?
-                        .write_all(child_str.as_bytes())?;
+                    write!(File::create(self.config().conmon_pidfile())?, "{child}")?;
                     unsafe { _exit(0) };
                 }
                 ForkResult::Child => (),
@@ -165,7 +163,10 @@ impl Server {
 
         let tracer = self.tracer().clone();
 
-        let worker_threads = num_cpus::get().min(4);
+        let worker_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(4);
         debug!(
             "Configuring Tokio runtime with {} worker threads",
             worker_threads
@@ -342,6 +343,7 @@ impl Server {
         // Always use SIGKILL to ensure immediate termination of container processes
         reaper
             .kill_grandchildren(Signal::SIGKILL)
+            .await
             .context("unable to kill grandchildren")?;
 
         debug!("Sending shutdown message");

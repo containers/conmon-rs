@@ -28,26 +28,26 @@ where
 
 impl<K, V> BoundedHashMap<K, V>
 where
-    K: Eq + Hash + Clone + Debug,
+    K: Eq + Hash + Debug,
     V: Debug,
 {
     /// Insert an element into the hashmap by:
-    /// - removing timed-out elements
+    /// - removing timed-out elements from the oldest end (O(k) where k = expired count)
     /// - removing the least recently used element if no space left (automatic via LRU)
     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
         let now = Instant::now();
 
-        // Remove timed-out items by iterating and collecting expired keys
-        let mut expired_keys = Vec::new();
-        for (key, (inserted, _)) in self.cache.iter() {
+        // Remove expired items from the LRU end. Since items are inserted
+        // chronologically, the LRU entry is always the oldest. If it's not
+        // expired, no entries are expired — so we can stop early.
+        let mut expired_count = 0;
+        while let Some((_, (inserted, _))) = self.cache.peek_lru() {
             if now - *inserted > self.max_duration {
-                expired_keys.push(key.clone());
+                self.cache.pop_lru();
+                expired_count += 1;
+            } else {
+                break;
             }
-        }
-
-        let expired_count = expired_keys.len();
-        for key in expired_keys {
-            self.cache.pop(&key);
         }
 
         if expired_count > 0 {
@@ -96,7 +96,7 @@ where
 
 impl<K, V> Default for BoundedHashMap<K, V>
 where
-    K: Eq + Hash + Clone + Debug,
+    K: Eq + Hash + Debug,
     V: Debug,
 {
     fn default() -> Self {

@@ -89,7 +89,7 @@ pub enum ContainerIOType {
 /// A message to be sent through the ContainerIO.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
-    Data(Vec<u8>, Pipe),
+    Data(Arc<[u8]>, Pipe),
     Done,
 }
 
@@ -236,7 +236,7 @@ impl ContainerIO {
                 Message::Data(data, _) => {
                     if let Some(future_len) = stdio.len().checked_add(data.len()) {
                         if future_len < Self::MAX_STDIO_STREAM_SIZE {
-                            stdio.extend(data)
+                            stdio.extend_from_slice(&data)
                         } else {
                             break;
                         }
@@ -289,16 +289,20 @@ impl ContainerIO {
                         .await
                         .context("write to log file")?;
 
-                    // Only clone data for attach if there are active attach clients
+                    // Use Arc to share data between attach and message channel
+                    // without cloning the buffer contents
+                    let data_arc: Arc<[u8]> = Arc::from(data);
+
+                    // Only send to attach if there are active attach clients
                     if attach.has_readers() {
                         attach
-                            .write(Message::Data(data.into(), pipe))
+                            .write(Message::Data(Arc::clone(&data_arc), pipe))
                             .await
                             .context("write to attach endpoints")?;
                     }
 
                     message_tx
-                        .force_send(Message::Data(data.into(), pipe))
+                        .force_send(Message::Data(data_arc, pipe))
                         .context("send data message")?;
                 }
 

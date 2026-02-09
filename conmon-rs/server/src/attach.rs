@@ -13,6 +13,7 @@ use std::{
         unix::fs::PermissionsExt,
     },
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ErrorKind},
@@ -31,8 +32,8 @@ use tracing::{Instrument, debug, debug_span, error};
 #[derive(Debug)]
 /// A shared container attach abstraction.
 pub struct SharedContainerAttach {
-    read_half_rx: Receiver<Vec<u8>>,
-    read_half_tx: Sender<Vec<u8>>,
+    read_half_rx: Receiver<Arc<[u8]>>,
+    read_half_tx: Sender<Arc<[u8]>>,
     write_half_tx: Sender<Message>,
 }
 
@@ -81,7 +82,7 @@ impl SharedContainerAttach {
     }
 
     /// Read from all attach endpoints standard input and return the first result.
-    pub async fn read(&mut self) -> Result<Vec<u8>> {
+    pub async fn read(&mut self) -> Result<Arc<[u8]>> {
         self.read_half_rx
             .recv()
             .await
@@ -89,7 +90,7 @@ impl SharedContainerAttach {
     }
 
     /// Try to read from all attach endpoints standard input and return the first result.
-    pub fn try_read(&mut self) -> Result<Vec<u8>> {
+    pub fn try_read(&mut self) -> Result<Arc<[u8]>> {
         self.read_half_rx
             .try_recv()
             .context("try to receive attach message")
@@ -111,7 +112,7 @@ impl SharedContainerAttach {
     }
 
     /// Retrieve the stdin sender.
-    pub fn stdin(&self) -> &Sender<Vec<u8>> {
+    pub fn stdin(&self) -> &Sender<Arc<[u8]>> {
         &self.read_half_tx
     }
 }
@@ -130,7 +131,7 @@ impl Attach {
     /// Create a new attach instance.
     fn create<T>(
         socket_path: T,
-        read_half_tx: Sender<Vec<u8>>,
+        read_half_tx: Sender<Arc<[u8]>>,
         write_half_tx: Sender<Message>,
         token: CancellationToken,
         stop_after_stdin_eof: bool,
@@ -186,7 +187,7 @@ impl Attach {
 
     async fn start(
         fd: OwnedFd,
-        read_half_tx: Sender<Vec<u8>>,
+        read_half_tx: Sender<Arc<[u8]>>,
         write_half_tx: Sender<Message>,
         token: CancellationToken,
         stop_after_stdin_eof: bool,
@@ -234,7 +235,7 @@ impl Attach {
 
     async fn read_loop(
         mut read_half: OwnedReadHalf,
-        tx: Sender<Vec<u8>>,
+        tx: Sender<Arc<[u8]>>,
         token: CancellationToken,
         stop_after_stdin_eof: bool,
     ) -> Result<()> {
@@ -251,7 +252,7 @@ impl Attach {
                     match n {
                         Ok(n) if n > 0 => {
                             let end = buf[..n].iter().position(|&x| x == 0).unwrap_or(n);
-                            let data = buf[..end].to_vec();
+                            let data: Arc<[u8]> = Arc::from(&buf[..end]);
                             debug!("Read {} stdin bytes from client", data.len());
                             tx.send(data).context("send data message")?;
                         }
@@ -309,19 +310,13 @@ impl Attach {
                         Pipe::StdOut => 2,
                         Pipe::StdErr => 3,
                     };
-                    let packets = buf
-                        .chunks(Self::PACKET_BUF_SIZE - 1)
-                        .map(|x| {
-                            let mut y = Vec::with_capacity(1 + x.len());
-                            y.push(p);
-                            y.extend_from_slice(x);
-                            y
-                        })
-                        .collect::<Vec<_>>();
-
-                    let len = packets.len();
-                    for (idx, packet) in packets.iter().enumerate() {
-                        match write_half.write(packet).await {
+                    let len = buf.chunks(Self::PACKET_BUF_SIZE - 1).len();
+                    let mut packet = Vec::with_capacity(Self::PACKET_BUF_SIZE);
+                    for (idx, chunk) in buf.chunks(Self::PACKET_BUF_SIZE - 1).enumerate() {
+                        packet.clear();
+                        packet.push(p);
+                        packet.extend_from_slice(chunk);
+                        match write_half.write(&packet).await {
                             Ok(_) => {
                                 debug!("Wrote {} packet {}/{} to client", pipe, idx + 1, len)
                             }

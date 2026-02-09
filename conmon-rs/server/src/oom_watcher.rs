@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, bail};
-use lazy_static::lazy_static;
 use linereader::LineReader;
 use nix::sys::statfs::{FsType, statfs};
 use notify::{
@@ -10,6 +9,7 @@ use std::{
     fs::File as StdFile,
     os::unix::prelude::AsRawFd,
     path::{Path, PathBuf},
+    sync::LazyLock,
 };
 use tokio::{
     fs::{File, OpenOptions},
@@ -46,14 +46,9 @@ static CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
 static MAX_LINEREADER_CAPACITY: usize = 256;
 
-lazy_static! {
-    static ref IS_CGROUP_V2: bool = {
-        if let Ok(sts) = statfs(CGROUP_ROOT) {
-            return sts.filesystem_type() == CGROUP2_SUPER_MAGIC;
-        }
-        false
-    };
-}
+static IS_CGROUP_V2: LazyLock<bool> = LazyLock::new(|| {
+    statfs(CGROUP_ROOT).is_ok_and(|sts| sts.filesystem_type() == CGROUP2_SUPER_MAGIC)
+});
 
 pub struct OOMWatcher {
     token: CancellationToken,
@@ -424,10 +419,12 @@ impl OOMWatcher {
         );
         let mut new_counter: u64 = 0;
         let mut found_oom = false;
-        let fp = StdFile::open(memory_events_file_path).context(format!(
-            "open memory events file: {}",
-            memory_events_file_path.display()
-        ))?;
+        let fp = StdFile::open(memory_events_file_path).with_context(|| {
+            format!(
+                "open memory events file: {}",
+                memory_events_file_path.display()
+            )
+        })?;
 
         let mut reader = LineReader::with_capacity(MAX_LINEREADER_CAPACITY, fp);
 
@@ -454,40 +451,26 @@ impl OOMWatcher {
     }
 
     async fn write_oom_files(exit_paths: &[PathBuf]) -> Result<()> {
-        let paths = exit_paths.to_owned();
-        let tasks: Vec<_> = paths
-            .into_iter()
-            .map(|path| {
-                tokio::spawn(
-                    async move {
-                        debug!("Writing OOM file: {}", path.display());
-                        match File::create(&path).await {
-                            Ok(file) => {
-                                // Ensure the file is synced to disk
-                                if let Err(e) = file.sync_all().await {
-                                    error!(
-                                        "Could not sync oom file to {}: {:#}",
-                                        path.display(),
-                                        e
-                                    );
-                                } else {
-                                    debug!(
-                                        "Successfully wrote and synced OOM file: {}",
-                                        path.display()
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                error!("Could not create oom file at {}: {:#}", path.display(), e);
-                            }
+        for path in exit_paths {
+            let span = debug_span!("write_oom_file");
+            async {
+                debug!("Writing OOM file: {}", path.display());
+                match File::create(path).await {
+                    Ok(file) => {
+                        // Ensure the file is synced to disk
+                        if let Err(e) = file.sync_all().await {
+                            error!("Could not sync oom file to {}: {:#}", path.display(), e);
+                        } else {
+                            debug!("Successfully wrote and synced OOM file: {}", path.display());
                         }
                     }
-                    .instrument(debug_span!("write_oom_file")),
-                )
-            })
-            .collect();
-        for task in tasks {
-            task.await.context("wait for task to be finished")?;
+                    Err(e) => {
+                        error!("Could not create oom file at {}: {:#}", path.display(), e);
+                    }
+                }
+            }
+            .instrument(span)
+            .await;
         }
         Ok(())
     }
