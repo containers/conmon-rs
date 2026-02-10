@@ -1,7 +1,6 @@
 //! Configuration related structures
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use getset::{CopyGetters, Getters, Setters};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 use strum::{AsRefStr, Display, EnumIter, EnumString, IntoStaticStr};
@@ -12,9 +11,7 @@ macro_rules! prefix {
     };
 }
 
-#[derive(
-    Clone, CopyGetters, Debug, Deserialize, Eq, Getters, Parser, PartialEq, Serialize, Setters,
-)]
+#[derive(Clone, Debug, Deserialize, Eq, Parser, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[command(
     after_help("More info at: https://github.com/containers/conmon-rs"),
@@ -22,12 +19,10 @@ macro_rules! prefix {
 )]
 /// An OCI container runtime monitor.
 pub struct Config {
-    #[get = "pub"]
     #[command(subcommand)]
     /// Possible subcommands.
     command: Option<Commands>,
 
-    #[get_copy = "pub"]
     #[arg(
         default_missing_value("default"),
         env(concat!(prefix!(), "VERSION")),
@@ -40,7 +35,6 @@ pub struct Config {
     /// Show version information, specify "full" for verbose output.
     version: Option<Verbosity>,
 
-    #[get_copy = "pub"]
     #[arg(
         default_missing_value("default"),
         env(concat!(prefix!(), "VERSION_JSON")),
@@ -54,7 +48,6 @@ pub struct Config {
     /// Show version information as parsable JSON, specify "full" for verbose output.
     version_json: Option<Verbosity>,
 
-    #[get = "pub"]
     #[arg(
         default_value_t,
         env(concat!(prefix!(), "LOG_LEVEL")),
@@ -66,7 +59,6 @@ pub struct Config {
     /// The logging level of the conmon server.
     log_level: LogLevel,
 
-    #[get_copy = "pub"]
     #[arg(
         default_value_t,
         env(concat!(prefix!(), "LOG_DRIVER")),
@@ -78,7 +70,6 @@ pub struct Config {
     /// The logging driver used by the conmon server.
     log_driver: LogDriver,
 
-    #[get = "pub"]
     #[arg(
         default_value(" "),
         env(concat!(prefix!(), "RUNTIME")),
@@ -89,7 +80,6 @@ pub struct Config {
     /// Binary path of the OCI runtime to use to operate on the containers.
     runtime: PathBuf,
 
-    #[get = "pub"]
     #[arg(
         default_value(" "),
         env(concat!(prefix!(), "RUNTIME_DIR")),
@@ -99,7 +89,6 @@ pub struct Config {
     /// Path of the directory for conmonrs to hold files at runtime.
     runtime_dir: PathBuf,
 
-    #[get = "pub"]
     #[arg(
         env(concat!(prefix!(), "RUNTIME_ROOT")),
         long("runtime-root"),
@@ -108,7 +97,6 @@ pub struct Config {
     /// Root directory used by the OCI runtime to operate on containers.
     runtime_root: Option<PathBuf>,
 
-    #[get_copy = "pub"]
     #[arg(
         env(concat!(prefix!(), "SKIP_FORK")),
         long("skip-fork"),
@@ -122,7 +110,6 @@ pub struct Config {
     /// (ignored for backwards compatibility)
     cgroup_manager: String,
 
-    #[get_copy = "pub"]
     #[arg(
         env(concat!(prefix!(), "ENABLE_TRACING")),
         long("enable-tracing"),
@@ -131,7 +118,6 @@ pub struct Config {
     /// Enable OpenTelemetry tracing.
     enable_tracing: bool,
 
-    #[get = "pub"]
     #[arg(
         default_value("http://127.0.0.1:4317"),
         env(concat!(prefix!(), "TRACING_ENDPOINT")),
@@ -141,6 +127,63 @@ pub struct Config {
     )]
     /// OpenTelemetry GRPC endpoint to be used for tracing.
     tracing_endpoint: String,
+}
+
+impl Config {
+    /// Possible subcommands.
+    pub fn command(&self) -> &Option<Commands> {
+        &self.command
+    }
+
+    /// Show version information.
+    pub fn version(&self) -> Option<Verbosity> {
+        self.version
+    }
+
+    /// Show version information as JSON.
+    pub fn version_json(&self) -> Option<Verbosity> {
+        self.version_json
+    }
+
+    /// The logging level.
+    pub fn log_level(&self) -> &LogLevel {
+        &self.log_level
+    }
+
+    /// The logging driver.
+    pub fn log_driver(&self) -> LogDriver {
+        self.log_driver
+    }
+
+    /// Binary path of the OCI runtime.
+    pub fn runtime(&self) -> &PathBuf {
+        &self.runtime
+    }
+
+    /// Path of the directory for conmonrs to hold files at runtime.
+    pub fn runtime_dir(&self) -> &PathBuf {
+        &self.runtime_dir
+    }
+
+    /// Root directory used by the OCI runtime.
+    pub fn runtime_root(&self) -> &Option<PathBuf> {
+        &self.runtime_root
+    }
+
+    /// Do not fork if true.
+    pub fn skip_fork(&self) -> bool {
+        self.skip_fork
+    }
+
+    /// Enable OpenTelemetry tracing.
+    pub fn enable_tracing(&self) -> bool {
+        self.enable_tracing
+    }
+
+    /// OpenTelemetry GRPC endpoint.
+    pub fn tracing_endpoint(&self) -> &str {
+        &self.tracing_endpoint
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Subcommand)]

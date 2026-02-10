@@ -71,7 +71,7 @@ fn map_fds(mappings: &mut [FdMapping], child_fds: &[RawFd]) -> io::Result<()> {
         .iter()
         .map(|m| max(m.parent_fd.as_raw_fd(), m.child_fd))
         .max()
-        .unwrap()
+        .expect("mappings is non-empty")
         + 1;
 
     for mapping in mappings.iter_mut() {

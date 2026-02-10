@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, bail};
 use capnp::enum_list::Reader;
 use conmon_common::conmon_capnp::conmon;
-use getset::{CopyGetters, Getters};
 use libc::pid_t;
 use nix::{
     mount::{MsFlags, mount, umount},
@@ -9,7 +8,6 @@ use nix::{
     sys::signal::{Signal, kill},
     unistd::{ForkResult, Gid, Pid, Uid, fork, setresgid, setresuid},
 };
-use once_cell::sync::OnceCell;
 use signal_hook::{consts::TERM_SIGNALS, iterator::Signals};
 use std::{
     env,
@@ -18,28 +16,37 @@ use std::{
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Command, exit},
+    sync::OnceLock,
 };
 use strum::{AsRefStr, Display, EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 use tracing::{debug, info, trace, warn};
 
 /// The main structure for this module.
-#[derive(Debug, CopyGetters, Getters)]
+#[derive(Debug)]
 pub struct Pause {
-    #[get = "pub"]
     base_path: PathBuf,
-
-    #[get = "pub"]
-    pod_id: String,
-
-    #[get = "pub"]
+    pod_id: Box<str>,
     namespaces: Vec<Namespace>,
-
-    #[get_copy]
     pid: Pid,
 }
 
+impl Pause {
+    pub fn base_path(&self) -> &PathBuf {
+        &self.base_path
+    }
+    pub fn pod_id(&self) -> &str {
+        &self.pod_id
+    }
+    pub fn namespaces(&self) -> &[Namespace] {
+        &self.namespaces
+    }
+    pub fn pid(&self) -> Pid {
+        self.pid
+    }
+}
+
 /// The global shared multiple pause instance.
-static PAUSE: OnceCell<Pause> = OnceCell::new();
+static PAUSE: OnceLock<Pause> = OnceLock::new();
 
 impl Pause {
     /// Retrieve the global instance of pause
@@ -50,10 +57,13 @@ impl Pause {
         uid_mappings: Vec<String>,
         gid_mappings: Vec<String>,
     ) -> Result<&'static Pause> {
-        PAUSE.get_or_try_init(|| {
-            Self::init(base_path, pod_id, namespaces, uid_mappings, gid_mappings)
-                .context("init pause")
-        })
+        if let Some(pause) = PAUSE.get() {
+            return Ok(pause);
+        }
+        let pause = Self::init(base_path, pod_id, namespaces, uid_mappings, gid_mappings)
+            .context("init pause")?;
+        let _ = PAUSE.set(pause);
+        PAUSE.get().context("pause not initialized")
     }
 
     /// Retrieve the global instance of pause if initialized.
@@ -169,7 +179,7 @@ impl Pause {
 
         Ok(Self {
             base_path,
-            pod_id: pod_id.to_owned(),
+            pod_id: pod_id.to_owned().into_boxed_str(),
             namespaces: Namespace::iter().collect(),
             pid: Pid::from_raw(pid as pid_t),
         })

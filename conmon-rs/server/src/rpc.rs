@@ -220,11 +220,8 @@ impl conmon::Server for Server {
 
         let timeout = req.get_timeout_sec();
 
-        let pidfile = pry_err!(ContainerIO::temp_file_name(
-            Some(self.config().runtime_dir()),
-            "exec_sync",
-            "pid"
-        ));
+        let pidfile =
+            ContainerIO::temp_file_name(Some(self.config().runtime_dir()), "exec_sync", "pid");
 
         debug!("Got exec sync container request with timeout {}", timeout);
 
@@ -290,7 +287,7 @@ impl conmon::Server for Server {
                         let exit_data = capnp_err!(exit_rx.recv().await)?;
                         resp.set_stdout(&stdout);
                         resp.set_stderr(&stderr);
-                        resp.set_exit_code(*exit_data.exit_code());
+                        resp.set_exit_code(exit_data.exit_code);
                         if timed_out || exit_data.timed_out {
                             resp.set_timed_out(true);
                         }
@@ -523,7 +520,7 @@ impl conmon::Server for Server {
                         container_io,
                         config,
                         cgroup_manager,
-                        id,
+                        id.into_boxed_str(),
                         command,
                         stdin,
                         stdout,

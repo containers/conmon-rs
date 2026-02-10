@@ -7,7 +7,6 @@ use crate::{
 };
 use anyhow::Result;
 use async_channel::{Receiver, Sender};
-use getset::Getters;
 use tokio::{
     process::{ChildStderr, ChildStdin, ChildStdout},
     task,
@@ -15,23 +14,29 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error};
 
-#[derive(Debug, Getters)]
+#[derive(Debug)]
 pub struct Streams {
-    #[getset(get = "pub")]
     logger: SharedContainerLog,
-
-    #[getset(get = "pub")]
     attach: SharedContainerAttach,
-
     pub message_rx_stdout: Receiver<Message>,
-
-    #[getset(get = "pub")]
     message_tx_stdout: Sender<Message>,
-
     pub message_rx_stderr: Receiver<Message>,
-
-    #[getset(get = "pub")]
     message_tx_stderr: Sender<Message>,
+}
+
+impl Streams {
+    pub fn logger(&self) -> &SharedContainerLog {
+        &self.logger
+    }
+    pub fn attach(&self) -> &SharedContainerAttach {
+        &self.attach
+    }
+    pub fn message_tx_stdout(&self) -> &Sender<Message> {
+        &self.message_tx_stdout
+    }
+    pub fn message_tx_stderr(&self) -> &Sender<Message> {
+        &self.message_tx_stderr
+    }
 }
 
 impl Streams {

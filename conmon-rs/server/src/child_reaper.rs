@@ -6,7 +6,6 @@ use crate::{
     oom_watcher::OOMWatcher,
 };
 use anyhow::{Context, Result, bail};
-use getset::{CopyGetters, Getters, Setters};
 use libc::pid_t;
 use nix::{
     errno::Errno,
@@ -37,10 +36,15 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error};
 
-#[derive(Debug, Default, Getters)]
+#[derive(Debug, Default)]
 pub struct ChildReaper {
-    #[getset(get)]
-    grandchildren: Arc<Mutex<HashMap<String, Vec<ReapableChild>>>>,
+    grandchildren: Arc<Mutex<HashMap<Box<str>, Vec<ReapableChild>>>>,
+}
+
+impl ChildReaper {
+    pub fn grandchildren(&self) -> &Arc<Mutex<HashMap<Box<str>, Vec<ReapableChild>>>> {
+        &self.grandchildren
+    }
 }
 
 /// first usable file descriptor after stdin, stdout and stderr
@@ -218,7 +222,7 @@ impl ChildReaper {
     }
 
     fn forget_grandchild(
-        locked_grandchildren: &Arc<Mutex<HashMap<String, Vec<ReapableChild>>>>,
+        locked_grandchildren: &Arc<Mutex<HashMap<Box<str>, Vec<ReapableChild>>>>,
         grandchild_pid: u32,
     ) -> Result<()> {
         let mut map = lock!(locked_grandchildren);
@@ -291,72 +295,73 @@ pub fn kill_grandchild(raw_pid: u32, s: Signal) {
 
 type TaskHandle = Arc<Mutex<Option<JoinHandle<()>>>>;
 
-#[derive(Clone, CopyGetters, Debug, Getters, Setters)]
+#[derive(Clone, Debug)]
 pub struct ReapableChild {
-    #[getset(get)]
-    exit_paths: Vec<PathBuf>,
-
-    #[getset(get)]
-    oom_exit_paths: Vec<PathBuf>,
-
-    #[getset(get_copy)]
+    exit_paths: Arc<[PathBuf]>,
+    oom_exit_paths: Arc<[PathBuf]>,
     pid: u32,
-
-    #[getset(get = "pub")]
     io: SharedContainerIO,
-
-    #[getset(get = "pub")]
     timeout: Option<Instant>,
-
-    #[getset(get = "pub")]
     token: CancellationToken,
-
     task: Option<TaskHandle>,
-
-    #[getset(get = "pub")]
-    cleanup_cmd: Vec<String>,
+    cleanup_cmd: Arc<[String]>,
 }
 
-#[derive(Clone, CopyGetters, Debug, Getters, Setters)]
+impl ReapableChild {
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub fn io(&self) -> &SharedContainerIO {
+        &self.io
+    }
+
+    pub fn timeout(&self) -> &Option<Instant> {
+        &self.timeout
+    }
+
+    pub fn token(&self) -> &CancellationToken {
+        &self.token
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct ExitChannelData {
-    #[getset(get = "pub")]
     pub exit_code: i32,
 
     #[allow(dead_code)]
-    #[getset(get = "pub")]
     pub oomed: bool,
 
-    #[getset(get = "pub")]
     pub timed_out: bool,
 }
 
 impl ReapableChild {
-    pub fn from_child(child: Child) -> (String, Self) {
+    pub fn from_child(child: Child) -> (Box<str>, Self) {
         (
             child.id,
             Self {
-                exit_paths: child.exit_paths,
-                oom_exit_paths: child.oom_exit_paths,
+                exit_paths: Arc::from(child.exit_paths),
+                oom_exit_paths: Arc::from(child.oom_exit_paths),
                 pid: child.pid,
                 io: child.io,
                 timeout: child.timeout,
                 token: child.token,
                 task: None,
-                cleanup_cmd: child.cleanup_cmd,
+                cleanup_cmd: Arc::from(child.cleanup_cmd),
             },
         )
     }
 
     fn watch(&mut self) -> Result<(Sender<ExitChannelData>, Receiver<ExitChannelData>)> {
-        let exit_paths = self.exit_paths().clone();
-        let oom_exit_paths = self.oom_exit_paths().clone();
+        let exit_paths = self.exit_paths.clone();
+        let oom_exit_paths = self.oom_exit_paths.clone();
         let pid = self.pid();
         // Only one exit code will be written.
         let (exit_tx, exit_rx) = broadcast::channel(1);
         let exit_tx_clone = exit_tx.clone();
         let timeout = *self.timeout();
         let stop_token = self.token().clone();
-        let cleanup_cmd_raw = self.cleanup_cmd().clone();
+        let cleanup_cmd_raw = self.cleanup_cmd.clone();
 
         let task = task::spawn(
             async move {

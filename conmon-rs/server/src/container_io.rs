@@ -4,7 +4,6 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use async_channel::{Receiver, Sender};
-use getset::{Getters, MutGetters};
 use nix::errno::Errno;
 use std::{
     fmt,
@@ -12,7 +11,6 @@ use std::{
     sync::Arc,
 };
 use strum::AsRefStr;
-use tempfile::Builder;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     select,
@@ -67,16 +65,26 @@ impl SharedContainerIO {
     }
 }
 
-#[derive(Debug, Getters, MutGetters)]
+#[derive(Debug)]
 pub struct ContainerIO {
-    #[getset(get = "pub", get_mut = "pub")]
     typ: ContainerIOType,
-
-    #[getset(get = "pub")]
     logger: SharedContainerLog,
-
-    #[getset(get = "pub")]
     attach: SharedContainerAttach,
+}
+
+impl ContainerIO {
+    pub fn typ(&self) -> &ContainerIOType {
+        &self.typ
+    }
+    pub fn typ_mut(&mut self) -> &mut ContainerIOType {
+        &mut self.typ
+    }
+    pub fn logger(&self) -> &SharedContainerLog {
+        &self.logger
+    }
+    pub fn attach(&self) -> &SharedContainerAttach {
+        &self.attach
+    }
 }
 
 #[derive(Debug)]
@@ -146,19 +154,13 @@ impl ContainerIO {
         })
     }
 
-    /// Generate a the temp file name without creating the file.
-    pub fn temp_file_name(directory: Option<&Path>, prefix: &str, suffix: &str) -> Result<PathBuf> {
-        let mut file = Builder::new();
-        file.prefix(prefix).suffix(suffix).rand_bytes(7);
-        let file = match directory {
-            Some(d) => file.tempfile_in(d),
-            None => file.tempfile(),
-        }
-        .context("create tempfile")?;
-
-        let path: PathBuf = file.path().into();
-        drop(file);
-        Ok(path)
+    /// Generate a unique temp file path without creating the file.
+    pub fn temp_file_name(directory: Option<&Path>, prefix: &str, suffix: &str) -> PathBuf {
+        let dir = directory
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
+        let unique = uuid::Uuid::new_v4();
+        dir.join(format!("{prefix}{unique}{suffix}"))
     }
 
     /// Retrieve clones of the stdout and stderr channels.

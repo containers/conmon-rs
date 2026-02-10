@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
 pub struct Child {
-    pub(crate) id: String,
+    pub(crate) id: Box<str>,
     pub(crate) pid: u32,
     pub(crate) exit_paths: Vec<PathBuf>,
     pub(crate) oom_exit_paths: Vec<PathBuf>,
@@ -18,7 +18,7 @@ pub struct Child {
 impl Child {
     #![allow(clippy::too_many_arguments)]
     pub fn new(
-        id: String,
+        id: impl Into<Box<str>>,
         pid: u32,
         exit_paths: Vec<PathBuf>,
         oom_exit_paths: Vec<PathBuf>,
@@ -28,7 +28,7 @@ impl Child {
         token: CancellationToken,
     ) -> Self {
         Self {
-            id,
+            id: id.into(),
             pid,
             exit_paths,
             oom_exit_paths,

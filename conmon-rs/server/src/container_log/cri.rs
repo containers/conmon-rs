@@ -2,7 +2,6 @@
 
 use crate::container_io::Pipe;
 use anyhow::{Context, Result};
-use getset::{CopyGetters, Getters, Setters};
 use memchr::memchr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -13,22 +12,18 @@ use tokio::{
 };
 use tracing::{debug, trace};
 
-#[derive(Debug, CopyGetters, Getters, Setters)]
+#[derive(Debug)]
 /// The main structure used for container log handling.
 pub struct CriLogger {
-    #[getset(get)]
     /// Path to the file on disk.
     path: PathBuf,
 
-    #[getset(set)]
     /// Open file handle of the `path`.
     file: Option<BufWriter<File>>,
 
-    #[getset(get_copy)]
     /// Maximum allowed log size in bytes.
     max_log_size: Option<usize>,
 
-    #[getset(get_copy, set)]
     /// Current bytes written to the log file.
     bytes_written: usize,
 
@@ -40,6 +35,24 @@ pub struct CriLogger {
 
     /// Last time the cached timestamp was updated
     last_timestamp_update: Instant,
+}
+
+impl CriLogger {
+    fn path(&self) -> &PathBuf {
+        &self.path
+    }
+    fn set_file(&mut self, val: Option<BufWriter<File>>) {
+        self.file = val;
+    }
+    fn max_log_size(&self) -> Option<usize> {
+        self.max_log_size
+    }
+    fn bytes_written(&self) -> usize {
+        self.bytes_written
+    }
+    fn set_bytes_written(&mut self, val: usize) {
+        self.bytes_written = val;
+    }
 }
 
 impl CriLogger {

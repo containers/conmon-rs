@@ -3,9 +3,13 @@ name = "conmon-common"
 # Version listed below is also used by .packit.sh
 version = "0.7.3"
 edition = "2024"
+license = "Apache-2.0"
 
 [dependencies]
 capnp = "0.25.0"
+
+[lints]
+workspace = true
 
 [build-dependencies]
 capnp = { version = "0.25.0", default-features = false }

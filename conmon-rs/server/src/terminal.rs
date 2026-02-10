@@ -8,7 +8,6 @@ use crate::{
 };
 use anyhow::{Context as _, Result, format_err};
 use async_channel::Receiver as UnboundedReceiver;
-use getset::{Getters, MutGetters, Setters};
 use libc::{TIOCSWINSZ, winsize};
 use nix::{
     fcntl::{self, FcntlArg, OFlag},
@@ -36,40 +35,55 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error, trace};
 
-#[derive(Debug, Getters, MutGetters, Setters)]
+#[derive(Debug)]
 pub struct Terminal {
-    #[getset(get = "pub")]
     path: PathBuf,
-
     connected_rx: Receiver<OwnedFd>,
-
-    #[getset(get = "pub", get_mut = "pub")]
     message_rx: Option<UnboundedReceiver<Message>>,
-
-    #[getset(get, set)]
     tty: Option<Weak<TerminalFd>>,
-
     logger: SharedContainerLog,
     attach: SharedContainerAttach,
 }
 
-#[derive(Debug, Getters)]
+impl Terminal {
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
+    pub fn message_rx(&self) -> &Option<UnboundedReceiver<Message>> {
+        &self.message_rx
+    }
+    pub fn message_rx_mut(&mut self) -> &mut Option<UnboundedReceiver<Message>> {
+        &mut self.message_rx
+    }
+    fn tty(&self) -> &Option<Weak<TerminalFd>> {
+        &self.tty
+    }
+    fn set_tty(&mut self, val: Option<Weak<TerminalFd>>) {
+        self.tty = val;
+    }
+}
+
+#[derive(Debug)]
 struct Config {
-    #[get]
     path: PathBuf,
-
-    #[get]
     ready_tx: StdSender<()>,
-
-    #[get]
     connected_tx: Sender<OwnedFd>,
+}
+
+impl Config {
+    fn path(&self) -> &PathBuf {
+        &self.path
+    }
+    fn ready_tx(&self) -> &StdSender<()> {
+        &self.ready_tx
+    }
 }
 
 impl Terminal {
     /// Setup a new terminal instance.
     pub fn new(logger: SharedContainerLog, attach: SharedContainerAttach) -> Result<Self> {
         debug!("Creating new terminal");
-        let path = ContainerIO::temp_file_name(None, "conmon-term-", ".sock")?;
+        let path = ContainerIO::temp_file_name(None, "conmon-term-", ".sock");
         let path_clone = path.clone();
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
