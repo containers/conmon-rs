@@ -19,7 +19,6 @@ use capnp_rpc::{RpcSystem, rpc_twoparty_capnp::Side, twoparty};
 use clap::crate_name;
 use conmon_common::conmon_capnp::conmon::{self, CgroupManager};
 use futures::{AsyncReadExt, FutureExt};
-use getset::Getters;
 use libc::_exit;
 use nix::{
     errno::Errno,
@@ -42,31 +41,51 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, prelude::*};
 use twoparty::VatNetwork;
 
-#[derive(Debug, Getters)]
+#[derive(Debug)]
 /// The main server structure.
 pub struct Server {
     /// Server configuration.
-    #[getset(get = "pub(crate)")]
     config: Arc<Config>,
 
     /// Child reaper instance.
-    #[getset(get = "pub(crate)")]
     reaper: Arc<ChildReaper>,
 
     /// Fd socket instance.
-    #[getset(get = "pub(crate)")]
     fd_socket: Arc<FdSocket>,
 
     /// OpenTelemetry tracer instance.
-    #[getset(get = "pub(crate)")]
     tracer: Option<SdkTracerProvider>,
 
     /// Streaming server instance.
-    #[getset(get = "pub(crate)")]
     streaming_server: Arc<RwLock<StreamingServer>>,
 }
 
 impl Server {
+    /// Server configuration.
+    pub(crate) fn config(&self) -> &Arc<Config> {
+        &self.config
+    }
+
+    /// Child reaper instance.
+    pub(crate) fn reaper(&self) -> &Arc<ChildReaper> {
+        &self.reaper
+    }
+
+    /// Fd socket instance.
+    pub(crate) fn fd_socket(&self) -> &Arc<FdSocket> {
+        &self.fd_socket
+    }
+
+    /// OpenTelemetry tracer instance.
+    pub(crate) fn tracer(&self) -> &Option<SdkTracerProvider> {
+        &self.tracer
+    }
+
+    /// Streaming server instance.
+    pub(crate) fn streaming_server(&self) -> &Arc<RwLock<StreamingServer>> {
+        &self.streaming_server
+    }
+
     /// Create a new `Server` instance.
     pub fn new() -> Result<Self> {
         let server = Self {

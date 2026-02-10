@@ -3,9 +3,9 @@
 Creating a new conmon-rs release can be done by proposing a PR to bump the
 versions in the following files:
 
-- [conmon-rs/common/Cargo.toml](conmon-rs/common/Cargo.toml)
-- [conmon-rs/server/Cargo.toml](conmon-rs/server/Cargo.toml)
-- [conmon-rs/client/Cargo.toml](conmon-rs/client/Cargo.toml)
+- [conmon-rs/common/Cargo.toml](conmon-rs/common/Cargo.toml) (`version`)
+- [conmon-rs/server/Cargo.toml](conmon-rs/server/Cargo.toml) (`version` and `conmon-common` dependency version)
+- [conmon-rs/client/Cargo.toml](conmon-rs/client/Cargo.toml) (`version` and `conmon-common` dependency version)
 
 After that PR being merged, an annotated tag can be pushed to the repository or
 via the GitHub UI. We usually auto-generate the changelog directly from the

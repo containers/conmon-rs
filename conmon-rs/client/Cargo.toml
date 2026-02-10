@@ -2,13 +2,16 @@
 name = "conmonrs-cli"
 version = "0.7.3"
 edition = "2024"
+license = "Apache-2.0"
+
+[lints]
+workspace = true
 
 [dependencies]
 capnp = { version = "0.25.0", default-features = false }
 capnp-rpc = { version = "0.25.0", default-features = false }
-conmon-common = { path = "../common" }
+conmon-common = { version = "0.7.3", path = "../common" }
 futures = { version = "0.3.31", default-features = false }
-log = { version = "0.4.29", default-features = false, features = ["serde", "std"] }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 tokio = { version = "1.49.0", default-features = false, features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
 tokio-util = { version = "0.7.18", default-features = false, features = ["compat"] }

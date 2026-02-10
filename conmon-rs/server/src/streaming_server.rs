@@ -78,7 +78,7 @@ struct ExecSession {
     container_io: ContainerIO,
     server_config: Arc<Config>,
     cgroup_manager: CgroupManager,
-    container_id: String,
+    container_id: Box<str>,
     command: Vec<String>,
     stdin: bool,
     stdout: bool,
@@ -98,7 +98,7 @@ struct AttachSession {
 /// Required port forward session data.
 struct PortForwardSession {
     #[allow(dead_code)]
-    net_ns_path: String,
+    net_ns_path: Box<str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,7 +215,7 @@ impl StreamingServer {
         container_io: ContainerIO,
         server_config: Arc<Config>,
         cgroup_manager: CgroupManager,
-        container_id: String,
+        container_id: Box<str>,
         command: Vec<String>,
         stdin: bool,
         stdout: bool,
@@ -271,7 +271,9 @@ impl StreamingServer {
         let uuid = Uuid::new_v4();
         state_lock.insert(
             uuid,
-            Session::PortForward(PortForwardSession { net_ns_path }),
+            Session::PortForward(PortForwardSession {
+                net_ns_path: net_ns_path.into_boxed_str(),
+            }),
         );
         self.url_for(PORT_FORWARD_PATH, &uuid)
     }
@@ -415,8 +417,7 @@ impl StreamingServer {
             Some(session.server_config.runtime_dir()),
             "exec_streaming",
             "pid",
-        )
-        .context("build pid file path")?;
+        );
 
         let args = GenerateRuntimeArgs {
             config: &session.server_config,

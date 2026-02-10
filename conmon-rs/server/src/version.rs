@@ -1,18 +1,10 @@
 //! Generic version information for conmon
 
-#![allow(clippy::uninlined_format_args)]
-#![allow(clippy::needless_raw_string_hashes)]
-
 use anyhow::{Context, Result};
-use getset::CopyGetters;
 use serde::Serialize;
-use shadow_rs::shadow;
 
-shadow!(build);
-
-#[derive(CopyGetters, Debug, Default, Eq, PartialEq, Serialize)]
-#[getset(get_copy = "pub")]
 /// The version structure.
+#[derive(Debug, Default, Eq, PartialEq, Serialize)]
 pub struct Version {
     /// Specifies if the output should contain verbose debug information.
     verbose: bool,
@@ -47,15 +39,64 @@ impl Version {
     pub fn new(verbose: bool) -> Self {
         Self {
             verbose,
-            version: build::PKG_VERSION,
-            tag: build::TAG,
-            commit: build::COMMIT_HASH,
-            build_date: build::BUILD_TIME,
-            target: build::BUILD_TARGET,
-            rust_version: build::RUST_VERSION,
-            cargo_version: build::CARGO_VERSION,
-            cargo_tree: if verbose { build::CARGO_TREE } else { "" },
+            version: env!("CARGO_PKG_VERSION"),
+            tag: env!("BUILD_TAG"),
+            commit: env!("BUILD_COMMIT"),
+            build_date: env!("BUILD_TIME"),
+            target: env!("BUILD_TARGET"),
+            rust_version: env!("BUILD_RUST_VERSION"),
+            cargo_version: env!("BUILD_CARGO_VERSION"),
+            cargo_tree: if verbose {
+                env!("BUILD_CARGO_TREE")
+            } else {
+                ""
+            },
         }
+    }
+
+    /// Whether verbose output is enabled.
+    pub fn verbose(&self) -> bool {
+        self.verbose
+    }
+
+    /// The current crate version.
+    pub fn version(&self) -> &'static str {
+        self.version
+    }
+
+    /// The tag of the build.
+    pub fn tag(&self) -> &'static str {
+        self.tag
+    }
+
+    /// The git commit SHA.
+    pub fn commit(&self) -> &'static str {
+        self.commit
+    }
+
+    /// The build date string.
+    pub fn build_date(&self) -> &'static str {
+        self.build_date
+    }
+
+    /// The target triple.
+    pub fn target(&self) -> &'static str {
+        self.target
+    }
+
+    /// The Rust version used.
+    pub fn rust_version(&self) -> &'static str {
+        self.rust_version
+    }
+
+    /// The Cargo version used.
+    pub fn cargo_version(&self) -> &'static str {
+        self.cargo_version
+    }
+
+    /// The cargo dependency tree.
+    pub fn cargo_tree(&self) -> &'static str {
+        self.cargo_tree
     }
 
     /// Print the version information to stdout.
@@ -97,13 +138,13 @@ mod tests {
     #[test]
     fn version_test() {
         let v = Version::new(false);
-        assert_eq!(v.version(), build::PKG_VERSION);
-        assert_eq!(v.tag(), build::TAG);
-        assert_eq!(v.commit(), build::COMMIT_HASH);
-        assert_eq!(v.build_date(), build::BUILD_TIME);
-        assert_eq!(v.target(), build::BUILD_TARGET);
-        assert_eq!(v.rust_version(), build::RUST_VERSION);
-        assert_eq!(v.cargo_version(), build::CARGO_VERSION);
+        assert_eq!(v.version(), env!("CARGO_PKG_VERSION"));
+        assert_eq!(v.tag(), env!("BUILD_TAG"));
+        assert_eq!(v.commit(), env!("BUILD_COMMIT"));
+        assert_eq!(v.build_date(), env!("BUILD_TIME"));
+        assert_eq!(v.target(), env!("BUILD_TARGET"));
+        assert_eq!(v.rust_version(), env!("BUILD_RUST_VERSION"));
+        assert_eq!(v.cargo_version(), env!("BUILD_CARGO_VERSION"));
         assert!(v.cargo_tree().is_empty());
 
         v.print();
@@ -112,19 +153,19 @@ mod tests {
     #[test]
     fn version_test_verbose() {
         let v = Version::new(true);
-        assert_eq!(v.cargo_tree(), build::CARGO_TREE);
+        assert_eq!(v.cargo_tree(), env!("BUILD_CARGO_TREE"));
     }
 
     #[test]
     fn version_test_json() -> Result<()> {
         let v = Version::new(false);
-        assert_eq!(v.version(), build::PKG_VERSION);
-        assert_eq!(v.tag(), build::TAG);
-        assert_eq!(v.commit(), build::COMMIT_HASH);
-        assert_eq!(v.build_date(), build::BUILD_TIME);
-        assert_eq!(v.target(), build::BUILD_TARGET);
-        assert_eq!(v.rust_version(), build::RUST_VERSION);
-        assert_eq!(v.cargo_version(), build::CARGO_VERSION);
+        assert_eq!(v.version(), env!("CARGO_PKG_VERSION"));
+        assert_eq!(v.tag(), env!("BUILD_TAG"));
+        assert_eq!(v.commit(), env!("BUILD_COMMIT"));
+        assert_eq!(v.build_date(), env!("BUILD_TIME"));
+        assert_eq!(v.target(), env!("BUILD_TARGET"));
+        assert_eq!(v.rust_version(), env!("BUILD_RUST_VERSION"));
+        assert_eq!(v.cargo_version(), env!("BUILD_CARGO_VERSION"));
         assert!(v.cargo_tree().is_empty());
 
         v.print_json()?;

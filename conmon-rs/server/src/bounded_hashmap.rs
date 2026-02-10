@@ -94,6 +94,8 @@ where
     }
 }
 
+const DEFAULT_CAPACITY: NonZeroUsize = NonZeroUsize::new(25).unwrap();
+
 impl<K, V> Default for BoundedHashMap<K, V>
 where
     K: Eq + Hash + Debug,
@@ -101,7 +103,7 @@ where
 {
     fn default() -> Self {
         Self {
-            cache: LruCache::new(NonZeroUsize::new(25).unwrap()),
+            cache: LruCache::new(DEFAULT_CAPACITY),
             max_duration: Duration::new(60 * 60, 0), // 1 hour
         }
     }

@@ -1,6 +1,5 @@
 use crate::container_io::Pipe;
 use anyhow::{Context, Result};
-use getset::{CopyGetters, Getters, Setters};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -18,18 +17,11 @@ struct LogEntry<'a> {
     message: &'a str,
 }
 
-#[derive(Debug, CopyGetters, Getters, Setters)]
+#[derive(Debug)]
 pub struct JsonLogger {
-    #[getset(get)]
     path: PathBuf,
-
-    #[getset(set)]
     file: Option<BufWriter<File>>,
-
-    #[getset(get_copy)]
     max_log_size: Option<usize>,
-
-    #[getset(get_copy, set)]
     bytes_written: usize,
 
     /// Reusable buffer for line reading to reduce allocations
@@ -37,6 +29,15 @@ pub struct JsonLogger {
 
     /// Reusable buffer for JSON serialization
     json_buf: Vec<u8>,
+}
+
+impl JsonLogger {
+    fn path(&self) -> &PathBuf {
+        &self.path
+    }
+    fn set_file(&mut self, val: Option<BufWriter<File>>) {
+        self.file = val;
+    }
 }
 
 impl JsonLogger {
@@ -157,7 +158,7 @@ mod tests {
     async fn test_json_logger_new() {
         let logger = JsonLogger::new("/tmp/test.log", Some(1000)).unwrap();
         assert_eq!(logger.path().to_str().unwrap(), "/tmp/test.log");
-        assert_eq!(logger.max_log_size().unwrap(), 1000);
+        assert_eq!(logger.max_log_size.unwrap(), 1000);
     }
 
     #[tokio::test]

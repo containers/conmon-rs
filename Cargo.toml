@@ -6,6 +6,9 @@ members = [
 	"conmon-rs/server",
 ]
 
+[workspace.lints.clippy]
+needless_return = "allow"
+
 [profile.release]
 debug = 0
 lto = true

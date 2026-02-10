@@ -203,7 +203,7 @@ impl Server {
 
             let id_and_num_fds = match n {
                 0 => break Ok(()), // EOF
-                8 => u64::from_le_bytes(buf[..8].try_into().unwrap()),
+                8 => u64::from_le_bytes(buf[..8].try_into().expect("8-byte slice")),
                 _ => continue, // ignore invalid message
             };
 
@@ -246,10 +246,13 @@ impl Server {
                     let mut chunks = buf.chunks_exact_mut(8);
                     chunks
                         .next()
-                        .unwrap()
+                        .expect("chunks has header element")
                         .copy_from_slice(&id_and_num_fds.to_le_bytes());
                     for slot in slots {
-                        chunks.next().unwrap().copy_from_slice(&slot.to_le_bytes());
+                        chunks
+                            .next()
+                            .expect("chunks has slot element")
+                            .copy_from_slice(&slot.to_le_bytes());
                     }
                     conn.send(&buf).await?;
                 }
