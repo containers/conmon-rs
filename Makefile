@@ -45,11 +45,11 @@ default: ## Build in debug mode.
 
 .PHONY: release
 release: ## Build in release mode.
-	cargo build --release --features telemetry
+	cargo build --release
 
 .PHONY: release-static
 release-static: ## Build the static release binary.
-	RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --features telemetry --target x86_64-unknown-linux-gnu
+	RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86_64-unknown-linux-gnu
 	strip -s target/x86_64-unknown-linux-gnu/release/conmonrs
 	ldd target/x86_64-unknown-linux-gnu/release/conmonrs 2>&1 | grep -qE '(statically linked)|(not a dynamic executable)'
 
