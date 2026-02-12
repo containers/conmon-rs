@@ -6,11 +6,11 @@ edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
-capnp = "0.25.0"
+capnp = "0.25.1"
 
 [lints]
 workspace = true
 
 [build-dependencies]
-capnp = { version = "0.25.0", default-features = false }
+capnp = { version = "0.25.1", default-features = false }
 capnpc = { version = "0.25.0", default-features = false }
