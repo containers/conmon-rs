@@ -8,7 +8,7 @@ license = "Apache-2.0"
 workspace = true
 
 [dependencies]
-capnp = { version = "0.25.0", default-features = false }
+capnp = { version = "0.25.1", default-features = false }
 capnp-rpc = { version = "0.25.0", default-features = false }
 conmon-common = { version = "0.7.3", path = "../common" }
 futures = { version = "0.3.31", default-features = false }

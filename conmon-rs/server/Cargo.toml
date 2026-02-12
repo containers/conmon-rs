@@ -15,7 +15,7 @@ workspace = true
 anyhow = { version = "1.0.101", default-features = false }
 async-channel = { version = "2.5.0", default-features = false, features = ["std"] }
 axum = { version = "0.8.8", default-features = false, features = ["http2", "tokio", "ws"] }
-capnp = { version = "0.25.0", default-features = false }
+capnp = { version = "0.25.1", default-features = false }
 capnp-rpc = { version = "0.25.0", default-features = false }
 clap = { version = "4.5.57", default-features = false, features = ["cargo", "derive", "env", "error-context", "help", "std", "usage"] }
 conmon-common = { version = "0.7.3", path = "../common" }
