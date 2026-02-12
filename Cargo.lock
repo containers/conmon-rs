@@ -148,9 +148,9 @@ dependencies = [
 
 [[package]]
 name = "capnp-futures"
-version = "0.25.0"
+version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9daf04715852f10ba0e2a5e5aa712968bc02f01527ec48bb74169f00c715a6cc"
+checksum = "867358df188680cff6c32d4e3c9243cd1fe5b5aa0bf3989de922a3888856f8a6"
 dependencies = [
  "capnp",
  "futures-channel",
