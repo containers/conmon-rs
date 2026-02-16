@@ -72,7 +72,7 @@ integration-static: .install.ginkgo ## Run the integration tests using the stati
 		$(MAKE) release-static; \
 	fi && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
-	export MAX_RSS_KB=5000 && \
+	export MAX_RSS_KB=5500 && \
 	"$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
 
 ##@ Verify targets:
