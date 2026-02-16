@@ -45,7 +45,7 @@ tracing = { version = "0.1.44", default-features = false }
 tracing-opentelemetry = { version = "0.32.1", default-features = false }
 tracing-subscriber = { version = "0.3.22", default-features = false, features = ["fmt"] }
 time = { version = "0.3.47", default-features = false, features = ["formatting", "local-offset", "parsing", "std"] }
-uuid = { version = "1.20.0", default-features = false, features = ["v4", "fast-rng"] }
+uuid = { version = "1.21.0", default-features = false, features = ["v4", "fast-rng"] }
 
 [dev-dependencies]
 mockall = { version = "0.14.0", default-features = false }
