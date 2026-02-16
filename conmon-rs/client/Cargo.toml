@@ -11,7 +11,7 @@ workspace = true
 capnp = { version = "0.25.1", default-features = false }
 capnp-rpc = { version = "0.25.0", default-features = false }
 conmon-common = { version = "0.7.3", path = "../common" }
-futures = { version = "0.3.31", default-features = false }
+futures = { version = "0.3.32", default-features = false }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 tokio = { version = "1.49.0", default-features = false, features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
 tokio-util = { version = "0.7.18", default-features = false, features = ["compat"] }
