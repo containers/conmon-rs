@@ -21,26 +21,7 @@ use tokio_eventfd::EventFd;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error, trace};
 
-#[cfg(all(target_os = "linux", target_env = "musl"))]
-pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as u64);
-#[cfg(all(target_os = "linux", target_arch = "s390x", not(target_env = "musl")))]
-pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as u32);
-#[cfg(all(
-    target_os = "linux",
-    any(
-        all(target_arch = "arm", not(target_env = "musl")),
-        target_arch = "x86",
-    )
-))]
-pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as i32);
-#[cfg(all(
-    target_os = "linux",
-    not(target_arch = "s390x"),
-    not(target_arch = "arm"),
-    not(target_arch = "x86"),
-    not(target_env = "musl")
-))]
-pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC);
+pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as _);
 
 static CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
