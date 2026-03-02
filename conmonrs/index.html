@@ -1,0 +1,147 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="ci gh-pages codecov dependencies builds docs go-docs"><title>conmonrs - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-b7b9f40b.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="conmonrs" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0-nightly (80381278a 2026-03-01)" data-channel="nightly" data-search-js="search-63369b7b.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-170eb4bf.js" ><script src="../static.files/storage-41dd4d93.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc mod crate"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Crate conmonrs</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../conmonrs/index.html">conmonrs</a><span class="version">0.7.3</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#obtain-the-latest-version" title="Obtain the latest version">Obtain the latest version</a></li><li><a href="#architecture" title="Architecture">Architecture</a></li><li><a href="#goals" title="Goals">Goals</a></li><li><a href="#future-development" title="Future development">Future development</a></li><li><a href="#usage" title="Usage">Usage</a><ul><li><a href="#configure-cri-o" title="Configure CRI-O">Configure CRI-O</a></li><li><a href="#configuring-to-use-with-red-hat-openshift" title="Configuring to use with Red Hat OpenShift">Configuring to use with Red Hat OpenShift</a></li></ul></li></ul><h3><a href="#structs">Crate Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1>Crate <span>conmonrs</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/conmonrs/lib.rs.html#1-38">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p align="center"><img  height="200" src="./.github/logo/conmon-rs.png"></p>
+<p><a href="https://github.com/containers/conmon-rs/actions"><img src="https://github.com/containers/conmon-rs/workflows/ci/badge.svg" alt="ci" /></a>
+<a href="https://github.com/containers/conmon-rs/actions"><img src="https://github.com/containers/conmon-rs/workflows/gh-pages/badge.svg" alt="gh-pages" /></a>
+<a href="https://codecov.io/gh/containers/conmon-rs"><img src="https://codecov.io/gh/containers/conmon-rs/branch/main/graph/badge.svg" alt="codecov" /></a>
+<a href="https://deps.rs/repo/github/containers/conmon-rs"><img src="https://deps.rs/repo/github/containers/conmon-rs/status.svg" alt="dependencies" /></a>
+<a href="https://copr.fedorainfracloud.org/coprs/rhcontainerbot/podman-next/package/conmon-rs"><img src="https://img.shields.io/badge/packages-copr-orange.svg" alt="builds" /></a>
+<a href="https://containers.github.io/conmon-rs/conmonrs/index.html"><img src="https://img.shields.io/badge/docs-main-blue.svg" alt="docs" /></a>
+<a href="https://pkg.go.dev/github.com/containers/conmon-rs/pkg/client"><img src="https://godoc.org/github.com/containers/conmon-rs?status.svg" alt="go-docs" /></a></p>
+<p>A pod level OCI container runtime monitor.</p>
+<p>The goal of this project is to provide a container monitor in Rust. The scope of conmon-rs encompasses the scope of the c iteration of
+<a href="https://github.com/containers/conmon">conmon</a>, including daemonizing, holding open container standard streams, writing the exit code.</p>
+<p>However, the goal of conmon-rs also extends past that of conmon, attempting to become a monitor for a full pod (or a group of containers).
+Instead of a container engine creating a conmon per container (as well as subsequent conmons per container exec), the engine
+will spawn a conmon-rs instance when a pod is created. That instance will listen over an UNIX domain socket for new requests to
+create containers, and exec processes within them.</p>
+<h3 id="obtain-the-latest-version"><a class="doc-anchor" href="#obtain-the-latest-version">§</a>Obtain the latest version</h3>
+<p>We provide statically linked binaries for every successfully built commit on
+<code>main</code> via our <a href="https://console.cloud.google.com/storage/browser/cri-o/conmon-rs">Google Cloud Storage Bucket</a>. Our provided <a href="scripts/get">get
+script</a> can be used to download the latest version:</p>
+<div class="example-wrap"><pre class="language-console"><code>&gt; curl https://raw.githubusercontent.com/containers/conmon-rs/main/scripts/get | bash</code></pre></div>
+<p>It is also possible to select a specific git SHA or the output binary path by:</p>
+<div class="example-wrap"><pre class="language-console"><code>&gt; curl https://raw.githubusercontent.com/containers/conmon-rs/main/scripts/get | \
+    bash -s -- -t $GIT_SHA -o $OUTPUT_PATH</code></pre></div>
+<p>The script automatically verifies the created sigstore signatures if the local
+system has <a href="https://github.com/sigstore/cosign"><code>cosign</code></a> available in its
+<code>$PATH</code>.</p>
+<p>More information about how to use conmon-rs can be found in the
+<a href="usage.md">usage documentation</a>.</p>
+<p>If you want to create a new conmon-rs release, please refer to the <a href="release.md">release
+documentation</a>.</p>
+<h3 id="architecture"><a class="doc-anchor" href="#architecture">§</a>Architecture</h3>
+<p>The whole application consists of two main components:</p>
+<ol>
+<li>The Rust server: <a href="./conmon-rs/server">conmon-rs/server</a> (<a href="https://containers.github.io/conmon-rs/conmonrs/struct.Server.html">docs</a>)</li>
+<li>A golang client: <a href="./pkg/client">pkg/client</a> (<a href="https://pkg.go.dev/github.com/containers/conmon-rs/pkg/client#ConmonClient">docs</a>)</li>
+</ol>
+<p>The golang client should act as main interface while it takes care of creating
+the server instance via the Command Line Interface (CLI) as well as
+communicating to the server via <a href="https://capnproto.org">Cap’n Proto</a>. The client
+itself hides the raw Cap’n Proto parts and exposes dedicated golang structures
+to provide a clean API surface.</p>
+<p>The following flow chart explains the client and container creation process:</p>
+<p align="center"><img src=".github/img/conmon-rs.png" height=700 width=auto></p>
+<h3 id="goals"><a class="doc-anchor" href="#goals">§</a>Goals</h3>
+<ul>
+<li><input disabled="" type="checkbox" checked=""/>
+Single conmon per pod (post MVP/stretch)</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Keeping RSS under 3-4 MB</li>
+<li><input disabled="" type="checkbox" checked=""/>
+Support exec without respawning a new conmon</li>
+<li><input disabled="" type="checkbox" checked=""/>
+API with RPC to make it extensible (should support golang clients)</li>
+<li><input disabled="" type="checkbox"/>
+Act as pid namespace init</li>
+<li><input disabled="" type="checkbox"/>
+Join network namespace to solve running hooks inside the pod context</li>
+<li><input disabled="" type="checkbox"/>
+Use pidfds (it doesn’t support getting exit code today, though)</li>
+<li><input disabled="" type="checkbox"/>
+Use io_uring</li>
+<li><input disabled="" type="checkbox"/>
+Plugin support for seccomp notification</li>
+<li><input disabled="" type="checkbox"/>
+Logging rate limiting (double buffer?)</li>
+<li><input disabled="" type="checkbox"/>
+Stats</li>
+<li><input disabled="" type="checkbox"/>
+IPv6 port forwarding</li>
+</ul>
+<h3 id="future-development"><a class="doc-anchor" href="#future-development">§</a>Future development</h3>
+<p>In the future, conmon-rs may:</p>
+<ul>
+<li>Be extended to mirror the functionality for each runtime operation.
+<ul>
+<li>Thus reducing the amount of exec calls that must happen in the container
+engine, and reducing the amount of memory it uses.</li>
+</ul>
+</li>
+<li>Be in charge of configuring the namespaces for the pod
+<ul>
+<li>Taking over functionality that
+<a href="https://github.com/cri-o/cri-o/tree/main/pinns">pinns</a> has historically
+done.</li>
+</ul>
+</li>
+</ul>
+<h2 id="usage"><a class="doc-anchor" href="#usage">§</a>Usage</h2>
+<p>To use conmon-rs with <a href="https://github.com/cri-o/cri-o">CRI-O</a>, please ensure
+that you use at least:</p>
+<ul>
+<li><a href="https://github.com/cri-o/cri-o/releases/tag/v1.25.2">CRI-O v1.25.2</a></li>
+<li><a href="https://github.com/containers/conmon-rs/releases/tag/v0.4.0">conmon-rs v0.4.0</a></li>
+</ul>
+<p>Alternatively, use their latest <code>main</code> versions which are mostly guaranteed to
+work together.</p>
+<h3 id="configure-cri-o"><a class="doc-anchor" href="#configure-cri-o">§</a>Configure CRI-O</h3>
+<p>CRI-O needs to be configured to use conmon-rs. To do this, change the runtime
+configurations <code>runtime_type</code> and optionally the <code>monitor_path</code>, for example:</p>
+<div class="example-wrap"><pre class="language-console"><code>&gt; cat /etc/crio/crio.conf.d/99-runtimes.conf</code></pre></div><div class="example-wrap"><pre class="language-toml"><code>[crio.runtime]
+default_runtime = &quot;runc&quot;
+
+[crio.runtime.runtimes.runc]
+runtime_type = &quot;pod&quot;
+monitor_path = &quot;/path/to/conmonrs&quot;  # Optional, lookup $PATH if not set</code></pre></div>
+<p>CRI-O should now use conmon-rs after a restart, which is being indicated by the
+debug logs when creating a container:</p>
+<div class="example-wrap"><pre class="language-text"><code>…
+DEBU[…] Using conmonrs version: 0.4.0, tag: none, commit: 130bd1373835cdfef8ae066a87eb4becabbe440a, \
+            build: 2022-11-09 10:36:18 +01:00, \
+            target: x86_64-unknown-linux-gnu, \
+            rustc 1.65.0 (897e37553 2022-11-02), \
+            cargo 1.65.0 (4bc8f24d3 2022-10-20)  file=&quot;oci/runtime_pod.go:100&quot;
+…</code></pre></div><h3 id="configuring-to-use-with-red-hat-openshift"><a class="doc-anchor" href="#configuring-to-use-with-red-hat-openshift">§</a>Configuring to use with Red Hat OpenShift</h3>
+<p>OpenShift 4.12 ships the latest version of conmon-rs per default. To use it,
+just apply the following <code>MachineConfig</code> (for <code>runc</code>):</p>
+<div class="example-wrap"><pre class="language-yaml"><code>apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  labels:
+    machineconfiguration.openshift.io/role: worker
+  name: 99-worker-conmonrs
+spec:
+  config:
+    ignition:
+      version: 3.2.0
+    storage:
+      files:
+        - contents:
+            source: data:,%5Bcrio.runtime.runtimes.runc%5D%0Aruntime_type%20%3D%20%22pod%22%0A
+          mode: 420
+          overwrite: true
+          path: /etc/crio/crio.conf.d/99-conmonrs.conf</code></pre></div>
+<p>The same can be done for the <code>master</code> role or any other configured runtime like
+<code>crun</code>.</p>
+<h4 id="using-a-custom-conmonrs-version"><a class="doc-anchor" href="#using-a-custom-conmonrs-version">§</a>Using a custom conmonrs version</h4>
+<p>All conmonrs commits on <code>main</code> are build via <a href="https://copr.fedorainfracloud.org/coprs/rhcontainerbot/podman-next/package/conmon-rs">fedora
+copr</a>.
+This means that it’s possible to install a custom version by running
+<code>rpm-ostree</code>, for example for RHCOS 8:</p>
+<div class="example-wrap"><pre class="language-console"><code>&gt; rpm-ostree override replace https://download.copr.fedorainfracloud.org/results/rhcontainerbot/podman-next/epel-8-x86_64/05025896-conmon-rs/conmon-rs-0.0.git.1551.130d137-1.el8.x86_64.rpm
+…
+Upgraded:
+  conmon-rs 0.4.0-2.rhaos4.12.git.el8 -&gt; 101:0.0.git.1551.130bd137-1.el8
+Use &quot;rpm-ostree override reset&quot; to undo overrides
+Run &quot;systemctl reboot&quot; to start a reboot
+&gt; systemctl reboot</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Server.html" title="struct conmonrs::Server">Server</a></dt><dd>The main server structure.</dd><dt><a class="struct" href="struct.Version.html" title="struct conmonrs::Version">Version</a></dt><dd>The version structure.</dd></dl></section></div></main></body></html>
