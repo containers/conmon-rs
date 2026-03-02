@@ -25,7 +25,7 @@ libsystemd = { version = "0.7.2", default-features = false }
 linereader = { version = "0.4.0", default-features = false }
 lru = { version = "0.16.3", default-features = false }
 memchr = { version = "2.8.0", default-features = false }
-nix = { version = "0.31.1", default-features = false, features = ["fs", "hostname", "mount", "sched", "signal", "socket", "term", "user"] }
+nix = { version = "0.31.2", default-features = false, features = ["fs", "hostname", "mount", "sched", "signal", "socket", "term", "user"] }
 notify = { version = "8.2.0", default-features = false }
 opentelemetry = { version = "0.31.0", default-features = false }
 opentelemetry_sdk = { version = "0.31.0", default-features = false, features = ["rt-tokio"] }
