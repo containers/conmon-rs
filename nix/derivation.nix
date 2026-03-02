@@ -16,7 +16,7 @@ with pkgs; rustPlatform.buildRustPackage {
       glibc
       glibc.static
     ];
-  # Fix nix crate statfs type mismatch on s390x-musl
+  # Fix nix crate statfs type mismatch on s390x-musl (for older transitive deps like nix 0.29.0)
   postPatch = lib.optionalString (stdenv.hostPlatform.isS390x && stdenv.hostPlatform.isMusl) ''
     for f in /build/cargo-vendor-dir/nix-*/src/sys/statfs.rs; do
       if [ -f "$f" ]; then
