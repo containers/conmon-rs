@@ -49,4 +49,4 @@ uuid = { version = "1.21.0", default-features = false, features = ["v4", "fast-r
 
 [dev-dependencies]
 mockall = { version = "0.14.0", default-features = false }
-tempfile = { version = "3.25.0", default-features = false }
+tempfile = { version = "3.26.0", default-features = false }
