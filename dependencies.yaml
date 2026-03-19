@@ -1,13 +1,13 @@
 ---
 dependencies:
   - name: go
-    version: 1.25
+    version: 1.26
     refPaths:
       - path: go.mod
         match: go
 
   - name: golangci-lint
-    version: 2.8.0
+    version: 2.11.3
     refPaths:
       - path: .github/workflows/ci.yml
         match: version

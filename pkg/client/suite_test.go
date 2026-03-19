@@ -58,20 +58,26 @@ func TestConmonClient(t *testing.T) {
 
 var _ = AfterSuite(func() {
 	By("printing the goroutine stack for debugging purposes")
+
 	goroutines := pprof.Lookup("goroutine")
 	Expect(goroutines.WriteTo(os.Stdout, 1)).To(Succeed())
 
 	By("Verifying that no conmonrs processes are still running in the background")
+
 	cmd := exec.CommandContext(context.Background(), "ps", "aux")
+
 	var stdout bytes.Buffer
+
 	cmd.Stdout = &stdout
 	Expect(cmd.Run()).To(Succeed())
+
 	scanner := bufio.NewScanner(strings.NewReader(stdout.String()))
 	for scanner.Scan() {
 		text := scanner.Text()
 		if strings.Contains(text, conmonBinaryKey) {
 			continue
 		}
+
 		Expect(text).NotTo(ContainSubstring(conmonPath))
 	}
 })
@@ -395,6 +401,7 @@ func (rr *RuntimeRunner) runCommand(args ...string) (string, error) {
 
 	var stderr bytes.Buffer
 
+	//nolint:gosec // test helper with controlled inputs
 	cmd := exec.CommandContext(context.Background(), runtimePath, append(rr.runtimeRootArgs(), args...)...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

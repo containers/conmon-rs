@@ -30,8 +30,11 @@ import (
 )
 
 var _ = Describe("ConmonClient", func() {
-	var tr *testRunner
-	var sut *client.ConmonClient
+	var (
+		tr  *testRunner
+		sut *client.ConmonClient
+	)
+
 	JustAfterEach(func() {
 		if sut != nil {
 			pid := sut.PID()
@@ -46,9 +49,11 @@ var _ = Describe("ConmonClient", func() {
 
 	AfterEach(func() {
 		Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID)).To(Succeed())
+
 		if sut != nil {
 			Expect(sut.Shutdown()).To(Succeed())
 		}
+
 		Expect(os.RemoveAll(tr.tmpDir)).To(Succeed())
 	})
 	Describe("New", func() {
@@ -67,6 +72,7 @@ var _ = Describe("ConmonClient", func() {
 			if verbose {
 				name += " with verbose output"
 			}
+
 			It(name, func() {
 				tr = newTestRunner()
 				tr.createRuntimeConfig(false)
@@ -226,9 +232,11 @@ var _ = Describe("ConmonClient", func() {
 					if _, err := os.Stat(tr.oomExitPath()); err == nil {
 						break
 					}
+
 					GinkgoWriter.Println("Waiting for OOM exit path to exist")
 					time.Sleep(time.Second)
 				}
+
 				Expect(fileContents(tr.oomExitPath())).To(BeEmpty())
 			})
 
@@ -280,9 +288,11 @@ var _ = Describe("ConmonClient", func() {
 				var wg sync.WaitGroup
 				for i := range 10 {
 					wg.Add(1)
+
 					go func(i int) {
 						defer GinkgoRecover()
 						defer wg.Done()
+
 						result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
 							ID:       tr.ctrID,
 							Command:  []string{"/busybox", "echo", "-n", "hello", "world", strconv.Itoa(i)},
@@ -295,6 +305,7 @@ var _ = Describe("ConmonClient", func() {
 						GinkgoWriter.Println("done with", i, string(result.Stdout))
 					}(i)
 				}
+
 				wg.Wait()
 			})
 
@@ -356,6 +367,7 @@ var _ = Describe("ConmonClient", func() {
 					ID: tr.ctrID,
 				})
 				Expect(err).To(Succeed())
+
 				logs := fileContents(tr.logPath())
 				Expect(logs).To(BeEmpty())
 			})
@@ -396,10 +408,12 @@ var _ = Describe("ConmonClient", func() {
 
 				Expect(err).To(Succeed())
 				Expect(result.ExitCode).To(BeEquivalentTo(127))
+
 				expectedStr := "invalid: applet not found"
 				if terminal {
 					expectedStr += "\r"
 				}
+
 				expectedStr += "\n"
 				if terminal {
 					Expect(result.Stdout).To(BeEquivalentTo(expectedStr))
@@ -486,6 +500,7 @@ var _ = Describe("ConmonClient", func() {
 
 		BeforeEach(func() {
 			cmd := exec.Command(contribTracingPath + "start")
+
 			fmt.Fprintln(os.Stdout)
 			cmd.Stdout = os.Stdout
 			Expect(cmd.Run()).To(Succeed())
@@ -494,6 +509,7 @@ var _ = Describe("ConmonClient", func() {
 		hasTraces := func() bool {
 			resp, err := http.Get("http://localhost:16686/api/traces?service=conmonrs")
 			Expect(err).NotTo(HaveOccurred())
+
 			defer resp.Body.Close()
 
 			body, err := io.ReadAll(resp.Body)
@@ -502,6 +518,7 @@ var _ = Describe("ConmonClient", func() {
 			type traceData struct {
 				Data []any `json:"data"`
 			}
+
 			traces := &traceData{}
 			Expect(json.Unmarshal(body, traces)).NotTo(HaveOccurred())
 
@@ -604,6 +621,7 @@ var _ = Describe("ConmonClient", func() {
 				Expect(err).To(Succeed())
 
 				const basePath = "/var/run/"
+
 				switch i {
 				case 0:
 					Expect(ns.Path).To(ContainSubstring(basePath + "ipcns/"))
@@ -626,6 +644,7 @@ var _ = Describe("ConmonClient", func() {
 
 			basePath := MustTempDir("ns-test-")
 			defer os.RemoveAll(basePath)
+
 			podID := uuid.New().String()
 
 			uids := []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}}
@@ -685,11 +704,14 @@ var _ = Describe("ConmonClient", func() {
 })
 
 var _ = Describe("JSONLogger", func() {
-	var tr *testRunner
-	var sut *client.ConmonClient
+	var (
+		tr  *testRunner
+		sut *client.ConmonClient
+	)
 
 	AfterEach(func() {
 		Expect(os.RemoveAll(tr.tmpDir)).To(Succeed())
+
 		if sut != nil {
 			Expect(sut.Shutdown()).To(Succeed())
 		}
@@ -733,8 +755,10 @@ var _ = Describe("JSONLogger", func() {
 })
 
 var _ = Describe("JournaldLogger", func() {
-	var tr *testRunner
-	var sut *client.ConmonClient
+	var (
+		tr  *testRunner
+		sut *client.ConmonClient
+	)
 
 	AfterEach(func() {
 		if sut != nil {
@@ -767,6 +791,7 @@ var _ = Describe("JournaldLogger", func() {
 				stdout := strings.Builder{}
 				cmd.Stdout = &stdout
 				Expect(cmd.Run()).NotTo(HaveOccurred())
+
 				res := stdout.String()
 				Expect(res).To(ContainSubstring("hello world"))
 				Expect(res).To(ContainSubstring("foo bar"))
@@ -783,9 +808,11 @@ var _ = Describe("StreamingServer", func() {
 
 	AfterEach(func() {
 		Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID)).To(Succeed())
+
 		if sut != nil {
 			Expect(sut.Shutdown()).To(Succeed())
 		}
+
 		Expect(os.RemoveAll(tr.tmpDir)).To(Succeed())
 	})
 
