@@ -29,7 +29,7 @@ nix = { version = "0.31.2", default-features = false, features = ["fs", "hostnam
 notify = { version = "8.2.0", default-features = false }
 opentelemetry = { version = "0.31.0", default-features = false }
 opentelemetry_sdk = { version = "0.31.0", default-features = false, features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.31.0", default-features = false, features = ["grpc-tonic", "trace"] }
+opentelemetry-otlp = { version = "0.31.1", default-features = false, features = ["grpc-tonic", "trace"] }
 opentelemetry-semantic-conventions = { version = "0.31.0", default-features = false, features = ["semconv_experimental"] }
 sendfd = { version = "0.4.4", default-features = false, features = ["tokio"] }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
