@@ -1,6 +1,6 @@
 [package]
 name = "conmonrs"
-version = "0.7.3"
+version = "0.8.0"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -18,7 +18,7 @@ axum = { version = "0.8.8", default-features = false, features = ["http2", "toki
 capnp = { version = "0.25.2", default-features = false }
 capnp-rpc = { version = "0.25.0", default-features = false }
 clap = { version = "4.6.0", default-features = false, features = ["cargo", "derive", "env", "error-context", "help", "std", "usage"] }
-conmon-common = { version = "0.7.3", path = "../common" }
+conmon-common = { version = "0.8.0", path = "../common" }
 futures = { version = "0.3.32", default-features = false }
 libc = { version = "0.2.183", default-features = false }
 libsystemd = { version = "0.7.2", default-features = false }
