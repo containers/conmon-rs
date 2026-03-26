@@ -160,5 +160,4 @@ rpm: # Build the RPM locally
 
 .PHONY: nixpkgs
 nixpkgs: ## Update the NIX package dependencies.
-	@nix run -f channel:nixpkgs-unstable nix-prefetch-git -- \
-		--no-deepClone https://github.com/nixos/nixpkgs > nix/nixpkgs.json
+	@nix flake update

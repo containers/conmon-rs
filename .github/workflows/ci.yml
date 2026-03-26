@@ -152,7 +152,7 @@ jobs:
           name: conmon-rs
           authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
           pushFilter: "(conmon-rs)"
-      - run: nix-build nix/default-${{ matrix.arch }}.nix
+      - run: nix build .#${{ matrix.arch }}
       - run: file result/bin/conmonrs | grep static | grep stripped
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
