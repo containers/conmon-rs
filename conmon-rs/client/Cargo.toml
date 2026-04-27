@@ -8,10 +8,10 @@ license = "Apache-2.0"
 workspace = true
 
 [dependencies]
-capnp = { version = "0.25.3", default-features = false }
+capnp = { version = "0.25.4", default-features = false }
 capnp-rpc = { version = "0.25.0", default-features = false }
 conmon-common = { version = "0.8.0", path = "../common" }
 futures = { version = "0.3.32", default-features = false }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
-tokio = { version = "1.50.0", default-features = false, features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
+tokio = { version = "1.51.1", default-features = false, features = ["fs", "macros", "net", "process", "rt", "signal", "time"] }
 tokio-util = { version = "0.7.18", default-features = false, features = ["compat"] }
