@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 capnp = { version = "0.25.4", default-features = false }
-capnp-rpc = { version = "0.25.0", default-features = false }
+capnp-rpc = { version = "0.25.1", default-features = false }
 conmon-common = { version = "0.8.0", path = "../common" }
 futures = { version = "0.3.32", default-features = false }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
