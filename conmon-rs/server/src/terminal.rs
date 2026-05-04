@@ -267,13 +267,16 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_file(self.path()) {
-            trace!(
-                "Unable to remove socket file path {}: {}",
-                self.path().display(),
-                e
-            )
-        }
+        let path = self.path().to_path_buf();
+        task::spawn(async move {
+            if let Err(e) = fs::remove_file(&path).await {
+                trace!(
+                    "Unable to remove socket file path {}: {}",
+                    path.display(),
+                    e
+                )
+            }
+        });
     }
 }
 
