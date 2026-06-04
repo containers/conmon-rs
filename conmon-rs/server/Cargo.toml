@@ -14,7 +14,7 @@ workspace = true
 [dependencies]
 anyhow = { version = "1.0.102", default-features = false }
 async-channel = { version = "2.5.0", default-features = false, features = ["std"] }
-axum = { version = "0.8.8", default-features = false, features = ["http2", "tokio", "ws"] }
+axum = { version = "0.8.8", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
 capnp = { version = "0.25.5", default-features = false }
 capnp-rpc = { version = "0.25.1", default-features = false }
 clap = { version = "4.6.0", default-features = false, features = ["cargo", "derive", "env", "error-context", "help", "std", "usage"] }
@@ -27,10 +27,10 @@ lru = { version = "0.18.0", default-features = false }
 memchr = { version = "2.8.1", default-features = false }
 nix = { version = "0.31.3", default-features = false, features = ["fs", "hostname", "mount", "sched", "signal", "socket", "term", "user"] }
 notify = { version = "8.2.0", default-features = false }
-opentelemetry = { version = "0.32.0", default-features = false }
-opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "trace"] }
-opentelemetry-semantic-conventions = { version = "0.32.0", default-features = false, features = ["semconv_experimental"] }
+opentelemetry = { version = "0.32.0", default-features = false, optional = true }
+opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "trace"], optional = true }
+opentelemetry-semantic-conventions = { version = "0.32.0", default-features = false, features = ["semconv_experimental"], optional = true }
 sendfd = { version = "0.4.4", default-features = false, features = ["tokio"] }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.150", default-features = false, features = ["std"] }
@@ -42,10 +42,20 @@ tokio-seqpacket = { version = "0.8.2", default-features = false }
 tokio-util = { version = "0.7.18", default-features = false, features = ["compat"] }
 tower-http = { version = "0.6.11", default-features = false, features = ["trace"] }
 tracing = { version = "0.1.44", default-features = false }
-tracing-opentelemetry = { version = "0.33.0", default-features = false }
+tracing-opentelemetry = { version = "0.33.0", default-features = false, optional = true }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt"] }
 time = { version = "0.3.47", default-features = false, features = ["formatting", "local-offset", "parsing", "std"] }
 uuid = { version = "1.23.2", default-features = false, features = ["v4", "fast-rng"] }
+
+[features]
+default = []
+tracing = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:opentelemetry-semantic-conventions",
+    "dep:tracing-opentelemetry",
+]
 
 [dev-dependencies]
 mockall = { version = "0.14.0", default-features = false }

@@ -1,3 +1,5 @@
+#[cfg(feature = "tracing")]
+use crate::telemetry::Telemetry;
 use crate::{
     capnp_util,
     child::Child,
@@ -5,7 +7,6 @@ use crate::{
     container_log::ContainerLog,
     pause::Pause,
     server::{GenerateRuntimeArgs, Server},
-    telemetry::Telemetry,
     version::Version,
 };
 use anyhow::{Context, format_err};
@@ -33,6 +34,20 @@ macro_rules! capnp_err {
     ($x:expr_2021) => {
         $x.map_err(|e| Error::failed(format!("{:#}", e)))
     };
+}
+
+#[cfg(feature = "tracing")]
+fn set_parent_context(
+    reader: capnp::struct_list::Reader<'_, conmon::text_text_map_entry::Owned>,
+) -> Result<(), Error> {
+    Telemetry::set_parent_context(reader).map_err(|e| Error::failed(format!("{:#}", e)))
+}
+
+#[cfg(not(feature = "tracing"))]
+fn set_parent_context(
+    _reader: capnp::struct_list::Reader<'_, conmon::text_text_map_entry::Owned>,
+) -> Result<(), Error> {
+    Ok(())
 }
 
 macro_rules! new_root_span {
@@ -87,7 +102,7 @@ impl conmon::Server for Server {
 
         let span = debug_span!("version", uuid = %Uuid::new_v4());
         let _enter = span.enter();
-        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+        pry!(set_parent_context(pry!(req.get_metadata())));
 
         let version = Version::new(req.get_verbose());
         let mut response = results.get().init_response();
@@ -115,7 +130,7 @@ impl conmon::Server for Server {
 
         let span = new_root_span!("create_container", id.as_str());
         let _enter = span.enter();
-        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+        pry!(set_parent_context(pry!(req.get_metadata())));
 
         let cleanup_cmd: Vec<String> = capnp_vec_str!(req.get_cleanup_cmd());
 
@@ -216,7 +231,7 @@ impl conmon::Server for Server {
 
         let span = new_root_span!("exec_sync_container", id.as_str());
         let _enter = span.enter();
-        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+        pry!(set_parent_context(pry!(req.get_metadata())));
 
         let timeout = req.get_timeout_sec();
 
@@ -315,7 +330,7 @@ impl conmon::Server for Server {
 
         let span = new_root_span!("attach_container", id);
         let _enter = span.enter();
-        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+        pry!(set_parent_context(pry!(req.get_metadata())));
 
         debug!("Got a attach container request",);
 
@@ -354,7 +369,7 @@ impl conmon::Server for Server {
 
         let span = new_root_span!("reopen_log_container", id);
         let _enter = span.enter();
-        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+        pry!(set_parent_context(pry!(req.get_metadata())));
 
         debug!("Got a reopen container log request");
 
@@ -377,7 +392,7 @@ impl conmon::Server for Server {
 
         let span = new_root_span!("set_window_size_container", id);
         let _enter = span.enter();
-        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+        pry!(set_parent_context(pry!(req.get_metadata())));
 
         debug!("Got a set window size container request");
 
@@ -407,7 +422,7 @@ impl conmon::Server for Server {
 
         let span = new_root_span!("create_namespaces", pod_id);
         let _enter = span.enter();
-        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+        pry!(set_parent_context(pry!(req.get_metadata())));
 
         let pause = pry_err!(Pause::init_shared(
             pry!(pry!(req.get_base_path()).to_str()),
@@ -447,7 +462,7 @@ impl conmon::Server for Server {
             uuid = %Uuid::new_v4()
         );
         let _enter = span.enter();
-        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+        pry!(set_parent_context(pry!(req.get_metadata())));
 
         debug!("Got a start fd socket request");
 
@@ -480,7 +495,7 @@ impl conmon::Server for Server {
             uuid = %Uuid::new_v4()
         );
         let _enter = span.enter();
-        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+        pry!(set_parent_context(pry!(req.get_metadata())));
 
         let id = pry_err!(pry_err!(req.get_id()).to_string());
 
@@ -548,7 +563,7 @@ impl conmon::Server for Server {
             uuid = %Uuid::new_v4()
         );
         let _enter = span.enter();
-        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+        pry!(set_parent_context(pry!(req.get_metadata())));
 
         let id = pry_err!(pry_err!(req.get_id()).to_str());
         let (stdin, stdout, stderr) = (req.get_stdin(), req.get_stdout(), req.get_stderr());
@@ -593,7 +608,7 @@ impl conmon::Server for Server {
             uuid = %Uuid::new_v4()
         );
         let _enter = span.enter();
-        pry_err!(Telemetry::set_parent_context(pry!(req.get_metadata())));
+        pry!(set_parent_context(pry!(req.get_metadata())));
 
         let net_ns_path = pry_err!(pry_err!(req.get_net_ns_path()).to_string());
         let streaming_server = self.streaming_server().clone();

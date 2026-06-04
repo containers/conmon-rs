@@ -110,6 +110,7 @@ pub struct Config {
     /// (ignored for backwards compatibility)
     cgroup_manager: String,
 
+    #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
     #[arg(
         env(concat!(prefix!(), "ENABLE_TRACING")),
         long("enable-tracing"),
@@ -118,6 +119,7 @@ pub struct Config {
     /// Enable OpenTelemetry tracing.
     enable_tracing: bool,
 
+    #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
     #[arg(
         default_value("http://127.0.0.1:4317"),
         env(concat!(prefix!(), "TRACING_ENDPOINT")),
@@ -176,11 +178,13 @@ impl Config {
     }
 
     /// Enable OpenTelemetry tracing.
+    #[cfg(feature = "tracing")]
     pub fn enable_tracing(&self) -> bool {
         self.enable_tracing
     }
 
     /// OpenTelemetry GRPC endpoint.
+    #[cfg(feature = "tracing")]
     pub fn tracing_endpoint(&self) -> &str {
         &self.tracing_endpoint
     }
