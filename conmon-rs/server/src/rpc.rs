@@ -4,7 +4,7 @@ use crate::{
     capnp_util,
     child::Child,
     container_io::{ContainerIO, SharedContainerIO},
-    container_log::ContainerLog,
+    container_log::SharedContainerLog,
     pause::Pause,
     server::{GenerateRuntimeArgs, Server},
     version::Version,
@@ -137,7 +137,7 @@ impl conmon::Server for Server {
         debug!("Got a create container request");
 
         let log_drivers = pry!(req.get_log_drivers());
-        let container_log = pry_err!(ContainerLog::from(log_drivers));
+        let container_log = pry_err!(SharedContainerLog::from(log_drivers));
         let mut container_io =
             pry_err!(ContainerIO::new(req.get_terminal(), container_log.clone()));
 
@@ -168,8 +168,6 @@ impl conmon::Server for Server {
 
         Promise::from_future(
             async move {
-                capnp_err!(container_log.write().await.init().await)?;
-
                 let (grandchild_pid, token) = capnp_err!(match child_reaper
                     .create_child(
                         runtime,
@@ -243,7 +241,7 @@ impl conmon::Server for Server {
         let runtime = self.config().runtime().clone();
         let child_reaper = self.reaper().clone();
 
-        let logger = ContainerLog::new();
+        let logger = SharedContainerLog::new();
         let mut container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger));
 
         let command = pry!(req.get_command());
@@ -376,7 +374,7 @@ impl conmon::Server for Server {
         let child = pry_err!(self.reaper().get(id));
 
         Promise::from_future(
-            async move { capnp_err!(child.io().logger().await.write().await.reopen().await) }
+            async move { capnp_err!(child.io().logger().await.reopen().await) }
                 .instrument(debug_span!("promise")),
         )
     }
@@ -512,7 +510,7 @@ impl conmon::Server for Server {
 
         let streaming_server = self.streaming_server().clone();
         let child_reaper = self.reaper().clone();
-        let container_io = pry_err!(ContainerIO::new(tty, ContainerLog::new()));
+        let container_io = pry_err!(ContainerIO::new(tty, SharedContainerLog::new()));
         let config = self.config().clone();
         let cgroup_manager = pry!(req.get_cgroup_manager());
 

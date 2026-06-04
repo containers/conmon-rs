@@ -283,13 +283,13 @@ impl Drop for Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::container_log::ContainerLog;
+    use crate::container_log::SharedContainerLog;
     use nix::pty;
     use sendfd::SendWithFd;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn new_success() -> Result<()> {
-        let logger = ContainerLog::new();
+        let logger = SharedContainerLog::new();
         let attach = SharedContainerAttach::default();
         let token = CancellationToken::new();
 

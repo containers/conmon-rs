@@ -283,19 +283,13 @@ impl ContainerIO {
 
                 Ok(n) => {
                     trace!("Read {} bytes", n);
-                    let data = &buf[..n];
+                    let data_arc: Arc<[u8]> = Arc::from(&buf[..n]);
 
-                    let mut locked_logger = logger.write().await;
-                    locked_logger
-                        .write(pipe, data)
+                    logger
+                        .send(pipe, Arc::clone(&data_arc))
                         .await
-                        .context("write to log file")?;
+                        .context("send to log writer")?;
 
-                    // Use Arc to share data between attach and message channel
-                    // without cloning the buffer contents
-                    let data_arc: Arc<[u8]> = Arc::from(data);
-
-                    // Only send to attach if there are active attach clients
                     if attach.has_readers() {
                         attach
                             .write(Message::Data(Arc::clone(&data_arc), pipe))

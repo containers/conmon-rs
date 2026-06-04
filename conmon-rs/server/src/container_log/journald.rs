@@ -1,10 +1,6 @@
 use crate::{container_io::Pipe, journal::Journal};
 use anyhow::{Context, Result};
 use std::io::Write;
-use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt},
-    task,
-};
 use tracing::debug;
 
 #[derive(Debug)]
@@ -15,30 +11,22 @@ impl JournaldLogger {
         Ok(Self)
     }
 
-    pub async fn init(&mut self) -> Result<()> {
+    pub fn init(&mut self) -> Result<()> {
         debug!("Initializing journald logger");
         Ok(())
     }
 
-    pub async fn write<T>(&mut self, _: Pipe, mut bytes: T) -> Result<()>
-    where
-        T: AsyncBufRead + Unpin,
-    {
-        let mut line_buf = String::new();
-        while bytes.read_line(&mut line_buf).await? > 0 {
-            let line = std::mem::take(&mut line_buf);
-            task::spawn_blocking(move || {
-                Journal
-                    .write_all(line.as_bytes())
-                    .context("write to journal")
-            })
-            .await
-            .context("journal spawn_blocking")??;
+    pub fn write(&mut self, _: Pipe, data: &[u8]) -> Result<()> {
+        let text = String::from_utf8_lossy(data);
+        for line in text.lines() {
+            Journal
+                .write_all(line.as_bytes())
+                .context("write to journal")?;
         }
         Ok(())
     }
 
-    pub async fn reopen(&mut self) -> Result<()> {
+    pub fn reopen(&mut self) -> Result<()> {
         debug!("Reopen journald log");
         Ok(())
     }
@@ -47,39 +35,43 @@ impl JournaldLogger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
 
-    #[tokio::test]
-    async fn test_journald_logger_new() {
+    #[test]
+    fn test_journald_logger_new() {
         JournaldLogger::new(Some(1000)).unwrap();
     }
 
-    #[tokio::test]
-    async fn test_journald_logger_init() {
+    #[test]
+    fn test_journald_logger_init() {
         let mut logger = JournaldLogger::new(Some(1000)).unwrap();
-        assert!(logger.init().await.is_ok());
+        assert!(logger.init().is_ok());
     }
 
-    #[tokio::test]
-    async fn test_journald_logger_write() {
+    #[test]
+    fn test_journald_logger_write() {
         let mut logger = JournaldLogger::new(Some(1000)).unwrap();
-        logger.init().await.unwrap();
+        logger.init().unwrap();
 
-        let cursor = Cursor::new(b"Test log message\n".to_vec());
-        assert!(logger.write(Pipe::StdOut, cursor).await.is_ok());
+        assert!(logger.write(Pipe::StdOut, b"Test log message\n").is_ok());
     }
 
-    #[tokio::test]
-    async fn test_journald_logger_reopen() {
+    #[test]
+    fn test_journald_logger_reopen() {
         let mut logger = JournaldLogger::new(Some(1000)).unwrap();
-        logger.init().await.unwrap();
+        logger.init().unwrap();
 
-        let cursor = Cursor::new(b"Test log message before reopen\n".to_vec());
-        assert!(logger.write(Pipe::StdOut, cursor).await.is_ok());
+        assert!(
+            logger
+                .write(Pipe::StdOut, b"Test log message before reopen\n")
+                .is_ok()
+        );
 
-        assert!(logger.reopen().await.is_ok());
+        assert!(logger.reopen().is_ok());
 
-        let cursor = Cursor::new(b"Test log message after reopen\n".to_vec());
-        assert!(logger.write(Pipe::StdOut, cursor).await.is_ok());
+        assert!(
+            logger
+                .write(Pipe::StdOut, b"Test log message after reopen\n")
+                .is_ok()
+        );
     }
 }

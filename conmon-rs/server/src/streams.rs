@@ -117,7 +117,7 @@ impl Streams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::container_log::ContainerLog;
+    use crate::container_log::SharedContainerLog;
     use anyhow::{Context, bail};
     use std::{process::Stdio, str::from_utf8};
     use tokio::process::Command;
@@ -131,7 +131,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn new_success() -> Result<()> {
-        let logger = ContainerLog::new();
+        let logger = SharedContainerLog::new();
         let attach = SharedContainerAttach::default();
         let token = CancellationToken::new();
 
