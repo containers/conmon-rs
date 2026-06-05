@@ -445,8 +445,18 @@ impl StreamingServer {
             .await
             .context("create new child process")?;
 
+        // Extract values we need for the I/O loop
+        let stdin_enabled = session.stdin;
+        let stdout_enabled = session.stdout;
+        let stderr_enabled = session.stderr;
+
         let container_id = session.container_id;
         let io = SharedContainerIO::new(session.container_io);
+        let child_reaper = session.child_reaper.clone();
+
+        // Session fields are now extracted or moved; it will be dropped at end of this scope
+        // before the I/O loop, freeing server_config Arc, cgroup_manager, and command Vec
+
         let child = Child::new(
             container_id,
             grandchild_pid,
@@ -458,8 +468,7 @@ impl StreamingServer {
             token.clone(),
         );
 
-        let mut exit_rx = session
-            .child_reaper
+        let mut exit_rx = child_reaper
             .watch_grandchild(child, vec![])
             .context("watch grandchild for pid")?;
 
@@ -470,9 +479,12 @@ impl StreamingServer {
 
         let attach = io.attach().await;
 
+        // Preallocate frame buffer for WebSocket framing (reused throughout the loop)
+        let mut frame_buffer = Vec::with_capacity(8192 + 1);
+
         loop {
             tokio::select! {
-                Some(data) = stdin_rx.recv()  => if session.stdin {
+                Some(data) = stdin_rx.recv()  => if stdin_enabled {
                     // First element is the message type indicator
                     if let Some((&msg_type, payload)) = data.split_first() {
                         match msg_type {
@@ -494,13 +506,13 @@ impl StreamingServer {
                     }
                 },
 
-                Ok(IOMessage::Data(data, _)) = stdout_rx.recv() => if session.stdout {
-                    Self::frame_and_send(STDOUT_BYTE, &data, sender).await
+                Ok(IOMessage::Data(data, _)) = stdout_rx.recv() => if stdout_enabled {
+                    Self::frame_and_send_reuse(STDOUT_BYTE, &data, sender, &mut frame_buffer).await
                         .context("send to stdout")?;
                 },
 
-                Ok(IOMessage::Data(data, _)) = stderr_rx.recv() => if session.stderr {
-                    Self::frame_and_send(STDERR_BYTE, &data, sender).await
+                Ok(IOMessage::Data(data, _)) = stderr_rx.recv() => if stderr_enabled {
+                    Self::frame_and_send_reuse(STDERR_BYTE, &data, sender, &mut frame_buffer).await
                         .context("send to stderr")?;
                 },
 
@@ -525,7 +537,15 @@ impl StreamingServer {
         sender: &mut SplitSink<WebSocket, Message>,
         mut stdin_rx: MpscReceiver<Vec<u8>>,
     ) -> Result<()> {
+        // Extract values we need for the I/O loop
+        let stdin_enabled = session.stdin;
+        let stdout_enabled = session.stdout;
+        let stderr_enabled = session.stderr;
         let io = session.child.io();
+        let token = session.child.token();
+
+        // Session fields are now extracted; it will be dropped at end of this scope
+        // before the I/O loop, freeing the child ReapableChild
 
         let (stdout_rx, stderr_rx) = io
             .stdio()
@@ -534,9 +554,12 @@ impl StreamingServer {
 
         let attach = io.attach().await;
 
+        // Preallocate frame buffer for WebSocket framing (reused throughout the loop)
+        let mut frame_buffer = Vec::with_capacity(8192 + 1);
+
         loop {
             tokio::select! {
-                Some(data) = stdin_rx.recv()  => if session.stdin {
+                Some(data) = stdin_rx.recv()  => if stdin_enabled {
                     // First element is the message type indicator
                     if let Some((&msg_type, payload)) = data.split_first() {
                         match msg_type {
@@ -558,17 +581,17 @@ impl StreamingServer {
                     }
                 },
 
-                Ok(IOMessage::Data(data, _)) = stdout_rx.recv() => if session.stdout {
-                    Self::frame_and_send(STDOUT_BYTE, &data, sender).await
+                Ok(IOMessage::Data(data, _)) = stdout_rx.recv() => if stdout_enabled {
+                    Self::frame_and_send_reuse(STDOUT_BYTE, &data, sender, &mut frame_buffer).await
                         .context("send to stdout")?;
                 },
 
-                Ok(IOMessage::Data(data, _)) = stderr_rx.recv() => if session.stderr {
-                    Self::frame_and_send(STDERR_BYTE, &data, sender).await
+                Ok(IOMessage::Data(data, _)) = stderr_rx.recv() => if stderr_enabled {
+                    Self::frame_and_send_reuse(STDERR_BYTE, &data, sender, &mut frame_buffer).await
                         .context("send to stderr")?;
                 },
 
-                _ = session.child.token().cancelled() => {
+                _ = token.cancelled() => {
                     debug!("Exiting streaming attach because token cancelled");
                     break
                 }
@@ -588,16 +611,18 @@ impl StreamingServer {
     }
 
     /// Prepend a stream type byte and send the data over WebSocket.
-    async fn frame_and_send(
+    /// Reuses the provided frame_buffer to avoid repeated allocations.
+    async fn frame_and_send_reuse(
         stream_byte: u8,
         data: &[u8],
         sender: &mut SplitSink<WebSocket, Message>,
+        frame_buffer: &mut Vec<u8>,
     ) -> Result<()> {
-        let mut framed = Vec::with_capacity(1 + data.len());
-        framed.push(stream_byte);
-        framed.extend_from_slice(data);
+        frame_buffer.clear();
+        frame_buffer.push(stream_byte);
+        frame_buffer.extend_from_slice(data);
         sender
-            .send(Message::Binary(framed.into()))
+            .send(Message::Binary(frame_buffer.clone().into()))
             .await
             .context("send framed data")
     }
