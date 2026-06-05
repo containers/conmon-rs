@@ -1,5 +1,7 @@
 #![deny(missing_docs)]
 
+#[cfg(feature = "tracing")]
+use crate::telemetry::Telemetry;
 use crate::{
     child_reaper::ChildReaper,
     config::{Commands, Config, LogDriver, LogLevel, Verbosity},
@@ -10,12 +12,12 @@ use crate::{
     listener::{DefaultListener, Listener},
     pause::Pause,
     streaming_server::StreamingServer,
-    telemetry::Telemetry,
     version::Version,
 };
 use anyhow::{Context, Result, format_err};
 use capnp::text_list::Reader;
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp::Side, twoparty};
+#[cfg(feature = "tracing")]
 use clap::crate_name;
 use conmon_common::conmon_capnp::conmon::{self, CgroupManager};
 use futures::{AsyncReadExt, FutureExt};
@@ -25,7 +27,9 @@ use nix::{
     sys::signal::Signal,
     unistd::{ForkResult, fork},
 };
+#[cfg(feature = "tracing")]
 use opentelemetry::trace::{FutureExt as OpenTelemetryFutureExt, TracerProvider};
+#[cfg(feature = "tracing")]
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use std::{fs::File, io::Write, path::Path, process, str::FromStr, sync::Arc};
 use tokio::{
@@ -37,6 +41,7 @@ use tokio::{
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{Instrument, debug, debug_span, info};
+#[cfg(feature = "tracing")]
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, prelude::*};
 use twoparty::VatNetwork;
@@ -54,6 +59,7 @@ pub struct Server {
     fd_socket: Arc<FdSocket>,
 
     /// OpenTelemetry tracer instance.
+    #[cfg(feature = "tracing")]
     tracer: Option<SdkTracerProvider>,
 
     /// Streaming server instance.
@@ -77,6 +83,7 @@ impl Server {
     }
 
     /// OpenTelemetry tracer instance.
+    #[cfg(feature = "tracing")]
     pub(crate) fn tracer(&self) -> &Option<SdkTracerProvider> {
         &self.tracer
     }
@@ -92,6 +99,7 @@ impl Server {
             config: Arc::new(Config::default()),
             reaper: Default::default(),
             fd_socket: Default::default(),
+            #[cfg(feature = "tracing")]
             tracer: Default::default(),
             streaming_server: Default::default(),
         };
@@ -162,6 +170,7 @@ impl Server {
             return Err(Errno::last()).context("set child subreaper");
         }
 
+        #[cfg(feature = "tracing")]
         let tracer = self.tracer().clone();
 
         let worker_threads = std::thread::available_parallelism()
@@ -179,6 +188,7 @@ impl Server {
             .build()?;
         rt.block_on(self.spawn_tasks())?;
 
+        #[cfg(feature = "tracing")]
         if let Some(tracer) = tracer {
             tracer.shutdown().context("shutdown tracer")?;
         }
@@ -200,6 +210,7 @@ impl Server {
         let level = LevelFilter::from_str(self.config().log_level().as_ref())
             .context("convert log level filter")?;
 
+        #[cfg(feature = "tracing")]
         let telemetry_layer = if self.config().enable_tracing() {
             let tracer = Telemetry::layer(self.config().tracing_endpoint())
                 .context("build telemetry layer")?;
@@ -213,7 +224,9 @@ impl Server {
             None
         };
 
-        let registry = tracing_subscriber::registry().with(telemetry_layer);
+        let registry = tracing_subscriber::registry();
+        #[cfg(feature = "tracing")]
+        let registry = registry.with(telemetry_layer);
 
         match self.config().log_driver() {
             LogDriver::None => {}
@@ -256,14 +269,21 @@ impl Server {
         let reaper = self.reaper.clone();
 
         let signal_handler_span = debug_span!("signal_handler");
+        #[cfg(feature = "tracing")]
         task::spawn(
             Self::start_signal_handler(reaper, socket, fd_socket, shutdown_tx)
                 .with_context(signal_handler_span.context())
                 .instrument(signal_handler_span),
         );
+        #[cfg(not(feature = "tracing"))]
+        task::spawn(
+            Self::start_signal_handler(reaper, socket, fd_socket, shutdown_tx)
+                .instrument(signal_handler_span),
+        );
 
         let backend_span = debug_span!("backend");
-        task::spawn_blocking(move || {
+        #[cfg(feature = "tracing")]
+        let result = task::spawn_blocking(move || {
             Handle::current().block_on(
                 LocalSet::new()
                     .run_until(self.start_backend(shutdown_rx))
@@ -271,7 +291,17 @@ impl Server {
                     .instrument(backend_span),
             )
         })
-        .await?
+        .await?;
+        #[cfg(not(feature = "tracing"))]
+        let result = task::spawn_blocking(move || {
+            Handle::current().block_on(
+                LocalSet::new()
+                    .run_until(self.start_backend(shutdown_rx))
+                    .instrument(backend_span),
+            )
+        })
+        .await?;
+        result
     }
 
     async fn start_signal_handler<T: AsRef<Path>>(

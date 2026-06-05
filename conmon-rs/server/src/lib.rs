@@ -32,6 +32,7 @@ mod rpc;
 mod server;
 mod streaming_server;
 mod streams;
+#[cfg(feature = "tracing")]
 mod telemetry;
 #[allow(unsafe_code)]
 mod terminal;
