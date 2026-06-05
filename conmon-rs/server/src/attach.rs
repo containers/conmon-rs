@@ -290,6 +290,7 @@ impl Attach {
     }
 
     async fn write_loop(mut write_half: OwnedWriteHalf, mut rx: Receiver<Message>) -> Result<()> {
+        let mut packet = Vec::with_capacity(Self::PACKET_BUF_SIZE);
         loop {
             match rx.recv().await.context("receive message")? {
                 Message::Done => {
@@ -311,7 +312,6 @@ impl Attach {
                         Pipe::StdErr => 3,
                     };
                     let len = buf.chunks(Self::PACKET_BUF_SIZE - 1).len();
-                    let mut packet = Vec::with_capacity(Self::PACKET_BUF_SIZE);
                     for (idx, chunk) in buf.chunks(Self::PACKET_BUF_SIZE - 1).enumerate() {
                         packet.clear();
                         packet.push(p);
