@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tokio::{
     fs::{File, OpenOptions},
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncWriteExt, BufWriter},
 };
 use tracing::debug;
 
@@ -23,9 +23,6 @@ pub struct JsonLogger {
     file: Option<BufWriter<File>>,
     max_log_size: Option<usize>,
     bytes_written: usize,
-
-    /// Reusable buffer for line reading to reduce allocations
-    line_buf: Vec<u8>,
 
     /// Reusable buffer for JSON serialization
     json_buf: Vec<u8>,
@@ -49,7 +46,6 @@ impl JsonLogger {
             file: None,
             max_log_size,
             bytes_written: 0,
-            line_buf: Vec::with_capacity(256), // Pre-allocate for typical log lines
             json_buf: Vec::with_capacity(512), // Pre-allocate for JSON output
         })
     }
@@ -60,26 +56,31 @@ impl JsonLogger {
         Ok(())
     }
 
-    pub async fn write<T>(&mut self, pipe: Pipe, bytes: T) -> Result<()>
-    where
-        T: AsyncBufRead + Unpin,
-    {
-        let mut reader = BufReader::new(bytes);
+    pub async fn write(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {
+        // Get Unix timestamp in seconds (more efficient than Debug format)
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
 
-        while reader.read_until(b'\n', &mut self.line_buf).await? > 0 {
-            // Get Unix timestamp in seconds (more efficient than Debug format)
-            let timestamp = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+        let pipe_str = match pipe {
+            Pipe::StdOut => "stdout",
+            Pipe::StdErr => "stderr",
+        };
 
-            let pipe_str = match pipe {
-                Pipe::StdOut => "stdout",
-                Pipe::StdErr => "stderr",
-            };
+        let mut pos = 0;
+        while pos < bytes.len() {
+            // Find the next newline or end of buffer
+            let end = bytes[pos..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map(|i| pos + i + 1)
+                .unwrap_or(bytes.len());
+
+            let line = &bytes[pos..end];
 
             // Convert message to UTF-8, trim whitespace
-            let message = String::from_utf8_lossy(&self.line_buf);
+            let message = String::from_utf8_lossy(line);
             let message_trimmed = message.trim();
 
             // Create log entry struct
@@ -106,7 +107,8 @@ impl JsonLogger {
             let file = self.file.as_mut().context(Self::ERR_UNINITIALIZED)?;
             file.write_all(&self.json_buf).await?;
             file.write_all(b"\n").await?;
-            self.line_buf.clear();
+
+            pos = end;
         }
 
         // Flush once at the end instead of per-line to reduce syscall overhead
@@ -151,7 +153,6 @@ impl JsonLogger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
     use tokio::io::AsyncReadExt;
 
     #[tokio::test]
@@ -173,8 +174,8 @@ mod tests {
         let mut logger = JsonLogger::new("/tmp/test_write.log", Some(1000)).unwrap();
         logger.init().await.unwrap();
 
-        let cursor = Cursor::new(b"Test log message\n".to_vec());
-        logger.write(Pipe::StdOut, cursor).await.unwrap();
+        let data = b"Test log message\n";
+        logger.write(Pipe::StdOut, data).await.unwrap();
 
         // Read back from the file
         let mut file = File::open("/tmp/test_write.log").await.unwrap();
@@ -191,15 +192,15 @@ mod tests {
         logger.init().await.unwrap();
 
         // Write to the file
-        let cursor = Cursor::new(b"Test log message before reopen\n".to_vec());
-        logger.write(Pipe::StdOut, cursor).await.unwrap();
+        let data1 = b"Test log message before reopen\n";
+        logger.write(Pipe::StdOut, data1).await.unwrap();
 
         // Reopen the file
         logger.reopen().await.unwrap();
 
         // Write to the file again
-        let cursor = Cursor::new(b"Test log message after reopen\n".to_vec());
-        logger.write(Pipe::StdOut, cursor).await.unwrap();
+        let data2 = b"Test log message after reopen\n";
+        logger.write(Pipe::StdOut, data2).await.unwrap();
 
         // Read back from the file
         let mut file = File::open("/tmp/test_reopen.log").await.unwrap();
