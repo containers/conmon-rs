@@ -265,6 +265,9 @@ impl ContainerIO {
     {
         let mut buf = BytesMut::with_capacity(READ_BUFFER_SIZE);
 
+        // Cache has_drivers check - drivers are immutable after container creation
+        let log_has_drivers = logger.read().await.has_drivers();
+
         loop {
             // Ensure buffer has space
             if buf.capacity() == 0 {
@@ -293,9 +296,9 @@ impl ContainerIO {
                     // Split off the read data and freeze to Bytes (zero-copy refcounted buffer)
                     let data = buf.split_to(n).freeze();
 
-                    // Only acquire logger lock if there are drivers configured
+                    // Write to logger if drivers are configured
                     // (exec_sync uses an empty logger, so skip the overhead)
-                    if logger.read().await.has_drivers() {
+                    if log_has_drivers {
                         let mut locked_logger = logger.write().await;
                         locked_logger
                             .write(pipe, &data[..])

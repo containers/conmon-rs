@@ -32,6 +32,11 @@ impl ContainerLog {
         Arc::new(RwLock::new(Self::default()))
     }
 
+    /// Check if this logger has any drivers configured.
+    pub fn has_drivers(&self) -> bool {
+        !self.drivers.is_empty()
+    }
+
     /// Create a new SharedContainerLog from an owned reader.
     pub fn from(reader: Reader<Owned>) -> Result<SharedContainerLog> {
         let drivers = reader
