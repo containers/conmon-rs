@@ -65,11 +65,9 @@ impl Streams {
         token: CancellationToken,
     ) {
         debug!("Start reading from IO streams");
-        let logger = self.logger().clone();
-        let attach = self.attach().clone();
-        let message_tx = self.message_tx_stdout().clone();
 
         if let Some(stdin) = stdin {
+            let attach = self.attach().clone();
             task::spawn(
                 async move {
                     if let Err(e) = ContainerIO::read_loop_stdin(stdin, attach, token).await {
@@ -80,8 +78,10 @@ impl Streams {
             );
         }
 
-        let attach = self.attach().clone();
         if let Some(stdout) = stdout {
+            let logger = self.logger().clone();
+            let attach = self.attach().clone();
+            let message_tx = self.message_tx_stdout().clone();
             task::spawn(
                 async move {
                     if let Err(e) =
@@ -95,10 +95,10 @@ impl Streams {
             );
         }
 
-        let logger = self.logger().clone();
-        let attach = self.attach().clone();
-        let message_tx = self.message_tx_stderr().clone();
         if let Some(stderr) = stderr {
+            let logger = self.logger().clone();
+            let attach = self.attach().clone();
+            let message_tx = self.message_tx_stderr().clone();
             task::spawn(
                 async move {
                     if let Err(e) =

@@ -1,7 +1,10 @@
 use crate::{container_io::Pipe, journal::Journal};
 use anyhow::{Context, Result};
 use std::io::Write;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt};
+use tokio::{
+    io::{AsyncBufRead, AsyncBufReadExt},
+    task,
+};
 use tracing::debug;
 
 #[derive(Debug)]
@@ -23,12 +26,15 @@ impl JournaldLogger {
     {
         let mut line_buf = String::new();
         while bytes.read_line(&mut line_buf).await? > 0 {
-            Journal
-                .write_all(line_buf.as_bytes())
-                .context("write to journal")?;
-            line_buf.clear();
+            let line = std::mem::take(&mut line_buf);
+            task::spawn_blocking(move || {
+                Journal
+                    .write_all(line.as_bytes())
+                    .context("write to journal")
+            })
+            .await
+            .context("journal spawn_blocking")??;
         }
-
         Ok(())
     }
 
@@ -61,8 +67,6 @@ mod tests {
 
         let cursor = Cursor::new(b"Test log message\n".to_vec());
         assert!(logger.write(Pipe::StdOut, cursor).await.is_ok());
-
-        // Verifying the actual log message in Journald might require additional setup or permissions.
     }
 
     #[tokio::test]
@@ -77,7 +81,5 @@ mod tests {
 
         let cursor = Cursor::new(b"Test log message after reopen\n".to_vec());
         assert!(logger.write(Pipe::StdOut, cursor).await.is_ok());
-
-        // As with the write test, verifying the actual log messages in Journald might require additional setup or permissions.
     }
 }
