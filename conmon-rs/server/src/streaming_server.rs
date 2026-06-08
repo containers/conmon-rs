@@ -446,14 +446,25 @@ impl StreamingServer {
             .await
             .context("create new child process")?;
 
-        // Extract values we need for the I/O loop
-        let stdin_enabled = session.stdin;
-        let stdout_enabled = session.stdout;
-        let stderr_enabled = session.stderr;
+        // Extract all values we need before dropping session to free
+        // server_config Arc and cgroup_manager before the I/O loop
+        let ExecSession {
+            stdin,
+            stdout,
+            stderr,
+            container_id,
+            container_io,
+            child_reaper,
+            server_config: _,
+            cgroup_manager: _,
+            command: _,
+        } = session;
 
-        let container_id = session.container_id;
-        let io = SharedContainerIO::new(session.container_io);
-        let child_reaper = session.child_reaper.clone();
+        let stdin_enabled = stdin;
+        let stdout_enabled = stdout;
+        let stderr_enabled = stderr;
+        let io = SharedContainerIO::new(container_io);
+        let child_reaper = child_reaper.clone();
 
         let child = Child::new(
             container_id,
@@ -539,8 +550,11 @@ impl StreamingServer {
         let stdin_enabled = session.stdin;
         let stdout_enabled = session.stdout;
         let stderr_enabled = session.stderr;
-        let io = session.child.io();
-        let token = session.child.token();
+        let io = session.child.io().clone();
+        let token = session.child.token().clone();
+
+        // Explicitly drop session to free the ReapableChild before entering the I/O loop
+        drop(session);
 
         let (stdout_rx, stderr_rx) = io
             .stdio()
