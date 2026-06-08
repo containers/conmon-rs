@@ -1,7 +1,10 @@
 use crate::{container_io::Pipe, journal::Journal};
 use anyhow::{Context, Result};
 use std::io::Write;
-use tokio::task;
+use tokio::{
+    io::{AsyncBufRead, AsyncBufReadExt},
+    task,
+};
 use tracing::debug;
 
 #[derive(Debug)]
@@ -17,12 +20,21 @@ impl JournaldLogger {
         Ok(())
     }
 
-    pub async fn write(&mut self, _: Pipe, bytes: &[u8]) -> Result<()> {
-        // Convert to owned Vec to move into spawn_blocking
-        let bytes_owned = bytes.to_vec();
-        task::spawn_blocking(move || Journal.write_all(&bytes_owned).context("write to journal"))
+    pub async fn write<T>(&mut self, _: Pipe, mut bytes: T) -> Result<()>
+    where
+        T: AsyncBufRead + Unpin,
+    {
+        let mut line_buf = String::new();
+        while bytes.read_line(&mut line_buf).await? > 0 {
+            let line = std::mem::take(&mut line_buf);
+            task::spawn_blocking(move || {
+                Journal
+                    .write_all(line.as_bytes())
+                    .context("write to journal")
+            })
             .await
             .context("journal spawn_blocking")??;
+        }
         Ok(())
     }
 
@@ -53,7 +65,7 @@ mod tests {
         logger.init().await.unwrap();
 
         let data = b"Test log message\n";
-        assert!(logger.write(Pipe::StdOut, data).await.is_ok());
+        assert!(logger.write(Pipe::StdOut, &data[..]).await.is_ok());
     }
 
     #[tokio::test]
@@ -62,11 +74,11 @@ mod tests {
         logger.init().await.unwrap();
 
         let data1 = b"Test log message before reopen\n";
-        assert!(logger.write(Pipe::StdOut, data1).await.is_ok());
+        assert!(logger.write(Pipe::StdOut, &data1[..]).await.is_ok());
 
         assert!(logger.reopen().await.is_ok());
 
         let data2 = b"Test log message after reopen\n";
-        assert!(logger.write(Pipe::StdOut, data2).await.is_ok());
+        assert!(logger.write(Pipe::StdOut, &data2[..]).await.is_ok());
     }
 }
