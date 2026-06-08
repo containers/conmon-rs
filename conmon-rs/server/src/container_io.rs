@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use async_channel::{Receiver, Sender};
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use nix::errno::Errno;
 use std::{
     fmt,
@@ -270,7 +270,7 @@ impl ContainerIO {
 
         loop {
             // Ensure buffer has space
-            if buf.capacity() == 0 {
+            if buf.remaining_mut() == 0 {
                 buf.reserve(READ_BUFFER_SIZE);
             }
 

@@ -464,7 +464,7 @@ impl StreamingServer {
         let stdout_enabled = stdout;
         let stderr_enabled = stderr;
         let io = SharedContainerIO::new(container_io);
-        let child_reaper = child_reaper.clone();
+        let child_reaper = child_reaper;
 
         let child = Child::new(
             container_id,
@@ -630,8 +630,9 @@ impl StreamingServer {
         frame_buffer.clear();
         frame_buffer.push(stream_byte);
         frame_buffer.extend_from_slice(data);
+        // Move the Vec into the message to avoid copying, replace with empty Vec
         sender
-            .send(Message::Binary(frame_buffer.clone().into()))
+            .send(Message::Binary(std::mem::take(frame_buffer).into()))
             .await
             .context("send framed data")
     }

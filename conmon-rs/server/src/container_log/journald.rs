@@ -20,13 +20,9 @@ impl JournaldLogger {
     pub async fn write(&mut self, _: Pipe, bytes: &[u8]) -> Result<()> {
         // Convert to owned Vec to move into spawn_blocking
         let bytes_owned = bytes.to_vec();
-        task::spawn_blocking(move || {
-            Journal
-                .write_all(&bytes_owned)
-                .context("write to journal")
-        })
-        .await
-        .context("journal spawn_blocking")??;
+        task::spawn_blocking(move || Journal.write_all(&bytes_owned).context("write to journal"))
+            .await
+            .context("journal spawn_blocking")??;
         Ok(())
     }
 

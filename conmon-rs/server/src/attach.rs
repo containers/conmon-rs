@@ -3,7 +3,7 @@ use crate::{
     listener::{DefaultListener, Listener},
 };
 use anyhow::{Context, Result, bail};
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use nix::{
     errno::Errno,
     sys::socket::{AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, listen, socket},
@@ -242,7 +242,7 @@ impl Attach {
         let mut buf = BytesMut::with_capacity(Self::PACKET_BUF_SIZE);
         loop {
             // Ensure buffer has space
-            if buf.capacity() == 0 {
+            if buf.remaining_mut() == 0 {
                 buf.reserve(Self::PACKET_BUF_SIZE);
             }
 
