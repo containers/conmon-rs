@@ -73,7 +73,7 @@ mod map_entry {
         let size = if let Ok(size) = data.len().try_into() {
             size
         } else {
-            panic!("map with more then u32::MAX entries")
+            panic!("map with more than u32::MAX entries")
         };
         let mut list = init(size);
         for (i, (key, value)) in data.enumerate() {

@@ -105,9 +105,8 @@ pub struct Config {
     /// Do not fork if true.
     skip_fork: bool,
 
-    // TODO: remove in next major release
     #[arg(default_value(""), long("cgroup-manager"), short('c'), hide(true))]
-    /// (ignored for backwards compatibility)
+    /// Ignored for backwards compatibility with older CRI-O versions.
     cgroup_manager: String,
 
     #[cfg_attr(not(feature = "tracing"), allow(dead_code))]

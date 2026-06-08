@@ -382,12 +382,9 @@ impl OOMWatcher {
 
     /// Checks if a file does not exist on disk.
     async fn file_not_found(f: impl AsRef<Path>) -> bool {
-        // TODO: use is_err_and if we can use Rust 1.70.0:
-        // https://doc.rust-lang.org/std/result/enum.Result.html#method.is_err_and
-        match tokio::fs::metadata(f).await {
-            Err(e) => e.kind() == ErrorKind::NotFound,
-            _ => false,
-        }
+        tokio::fs::metadata(f)
+            .await
+            .is_err_and(|e| e.kind() == ErrorKind::NotFound)
     }
 
     async fn check_for_oom(

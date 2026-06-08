@@ -70,9 +70,9 @@ The following flow chart explains the client and container creation process:
 - [x] Keeping RSS under 3-4 MB
 - [x] Support exec without respawning a new conmon
 - [x] API with RPC to make it extensible (should support golang clients)
+- [x] Use pidfds for async process exit waiting
 - [ ] Act as pid namespace init
 - [ ] Join network namespace to solve running hooks inside the pod context
-- [ ] Use pidfds (it doesn't support getting exit code today, though)
 - [ ] Use io_uring
 - [ ] Plugin support for seccomp notification
 - [ ] Logging rate limiting (double buffer?)

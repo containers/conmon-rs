@@ -129,7 +129,12 @@ func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) e
 
 		req.SetStopAfterStdinEof(cfg.StopAfterStdinEOF)
 
-		// TODO: add exec session
+		if cfg.ExecSession != "" {
+			if err := req.SetExecSessionId(cfg.ExecSession); err != nil {
+				return fmt.Errorf("set exec session ID: %w", err)
+			}
+		}
+
 		return nil
 	})
 	defer free()

@@ -8,6 +8,10 @@ coverage:
   precision: 2
   round: down
   range: 50..75
+  status:
+    patch:
+      default:
+        informational: true
 
 comment:
   layout: "header, diff"
