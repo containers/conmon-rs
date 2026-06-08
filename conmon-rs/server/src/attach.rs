@@ -3,7 +3,7 @@ use crate::{
     listener::{DefaultListener, Listener},
 };
 use anyhow::{Context, Result, bail};
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use nix::{
     errno::Errno,
     sys::socket::{AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, listen, socket},
@@ -256,10 +256,15 @@ impl Attach {
                 n = read_half.read_buf(&mut buf) => {
                     match n {
                         Ok(n) if n > 0 => {
-                            // Find null terminator position
-                            let end = buf[..n].iter().position(|&x| x == 0).unwrap_or(n);
+                            // Find null terminator position in the entire buffer
+                            // (read_buf appends, so we must search all accumulated data)
+                            let end = buf.iter().position(|&x| x == 0).unwrap_or(buf.len());
                             // Split and freeze to Bytes (zero-copy refcounted buffer)
                             let data = buf.split_to(end).freeze();
+                            // If we found a null terminator, consume it too
+                            if end < buf.len() && buf[0] == 0 {
+                                buf.advance(1);
+                            }
                             debug!("Read {} stdin bytes from client", data.len());
                             tx.send(data).context("send data message")?;
                         }
