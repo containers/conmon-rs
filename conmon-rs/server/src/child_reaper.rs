@@ -27,7 +27,7 @@ use std::{
 };
 use tokio::{
     fs::{self, File},
-    io::AsyncWriteExt,
+    io::{AsyncWriteExt, unix::AsyncFd},
     process::Command,
     sync::broadcast::{self, Receiver, Sender},
     task::{self, JoinHandle},
@@ -372,17 +372,13 @@ impl ReapableChild {
                 let (oom_tx, mut oom_rx) = tokio::sync::mpsc::channel(1);
                 let oom_watcher = OOMWatcher::new(&stop_token, pid, &oom_exit_paths, oom_tx).await;
 
-                let span = debug_span!("wait_for_exit_code");
-                let wait_for_exit_code = task::spawn_blocking(move || {
-                    let _enter = span.enter();
-                    Self::wait_for_exit_code(&stop_token, pid)
-                });
+                let stop_token_for_timeout = stop_token.clone();
+                let wait_for_exit_code = Self::wait_for_exit_code_async(stop_token, pid)
+                    .instrument(debug_span!("wait_for_exit_code"));
 
                 let closure = async {
                     let (code, oom) = tokio::join!(wait_for_exit_code, oom_rx.recv());
-                    if let Ok(code) = code {
-                        exit_code = code;
-                    }
+                    exit_code = code;
                     if let Some(event) = oom {
                         oomed = event.oom;
                     }
@@ -392,6 +388,13 @@ impl ReapableChild {
                         timed_out = true;
                         exit_code = -3;
                         kill_grandchild(pid, Signal::SIGKILL);
+                        stop_token_for_timeout.cancel();
+                        // Reap the zombie: the pidfd future was dropped by the
+                        // timeout so waitpid never ran. spawn_blocking survives
+                        // cancellation and will reap once SIGKILL takes effect.
+                        task::spawn_blocking(move || {
+                            let _ = waitpid(Pid::from_raw(pid as pid_t), None);
+                        });
                     }
                 } else {
                     closure.await;
@@ -446,19 +449,87 @@ impl ReapableChild {
         });
     }
 
-    fn wait_for_exit_code(token: &CancellationToken, pid: u32) -> i32 {
-        debug!("Waiting for exit code");
+    /// Wait for a process to exit using pidfd_open for async polling,
+    /// with a blocking waitpid fallback for older kernels.
+    async fn wait_for_exit_code_async(token: CancellationToken, pid: u32) -> i32 {
+        const FAILED_EXIT_CODE: i32 = -3;
+        debug!("Waiting for exit code of pid {pid}");
+
+        let exit_code = match Self::try_pidfd_wait(pid).await {
+            Some(code) => code,
+            None => {
+                debug!("pidfd not available, falling back to blocking waitpid");
+                match task::spawn_blocking(move || Self::wait_for_exit_code_blocking(pid)).await {
+                    Ok(code) => code,
+                    Err(e) => {
+                        error!("waitpid task failed: {:#}", e);
+                        FAILED_EXIT_CODE
+                    }
+                }
+            }
+        };
+
+        token.cancel();
+        exit_code
+    }
+
+    /// Try to use pidfd_open + async polling. Returns None if pidfd is unavailable.
+    #[allow(unsafe_code)]
+    async fn try_pidfd_wait(pid: u32) -> Option<i32> {
+        use nix::fcntl::{FcntlArg, OFlag, fcntl};
+
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::c_int, 0) };
+        if fd < 0 {
+            return None;
+        }
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd as RawFd) };
+
+        let flags = fcntl(&owned_fd, FcntlArg::F_GETFL).ok()?;
+        let flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
+        fcntl(&owned_fd, FcntlArg::F_SETFL(flags)).ok()?;
+
+        let async_fd = match AsyncFd::new(owned_fd) {
+            Ok(fd) => fd,
+            Err(e) => {
+                error!("Failed to create AsyncFd from pidfd: {:#}", e);
+                return None;
+            }
+        };
+
+        if async_fd.readable().await.is_err() {
+            return None;
+        }
+
+        match waitpid(Pid::from_raw(pid as pid_t), WaitPidFlag::WNOHANG.into()) {
+            Ok(WaitStatus::Exited(_, code)) => {
+                debug!("Exited {code}");
+                Some(code)
+            }
+            Ok(WaitStatus::Signaled(_, sig, _)) => {
+                debug!("Signaled: {sig}");
+                Some((sig as i32) + 128)
+            }
+            Ok(_) => {
+                debug!("Unexpected wait status after pidfd readable");
+                Some(-1)
+            }
+            Err(e) => {
+                error!("waitpid after pidfd readable failed: {:#}", e);
+                Some(-1)
+            }
+        }
+    }
+
+    fn wait_for_exit_code_blocking(pid: u32) -> i32 {
         const FAILED_EXIT_CODE: i32 = -3;
         loop {
             match waitpid(Pid::from_raw(pid as pid_t), None) {
                 Ok(WaitStatus::Exited(_, exit_code)) => {
                     debug!("Exited {}", exit_code);
-                    token.cancel();
                     return exit_code;
                 }
                 Ok(WaitStatus::Signaled(_, sig, _)) => {
                     debug!("Signaled: {sig}");
-                    token.cancel();
                     return (sig as i32) + 128;
                 }
                 Ok(_) => {
@@ -470,7 +541,6 @@ impl ReapableChild {
                 }
                 Err(err) => {
                     error!("Unable to waitpid on {:#}", err);
-                    token.cancel();
                     return FAILED_EXIT_CODE;
                 }
             };
