@@ -455,9 +455,6 @@ impl StreamingServer {
         let io = SharedContainerIO::new(session.container_io);
         let child_reaper = session.child_reaper.clone();
 
-        // Session fields are now extracted or moved; it will be dropped at end of this scope
-        // before the I/O loop, freeing server_config Arc, cgroup_manager, and command Vec
-
         let child = Child::new(
             container_id,
             grandchild_pid,
@@ -544,9 +541,6 @@ impl StreamingServer {
         let stderr_enabled = session.stderr;
         let io = session.child.io();
         let token = session.child.token();
-
-        // Session fields are now extracted; it will be dropped at end of this scope
-        // before the I/O loop, freeing the child ReapableChild
 
         let (stdout_rx, stderr_rx) = io
             .stdio()
