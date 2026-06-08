@@ -173,18 +173,10 @@ impl Server {
         #[cfg(feature = "tracing")]
         let tracer = self.tracer().clone();
 
-        let worker_threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-            .min(4);
-        debug!(
-            "Configuring Tokio runtime with {} worker threads",
-            worker_threads
-        );
-        let rt = Builder::new_multi_thread()
-            .worker_threads(worker_threads)
-            .thread_stack_size(512 * 1024)
-            .enable_all()
+        debug!("Configuring Tokio runtime with current_thread");
+        let rt = Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
             .build()?;
         rt.block_on(self.spawn_tasks())?;
 
@@ -269,36 +261,50 @@ impl Server {
         let reaper = self.reaper.clone();
 
         let signal_handler_span = debug_span!("signal_handler");
-        #[cfg(feature = "tracing")]
-        task::spawn(
-            Self::start_signal_handler(reaper, socket, fd_socket, shutdown_tx)
-                .with_context(signal_handler_span.context())
-                .instrument(signal_handler_span),
-        );
-        #[cfg(not(feature = "tracing"))]
-        task::spawn(
-            Self::start_signal_handler(reaper, socket, fd_socket, shutdown_tx)
-                .instrument(signal_handler_span),
-        );
-
         let backend_span = debug_span!("backend");
+
+        // Run both signal handler and backend inside spawn_blocking with LocalSet
+        // This allows concurrent execution within the LocalSet while preventing
+        // blocking of the main current_thread runtime
         #[cfg(feature = "tracing")]
         let result = task::spawn_blocking(move || {
-            Handle::current().block_on(
-                LocalSet::new()
-                    .run_until(self.start_backend(shutdown_rx))
-                    .with_context(backend_span.context())
-                    .instrument(backend_span),
-            )
+            Handle::current().block_on(async move {
+                let local = LocalSet::new();
+
+                // Spawn signal handler as a local task
+                local.spawn_local(
+                    Self::start_signal_handler(reaper, socket, fd_socket, shutdown_tx)
+                        .with_context(signal_handler_span.context())
+                        .instrument(signal_handler_span),
+                );
+
+                // Run backend on the LocalSet
+                local
+                    .run_until(
+                        self.start_backend(shutdown_rx)
+                            .with_context(backend_span.context())
+                            .instrument(backend_span),
+                    )
+                    .await
+            })
         })
         .await?;
         #[cfg(not(feature = "tracing"))]
         let result = task::spawn_blocking(move || {
-            Handle::current().block_on(
-                LocalSet::new()
-                    .run_until(self.start_backend(shutdown_rx))
-                    .instrument(backend_span),
-            )
+            Handle::current().block_on(async move {
+                let local = LocalSet::new();
+
+                // Spawn signal handler as a local task
+                local.spawn_local(
+                    Self::start_signal_handler(reaper, socket, fd_socket, shutdown_tx)
+                        .instrument(signal_handler_span),
+                );
+
+                // Run backend on the LocalSet
+                local
+                    .run_until(self.start_backend(shutdown_rx).instrument(backend_span))
+                    .await
+            })
         })
         .await?;
         result
