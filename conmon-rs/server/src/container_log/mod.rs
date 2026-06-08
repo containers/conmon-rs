@@ -10,7 +10,7 @@ use anyhow::Result;
 use capnp::struct_list::Reader;
 use conmon_common::conmon_capnp::conmon::log_driver::{Owned, Type};
 use std::sync::Arc;
-use tokio::{io::AsyncBufRead, sync::RwLock};
+use tokio::sync::RwLock;
 
 pub type SharedContainerLog = Arc<RwLock<ContainerLog>>;
 
@@ -30,6 +30,11 @@ impl ContainerLog {
     /// Create a new default SharedContainerLog.
     pub fn new() -> SharedContainerLog {
         Arc::new(RwLock::new(Self::default()))
+    }
+
+    /// Check if this logger has any drivers configured.
+    pub fn has_drivers(&self) -> bool {
+        !self.drivers.is_empty()
     }
 
     /// Create a new SharedContainerLog from an owned reader.
@@ -93,18 +98,13 @@ impl ContainerLog {
         Ok(())
     }
 
-    /// Write the contents of the provided reader into all loggers.
-    pub async fn write<T>(&mut self, pipe: Pipe, bytes: T) -> Result<()>
-    where
-        T: AsyncBufRead + Unpin + Clone,
-    {
+    /// Write the contents of the provided bytes into all loggers.
+    pub async fn write(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {
         for driver in &mut self.drivers {
             match driver {
-                LogDriver::ContainerRuntimeInterface(logger) => {
-                    logger.write(pipe, bytes.clone()).await?
-                }
-                LogDriver::Journald(logger) => logger.write(pipe, bytes.clone()).await?,
-                LogDriver::Json(logger) => logger.write(pipe, bytes.clone()).await?,
+                LogDriver::ContainerRuntimeInterface(logger) => logger.write(pipe, bytes).await?,
+                LogDriver::Journald(logger) => logger.write(pipe, bytes).await?,
+                LogDriver::Json(logger) => logger.write(pipe, bytes).await?,
             }
         }
         Ok(())

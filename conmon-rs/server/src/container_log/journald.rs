@@ -47,7 +47,6 @@ impl JournaldLogger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
 
     #[tokio::test]
     async fn test_journald_logger_new() {
@@ -65,8 +64,8 @@ mod tests {
         let mut logger = JournaldLogger::new(Some(1000)).unwrap();
         logger.init().await.unwrap();
 
-        let cursor = Cursor::new(b"Test log message\n".to_vec());
-        assert!(logger.write(Pipe::StdOut, cursor).await.is_ok());
+        let data = b"Test log message\n";
+        assert!(logger.write(Pipe::StdOut, &data[..]).await.is_ok());
     }
 
     #[tokio::test]
@@ -74,12 +73,12 @@ mod tests {
         let mut logger = JournaldLogger::new(Some(1000)).unwrap();
         logger.init().await.unwrap();
 
-        let cursor = Cursor::new(b"Test log message before reopen\n".to_vec());
-        assert!(logger.write(Pipe::StdOut, cursor).await.is_ok());
+        let data1 = b"Test log message before reopen\n";
+        assert!(logger.write(Pipe::StdOut, &data1[..]).await.is_ok());
 
         assert!(logger.reopen().await.is_ok());
 
-        let cursor = Cursor::new(b"Test log message after reopen\n".to_vec());
-        assert!(logger.write(Pipe::StdOut, cursor).await.is_ok());
+        let data2 = b"Test log message after reopen\n";
+        assert!(logger.write(Pipe::StdOut, &data2[..]).await.is_ok());
     }
 }

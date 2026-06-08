@@ -3,6 +3,7 @@ use crate::{
     listener::{DefaultListener, Listener},
 };
 use anyhow::{Context, Result, bail};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use nix::{
     errno::Errno,
     sys::socket::{AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, listen, socket},
@@ -13,7 +14,6 @@ use std::{
         unix::fs::PermissionsExt,
     },
     path::{Path, PathBuf},
-    sync::Arc,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ErrorKind},
@@ -32,8 +32,8 @@ use tracing::{Instrument, debug, debug_span, error};
 #[derive(Debug)]
 /// A shared container attach abstraction.
 pub struct SharedContainerAttach {
-    read_half_rx: Receiver<Arc<[u8]>>,
-    read_half_tx: Sender<Arc<[u8]>>,
+    read_half_rx: Receiver<Bytes>,
+    read_half_tx: Sender<Bytes>,
     write_half_tx: Sender<Message>,
 }
 
@@ -82,7 +82,7 @@ impl SharedContainerAttach {
     }
 
     /// Read from all attach endpoints standard input and return the first result.
-    pub async fn read(&mut self) -> Result<Arc<[u8]>> {
+    pub async fn read(&mut self) -> Result<Bytes> {
         self.read_half_rx
             .recv()
             .await
@@ -90,7 +90,7 @@ impl SharedContainerAttach {
     }
 
     /// Try to read from all attach endpoints standard input and return the first result.
-    pub fn try_read(&mut self) -> Result<Arc<[u8]>> {
+    pub fn try_read(&mut self) -> Result<Bytes> {
         self.read_half_rx
             .try_recv()
             .context("try to receive attach message")
@@ -112,7 +112,7 @@ impl SharedContainerAttach {
     }
 
     /// Retrieve the stdin sender.
-    pub fn stdin(&self) -> &Sender<Arc<[u8]>> {
+    pub fn stdin(&self) -> &Sender<Bytes> {
         &self.read_half_tx
     }
 }
@@ -131,7 +131,7 @@ impl Attach {
     /// Create a new attach instance.
     fn create<T>(
         socket_path: T,
-        read_half_tx: Sender<Arc<[u8]>>,
+        read_half_tx: Sender<Bytes>,
         write_half_tx: Sender<Message>,
         token: CancellationToken,
         stop_after_stdin_eof: bool,
@@ -187,7 +187,7 @@ impl Attach {
 
     async fn start(
         fd: OwnedFd,
-        read_half_tx: Sender<Arc<[u8]>>,
+        read_half_tx: Sender<Bytes>,
         write_half_tx: Sender<Message>,
         token: CancellationToken,
         stop_after_stdin_eof: bool,
@@ -235,12 +235,17 @@ impl Attach {
 
     async fn read_loop(
         mut read_half: OwnedReadHalf,
-        tx: Sender<Arc<[u8]>>,
+        tx: Sender<Bytes>,
         token: CancellationToken,
         stop_after_stdin_eof: bool,
     ) -> Result<()> {
-        let mut buf = vec![0; Self::PACKET_BUF_SIZE];
+        let mut buf = BytesMut::with_capacity(Self::PACKET_BUF_SIZE);
         loop {
+            // Ensure buffer has space
+            if buf.remaining_mut() == 0 {
+                buf.reserve(Self::PACKET_BUF_SIZE);
+            }
+
             // In situations we're processing output directly from the I/O streams
             // we need a mechanism to figure out when to stop that doesn't involve reading the
             // number of bytes read.
@@ -248,11 +253,18 @@ impl Attach {
             // While this could result in a data race, as select statements are racy,
             // we won't interleve these two futures, as one ends execution.
             select! {
-                n = read_half.read(&mut buf) => {
+                n = read_half.read_buf(&mut buf) => {
                     match n {
                         Ok(n) if n > 0 => {
-                            let end = buf[..n].iter().position(|&x| x == 0).unwrap_or(n);
-                            let data: Arc<[u8]> = Arc::from(&buf[..end]);
+                            // Find null terminator position in the entire buffer
+                            // (read_buf appends, so we must search all accumulated data)
+                            let end = buf.iter().position(|&x| x == 0).unwrap_or(buf.len());
+                            // Split and freeze to Bytes (zero-copy refcounted buffer)
+                            let data = buf.split_to(end).freeze();
+                            // If we found a null terminator, consume it too
+                            if end < buf.len() && buf[0] == 0 {
+                                buf.advance(1);
+                            }
                             debug!("Read {} stdin bytes from client", data.len());
                             tx.send(data).context("send data message")?;
                         }
@@ -290,6 +302,7 @@ impl Attach {
     }
 
     async fn write_loop(mut write_half: OwnedWriteHalf, mut rx: Receiver<Message>) -> Result<()> {
+        let mut packet = Vec::with_capacity(Self::PACKET_BUF_SIZE);
         loop {
             match rx.recv().await.context("receive message")? {
                 Message::Done => {
@@ -311,7 +324,6 @@ impl Attach {
                         Pipe::StdErr => 3,
                     };
                     let len = buf.chunks(Self::PACKET_BUF_SIZE - 1).len();
-                    let mut packet = Vec::with_capacity(Self::PACKET_BUF_SIZE);
                     for (idx, chunk) in buf.chunks(Self::PACKET_BUF_SIZE - 1).enumerate() {
                         packet.clear();
                         packet.push(p);

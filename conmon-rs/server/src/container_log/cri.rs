@@ -2,13 +2,12 @@
 
 use crate::container_io::Pipe;
 use anyhow::{Context, Result};
-use memchr::memchr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
     fs::{File, OpenOptions},
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncWriteExt, BufWriter},
 };
 use tracing::{debug, trace};
 
@@ -26,9 +25,6 @@ pub struct CriLogger {
 
     /// Current bytes written to the log file.
     bytes_written: usize,
-
-    /// Reusable buffer for line reading to reduce allocations
-    line_buf: Vec<u8>,
 
     /// Cached timestamp string to avoid repeated formatting
     cached_timestamp: String,
@@ -65,7 +61,6 @@ impl CriLogger {
             file: None,
             max_log_size,
             bytes_written: 0,
-            line_buf: Vec::with_capacity(256), // Pre-allocate for typical log lines
             cached_timestamp: String::new(),
             last_timestamp_update: Instant::now(),
         })
@@ -78,13 +73,8 @@ impl CriLogger {
         Ok(())
     }
 
-    /// Write the contents of the provided reader into the file logger.
-    pub async fn write<T>(&mut self, pipe: Pipe, bytes: T) -> Result<()>
-    where
-        T: AsyncBufRead + Unpin,
-    {
-        let mut reader = BufReader::new(bytes);
-
+    /// Write the contents of the provided bytes into the file logger.
+    pub async fn write(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {
         // Update cached timestamp if it's been more than 100ms or if empty (first use)
         let now = Instant::now();
         if self.cached_timestamp.is_empty()
@@ -103,18 +93,23 @@ impl CriLogger {
             .checked_add(10) // len of " stdout " + "P "
             .context("min log line len exceeds usize")?;
 
-        loop {
-            // Read the line - reuse buffer with clear instead of allocating
-            self.line_buf.clear();
-            if self.line_buf.capacity() < min_log_len {
-                self.line_buf
-                    .reserve(min_log_len - self.line_buf.capacity());
-            }
-            let (read, partial) = Self::read_line(&mut reader, &mut self.line_buf).await?;
+        let mut pos = 0;
+        while pos < bytes.len() {
+            // Find the next newline or end of buffer
+            let newline_pos = bytes[pos..].iter().position(|&b| b == b'\n');
+            let (end, partial) = match newline_pos {
+                Some(i) => (pos + i + 1, false), // Found newline, include it, not partial
+                None => (bytes.len(), true),     // No newline, partial line
+            };
+
+            let line = &bytes[pos..end];
+            let read = line.len();
 
             if read == 0 {
                 break;
             }
+
+            pos = end;
 
             let mut bytes_to_be_written = read + min_log_len;
             if partial {
@@ -167,7 +162,7 @@ impl CriLogger {
             }
 
             // Output the actual contents
-            file.write_all(&self.line_buf).await?;
+            file.write_all(line).await?;
 
             // Output a newline for partial
             if partial {
@@ -216,27 +211,6 @@ impl CriLogger {
                 .await
                 .with_context(|| format!("open log file path '{}'", path.as_ref().display()))?,
         ))
-    }
-
-    async fn read_line<T>(r: &mut BufReader<T>, buf: &mut Vec<u8>) -> Result<(usize, bool)>
-    where
-        T: AsyncBufRead + Unpin,
-    {
-        let (partial, read) = {
-            let available = r.fill_buf().await?;
-            match memchr(b'\n', available) {
-                Some(i) => {
-                    buf.extend_from_slice(&available[..=i]);
-                    (false, i + 1)
-                }
-                None => {
-                    buf.extend_from_slice(available);
-                    (true, available.len())
-                }
-            }
-        };
-        r.consume(read);
-        Ok((read, partial))
     }
 }
 

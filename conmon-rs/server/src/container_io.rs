@@ -4,6 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use async_channel::{Receiver, Sender};
+use bytes::{BufMut, Bytes, BytesMut};
 use nix::errno::Errno;
 use std::{
     fmt,
@@ -97,7 +98,7 @@ pub enum ContainerIOType {
 /// A message to be sent through the ContainerIO.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
-    Data(Arc<[u8]>, Pipe),
+    Data(Bytes, Pipe),
     Done,
 }
 
@@ -262,10 +263,18 @@ impl ContainerIO {
     where
         T: AsyncRead + Unpin,
     {
-        let mut buf = vec![0; READ_BUFFER_SIZE];
+        let mut buf = BytesMut::with_capacity(READ_BUFFER_SIZE);
+
+        // Cache has_drivers check - drivers are immutable after container creation
+        let log_has_drivers = logger.read().await.has_drivers();
 
         loop {
-            match reader.read(&mut buf).await {
+            // Ensure buffer has space
+            if buf.remaining_mut() == 0 {
+                buf.reserve(READ_BUFFER_SIZE);
+            }
+
+            match reader.read_buf(&mut buf).await {
                 Ok(0) => {
                     debug!("Nothing more to read");
 
@@ -283,28 +292,31 @@ impl ContainerIO {
 
                 Ok(n) => {
                     trace!("Read {} bytes", n);
-                    let data = &buf[..n];
 
-                    let mut locked_logger = logger.write().await;
-                    locked_logger
-                        .write(pipe, data)
-                        .await
-                        .context("write to log file")?;
+                    // Split off the read data and freeze to Bytes (zero-copy refcounted buffer)
+                    let data = buf.split_to(n).freeze();
 
-                    // Use Arc to share data between attach and message channel
-                    // without cloning the buffer contents
-                    let data_arc: Arc<[u8]> = Arc::from(data);
+                    // Write to logger if drivers are configured
+                    // (exec_sync uses an empty logger, so skip the overhead)
+                    if log_has_drivers {
+                        let mut locked_logger = logger.write().await;
+                        locked_logger
+                            .write(pipe, &data[..])
+                            .await
+                            .context("write to log file")?;
+                    }
 
                     // Only send to attach if there are active attach clients
+                    // Bytes::clone() is just a refcount increment, no data copy
                     if attach.has_readers() {
                         attach
-                            .write(Message::Data(Arc::clone(&data_arc), pipe))
+                            .write(Message::Data(data.clone(), pipe))
                             .await
                             .context("write to attach endpoints")?;
                     }
 
                     message_tx
-                        .force_send(Message::Data(data_arc, pipe))
+                        .force_send(Message::Data(data, pipe))
                         .context("send data message")?;
                 }
 
