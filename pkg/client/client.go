@@ -42,7 +42,6 @@ var (
 	errInvalidValue           = errors.New("invalid value")
 	errRunDirNotCreated       = errors.New("could not create RunDir")
 	errTimeoutWaitForPid      = errors.New("timed out waiting for server PID to disappear")
-	errUndefinedCgroupManager = errors.New("undefined cgroup manager")
 )
 
 // ConmonClient is the main client structure of this package.
@@ -411,22 +410,6 @@ func (c *ConmonClient) toArgs(config *ConmonServerConfig) (entrypoint string, ar
 		}
 
 		args = append(args, "--log-driver", string(config.LogDriver))
-	}
-
-	const cgroupManagerFlag = "--cgroup-manager"
-
-	switch config.CgroupManager {
-	case CgroupManagerSystemd:
-		args = append(args, cgroupManagerFlag, "systemd")
-
-	case CgroupManagerCgroupfs:
-		args = append(args, cgroupManagerFlag, "cgroupfs")
-
-	case CgroupManagerPerCommand:
-		// nothing to do, will use the cgroup manager specified per command
-
-	default:
-		return "", args, errUndefinedCgroupManager
 	}
 
 	if config.Tracing != nil && config.Tracing.Enabled {
@@ -1177,24 +1160,6 @@ type RequestWithMetadata interface {
 	NewMetadata(n int32) (proto.Conmon_TextTextMapEntry_List, error)
 }
 
-type RequestWithMetadataOld interface {
-	RequestWithMetadata
-	SetMetadataOld(v []byte) error
-}
-
-var (
-	_ RequestWithMetadataOld = nil
-	// verify that all existing messages are compatible with old conmon-rs servers
-	// (new messages don't need to support the old encoding).
-	_ = proto.Conmon_VersionRequest{}
-	_ = proto.Conmon_CreateContainerRequest{}
-	_ = proto.Conmon_ExecSyncContainerRequest{}
-	_ = proto.Conmon_AttachRequest{}
-	_ = proto.Conmon_ReopenLogRequest{}
-	_ = proto.Conmon_SetWindowSizeRequest{}
-	_ = proto.Conmon_CreateNamespacesRequest{}
-)
-
 // setMetadata sets the tracing metadata properties on the request.
 func (c *ConmonClient) setMetadata(ctx context.Context, req RequestWithMetadata) error {
 	if !c.tracingEnabled {
@@ -1213,19 +1178,7 @@ func (c *ConmonClient) setMetadata(ctx context.Context, req RequestWithMetadata)
 	otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(m))
 
 	if err := stringStringMapToMapEntryList(m, req.NewMetadata); err != nil {
-		return fmt.Errorf("set metadata2: %w", err)
-	}
-
-	// support old conmon-rs servers with json encoded metadata field
-	if req, ok := req.(RequestWithMetadataOld); ok {
-		metadataBytes, err := json.Marshal(m)
-		if err != nil {
-			return fmt.Errorf("marshal metadata: %w", err)
-		}
-
-		if err := req.SetMetadataOld(metadataBytes); err != nil {
-			return fmt.Errorf("set metadata: %w", err)
-		}
+		return fmt.Errorf("set metadata: %w", err)
 	}
 
 	return nil
@@ -1279,14 +1232,6 @@ func (c *ConmonClient) CreateNamespaces(
 	ctx, span := c.startSpan(ctx, "CreateNamespaces")
 	if span != nil {
 		defer span.End()
-	}
-
-	// Feature not supported pre v0.5.0
-	const minMinor = 5
-
-	minVersion := semver.Version{Minor: minMinor}
-	if c.serverVersion.LT(minVersion) {
-		return nil, fmt.Errorf("requires at least %v: %w", minVersion, ErrUnsupported)
 	}
 
 	rpcClient, err := c.client(ctx)
