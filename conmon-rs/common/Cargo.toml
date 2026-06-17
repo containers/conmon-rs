@@ -13,4 +13,4 @@ workspace = true
 
 [build-dependencies]
 capnp = { version = "0.25.5", default-features = false }
-capnpc = { version = "0.25.3", default-features = false }
+capnpc = { version = "0.26.0", default-features = false }
