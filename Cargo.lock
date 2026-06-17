@@ -141,23 +141,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "capnp-futures"
-version = "0.25.2"
+name = "capnp"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73b69dfddccc57844f9a90f9d72b44b97c326914851ea94fb7da40ef9cad6e8d"
+checksum = "71338171543626713e427635f7de390328d9e85828a816a0c88d959032b34a2f"
 dependencies = [
- "capnp",
+ "embedded-io",
+]
+
+[[package]]
+name = "capnp-futures"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a732246b9523a962319faa1000b163645721accbc759cdf296f5f8424a97bdc"
+dependencies = [
+ "capnp 0.26.0",
  "futures-channel",
  "futures-util",
 ]
 
 [[package]]
 name = "capnp-rpc"
-version = "0.25.1"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3c74c337e87f75f3174ffb3513738ab0acc631c04f64cc33b867c60f84771da"
+checksum = "09a77734dd5aa0dbbc2e1a5953a80cef75c11af289641cdaeb59cce38b11e2e1"
 dependencies = [
- "capnp",
+ "capnp 0.26.0",
  "capnp-futures",
  "futures",
 ]
@@ -168,7 +177,7 @@ version = "0.25.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fca02be865c8c5a78bfc24b9819006ab6b59bef238467203928e26459557af93"
 dependencies = [
- "capnp",
+ "capnp 0.25.6",
 ]
 
 [[package]]
@@ -245,7 +254,7 @@ dependencies = [
 name = "conmon-common"
 version = "1.0.0"
 dependencies = [
- "capnp",
+ "capnp 0.25.6",
  "capnpc",
 ]
 
@@ -257,7 +266,7 @@ dependencies = [
  "async-channel",
  "axum",
  "bytes",
- "capnp",
+ "capnp 0.25.6",
  "capnp-rpc",
  "clap",
  "conmon-common",
@@ -296,7 +305,7 @@ dependencies = [
 name = "conmonrs-cli"
 version = "1.0.0"
 dependencies = [
- "capnp",
+ "capnp 0.25.6",
  "capnp-rpc",
  "conmon-common",
  "futures",
@@ -393,7 +402,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1312,7 +1321,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1459,7 +1468,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1515,7 +1524,7 @@ dependencies = [
  "fastrand",
  "once_cell",
  "rustix",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2027,7 +2036,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
