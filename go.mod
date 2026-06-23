@@ -6,7 +6,7 @@ require (
 	capnproto.org/go/capnp/v3 v3.1.0-alpha.2
 	github.com/blang/semver/v4 v4.0.0
 	github.com/google/uuid v1.6.0
-	github.com/onsi/ginkgo/v2 v2.31.0
+	github.com/onsi/ginkgo/v2 v2.32.0
 	github.com/onsi/gomega v1.42.0
 	github.com/opencontainers/runc v1.5.0
 	github.com/opencontainers/runtime-tools v0.9.1-0.20260316125833-8a4db579f5c8
