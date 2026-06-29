@@ -243,16 +243,10 @@ impl Server {
             match result {
                 Ok(slots) => {
                     let mut buf = vec![0; 8 + slots.len() * 8];
-                    let mut chunks = buf.chunks_exact_mut(8);
-                    chunks
-                        .next()
-                        .expect("chunks has header element")
-                        .copy_from_slice(&id_and_num_fds.to_le_bytes());
-                    for slot in slots {
-                        chunks
-                            .next()
-                            .expect("chunks has slot element")
-                            .copy_from_slice(&slot.to_le_bytes());
+                    let (chunks, _) = buf.as_chunks_mut::<8>();
+                    chunks[0].copy_from_slice(&id_and_num_fds.to_le_bytes());
+                    for (i, slot) in slots.iter().enumerate() {
+                        chunks[i + 1].copy_from_slice(&slot.to_le_bytes());
                     }
                     conn.send(&buf).await?;
                 }
