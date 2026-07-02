@@ -65,8 +65,9 @@ EOT
 
 install_critest() {
     URL=https://github.com/kubernetes-sigs/cri-tools
+    CRI_TOOLS_VERSION=v1.36.0
 
-    git clone $URL
+    git clone --depth 1 --branch $CRI_TOOLS_VERSION $URL
     pushd cri-tools
     sudo -E PATH="$PATH" make BINDIR=/usr/local/bin install
     popd

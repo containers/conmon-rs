@@ -1,21 +1,21 @@
 module github.com/containers/conmon-rs
 
-go 1.26.4
+go 1.26.3
 
 require (
 	capnproto.org/go/capnp/v3 v3.1.0-alpha.2
 	github.com/blang/semver/v4 v4.0.0
 	github.com/google/uuid v1.6.0
-	github.com/onsi/ginkgo/v2 v2.32.0
-	github.com/onsi/gomega v1.42.1
-	github.com/opencontainers/runc v1.5.0
-	github.com/opencontainers/runtime-tools v0.9.1-0.20260316125833-8a4db579f5c8
+	github.com/onsi/ginkgo/v2 v2.28.3
+	github.com/onsi/gomega v1.40.0
+	github.com/opencontainers/runc v1.4.1
+	github.com/opencontainers/runtime-tools v0.9.1-0.20251205004911-5e639034dcdc
 	github.com/sirupsen/logrus v1.9.4
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/trace v1.44.0
-	go.podman.io/common v0.68.0
-	go.podman.io/storage v1.63.0
-	k8s.io/client-go v0.36.2
+	go.podman.io/common v0.66.2-0.20260126213724-1e46b0756b39
+	go.podman.io/storage v1.61.1-0.20251212224252-b0f86df5a665
+	k8s.io/client-go v0.36.0
 )
 
 require (

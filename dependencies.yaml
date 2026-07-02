@@ -26,6 +26,12 @@ dependencies:
       - path: contrib/tracing/start
         match: JAEGER_IMG
 
+  - name: cri-tools
+    version: 1.36.0
+    refPaths:
+      - path: .github/setup
+        match: CRI_TOOLS_VERSION
+
   - name: nix
     version: 2.32.4
     refPaths:
