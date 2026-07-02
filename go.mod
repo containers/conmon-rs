@@ -15,7 +15,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.43.0
 	go.podman.io/common v0.66.2-0.20260126213724-1e46b0756b39
 	go.podman.io/storage v1.61.1-0.20251212224252-b0f86df5a665
-	k8s.io/client-go v0.36.0
+	k8s.io/client-go v0.36.2
 )
 
 require (
@@ -62,8 +62,8 @@ require (
 	golang.org/x/time v0.14.0 // indirect
 	golang.org/x/tools v0.44.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
-	k8s.io/api v0.36.0 // indirect
-	k8s.io/apimachinery v0.36.0 // indirect
+	k8s.io/api v0.36.2 // indirect
+	k8s.io/apimachinery v0.36.2 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20260317180543-43fb72c5454a // indirect
 	k8s.io/streaming v0.37.0-alpha.0 // indirect
