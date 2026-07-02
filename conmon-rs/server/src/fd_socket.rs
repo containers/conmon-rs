@@ -201,7 +201,7 @@ impl Server {
                 .recv_vectored_with_ancillary(&mut [IoSliceMut::new(&mut buf)], &mut ancillary_buf)
                 .await?;
 
-            let id_and_num_fds = match n {
+            let id_and_num_fds = match n.bytes_read() {
                 0 => break Ok(()), // EOF
                 8 => u64::from_le_bytes(buf[..8].try_into().expect("8-byte slice")),
                 _ => continue, // ignore invalid message

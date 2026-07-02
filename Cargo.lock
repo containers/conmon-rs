@@ -1625,9 +1625,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-seqpacket"
-version = "0.8.2"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24d1294c36e418ee280e57ba514cc260c0c80c69571abf44109eef2823a1c1c6"
+checksum = "c107ce7ec3d719256c5d92c49da148c7567b648ff9d01b9d650f20be768f9b6d"
 dependencies = [
  "filedesc",
  "libc",
