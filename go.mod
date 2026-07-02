@@ -14,7 +14,7 @@ require (
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/trace v1.43.0
 	go.podman.io/common v0.66.2-0.20260126213724-1e46b0756b39
-	go.podman.io/storage v1.61.1-0.20251212224252-b0f86df5a665
+	go.podman.io/storage v1.63.0
 	k8s.io/client-go v0.36.0
 )
 
@@ -56,7 +56,7 @@ require (
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/term v0.42.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
