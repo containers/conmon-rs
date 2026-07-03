@@ -12,17 +12,17 @@ updates:
       - dependency-type: direct
       - dependency-type: indirect
     groups:
+      capnp:
+        patterns:
+          - "capnp*"
       opentelemetry:
         patterns:
           - "opentelemetry*"
           - "tracing-opentelemetry"
-  - package-ecosystem: gomod
-    directory: "/"
-    schedule:
-      interval: daily
-    open-pull-requests-limit: 10
-    labels:
-      - "release-note-none"
+      rust-dependencies:
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
