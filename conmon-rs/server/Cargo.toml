@@ -15,7 +15,7 @@ workspace = true
 anyhow = { version = "1.0.102", default-features = false }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws"] }
 async-channel = { version = "2.5.0", default-features = false, features = ["std"] }
-bytes = { version = "1.9.0", default-features = false }
+bytes = { version = "1.12.0", default-features = false }
 capnp = { version = "0.26.0", default-features = false }
 capnp-rpc = { version = "0.26.0", default-features = false }
 clap = { version = "4.6.1", default-features = false, features = ["cargo", "derive", "env", "error-context", "help", "std", "usage"] }
