@@ -110,7 +110,7 @@ download_binary() {
         fi
     elif [[ $COMMIT == "" ]]; then
         echo "Getting latest commit on main"
-        COMMIT=$(curl_retry $BASE_URL/latest-main.txt)
+        COMMIT=$(curl_retry "$BASE_URL/latest-main.txt" -H "Cache-Control: no-cache")
     fi
 
     echo "Found commit: $COMMIT"
