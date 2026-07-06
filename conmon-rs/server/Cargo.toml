@@ -1,6 +1,6 @@
 [package]
 name = "conmonrs"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -19,7 +19,7 @@ bytes = { version = "1.12.0", default-features = false }
 capnp = { version = "0.26.0", default-features = false }
 capnp-rpc = { version = "0.26.0", default-features = false }
 clap = { version = "4.6.1", default-features = false, features = ["cargo", "derive", "env", "error-context", "help", "std", "usage"] }
-conmon-common = { version = "1.0.0", path = "../common" }
+conmon-common = { version = "1.0.1", path = "../common" }
 futures = { version = "0.3.32", default-features = false }
 libc = { version = "0.2.186", default-features = false }
 libsystemd = { version = "0.7.2", default-features = false }
