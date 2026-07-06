@@ -89,9 +89,9 @@ jobs:
           mv target/x86_64-unknown-linux-gnu/release/conmonrs ${{ github.sha }}
       - run: ./${{ github.sha }}/conmonrs -v
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
+        if: github.ref == 'refs/heads/main'
       - name: Sign binary
-        if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
+        if: github.ref == 'refs/heads/main'
         run: |
           cd ${{ github.sha }}
           cosign sign-blob -y conmonrs \
@@ -103,11 +103,11 @@ jobs:
           name: conmonrs
           path: ${{ github.sha }}/*
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
-        if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
+        if: github.ref == 'refs/heads/main'
         with:
           credentials_json: ${{ secrets.GCS_CRIO_SA }}
       - uses: google-github-actions/upload-cloud-storage@6397bd7208e18d13ba2619ee21b9873edc94427a # v3.0.0
-        if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
+        if: github.ref == 'refs/heads/main'
         with:
           path: ${{ github.sha }}
           destination: cri-o/conmon-rs
@@ -163,9 +163,9 @@ jobs:
           mkdir ${{ github.sha }}
           cp result/bin/conmonrs ${{ github.sha }}/conmonrs.${{ matrix.arch }}
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
+        if: github.ref == 'refs/heads/main'
       - name: Sign binary
-        if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
+        if: github.ref == 'refs/heads/main'
         run: |
           cd ${{ github.sha }}
           cosign sign-blob -y conmonrs.${{ matrix.arch }} \
@@ -177,11 +177,11 @@ jobs:
           name: conmonrs-${{ matrix.arch }}
           path: ${{ github.sha }}/*
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
-        if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
+        if: github.ref == 'refs/heads/main'
         with:
           credentials_json: ${{ secrets.GCS_CRIO_SA }}
       - uses: google-github-actions/upload-cloud-storage@6397bd7208e18d13ba2619ee21b9873edc94427a # v3.0.0
-        if: github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags')
+        if: github.ref == 'refs/heads/main'
         with:
           path: ${{ github.sha }}
           destination: cri-o/conmon-rs
