@@ -31,7 +31,7 @@ use nix::{
 use opentelemetry::trace::{FutureExt as OpenTelemetryFutureExt, TracerProvider};
 #[cfg(feature = "tracing")]
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use std::{fs::File, io::Write, path::Path, process, str::FromStr, sync::Arc};
+use std::{fs::File, io::Write, os::fd::RawFd, path::Path, process, str::FromStr, sync::Arc};
 use tokio::{
     fs,
     runtime::{Builder, Handle},
@@ -147,6 +147,75 @@ impl Server {
         Ok(server)
     }
 
+    /// Close file descriptors inherited from whatever started us.
+    ///
+    /// conmon-rs daemonizes and outlives the process that spawned it, so any
+    /// descriptor it inherits stays open for the lifetime of the server. If
+    /// the spawning process was itself started with extra descriptors open,
+    /// holding them can keep that process tree from ever finishing - a test
+    /// harness waiting for its own pipe to close, for example.
+    ///
+    /// conmon does the same thing, see `close_all_fds_ge_than(3)` there. Any
+    /// descriptor conmon-rs actually needs is either created after this point
+    /// or received later over the fd socket, so nothing above stderr is worth
+    /// keeping.
+    fn close_inherited_fds() {
+        for fd in Self::inherited_fds() {
+            // The descriptor used to enumerate them is already closed by now,
+            // so check before closing to avoid closing an unrelated descriptor
+            // that reused the number. This runs before tokio starts, so nothing
+            // else can be opening descriptors concurrently.
+            //
+            // These are raw libc calls rather than the `nix` wrappers on
+            // purpose: `BorrowedFd`/`OwnedFd` require the descriptor to be open
+            // for the duration of the borrow, and whether it is still open is
+            // exactly what is unknown here. `fcntl(2)` and `close(2)` take a
+            // plain integer with no such precondition and report `EBADF`.
+            //
+            // SAFETY: both calls are defined for any integer; a stale or
+            // invalid descriptor number fails with `EBADF` rather than
+            // affecting anything else.
+            if unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1 {
+                unsafe { libc::close(fd) };
+            }
+        }
+    }
+
+    /// Every open descriptor above stderr. Split out from `close_inherited_fds`
+    /// so it can be tested without closing the test runner's own descriptors.
+    ///
+    /// This is Linux only: it enumerates `/proc/self/fd` and would report
+    /// nothing at all where that is unavailable, silently leaking the inherited
+    /// descriptors. conmon-rs already requires Linux elsewhere (`prctl`, epoll,
+    /// journald), so the assertion below just makes a port fail here loudly
+    /// rather than lose the behaviour quietly. A log line would not work,
+    /// `close_inherited_fds` runs well before `init_logging`.
+    fn inherited_fds() -> Vec<RawFd> {
+        const {
+            assert!(
+                cfg!(target_os = "linux"),
+                "inherited fds are enumerated through /proc/self/fd, which is Linux only"
+            )
+        };
+
+        let mut fds = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
+            for entry in entries.flatten() {
+                if let Some(fd) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse::<RawFd>().ok())
+                    && fd > 2
+                {
+                    fds.push(fd);
+                }
+            }
+        }
+
+        fds
+    }
+
     /// Start the `Server` instance and consume it.
     pub fn start(self) -> Result<()> {
         // We need to fork as early as possible, especially before setting up tokio.
@@ -163,6 +232,10 @@ impl Server {
                 ForkResult::Child => (),
             }
         }
+
+        // Deliberately outside the `skip_fork` check above: the server outlives
+        // its parent either way, so the descriptors have to go either way.
+        Self::close_inherited_fds();
 
         // now that we've forked, set self to childreaper
         let ret = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
@@ -523,5 +596,30 @@ impl GenerateRuntimeArgs<'_> {
         }
 
         Ok(args)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    #[test]
+    fn inherited_fds_reports_descriptors_above_stderr() -> Result<()> {
+        let file = tempfile::tempfile()?;
+        let fd = file.as_raw_fd();
+
+        let fds = Server::inherited_fds();
+
+        assert!(
+            fds.contains(&fd),
+            "expected an open descriptor {fd} to be reported, got {fds:?}"
+        );
+        // stdin, stdout and stderr are never reported, they are not ours to close.
+        assert!(!fds.contains(&0));
+        assert!(!fds.contains(&1));
+        assert!(!fds.contains(&2));
+
+        Ok(())
     }
 }
