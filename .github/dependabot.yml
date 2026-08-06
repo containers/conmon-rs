@@ -23,6 +23,10 @@ updates:
         update-types:
           - minor
           - patch
+        exclude-patterns:
+          - "capnp*"
+          - "opentelemetry*"
+          - "tracing-opentelemetry"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
