@@ -5,6 +5,8 @@ sudo apt-get update
 sudo apt-get install capnproto protobuf-compiler
 
 # Install latest crun from GitHub releases
-CRUN_VERSION=$(curl -sSfL "https://api.github.com/repos/containers/crun/releases/latest" | grep -oP '"tag_name": "\K[^"]+')
+CRUN_VERSION=$(curl -sSfL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    "https://api.github.com/repos/containers/crun/releases/latest" | grep -oP '"tag_name": "\K[^"]+')
 sudo curl -sSfL "https://github.com/containers/crun/releases/download/${CRUN_VERSION}/crun-${CRUN_VERSION}-linux-amd64" -o /usr/bin/crun
+sudo chmod +x /usr/bin/crun
 crun --version
