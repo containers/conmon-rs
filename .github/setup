@@ -56,6 +56,9 @@ runtime_type = "pod"
 monitor_path = "/usr/libexec/crio/conmonrs"
 EOT
 
+    sudo mv /etc/cni/net.d/10-crio-bridge.conflist.disabled \
+        /etc/cni/net.d/10-crio-bridge.conflist
+
     sudo systemctl enable --now crio.service
 
     # Validate if the correct config is being loaded

@@ -11,6 +11,7 @@ concurrency:
   cancel-in-progress: true
 env:
   CARGO_TERM_COLOR: always
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   NIX_VERSION: "2.32.4"
 jobs:
   build:
