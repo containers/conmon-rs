@@ -300,7 +300,6 @@ dependencies = [
  "capnp-rpc",
  "conmon-common",
  "futures",
- "serde",
  "tokio",
  "tokio-util",
 ]

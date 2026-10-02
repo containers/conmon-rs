@@ -280,47 +280,6 @@ impl Drop for Terminal {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::container_log::ContainerLog;
-    use nix::pty;
-    use sendfd::SendWithFd;
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn new_success() -> Result<()> {
-        let logger = ContainerLog::new();
-        let attach = SharedContainerAttach::default();
-        let token = CancellationToken::new();
-
-        let mut sut = Terminal::new(logger, attach)?;
-        assert!(sut.path().exists());
-
-        let res = pty::openpty(None, None)?;
-
-        let stream = UnixStream::connect(sut.path()).await?;
-        loop {
-            let ready = stream.ready(Interest::WRITABLE).await?;
-            if ready.is_writable() {
-                match stream.send_with_fd(b"test", &[res.master.as_raw_fd()]) {
-                    Ok(_) => break,
-                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
-                    Err(e) => anyhow::bail!(e),
-                }
-            }
-        }
-
-        sut.wait_connected(true, token).await?;
-        assert!(!sut.path().exists());
-
-        // Write to the slave
-        let mut file: std::fs::File = res.slave.into();
-        file.write_all(b"test")?;
-
-        Ok(())
-    }
-}
-
 #[derive(Debug)]
 struct TerminalFd(AsyncFd<std::fs::File>);
 
@@ -381,5 +340,46 @@ impl AsyncWrite for &TerminalFd {
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::container_log::ContainerLog;
+    use nix::pty;
+    use sendfd::SendWithFd;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_success() -> Result<()> {
+        let logger = ContainerLog::new();
+        let attach = SharedContainerAttach::default();
+        let token = CancellationToken::new();
+
+        let mut sut = Terminal::new(logger, attach)?;
+        assert!(sut.path().exists());
+
+        let res = pty::openpty(None, None)?;
+
+        let stream = UnixStream::connect(sut.path()).await?;
+        loop {
+            let ready = stream.ready(Interest::WRITABLE).await?;
+            if ready.is_writable() {
+                match stream.send_with_fd(b"test", &[res.master.as_raw_fd()]) {
+                    Ok(_) => break,
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
+                    Err(e) => anyhow::bail!(e),
+                }
+            }
+        }
+
+        sut.wait_connected(true, token).await?;
+        assert!(!sut.path().exists());
+
+        // Write to the slave
+        let mut file: std::fs::File = res.slave.into();
+        file.write_all(b"test")?;
+
+        Ok(())
     }
 }
