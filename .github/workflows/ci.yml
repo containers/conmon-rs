@@ -99,7 +99,7 @@ jobs:
             --bundle conmonrs.bundle \
             --output-signature conmonrs.sig \
             --output-certificate conmonrs.cert
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conmonrs
           path: ${{ github.sha }}/*
@@ -155,7 +155,7 @@ jobs:
           pushFilter: "(conmon-rs)"
       - run: nix build .#${{ matrix.arch }}
       - run: file result/bin/conmonrs | grep static | grep stripped
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: build-static-${{ matrix.arch }}
           path: |
@@ -173,7 +173,7 @@ jobs:
             --bundle conmonrs.${{ matrix.arch }}.bundle \
             --output-signature conmonrs.${{ matrix.arch }}.sig \
             --output-certificate conmonrs.${{ matrix.arch }}.cert
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: conmonrs-${{ matrix.arch }}
           path: ${{ github.sha }}/*
@@ -347,7 +347,7 @@ jobs:
           test $TEST_RC -ne 0 && cat journal.log
           exit $TEST_RC
       - name: Upload logs
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: journal.log
           path: journal.log
