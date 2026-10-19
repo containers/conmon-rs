@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -507,22 +508,54 @@ var _ = Describe("ConmonClient", func() {
 		})
 
 		hasTraces := func() bool {
-			resp, err := http.Get("http://localhost:16686/api/traces?service=conmonrs")
+			// Jaeger v2 only serves the v3 query API, which requires a time range.
+			now := time.Now().UTC()
+			query := url.Values{}
+			query.Set("query.service_name", "conmonrs")
+			query.Set("query.start_time_min", now.Add(-time.Hour).Format(time.RFC3339))
+			query.Set("query.start_time_max", now.Add(time.Minute).Format(time.RFC3339))
+
+			req, err := http.NewRequestWithContext(
+				context.Background(), http.MethodGet,
+				"http://localhost:16686/api/v3/traces?"+query.Encode(), http.NoBody,
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			resp, err := http.DefaultClient.Do(req)
 			Expect(err).NotTo(HaveOccurred())
 
 			defer resp.Body.Close()
 
-			body, err := io.ReadAll(resp.Body)
-			Expect(err).NotTo(HaveOccurred())
-
-			type traceData struct {
-				Data []any `json:"data"`
+			// No matching trace is reported as not found.
+			if resp.StatusCode == http.StatusNotFound {
+				return false
 			}
 
-			traces := &traceData{}
-			Expect(json.Unmarshal(body, traces)).NotTo(HaveOccurred())
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
 
-			return len(traces.Data) > 0
+			// The API streams one result object per chunk.
+			type traceData struct {
+				Result struct {
+					ResourceSpans []any `json:"resourceSpans"`
+				} `json:"result"`
+			}
+
+			decoder := json.NewDecoder(resp.Body)
+
+			for {
+				traces := &traceData{}
+
+				err := decoder.Decode(traces)
+				if errors.Is(err, io.EOF) {
+					return false
+				}
+
+				Expect(err).NotTo(HaveOccurred())
+
+				if len(traces.Result.ResourceSpans) > 0 {
+					return true
+				}
+			}
 		}
 
 		It("should succeed", func() {
@@ -836,7 +869,7 @@ var _ = Describe("StreamingServer", func() {
 				Expect(err).To(Succeed())
 				Expect(result.URL).NotTo(BeEmpty())
 
-				config := &rest.Config{TLSClientConfig: rest.TLSClientConfig{Insecure: true}}
+				config := &rest.Config{Insecure: true}
 				executor, err := remotecommand.NewWebSocketExecutor(config, "GET", result.URL)
 				Expect(err).NotTo(HaveOccurred())
 
@@ -899,7 +932,7 @@ var _ = Describe("StreamingServer", func() {
 			Expect(err).To(Succeed())
 			Expect(result.URL).NotTo(BeEmpty())
 
-			config := &rest.Config{TLSClientConfig: rest.TLSClientConfig{Insecure: true}}
+			config := &rest.Config{Insecure: true}
 			executor, err := remotecommand.NewWebSocketExecutor(config, "GET", result.URL)
 			Expect(err).NotTo(HaveOccurred())
 

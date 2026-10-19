@@ -1,39 +1,39 @@
 ---
 dependencies:
   - name: go
-    version: 1.26
+    version: 1.27.1
     refPaths:
       - path: go.mod
-        match: go
+        match: ^go
 
   - name: golangci-lint
-    version: 2.11.3
+    version: 2.15.0
     refPaths:
       - path: .github/workflows/ci.yml
-        match: version
+        match: "version: v"
       - path: Makefile
-        match: GOLANGCI_LINT_VERSION
+        match: "GOLANGCI_LINT_VERSION :="
 
   - name: zeitgeist
-    version: 0.5.4
+    version: 0.8.0
     refPaths:
       - path: Makefile
-        match: ZEITGEIST_VERSION
+        match: "ZEITGEIST_VERSION :="
 
   - name: jaeger
-    version: 2.11.0
+    version: 2.22.0
     refPaths:
       - path: contrib/tracing/start
-        match: JAEGER_IMG
+        match: JAEGER_IMG=
 
   - name: cri-tools
-    version: 1.36.0
+    version: 1.37.0
     refPaths:
       - path: .github/setup
-        match: CRI_TOOLS_VERSION
+        match: CRI_TOOLS_VERSION=
 
   - name: nix
-    version: 2.32.4
+    version: 2.35.3
     refPaths:
       - path: .github/workflows/ci.yml
-        match: NIX_VERSION
+        match: "NIX_VERSION:"

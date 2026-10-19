@@ -54,6 +54,11 @@ default_runtime = "crun"
 runtime_path = "/usr/libexec/crio/crun"
 runtime_type = "pod"
 monitor_path = "/usr/libexec/crio/conmonrs"
+
+# critest verifies the pod sandbox metrics since cri-tools v1.37.0, which
+# CRI-O only serves when they are enabled.
+[crio.stats]
+included_pod_metrics = ["all"]
 EOT
 
     sudo mv /etc/cni/net.d/10-crio-bridge.conflist.disabled \
@@ -68,7 +73,7 @@ EOT
 
 install_critest() {
     URL=https://github.com/kubernetes-sigs/cri-tools
-    CRI_TOOLS_VERSION=v1.36.0
+    CRI_TOOLS_VERSION=v1.37.0
 
     git clone --depth 1 --branch $CRI_TOOLS_VERSION $URL
     pushd cri-tools
