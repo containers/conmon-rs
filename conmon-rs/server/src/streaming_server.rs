@@ -1,12 +1,14 @@
 use crate::{
+    attach::SharedContainerAttach,
     bounded_hashmap::BoundedHashMap,
     child::Child,
     child_reaper::{ChildReaper, ReapableChild},
     config::Config,
-    container_io::{ContainerIO, Message as IOMessage, SharedContainerIO},
+    container_io::{ContainerIO, Message as IOMessage, Pipe, SharedContainerIO},
     server::GenerateRuntimeArgs,
 };
 use anyhow::{Context, Result};
+use async_channel::Receiver as IOReceiver;
 use axum::{
     Router,
     extract::{
@@ -17,21 +19,23 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use conmon_common::conmon_capnp::conmon::CgroupManager;
 use futures::{
     sink::SinkExt,
     stream::{SplitSink, SplitStream, StreamExt},
 };
 use serde::{Deserialize, Serialize};
-use std::{fmt::Debug, ops::ControlFlow, sync::Arc};
+use std::{fmt::Debug, ops::ControlFlow, sync::Arc, time::Duration};
 use tokio::{
     net::TcpListener,
     sync::{
         RwLock,
+        broadcast::{self, error::RecvError},
         mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender},
     },
     task::{self, JoinHandle},
+    time::timeout,
 };
 use tower_http::trace::TraceLayer;
 use tracing::{debug, debug_span, error, info, trace, warn};
@@ -52,6 +56,13 @@ const STDERR_BYTE: u8 = 2;
 const STREAM_ERR_BYTE: u8 = 3;
 const RESIZE_BYTE: u8 = 4;
 const CLOSE_BYTE: u8 = 255;
+
+/// Upper bound for waiting on the remaining output after the container
+/// exited. The read loops may still be draining the pipes when the exit is
+/// observed, they signal the end with `Message::Done`. The timeout only kicks
+/// in if that never arrives, for example because a grandchild keeps the pipe
+/// open.
+const DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Default)]
 /// The main streaming server structure of this module.
@@ -335,7 +346,7 @@ impl StreamingServer {
     /// Build a common write task based on the session type.
     async fn write_task(
         mut sender: SplitSink<WebSocket, Message>,
-        stdin_rx: MpscReceiver<Vec<u8>>,
+        stdin_rx: MpscReceiver<Bytes>,
         session: Session,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
@@ -368,7 +379,7 @@ impl StreamingServer {
     /// Build a common read task.
     async fn read_task(
         mut receiver: SplitStream<WebSocket>,
-        stdin_tx: MpscSender<Vec<u8>>,
+        stdin_tx: MpscSender<Bytes>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             while let Some(Ok(msg)) = receiver.next().await {
@@ -380,11 +391,11 @@ impl StreamingServer {
     }
 
     /// Read a single message and return the control flow decision.
-    async fn read_message(msg: Message, stdin_tx: &MpscSender<Vec<u8>>) -> ControlFlow<(), ()> {
+    async fn read_message(msg: Message, stdin_tx: &MpscSender<Bytes>) -> ControlFlow<(), ()> {
         match msg {
             Message::Binary(data) if !data.is_empty() => {
                 debug!("Got {} binary bytes", data.len());
-                if let Err(e) = stdin_tx.send(data.into()).await {
+                if let Err(e) = stdin_tx.send(data).await {
                     error!("Unable to send stdin data: {e}");
                 }
             }
@@ -412,7 +423,7 @@ impl StreamingServer {
     async fn exec_loop(
         mut session: ExecSession,
         sender: &mut SplitSink<WebSocket, Message>,
-        mut stdin_rx: MpscReceiver<Vec<u8>>,
+        mut stdin_rx: MpscReceiver<Bytes>,
     ) -> Result<()> {
         let pidfile = ContainerIO::temp_file_name(
             Some(session.server_config.runtime_dir()),
@@ -488,44 +499,43 @@ impl StreamingServer {
 
         let attach = io.attach().await;
 
-        // Preallocate frame buffer for WebSocket framing (reused throughout the loop)
-        let mut frame_buffer = Vec::with_capacity(8192 + 1);
+        // Streams which are disabled or whose read loop signalled the end are
+        // not polled anymore.
+        let mut stdout_done = !stdout_enabled;
+        let mut stderr_done = !stderr_enabled;
 
         loop {
             tokio::select! {
-                Some(data) = stdin_rx.recv()  => if stdin_enabled {
-                    // First element is the message type indicator
-                    if let Some((&msg_type, payload)) = data.split_first() {
-                        match msg_type {
-                            STDIN_BYTE => {
-                                trace!("Got stdin message of len {}", payload.len());
-                                attach.stdin().send(Bytes::copy_from_slice(payload)).context("send to attach session")?;
-                            },
-                            RESIZE_BYTE => {
-                                let e = serde_json::from_slice::<ResizeEvent>(payload).context("unmarshal resize event")?;
-                                trace!("Got resize message: {e:?}");
-                                io.resize(e.width, e.height).await.context("resize terminal")?;
-                            },
-                            CLOSE_BYTE => {
-                                info!("Got close message");
-                                break
-                            },
-                            x => warn!("Unknown start byte for stdin: {x}"),
-                        }
+                res = stdout_rx.recv(), if !stdout_done => match res {
+                    Ok(IOMessage::Data(data, _)) => {
+                        Self::frame_and_send(STDOUT_BYTE, &data, sender).await
+                            .context("send to stdout")?;
                     }
+                    Ok(IOMessage::Done) | Err(_) => stdout_done = true,
                 },
 
-                Ok(IOMessage::Data(data, _)) = stdout_rx.recv() => if stdout_enabled {
-                    Self::frame_and_send_reuse(STDOUT_BYTE, &data, sender, &mut frame_buffer).await
-                        .context("send to stdout")?;
+                res = stderr_rx.recv(), if !stderr_done => match res {
+                    Ok(IOMessage::Data(data, _)) => {
+                        Self::frame_and_send(STDERR_BYTE, &data, sender).await
+                            .context("send to stderr")?;
+                    }
+                    Ok(IOMessage::Done) | Err(_) => stderr_done = true,
                 },
 
-                Ok(IOMessage::Data(data, _)) = stderr_rx.recv() => if stderr_enabled {
-                    Self::frame_and_send_reuse(STDERR_BYTE, &data, sender, &mut frame_buffer).await
-                        .context("send to stderr")?;
+                Some(data) = stdin_rx.recv() => if stdin_enabled
+                    && Self::handle_stdin(data, &attach, &io).await?.is_break()
+                {
+                    break
                 },
 
                 Ok(exit_data) = exit_rx.recv() => {
+                    // Forward what the read loops still deliver before closing.
+                    if !stdout_done {
+                        Self::drain_stdio(&stdout_rx, STDOUT_BYTE, sender).await.context("drain stdout")?;
+                    }
+                    if !stderr_done {
+                        Self::drain_stdio(&stderr_rx, STDERR_BYTE, sender).await.context("drain stderr")?;
+                    }
                     if exit_data.exit_code != 0 {
                         let mut err = vec![STREAM_ERR_BYTE];
                         let msg = ErrorMessage::new(exit_data.exit_code);
@@ -544,7 +554,7 @@ impl StreamingServer {
     async fn attach_loop(
         session: AttachSession,
         sender: &mut SplitSink<WebSocket, Message>,
-        mut stdin_rx: MpscReceiver<Vec<u8>>,
+        mut stdin_rx: MpscReceiver<Bytes>,
     ) -> Result<()> {
         // Extract values we need for the I/O loop
         let stdin_enabled = session.stdin;
@@ -556,52 +566,43 @@ impl StreamingServer {
         // Explicitly drop session to free the ReapableChild before entering the I/O loop
         drop(session);
 
-        let (stdout_rx, stderr_rx) = io
-            .stdio()
-            .await
-            .context("retrieve stdout and stderr channels")?;
-
+        // Subscribe to the attach broadcast rather than the stdio channels. The
+        // broadcast only carries output produced while someone is attached,
+        // whereas the stdio channels replay buffered history and are closed
+        // for created containers anyway.
         let attach = io.attach().await;
+        let mut attach_rx = attach.subscribe();
 
-        // Preallocate frame buffer for WebSocket framing (reused throughout the loop)
-        let mut frame_buffer = Vec::with_capacity(8192 + 1);
+        // Every read loop sends one `Done` once its pipe ended. Count them to
+        // know when the output is complete.
+        let expected_done = io.pipe_count().await;
+        let mut done = 0;
 
         loop {
             tokio::select! {
-                Some(data) = stdin_rx.recv()  => if stdin_enabled {
-                    // First element is the message type indicator
-                    if let Some((&msg_type, payload)) = data.split_first() {
-                        match msg_type {
-                            STDIN_BYTE => {
-                                trace!("Got stdin message of len {}", payload.len());
-                                attach.stdin().send(Bytes::copy_from_slice(payload)).context("send to attach session")?;
-                            },
-                            RESIZE_BYTE => {
-                                let e = serde_json::from_slice::<ResizeEvent>(payload).context("unmarshal resize event")?;
-                                trace!("Got resize message: {e:?}");
-                                io.resize(e.width, e.height).await.context("resize terminal")?;
-                            },
-                            CLOSE_BYTE => {
-                                info!("Got close message");
-                                break
-                            },
-                            x => warn!("Unknown start byte for stdin: {x}"),
-                        }
+                res = attach_rx.recv(), if done < expected_done => match res {
+                    Ok(IOMessage::Done) => done += 1,
+                    Ok(message) => {
+                        Self::forward_output(message, stdout_enabled, stderr_enabled, sender).await?;
+                    }
+                    Err(RecvError::Lagged(n)) => warn!("Attach client too slow, skipped {n} messages"),
+                    Err(RecvError::Closed) => {
+                        debug!("Exiting streaming attach because container I/O is gone");
+                        break
                     }
                 },
 
-                Ok(IOMessage::Data(data, _)) = stdout_rx.recv() => if stdout_enabled {
-                    Self::frame_and_send_reuse(STDOUT_BYTE, &data, sender, &mut frame_buffer).await
-                        .context("send to stdout")?;
-                },
-
-                Ok(IOMessage::Data(data, _)) = stderr_rx.recv() => if stderr_enabled {
-                    Self::frame_and_send_reuse(STDERR_BYTE, &data, sender, &mut frame_buffer).await
-                        .context("send to stderr")?;
+                Some(data) = stdin_rx.recv() => if stdin_enabled
+                    && Self::handle_stdin(data, &attach, &io).await?.is_break()
+                {
+                    break
                 },
 
                 _ = token.cancelled() => {
                     debug!("Exiting streaming attach because token cancelled");
+                    if done < expected_done {
+                        Self::drain_attach(&mut attach_rx, expected_done - done, stdout_enabled, stderr_enabled, sender).await?;
+                    }
                     break
                 }
             }
@@ -610,29 +611,131 @@ impl StreamingServer {
         Ok(())
     }
 
+    /// Forward a single output message to the WebSocket client.
+    async fn forward_output(
+        message: IOMessage,
+        stdout_enabled: bool,
+        stderr_enabled: bool,
+        sender: &mut SplitSink<WebSocket, Message>,
+    ) -> Result<()> {
+        match message {
+            IOMessage::Data(data, Pipe::StdOut) if stdout_enabled => {
+                Self::frame_and_send(STDOUT_BYTE, &data, sender)
+                    .await
+                    .context("send to stdout")
+            }
+            IOMessage::Data(data, Pipe::StdErr) if stderr_enabled => {
+                Self::frame_and_send(STDERR_BYTE, &data, sender)
+                    .await
+                    .context("send to stderr")
+            }
+            IOMessage::Data(..) | IOMessage::Done => Ok(()),
+        }
+    }
+
+    /// Forward the output which is still queued or arrives shortly after the
+    /// container exited, until the remaining read loops signalled the end or
+    /// the channel stays quiet for `DRAIN_TIMEOUT`.
+    async fn drain_attach(
+        attach_rx: &mut broadcast::Receiver<IOMessage>,
+        mut remaining_done: usize,
+        stdout_enabled: bool,
+        stderr_enabled: bool,
+        sender: &mut SplitSink<WebSocket, Message>,
+    ) -> Result<()> {
+        while remaining_done > 0 {
+            match timeout(DRAIN_TIMEOUT, attach_rx.recv()).await {
+                Ok(Ok(IOMessage::Done)) => remaining_done -= 1,
+                Ok(Ok(message)) => {
+                    Self::forward_output(message, stdout_enabled, stderr_enabled, sender).await?;
+                }
+                Ok(Err(RecvError::Lagged(n))) => {
+                    warn!("Attach client too slow, skipped {n} messages");
+                }
+                Ok(Err(RecvError::Closed)) | Err(_) => return Ok(()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Forward the remaining output of an exec stdio channel after the process
+    /// exited, until the read loop signals that it is done or the channel
+    /// stays quiet for `DRAIN_TIMEOUT`.
+    async fn drain_stdio(
+        rx: &IOReceiver<IOMessage>,
+        stream_byte: u8,
+        sender: &mut SplitSink<WebSocket, Message>,
+    ) -> Result<()> {
+        loop {
+            match timeout(DRAIN_TIMEOUT, rx.recv()).await {
+                Ok(Ok(IOMessage::Data(data, _))) => {
+                    Self::frame_and_send(stream_byte, &data, sender).await?;
+                }
+                Ok(Ok(IOMessage::Done)) | Ok(Err(_)) | Err(_) => return Ok(()),
+            }
+        }
+    }
+
     /// The port forward specific read/write loop.
     async fn port_forward_loop(
         _session: PortForwardSession,
         _sender: &mut SplitSink<WebSocket, Message>,
-        mut _in_rx: MpscReceiver<Vec<u8>>,
+        mut _in_rx: MpscReceiver<Bytes>,
     ) -> Result<()> {
         todo!("Requires SPDY protocol implementation from https://github.com/moby/spdystream")
     }
 
-    /// Prepend a stream type byte and send the data over WebSocket.
-    /// Reuses the provided frame_buffer to avoid repeated allocations.
-    async fn frame_and_send_reuse(
+    /// Handle a single stdin message from the websocket client. The first
+    /// byte of the message selects the stream, the rest is the payload.
+    async fn handle_stdin(
+        data: Bytes,
+        attach: &SharedContainerAttach,
+        io: &SharedContainerIO,
+    ) -> Result<ControlFlow<()>> {
+        let Some(&msg_type) = data.first() else {
+            return Ok(ControlFlow::Continue(()));
+        };
+        // Slicing the reference counted bytes avoids copying the payload.
+        let payload = data.slice(1..);
+
+        match msg_type {
+            STDIN_BYTE => {
+                trace!("Got stdin message of len {}", payload.len());
+                attach
+                    .stdin()
+                    .send(payload)
+                    .context("send to attach session")?;
+            }
+            RESIZE_BYTE => {
+                let e = serde_json::from_slice::<ResizeEvent>(&payload)
+                    .context("unmarshal resize event")?;
+                trace!("Got resize message: {e:?}");
+                io.resize(e.width, e.height)
+                    .await
+                    .context("resize terminal")?;
+            }
+            CLOSE_BYTE => {
+                info!("Got close message");
+                return Ok(ControlFlow::Break(()));
+            }
+            x => warn!("Unknown start byte for stdin: {x}"),
+        }
+
+        Ok(ControlFlow::Continue(()))
+    }
+
+    /// Prepend a stream type byte and send the data over WebSocket. The frame
+    /// is allocated with its exact size and handed over without copying.
+    async fn frame_and_send(
         stream_byte: u8,
         data: &[u8],
         sender: &mut SplitSink<WebSocket, Message>,
-        frame_buffer: &mut Vec<u8>,
     ) -> Result<()> {
-        frame_buffer.clear();
-        frame_buffer.push(stream_byte);
-        frame_buffer.extend_from_slice(data);
-        // Move the Vec into the message to avoid copying, replace with empty Vec
+        let mut frame = BytesMut::with_capacity(data.len() + 1);
+        frame.put_u8(stream_byte);
+        frame.extend_from_slice(data);
         sender
-            .send(Message::Binary(std::mem::take(frame_buffer).into()))
+            .send(Message::Binary(frame.freeze()))
             .await
             .context("send framed data")
     }

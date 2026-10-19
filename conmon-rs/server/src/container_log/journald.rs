@@ -1,10 +1,8 @@
-use crate::{container_io::Pipe, journal::Journal};
+use crate::container_io::Pipe;
 use anyhow::{Context, Result};
-use std::io::Write;
-use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt},
-    task,
-};
+use bytes::Bytes;
+use libsystemd::logging::{Priority, journal_print};
+use tokio::task;
 use tracing::debug;
 
 #[derive(Debug)]
@@ -20,22 +18,25 @@ impl JournaldLogger {
         Ok(())
     }
 
-    pub async fn write<T>(&mut self, _: Pipe, mut bytes: T) -> Result<()>
-    where
-        T: AsyncBufRead + Unpin,
-    {
-        let mut line_buf = String::new();
-        while bytes.read_line(&mut line_buf).await? > 0 {
-            let line = std::mem::take(&mut line_buf);
-            task::spawn_blocking(move || {
-                Journal
-                    .write_all(line.as_bytes())
-                    .context("write to journal")
-            })
-            .await
-            .context("journal spawn_blocking")??;
+    /// Write every line of the provided bytes as a journal entry.
+    ///
+    /// Sending to the journal is blocking socket I/O, so the whole chunk is
+    /// handed to a single blocking task instead of one per line. The bytes are
+    /// reference counted, which makes moving them into the task free.
+    pub async fn write(&mut self, _: Pipe, bytes: Bytes) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
         }
-        Ok(())
+
+        task::spawn_blocking(move || {
+            for line in bytes.split_inclusive(|&b| b == b'\n') {
+                journal_print(Priority::Notice, &String::from_utf8_lossy(line))
+                    .context("write to journal")?;
+            }
+            Ok(())
+        })
+        .await
+        .context("journal spawn_blocking")?
     }
 
     pub async fn reopen(&mut self) -> Result<()> {
@@ -64,8 +65,8 @@ mod tests {
         let mut logger = JournaldLogger::new(Some(1000)).unwrap();
         logger.init().await.unwrap();
 
-        let data = b"Test log message\n";
-        assert!(logger.write(Pipe::StdOut, &data[..]).await.is_ok());
+        let data = Bytes::from_static(b"Test log message\nand another one\n");
+        assert!(logger.write(Pipe::StdOut, data).await.is_ok());
     }
 
     #[tokio::test]
@@ -73,12 +74,12 @@ mod tests {
         let mut logger = JournaldLogger::new(Some(1000)).unwrap();
         logger.init().await.unwrap();
 
-        let data1 = b"Test log message before reopen\n";
-        assert!(logger.write(Pipe::StdOut, &data1[..]).await.is_ok());
+        let data1 = Bytes::from_static(b"Test log message before reopen\n");
+        assert!(logger.write(Pipe::StdOut, data1).await.is_ok());
 
         assert!(logger.reopen().await.is_ok());
 
-        let data2 = b"Test log message after reopen\n";
-        assert!(logger.write(Pipe::StdOut, &data2[..]).await.is_ok());
+        let data2 = Bytes::from_static(b"Test log message after reopen\n");
+        assert!(logger.write(Pipe::StdOut, data2).await.is_ok());
     }
 }

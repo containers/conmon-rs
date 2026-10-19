@@ -6,6 +6,7 @@ use crate::{
     oom_watcher::OOMWatcher,
 };
 use anyhow::{Context, Result, bail};
+use futures::future::join_all;
 use libc::pid_t;
 use nix::{
     errno::Errno,
@@ -245,27 +246,32 @@ impl ChildReaper {
                 .map(|gc| (gc.pid, gc.task.clone()))
                 .collect()
         };
+        // Signal every grandchild first and wait for all of their tasks
+        // concurrently, so that the shutdown takes as long as the slowest
+        // child instead of the sum of all of them.
+        let mut waits = Vec::with_capacity(children.len());
         for (pid, task) in children {
             let span = debug_span!("kill_grandchild", pid);
             let _enter = span.enter();
             debug!("Killing single grandchild");
             kill_grandchild(pid, s);
-            if let Some(t) = task {
-                let handle = lock!(t).take();
-                if let Some(handle) = handle {
-                    let close_span = debug_span!("close", signal = s.as_str());
-                    async {
+            if let Some(t) = task
+                && let Some(handle) = lock!(t).take()
+            {
+                let close_span = debug_span!("close", signal = s.as_str());
+                waits.push(
+                    async move {
                         debug!("Waiting for task to close");
                         if let Err(e) = handle.await {
                             error!("Unable to close grandchild: {:#}", e)
                         }
+                        debug!("Done killing single grandchild");
                     }
-                    .instrument(close_span)
-                    .await;
-                }
+                    .instrument(close_span),
+                );
             }
-            debug!("Done killing single grandchild");
         }
+        join_all(waits).await;
         debug!("Done killing all grandchildren");
         Ok(())
     }

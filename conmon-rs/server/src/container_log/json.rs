@@ -1,12 +1,8 @@
-use crate::container_io::Pipe;
+use crate::{container_io::Pipe, container_log::LogFile};
 use anyhow::{Context, Result};
+use memchr::memchr;
 use serde::Serialize;
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
-use tokio::{
-    fs::{File, OpenOptions},
-    io::{AsyncWriteExt, BufWriter},
-};
+use std::{path::Path, time::SystemTime};
 use tracing::debug;
 
 /// Log entry structure for JSON serialization
@@ -19,31 +15,19 @@ struct LogEntry<'a> {
 
 #[derive(Debug)]
 pub struct JsonLogger {
-    path: PathBuf,
-    file: Option<BufWriter<File>>,
+    /// The log file on disk.
+    file: LogFile,
     max_log_size: Option<usize>,
     bytes_written: usize,
 
-    /// Reusable buffer for JSON serialization
+    /// Reusable buffer for serializing a single entry
     json_buf: Vec<u8>,
 }
 
 impl JsonLogger {
-    fn path(&self) -> &PathBuf {
-        &self.path
-    }
-    fn set_file(&mut self, val: Option<BufWriter<File>>) {
-        self.file = val;
-    }
-}
-
-impl JsonLogger {
-    const ERR_UNINITIALIZED: &'static str = "logger not initialized";
-
     pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> Result<JsonLogger> {
         Ok(Self {
-            path: path.as_ref().into(),
-            file: None,
+            file: LogFile::new(path, None),
             max_log_size,
             bytes_written: 0,
             json_buf: Vec::with_capacity(512), // Pre-allocate for JSON output
@@ -51,9 +35,11 @@ impl JsonLogger {
     }
 
     pub async fn init(&mut self) -> Result<()> {
-        debug!("Initializing JSON logger in path {}", self.path().display());
-        self.set_file(Self::open(self.path()).await?.into());
-        Ok(())
+        debug!(
+            "Initializing JSON logger in path {}",
+            self.file.path().display()
+        );
+        self.file.open().await
     }
 
     pub async fn write(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {
@@ -71,144 +57,130 @@ impl JsonLogger {
         let mut pos = 0;
         while pos < bytes.len() {
             // Find the next newline or end of buffer
-            let end = bytes[pos..]
-                .iter()
-                .position(|&b| b == b'\n')
+            let end = memchr(b'\n', &bytes[pos..])
                 .map(|i| pos + i + 1)
                 .unwrap_or(bytes.len());
-
             let line = &bytes[pos..end];
+            pos = end;
 
             // Convert message to UTF-8, trim whitespace
             let message = String::from_utf8_lossy(line);
-            let message_trimmed = message.trim();
 
-            // Create log entry struct
             let log_entry = LogEntry {
                 timestamp,
                 pipe: pipe_str,
-                message: message_trimmed,
+                message: message.trim(),
             };
 
-            // Serialize directly to reusable buffer to avoid String allocation
+            // Serialize the entry and its trailing newline into the reusable
+            // buffer first, so that the size check happens before it gets
+            // appended to the chunk.
             self.json_buf.clear();
             serde_json::to_writer(&mut self.json_buf, &log_entry).context("serialize log entry")?;
+            self.json_buf.push(b'\n');
 
-            self.bytes_written += self.json_buf.len() + 1; // +1 for newline
-
-            #[allow(clippy::collapsible_if)]
-            if let Some(max_size) = self.max_log_size {
-                if self.bytes_written > max_size {
-                    self.reopen().await?;
-                    self.bytes_written = 0;
-                }
+            let total = self.bytes_written.saturating_add(self.json_buf.len());
+            if self.max_log_size.is_some_and(|max| total > max) {
+                self.reopen().await?;
+                // The entry which triggered the rotation ends up in the new
+                // file and counts towards its size.
+                self.bytes_written = self.json_buf.len();
+            } else {
+                self.bytes_written = total;
             }
 
-            let file = self.file.as_mut().context(Self::ERR_UNINITIALIZED)?;
-            file.write_all(&self.json_buf).await?;
-            file.write_all(b"\n").await?;
-
-            pos = end;
+            self.file.buf.extend_from_slice(&self.json_buf);
         }
 
-        // Flush once at the end instead of per-line to reduce syscall overhead
-        self.flush().await?;
-        Ok(())
+        // Write the whole chunk at once instead of per line
+        self.file.flush().await
     }
 
     pub async fn reopen(&mut self) -> Result<()> {
-        debug!("Reopen JSON log {}", self.path().display());
-        self.file
-            .as_mut()
-            .context(Self::ERR_UNINITIALIZED)?
-            .get_ref()
-            .sync_all()
-            .await?;
-        self.init().await
-    }
-
-    pub async fn flush(&mut self) -> Result<()> {
-        self.file
-            .as_mut()
-            .context(Self::ERR_UNINITIALIZED)?
-            .flush()
-            .await
-            .context("flush file writer")
-    }
-
-    async fn open<T: AsRef<Path>>(path: T) -> Result<BufWriter<File>> {
-        Ok(BufWriter::new(
-            OpenOptions::new()
-                .create(true)
-                .read(true)
-                .truncate(true)
-                .write(true)
-                .open(&path)
-                .await
-                .with_context(|| format!("open log file path '{}'", path.as_ref().display()))?,
-        ))
+        debug!("Reopen JSON log {}", self.file.path().display());
+        self.file.reopen().await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncReadExt;
+    use std::fs;
+    use tempfile::NamedTempFile;
 
     #[tokio::test]
-    async fn test_json_logger_new() {
-        let logger = JsonLogger::new("/tmp/test.log", Some(1000)).unwrap();
-        assert_eq!(logger.path().to_str().unwrap(), "/tmp/test.log");
-        assert_eq!(logger.max_log_size.unwrap(), 1000);
+    async fn test_json_logger_new() -> Result<()> {
+        let logger = JsonLogger::new("/tmp/test.log", Some(1000))?;
+        assert_eq!(
+            logger.file.path().to_str().context("path")?,
+            "/tmp/test.log"
+        );
+        assert_eq!(logger.max_log_size, Some(1000));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_json_logger_init() {
-        let mut logger = JsonLogger::new("/tmp/test_init.log", Some(1000)).unwrap();
-        logger.init().await.unwrap();
-        assert!(logger.file.is_some());
+    async fn test_json_logger_init() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let mut logger = JsonLogger::new(file.path(), Some(1000))?;
+        logger.init().await?;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_json_logger_write() {
-        let mut logger = JsonLogger::new("/tmp/test_write.log", Some(1000)).unwrap();
-        logger.init().await.unwrap();
+    async fn test_json_logger_write() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let mut logger = JsonLogger::new(file.path(), Some(1000))?;
+        logger.init().await?;
 
-        let data = b"Test log message\n";
-        logger.write(Pipe::StdOut, data).await.unwrap();
+        logger
+            .write(Pipe::StdOut, b"Test log message\nsecond")
+            .await?;
 
-        // Read back from the file
-        let mut file = File::open("/tmp/test_write.log").await.unwrap();
-        let mut contents = String::new();
-        file.read_to_string(&mut contents).await.unwrap();
-
-        // Check if the file contains the logged message
-        assert!(contents.contains("Test log message"));
+        let contents = fs::read_to_string(file.path())?;
+        let mut lines = contents.lines();
+        let first = lines.next().context("no first line")?;
+        assert!(first.contains(r#""pipe":"stdout""#));
+        assert!(first.contains(r#""message":"Test log message""#));
+        let second = lines.next().context("no second line")?;
+        assert!(second.contains(r#""message":"second""#));
+        assert!(lines.next().is_none());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_json_logger_reopen() {
-        let mut logger = JsonLogger::new("/tmp/test_reopen.log", Some(1000)).unwrap();
-        logger.init().await.unwrap();
+    async fn test_json_logger_reopen() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let mut logger = JsonLogger::new(file.path(), Some(1000))?;
+        logger.init().await?;
 
-        // Write to the file
-        let data1 = b"Test log message before reopen\n";
-        logger.write(Pipe::StdOut, data1).await.unwrap();
+        logger
+            .write(Pipe::StdOut, b"Test log message before reopen\n")
+            .await?;
+        logger.reopen().await?;
+        logger
+            .write(Pipe::StdOut, b"Test log message after reopen\n")
+            .await?;
 
-        // Reopen the file
-        logger.reopen().await.unwrap();
-
-        // Write to the file again
-        let data2 = b"Test log message after reopen\n";
-        logger.write(Pipe::StdOut, data2).await.unwrap();
-
-        // Read back from the file
-        let mut file = File::open("/tmp/test_reopen.log").await.unwrap();
-        let mut contents = String::new();
-        file.read_to_string(&mut contents).await.unwrap();
-
-        // Check if the file contains the logged message
+        let contents = fs::read_to_string(file.path())?;
         assert!(contents.contains("Test log message after reopen"));
         assert!(!contents.contains("Test log message before reopen"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_logger_rotation_counts_trigger() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        // Every entry is about 60 bytes, so the third one triggers a rotation.
+        let mut logger = JsonLogger::new(file.path(), Some(150))?;
+        logger.init().await?;
+
+        logger.write(Pipe::StdOut, b"a\nb\nc\n").await?;
+        assert_eq!(logger.bytes_written, logger.json_buf.len());
+
+        let contents = fs::read_to_string(file.path())?;
+        assert_eq!(contents.lines().count(), 1);
+        assert!(contents.contains(r#""message":"c""#));
+        Ok(())
     }
 }

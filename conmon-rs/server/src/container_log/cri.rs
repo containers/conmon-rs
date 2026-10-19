@@ -1,24 +1,23 @@
 //! File logging functionalities.
 
-use crate::container_io::Pipe;
+use crate::{container_io::Pipe, container_log::LogFile};
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use tokio::{
-    fs::{File, OpenOptions},
-    io::{AsyncWriteExt, BufWriter},
+use memchr::memchr;
+use std::{
+    path::Path,
+    time::{Duration, Instant},
 };
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tracing::{debug, trace};
+
+/// How long a formatted timestamp is reused before it gets refreshed.
+const TIMESTAMP_CACHE_DURATION: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 /// The main structure used for container log handling.
 pub struct CriLogger {
-    /// Path to the file on disk.
-    path: PathBuf,
-
-    /// Open file handle of the `path`.
-    file: Option<BufWriter<File>>,
+    /// The log file on disk.
+    file: LogFile,
 
     /// Maximum allowed log size in bytes.
     max_log_size: Option<usize>,
@@ -34,31 +33,10 @@ pub struct CriLogger {
 }
 
 impl CriLogger {
-    fn path(&self) -> &PathBuf {
-        &self.path
-    }
-    fn set_file(&mut self, val: Option<BufWriter<File>>) {
-        self.file = val;
-    }
-    fn max_log_size(&self) -> Option<usize> {
-        self.max_log_size
-    }
-    fn bytes_written(&self) -> usize {
-        self.bytes_written
-    }
-    fn set_bytes_written(&mut self, val: usize) {
-        self.bytes_written = val;
-    }
-}
-
-impl CriLogger {
-    const ERR_UNINITIALIZED: &'static str = "logger not initialized";
-
     /// Create a new file logger instance.
     pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> Result<CriLogger> {
         Ok(Self {
-            path: path.as_ref().into(),
-            file: None,
+            file: LogFile::new(path, Some(0o600)),
             max_log_size,
             bytes_written: 0,
             cached_timestamp: String::new(),
@@ -68,149 +46,96 @@ impl CriLogger {
 
     /// Asynchronously initialize the CRI logger.
     pub async fn init(&mut self) -> Result<()> {
-        debug!("Initializing CRI logger in path {}", self.path().display());
-        self.set_file(Self::open(self.path()).await?.into());
+        debug!(
+            "Initializing CRI logger in path {}",
+            self.file.path().display()
+        );
+        self.file.open().await
+    }
+
+    /// Refresh the cached timestamp if it is empty or older than
+    /// `TIMESTAMP_CACHE_DURATION`.
+    fn update_timestamp(&mut self) -> Result<()> {
+        let now = Instant::now();
+        if self.cached_timestamp.is_empty()
+            || now.duration_since(self.last_timestamp_update) >= TIMESTAMP_CACHE_DURATION
+        {
+            let now_dt = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+            self.cached_timestamp = now_dt.format(&Rfc3339).context("format datetime")?;
+            self.last_timestamp_update = now;
+        }
         Ok(())
     }
 
     /// Write the contents of the provided bytes into the file logger.
     pub async fn write(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {
-        // Update cached timestamp if it's been more than 100ms or if empty (first use)
-        let now = Instant::now();
-        if self.cached_timestamp.is_empty()
-            || now.duration_since(self.last_timestamp_update) >= Duration::from_millis(100)
-        {
-            let now_dt = OffsetDateTime::now_local()
-                .or_else(|_| Ok::<_, time::error::Format>(OffsetDateTime::now_utc()))
-                .context("get local datetime")?;
-            self.cached_timestamp = now_dt.format(&Rfc3339).context("format datetime")?;
-            self.last_timestamp_update = now;
-        }
+        self.update_timestamp()?;
 
+        let pipe_tag: &[u8] = match pipe {
+            Pipe::StdOut => b" stdout ",
+            Pipe::StdErr => b" stderr ",
+        };
+
+        // The timestamp, the pipe tag and the "P " or "F " marker.
         let min_log_len = self
             .cached_timestamp
             .len()
-            .checked_add(10) // len of " stdout " + "P "
+            .checked_add(pipe_tag.len() + 2)
             .context("min log line len exceeds usize")?;
 
         let mut pos = 0;
         while pos < bytes.len() {
             // Find the next newline or end of buffer
-            let newline_pos = bytes[pos..].iter().position(|&b| b == b'\n');
-            let (end, partial) = match newline_pos {
+            let (end, partial) = match memchr(b'\n', &bytes[pos..]) {
                 Some(i) => (pos + i + 1, false), // Found newline, include it, not partial
                 None => (bytes.len(), true),     // No newline, partial line
             };
-
             let line = &bytes[pos..end];
-            let read = line.len();
-
-            if read == 0 {
-                break;
-            }
-
             pos = end;
 
-            let mut bytes_to_be_written = read + min_log_len;
+            let mut bytes_to_be_written = line.len() + min_log_len;
             if partial {
                 bytes_to_be_written += 1; // the added newline
             }
 
-            let mut new_bytes_written = self
-                .bytes_written()
-                .checked_add(bytes_to_be_written)
-                .unwrap_or_default();
+            let total = self.bytes_written.saturating_add(bytes_to_be_written);
+            trace!(
+                "Verifying log size: max_log_size = {:?}, bytes_written = {}, bytes_to_be_written = {}",
+                self.max_log_size, self.bytes_written, bytes_to_be_written,
+            );
 
-            if new_bytes_written == 0 {
+            let new_bytes_written = if self.max_log_size.is_some_and(|max| total > max) {
                 self.reopen()
                     .await
-                    .context("reopen logs because of overflowing bytes_written")?;
-            }
-
-            if let Some(max_log_size) = self.max_log_size() {
-                trace!(
-                    "Verifying log size: max_log_size = {}, bytes_written = {},  bytes_to_be_written = {}, new_bytes_written = {}",
-                    max_log_size,
-                    self.bytes_written(),
-                    bytes_to_be_written,
-                    new_bytes_written,
-                );
-
-                if new_bytes_written > max_log_size {
-                    new_bytes_written = 0;
-                    self.reopen()
-                        .await
-                        .context("reopen logs because of exceeded size")?;
-                }
-            }
-
-            // Write the timestamp
-            let file = self.file.as_mut().context(Self::ERR_UNINITIALIZED)?;
-            file.write_all(self.cached_timestamp.as_bytes()).await?;
-
-            // Add the pipe name
-            match pipe {
-                Pipe::StdOut => file.write_all(b" stdout ").await,
-                Pipe::StdErr => file.write_all(b" stderr ").await,
-            }?;
-
-            // Output log tag for partial or newline
-            if partial {
-                file.write_all(b"P ").await?;
+                    .context("reopen logs because of exceeded size")?;
+                // The line which triggered the rotation ends up in the new file
+                // and counts towards its size.
+                bytes_to_be_written
             } else {
-                file.write_all(b"F ").await?;
-            }
+                total
+            };
 
-            // Output the actual contents
-            file.write_all(line).await?;
-
-            // Output a newline for partial
+            // Assemble the whole line into the chunk buffer
+            let buf = &mut self.file.buf;
+            buf.extend_from_slice(self.cached_timestamp.as_bytes());
+            buf.extend_from_slice(pipe_tag);
+            buf.extend_from_slice(if partial { b"P " } else { b"F " });
+            buf.extend_from_slice(line);
             if partial {
-                file.write_all(b"\n").await?;
+                buf.push(b'\n');
             }
 
-            self.set_bytes_written(new_bytes_written);
+            self.bytes_written = new_bytes_written;
             trace!("Wrote log line of length {}", bytes_to_be_written);
         }
 
-        self.flush().await
+        self.file.flush().await
     }
 
     /// Reopen the container log file.
     pub async fn reopen(&mut self) -> Result<()> {
-        debug!("Reopen container log {}", self.path().display());
-        self.file
-            .as_mut()
-            .context(Self::ERR_UNINITIALIZED)?
-            .get_ref()
-            .sync_all()
-            .await?;
-        self.init().await
-    }
-
-    /// Ensures that all content is written to disk.
-    pub async fn flush(&mut self) -> Result<()> {
-        self.file
-            .as_mut()
-            .context(Self::ERR_UNINITIALIZED)?
-            .flush()
-            .await
-            .context("flush file writer")
-    }
-
-    /// Open the provided path with the default options.
-    async fn open<T: AsRef<Path>>(path: T) -> Result<BufWriter<File>> {
-        Ok(BufWriter::new(
-            OpenOptions::new()
-                .create(true)
-                .read(true)
-                .truncate(true)
-                .write(true)
-                .mode(0o600)
-                .open(&path)
-                .await
-                .with_context(|| format!("open log file path '{}'", path.as_ref().display()))?,
-        ))
+        debug!("Reopen container log {}", self.file.path().display());
+        self.file.reopen().await
     }
 }
 
@@ -239,6 +164,21 @@ mod tests {
 
         let timestamp = res.split_whitespace().next().context("no timestamp")?;
         OffsetDateTime::parse(timestamp, &Rfc3339).context("unable to parse timestamp")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_partial_line() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let path = file.path();
+        let mut sut = CriLogger::new(path, None)?;
+        sut.init().await?;
+
+        sut.write(Pipe::StdOut, b"full\npartial").await?;
+
+        let res = fs::read_to_string(path)?;
+        assert!(res.contains(" stdout F full\n"));
+        assert!(res.ends_with(" stdout P partial\n"));
         Ok(())
     }
 
