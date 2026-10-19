@@ -11,8 +11,8 @@ TEST_FLAGS ?=
 PACKAGE_NAME ?= $(shell cargo metadata --no-deps --format-version 1 | jq -r '.packages[2] | [ .name, .version ] | join("-v")')
 PREFIX ?= /usr
 CI_TAG ?=
-GOLANGCI_LINT_VERSION := v2.11.3
-ZEITGEIST_VERSION := v0.5.4
+GOLANGCI_LINT_VERSION := v2.15.0
+ZEITGEIST_VERSION := v0.8.0
 
 COLOR:=\\033[36m
 NOCOLOR:=\\033[0m
@@ -113,13 +113,13 @@ prettier: ## Prettify supported files.
 
 .PHONY: .install.golangci-lint
 .install.golangci-lint:
-	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | \
-		BINDIR=$(abspath $(GOTOOLS_BINDIR)) sh -s $(GOLANGCI_LINT_VERSION)
+	GOBIN=$(abspath $(GOTOOLS_BINDIR)) \
+		go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
 $(GOTOOLS_BINDIR)/zeitgeist:
 	mkdir -p $(GOTOOLS_BINDIR)
 	curl -sSfL -o $(GOTOOLS_BINDIR)/zeitgeist \
-		https://storage.googleapis.com/k8s-artifacts-sig-release/kubernetes-sigs/zeitgeist/$(ZEITGEIST_VERSION)/zeitgeist-amd64-linux
+		https://github.com/kubernetes-sigs/zeitgeist/releases/download/$(ZEITGEIST_VERSION)/zeitgeist-amd64-linux
 	chmod +x $(GOTOOLS_BINDIR)/zeitgeist
 
 .PHONY: clean
