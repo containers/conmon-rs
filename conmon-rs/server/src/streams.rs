@@ -90,6 +90,9 @@ impl Streams {
     ) {
         debug!("Start reading from IO streams");
 
+        // Shared by both read loops, the output ends once the last one ended.
+        let output = self.attach().output();
+
         if let Some(stdin) = stdin {
             let attach = self.attach().clone();
             task::spawn(
@@ -100,17 +103,27 @@ impl Streams {
                 }
                 .instrument(debug_span!("stdin")),
             );
+        } else {
+            // Attach clients must not wait for a stdin nothing ever reads.
+            self.attach().close_stdin();
         }
 
         if let Some(stdout) = stdout {
             let logger = self.logger().clone();
             let attach = self.attach().clone();
             let message_tx = self.message_tx_stdout.take();
+            let output = output.clone();
             task::spawn(
                 async move {
-                    if let Err(e) =
-                        ContainerIO::read_loop(stdout, Pipe::StdOut, logger, message_tx, attach)
-                            .await
+                    if let Err(e) = ContainerIO::read_loop(
+                        stdout,
+                        Pipe::StdOut,
+                        logger,
+                        message_tx,
+                        attach,
+                        output,
+                    )
+                    .await
                     {
                         error!("Stdout read loop failure: {:#}", e);
                     }
@@ -123,11 +136,18 @@ impl Streams {
             let logger = self.logger().clone();
             let attach = self.attach().clone();
             let message_tx = self.message_tx_stderr.take();
+            let output = output.clone();
             task::spawn(
                 async move {
-                    if let Err(e) =
-                        ContainerIO::read_loop(stderr, Pipe::StdErr, logger, message_tx, attach)
-                            .await
+                    if let Err(e) = ContainerIO::read_loop(
+                        stderr,
+                        Pipe::StdErr,
+                        logger,
+                        message_tx,
+                        attach,
+                        output,
+                    )
+                    .await
                     {
                         error!("Stderr read loop failure: {:#}", e);
                     }

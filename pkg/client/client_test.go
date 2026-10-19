@@ -514,6 +514,149 @@ var _ = Describe("ConmonClient", func() {
 				testAttach(sut, cfg, stdinWriter, stdReader, pipe, pipe == "stderr", terminal)
 			})
 		}
+
+		// attachAll attaches stdin, stdout and stderr to a container running the
+		// script, writes the input and closes stdin if requested. The
+		// beforeAttach function runs after starting the container.
+		attachAll := func(
+			script string, terminal, stopAfterStdinEOF bool, input string, closeStdin bool,
+			changeSpec func(generate.Generator), beforeAttach func(),
+		) (attachErr <-chan error, stdout, stderr <-chan string) {
+			tr = newTestRunner()
+			tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh", "-c", script}, changeSpec)
+			sut = tr.configGivenEnv()
+			tr.createContainer(sut, terminal)
+			tr.startContainer(sut)
+
+			if beforeAttach != nil {
+				beforeAttach()
+			}
+
+			stdinReader, stdinWriter := io.Pipe()
+			stdoutReader, stdoutWriter := io.Pipe()
+			stderrReader, stderrWriter := io.Pipe()
+
+			cfg := &client.AttachConfig{
+				ID:                tr.ctrID,
+				SocketPath:        filepath.Join(tr.tmpDir, "attach"),
+				Tty:               terminal,
+				StopAfterStdinEOF: stopAfterStdinEOF,
+				ContainerStdin:    true,
+				Streams: client.AttachStreams{
+					Stdin:  &client.In{stdinReader},
+					Stdout: &client.Out{stdoutWriter},
+					Stderr: &client.Out{stderrWriter},
+				},
+			}
+
+			readAll := func(reader io.Reader) <-chan string {
+				output := make(chan string, 1)
+
+				go func() {
+					defer GinkgoRecover()
+
+					data, err := io.ReadAll(reader)
+					Expect(err).To(Succeed())
+
+					output <- string(data)
+				}()
+
+				return output
+			}
+
+			go func() {
+				defer GinkgoRecover()
+
+				if input != "" {
+					_, err := stdinWriter.Write([]byte(input))
+					Expect(err).To(Succeed())
+				}
+
+				if closeStdin {
+					Expect(stdinWriter.Close()).To(Succeed())
+				}
+			}()
+
+			errCh := make(chan error, 1)
+
+			go func() {
+				errCh <- sut.AttachContainer(context.Background(), cfg)
+			}()
+
+			return errCh, readAll(stdoutReader), readAll(stderrReader)
+		}
+
+		It("should receive the output written after stdin EOF", func() {
+			attachErr, stdout, stderr := attachAll(
+				"/busybox cat && echo stdin closed", false, true, "attached", true, nil, nil,
+			)
+
+			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
+			Eventually(stdout, 10*time.Second).Should(Receive(Equal("attachedstdin closed\n")))
+			Eventually(stderr, 10*time.Second).Should(Receive(BeEmpty()))
+		})
+
+		It("should receive all output if stdin stays open", func() {
+			attachErr, stdout, stderr := attachAll(
+				"read -r; echo one; /busybox sleep 0.5; echo two", false, false, "go\n", false, nil, nil,
+			)
+
+			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
+			Eventually(stdout, 10*time.Second).Should(Receive(Equal("one\ntwo\n")))
+			Eventually(stderr, 10*time.Second).Should(Receive(BeEmpty()))
+		})
+
+		It("should return on stdin EOF if stdin stays open", func() {
+			attachErr, stdout, stderr := attachAll("/busybox sleep 1000", false, false, "", true, nil, nil)
+
+			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
+			Eventually(stdout, 10*time.Second).Should(Receive(BeEmpty()))
+			Eventually(stderr, 10*time.Second).Should(Receive(BeEmpty()))
+		})
+
+		It("should return on stdin EOF with terminal and stdin once", func() {
+			attachErr, _, _ := attachAll("/busybox sleep 1000", true, true, "", true, nil, nil)
+
+			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
+		})
+
+		It("should receive the done packet if the output ended before attaching", func() {
+			attachErr, stdout, stderr := attachAll(
+				"exec >&- 2>&-; /busybox touch /output-closed; /busybox cat", false, true, "", true, nil,
+				func() {
+					// Attach only once the output got closed, the read loops
+					// see the EOF right away.
+					Eventually(func() string {
+						return filepath.Join(tr.tmpRootfs, "output-closed")
+					}, 10*time.Second).Should(BeAnExistingFile())
+				},
+			)
+
+			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
+			Eventually(stdout, 10*time.Second).Should(Receive(BeEmpty()))
+			Eventually(stderr, 10*time.Second).Should(Receive(BeEmpty()))
+		})
+
+		It("should catch out of memory (oom) events after stdin EOF", func() {
+			if unshare.IsRootless() {
+				Skip("does not run rootless")
+			}
+
+			attachErr, _, _ := attachAll(
+				"/busybox cat; /busybox tail /dev/zero", false, true, "", true,
+				func(g generate.Generator) {
+					// Pin the swap limit as well, otherwise the cgroup swaps
+					// on hosts with swap instead of being killed.
+					const limit = 16 * 1024 * 1024
+					g.SetLinuxResourcesMemoryLimit(limit)
+					g.SetLinuxResourcesMemorySwap(limit)
+				},
+				nil,
+			)
+
+			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
+			Eventually(tr.oomExitPath, 10*time.Second).Should(BeAnExistingFile())
+		})
 	})
 
 	Describe("Tracing", func() {
@@ -1094,6 +1237,40 @@ var _ = Describe("StreamingServer", func() {
 				Expect(result).To(BeNil())
 			})
 		}
+
+		It("should receive the output written after stdin EOF", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "10"}, nil)
+			sut = tr.configGivenEnv()
+			tr.createContainer(sut, false)
+			tr.startContainer(sut)
+
+			result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
+				ID:      tr.ctrID,
+				Command: []string{"/busybox", "sh", "-c", "/busybox cat && echo stdin closed"},
+				Stdin:   true,
+				Stdout:  true,
+				Stderr:  true,
+			})
+			Expect(err).To(Succeed())
+
+			executor, err := remotecommand.NewWebSocketExecutor(&rest.Config{Insecure: true}, "GET", result.URL)
+			Expect(err).NotTo(HaveOccurred())
+
+			stdout := &bytes.Buffer{}
+			stderr := &bytes.Buffer{}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			Expect(executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+				Stdin:  strings.NewReader("attached"),
+				Stdout: stdout,
+				Stderr: stderr,
+			})).To(Succeed())
+			Expect(stdout.String()).To(Equal("attachedstdin closed\n"))
+			Expect(stderr.String()).To(BeEmpty())
+		})
 	})
 
 	Describe("ServeAttachContainer", func() {
@@ -1136,6 +1313,42 @@ var _ = Describe("StreamingServer", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID)).To(Succeed())
 			Expect(stdout.String()).To(ContainSubstring("echo test"))
+			Expect(stderr.String()).To(BeEmpty())
+		})
+
+		It("should receive the output written after stdin EOF with stdin once", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfigWithProcessArgs(
+				false, []string{"/busybox", "sh", "-c", "/busybox cat && echo stdin closed"}, nil,
+			)
+			sut = tr.configGivenEnv()
+			tr.createContainer(sut, false)
+			tr.startContainer(sut)
+
+			result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
+				ID:                tr.ctrID,
+				Stdin:             true,
+				Stdout:            true,
+				Stderr:            true,
+				StopAfterStdinEOF: true,
+			})
+			Expect(err).To(Succeed())
+
+			executor, err := remotecommand.NewWebSocketExecutor(&rest.Config{Insecure: true}, "GET", result.URL)
+			Expect(err).NotTo(HaveOccurred())
+
+			stdout := &bytes.Buffer{}
+			stderr := &bytes.Buffer{}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			Expect(executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+				Stdin:  strings.NewReader("attached"),
+				Stdout: stdout,
+				Stderr: stderr,
+			})).To(Succeed())
+			Expect(stdout.String()).To(Equal("attachedstdin closed\n"))
 			Expect(stderr.String()).To(BeEmpty())
 		})
 

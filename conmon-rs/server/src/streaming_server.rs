@@ -1,5 +1,4 @@
 use crate::{
-    attach::SharedContainerAttach,
     bounded_hashmap::BoundedHashMap,
     child::{Child, ChildKind},
     child_reaper::{ChildReaper, ReapableChild},
@@ -114,6 +113,7 @@ struct AttachSession {
     stdin: bool,
     stdout: bool,
     stderr: bool,
+    stop_after_stdin_eof: bool,
 }
 
 #[derive(Debug)]
@@ -283,6 +283,7 @@ impl StreamingServer {
         stdin: bool,
         stdout: bool,
         stderr: bool,
+        stop_after_stdin_eof: bool,
     ) -> String {
         let mut state_lock = self.state.write().await;
         let uuid = Uuid::new_v4();
@@ -293,6 +294,7 @@ impl StreamingServer {
                 stdin,
                 stdout,
                 stderr,
+                stop_after_stdin_eof,
             }),
         );
         self.url_for(ATTACH_PATH, &uuid)
@@ -340,9 +342,12 @@ impl StreamingServer {
     async fn handle_websocket(socket: WebSocket, session: Session) {
         let (sender, receiver) = socket.split();
         let (stdin_tx, stdin_rx) = mpsc::channel(16);
+        // Resize events go through their own channel, so that they do not
+        // queue behind stdin the container does not read.
+        let (resize_tx, resize_rx) = mpsc::channel(16);
 
-        let mut send_task = Self::write_task(sender, stdin_rx, session).await;
-        let mut recv_task = Self::read_task(receiver, stdin_tx).await;
+        let mut send_task = Self::write_task(sender, stdin_rx, resize_rx, session).await;
+        let mut recv_task = Self::read_task(receiver, stdin_tx, resize_tx).await;
 
         tokio::select! {
             rv_a = (&mut send_task) => {
@@ -368,12 +373,19 @@ impl StreamingServer {
     async fn write_task(
         mut sender: SplitSink<WebSocket, Message>,
         stdin_rx: MpscReceiver<Bytes>,
+        resize_rx: MpscReceiver<Bytes>,
         session: Session,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             if let (Err(e), typ) = match session {
-                Session::Exec(s) => (Self::exec_loop(*s, &mut sender, stdin_rx).await, "exec"),
-                Session::Attach(s) => (Self::attach_loop(s, &mut sender, stdin_rx).await, "attach"),
+                Session::Exec(s) => (
+                    Self::exec_loop(*s, &mut sender, stdin_rx, resize_rx).await,
+                    "exec",
+                ),
+                Session::Attach(s) => (
+                    Self::attach_loop(s, &mut sender, stdin_rx, resize_rx).await,
+                    "attach",
+                ),
                 Session::PortForward(s) => (
                     Self::port_forward_loop(s, &mut sender, stdin_rx).await,
                     "port forward",
@@ -407,10 +419,14 @@ impl StreamingServer {
     async fn read_task(
         mut receiver: SplitStream<WebSocket>,
         stdin_tx: MpscSender<Bytes>,
+        resize_tx: MpscSender<Bytes>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             while let Some(Ok(msg)) = receiver.next().await {
-                if Self::read_message(msg, &stdin_tx).await.is_break() {
+                if Self::read_message(msg, &stdin_tx, &resize_tx)
+                    .await
+                    .is_break()
+                {
                     break;
                 }
             }
@@ -418,11 +434,20 @@ impl StreamingServer {
     }
 
     /// Read a single message and return the control flow decision.
-    async fn read_message(msg: Message, stdin_tx: &MpscSender<Bytes>) -> ControlFlow<(), ()> {
+    async fn read_message(
+        msg: Message,
+        stdin_tx: &MpscSender<Bytes>,
+        resize_tx: &MpscSender<Bytes>,
+    ) -> ControlFlow<(), ()> {
         match msg {
             Message::Binary(data) if !data.is_empty() => {
                 debug!("Got {} binary bytes", data.len());
-                if let Err(e) = stdin_tx.send(data).await {
+                let tx = if data[0] == RESIZE_BYTE {
+                    resize_tx
+                } else {
+                    stdin_tx
+                };
+                if let Err(e) = tx.send(data).await {
                     error!("Unable to send stdin data: {e}");
                 }
             }
@@ -451,6 +476,7 @@ impl StreamingServer {
         mut session: ExecSession,
         sender: &mut SplitSink<WebSocket, Message>,
         mut stdin_rx: MpscReceiver<Bytes>,
+        mut resize_rx: MpscReceiver<Bytes>,
     ) -> Result<()> {
         let pidfile = ContainerIO::temp_file_name(
             Some(session.server_config.runtime_dir()),
@@ -526,6 +552,8 @@ impl StreamingServer {
             .context("retrieve stdout and stderr channels")?;
 
         let attach = io.attach().await;
+        let mut pending_stdin = None;
+        let mut stdin_closed = false;
 
         // Streams which are disabled or whose read loop signalled the end are
         // not polled anymore.
@@ -550,10 +578,25 @@ impl StreamingServer {
                     Ok(IOMessage::Done) | Err(_) => stderr_done = true,
                 },
 
-                Some(data) = stdin_rx.recv() => if stdin_enabled
-                    && Self::handle_stdin(data, &attach, &io).await?.is_break()
-                {
-                    break
+                Some(data) = resize_rx.recv() => if stdin_enabled {
+                    Self::handle_resize(&data, &io).await?;
+                },
+
+                // Wait for the container to take the stdin without blocking the
+                // output meanwhile.
+                () = attach.send_stdin(pending_stdin.clone().unwrap_or_default()), if pending_stdin.is_some() => {
+                    pending_stdin = None
+                },
+
+                Some(data) = stdin_rx.recv(), if pending_stdin.is_none() => if stdin_enabled && !stdin_closed {
+                    match Self::handle_stdin(data) {
+                        // The client closed its stdin. Close the process stdin
+                        // as well and keep forwarding the output until it
+                        // exits, a terminal ends the session instead.
+                        ControlFlow::Break(()) if attach.close_container_stdin() => stdin_closed = true,
+                        ControlFlow::Break(()) => break,
+                        ControlFlow::Continue(stdin) => pending_stdin = stdin,
+                    }
                 },
 
                 Ok(exit_data) = exit_rx.recv() => {
@@ -583,11 +626,13 @@ impl StreamingServer {
         session: AttachSession,
         sender: &mut SplitSink<WebSocket, Message>,
         mut stdin_rx: MpscReceiver<Bytes>,
+        mut resize_rx: MpscReceiver<Bytes>,
     ) -> Result<()> {
         // Extract values we need for the I/O loop
         let stdin_enabled = session.stdin;
         let stdout_enabled = session.stdout;
         let stderr_enabled = session.stderr;
+        let stop_after_stdin_eof = session.stop_after_stdin_eof;
         let io = session.child.io().clone();
         let token = session.child.token().clone();
 
@@ -599,17 +644,28 @@ impl StreamingServer {
         // whereas the stdio channels replay buffered history and are closed
         // for created containers anyway.
         let attach = io.attach().await;
-        let mut attach_rx = attach.subscribe();
+        let mut pending_stdin = None;
+        let mut stdin_closed = false;
 
-        // Every read loop sends one `Done` once its pipe ended. Count them to
-        // know when the output is complete.
-        let expected_done = io.pipe_count().await;
-        let mut done = 0;
+        // A single `Done` follows once all pipes ended. It may have been sent
+        // before subscribing, then only forward what is still queued.
+        let (mut attach_rx, mut done) = attach.subscribe();
+        if done {
+            while let Ok(message) = attach_rx.try_recv() {
+                Self::forward_output(message, stdout_enabled, stderr_enabled, sender).await?;
+            }
+        }
 
         loop {
             tokio::select! {
-                res = attach_rx.recv(), if done < expected_done => match res {
-                    Ok(IOMessage::Done) => done += 1,
+                res = attach_rx.recv(), if !done => match res {
+                    Ok(IOMessage::Done) => {
+                        done = true;
+                        // Nothing is left to forward in either direction.
+                        if stdin_closed {
+                            break
+                        }
+                    }
                     Ok(message) => {
                         Self::forward_output(message, stdout_enabled, stderr_enabled, sender).await?;
                     }
@@ -620,16 +676,33 @@ impl StreamingServer {
                     }
                 },
 
-                Some(data) = stdin_rx.recv() => if stdin_enabled
-                    && Self::handle_stdin(data, &attach, &io).await?.is_break()
-                {
-                    break
+                Some(data) = resize_rx.recv() => if stdin_enabled {
+                    Self::handle_resize(&data, &io).await?;
+                },
+
+                // Wait for the container to take the stdin without blocking the
+                // output meanwhile.
+                () = attach.send_stdin(pending_stdin.clone().unwrap_or_default()), if pending_stdin.is_some() => {
+                    pending_stdin = None
+                },
+
+                Some(data) = stdin_rx.recv(), if pending_stdin.is_none() => if stdin_enabled && !stdin_closed {
+                    match Self::handle_stdin(data) {
+                        // The client closed its stdin. With stdin once, close
+                        // the container stdin as well and keep forwarding the
+                        // output until it ends.
+                        ControlFlow::Break(()) if !done && stop_after_stdin_eof && attach.close_container_stdin() => {
+                            stdin_closed = true
+                        }
+                        ControlFlow::Break(()) => break,
+                        ControlFlow::Continue(stdin) => pending_stdin = stdin,
+                    }
                 },
 
                 _ = token.cancelled() => {
                     debug!("Exiting streaming attach because token cancelled");
-                    if done < expected_done {
-                        Self::drain_attach(&mut attach_rx, expected_done - done, stdout_enabled, stderr_enabled, sender).await?;
+                    if !done {
+                        Self::drain_attach(&mut attach_rx, stdout_enabled, stderr_enabled, sender).await?;
                     }
                     break
                 }
@@ -662,19 +735,17 @@ impl StreamingServer {
     }
 
     /// Forward the output which is still queued or arrives shortly after the
-    /// container exited, until the remaining read loops signalled the end or
-    /// the [`Drain`] gives up.
+    /// container exited, until the output ended or the [`Drain`] gives up.
     async fn drain_attach(
         attach_rx: &mut broadcast::Receiver<IOMessage>,
-        mut remaining_done: usize,
         stdout_enabled: bool,
         stderr_enabled: bool,
         sender: &mut SplitSink<WebSocket, Message>,
     ) -> Result<()> {
         let mut drain = Drain::default();
-        while remaining_done > 0 {
+        loop {
             match drain.recv(attach_rx.recv()).await {
-                Some(Ok(IOMessage::Done)) => remaining_done -= 1,
+                Some(Ok(IOMessage::Done)) => return Ok(()),
                 Some(Ok(message)) => {
                     Self::forward_output(message, stdout_enabled, stderr_enabled, sender).await?;
                 }
@@ -684,7 +755,6 @@ impl StreamingServer {
                 Some(Err(RecvError::Closed)) | None => return Ok(()),
             }
         }
-        Ok(())
     }
 
     /// Forward the remaining output of an exec stdio channel after the process
@@ -729,14 +799,11 @@ impl StreamingServer {
     }
 
     /// Handle a single stdin message from the websocket client. The first
-    /// byte of the message selects the stream, the rest is the payload.
-    async fn handle_stdin(
-        data: Bytes,
-        attach: &SharedContainerAttach,
-        io: &SharedContainerIO,
-    ) -> Result<ControlFlow<()>> {
+    /// byte of the message selects the stream, the rest is the payload. Returns
+    /// the payload which has to be sent to the container stdin, if any.
+    fn handle_stdin(data: Bytes) -> ControlFlow<(), Option<Bytes>> {
         let Some(&msg_type) = data.first() else {
-            return Ok(ControlFlow::Continue(()));
+            return ControlFlow::Continue(None);
         };
         // Slicing the reference counted bytes avoids copying the payload.
         let payload = data.slice(1..);
@@ -744,27 +811,26 @@ impl StreamingServer {
         match msg_type {
             STDIN_BYTE => {
                 trace!("Got stdin message of len {}", payload.len());
-                attach
-                    .stdin()
-                    .send(payload)
-                    .context("send to attach session")?;
-            }
-            RESIZE_BYTE => {
-                let e = serde_json::from_slice::<ResizeEvent>(&payload)
-                    .context("unmarshal resize event")?;
-                trace!("Got resize message: {e:?}");
-                io.resize(e.width, e.height)
-                    .await
-                    .context("resize terminal")?;
+                return ControlFlow::Continue(Some(payload));
             }
             CLOSE_BYTE => {
                 info!("Got close message");
-                return Ok(ControlFlow::Break(()));
+                return ControlFlow::Break(());
             }
             x => warn!("Unknown start byte for stdin: {x}"),
         }
 
-        Ok(ControlFlow::Continue(()))
+        ControlFlow::Continue(None)
+    }
+
+    /// Handle a single resize message from the websocket client.
+    async fn handle_resize(data: &[u8], io: &SharedContainerIO) -> Result<()> {
+        let e = serde_json::from_slice::<ResizeEvent>(data.get(1..).unwrap_or_default())
+            .context("unmarshal resize event")?;
+        trace!("Got resize message: {e:?}");
+        io.resize(e.width, e.height)
+            .await
+            .context("resize terminal")
     }
 
     /// Prepend a stream type byte and send the data over WebSocket. The frame

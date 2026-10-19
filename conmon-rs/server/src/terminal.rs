@@ -136,6 +136,16 @@ impl Terminal {
 
     /// Waits for the socket client to be connected.
     pub async fn wait_connected(&mut self, stdin: bool, token: CancellationToken) -> Result<()> {
+        let res = self.connect(stdin, token).await;
+        if res.is_err() {
+            // Nothing will ever read the stdin, so attach clients must not
+            // wait for it.
+            self.attach.close_stdin();
+        }
+        res
+    }
+
+    async fn connect(&mut self, stdin: bool, token: CancellationToken) -> Result<()> {
         debug!("Waiting for terminal socket connection");
         let fd = self
             .connected_rx
@@ -151,6 +161,7 @@ impl Terminal {
         termios::tcsetattr(&fd, SetArg::TCSANOW, &term)?;
 
         let attach_clone = self.attach.clone();
+        let output = attach_clone.output();
         let logger_clone = self.logger.clone();
         let (message_tx, message_rx) = async_channel::bounded(100);
         self.message_rx = Some(message_rx);
@@ -164,6 +175,7 @@ impl Terminal {
                     logger_clone,
                     Some(message_tx),
                     attach_clone,
+                    output,
                 )
                 .await
                 {
@@ -184,6 +196,9 @@ impl Terminal {
                 }
                 .instrument(debug_span!("read_loop_stdin")),
             );
+        } else {
+            // Attach clients must not wait for a stdin nothing ever reads.
+            self.attach.close_stdin();
         }
 
         Ok(())
