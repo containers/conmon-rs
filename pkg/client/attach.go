@@ -282,7 +282,7 @@ func (c *ConmonClient) redirectResponseToOutputStreams(
 			}
 		}
 
-		if er == io.EOF || (cfg.ContainerStdin && !cfg.StopAfterStdinEOF) {
+		if er == io.EOF {
 			return nil
 		}
 

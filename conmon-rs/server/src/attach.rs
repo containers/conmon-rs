@@ -3,14 +3,13 @@ use crate::{
     listener::{DefaultListener, Listener},
 };
 use anyhow::{Context, Result, bail};
-use bytes::{Buf, Bytes, BytesMut};
-use memchr::memchr;
+use bytes::{Bytes, BytesMut};
 use nix::{
     errno::Errno,
     sys::socket::{AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, listen, socket},
 };
 use std::{
-    io::IoSlice,
+    io::{self, IoSlice},
     os::{
         fd::{AsRawFd, OwnedFd},
         unix::fs::PermissionsExt,
@@ -18,7 +17,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, ErrorKind, Interest},
+    io::{AsyncWriteExt, ErrorKind, Interest},
     net::{
         UnixListener,
         unix::{OwnedReadHalf, OwnedWriteHalf},
@@ -44,6 +43,11 @@ pub struct SharedContainerAttach {
     read_half_rx: Receiver<Bytes>,
     read_half_tx: Sender<Bytes>,
     write_half_tx: Sender<Message>,
+
+    /// Cancelled once a client with `stop_after_stdin_eof` closed its stdin,
+    /// which closes the stdin of the container for good. It is separate from
+    /// the token of the container, which only the exit may cancel.
+    stdin_closed: CancellationToken,
 }
 
 impl Default for SharedContainerAttach {
@@ -54,6 +58,7 @@ impl Default for SharedContainerAttach {
             read_half_rx,
             read_half_tx,
             write_half_tx,
+            stdin_closed: CancellationToken::new(),
         }
     }
 }
@@ -64,12 +69,14 @@ impl Clone for SharedContainerAttach {
             read_half_rx: self.read_half_tx.subscribe(),
             read_half_tx: self.read_half_tx.clone(),
             write_half_tx: self.write_half_tx.clone(),
+            stdin_closed: self.stdin_closed.clone(),
         }
     }
 }
 
 impl SharedContainerAttach {
-    /// Add a new attach endpoint to this shared container attach instance.
+    /// Add a new attach endpoint to this shared container attach instance. The
+    /// `token` of the container stops it on exit.
     pub async fn add<T>(
         &mut self,
         socket_path: T,
@@ -85,6 +92,7 @@ impl SharedContainerAttach {
             self.read_half_tx.clone(),
             self.write_half_tx.clone(),
             token,
+            self.stdin_closed.clone(),
             stop_after_stdin_eof,
         )
         .context("create attach endpoint")
@@ -129,6 +137,11 @@ impl SharedContainerAttach {
     pub fn stdin(&self) -> &Sender<Bytes> {
         &self.read_half_tx
     }
+
+    /// The token cancelled once the stdin of the container got closed.
+    pub fn stdin_closed(&self) -> &CancellationToken {
+        &self.stdin_closed
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +161,7 @@ impl Attach {
         read_half_tx: Sender<Bytes>,
         write_half_tx: Sender<Message>,
         token: CancellationToken,
+        stdin_closed: CancellationToken,
         stop_after_stdin_eof: bool,
     ) -> Result<()>
     where
@@ -197,10 +211,19 @@ impl Attach {
             return Err(e);
         }
 
+        let path = path.to_path_buf();
         task::spawn(
             async move {
-                if let Err(e) =
-                    Self::start(fd, read_half_tx, write_half_tx, token, stop_after_stdin_eof).await
+                if let Err(e) = Self::start(
+                    fd,
+                    path,
+                    read_half_tx,
+                    write_half_tx,
+                    token,
+                    stdin_closed,
+                    stop_after_stdin_eof,
+                )
+                .await
                 {
                     error!("Attach failure: {:#}", e);
                 }
@@ -213,27 +236,44 @@ impl Attach {
 
     async fn start(
         fd: OwnedFd,
+        path: PathBuf,
         read_half_tx: Sender<Bytes>,
         write_half_tx: Sender<Message>,
         token: CancellationToken,
+        stdin_closed: CancellationToken,
         stop_after_stdin_eof: bool,
     ) -> Result<()> {
         debug!("Start listening on attach socket");
         let listener = UnixListener::from_std(fd.into()).context("create unix listener")?;
         loop {
-            match listener.accept().await {
+            // The container exit cancels the token, stop accepting then and
+            // remove the socket instead of keeping the listener around for the
+            // lifetime of the server.
+            let accepted = select! {
+                accepted = listener.accept() => accepted,
+                _ = token.cancelled() => {
+                    debug!("Stopping attach listener because token cancelled");
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        debug!("Unable to remove attach socket {}: {e}", path.display());
+                    }
+                    return Ok(());
+                }
+            };
+            match accepted {
                 Ok((stream, _)) => {
                     debug!("Got new attach stream connection");
                     let (read, write) = stream.into_split();
 
                     let read_half_tx_clone = read_half_tx.clone();
                     let token_clone = token.clone();
+                    let stdin_closed_clone = stdin_closed.clone();
                     task::spawn(
                         async move {
                             if let Err(e) = Self::read_loop(
                                 read,
                                 read_half_tx_clone,
                                 token_clone,
+                                stdin_closed_clone,
                                 stop_after_stdin_eof,
                             )
                             .await
@@ -259,12 +299,22 @@ impl Attach {
         }
     }
 
+    /// Forward the stdin of a client until it closes, the stdin of the
+    /// container got closed or the container exited, which cancels `token`.
     async fn read_loop(
-        mut read_half: OwnedReadHalf,
+        read_half: OwnedReadHalf,
         tx: Sender<Bytes>,
         token: CancellationToken,
+        stdin_closed: CancellationToken,
         stop_after_stdin_eof: bool,
     ) -> Result<()> {
+        let stopped = async || {
+            select! {
+                _ = token.cancelled() => debug!("Exiting because token cancelled"),
+                _ = stdin_closed.cancelled() => debug!("Exiting because stdin got closed"),
+            }
+        };
+
         // `read_buf` grows the buffer back to this capacity once the frozen
         // parts are used up, so no explicit reserve is needed in the loop.
         let mut buf = BytesMut::with_capacity(Self::PACKET_BUF_SIZE);
@@ -276,11 +326,8 @@ impl Attach {
             // While this could result in a data race, as select statements are racy,
             // we won't interleve these two futures, as one ends execution.
             let read = select! {
-                n = read_half.read_buf(&mut buf) => n,
-                _ = token.cancelled() => {
-                    debug!("Exiting because token cancelled");
-                    return Ok(());
-                }
+                n = Self::read_packet(&read_half, &mut buf) => n,
+                _ = stopped() => return Ok(()),
             };
 
             // A zero byte read on a SOCK_SEQPACKET socket is either an empty
@@ -292,10 +339,7 @@ impl Attach {
                     ready = read_half.ready(Interest::READABLE) => {
                         ready.context("wait for attach socket readiness")?
                     }
-                    _ = token.cancelled() => {
-                        debug!("Exiting because token cancelled");
-                        return Ok(());
-                    }
+                    _ = stopped() => return Ok(()),
                 };
                 if !ready.is_read_closed() {
                     trace!("Ignoring empty packet");
@@ -305,15 +349,10 @@ impl Attach {
 
             match read {
                 Ok(n) if n > 0 => {
-                    // Find null terminator position in the entire buffer
-                    // (read_buf appends, so we must search all accumulated data)
-                    let end = memchr(0, &buf).unwrap_or(buf.len());
-                    // Split and freeze to Bytes (zero-copy refcounted buffer)
-                    let data = buf.split_to(end).freeze();
-                    // If we found a null terminator, consume it too
-                    if end < buf.len() && buf[0] == 0 {
-                        buf.advance(1);
-                    }
+                    // Every read returns a single packet, which is forwarded as
+                    // is. Stdin is binary, null bytes are part of the data.
+                    // Splitting and freezing shares the buffer without a copy.
+                    let data = buf.split().freeze();
                     debug!("Read {} stdin bytes from client", data.len());
                     tx.send(data).context("send data message")?;
                 }
@@ -328,11 +367,7 @@ impl Attach {
                     Errno::EAGAIN => {
                         continue;
                     }
-                    _ => error!(
-                        "Unable to read from file descriptor: {} {}",
-                        e,
-                        e.raw_os_error().context("get OS error")?
-                    ),
+                    _ => return Err(e).context("read from attach socket"),
                 },
                 _ => {
                     // The client closed its write half, no more input will
@@ -340,10 +375,27 @@ impl Attach {
                     // delivering output independently.
                     debug!("Stopping read loop because there is nothing more to read");
                     if stop_after_stdin_eof {
-                        token.cancel();
+                        stdin_closed.cancel();
                     }
                     return Ok(());
                 }
+            }
+        }
+    }
+
+    /// Read the next packet into `buf`.
+    ///
+    /// Every read of a SOCK_SEQPACKET socket returns a single packet. tokio's
+    /// `read_buf` takes a short read as the socket being drained and waits for
+    /// the next readiness event, which leaves packets already queued unread
+    /// until another one arrives. `try_read_buf` only clears the readiness
+    /// once the socket would block.
+    async fn read_packet(read_half: &OwnedReadHalf, buf: &mut BytesMut) -> io::Result<usize> {
+        loop {
+            read_half.readable().await?;
+            match read_half.try_read_buf(buf) {
+                Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
+                res => return res,
             }
         }
     }
@@ -398,5 +450,89 @@ impl Attach {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nix::sys::socket::{MsgFlags, Shutdown, connect, send, shutdown, socketpair};
+    use std::os::unix::net::UnixStream as StdUnixStream;
+    use std::time::Duration;
+    use tokio::{net::UnixStream, time::timeout};
+
+    #[tokio::test]
+    async fn read_loop_forwards_packets_with_null_bytes() -> Result<()> {
+        let (client, server) = socketpair(
+            AddressFamily::Unix,
+            SockType::SeqPacket,
+            None,
+            SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
+        )?;
+        let (read_half, _write_half) =
+            UnixStream::from_std(StdUnixStream::from(server))?.into_split();
+
+        let (tx, mut rx) = broadcast::channel(STDIN_CHANNEL_SIZE);
+        let token = CancellationToken::new();
+        let task = task::spawn(Attach::read_loop(
+            read_half,
+            tx,
+            token.clone(),
+            CancellationToken::new(),
+            false,
+        ));
+
+        for packet in [&b"a\0b"[..], b"\0", b"c"] {
+            send(client.as_raw_fd(), packet, MsgFlags::empty())?;
+        }
+
+        for expected in [&b"a\0b"[..], b"\0", b"c"] {
+            let data = timeout(Duration::from_secs(5), rx.recv()).await??;
+            assert_eq!(data, expected);
+        }
+
+        token.cancel();
+        task.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stdin_eof_keeps_listener() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("attach");
+        let token = CancellationToken::new();
+        let mut attach = SharedContainerAttach::default();
+        attach.add(&path, token.clone(), true).await?;
+
+        let connect_client = || -> Result<OwnedFd> {
+            let fd = socket(
+                AddressFamily::Unix,
+                SockType::SeqPacket,
+                SockFlag::SOCK_CLOEXEC,
+                None,
+            )?;
+            connect(fd.as_raw_fd(), &UnixAddr::new(&path)?)?;
+            Ok(fd)
+        };
+
+        // A client which stops after stdin EOF closes the stdin of the
+        // container, but the container keeps running.
+        let first = connect_client()?;
+        shutdown(first.as_raw_fd(), Shutdown::Write)?;
+        timeout(Duration::from_secs(5), attach.stdin_closed().cancelled()).await?;
+        assert!(!token.is_cancelled());
+
+        // Later clients still get attached.
+        let _second = connect_client()?;
+
+        // The exit stops the listener and removes the socket.
+        token.cancel();
+        timeout(Duration::from_secs(5), async {
+            while path.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        Ok(())
     }
 }

@@ -173,6 +173,34 @@ func pauseProcessRunning(podID string) bool {
 	return false
 }
 
+// childrenOf returns the PIDs of all processes whose parent is pid, zombies
+// included.
+func childrenOf(pid int) []int {
+	const procPath = "/proc"
+
+	entries, err := os.ReadDir(procPath)
+	Expect(err).To(Succeed())
+
+	ppid := "PPid:\t" + strconv.Itoa(pid) + "\n"
+
+	var children []int
+
+	for _, entry := range entries {
+		child, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+
+		// The process may be gone already.
+		status, err := os.ReadFile(filepath.Join(procPath, entry.Name(), "status"))
+		if err == nil && bytes.Contains(status, []byte(ppid)) {
+			children = append(children, child)
+		}
+	}
+
+	return children
+}
+
 func (tr *testRunner) logPath() string {
 	return filepath.Join(tr.tmpDir, "log")
 }

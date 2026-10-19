@@ -1,7 +1,7 @@
 use crate::{
     attach::SharedContainerAttach,
     bounded_hashmap::BoundedHashMap,
-    child::Child,
+    child::{Child, ChildKind},
     child_reaper::{ChildReaper, ReapableChild},
     config::Config,
     container_io::{ContainerIO, Message as IOMessage, Pipe, SharedContainerIO},
@@ -137,7 +137,7 @@ struct ErrorMessage {
     status: &'static str,
     reason: &'static str,
     details: ErrorDetails,
-    message: &'static str,
+    message: String,
 }
 
 impl ErrorMessage {
@@ -154,7 +154,18 @@ impl ErrorMessage {
                     message: exit_code.to_string(),
                 }],
             },
-            message: "command terminated with non-zero exit code",
+            message: "command terminated with non-zero exit code".into(),
+        }
+    }
+
+    /// An error of the session itself, for example a command which could not
+    /// be started.
+    fn internal(message: String) -> Self {
+        Self {
+            status: "Failure",
+            reason: "InternalError",
+            details: ErrorDetails { causes: vec![] },
+            message,
         }
     }
 }
@@ -368,7 +379,13 @@ impl StreamingServer {
                     "port forward",
                 ),
             } {
-                error!("Unable to run {typ} for container: {e}");
+                error!("Unable to run {typ} for container: {e:#}");
+
+                // Otherwise the client sees a clean close and assumes success.
+                if let Err(e) = Self::send_error(&mut sender, format!("{typ} failed: {e:#}")).await
+                {
+                    error!("Unable to send error message: {e:#}");
+                }
             }
 
             if let Err(e) = sender
@@ -489,6 +506,7 @@ impl StreamingServer {
 
         let child = Child::new(
             container_id,
+            ChildKind::Exec,
             grandchild_pid,
             vec![],
             vec![],
@@ -695,6 +713,19 @@ impl StreamingServer {
         mut _in_rx: MpscReceiver<Bytes>,
     ) -> Result<()> {
         todo!("Requires SPDY protocol implementation from https://github.com/moby/spdystream")
+    }
+
+    /// Send a session error on the error stream.
+    async fn send_error(sender: &mut SplitSink<WebSocket, Message>, message: String) -> Result<()> {
+        let mut frame = vec![STREAM_ERR_BYTE];
+        frame.extend(
+            serde_json::to_vec(&ErrorMessage::internal(message))
+                .context("serialize error message")?,
+        );
+        sender
+            .send(Message::Binary(frame.into()))
+            .await
+            .context("send error message")
     }
 
     /// Handle a single stdin message from the websocket client. The first

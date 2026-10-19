@@ -447,8 +447,9 @@ var _ = Describe("ConmonClient", func() {
 
 	Describe("Attach", func() {
 		matrix := []struct {
-			terminal bool
-			pipe     string
+			terminal       bool
+			pipe           string
+			leaveStdinOpen bool
 		}{
 			{
 				terminal: true,
@@ -462,11 +463,30 @@ var _ = Describe("ConmonClient", func() {
 				terminal: false,
 				pipe:     "stderr",
 			},
+			// CRI-O keeps stdin open unless stdinOnce is set, output has to
+			// keep flowing until the container exits.
+			{
+				terminal:       true,
+				pipe:           "stdout",
+				leaveStdinOpen: true,
+			},
+			{
+				terminal:       false,
+				pipe:           "stdout",
+				leaveStdinOpen: true,
+			},
 		}
 		for _, test := range matrix {
 			terminal := test.terminal
 			pipe := test.pipe
-			It(testName("should succeed with "+test.pipe, test.terminal), func() {
+			leaveStdinOpen := test.leaveStdinOpen
+
+			name := "should succeed with " + test.pipe
+			if leaveStdinOpen {
+				name += " leaving stdin open"
+			}
+
+			It(testName(name, test.terminal), func() {
 				tr = newTestRunner()
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh"}, nil)
 				sut = tr.configGivenEnv()
@@ -479,7 +499,8 @@ var _ = Describe("ConmonClient", func() {
 				cfg := &client.AttachConfig{
 					ID:                tr.ctrID,
 					SocketPath:        filepath.Join(tr.tmpDir, "attach"),
-					StopAfterStdinEOF: true,
+					ContainerStdin:    true,
+					StopAfterStdinEOF: !leaveStdinOpen,
 					Streams: client.AttachStreams{
 						Stdin: &client.In{stdinReader},
 					},
@@ -791,6 +812,92 @@ var _ = Describe("ConmonClient", func() {
 			// The PID namespace needs the pause process to stay alive.
 			Expect(filepath.Join(basePath, "conmonrs", podID+".pid")).To(BeAnExistingFile())
 			Expect(pauseProcessRunning(podID)).To(BeTrue())
+		})
+
+		It("should reap orphans in the pod PID namespace", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			basePath := MustTempDir("ns-test-")
+			// Runs after the server shutdown unmounted the namespaces.
+			DeferCleanup(os.RemoveAll, basePath)
+
+			podID := uuid.New().String()
+
+			response, err := sut.CreateNamespaces(
+				context.Background(),
+				&client.CreateNamespacesConfig{
+					Namespaces: []client.Namespace{client.NamespacePID},
+					BasePath:   basePath,
+					PodID:      podID,
+				},
+			)
+			Expect(err).To(Succeed())
+			Expect(response.Namespaces).To(HaveLen(1))
+
+			pidFile, err := os.ReadFile(filepath.Join(basePath, "conmonrs", podID+".pid"))
+			Expect(err).To(Succeed())
+			pausePID, err := strconv.Atoi(strings.TrimSpace(string(pidFile)))
+			Expect(err).To(Succeed())
+
+			// The shell exits right away, so its background child gets
+			// reparented to the pause process, the init of the PID namespace.
+			//nolint:gosec // test helper with controlled inputs
+			cmd := exec.CommandContext(
+				context.Background(),
+				"nsenter", "--pid="+response.Namespaces[0].Path, "--",
+				"sh", "-c", "sleep 1 & exit 0",
+			)
+			Expect(cmd.Run()).To(Succeed())
+			Expect(childrenOf(pausePID)).NotTo(BeEmpty())
+
+			// Once the orphan exited, it does not stay a zombie.
+			Eventually(func() []int { return childrenOf(pausePID) }).
+				WithTimeout(10 * time.Second).
+				Should(BeEmpty())
+		})
+
+		It("should fail for another pod or configuration", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			basePath := MustTempDir("ns-test-")
+			// Runs after the server shutdown unmounted the namespaces.
+			DeferCleanup(os.RemoveAll, basePath)
+
+			cfg := client.CreateNamespacesConfig{
+				Namespaces: []client.Namespace{client.NamespaceIPC, client.NamespaceUTS},
+				BasePath:   basePath,
+				PodID:      uuid.New().String(),
+			}
+			response, err := sut.CreateNamespaces(context.Background(), &cfg)
+			Expect(err).To(Succeed())
+			Expect(response.Namespaces).To(HaveLen(2))
+
+			// The same request is answered with the same namespaces, in any order.
+			same := cfg
+			same.Namespaces = []client.Namespace{client.NamespaceUTS, client.NamespaceIPC}
+			again, err := sut.CreateNamespaces(context.Background(), &same)
+			Expect(err).To(Succeed())
+			Expect(again.Namespaces).To(Equal(response.Namespaces))
+
+			otherPod := cfg
+			otherPod.PodID = uuid.New().String()
+			_, err = sut.CreateNamespaces(context.Background(), &otherPod)
+			Expect(err).NotTo(Succeed())
+
+			otherNamespaces := cfg
+			otherNamespaces.Namespaces = []client.Namespace{client.NamespaceNet}
+			_, err = sut.CreateNamespaces(context.Background(), &otherNamespaces)
+			Expect(err).NotTo(Succeed())
+
+			otherBasePath := cfg
+			otherBasePath.BasePath = MustTempDir("ns-test-")
+			DeferCleanup(os.RemoveAll, otherBasePath.BasePath)
+			_, err = sut.CreateNamespaces(context.Background(), &otherBasePath)
+			Expect(err).NotTo(Succeed())
 		})
 
 		It("should fail with user namespace without mappings", func() {

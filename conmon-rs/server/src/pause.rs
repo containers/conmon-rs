@@ -1,28 +1,36 @@
+use crate::child_reaper::ReapableChild;
 use anyhow::{Context, Result, bail};
 use capnp::enum_list::Reader;
 use conmon_common::conmon_capnp::conmon;
 use libc::pid_t;
 use nix::{
+    errno::Errno,
     mount::{MsFlags, mount, umount},
     sched::{CloneFlags, unshare},
     sys::{
+        prctl,
         signal::{Signal, kill},
-        wait::waitpid,
+        wait::{WaitPidFlag, WaitStatus, waitpid},
     },
     unistd::{ForkResult, Gid, Pid, Uid, fork, getpid, setresgid, setresuid},
 };
-use signal_hook::{consts::TERM_SIGNALS, iterator::Signals};
+use signal_hook::{
+    consts::{SIGCHLD, TERM_SIGNALS},
+    iterator::Signals,
+};
 use std::{
     env,
     fs::{self, File},
     io::{Read, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::OnceLock,
 };
 use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
-use tracing::{debug, info, trace, warn};
+use tokio::task;
+use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, debug, debug_span, info, trace, warn};
 
 /// The main structure for this module.
 #[derive(Debug)]
@@ -32,6 +40,10 @@ pub struct Pause {
 
     /// The namespaces which were requested, created and bound.
     namespaces: Vec<Namespace>,
+
+    /// The ID mappings of the user namespace, empty without one.
+    uid_mappings: Vec<String>,
+    gid_mappings: Vec<String>,
 
     /// The PID of the long running pause process. It only exists if a PID
     /// namespace was requested, because that is the only namespace which
@@ -59,7 +71,11 @@ impl Pause {
 static PAUSE: OnceLock<Pause> = OnceLock::new();
 
 impl Pause {
-    /// Retrieve the global instance of pause
+    /// Retrieve the global instance of pause, creating it on the first call.
+    ///
+    /// A server holds the namespaces of a single pod. Later calls must ask for
+    /// the same pod and configuration, they would get other namespaces than
+    /// requested otherwise.
     pub fn init_shared(
         base_path: &str,
         pod_id: &str,
@@ -67,13 +83,118 @@ impl Pause {
         uid_mappings: Vec<String>,
         gid_mappings: Vec<String>,
     ) -> Result<&'static Pause> {
+        let base_path = PathBuf::from(base_path);
+        let namespaces = Self::parse_namespaces(namespaces)?;
+        let (uid_mappings, gid_mappings) = if namespaces.contains(&Namespace::User) {
+            if uid_mappings.is_empty() {
+                bail!("user ID mappings are empty")
+            }
+            if gid_mappings.is_empty() {
+                bail!("group ID mappings are empty")
+            }
+            (uid_mappings, gid_mappings)
+        } else {
+            // The mappings only apply to a user namespace.
+            (vec![], vec![])
+        };
+
         if let Some(pause) = PAUSE.get() {
+            pause
+                .ensure_matches(
+                    &base_path,
+                    pod_id,
+                    &namespaces,
+                    &uid_mappings,
+                    &gid_mappings,
+                )
+                .context("pause already initialized")?;
             return Ok(pause);
         }
+
         let pause = Self::init(base_path, pod_id, namespaces, uid_mappings, gid_mappings)
             .context("init pause")?;
+        if let Some(pid) = pause.pid() {
+            Self::spawn_reaper(pid);
+        }
         let _ = PAUSE.set(pause);
         PAUSE.get().context("pause not initialized")
+    }
+
+    /// Fail if the pause instance was created for another pod or configuration.
+    fn ensure_matches(
+        &self,
+        base_path: &Path,
+        pod_id: &str,
+        namespaces: &[Namespace],
+        uid_mappings: &[String],
+        gid_mappings: &[String],
+    ) -> Result<()> {
+        if self.pod_id() != pod_id {
+            bail!(
+                "created for pod {}, cannot serve pod {pod_id}",
+                self.pod_id()
+            );
+        }
+        if self.base_path() != base_path {
+            bail!(
+                "created with base path {}, not {}",
+                self.base_path().display(),
+                base_path.display()
+            );
+        }
+        // The order does not matter, both lists are free of duplicates.
+        if self.namespaces.len() != namespaces.len()
+            || !namespaces.iter().all(|ns| self.namespaces.contains(ns))
+        {
+            bail!(
+                "created with namespaces {:?}, not {:?}",
+                self.namespaces,
+                namespaces
+            );
+        }
+        if self.uid_mappings != uid_mappings || self.gid_mappings != gid_mappings {
+            bail!("created with other ID mappings")
+        }
+        Ok(())
+    }
+
+    /// Convert the requested namespaces, dropping duplicates.
+    fn parse_namespaces(requested: Reader<conmon::Namespace>) -> Result<Vec<Namespace>> {
+        let mut namespaces = vec![];
+        for namespace in requested.iter() {
+            let namespace = match namespace? {
+                conmon::Namespace::Ipc => Namespace::Ipc,
+                conmon::Namespace::Net => Namespace::Net,
+                conmon::Namespace::Pid => Namespace::Pid,
+                conmon::Namespace::Uts => Namespace::Uts,
+                conmon::Namespace::User => Namespace::User,
+            };
+
+            // A namespace requested twice is created and reported once.
+            if namespaces.contains(&namespace) {
+                debug!("Ignoring duplicate namespace {namespace}");
+                continue;
+            }
+            namespaces.push(namespace);
+        }
+        Ok(namespaces)
+    }
+
+    /// Reap the init of the PID namespace once it exits, it is a child of the
+    /// server, which is the child subreaper. Its PID is known, so waiting for
+    /// it does not take the exit status of any other child.
+    fn spawn_reaper(pid: Pid) {
+        task::spawn(
+            async move {
+                let code = ReapableChild::wait_for_exit_code_async(
+                    CancellationToken::new(),
+                    pid.as_raw() as u32,
+                )
+                .await;
+                info!("Pause PID {pid} exited with code {code}");
+            }
+            .instrument(debug_span!("pause_reaper")),
+        );
     }
 
     /// Retrieve the global instance of pause if initialized.
@@ -109,57 +230,28 @@ impl Pause {
 
     /// Initialize a new pause instance.
     fn init(
-        base_path: &str,
+        base_path: PathBuf,
         pod_id: &str,
-        init_namespaces: Reader<conmon::Namespace>,
+        namespaces: Vec<Namespace>,
         uid_mappings: Vec<String>,
         gid_mappings: Vec<String>,
     ) -> Result<Self> {
         debug!("Initializing pause");
 
         let mut args: Vec<String> = vec![format!("--pod-id={pod_id}")];
-        let mut namespaces = vec![];
-
-        for namespace in init_namespaces.iter() {
-            let namespace = match namespace? {
-                conmon::Namespace::Ipc => Namespace::Ipc,
-                conmon::Namespace::Net => Namespace::Net,
-                conmon::Namespace::Pid => Namespace::Pid,
-                conmon::Namespace::Uts => Namespace::Uts,
-                conmon::Namespace::User => Namespace::User,
-            };
-
-            // A namespace requested twice is created and reported once.
-            if namespaces.contains(&namespace) {
-                debug!("Ignoring duplicate namespace {namespace}");
-                continue;
-            }
-
-            if namespace == Namespace::User {
-                if uid_mappings.is_empty() {
-                    bail!("user ID mappings are empty")
-                }
-
-                if gid_mappings.is_empty() {
-                    bail!("group ID mappings are empty")
-                }
-
-                for mapping in &uid_mappings {
-                    args.push(format!("--uid-mappings={mapping}"));
-                }
-                for mapping in &gid_mappings {
-                    args.push(format!("--gid-mappings={mapping}"));
-                }
-            }
-
+        for mapping in &uid_mappings {
+            args.push(format!("--uid-mappings={mapping}"));
+        }
+        for mapping in &gid_mappings {
+            args.push(format!("--gid-mappings={mapping}"));
+        }
+        for namespace in &namespaces {
             args.push(format!("--{namespace}"));
-            namespaces.push(namespace);
         }
 
         debug!("Pause namespaces: {:?}", namespaces);
         debug!("Pause args: {:?}", args);
 
-        let base_path = PathBuf::from(base_path);
         fs::create_dir_all(&base_path).context("create base path")?;
         debug!("Pause base path: {}", base_path.display());
 
@@ -169,6 +261,10 @@ impl Pause {
             .arg("--base-path")
             .arg(&base_path)
             .args(args)
+            // The init of a PID namespace outlives this call. It must not keep
+            // the output of the server open, only errors are of interest.
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
             .spawn()
             .context("run pause")?;
 
@@ -196,6 +292,8 @@ impl Pause {
             base_path,
             pod_id: pod_id.to_owned().into_boxed_str(),
             namespaces,
+            uid_mappings,
+            gid_mappings,
             pid,
         })
     }
@@ -258,6 +356,11 @@ impl Pause {
         if uts {
             flags.insert(CloneFlags::CLONE_NEWUTS);
         }
+
+        // Become the subreaper of the init, so that a failed setup can reap
+        // it after killing it. On success it gets reparented to the server once
+        // this process exits.
+        prctl::set_child_subreaper(true).context("set child subreaper")?;
 
         let (sock_parent, sock_child) = UnixStream::pair().context("create unix socket pair")?;
 
@@ -343,10 +446,34 @@ impl Pause {
     }
 
     /// The init of the PID namespace, which keeps it alive until terminated.
+    /// Processes of the pod which lose their parent get reparented to it, so it
+    /// reaps them like any init.
     fn run_init() -> Result<()> {
-        let mut signals = Signals::new(TERM_SIGNALS).context("register signals")?;
-        signals.forever().next().context("no signal number")?;
-        Ok(())
+        let mut signals = Signals::new(TERM_SIGNALS.iter().copied().chain([SIGCHLD]))
+            .context("register signals")?;
+        for signal in signals.forever() {
+            if signal != SIGCHLD {
+                debug!("Got signal {signal}, exiting pause init");
+                return Ok(());
+            }
+            Self::reap_children();
+        }
+        bail!("signal iterator ended")
+    }
+
+    /// Reap all exited children without blocking.
+    fn reap_children() {
+        loop {
+            match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::StillAlive) | Err(Errno::ECHILD) => return,
+                Ok(status) => trace!("Reaped child: {status:?}"),
+                Err(Errno::EINTR) => continue,
+                Err(e) => {
+                    warn!("Unable to reap children: {:#}", e);
+                    return;
+                }
+            }
+        }
     }
 
     /// Write user or group ID mappings.
@@ -470,9 +597,8 @@ impl PauseParent<'_> {
     fn cleanup(&self) {
         let child = self.child;
 
-        // The killed init gets reparented to the server, which is the child
-        // subreaper.
-        if let Some(init) = self.holder.filter(|holder| *holder != child)
+        let init = self.holder.filter(|holder| *holder != child);
+        if let Some(init) = init
             && let Err(e) = kill(init, Signal::SIGKILL)
         {
             debug!("Unable to kill pause init {init}: {:#}", e);
@@ -484,6 +610,14 @@ impl PauseParent<'_> {
         }
         if let Err(e) = waitpid(child, None) {
             debug!("Unable to wait for pause child {child}: {:#}", e);
+        }
+
+        // With the child gone, the killed init got reparented to this process,
+        // the subreaper.
+        if let Some(init) = init
+            && let Err(e) = waitpid(init, None)
+        {
+            debug!("Unable to wait for pause init {init}: {:#}", e);
         }
 
         for namespace in self.namespaces {
@@ -576,5 +710,51 @@ impl Namespace {
             Namespace::User => conmon::Namespace::User,
             Namespace::Uts => conmon::Namespace::Uts,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_matches_config() {
+        let mappings = vec!["0 0 1".to_string()];
+        let pause = Pause {
+            base_path: "/var/run".into(),
+            pod_id: "pod".into(),
+            namespaces: vec![Namespace::Ipc, Namespace::User],
+            uid_mappings: mappings.clone(),
+            gid_mappings: mappings.clone(),
+            pid: None,
+        };
+        let namespaces = [Namespace::User, Namespace::Ipc];
+        let base_path = Path::new("/var/run/");
+
+        assert!(
+            pause
+                .ensure_matches(base_path, "pod", &namespaces, &mappings, &mappings)
+                .is_ok()
+        );
+        assert!(
+            pause
+                .ensure_matches(base_path, "other", &namespaces, &mappings, &mappings)
+                .is_err()
+        );
+        assert!(
+            pause
+                .ensure_matches(Path::new("/tmp"), "pod", &namespaces, &mappings, &mappings)
+                .is_err()
+        );
+        assert!(
+            pause
+                .ensure_matches(base_path, "pod", &[Namespace::Ipc], &mappings, &mappings)
+                .is_err()
+        );
+        assert!(
+            pause
+                .ensure_matches(base_path, "pod", &namespaces, &[], &mappings)
+                .is_err()
+        );
     }
 }
