@@ -169,7 +169,7 @@ interface Conmon {
     # Available namespaces.
     struct NamespaceResponse {
         type @0 :Namespace; # The type of the namespace.
-        path @1 :Text; # Path to the directory for the unshared namespaces.
+        path @1 :Text; # Path to the bind mount of the namespace.
     }
 
     createNamespaces @6 (request: CreateNamespacesRequest) -> (response: CreateNamespacesResponse);

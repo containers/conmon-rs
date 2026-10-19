@@ -5,8 +5,11 @@ use libc::pid_t;
 use nix::{
     mount::{MsFlags, mount, umount},
     sched::{CloneFlags, unshare},
-    sys::signal::{Signal, kill},
-    unistd::{ForkResult, Gid, Pid, Uid, fork, setresgid, setresuid},
+    sys::{
+        signal::{Signal, kill},
+        wait::waitpid,
+    },
+    unistd::{ForkResult, Gid, Pid, Uid, fork, getpid, setresgid, setresuid},
 };
 use signal_hook::{consts::TERM_SIGNALS, iterator::Signals};
 use std::{
@@ -15,10 +18,10 @@ use std::{
     io::{Read, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    process::{Command, exit},
+    process::Command,
     sync::OnceLock,
 };
-use strum::{AsRefStr, Display, EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
+use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
 use tracing::{debug, info, trace, warn};
 
 /// The main structure for this module.
@@ -26,8 +29,15 @@ use tracing::{debug, info, trace, warn};
 pub struct Pause {
     base_path: PathBuf,
     pod_id: Box<str>,
+
+    /// The namespaces which were requested, created and bound.
     namespaces: Vec<Namespace>,
-    pid: Pid,
+
+    /// The PID of the long running pause process. It only exists if a PID
+    /// namespace was requested, because that is the only namespace which
+    /// dies with its init process. All other namespaces stay alive through
+    /// their bind mounts alone.
+    pid: Option<Pid>,
 }
 
 impl Pause {
@@ -40,7 +50,7 @@ impl Pause {
     pub fn namespaces(&self) -> &[Namespace] {
         &self.namespaces
     }
-    pub fn pid(&self) -> Pid {
+    pub fn pid(&self) -> Option<Pid> {
         self.pid
     }
 }
@@ -80,9 +90,11 @@ impl Pause {
             }
         }
 
-        info!("Killing pause PID: {}", self.pid());
-        if let Err(e) = kill(self.pid(), Signal::SIGTERM) {
-            warn!("Unable to kill pause PID {}: {:#}", self.pid(), e);
+        if let Some(pid) = self.pid() {
+            info!("Killing pause PID: {pid}");
+            if let Err(e) = kill(pid, Signal::SIGTERM) {
+                warn!("Unable to kill pause PID {pid}: {:#}", e);
+            }
         }
 
         let pause_pid_path = Self::pause_pid_path(self.base_path(), self.pod_id());
@@ -109,46 +121,41 @@ impl Pause {
         let mut namespaces = vec![];
 
         for namespace in init_namespaces.iter() {
-            match namespace? {
-                conmon::Namespace::Ipc => {
-                    args.push("--ipc".into());
-                    namespaces.push(Namespace::Ipc);
+            let namespace = match namespace? {
+                conmon::Namespace::Ipc => Namespace::Ipc,
+                conmon::Namespace::Net => Namespace::Net,
+                conmon::Namespace::Pid => Namespace::Pid,
+                conmon::Namespace::Uts => Namespace::Uts,
+                conmon::Namespace::User => Namespace::User,
+            };
+
+            // A namespace requested twice is created and reported once.
+            if namespaces.contains(&namespace) {
+                debug!("Ignoring duplicate namespace {namespace}");
+                continue;
+            }
+
+            if namespace == Namespace::User {
+                if uid_mappings.is_empty() {
+                    bail!("user ID mappings are empty")
                 }
-                conmon::Namespace::Net => {
-                    args.push("--net".into());
-                    namespaces.push(Namespace::Net);
+
+                if gid_mappings.is_empty() {
+                    bail!("group ID mappings are empty")
                 }
-                conmon::Namespace::Pid => {
-                    args.push("--pid".into());
-                    namespaces.push(Namespace::Pid);
+
+                for mapping in &uid_mappings {
+                    args.push(format!("--uid-mappings={mapping}"));
                 }
-                conmon::Namespace::Uts => {
-                    args.push("--uts".into());
-                    namespaces.push(Namespace::Uts);
-                }
-                conmon::Namespace::User => {
-                    if uid_mappings.is_empty() {
-                        bail!("user ID mappings are empty")
-                    }
-
-                    if gid_mappings.is_empty() {
-                        bail!("group ID mappings are empty")
-                    }
-
-                    args.push("--user".into());
-
-                    for mapping in &uid_mappings {
-                        args.push(format!("--uid-mappings={mapping}"));
-                    }
-
-                    for mapping in &gid_mappings {
-                        args.push(format!("--gid-mappings={mapping}"));
-                    }
-
-                    namespaces.push(Namespace::User);
+                for mapping in &gid_mappings {
+                    args.push(format!("--gid-mappings={mapping}"));
                 }
             }
+
+            args.push(format!("--{namespace}"));
+            namespaces.push(namespace);
         }
+
         debug!("Pause namespaces: {:?}", namespaces);
         debug!("Pause args: {:?}", args);
 
@@ -170,18 +177,26 @@ impl Pause {
             bail!("exit status not ok: {status}")
         }
 
-        let pid = fs::read_to_string(Self::pause_pid_path(&base_path, pod_id))
-            .context("read pause PID path")?
-            .trim()
-            .parse::<u32>()
-            .context("parse pause PID")?;
-        info!("Pause PID is: {pid}");
+        // Without a PID namespace the pause process already exited after
+        // binding the namespaces and left no PID behind.
+        let pid = if namespaces.contains(&Namespace::Pid) {
+            let pid = fs::read_to_string(Self::pause_pid_path(&base_path, pod_id))
+                .context("read pause PID path")?
+                .trim()
+                .parse::<u32>()
+                .context("parse pause PID")?;
+            info!("Pause PID is: {pid}");
+            Some(Pid::from_raw(pid as pid_t))
+        } else {
+            info!("No PID namespace requested, pause process exited after binding");
+            None
+        };
 
         Ok(Self {
             base_path,
             pod_id: pod_id.to_owned().into_boxed_str(),
-            namespaces: Namespace::iter().collect(),
-            pid: Pid::from_raw(pid as pid_t),
+            namespaces,
+            pid,
         })
     }
 
@@ -195,6 +210,18 @@ impl Pause {
 
     #[allow(clippy::too_many_arguments)]
     /// Run a new pause instance.
+    ///
+    /// The process forks. The child unshares the requested namespaces and the
+    /// parent, which stays in the host namespaces, binds them from the
+    /// `/proc/<pid>/ns` entries of the process holding them. Binding from the
+    /// child would not work for a user namespace: its mounts live in a mount
+    /// namespace owned by the less privileged user namespace and never reach
+    /// the host.
+    ///
+    /// The bind mounts keep every namespace alive except a PID namespace, which
+    /// dies with its init process. Unsharing a PID namespace does not move the
+    /// caller into it, so the child forks that init, which is the only process
+    /// that stays around.
     pub fn run<T: AsRef<Path> + Copy>(
         base_path: T,
         pod_id: &str,
@@ -206,6 +233,18 @@ impl Pause {
         uid_mappings: &[String],
         gid_mappings: &[String],
     ) -> Result<()> {
+        let requested = [
+            (ipc, Namespace::Ipc),
+            (pid, Namespace::Pid),
+            (net, Namespace::Net),
+            (user, Namespace::User),
+            (uts, Namespace::Uts),
+        ];
+        let namespaces: Vec<Namespace> = requested
+            .into_iter()
+            .filter_map(|(enabled, namespace)| enabled.then_some(namespace))
+            .collect();
+
         let mut flags = CloneFlags::empty();
         if ipc {
             flags.insert(CloneFlags::CLONE_NEWIPC);
@@ -216,91 +255,95 @@ impl Pause {
         if net {
             flags.insert(CloneFlags::CLONE_NEWNET);
         }
-        if user {
-            // CLONE_NEWNS is intentional here, because we need a new mount namespace for user
-            // namespace handling as well. The CLONE_NEWUSER will be done before calling unshare
-            // with the rest of the flags.
-            flags.insert(CloneFlags::CLONE_NEWNS);
-        }
         if uts {
             flags.insert(CloneFlags::CLONE_NEWUTS);
         }
 
-        if !user {
-            unshare(flags).context("unshare with clone flags")?;
-        }
-
-        let (mut sock_parent, mut sock_child) =
-            UnixStream::pair().context("create unix socket pair")?;
-        const MSG: &[u8] = &[1];
-        let mut res = [0];
+        let (sock_parent, sock_child) = UnixStream::pair().context("create unix socket pair")?;
 
         match unsafe { fork().context("forking process")? } {
             ForkResult::Parent { child } => {
-                let pause_pid_path = Self::pause_pid_path(base_path, pod_id);
-                fs::create_dir_all(
-                    pause_pid_path
-                        .parent()
-                        .context("no parent for pause PID path")?,
-                )
-                .context("create pause PID parent path")?;
-                let mut file = File::create(pause_pid_path).context("create pause PID file")?;
-                write!(file, "{child}").context("write child to pause file")?;
+                // Close the child end, so that reads fail if the child dies.
+                drop(sock_child);
 
-                if user {
-                    // Wait for user namespace creation
-                    sock_parent.read_exact(&mut res)?;
-
-                    // Write mappings
-                    Self::write_mappings(gid_mappings, child, true).context("write gid maps")?;
-                    Self::write_mappings(uid_mappings, child, false).context("write uid maps")?;
-
-                    // Notify that user mappings have been written
-                    sock_parent.write_all(MSG)?;
+                let mut parent = PauseParent {
+                    base_path: base_path.as_ref(),
+                    pod_id,
+                    child,
+                    namespaces: &namespaces,
+                    holder: None,
+                };
+                let result = parent.run(uid_mappings, gid_mappings, sock_parent);
+                if result.is_err() {
+                    parent.cleanup();
                 }
-
-                // Wait for mounts to be created
-                sock_parent.read_exact(&mut res)?;
-
-                exit(0);
+                result
             }
-
-            ForkResult::Child if user => {
-                unshare(CloneFlags::CLONE_NEWUSER).context("unshare into user namespace")?;
-
-                // Notify that the user namespace is now created
-                sock_child.write_all(MSG)?;
-
-                // Wait for the mappings to be written
-                sock_child.read_exact(&mut res)?;
-
-                // Set the UID and GID
-                let uid = Uid::from_raw(0);
-                setresuid(uid, uid, uid).context("set root uid")?;
-
-                let gid = Gid::from_raw(0);
-                setresgid(gid, gid, gid).context("set root gid")?;
-
-                // Unshare the rest of the namespaces
-                unshare(flags).context("unshare with other clone flags")?;
+            ForkResult::Child => {
+                drop(sock_parent);
+                Self::run_child(flags, user, pid, sock_child)
             }
+        }
+    }
 
-            _ => (),
+    /// The message exchanged between the pause parent and child.
+    const MSG: &'static [u8] = &[1];
+
+    /// The child side of the pause process: unshares the namespaces, forks the
+    /// init of a PID namespace if requested, reports the process holding the
+    /// namespaces and waits for the parent to bind them.
+    fn run_child(flags: CloneFlags, user: bool, pid: bool, mut sock: UnixStream) -> Result<()> {
+        let mut res = [0];
+
+        if user {
+            unshare(CloneFlags::CLONE_NEWUSER).context("unshare into user namespace")?;
+
+            // Notify that the user namespace is now created
+            sock.write_all(Self::MSG)
+                .context("notify about user namespace")?;
+
+            // Wait for the mappings to be written
+            sock.read_exact(&mut res).context("wait for mappings")?;
+
+            // Set the UID and GID
+            let uid = Uid::from_raw(0);
+            setresuid(uid, uid, uid).context("set root uid")?;
+            let gid = Gid::from_raw(0);
+            setresgid(gid, gid, gid).context("set root gid")?;
         }
 
-        // We bind all namespaces, if not unshared then we use the host namespace.
-        for namespace in Namespace::iter() {
-            namespace.bind(base_path, pod_id).with_context(|| {
-                format!(
-                    "bind namespace to path: {}",
-                    namespace.path(base_path, pod_id).display(),
-                )
-            })?;
-        }
+        // Unshare the rest of the namespaces after the user namespace, so that
+        // it owns them.
+        unshare(flags).context("unshare with clone flags")?;
 
-        // Notify that all mounts are created
-        sock_child.write_all(MSG)?;
+        // Only the next child becomes part of a new PID namespace, as its init.
+        let holder = if pid {
+            match unsafe { fork().context("forking PID namespace init")? } {
+                ForkResult::Parent { child } => child,
+                ForkResult::Child => {
+                    drop(sock);
+                    return Self::run_init();
+                }
+            }
+        } else {
+            getpid()
+        };
 
+        // Report the process holding all namespaces
+        sock.write_all(&holder.as_raw().to_ne_bytes())
+            .context("report namespace holder PID")?;
+
+        // Wait for the parent to bind them
+        sock.read_exact(&mut res).context("wait for mounts")?;
+
+        // The bind mounts keep the namespaces alive on their own, only a PID
+        // namespace dies with its init, which stays around.
+        debug!("Namespaces bound, exiting pause child");
+        Ok(())
+    }
+
+    /// The init of the PID namespace, which keeps it alive until terminated.
+    fn run_init() -> Result<()> {
         let mut signals = Signals::new(TERM_SIGNALS).context("register signals")?;
         signals.forever().next().context("no signal number")?;
         Ok(())
@@ -335,9 +378,132 @@ impl Pause {
     }
 }
 
-#[derive(
-    AsRefStr, Clone, Copy, Debug, Display, EnumIter, EnumString, Eq, IntoStaticStr, PartialEq,
-)]
+/// The parent side of the pause process.
+struct PauseParent<'a> {
+    base_path: &'a Path,
+    pod_id: &'a str,
+
+    /// The forked pause child, which unshares the namespaces.
+    child: Pid,
+
+    /// The requested namespaces.
+    namespaces: &'a [Namespace],
+
+    /// The process holding the namespaces, once reported by the child. It is
+    /// the init of the PID namespace if one was requested.
+    holder: Option<Pid>,
+}
+
+impl PauseParent<'_> {
+    /// Write the ID mappings, bind the namespaces of the holder process
+    /// reported by the child and record the PID of the holder if it is the init
+    /// of a PID namespace.
+    fn run(
+        &mut self,
+        uid_mappings: &[String],
+        gid_mappings: &[String],
+        mut sock: UnixStream,
+    ) -> Result<()> {
+        let child = self.child;
+
+        if self.namespaces.contains(&Namespace::User) {
+            // Wait for user namespace creation
+            let mut res = [0];
+            sock.read_exact(&mut res)
+                .context("wait for user namespace")?;
+
+            // Write mappings
+            Pause::write_mappings(gid_mappings, child, true).context("write gid maps")?;
+            Pause::write_mappings(uid_mappings, child, false).context("write uid maps")?;
+
+            // Notify that user mappings have been written
+            sock.write_all(Pause::MSG)
+                .context("notify about written mappings")?;
+        }
+
+        // Wait for the child to have all namespaces in place and to report
+        // the process holding them.
+        let mut buf = [0; size_of::<pid_t>()];
+        sock.read_exact(&mut buf)
+            .context("wait for namespace holder PID")?;
+        let pid = Pid::from_raw(pid_t::from_ne_bytes(buf));
+        self.holder = Some(pid);
+
+        for namespace in self.namespaces {
+            namespace
+                .bind(self.base_path, self.pod_id, pid)
+                .with_context(|| {
+                    format!(
+                        "bind namespace to path: {}",
+                        namespace.path(self.base_path, self.pod_id).display(),
+                    )
+                })?;
+        }
+
+        if self.namespaces.contains(&Namespace::Pid) {
+            let pause_pid_path = Pause::pause_pid_path(self.base_path, self.pod_id);
+            fs::create_dir_all(
+                pause_pid_path
+                    .parent()
+                    .context("no parent for pause PID path")?,
+            )
+            .context("create pause PID parent path")?;
+            let mut file = File::create(pause_pid_path).context("create pause PID file")?;
+            write!(file, "{pid}").context("write PID to pause file")?;
+        }
+
+        // Notify that all mounts are created
+        sock.write_all(Pause::MSG).context("notify about mounts")?;
+
+        // The child exits right after the notification. Reap it here so that
+        // it does not linger as a zombie. The namespaces are already in place,
+        // so a failure is no reason to fail the whole setup.
+        if let Err(e) = waitpid(child, None) {
+            warn!("Unable to wait for pause child {child}: {:#}", e);
+        }
+
+        Ok(())
+    }
+
+    /// Undo a failed setup: kill the pause processes and remove the bind
+    /// mounts and PID file which may already exist.
+    fn cleanup(&self) {
+        let child = self.child;
+
+        // The killed init gets reparented to the server, which is the child
+        // subreaper.
+        if let Some(init) = self.holder.filter(|holder| *holder != child)
+            && let Err(e) = kill(init, Signal::SIGKILL)
+        {
+            debug!("Unable to kill pause init {init}: {:#}", e);
+        }
+
+        // Do not leave the child blocked on the socket or as a zombie.
+        if let Err(e) = kill(child, Signal::SIGKILL) {
+            debug!("Unable to kill pause child {child}: {:#}", e);
+        }
+        if let Err(e) = waitpid(child, None) {
+            debug!("Unable to wait for pause child {child}: {:#}", e);
+        }
+
+        for namespace in self.namespaces {
+            if let Err(e) = namespace.umount(self.base_path, self.pod_id) {
+                debug!("Unable to umount namespace {namespace}: {:#}", e);
+            }
+        }
+
+        let pause_pid_path = Pause::pause_pid_path(self.base_path, self.pod_id);
+        if let Err(e) = fs::remove_file(&pause_pid_path) {
+            debug!(
+                "Unable to remove pause PID path {}: {:#}",
+                pause_pid_path.display(),
+                e
+            );
+        }
+    }
+}
+
+#[derive(AsRefStr, Clone, Copy, Debug, Display, EnumString, Eq, IntoStaticStr, PartialEq)]
 #[strum(serialize_all = "lowercase")]
 /// All available linux namespaces.
 pub enum Namespace {
@@ -360,8 +526,9 @@ pub enum Namespace {
 }
 
 impl Namespace {
-    /// Bind the namespace to the provided base path and pod ID.
-    pub fn bind<T: AsRef<Path>>(&self, path: T, pod_id: &str) -> Result<()> {
+    /// Bind the namespace of the process `pid` to the provided base path and
+    /// pod ID.
+    pub fn bind<T: AsRef<Path>>(&self, path: T, pod_id: &str, pid: Pid) -> Result<()> {
         let bind_path = self.path(path, pod_id);
         fs::create_dir_all(
             bind_path
@@ -370,7 +537,10 @@ impl Namespace {
         )
         .context("create namespace parent path")?;
         File::create(&bind_path).context("create namespace bind path")?;
-        let source_path = PathBuf::from("/proc/self/ns").join(self.as_ref());
+        let source_path = PathBuf::from("/proc")
+            .join(pid.as_raw().to_string())
+            .join("ns")
+            .join(self.as_ref());
 
         mount(
             Some(&source_path),

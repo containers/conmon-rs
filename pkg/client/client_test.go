@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -636,38 +635,114 @@ var _ = Describe("ConmonClient", func() {
 			Expect(err).To(Succeed())
 			Expect(response).NotTo(BeNil())
 
-			Expect(len(response.Namespaces)).To(BeEquivalentTo(5))
+			// Only the requested namespaces are created, in request order.
+			Expect(response.Namespaces).To(HaveLen(4))
 			Expect(response.Namespaces[0].Type).To(Equal(client.NamespaceIPC))
-			Expect(response.Namespaces[1].Type).To(Equal(client.NamespacePID))
-			Expect(response.Namespaces[2].Type).To(Equal(client.NamespaceNet))
-			Expect(response.Namespaces[3].Type).To(Equal(client.NamespaceUser))
-			Expect(response.Namespaces[4].Type).To(Equal(client.NamespaceUTS))
+			Expect(response.Namespaces[1].Type).To(Equal(client.NamespaceNet))
+			Expect(response.Namespaces[2].Type).To(Equal(client.NamespacePID))
+			Expect(response.Namespaces[3].Type).To(Equal(client.NamespaceUTS))
+
+			const basePath = "/var/run/"
 
 			for i, ns := range response.Namespaces {
-				stat, err := os.Lstat(ns.Path)
-				Expect(err).To(Succeed())
-				Expect(stat.IsDir()).To(BeFalse())
-				Expect(stat.Size()).To(BeZero())
-				Expect(stat.Mode()).To(Equal(fs.FileMode(0o444)))
-
+				expectNamespaceFile(ns.Path)
 				Expect(filepath.Base(ns.Path)).To(Equal(podID))
-				Expect(err).To(Succeed())
-
-				const basePath = "/var/run/"
 
 				switch i {
 				case 0:
 					Expect(ns.Path).To(ContainSubstring(basePath + "ipcns/"))
 				case 1:
-					Expect(ns.Path).To(ContainSubstring(basePath + "pidns/"))
-				case 2:
 					Expect(ns.Path).To(ContainSubstring(basePath + "netns/"))
+				case 2:
+					Expect(ns.Path).To(ContainSubstring(basePath + "pidns/"))
 				case 3:
-					Expect(ns.Path).To(ContainSubstring(basePath + "userns/"))
-				case 4:
 					Expect(ns.Path).To(ContainSubstring(basePath + "utsns/"))
 				}
 			}
+
+			// The user namespace was not requested and is not bound.
+			Expect(filepath.Join(basePath, "userns", podID)).NotTo(BeAnExistingFile())
+		})
+
+		It("should not keep a pause process without PID namespace", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			basePath := MustTempDir("ns-test-")
+			// Runs after the server shutdown unmounted the namespaces.
+			DeferCleanup(os.RemoveAll, basePath)
+
+			podID := uuid.New().String()
+
+			response, err := sut.CreateNamespaces(
+				context.Background(),
+				&client.CreateNamespacesConfig{
+					Namespaces: []client.Namespace{
+						client.NamespaceIPC,
+						client.NamespaceNet,
+						client.NamespaceUTS,
+					},
+					BasePath: basePath,
+					PodID:    podID,
+				},
+			)
+			Expect(err).To(Succeed())
+			Expect(response).NotTo(BeNil())
+			Expect(response.Namespaces).To(HaveLen(3))
+
+			// The bind mounts keep the namespaces alive on their own.
+			for _, ns := range response.Namespaces {
+				expectNamespaceFile(ns.Path)
+			}
+
+			// Without a PID namespace no pause process stays behind.
+			Expect(filepath.Join(basePath, "conmonrs", podID+".pid")).NotTo(BeAnExistingFile())
+			Expect(pauseProcessRunning(podID)).To(BeFalse())
+		})
+
+		It("should not keep a pause process with user namespace and without PID namespace", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			basePath := MustTempDir("ns-test-")
+			// Runs after the server shutdown unmounted the namespaces.
+			DeferCleanup(os.RemoveAll, basePath)
+
+			podID := uuid.New().String()
+
+			uids := []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}}
+			gids := []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}}
+
+			response, err := sut.CreateNamespaces(
+				context.Background(),
+				&client.CreateNamespacesConfig{
+					Namespaces: []client.Namespace{
+						client.NamespaceIPC,
+						client.NamespaceNet,
+						client.NamespaceUTS,
+						client.NamespaceUser,
+						// Duplicates are reported once.
+						client.NamespaceNet,
+					},
+					IDMappings: idtools.NewIDMappingsFromMaps(uids, gids),
+					BasePath:   basePath,
+					PodID:      podID,
+				},
+			)
+			Expect(err).To(Succeed())
+			Expect(response).NotTo(BeNil())
+			Expect(response.Namespaces).To(HaveLen(4))
+			Expect(response.Namespaces[3].Type).To(Equal(client.NamespaceUser))
+
+			// The namespaces are bound on the host and outlive the pause process.
+			for _, ns := range response.Namespaces {
+				expectNamespaceFile(ns.Path)
+			}
+
+			Expect(filepath.Join(basePath, "conmonrs", podID+".pid")).NotTo(BeAnExistingFile())
+			Expect(pauseProcessRunning(podID)).To(BeFalse())
 		})
 
 		It("should succeed with user namespace and custom base path", func() {
@@ -676,7 +751,8 @@ var _ = Describe("ConmonClient", func() {
 			sut = tr.configGivenEnv()
 
 			basePath := MustTempDir("ns-test-")
-			defer os.RemoveAll(basePath)
+			// Runs after the server shutdown unmounted the namespaces.
+			DeferCleanup(os.RemoveAll, basePath)
 
 			podID := uuid.New().String()
 
@@ -701,19 +777,20 @@ var _ = Describe("ConmonClient", func() {
 			Expect(err).To(Succeed())
 			Expect(response).NotTo(BeNil())
 
-			Expect(len(response.Namespaces)).To(BeEquivalentTo(5))
+			Expect(response.Namespaces).To(HaveLen(5))
 			Expect(response.Namespaces[0].Type).To(Equal(client.NamespaceIPC))
-			Expect(response.Namespaces[1].Type).To(Equal(client.NamespacePID))
-			Expect(response.Namespaces[2].Type).To(Equal(client.NamespaceNet))
-			Expect(response.Namespaces[3].Type).To(Equal(client.NamespaceUser))
-			Expect(response.Namespaces[4].Type).To(Equal(client.NamespaceUTS))
+			Expect(response.Namespaces[1].Type).To(Equal(client.NamespaceNet))
+			Expect(response.Namespaces[2].Type).To(Equal(client.NamespacePID))
+			Expect(response.Namespaces[3].Type).To(Equal(client.NamespaceUTS))
+			Expect(response.Namespaces[4].Type).To(Equal(client.NamespaceUser))
 
 			for _, ns := range response.Namespaces {
-				stat, err := os.Lstat(ns.Path)
-				Expect(err).To(Succeed())
-				Expect(stat.IsDir()).To(BeFalse())
-				Expect(stat.Size()).To(BeZero())
+				expectNamespaceFile(ns.Path)
 			}
+
+			// The PID namespace needs the pause process to stay alive.
+			Expect(filepath.Join(basePath, "conmonrs", podID+".pid")).To(BeAnExistingFile())
+			Expect(pauseProcessRunning(podID)).To(BeTrue())
 		})
 
 		It("should fail with user namespace without mappings", func() {

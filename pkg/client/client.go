@@ -1212,17 +1212,20 @@ type NamespacesResponse struct {
 	// Namespace is the type of namespace.
 	Type Namespace
 
-	// Path is the base path to the namespaces directory.
+	// Path is the bind mount of the namespace, which can be joined via
+	// setns(2).
 	Path string
 }
 
 // CreateNamespaces can be used to create a new set of unshared namespaces by
 // bind mounting it to the local filesystem.
 //
-// If a namespace is not selected by the CreateNamespacesConfig, then the
-// server will fallback to the host namespace and still create the bind mount
-// to it. All namespaces are mounted to /var/run/[ipc,pid,net,user,uts]ns/$POD_ID,
-// whereas the POD_ID is being used from the CreateNamespacesConfig as well.
+// Only the namespaces selected by the CreateNamespacesConfig are created and
+// returned, in the requested order and without duplicates. They are mounted to
+// $BASE_PATH/[ipc,pid,net,user,uts]ns/$POD_ID, where BASE_PATH and POD_ID are
+// taken from the CreateNamespacesConfig. A pause process only stays around as
+// init of a requested PID namespace, all other namespaces are kept alive by
+// their bind mounts.
 //
 // UID and GID mappings are required if unsharing of the user namespace is
 // requested.
