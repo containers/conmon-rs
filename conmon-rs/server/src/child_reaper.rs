@@ -3,6 +3,7 @@ use crate::fd_mapping::{CommandFdExt, FdMapping};
 use crate::{
     child::{Child, ChildKind},
     container_io::{ContainerIO, ContainerIOType, SharedContainerIO},
+    mutex::lock,
     oom_watcher::OOMWatcher,
 };
 use anyhow::{Context, Result, bail};
@@ -28,8 +29,8 @@ use std::{
     thread,
 };
 use tokio::{
-    fs::{self, File},
-    io::{AsyncWriteExt, unix::AsyncFd},
+    fs,
+    io::unix::AsyncFd,
     process::Command,
     select,
     sync::{
@@ -66,7 +67,7 @@ impl ChildReaper {
     /// Retrieve the container registered under `id`. Execs share the id of
     /// their container and are skipped.
     pub fn get(&self, id: &str) -> Result<ReapableChild> {
-        let lock = lock!(self.grandchildren());
+        let lock = lock(self.grandchildren())?;
         let r = lock
             .get(id)
             .and_then(|v| v.iter().find(|c| c.kind == ChildKind::Container))
@@ -241,13 +242,13 @@ impl ChildReaper {
         let (id, mut reapable_grandchild) = ReapableChild::from_child(child);
 
         // Create channels outside the lock to minimize contention
-        let (exit_tx, exit_rx) = reapable_grandchild.watch()?;
+        let (exit_tx, exit_rx) = reapable_grandchild.watch();
 
         let locked_grandchildren = self.grandchildren();
-        {
-            let mut map = lock!(locked_grandchildren);
-            map.entry(id).or_default().push(reapable_grandchild);
-        }
+        lock(locked_grandchildren)?
+            .entry(id)
+            .or_default()
+            .push(reapable_grandchild);
         let cleanup_grandchildren = locked_grandchildren.clone();
 
         task::spawn(
@@ -265,11 +266,11 @@ impl ChildReaper {
         locked_grandchildren: &Arc<Mutex<HashMap<Box<str>, Vec<ReapableChild>>>>,
         grandchild_pid: u32,
     ) -> Result<()> {
-        let mut map = lock!(locked_grandchildren);
+        let mut map = lock(locked_grandchildren)?;
         for children in map.values_mut() {
             if let Some(pos) = children.iter().position(|v| v.pid == grandchild_pid) {
                 children.swap_remove(pos);
-                return Ok(());
+                break;
             }
         }
         Ok(())
@@ -279,7 +280,7 @@ impl ChildReaper {
         debug!("Killing grandchildren");
         // Collect only PIDs and task handles to avoid cloning entire ReapableChild
         let children: Vec<_> = {
-            let map = lock!(self.grandchildren);
+            let map = lock(&self.grandchildren)?;
             map.values()
                 .flatten()
                 .map(|gc| (gc.pid, gc.task.clone()))
@@ -295,7 +296,7 @@ impl ChildReaper {
             debug!("Killing single grandchild");
             kill_grandchild(pid, s);
             if let Some(t) = task
-                && let Some(handle) = lock!(t).take()
+                && let Some(handle) = lock(&t)?.take()
             {
                 let close_span = debug_span!("close", signal = s.as_str());
                 waits.push(
@@ -328,7 +329,7 @@ pub fn kill_grandchild(raw_pid: u32, s: Signal) {
             if let Err(e) = kill(Pid::from_raw(-pgid), s) {
                 error!(
                     raw_pid,
-                    "Failed to get pgid, falling back to killing pid: {:#}", e
+                    "Failed to kill process group {pgid}, falling back to killing pid: {:#}", e
                 );
             }
         }
@@ -362,8 +363,8 @@ impl ReapableChild {
         &self.io
     }
 
-    pub fn timeout(&self) -> &Option<Instant> {
-        &self.timeout
+    pub fn timeout(&self) -> Option<Instant> {
+        self.timeout
     }
 
     pub fn token(&self) -> &CancellationToken {
@@ -374,10 +375,6 @@ impl ReapableChild {
 #[derive(Clone, Debug)]
 pub struct ExitChannelData {
     pub exit_code: i32,
-
-    #[allow(dead_code)]
-    pub oomed: bool,
-
     pub timed_out: bool,
 }
 
@@ -399,14 +396,14 @@ impl ReapableChild {
         )
     }
 
-    fn watch(&mut self) -> Result<(Sender<ExitChannelData>, Receiver<ExitChannelData>)> {
+    fn watch(&mut self) -> (Sender<ExitChannelData>, Receiver<ExitChannelData>) {
         let exit_paths = self.exit_paths.clone();
         let oom_exit_paths = self.oom_exit_paths.clone();
         let pid = self.pid();
         // Only one exit code will be written.
         let (exit_tx, exit_rx) = broadcast::channel(1);
         let exit_tx_clone = exit_tx.clone();
-        let timeout = *self.timeout();
+        let timeout = self.timeout();
         let stop_token = self.token().clone();
         let cleanup_cmd_raw = self.cleanup_cmd.clone();
 
@@ -417,7 +414,7 @@ impl ReapableChild {
                 let mut oomed = false;
                 let mut timed_out = false;
                 let (oom_tx, mut oom_rx) = tokio::sync::mpsc::channel(1);
-                let oom_watcher = OOMWatcher::new(&stop_token, pid, &oom_exit_paths, oom_tx).await;
+                let oom_watcher = OOMWatcher::new(&stop_token, pid, &oom_exit_paths, oom_tx);
 
                 let stop_token_for_timeout = stop_token.clone();
                 let wait_for_exit_code = Self::wait_for_exit_code_async(stop_token, pid)
@@ -446,17 +443,14 @@ impl ReapableChild {
                 } else {
                     closure.await;
                 }
-                oom_watcher.stop().await;
+                oom_watcher.stop();
 
                 let exit_channel_data = ExitChannelData {
                     exit_code,
-                    oomed,
                     timed_out,
                 };
-                debug!(?exit_paths, "Write to exit paths");
-                if let Err(e) = Self::write_to_exit_paths(exit_code, &exit_paths).await {
-                    error!(pid, "Could not write exit paths: {:#}", e);
-                }
+                debug!(?exit_paths, oomed, "Write to exit paths");
+                Self::write_to_exit_paths(exit_code, &exit_paths).await;
 
                 if !cleanup_cmd_raw.is_empty() {
                     Self::spawn_cleanup_process(&cleanup_cmd_raw).await;
@@ -473,7 +467,7 @@ impl ReapableChild {
 
         self.task = Some(Arc::new(Mutex::new(Some(task))));
 
-        Ok((exit_tx, exit_rx))
+        (exit_tx, exit_rx)
     }
 
     async fn spawn_cleanup_process(raw_cmd: &[String]) {
@@ -553,14 +547,17 @@ impl ReapableChild {
     }
 
     /// Try to use pidfd_open + async polling. Returns None if pidfd is unavailable.
-    #[allow(unsafe_code)]
     async fn try_pidfd_wait(pid: u32) -> Option<i32> {
         use nix::fcntl::{FcntlArg, OFlag, fcntl};
 
+        // SAFETY: pidfd_open takes a PID and flags and returns a new descriptor
+        // or a negative error, it does not touch any memory of ours.
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::c_int, 0) };
         if fd < 0 {
             return None;
         }
+        // SAFETY: the descriptor was just returned by the kernel and is not
+        // owned by anything else.
         let owned_fd = unsafe { OwnedFd::from_raw_fd(fd as RawFd) };
 
         let flags = fcntl(&owned_fd, FcntlArg::F_GETFL).ok()?;
@@ -628,27 +625,20 @@ impl ReapableChild {
         }
     }
 
-    async fn write_to_exit_paths(code: i32, paths: &[PathBuf]) -> Result<()> {
+    /// Write the exit code to every exit path. Failures are logged per path,
+    /// one unwritable path must not prevent the others.
+    async fn write_to_exit_paths(code: i32, paths: &[PathBuf]) {
         let code_str = format!("{code}");
         for path_buf in paths {
             let span = debug_span!("write_exit_path", path = %path_buf.display());
             async {
-                debug!("Creating exit file");
-                if let Ok(mut fp) = File::create(path_buf).await {
-                    debug!(code, "Writing exit code to file");
-                    if let Err(e) = fp.write_all(code_str.as_bytes()).await {
-                        error!("Could not write exit file to path: {:#}", e);
-                    }
-                    debug!("Flushing file");
-                    if let Err(e) = fp.flush().await {
-                        error!("Unable to flush {}: {:#}", path_buf.display(), e);
-                    }
-                    debug!("Done writing exit file");
+                debug!(code, "Writing exit code to file");
+                if let Err(e) = fs::write(path_buf, &code_str).await {
+                    error!("Could not write exit file: {:#}", e);
                 }
             }
             .instrument(span)
             .await;
         }
-        Ok(())
     }
 }

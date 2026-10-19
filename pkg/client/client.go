@@ -692,7 +692,7 @@ func (c *ConmonClient) Version(
 
 	cargoTree, err := response.CargoTree()
 	if err != nil {
-		return nil, fmt.Errorf("set cargo version: %w", err)
+		return nil, fmt.Errorf("get cargo tree: %w", err)
 	}
 
 	return &VersionResponse{
@@ -806,6 +806,9 @@ type CreateContainerResponse struct {
 	PID uint32
 
 	// NamespacesPath is the base path where the namespaces are mounted.
+	//
+	// Deprecated: The server never reported it, so it is always empty. Use
+	// the paths returned by CreateNamespaces instead.
 	NamespacesPath string
 }
 
@@ -1309,7 +1312,7 @@ func (c *ConmonClient) CreateNamespaces(
 		}
 
 		if err := req.SetPodId(cfg.PodID); err != nil {
-			return fmt.Errorf("set base path: %w", err)
+			return fmt.Errorf("set pod ID: %w", err)
 		}
 
 		return nil
@@ -1330,7 +1333,7 @@ func (c *ConmonClient) CreateNamespaces(
 
 	namespaces, err := response.Namespaces()
 	if err != nil {
-		return nil, fmt.Errorf("set path: %w", err)
+		return nil, fmt.Errorf("get namespaces: %w", err)
 	}
 
 	namespacesResponse := make([]*NamespacesResponse, 0, namespaces.Len())
@@ -1502,8 +1505,8 @@ type ServeAttachContainerConfig struct {
 
 	// CgroupManager can be use to select the cgroup manager.
 	//
-	// To use this option set `ConmonServerConfig.CgroupManager` to
-	// `CgroupManagerPerCommand`.
+	// Deprecated: Attach does not run the runtime, so the value was never
+	// sent and has no effect.
 	CgroupManager CgroupManager
 }
 
@@ -1609,7 +1612,7 @@ func (c *ConmonClient) ServePortForwardContainer(
 		}
 
 		if err := req.SetNetNsPath(cfg.NetNsPath); err != nil {
-			return fmt.Errorf("set ID: %w", err)
+			return fmt.Errorf("set network namespace path: %w", err)
 		}
 
 		return nil

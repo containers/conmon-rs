@@ -37,7 +37,7 @@ use tokio::{
     time::timeout,
 };
 use tower_http::trace::TraceLayer;
-use tracing::{debug, debug_span, error, info, trace, warn};
+use tracing::{Instrument, debug, debug_span, error, info, trace, warn};
 use uuid::Uuid;
 
 const ADDR: &str = "127.0.0.1";
@@ -319,23 +319,24 @@ impl StreamingServer {
         Path(token): Path<Uuid>,
         AxumState(state): AxumState<Arc<RwLock<State>>>,
     ) -> impl IntoResponse {
-        let span = debug_span!("handle_common", %token);
-        let _enter = span.enter();
+        async move {
+            info!("Got request for token: {token}");
+            let session = state.write().await.remove(&token);
 
-        info!("Got request for token: {token}");
-        let mut state_lock = state.write().await;
-
-        match state_lock.remove(&token) {
-            Some(session) => {
-                info!("Got valid session for token {token}: {session:?}");
-                ws.protocols([PROTOCOL_V5, PROTOCOL_PORT_FORWARD])
-                    .on_upgrade(move |socket| Self::handle_websocket(socket, session))
-            }
-            None => {
-                error!("Unable to find session for token: {token}");
-                StatusCode::NOT_FOUND.into_response()
+            match session {
+                Some(session) => {
+                    info!("Got valid session for token {token}: {session:?}");
+                    ws.protocols([PROTOCOL_V5, PROTOCOL_PORT_FORWARD])
+                        .on_upgrade(move |socket| Self::handle_websocket(socket, session))
+                }
+                None => {
+                    error!("Unable to find session for token: {token}");
+                    StatusCode::NOT_FOUND.into_response()
+                }
             }
         }
+        .instrument(debug_span!("handle_common", %token))
+        .await
     }
 
     /// Handle a single websocket connection.
@@ -346,8 +347,8 @@ impl StreamingServer {
         // queue behind stdin the container does not read.
         let (resize_tx, resize_rx) = mpsc::channel(16);
 
-        let mut send_task = Self::write_task(sender, stdin_rx, resize_rx, session).await;
-        let mut recv_task = Self::read_task(receiver, stdin_tx, resize_tx).await;
+        let mut send_task = Self::write_task(sender, stdin_rx, resize_rx, session);
+        let mut recv_task = Self::read_task(receiver, stdin_tx, resize_tx);
 
         tokio::select! {
             rv_a = (&mut send_task) => {
@@ -370,7 +371,7 @@ impl StreamingServer {
     }
 
     /// Build a common write task based on the session type.
-    async fn write_task(
+    fn write_task(
         mut sender: SplitSink<WebSocket, Message>,
         stdin_rx: MpscReceiver<Bytes>,
         resize_rx: MpscReceiver<Bytes>,
@@ -416,7 +417,7 @@ impl StreamingServer {
     }
 
     /// Build a common read task.
-    async fn read_task(
+    fn read_task(
         mut receiver: SplitStream<WebSocket>,
         stdin_tx: MpscSender<Bytes>,
         resize_tx: MpscSender<Bytes>,
@@ -530,17 +531,17 @@ impl StreamingServer {
         let io = SharedContainerIO::new(container_io);
         let child_reaper = child_reaper;
 
-        let child = Child::new(
-            container_id,
-            ChildKind::Exec,
-            grandchild_pid,
-            vec![],
-            vec![],
-            None,
-            io.clone(),
-            vec![],
-            token.clone(),
-        );
+        let child = Child {
+            id: container_id,
+            kind: ChildKind::Exec,
+            pid: grandchild_pid,
+            exit_paths: vec![],
+            oom_exit_paths: vec![],
+            timeout: None,
+            io: io.clone(),
+            cleanup_cmd: vec![],
+            token: token.clone(),
+        };
 
         let mut exit_rx = child_reaper
             .watch_grandchild(child, vec![])

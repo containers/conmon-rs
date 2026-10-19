@@ -36,7 +36,10 @@
 //!
 //! An empty request does **not** receive a response.
 
-use crate::listener::{Listener, SeqpacketListener};
+use crate::{
+    listener::{Listener, SeqpacketListener},
+    mutex::lock,
+};
 use anyhow::Result;
 use std::{
     collections::{HashMap, hash_map},
@@ -68,11 +71,6 @@ impl FdSocket {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn take(&self, slot: u64) -> Result<OwnedFd> {
-        lock!(self.state).take(slot)
-    }
-
     pub fn take_all<I>(&self, slots: I) -> Result<Vec<OwnedFd>>
     where
         I: IntoIterator<Item = u64>,
@@ -82,7 +80,7 @@ impl FdSocket {
         if slots.len() == 0 {
             Ok(Vec::new())
         } else {
-            let mut state = lock!(self.state);
+            let mut state = lock(&self.state)?;
             slots.into_iter().map(|slot| state.take(slot)).collect()
         }
     }
@@ -156,7 +154,7 @@ impl Drop for ConnectionGuard {
 
 impl ConnectionGuard {
     fn close(&mut self) -> Result<()> {
-        let mut state = lock!(self.fd_socket.state);
+        let mut state = lock(&self.fd_socket.state)?;
         debug!("close... {state:?}");
         for slot in mem::take(&mut self.slots) {
             state.fds.remove(&slot);
@@ -231,7 +229,7 @@ impl Server {
                     )
                 }
 
-                let mut state = lock!(guard.fd_socket.state);
+                let mut state = lock(&guard.fd_socket.state)?;
                 let start = guard.slots.len();
                 guard
                     .slots

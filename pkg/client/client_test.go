@@ -141,8 +141,9 @@ var _ = Describe("ConmonClient", func() {
 
 			It(testName("should execute cleanup command when container exits", terminal), func() {
 				tr = newTestRunner()
-				filepath := fmt.Sprintf("%s/conmon-client-test%s", os.TempDir(), tr.ctrID)
 				tr.createRuntimeConfig(terminal)
+				// The container ID is only known after the runtime config exists.
+				cleanupPath := filepath.Join(tr.tmpDir, "cleanup-"+tr.ctrID)
 				sut = tr.configGivenEnv()
 				tr.createContainerWithConfig(sut, &client.CreateContainerConfig{
 					ID:           tr.ctrID,
@@ -154,10 +155,11 @@ var _ = Describe("ConmonClient", func() {
 						Type: client.LogDriverTypeContainerRuntimeInterface,
 						Path: tr.logPath(),
 					}},
-					CleanupCmd: []string{"touch", filepath},
+					CleanupCmd: []string{"touch", cleanupPath},
 				})
 				tr.startContainer(sut)
-				Expect(fileContents(filepath)).To(BeEmpty())
+				Eventually(cleanupPath, 10*time.Second).Should(BeAnExistingFile())
+				Expect(fileContents(cleanupPath)).To(BeEmpty())
 			})
 
 			It(testName("should return error if invalid command", terminal), func() {
@@ -228,15 +230,7 @@ var _ = Describe("ConmonClient", func() {
 				tr.createContainer(sut, terminal)
 				tr.startContainer(sut)
 
-				for range 10 {
-					if _, err := os.Stat(tr.oomExitPath()); err == nil {
-						break
-					}
-
-					GinkgoWriter.Println("Waiting for OOM exit path to exist")
-					time.Sleep(time.Second)
-				}
-
+				Eventually(tr.oomExitPath, 10*time.Second).Should(BeAnExistingFile())
 				Expect(fileContents(tr.oomExitPath())).To(BeEmpty())
 			})
 
@@ -727,16 +721,20 @@ var _ = Describe("ConmonClient", func() {
 			tr.enableTracing = true
 
 			sut = tr.configGivenEnv()
+
+			// Tracing is a compile time feature of the server, only a build
+			// with it can export spans.
+			version, err := sut.Version(context.Background(), &client.VersionConfig{Verbose: true})
+			Expect(err).NotTo(HaveOccurred())
+
+			if !strings.Contains(version.CargoTree, "opentelemetry") {
+				Skip("server built without the tracing feature")
+			}
+
 			tr.createContainer(sut, false)
 			tr.startContainer(sut)
 
-			for range 100 {
-				if hasTraces() {
-					break
-				}
-
-				time.Sleep(time.Second)
-			}
+			Eventually(hasTraces, 100*time.Second, time.Second).Should(BeTrue())
 		})
 
 		AfterEach(func() {
@@ -1130,9 +1128,11 @@ var _ = Describe("JournaldLogger", func() {
 		for _, terminal := range []bool{true, false} {
 			It(testName("should log to journald", terminal), func() {
 				tr = newTestRunner()
+				// Unique markers, other specs may log to the journal at the same time.
+				marker := uuid.New().String()
 				tr.createRuntimeConfigWithProcessArgs(
 					terminal,
-					[]string{"/busybox", "sh", "-c", "echo hello world && echo foo bar"},
+					[]string{"/busybox", "sh", "-c", "echo hello " + marker + " && echo foo " + marker},
 					nil,
 				)
 
@@ -1146,15 +1146,18 @@ var _ = Describe("JournaldLogger", func() {
 				Expect(err).NotTo(HaveOccurred())
 				tr.startContainer(sut)
 
-				// Verify the journal logs
-				cmd := exec.Command("journalctl", "-n2", "_COMM=conmonrs")
-				stdout := strings.Builder{}
-				cmd.Stdout = &stdout
-				Expect(cmd.Run()).NotTo(HaveOccurred())
+				// Verify the journal logs, they arrive asynchronously.
+				Eventually(func(g Gomega) string {
+					cmd := exec.Command("journalctl", "--since", "-1min", "_COMM=conmonrs")
+					stdout := strings.Builder{}
+					cmd.Stdout = &stdout
+					g.Expect(cmd.Run()).NotTo(HaveOccurred())
 
-				res := stdout.String()
-				Expect(res).To(ContainSubstring("hello world"))
-				Expect(res).To(ContainSubstring("foo bar"))
+					return stdout.String()
+				}, 10*time.Second).Should(And(
+					ContainSubstring("hello "+marker),
+					ContainSubstring("foo "+marker),
+				))
 			})
 		}
 	})

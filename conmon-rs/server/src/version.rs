@@ -3,6 +3,9 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+/// The dependency tree of the build, written by the build script.
+const CARGO_TREE: &str = include_str!(concat!(env!("OUT_DIR"), "/cargo-tree.txt"));
+
 /// The version structure.
 #[derive(Debug, Default, Eq, PartialEq, Serialize)]
 pub struct Version {
@@ -46,11 +49,7 @@ impl Version {
             target: env!("BUILD_TARGET"),
             rust_version: env!("BUILD_RUST_VERSION"),
             cargo_version: env!("BUILD_CARGO_VERSION"),
-            cargo_tree: if verbose {
-                env!("BUILD_CARGO_TREE")
-            } else {
-                ""
-            },
+            cargo_tree: if verbose { CARGO_TREE } else { "" },
         }
     }
 
@@ -153,7 +152,7 @@ mod tests {
     #[test]
     fn version_test_verbose() {
         let v = Version::new(true);
-        assert_eq!(v.cargo_tree(), env!("BUILD_CARGO_TREE"));
+        assert_eq!(v.cargo_tree(), CARGO_TREE);
     }
 
     #[test]

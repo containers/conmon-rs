@@ -157,7 +157,7 @@ impl conmon::Server for Server {
         };
         let args = pry_err!(args.create_args(bundle_path, global_args, command_args));
         let stdin = req.get_stdin();
-        let runtime = self.config().runtime().clone();
+        let runtime = self.config().runtime().to_path_buf();
         let exit_paths = capnp_vec_path!(req.get_exit_paths());
         let oom_exit_paths = capnp_vec_path!(req.get_oom_exit_paths());
         let env_vars = pry!(req.get_env_vars().and_then(capnp_util::into_map));
@@ -214,17 +214,17 @@ impl conmon::Server for Server {
 
                 // register grandchild with server
                 let io = SharedContainerIO::new(container_io);
-                let child = Child::new(
-                    id,
-                    ChildKind::Container,
-                    grandchild_pid,
+                let child = Child {
+                    id: id.into(),
+                    kind: ChildKind::Container,
+                    pid: grandchild_pid,
                     exit_paths,
                     oom_exit_paths,
-                    None,
+                    timeout: None,
                     io,
                     cleanup_cmd,
                     token,
-                );
+                };
                 capnp_err!(child_reaper.watch_grandchild(child, leak_fds))?;
 
                 results
@@ -257,7 +257,7 @@ impl conmon::Server for Server {
 
         debug!("Got exec sync container request with timeout {}", timeout);
 
-        let runtime = self.config().runtime().clone();
+        let runtime = self.config().runtime().to_path_buf();
         let child_reaper = self.reaper().clone();
 
         let logger = ContainerLog::new();
@@ -300,17 +300,17 @@ impl conmon::Server for Server {
                         // register grandchild with server
                         let io = SharedContainerIO::new(container_io);
                         let io_clone = io.clone();
-                        let child = Child::new(
-                            id,
-                            ChildKind::Exec,
-                            grandchild_pid,
-                            vec![],
-                            vec![],
-                            time_to_timeout,
-                            io_clone,
-                            vec![],
-                            token.clone(),
-                        );
+                        let child = Child {
+                            id: id.into(),
+                            kind: ChildKind::Exec,
+                            pid: grandchild_pid,
+                            exit_paths: vec![],
+                            oom_exit_paths: vec![],
+                            timeout: time_to_timeout,
+                            io: io_clone,
+                            cleanup_cmd: vec![],
+                            token: token.clone(),
+                        };
 
                         let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child, vec![]))?;
 
@@ -363,14 +363,11 @@ impl conmon::Server for Server {
 
         Promise::from_future(
             async move {
-                capnp_err!(
-                    child
-                        .io()
-                        .attach()
-                        .await
-                        .add(&socket_path, child.token().clone(), stop_after_stdin_eof)
-                        .await
-                )
+                capnp_err!(child.io().attach().await.add(
+                    &socket_path,
+                    child.token().clone(),
+                    stop_after_stdin_eof
+                ))
             }
             .instrument(debug_span!("promise")),
         )

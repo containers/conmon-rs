@@ -5,9 +5,6 @@
 pub use server::Server;
 pub use version::Version;
 
-#[macro_use]
-mod macros;
-
 mod attach;
 mod bounded_hashmap;
 mod capnp_util;
@@ -24,6 +21,7 @@ mod fd_socket;
 mod init;
 mod journal;
 mod listener;
+mod mutex;
 mod oom_watcher;
 #[allow(unsafe_code)]
 mod pause;

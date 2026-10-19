@@ -12,6 +12,11 @@ coverage:
     patch:
       default:
         informational: true
+    # Only the unit tests feed the report, code which the integration suite
+    # covers counts as uncovered. Small drops from such code are expected.
+    project:
+      default:
+        threshold: 1%
 
 comment:
   layout: "header, diff"

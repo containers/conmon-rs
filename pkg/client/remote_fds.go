@@ -132,7 +132,7 @@ func (r *RemoteFDs) Close() error {
 
 // RemoteFDs can be used start and connect to the remote fd socket.
 func (c *ConmonClient) RemoteFDs(ctx context.Context) (*RemoteFDs, error) {
-	ctx, span := c.startSpan(ctx, "AttachContainer")
+	ctx, span := c.startSpan(ctx, "RemoteFDs")
 	if span != nil {
 		defer span.End()
 	}

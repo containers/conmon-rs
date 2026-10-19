@@ -53,7 +53,7 @@ pub struct Pause {
 }
 
 impl Pause {
-    pub fn base_path(&self) -> &PathBuf {
+    pub fn base_path(&self) -> &Path {
         &self.base_path
     }
     pub fn pod_id(&self) -> &str {
@@ -364,6 +364,9 @@ impl Pause {
 
         let (sock_parent, sock_child) = UnixStream::pair().context("create unix socket pair")?;
 
+        // SAFETY: the pause process is single threaded at this point and the
+        // child only unshares namespaces, talks over the socket pair and waits
+        // for a signal, all of which is fine after a fork.
         match unsafe { fork().context("forking process")? } {
             ForkResult::Parent { child } => {
                 // Close the child end, so that reads fail if the child dies.

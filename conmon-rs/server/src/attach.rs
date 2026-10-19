@@ -84,8 +84,8 @@ impl SharedContainerAttach {
 
     /// Add a new attach endpoint to this shared container attach instance. The
     /// `token` of the container stops it on exit.
-    pub async fn add<T>(
-        &mut self,
+    pub fn add<T>(
+        &self,
         socket_path: T,
         token: CancellationToken,
         stop_after_stdin_eof: bool,
@@ -132,7 +132,7 @@ impl SharedContainerAttach {
     }
 
     /// Write a buffer to all attach endpoints.
-    pub async fn write(&mut self, m: Message) -> Result<()> {
+    pub fn write(&self, m: Message) -> Result<()> {
         if self.write_half_tx.receiver_count() > 0 {
             self.write_half_tx
                 .send(m)
@@ -552,16 +552,14 @@ mod tests {
 
     #[tokio::test]
     async fn done_after_all_pipes() -> Result<()> {
-        let mut attach = SharedContainerAttach::default();
+        let attach = SharedContainerAttach::default();
         let mut rx = attach.write_half_tx.subscribe();
 
         let stdout = attach.output();
         let stderr = stdout.clone();
 
         drop(stderr);
-        attach
-            .write(Message::Data(Bytes::from_static(b"last"), Pipe::StdOut))
-            .await?;
+        attach.write(Message::Data(Bytes::from_static(b"last"), Pipe::StdOut))?;
         drop(stdout);
 
         assert!(matches!(rx.recv().await?, Message::Data(..)));
@@ -629,15 +627,13 @@ mod tests {
 
     #[tokio::test]
     async fn write_loop_stops_on_broken_pipe() -> Result<()> {
-        let mut attach = SharedContainerAttach::default();
+        let attach = SharedContainerAttach::default();
         let (server, client) = seqpacket_pair()?;
         let (_, write) = server.into_split();
         drop(client);
 
         let (rx, _) = attach.subscribe();
-        attach
-            .write(Message::Data(Bytes::from_static(b"data"), Pipe::StdOut))
-            .await?;
+        attach.write(Message::Data(Bytes::from_static(b"data"), Pipe::StdOut))?;
         timeout(Duration::from_secs(5), Attach::write_loop(write, rx, false)).await??;
         Ok(())
     }
@@ -697,8 +693,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("attach");
         let token = CancellationToken::new();
-        let mut attach = SharedContainerAttach::default();
-        attach.add(&path, token.clone(), true).await?;
+        let attach = SharedContainerAttach::default();
+        attach.add(&path, token.clone(), true)?;
 
         let connect_client = || -> Result<OwnedFd> {
             let fd = socket(

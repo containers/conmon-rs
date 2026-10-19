@@ -238,10 +238,10 @@ jobs:
       - name: Select Toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
-          toolchain: nightly
+          toolchain: stable
           components: clippy, rustfmt
       - name: Clippy Lint
-        run: cargo +nightly clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   lint-rustfmt:
     runs-on: ubuntu-latest
@@ -263,7 +263,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: .github/install-deps
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-llvm-cov
       - name: Generate code coverage
         run: cargo llvm-cov --all-features --lcov --output-path lcov.info
       - name: Upload Results
@@ -284,23 +286,13 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Setup Rust and Golang Cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ runner.os }}-cargo-test-integration-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/go.sum') }}
+      # The tests run as root and keep their files per user ID.
       - name: Setup Testfiles Cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            /tmp/conmon-test-images
+            /tmp/conmon-test-images-0
           key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/files_test.go') }}
-      - run: rm -rf target/x86_64-unknown-linux-gnu/release/conmonrs
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: conmonrs
@@ -311,6 +303,7 @@ jobs:
         run: sudo ln -f -s $(go env GOROOT)/bin/* /usr/bin/
       - name: Integration tests
         run: sudo -E RUNTIME_PATH="/usr/bin/crun" make integration-static
+      # The tests run as root, setup-go saves its cache as the runner user.
       - name: Chown cache
         run: |
           sudo chown -R $(id -u):$(id -g) ~/go/pkg/mod
@@ -374,7 +367,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: stable
-      - uses: rustsec/audit-check@v2.0.0
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 

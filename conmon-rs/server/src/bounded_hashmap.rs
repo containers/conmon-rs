@@ -82,15 +82,9 @@ where
     }
 
     /// Get the current number of items in the cache
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.cache.len()
-    }
-
-    /// Check if the cache is empty
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.cache.is_empty()
     }
 }
 

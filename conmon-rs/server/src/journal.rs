@@ -1,23 +1,37 @@
+//! A `tracing` writer which forwards the server logs to journald.
+
 use libsystemd::logging::{Priority, journal_print};
 use std::{
-    io::{self, Error, ErrorKind, Write},
+    io::{self, Error, Write},
     str,
 };
+use tracing::{Level, Metadata};
 use tracing_subscriber::fmt::writer::MakeWriter;
 
-macro_rules! io_err {
-    ($x:expr_2021) => {
-        $x.map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?
-    };
+/// Writes every log line as one journal entry with the priority derived from
+/// the tracing level.
+#[derive(Default)]
+pub struct Journal {
+    priority: Option<Priority>,
 }
 
-#[derive(Default)]
-pub struct Journal;
+impl Journal {
+    const DEFAULT_PRIORITY: Priority = Priority::Notice;
+
+    fn priority_for(level: &Level) -> Priority {
+        match *level {
+            Level::ERROR => Priority::Error,
+            Level::WARN => Priority::Warning,
+            Level::INFO => Priority::Info,
+            Level::DEBUG | Level::TRACE => Priority::Debug,
+        }
+    }
+}
 
 impl Write for Journal {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let s = io_err!(str::from_utf8(buf));
-        io_err!(journal_print(Priority::Notice, s));
+        let s = str::from_utf8(buf).map_err(Error::other)?;
+        journal_print(self.priority.unwrap_or(Self::DEFAULT_PRIORITY), s).map_err(Error::other)?;
         Ok(s.len())
     }
 
@@ -30,6 +44,12 @@ impl<'a> MakeWriter<'a> for Journal {
     type Writer = Journal;
 
     fn make_writer(&'a self) -> Self::Writer {
-        Journal
+        Journal::default()
+    }
+
+    fn make_writer_for(&'a self, meta: &Metadata<'_>) -> Self::Writer {
+        Journal {
+            priority: Some(Self::priority_for(meta.level())),
+        }
     }
 }

@@ -40,7 +40,7 @@ use tokio::{
     task::{self, LocalSet},
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use tracing::{Instrument, debug, debug_span, info};
+use tracing::{Instrument, Span, debug, debug_span, info};
 #[cfg(feature = "tracing")]
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, prelude::*};
@@ -233,6 +233,9 @@ impl Server {
         // interrupt the child's execution.
         // 1: https://docs.rs/nix/0.23.0/nix/unistd/fn.fork.html#safety
         if !self.config().skip_fork() {
+            // SAFETY: nothing else runs yet, the tokio runtime is built only
+            // after the fork, so the child does not inherit a half initialized
+            // thread pool. The parent only writes the PID file and exits.
             match unsafe { fork()? } {
                 ForkResult::Parent { child, .. } => {
                     write!(File::create(self.config().conmon_pidfile())?, "{child}")?;
@@ -325,7 +328,7 @@ impl Server {
                     .with_target(true)
                     .with_line_number(true)
                     .without_time()
-                    .with_writer(Journal)
+                    .with_writer(Journal::default())
                     .with_filter(level);
                 registry
                     .with(layer)
@@ -352,55 +355,44 @@ impl Server {
         let fd_socket = self.config().fd_socket();
         let reaper = self.reaper.clone();
 
-        let signal_handler_span = debug_span!("signal_handler");
-        let backend_span = debug_span!("backend");
-
         // Run both signal handler and backend inside spawn_blocking with LocalSet
         // This allows concurrent execution within the LocalSet while preventing
         // blocking of the main current_thread runtime
-        #[cfg(feature = "tracing")]
         let result = task::spawn_blocking(move || {
             Handle::current().block_on(async move {
                 let local = LocalSet::new();
 
                 // Spawn signal handler as a local task
-                local.spawn_local(
-                    Self::start_signal_handler(reaper, socket, fd_socket, shutdown_tx)
-                        .with_context(signal_handler_span.context())
-                        .instrument(signal_handler_span),
-                );
+                local.spawn_local(Self::traced(
+                    Self::start_signal_handler(reaper, socket, fd_socket, shutdown_tx),
+                    debug_span!("signal_handler"),
+                ));
 
                 // Run backend on the LocalSet
                 local
-                    .run_until(
-                        self.start_backend(shutdown_rx)
-                            .with_context(backend_span.context())
-                            .instrument(backend_span),
-                    )
-                    .await
-            })
-        })
-        .await?;
-        #[cfg(not(feature = "tracing"))]
-        let result = task::spawn_blocking(move || {
-            Handle::current().block_on(async move {
-                let local = LocalSet::new();
-
-                // Spawn signal handler as a local task
-                local.spawn_local(
-                    Self::start_signal_handler(reaper, socket, fd_socket, shutdown_tx)
-                        .instrument(signal_handler_span),
-                );
-
-                // Run backend on the LocalSet
-                local
-                    .run_until(self.start_backend(shutdown_rx).instrument(backend_span))
+                    .run_until(Self::traced(
+                        self.start_backend(shutdown_rx),
+                        debug_span!("backend"),
+                    ))
                     .await
             })
         })
         .await?;
         result?;
         Ok(tracer)
+    }
+
+    /// Run the future inside the span, which also carries the OpenTelemetry
+    /// context if the feature is enabled.
+    #[cfg(feature = "tracing")]
+    fn traced<F: Future>(future: F, span: Span) -> impl Future<Output = F::Output> {
+        future.with_context(span.context()).instrument(span)
+    }
+
+    /// Run the future inside the span.
+    #[cfg(not(feature = "tracing"))]
+    fn traced<F: Future>(future: F, span: Span) -> impl Future<Output = F::Output> {
+        future.instrument(span)
     }
 
     async fn start_signal_handler<T: AsRef<Path>>(

@@ -556,10 +556,10 @@ func testAttach(
 func verifyBuffer(reader io.Reader, terminal bool, command, expected string) {
 	readSection := func() string {
 		data := make([]byte, 8191)
-		_, err := reader.Read(data)
+		n, err := reader.Read(data)
 		Expect(err).To(Succeed())
 
-		return string(bytes.Trim(data, "\x00"))
+		return string(data[:n])
 	}
 	if !terminal {
 		Expect(readSection()).To(Equal(expected))
