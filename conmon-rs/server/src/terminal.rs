@@ -288,7 +288,9 @@ impl TerminalFd {
         let flags = fcntl::fcntl(&fd, FcntlArg::F_GETFL)?;
         let flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
         fcntl::fcntl(&fd, FcntlArg::F_SETFL(flags))?;
-        AsyncFd::new(fd.into()).map(Self)
+        // SAFETY: `fd` is an open descriptor that the `File` takes ownership
+        // of, so it stays valid and unchanged for the lifetime of the `AsyncFd`.
+        Ok(Self(unsafe { AsyncFd::register(std::fs::File::from(fd)) }?))
     }
 }
 

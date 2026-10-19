@@ -488,7 +488,9 @@ impl ReapableChild {
         let flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
         fcntl(&owned_fd, FcntlArg::F_SETFL(flags)).ok()?;
 
-        let async_fd = match AsyncFd::new(owned_fd) {
+        // SAFETY: `owned_fd` is an open pidfd that the `AsyncFd` takes ownership
+        // of, so it stays valid and unchanged for the lifetime of the `AsyncFd`.
+        let async_fd = match unsafe { AsyncFd::register(owned_fd) } {
             Ok(fd) => fd,
             Err(e) => {
                 error!("Failed to create AsyncFd from pidfd: {:#}", e);
