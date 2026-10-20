@@ -276,7 +276,7 @@ impl ContainerIO {
         pipe: Pipe,
         logger: SharedContainerLog,
         mut message_tx: Option<Sender<Message>>,
-        mut attach: SharedContainerAttach,
+        attach: SharedContainerAttach,
         // Ends the output for the attach endpoints once all clones got
         // dropped, however this function returns.
         _attach_output: Arc<AttachOutput>,
@@ -324,7 +324,6 @@ impl ContainerIO {
                     if attach.has_readers() {
                         attach
                             .write(Message::Data(data.clone(), pipe))
-                            .await
                             .context("write to attach endpoints")?;
                     }
 

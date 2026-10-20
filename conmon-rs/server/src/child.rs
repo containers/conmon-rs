@@ -24,30 +24,3 @@ pub struct Child {
     pub(crate) cleanup_cmd: Vec<String>,
     pub(crate) token: CancellationToken,
 }
-
-impl Child {
-    #![allow(clippy::too_many_arguments)]
-    pub fn new(
-        id: impl Into<Box<str>>,
-        kind: ChildKind,
-        pid: u32,
-        exit_paths: Vec<PathBuf>,
-        oom_exit_paths: Vec<PathBuf>,
-        timeout: Option<Instant>,
-        io: SharedContainerIO,
-        cleanup_cmd: Vec<String>,
-        token: CancellationToken,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            kind,
-            pid,
-            exit_paths,
-            oom_exit_paths,
-            timeout,
-            io,
-            cleanup_cmd,
-            token,
-        }
-    }
-}

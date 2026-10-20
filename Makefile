@@ -11,7 +11,7 @@ TEST_FLAGS ?=
 # The generated Go code embeds a schema which differs between capnp versions,
 # use the one pinned by flake.lock. Set CAPNP=capnp to use the local one.
 CAPNP ?= nix shell --inputs-from . nixpkgs\#capnproto --command capnp
-PACKAGE_NAME ?= $(shell cargo metadata --no-deps --format-version 1 | jq -r '.packages[2] | [ .name, .version ] | join("-v")')
+PACKAGE_NAME ?= $(shell cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "$(BINARY)") | [ .name, .version ] | join("-v")')
 PREFIX ?= /usr
 CI_TAG ?=
 GOLANGCI_LINT_VERSION := v2.15.0
@@ -99,8 +99,8 @@ verify-dependencies: $(GOTOOLS_BINDIR)/zeitgeist ## Verify the local dependencie
 	$(GOTOOLS_BINDIR)/zeitgeist validate --local-only --base-path . --config dependencies.yaml
 
 .PHONY: verify-prettier
-verify-prettier: prettier ## Run prettier on the project.
-	./hack/tree_status.sh
+verify-prettier: prettier ## Run prettier on the project and fail on changes.
+	git diff --exit-code
 
 ##@ Utility targets:
 

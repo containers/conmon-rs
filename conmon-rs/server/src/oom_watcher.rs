@@ -1,3 +1,4 @@
+use crate::mutex::lock;
 use anyhow::{Context, Result, bail};
 use linereader::LineReader;
 use nix::sys::statfs::{FsType, statfs};
@@ -68,7 +69,7 @@ pub struct OOMEvent {
 }
 
 impl OOMWatcher {
-    pub async fn new(
+    pub fn new(
         token: &CancellationToken,
         pid: u32,
         exit_paths: &[PathBuf],
@@ -91,12 +92,12 @@ impl OOMWatcher {
                     error!("Failed to watch OOM: {:#}", e);
                 }
             }
-            .instrument(debug_span!("cgroup_handling")),
+            .instrument(debug_span!("cgroup_handling", pid)),
         );
         OOMWatcher { token }
     }
 
-    pub async fn stop(self) {
+    pub fn stop(self) {
         self.token.cancel();
     }
 
@@ -106,9 +107,6 @@ impl OOMWatcher {
         exit_paths: &[PathBuf],
         tx: Sender<OOMEvent>,
     ) -> Result<()> {
-        let span = debug_span!("oom_handling_cgroup_v1", pid);
-        let _enter = span.enter();
-
         let memory_cgroup_path = if let Some(path) =
             Self::process_cgroup_subsystem_path_cgroup_v1(pid, "memory")
                 .await
@@ -185,9 +183,6 @@ impl OOMWatcher {
         exit_paths: &[PathBuf],
         tx: Sender<OOMEvent>,
     ) -> Result<()> {
-        let span = debug_span!("oom_handling_cgroup_v2", pid);
-        let _enter = span.enter();
-
         let subsystem_path = if let Some(path) = Self::process_cgroup_subsystem_path_cgroup_v2(pid)
             .await
             .context("process cgroup subsystem path")?
@@ -647,7 +642,7 @@ static SHARED_WATCHER: Mutex<Weak<SharedWatcher>> = Mutex::new(Weak::new());
 impl SharedWatcher {
     /// Retrieve the process wide shared watcher, creating it if necessary.
     fn get() -> Result<Arc<Self>> {
-        let mut shared = lock!(SHARED_WATCHER);
+        let mut shared = lock(&SHARED_WATCHER)?;
         if let Some(watcher) = shared.upgrade() {
             return Ok(watcher);
         }
@@ -727,9 +722,9 @@ impl SharedWatcher {
         tx: Sender<WatchResult>,
     ) -> Result<Subscription> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut watcher = lock!(self.watcher);
+        let mut watcher = lock(&self.watcher)?;
 
-        lock!(self.subscribers)
+        lock(&self.subscribers)?
             .entry(path.to_path_buf())
             .or_default()
             .push((id, tx));
@@ -847,11 +842,11 @@ mod tests {
         let (tx2, _rx2) = channel(WATCH_EVENT_CHANNEL_SIZE);
         let sub1 = watcher.subscribe(file.path(), tx1).await?;
         let sub2 = watcher.subscribe(file.path(), tx2).await?;
-        assert_eq!(lock!(watcher.subscribers)[file.path()].len(), 2);
+        assert_eq!(lock(&watcher.subscribers)?[file.path()].len(), 2);
 
         // Unsubscribing happens on the blocking pool, give it a moment.
         let subscribers = |path: &Path| -> Result<usize> {
-            Ok(lock!(watcher.subscribers)
+            Ok(lock(&watcher.subscribers)?
                 .get(path)
                 .map_or(0, |subs| subs.len()))
         };
@@ -871,7 +866,7 @@ mod tests {
             }
             sleep(Duration::from_millis(10)).await;
         }
-        assert!(!lock!(watcher.subscribers).contains_key(file.path()));
+        assert!(!lock(&watcher.subscribers)?.contains_key(file.path()));
 
         Ok(())
     }

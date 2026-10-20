@@ -49,8 +49,8 @@ impl Terminal {
     pub fn path(&self) -> &PathBuf {
         &self.path
     }
-    pub fn message_rx(&self) -> &Option<UnboundedReceiver<Message>> {
-        &self.message_rx
+    pub fn message_rx(&self) -> Option<&UnboundedReceiver<Message>> {
+        self.message_rx.as_ref()
     }
     pub fn message_rx_mut(&mut self) -> &mut Option<UnboundedReceiver<Message>> {
         &mut self.message_rx
@@ -214,13 +214,11 @@ impl Terminal {
             ws_ypixel: 0,
         };
         let tty = self.tty().as_ref().and_then(Weak::upgrade);
-        match unsafe {
-            libc::ioctl(
-                tty.context("terminal not connected")?.as_raw_fd(),
-                TIOCSWINSZ,
-                &ws,
-            )
-        } {
+        let tty = tty.context("terminal not connected")?;
+        // SAFETY: TIOCSWINSZ reads a `winsize` from the pointer, which points
+        // to a live local of exactly that type, and the descriptor is kept
+        // open by the `Arc` for the duration of the call.
+        match unsafe { libc::ioctl(tty.as_raw_fd(), TIOCSWINSZ, &ws) } {
             0 => Ok(()),
             _ => Err(io::Error::last_os_error().into()),
         }
@@ -287,16 +285,14 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        let path = self.path().to_path_buf();
-        task::spawn(async move {
-            if let Err(e) = fs::remove_file(&path).await {
-                trace!(
-                    "Unable to remove socket file path {}: {}",
-                    path.display(),
-                    e
-                )
-            }
-        });
+        // A plain unlink does not need the runtime and cannot panic without one.
+        if let Err(e) = std::fs::remove_file(self.path()) {
+            trace!(
+                "Unable to remove socket file path {}: {}",
+                self.path().display(),
+                e
+            )
+        }
     }
 }
 

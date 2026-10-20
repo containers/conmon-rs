@@ -1,8 +1,10 @@
 //! Configuration related structures
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use strum::{AsRefStr, Display, EnumIter, EnumString, IntoStaticStr};
 
 macro_rules! prefix {
@@ -11,8 +13,7 @@ macro_rules! prefix {
     };
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Parser, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
 #[command(
     after_help("More info at: https://github.com/containers/conmon-rs"),
     disable_version_flag(true)
@@ -128,8 +129,8 @@ pub struct Config {
 
 impl Config {
     /// Possible subcommands.
-    pub fn command(&self) -> &Option<Commands> {
-        &self.command
+    pub fn command(&self) -> Option<&Commands> {
+        self.command.as_ref()
     }
 
     /// Show version information.
@@ -153,18 +154,18 @@ impl Config {
     }
 
     /// Binary path of the OCI runtime.
-    pub fn runtime(&self) -> &PathBuf {
+    pub fn runtime(&self) -> &Path {
         &self.runtime
     }
 
     /// Path of the directory for conmonrs to hold files at runtime.
-    pub fn runtime_dir(&self) -> &PathBuf {
+    pub fn runtime_dir(&self) -> &Path {
         &self.runtime_dir
     }
 
     /// Root directory used by the OCI runtime.
-    pub fn runtime_root(&self) -> &Option<PathBuf> {
-        &self.runtime_root
+    pub fn runtime_root(&self) -> Option<&Path> {
+        self.runtime_root.as_deref()
     }
 
     /// Do not fork if true.
@@ -185,7 +186,7 @@ impl Config {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Subcommand)]
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 /// Possible subcommands.
 pub enum Commands {
     /// Run pause, which bind mounts selected namespaces to the local file system.
@@ -256,7 +257,6 @@ pub enum Commands {
     Copy,
     Debug,
     Default,
-    Deserialize,
     Display,
     EnumIter,
     EnumString,
@@ -264,7 +264,6 @@ pub enum Commands {
     Hash,
     IntoStaticStr,
     PartialEq,
-    Serialize,
     ValueEnum,
 )]
 #[strum(serialize_all = "lowercase")]
@@ -295,7 +294,6 @@ pub enum LogLevel {
     Clone,
     Copy,
     Debug,
-    Deserialize,
     Display,
     EnumIter,
     EnumString,
@@ -303,7 +301,6 @@ pub enum LogLevel {
     Hash,
     IntoStaticStr,
     PartialEq,
-    Serialize,
     ValueEnum,
 )]
 #[strum(serialize_all = "lowercase")]
@@ -322,7 +319,6 @@ pub enum Verbosity {
     Copy,
     Debug,
     Default,
-    Deserialize,
     Display,
     EnumIter,
     EnumString,
@@ -330,7 +326,6 @@ pub enum Verbosity {
     Hash,
     IntoStaticStr,
     PartialEq,
-    Serialize,
     ValueEnum,
 )]
 #[strum(serialize_all = "lowercase")]
@@ -361,6 +356,8 @@ const FD_SOCKET: &str = "conmon-fd.sock";
 impl Config {
     /// Validate the configuration integrity.
     pub fn validate(&self) -> Result<()> {
+        // The runtime flags default to a blank, so that `--version` and the
+        // `pause` subcommand work without them.
         const RUNTIME_FLAG: &str = "--runtime";
         if self
             .runtime()
@@ -400,7 +397,11 @@ impl Config {
             if !rr.exists() {
                 fs::create_dir_all(rr)?;
             } else if !rr.is_dir() {
-                bail!("{} '{}' does not exist", RUNTIME_ROOT_FLAG, rr.display())
+                bail!(
+                    "{} '{}' is not a directory",
+                    RUNTIME_ROOT_FLAG,
+                    rr.display()
+                )
             }
         }
 

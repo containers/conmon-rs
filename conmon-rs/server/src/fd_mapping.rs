@@ -1,4 +1,7 @@
 //! File descriptor mapping for child process spawning.
+//!
+//! This mirrors the API of the `command-fds` crate (`CommandFdExt`,
+//! `FdMapping`, `FdMappingCollision`) without pulling in the dependency.
 
 use nix::{
     fcntl::{FcntlArg, FdFlag, fcntl},
