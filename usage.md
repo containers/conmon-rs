@@ -133,11 +133,28 @@ description lives in the module documentation of
 
 ## Logging
 
-Container output goes to the log drivers requested per container: the CRI log
-format (one line per entry with timestamp, stream and partial or full marker),
-a JSON format, or journald. Log files are truncated in place when they exceed
-the configured maximum size and on `reopenLogContainer`, which CRI-O calls for
-log rotation.
+Container output goes to the log drivers requested per container. Log files
+are truncated in place when they exceed the configured maximum size and on
+`reopenLogContainer`, which CRI-O calls for log rotation.
+
+- `containerRuntimeInterface`: the CRI log format, one line per entry with an
+  RFC 3339 timestamp, the stream, a `P` (partial) or `F` (full) marker and the
+  line.
+- `json`: one JSON object per line with `timestamp` (seconds since the epoch),
+  `pipe` (`stdout` or `stderr`), `message` (the line without its ending) and
+  `partial: true` when the line had no ending yet.
+- `journald`: one journal entry per line with the fields `CONTAINER_ID_FULL`,
+  `CONTAINER_ID` (the first 12 characters) and `SYSLOG_IDENTIFIER=conmonrs`,
+  at priority info for stdout and error for stderr, so that
+  `journalctl CONTAINER_ID=<id>` shows the output like with conmon. A line
+  which had no ending yet carries `CONTAINER_PARTIAL_MESSAGE=true`. The
+  maximum size does not apply.
+
+The JSON and journald drivers collect whole lines across reads, so a line
+written in several pieces or a multi byte character split by a read still
+ends up as one entry. Like the `P` marker of the CRI log, a partial entry is
+a line which had no ending yet: it grew beyond 16 KiB, the output paused for
+half a second, or the output ended without one.
 
 The server's own logs go to the `--log-driver`. Running with
 `--log-level debug` prints every RPC and I/O decision and is the first thing to

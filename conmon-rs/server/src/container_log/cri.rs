@@ -1,8 +1,10 @@
 //! File logging functionalities.
 
-use crate::{container_io::Pipe, container_log::LogFile};
+use crate::{
+    container_io::Pipe,
+    container_log::{LogFile, Logger, lines},
+};
 use anyhow::{Context, Result};
-use memchr::memchr;
 use std::{
     path::Path,
     time::{Duration, Instant},
@@ -28,21 +30,12 @@ pub struct CriLogger {
 
 impl CriLogger {
     /// Create a new file logger instance.
-    pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> Result<CriLogger> {
-        Ok(Self {
+    pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> CriLogger {
+        Self {
             file: LogFile::new(path, Some(0o600), max_log_size),
             cached_timestamp: String::new(),
             last_timestamp_update: Instant::now(),
-        })
-    }
-
-    /// Asynchronously initialize the CRI logger.
-    pub async fn init(&mut self) -> Result<()> {
-        debug!(
-            "Initializing CRI logger in path {}",
-            self.file.path().display()
-        );
-        self.file.open().await
+        }
     }
 
     /// Refresh the cached timestamp if it is empty or older than
@@ -58,9 +51,26 @@ impl CriLogger {
         }
         Ok(())
     }
+}
 
-    /// Write the contents of the provided bytes into the file logger.
-    pub async fn write(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {
+impl Logger for CriLogger {
+    /// Partial lines are written right away with the `P` marker.
+    const BUFFERS_LINES: bool = false;
+
+    async fn init(&mut self) -> Result<()> {
+        debug!(
+            "Initializing CRI logger in path {}",
+            self.file.path().display()
+        );
+        self.file.open().await
+    }
+
+    async fn reopen(&mut self) -> Result<()> {
+        debug!("Reopen container log {}", self.file.path().display());
+        self.file.reopen().await
+    }
+
+    async fn write_chunk(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {
         self.update_timestamp()?;
 
         let pipe_tag: &[u8] = match pipe {
@@ -68,16 +78,7 @@ impl CriLogger {
             Pipe::StdErr => b" stderr ",
         };
 
-        let mut pos = 0;
-        while pos < bytes.len() {
-            // Find the next newline or end of buffer
-            let (end, partial) = match memchr(b'\n', &bytes[pos..]) {
-                Some(i) => (pos + i + 1, false), // Found newline, include it, not partial
-                None => (bytes.len(), true),     // No newline, partial line
-            };
-            let line = &bytes[pos..end];
-            pos = end;
-
+        for (line, partial) in lines(bytes) {
             // Assemble the whole line into the chunk buffer
             let buf = &mut self.file.buf;
             let start = buf.len();
@@ -92,12 +93,6 @@ impl CriLogger {
         }
 
         self.file.flush().await
-    }
-
-    /// Reopen the container log file.
-    pub async fn reopen(&mut self) -> Result<()> {
-        debug!("Reopen container log {}", self.file.path().display());
-        self.file.reopen().await
     }
 }
 
@@ -115,10 +110,10 @@ mod tests {
 
         let file = NamedTempFile::new()?;
         let path = file.path();
-        let mut sut = CriLogger::new(path, None)?;
+        let mut sut = CriLogger::new(path, None);
         sut.init().await?;
 
-        sut.write(Pipe::StdOut, bytes).await?;
+        sut.write_chunk(Pipe::StdOut, bytes).await?;
 
         let res = fs::read_to_string(path)?;
         assert!(res.contains(" stdout F this is a line"));
@@ -133,10 +128,10 @@ mod tests {
     async fn write_partial_line() -> Result<()> {
         let file = NamedTempFile::new()?;
         let path = file.path();
-        let mut sut = CriLogger::new(path, None)?;
+        let mut sut = CriLogger::new(path, None);
         sut.init().await?;
 
-        sut.write(Pipe::StdOut, b"full\npartial").await?;
+        sut.write_chunk(Pipe::StdOut, b"full\npartial").await?;
 
         let res = fs::read_to_string(path)?;
         assert!(res.contains(" stdout F full\n"));
@@ -152,11 +147,11 @@ mod tests {
 
         let file = NamedTempFile::new()?;
         let path = file.path();
-        let mut sut = CriLogger::new(path, None)?;
+        let mut sut = CriLogger::new(path, None);
         sut.init().await?;
 
-        sut.write(Pipe::StdOut, bytes1).await?;
-        sut.write(Pipe::StdErr, bytes2).await?;
+        sut.write_chunk(Pipe::StdOut, bytes1).await?;
+        sut.write_chunk(Pipe::StdErr, bytes2).await?;
 
         let res = fs::read_to_string(path)?;
         assert!(res.contains(" stdout F a"));
@@ -175,10 +170,10 @@ mod tests {
 
         let file = NamedTempFile::new()?;
         let path = file.path();
-        let mut sut = CriLogger::new(path, Some(150))?;
+        let mut sut = CriLogger::new(path, Some(150));
         sut.init().await?;
 
-        sut.write(Pipe::StdOut, bytes).await?;
+        sut.write_chunk(Pipe::StdOut, bytes).await?;
 
         let res = fs::read_to_string(path)?;
         assert!(!res.contains(" stdout F a"));
@@ -194,12 +189,13 @@ mod tests {
     async fn write_multi_reopen() -> Result<()> {
         let file = NamedTempFile::new()?;
         let path = file.path();
-        let mut sut = CriLogger::new(path, Some(150))?;
+        let mut sut = CriLogger::new(path, Some(150));
         sut.init().await?;
 
-        sut.write(Pipe::StdOut, "abcd\nabcd\nabcd\n".as_bytes())
+        sut.write_chunk(Pipe::StdOut, "abcd\nabcd\nabcd\n".as_bytes())
             .await?;
-        sut.write(Pipe::StdErr, "a\nb\nc\n".as_bytes()).await?;
+        sut.write_chunk(Pipe::StdErr, "a\nb\nc\n".as_bytes())
+            .await?;
 
         let res = fs::read_to_string(path)?;
         assert!(!res.contains(" stdout "));
@@ -211,7 +207,7 @@ mod tests {
 
     #[tokio::test]
     async fn init_failure() -> Result<()> {
-        let mut sut = CriLogger::new("/file/does/not/exist", None)?;
+        let mut sut = CriLogger::new("/file/does/not/exist", None);
         assert!(sut.init().await.is_err());
         Ok(())
     }

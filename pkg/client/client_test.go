@@ -1135,7 +1135,7 @@ var _ = Describe("JournaldLogger", func() {
 				marker := uuid.New().String()
 				tr.createRuntimeConfigWithProcessArgs(
 					terminal,
-					[]string{"/busybox", "sh", "-c", "echo hello " + marker + " && echo foo " + marker},
+					[]string{"/busybox", "sh", "-c", "echo hello " + marker + " && echo foo " + marker + " >&2"},
 					nil,
 				)
 
@@ -1149,18 +1149,32 @@ var _ = Describe("JournaldLogger", func() {
 				Expect(err).NotTo(HaveOccurred())
 				tr.startContainer(sut)
 
-				// Verify the journal logs, they arrive asynchronously.
-				Eventually(func(g Gomega) string {
-					cmd := exec.Command("journalctl", "--since", "-1min", "_COMM=conmonrs")
-					stdout := strings.Builder{}
-					cmd.Stdout = &stdout
-					g.Expect(cmd.Run()).NotTo(HaveOccurred())
+				// Verify the journal logs, they arrive asynchronously. The
+				// documented short ID field finds both lines.
+				journal := func(args ...string) func(g Gomega) string {
+					return func(g Gomega) string {
+						args := append([]string{"--since", "-1min", "CONTAINER_ID=" + tr.ctrID[:12]}, args...)
+						cmd := exec.Command("journalctl", args...)
+						stdout := strings.Builder{}
+						cmd.Stdout = &stdout
+						g.Expect(cmd.Run()).NotTo(HaveOccurred())
 
-					return stdout.String()
-				}, 10*time.Second).Should(And(
+						return stdout.String()
+					}
+				}
+				Eventually(journal(), 10*time.Second).Should(And(
 					ContainSubstring("hello "+marker),
 					ContainSubstring("foo "+marker),
 				))
+
+				// Stderr goes out at error priority, stdout does not. A
+				// terminal merges both into stdout.
+				if !terminal {
+					Eventually(journal("--priority", "err"), 10*time.Second).Should(And(
+						Not(ContainSubstring("hello "+marker)),
+						ContainSubstring("foo "+marker),
+					))
+				}
 			})
 		}
 	})

@@ -17,10 +17,10 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     select,
     sync::RwLock,
-    time::{self, Instant},
+    time::{self, Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 
 /// Buffer size for reading container I/O streams
 const READ_BUFFER_SIZE: usize = 4096;
@@ -315,10 +315,35 @@ impl ContainerIO {
         (stdio, timed_out)
     }
 
+    /// How long a line without its ending waits before it is written as a
+    /// partial one, so that prompts and progress output show up in the logs.
+    const IDLE_FLUSH: Duration = Duration::from_millis(500);
+
+    /// Read the pipe until it ends and let the log drivers write what they
+    /// still buffer, however the loop ended.
     pub async fn read_loop<T>(
-        mut reader: T,
+        reader: T,
         pipe: Pipe,
         logger: SharedContainerLog,
+        message_tx: Option<Sender<Message>>,
+        attach: SharedContainerAttach,
+        attach_output: Arc<AttachOutput>,
+    ) -> Result<()>
+    where
+        T: AsyncRead + Unpin,
+    {
+        let log_has_drivers = logger.read().await.has_drivers();
+        let res = Self::read_pipe(reader, pipe, &logger, message_tx, attach, attach_output).await;
+        if log_has_drivers && let Err(e) = logger.write().await.finish(pipe).await {
+            error!("Unable to finish the log of {pipe}: {:#}", e);
+        }
+        res
+    }
+
+    async fn read_pipe<T>(
+        mut reader: T,
+        pipe: Pipe,
+        logger: &SharedContainerLog,
         mut message_tx: Option<Sender<Message>>,
         attach: SharedContainerAttach,
         // Ends the output for the attach endpoints once all clones got
@@ -338,7 +363,26 @@ impl ContainerIO {
         let log_has_drivers = logger.read().await.has_drivers();
 
         loop {
-            match reader.read_buf(&mut buf).await {
+            // A line which waits for its ending gets written once the output
+            // pauses, the drivers decide whether they buffer at all.
+            let read = if log_has_drivers && logger.read().await.has_pending(pipe) {
+                select! {
+                    read = reader.read_buf(&mut buf) => read,
+                    _ = time::sleep(Self::IDLE_FLUSH) => {
+                        logger
+                            .write()
+                            .await
+                            .flush(pipe)
+                            .await
+                            .context("flush paused log line")?;
+                        continue;
+                    }
+                }
+            } else {
+                reader.read_buf(&mut buf).await
+            };
+
+            match read {
                 Ok(0) => {
                     debug!("Nothing more to read");
 
