@@ -7,7 +7,9 @@ use std::{
     fs::File,
     io::{self, ErrorKind, Write},
     path::Path,
+    sync::OnceLock,
 };
+use tokio::process::Command;
 
 #[cfg(test)]
 use mockall::{automock, predicate::*};
@@ -58,6 +60,48 @@ where
     /// the server relay the messages, see the `notify` module.
     pub fn unset_notify_socket(&self) {
         self.imp.remove_var("NOTIFY_SOCKET")
+    }
+}
+
+/// The OOM score adjustment the server started with, see [`reset_oom_score`].
+static INHERITED_OOM_SCORE: OnceLock<Box<[u8]>> = OnceLock::new();
+
+/// Remember the OOM score adjustment the server started with, before it
+/// protects itself with [`Init::set_oom_score`].
+pub fn save_oom_score() {
+    match std::fs::read("/proc/self/oom_score_adj") {
+        Ok(score) => {
+            let _ = INHERITED_OOM_SCORE.set(score.trim_ascii().into());
+        }
+        Err(e) => eprintln!("Unable to read OOM score: {e}"),
+    }
+}
+
+/// Give a child the OOM score adjustment the server started with instead of
+/// the one it protects itself with. The runtimes pass theirs on to the
+/// container processes, an exec would be the last process the kernel picks
+/// otherwise. conmon resets its runtime the same way. Only for the runtimes
+/// and cleanup commands, the pause process keeps the one of the server.
+pub fn reset_oom_score(cmd: &mut Command) {
+    let Some(score) = INHERITED_OOM_SCORE.get() else {
+        return;
+    };
+    let score: &'static [u8] = score;
+    // SAFETY: the hook allocates nothing and only calls open, write and
+    // close, which are async signal safe. Raising the score needs no
+    // privileges, a failure keeps the inherited one, as before.
+    unsafe {
+        cmd.pre_exec(move || {
+            let fd = libc::open(
+                c"/proc/self/oom_score_adj".as_ptr(),
+                libc::O_WRONLY | libc::O_CLOEXEC,
+            );
+            if fd >= 0 {
+                libc::write(fd, score.as_ptr().cast(), score.len());
+                libc::close(fd);
+            }
+            Ok(())
+        });
     }
 }
 

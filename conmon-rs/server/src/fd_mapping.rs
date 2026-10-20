@@ -127,4 +127,48 @@ mod tests {
         assert!(validate_child_fds(&mappings).is_err());
         Ok(())
     }
+
+    /// A descriptor which is the target of another mapping must be moved out
+    /// of the way before it gets overwritten.
+    #[tokio::test]
+    async fn swapped_fds_are_mapped() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (a_path, b_path) = (dir.path().join("a"), dir.path().join("b"));
+        // Free numbers well above what the test harness uses.
+        let a: OwnedFd = File::create(&a_path)?.into();
+        let a = fcntl(&a, FcntlArg::F_DUPFD_CLOEXEC(200))?;
+        // SAFETY: the duplicate is new and owned by nothing else.
+        let a = unsafe { OwnedFd::from_raw_fd(a) };
+        let b: OwnedFd = File::create(&b_path)?.into();
+        let b = fcntl(&b, FcntlArg::F_DUPFD_CLOEXEC(200))?;
+        // SAFETY: as above.
+        let b = unsafe { OwnedFd::from_raw_fd(b) };
+        let (a_fd, b_fd) = (a.as_raw_fd(), b.as_raw_fd());
+
+        let output = Command::new("sh")
+            .args([
+                "-c",
+                &format!("readlink /proc/self/fd/{a_fd} /proc/self/fd/{b_fd}"),
+            ])
+            .fd_mappings(vec![
+                FdMapping {
+                    parent_fd: a,
+                    child_fd: b_fd,
+                },
+                FdMapping {
+                    parent_fd: b,
+                    child_fd: a_fd,
+                },
+            ])?
+            .output()
+            .await?;
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout)?;
+        let links: Vec<_> = stdout.lines().collect();
+        assert_eq!(
+            links,
+            [b_path.to_str(), a_path.to_str()].map(Option::unwrap)
+        );
+        Ok(())
+    }
 }

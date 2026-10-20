@@ -1,10 +1,7 @@
 use lru::LruCache;
-use std::{
-    fmt::Debug,
-    hash::Hash,
-    num::NonZeroUsize,
-    time::{Duration, Instant},
-};
+use std::{fmt::Debug, hash::Hash, num::NonZeroUsize, time::Duration};
+// The tokio clock, so that tests can pause and advance it.
+use tokio::time::Instant;
 use tracing::warn;
 
 /// A HashMap bounded by element age and maximum amount of items
@@ -97,7 +94,9 @@ where
     fn default() -> Self {
         Self {
             cache: LruCache::new(DEFAULT_CAPACITY),
-            max_duration: Duration::new(60 * 60, 0), // 1 hour
+            // A client connects right after it got the URL, the kubelet
+            // keeps its streaming requests for a minute as well.
+            max_duration: Duration::from_secs(60),
         }
     }
 }
@@ -105,10 +104,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread::sleep;
+    use tokio::time::advance;
 
-    #[test]
-    fn bounded_hashmap_test() {
+    #[tokio::test(start_paused = true)]
+    async fn bounded_hashmap_test() {
         let mut sut = BoundedHashMap {
             cache: LruCache::new(NonZeroUsize::new(2).unwrap()),
             max_duration: Duration::new(60 * 60, 0),
@@ -151,7 +150,7 @@ mod tests {
         // Change the max age of the elements, all should be timed out
         sut.max_duration = Duration::from_millis(100);
         assert!(sut.insert(0, 0).is_none());
-        sleep(Duration::from_millis(200));
+        advance(Duration::from_millis(200)).await;
 
         // Insert a new element - should trigger cleanup of expired items
         assert!(sut.insert(1, 0).is_none());
@@ -159,7 +158,7 @@ mod tests {
         assert!(sut.remove(&0).is_none());
 
         // The last element should be also timed out if we wait
-        sleep(Duration::from_millis(200));
+        advance(Duration::from_millis(200)).await;
         assert!(sut.remove(&1).is_none());
     }
 }

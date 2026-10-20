@@ -33,7 +33,8 @@ pub struct JsonLogger {
 impl JsonLogger {
     pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> JsonLogger {
         Self {
-            file: LogFile::new(path, None, max_log_size),
+            // Readable by the owner only, like the CRI log.
+            file: LogFile::new(path, Some(0o600), max_log_size),
         }
     }
 }
@@ -87,8 +88,10 @@ impl Logger for JsonLogger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::container_log::LineBuffer;
-    use std::fs;
+    use crate::container_log::{
+        LineBuffer,
+        test_helpers::{json_logger, read},
+    };
     use tempfile::NamedTempFile;
 
     /// Write a chunk the way `ContainerLog` does.
@@ -110,21 +113,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_json_logger_init() -> Result<()> {
-        let file = NamedTempFile::new()?;
-        let mut logger = JsonLogger::new(file.path(), Some(1000));
-        logger.init().await?;
+        let (file, _logger) = json_logger(Some(1000)).await?;
+        assert!(read(&file)?.is_empty());
         Ok(())
     }
 
     #[tokio::test]
     async fn test_json_logger_write() -> Result<()> {
-        let file = NamedTempFile::new()?;
-        let mut logger = JsonLogger::new(file.path(), Some(1000));
-        logger.init().await?;
+        let (file, mut logger) = json_logger(Some(1000)).await?;
 
         write(&mut logger, Pipe::StdOut, b"Test log message\nsecond").await?;
 
-        let contents = fs::read_to_string(file.path())?;
+        let contents = read(&file)?;
         let mut lines = contents.lines();
         let first = lines.next().context("no first line")?;
         assert!(first.contains(r#""pipe":"stdout""#));
@@ -137,9 +137,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_json_logger_line_endings() -> Result<()> {
-        let file = NamedTempFile::new()?;
-        let mut logger = JsonLogger::new(file.path(), None);
-        logger.init().await?;
+        let (file, mut logger) = json_logger(None).await?;
 
         write(
             &mut logger,
@@ -148,7 +146,7 @@ mod tests {
         )
         .await?;
 
-        let contents = fs::read_to_string(file.path())?;
+        let contents = read(&file)?;
         let mut lines = contents.lines();
         assert!(
             lines
@@ -174,9 +172,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_json_logger_reopen() -> Result<()> {
-        let file = NamedTempFile::new()?;
-        let mut logger = JsonLogger::new(file.path(), Some(1000));
-        logger.init().await?;
+        let (file, mut logger) = json_logger(Some(1000)).await?;
 
         write(
             &mut logger,
@@ -192,7 +188,7 @@ mod tests {
         )
         .await?;
 
-        let contents = fs::read_to_string(file.path())?;
+        let contents = read(&file)?;
         assert!(contents.contains("Test log message after reopen"));
         assert!(!contents.contains("Test log message before reopen"));
         Ok(())
@@ -200,17 +196,29 @@ mod tests {
 
     #[tokio::test]
     async fn test_json_logger_rotation_counts_trigger() -> Result<()> {
-        let file = NamedTempFile::new()?;
         // Every entry is about 60 bytes, so the third one triggers a rotation.
-        let mut logger = JsonLogger::new(file.path(), Some(150));
-        logger.init().await?;
+        let (file, mut logger) = json_logger(Some(150)).await?;
 
         write(&mut logger, Pipe::StdOut, b"a\nb\nc\n").await?;
 
-        let contents = fs::read_to_string(file.path())?;
+        let contents = read(&file)?;
         assert_eq!(logger.file.bytes_written, contents.len());
         assert_eq!(contents.lines().count(), 1);
         assert!(contents.contains(r#""message":"c""#));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn json_log_is_private() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("log.json");
+        JsonLogger::new(&path, None).init().await?;
+        assert_eq!(
+            std::fs::metadata(&path)?.permissions().mode() & 0o777,
+            0o600
+        );
         Ok(())
     }
 }

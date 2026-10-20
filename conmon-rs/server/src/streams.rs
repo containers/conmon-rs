@@ -2,11 +2,15 @@
 
 use crate::{
     attach::SharedContainerAttach,
-    container_io::{ContainerIO, Message, Pipe, STDIO_CHANNEL_SIZE},
+    container_io::{ContainerIO, Message, Pipe, STDIO_CHANNEL_SIZE, StdioSender},
     container_log::SharedContainerLog,
 };
 use anyhow::{Result, bail};
-use async_channel::{Receiver, Sender};
+use async_channel::Receiver;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::{
     process::{ChildStderr, ChildStdin, ChildStdout},
     task,
@@ -23,9 +27,12 @@ pub struct Streams {
     /// streams get attached, the receivers stay here until they are either
     /// cloned by a consumer or dropped via `drop_stdio`.
     message_rx_stdout: Option<Receiver<Message>>,
-    message_tx_stdout: Option<Sender<Message>>,
+    message_tx_stdout: Option<StdioSender>,
     message_rx_stderr: Option<Receiver<Message>>,
-    message_tx_stderr: Option<Sender<Message>>,
+    message_tx_stderr: Option<StdioSender>,
+
+    /// Whether a consumer reads the stdio channels, see [`StdioSender`].
+    consumed: Arc<AtomicBool>,
 }
 
 impl Streams {
@@ -44,15 +51,22 @@ impl Streams {
 
         let (message_tx_stdout, message_rx_stdout) = async_channel::bounded(STDIO_CHANNEL_SIZE);
         let (message_tx_stderr, message_rx_stderr) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+        let consumed = Arc::default();
 
         Self {
             logger,
             attach,
             message_rx_stdout: Some(message_rx_stdout),
-            message_tx_stdout: Some(message_tx_stdout),
+            message_tx_stdout: Some(StdioSender::new(message_tx_stdout, &consumed)),
             message_rx_stderr: Some(message_rx_stderr),
-            message_tx_stderr: Some(message_tx_stderr),
+            message_tx_stderr: Some(StdioSender::new(message_tx_stderr, &consumed)),
+            consumed,
         }
+    }
+
+    /// Make the read loops wait for the consumer of the stdio channels.
+    pub fn consume_stdio(&self) {
+        self.consumed.store(true, Ordering::Release);
     }
 
     /// Retrieve clones of the stdout and stderr receivers.

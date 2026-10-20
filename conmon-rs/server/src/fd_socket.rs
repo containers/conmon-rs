@@ -37,12 +37,12 @@
 //! An empty request does **not** receive a response.
 
 use crate::{
-    listener::{Listener, SeqpacketListener},
+    listener::{self, Listener, SeqpacketListener},
     mutex::lock,
 };
-use anyhow::Result;
+use anyhow::{Result, bail};
 use std::{
-    collections::{HashMap, hash_map},
+    collections::{HashMap, HashSet, hash_map},
     io::{IoSliceMut, Write},
     mem,
     num::Wrapping,
@@ -71,18 +71,27 @@ impl FdSocket {
         }
     }
 
+    /// Take the descriptors of all slots, or none of them if one is missing,
+    /// so that a failed request leaves them for a retry.
     pub fn take_all<I>(&self, slots: I) -> Result<Vec<OwnedFd>>
     where
         I: IntoIterator<Item = u64>,
-        I::IntoIter: ExactSizeIterator,
     {
-        let slots = slots.into_iter();
-        if slots.len() == 0 {
-            Ok(Vec::new())
-        } else {
-            let mut state = lock(&self.state)?;
-            slots.into_iter().map(|slot| state.take(slot)).collect()
+        let slots: Vec<u64> = slots.into_iter().collect();
+        if slots.is_empty() {
+            return Ok(Vec::new());
         }
+        let mut state = lock(&self.state)?;
+        let mut seen = HashSet::with_capacity(slots.len());
+        for slot in &slots {
+            if !seen.insert(slot) {
+                bail!("file descriptor slot {slot} requested twice")
+            }
+            if !state.fds.contains_key(slot) {
+                bail!("no file descriptor in slot {slot}")
+            }
+        }
+        slots.into_iter().map(|slot| state.take(slot)).collect()
     }
 }
 
@@ -123,6 +132,8 @@ struct Server {
     path: PathBuf,
 }
 
+/// Lets the next start bind a new socket once the accept loop task is gone,
+/// for example on a panic. The loop itself does not stop on errors.
 struct ListenerGuard(Arc<FdSocket>);
 
 impl Drop for ListenerGuard {
@@ -173,13 +184,19 @@ impl Server {
 
         task::spawn(
             async move {
-                while let Ok(conn) = listener.accept().await {
-                    let fd_socket = guard.0.clone();
-                    task::spawn(
-                        Self::serve(conn, fd_socket).instrument(debug_span!("fd_socket_serve")),
-                    );
+                // One failed connection must not stop the socket.
+                loop {
+                    match listener.accept().await {
+                        Ok(conn) => {
+                            let fd_socket = guard.0.clone();
+                            task::spawn(
+                                Self::serve(conn, fd_socket)
+                                    .instrument(debug_span!("fd_socket_serve")),
+                            );
+                        }
+                        Err(e) => listener::accept_failed(&e).await,
+                    }
                 }
-                drop(guard);
             }
             .instrument(debug_span!("fd_socket_server")),
         );
@@ -233,7 +250,8 @@ impl Server {
 
             let num_fds = (id_and_num_fds & 0xffff_ffff) as usize;
 
-            let mut received_fds = Vec::with_capacity(num_fds);
+            // Sized by what arrived, not by the count the peer claims.
+            let mut received_fds = Vec::new();
             for msg in ancillary.into_messages() {
                 if let OwnedAncillaryMessage::FileDescriptors(msg) = msg {
                     received_fds.extend(msg);
@@ -262,5 +280,66 @@ impl Server {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs::File, io::IoSlice, os::fd::AsFd};
+    use tokio_seqpacket::ancillary::AncillaryMessageWriter;
+
+    /// Send a request for `num_fds` with the given descriptors attached and
+    /// return the response.
+    async fn request(
+        conn: &UnixSeqpacket,
+        id: u64,
+        num_fds: u64,
+        fds: &[OwnedFd],
+    ) -> Result<Vec<u8>> {
+        let header = ((id << 32) | num_fds).to_le_bytes();
+        let mut ancillary_buf = [0; 64];
+        let mut ancillary = AncillaryMessageWriter::new(&mut ancillary_buf);
+        ancillary.add_fds(fds.iter().map(AsFd::as_fd))?;
+        conn.send_vectored_with_ancillary(&[IoSlice::new(&header)], &mut ancillary)
+            .await?;
+        let mut buf = [0; 1024];
+        let n = conn.recv(&mut buf).await?.bytes_read();
+        Ok(buf[..n].to_vec())
+    }
+
+    fn word(buf: &[u8], i: usize) -> u64 {
+        u64::from_le_bytes(buf[i * 8..(i + 1) * 8].try_into().expect("8 bytes"))
+    }
+
+    #[tokio::test]
+    async fn fds_round_trip() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("fd.sock");
+        let fd_socket = Arc::new(FdSocket::default());
+        assert_eq!(fd_socket.clone().start(path.clone()).await?, path);
+        let conn = UnixSeqpacket::connect(&path).await?;
+
+        let fds: Vec<OwnedFd> = vec![
+            File::open("/dev/null")?.into(),
+            File::open("/dev/null")?.into(),
+        ];
+        let resp = request(&conn, 7, 2, &fds).await?;
+        assert_eq!(resp.len(), 3 * 8);
+        assert_eq!(word(&resp, 0), (7 << 32) | 2);
+        let slots = [word(&resp, 1), word(&resp, 2)];
+
+        // A request which does not match the descriptors fails as a whole.
+        let resp = request(&conn, 8, 3, &fds[..1]).await?;
+        assert_eq!(word(&resp, 0), (8 << 32) | 0xffff_ffff);
+        assert!(String::from_utf8_lossy(&resp[8..]).contains("expected 3 fds"));
+
+        // Taking is all or nothing.
+        assert!(fd_socket.take_all([slots[0], 999]).is_err());
+        assert!(fd_socket.take_all([slots[0], slots[0]]).is_err());
+        assert_eq!(fd_socket.take_all(slots)?.len(), 2);
+        assert!(fd_socket.take_all([slots[0]]).is_err());
+        assert!(fd_socket.take_all([])?.is_empty());
+        Ok(())
     }
 }

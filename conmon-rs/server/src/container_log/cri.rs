@@ -51,6 +51,15 @@ impl CriLogger {
         }
         Ok(())
     }
+
+    /// Use a fixed timestamp for every entry, so that tests can compare the
+    /// written bytes. The refresh never happens because the last update lies
+    /// in the future, which `duration_since` saturates to zero.
+    #[cfg(test)]
+    pub(crate) fn freeze_timestamp(&mut self, timestamp: &str) {
+        self.cached_timestamp = timestamp.into();
+        self.last_timestamp_update = Instant::now() + Duration::from_secs(24 * 60 * 60);
+    }
 }
 
 impl Logger for CriLogger {
@@ -99,109 +108,101 @@ impl Logger for CriLogger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use crate::container_log::test_helpers::{TIMESTAMP, cri_logger, read};
+    use anyhow::Context;
     use tempfile::NamedTempFile;
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
+    /// A CRI log entry with the frozen timestamp.
+    fn entry(pipe: &str, tag: &str, line: &str) -> String {
+        format!("{TIMESTAMP} {pipe} {tag} {line}\n")
+    }
+
     #[tokio::test]
     async fn write_stdout_success() -> Result<()> {
-        let buffer = "this is a line\nand another line\n";
-        let bytes = buffer.as_bytes();
+        let (file, mut sut) = cri_logger(None).await?;
 
-        let file = NamedTempFile::new()?;
-        let path = file.path();
-        let mut sut = CriLogger::new(path, None);
-        sut.init().await?;
+        sut.write_chunk(Pipe::StdOut, b"this is a line\nand another line\n")
+            .await?;
 
-        sut.write_chunk(Pipe::StdOut, bytes).await?;
-
-        let res = fs::read_to_string(path)?;
-        assert!(res.contains(" stdout F this is a line"));
-        assert!(res.contains(" stdout F and another line"));
-
-        let timestamp = res.split_whitespace().next().context("no timestamp")?;
-        OffsetDateTime::parse(timestamp, &Rfc3339).context("unable to parse timestamp")?;
+        assert_eq!(
+            read(&file)?,
+            entry("stdout", "F", "this is a line") + &entry("stdout", "F", "and another line")
+        );
         Ok(())
     }
 
     #[tokio::test]
     async fn write_partial_line() -> Result<()> {
-        let file = NamedTempFile::new()?;
-        let path = file.path();
-        let mut sut = CriLogger::new(path, None);
-        sut.init().await?;
+        let (file, mut sut) = cri_logger(None).await?;
 
         sut.write_chunk(Pipe::StdOut, b"full\npartial").await?;
 
-        let res = fs::read_to_string(path)?;
-        assert!(res.contains(" stdout F full\n"));
-        assert!(res.ends_with(" stdout P partial\n"));
+        assert_eq!(
+            read(&file)?,
+            entry("stdout", "F", "full") + &entry("stdout", "P", "partial")
+        );
         Ok(())
     }
 
     #[tokio::test]
     async fn write_stdout_stderr_success() -> Result<()> {
-        let buffer = "a\nb\nc\n";
-        let bytes1 = buffer.as_bytes();
-        let bytes2 = buffer.as_bytes();
+        let (file, mut sut) = cri_logger(None).await?;
 
-        let file = NamedTempFile::new()?;
-        let path = file.path();
-        let mut sut = CriLogger::new(path, None);
-        sut.init().await?;
+        sut.write_chunk(Pipe::StdOut, b"a\nb\n").await?;
+        sut.write_chunk(Pipe::StdErr, b"c\n").await?;
 
-        sut.write_chunk(Pipe::StdOut, bytes1).await?;
-        sut.write_chunk(Pipe::StdErr, bytes2).await?;
-
-        let res = fs::read_to_string(path)?;
-        assert!(res.contains(" stdout F a"));
-        assert!(res.contains(" stdout F b"));
-        assert!(res.contains(" stdout F c"));
-        assert!(res.contains(" stderr F a"));
-        assert!(res.contains(" stderr F b"));
-        assert!(res.contains(" stderr F c"));
+        assert_eq!(
+            read(&file)?,
+            entry("stdout", "F", "a") + &entry("stdout", "F", "b") + &entry("stderr", "F", "c")
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn write_reopen() -> Result<()> {
-        let buffer = "a\nb\nc\nd\ne\nf\n";
-        let bytes = buffer.as_bytes();
+    async fn rotate_on_exceeded_size() -> Result<()> {
+        // Room for exactly three entries, the fourth one starts a new file.
+        let max_size = 3 * entry("stdout", "F", "a").len();
+        let (file, mut sut) = cri_logger(Some(max_size)).await?;
 
-        let file = NamedTempFile::new()?;
-        let path = file.path();
-        let mut sut = CriLogger::new(path, Some(150));
-        sut.init().await?;
+        sut.write_chunk(Pipe::StdOut, b"a\nb\nc\nd\ne\nf\n").await?;
 
-        sut.write_chunk(Pipe::StdOut, bytes).await?;
-
-        let res = fs::read_to_string(path)?;
-        assert!(!res.contains(" stdout F a"));
-        assert!(!res.contains(" stdout F b"));
-        assert!(!res.contains(" stdout F c"));
-        assert!(res.contains(" stdout F d"));
-        assert!(res.contains(" stdout F e"));
-        assert!(res.contains(" stdout F f"));
+        assert_eq!(
+            read(&file)?,
+            entry("stdout", "F", "d") + &entry("stdout", "F", "e") + &entry("stdout", "F", "f")
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn write_multi_reopen() -> Result<()> {
+    async fn rotate_on_exceeded_size_across_chunks() -> Result<()> {
+        // The first chunk fills the file exactly, the first entry of the
+        // second one starts a new file.
+        let max_size = 3 * entry("stdout", "F", "abcd").len();
+        let (file, mut sut) = cri_logger(Some(max_size)).await?;
+
+        sut.write_chunk(Pipe::StdOut, b"abcd\nabcd\nabcd\n").await?;
+        assert_eq!(read(&file)?.len(), max_size);
+        sut.write_chunk(Pipe::StdErr, b"a\nb\nc\n").await?;
+
+        assert_eq!(
+            read(&file)?,
+            entry("stderr", "F", "a") + &entry("stderr", "F", "b") + &entry("stderr", "F", "c")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn timestamp_is_rfc3339() -> Result<()> {
         let file = NamedTempFile::new()?;
-        let path = file.path();
-        let mut sut = CriLogger::new(path, Some(150));
+        let mut sut = CriLogger::new(file.path(), None);
         sut.init().await?;
 
-        sut.write_chunk(Pipe::StdOut, "abcd\nabcd\nabcd\n".as_bytes())
-            .await?;
-        sut.write_chunk(Pipe::StdErr, "a\nb\nc\n".as_bytes())
-            .await?;
+        sut.write_chunk(Pipe::StdOut, b"line\n").await?;
 
-        let res = fs::read_to_string(path)?;
-        assert!(!res.contains(" stdout "));
-        assert!(res.contains(" stderr F a"));
-        assert!(res.contains(" stderr F b"));
-        assert!(res.contains(" stderr F c"));
+        let res = read(&file)?;
+        let timestamp = res.split_whitespace().next().context("no timestamp")?;
+        OffsetDateTime::parse(timestamp, &Rfc3339).context("unable to parse timestamp")?;
         Ok(())
     }
 

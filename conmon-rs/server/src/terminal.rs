@@ -2,26 +2,29 @@
 
 use crate::{
     attach::SharedContainerAttach,
-    container_io::{ContainerIO, Message, Pipe, STDIO_CHANNEL_SIZE, TempFile},
+    container_io::{ContainerIO, Message, Pipe, STDIO_CHANNEL_SIZE, StdioSender, TempFile},
     container_log::SharedContainerLog,
     listener::{DefaultListener, Listener},
 };
 use anyhow::{Context as _, Result};
 use libc::{TIOCSWINSZ, winsize};
 use nix::{
-    fcntl::{self, FcntlArg, OFlag},
-    sys::termios::{self, OutputFlags, SetArg},
+    fcntl::{self, FcntlArg, FdFlag, OFlag},
+    sys::termios::{self, OutputFlags, SetArg, SpecialCharacterIndices},
 };
 use sendfd::RecvWithFd;
 use std::{
-    io::{self, ErrorKind, Read, Write},
+    io::{self, ErrorKind, Write},
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
         unix::{fs::PermissionsExt, io::RawFd},
     },
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Weak},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll, ready},
 };
 use tokio::{
@@ -44,6 +47,9 @@ pub struct Terminal {
     tty: Option<Weak<TerminalFd>>,
     logger: SharedContainerLog,
     attach: SharedContainerAttach,
+
+    /// Whether a consumer reads the message channel, see [`StdioSender`].
+    consumed: Arc<AtomicBool>,
 }
 
 impl Terminal {
@@ -114,7 +120,13 @@ impl Terminal {
             tty: None,
             logger,
             attach,
+            consumed: Arc::default(),
         })
+    }
+
+    /// Make the read loop wait for the consumer of the message channel.
+    pub fn consume_stdio(&self) {
+        self.consumed.store(true, Ordering::Release);
     }
 
     /// Make the terminal socket accessible to its owner only.
@@ -156,6 +168,7 @@ impl Terminal {
         let output = attach_clone.output();
         let logger_clone = self.logger.clone();
         let (message_tx, message_rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+        let message_tx = StdioSender::new(message_tx, &self.consumed);
         self.message_rx = Some(message_rx);
 
         task::spawn({
@@ -194,6 +207,22 @@ impl Terminal {
         }
 
         Ok(())
+    }
+
+    /// The end of file character of the terminal, ^D unless the process
+    /// changed it.
+    pub fn eof_char(&self) -> u8 {
+        const DEFAULT: u8 = 0x04;
+        let Some(tty) = self.tty().as_ref().and_then(Weak::upgrade) else {
+            return DEFAULT;
+        };
+        match termios::tcgetattr(&*tty) {
+            Ok(term) => term.control_chars[SpecialCharacterIndices::VEOF as usize],
+            Err(e) => {
+                debug!("Unable to get the terminal settings: {e}");
+                DEFAULT
+            }
+        }
     }
 
     /// Resize the terminal width and height.
@@ -253,6 +282,14 @@ impl Terminal {
                     // and nothing else owns it, taking ownership right away
                     // prevents a leak on the error paths below.
                     let fd = (fd_read != 0).then(|| unsafe { OwnedFd::from_raw_fd(fd_buffer[0]) });
+
+                    // The descriptor arrives without close-on-exec, the
+                    // runtimes and cleanup commands spawned later would
+                    // inherit the terminal of the container otherwise.
+                    if let Some(fd) = &fd {
+                        fcntl::fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
+                            .context("set terminal close-on-exec")?;
+                    }
 
                     // Allow only one single read
                     let path = config.path();
@@ -326,9 +363,28 @@ impl AsyncRead for &TerminalFd {
     ) -> Poll<io::Result<()>> {
         loop {
             let mut guard = ready!(self.0.poll_read_ready(cx))?;
-            match guard.try_io(|inner| inner.get_ref().read(buf.initialize_unfilled())) {
+            // Read into the uninitialized part directly, initializing it first
+            // would zero the whole buffer on every read.
+            // SAFETY: the slice is only handed to read(2), which writes to it
+            // and never reads from it, nothing de-initializes it.
+            let unfilled = unsafe { buf.unfilled_mut() };
+            match guard.try_io(|inner| {
+                // SAFETY: the pointer and length describe the writable slice
+                // above, which outlives the call.
+                let n = unsafe {
+                    libc::read(
+                        inner.as_raw_fd(),
+                        unfilled.as_mut_ptr().cast(),
+                        unfilled.len(),
+                    )
+                };
+                usize::try_from(n).map_err(|_| io::Error::last_os_error())
+            }) {
                 Ok(n) => {
-                    buf.advance(n?);
+                    let n = n?;
+                    // SAFETY: read(2) initialized the first `n` bytes.
+                    unsafe { buf.assume_init(n) };
+                    buf.advance(n);
                     break Poll::Ready(Ok(()));
                 }
                 Err(_would_block) => continue,
@@ -391,10 +447,64 @@ mod tests {
         sut.wait_connected(true, token).await?;
         assert!(!sut.path().exists());
 
+        // The received terminal does not leak into children.
+        let tty = sut
+            .tty()
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .context("no tty")?;
+        let flags = FdFlag::from_bits_truncate(fcntl::fcntl(&*tty, FcntlArg::F_GETFD)?);
+        assert!(flags.contains(FdFlag::FD_CLOEXEC));
+
+        sut.resize(120, 40)?;
+        let mut size = winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: TIOCGWINSZ writes a `winsize` to the pointer, which points
+        // to a live local of exactly that type.
+        assert_eq!(
+            unsafe { libc::ioctl(res.slave.as_raw_fd(), libc::TIOCGWINSZ, &mut size) },
+            0
+        );
+        assert_eq!((size.ws_col, size.ws_row), (120, 40));
+
         // Write to the slave
         let mut file: std::fs::File = res.slave.into();
         file.write_all(b"test")?;
 
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn eof_char_ends_the_input() -> Result<()> {
+        let attach = SharedContainerAttach::default();
+        let mut sut = Terminal::new(ContainerLog::new(), attach.clone())?;
+        let res = pty::openpty(None, None)?;
+        let stream = UnixStream::connect(sut.path()).await?;
+        loop {
+            stream.writable().await?;
+            match stream.send_with_fd(b"x", &[res.master.as_raw_fd()]) {
+                Ok(_) => break,
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
+                Err(e) => anyhow::bail!(e),
+            }
+        }
+        sut.wait_connected(true, CancellationToken::new()).await?;
+
+        let eof = sut.eof_char();
+        assert_eq!(eof, 0x04);
+        attach.send_stdin(vec![eof].into()).await;
+
+        // A process reading the terminal sees the end of its input.
+        let mut slave: std::fs::File = res.slave.into();
+        let read = task::spawn_blocking(move || io::Read::read(&mut slave, &mut [0; 16]));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), read).await???,
+            0
+        );
         Ok(())
     }
 

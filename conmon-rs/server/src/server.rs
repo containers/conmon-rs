@@ -8,20 +8,19 @@ use crate::{
     config::{Config, LogDriver, LogLevel},
     container_io::{ContainerIO, ContainerIOType},
     fd_socket::FdSocket,
-    init::{DefaultInit, Init},
+    init::{self, DefaultInit, Init},
     journal::Journal,
-    listener::{DefaultListener, Listener},
+    listener::{self, DefaultListener, Listener},
     pause::Pause,
     streaming_server::StreamingServer,
 };
 use anyhow::{Context, Result, format_err};
-use capnp::text_list::Reader;
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp::Side, twoparty};
 use futures::{AsyncReadExt, FutureExt};
 use libc::_exit;
 use nix::{
     errno::Errno,
-    sys::signal::Signal,
+    sys::signal::{Signal, kill},
     unistd::{ForkResult, fork},
 };
 #[cfg(feature = "tracing")]
@@ -90,7 +89,6 @@ impl Server {
         &self.streaming_server
     }
 
-    /// Create a new `Server` instance.
     /// Create a new server for a validated and prepared configuration.
     pub fn new(config: Config) -> Result<Self> {
         Self::init().context("init self")?;
@@ -195,7 +193,14 @@ impl Server {
             // thread pool. The parent only writes the PID file and exits.
             match unsafe { fork()? } {
                 ForkResult::Parent { child, .. } => {
-                    write!(File::create(self.config().conmon_pidfile())?, "{child}")?;
+                    let pidfile = self.config().conmon_pidfile();
+                    if let Err(e) = File::create(&pidfile).and_then(|mut f| write!(f, "{child}")) {
+                        // Without the PID file nobody knows the server, do not
+                        // leave it running behind a failure.
+                        eprintln!("Unable to write PID file {}: {e}", pidfile.display());
+                        let _ = kill(child, Signal::SIGKILL);
+                        unsafe { _exit(1) };
+                    }
                     unsafe { _exit(0) };
                 }
                 ForkResult::Child => (),
@@ -241,6 +246,7 @@ impl Server {
         init.unset_locale()?;
         init.set_default_umask();
         init.unset_notify_socket();
+        init::save_oom_score();
         // While we could configure this, standard practice has it as -1000,
         // so it may be YAGNI to add configuration.
         init.set_oom_score("-1000")
@@ -431,8 +437,13 @@ impl Server {
                     debug!("Received shutdown message");
                     return Ok(())
                 }
-                stream = listener.accept() => {
-                    stream?.0
+                stream = listener.accept() => match stream {
+                    Ok((stream, _)) => stream,
+                    // One failed connection must not end the server.
+                    Err(e) => {
+                        listener::accept_failed(&e).await;
+                        continue;
+                    }
                 },
             };
             let (reader, writer) = TokioAsyncReadCompatExt::compat(stream).split();
@@ -465,16 +476,14 @@ impl GenerateRuntimeArgs<'_> {
     pub fn create_args(
         self,
         bundle_path: &Path,
-        global_args: Reader,
-        command_args: Reader,
+        global_args: impl IntoIterator<Item = impl AsRef<str>>,
+        command_args: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<Vec<String>> {
         // Pre-allocate capacity for typical arg count to reduce reallocations
         let mut args = Vec::with_capacity(16);
         args.extend(self.default_args().context("build default runtime args")?);
 
-        for arg in global_args {
-            args.push(arg?.to_string()?);
-        }
+        args.extend(global_args.into_iter().map(|arg| arg.as_ref().into()));
 
         // Use static strings where possible to avoid allocations
         args.push("create".into());
@@ -483,9 +492,7 @@ impl GenerateRuntimeArgs<'_> {
         args.push("--pid-file".into());
         args.push(self.pidfile.display().to_string());
 
-        for arg in command_args {
-            args.push(arg?.to_string()?);
-        }
+        args.extend(command_args.into_iter().map(|arg| arg.as_ref().into()));
 
         if let ContainerIOType::Terminal(terminal) = self.container_io.typ() {
             args.push(format!("--console-socket={}", terminal.path().display()));
@@ -498,14 +505,15 @@ impl GenerateRuntimeArgs<'_> {
     }
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
-    pub(crate) fn exec_sync_args(&self, command: Reader) -> Result<Vec<String>> {
+    pub(crate) fn exec_sync_args(
+        &self,
+        command: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<Vec<String>> {
         let mut args = self
             .exec_sync_args_without_command()
             .context("exec sync args without command")?;
 
-        for arg in command {
-            args.push(arg?.to_string()?);
-        }
+        args.extend(command.into_iter().map(|arg| arg.as_ref().into()));
 
         debug!("Exec args {:?}", args.join(" "));
         Ok(args)
@@ -571,6 +579,7 @@ impl GenerateRuntimeArgs<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::container_log::ContainerLog;
     use std::os::fd::AsRawFd;
 
     #[test]
@@ -589,6 +598,242 @@ mod tests {
         assert!(!fds.contains(&1));
         assert!(!fds.contains(&2));
 
+        Ok(())
+    }
+
+    /// Build the arguments with a configuration from `flags`, None if the
+    /// environment would change it.
+    fn runtime_args<F>(flags: &[&str], cgroup_manager: CgroupManager, f: F) -> Option<Vec<String>>
+    where
+        F: FnOnce(GenerateRuntimeArgs) -> Result<Vec<String>>,
+    {
+        runtime_args_with_io(flags, cgroup_manager, false, f)
+    }
+
+    fn runtime_args_with_io<F>(
+        flags: &[&str],
+        cgroup_manager: CgroupManager,
+        terminal: bool,
+        f: F,
+    ) -> Option<Vec<String>>
+    where
+        F: FnOnce(GenerateRuntimeArgs) -> Result<Vec<String>>,
+    {
+        let config = Config::parse_for_test(flags.iter().copied())?;
+        let container_io =
+            ContainerIO::new(terminal, ContainerLog::new()).expect("create container IO");
+        let args = GenerateRuntimeArgs {
+            config: &config,
+            id: "id",
+            container_io: &container_io,
+            pidfile: Path::new("/pidfile"),
+            cgroup_manager,
+        };
+        Some(f(args).expect("generate runtime args"))
+    }
+
+    fn create(args: GenerateRuntimeArgs) -> Result<Vec<String>> {
+        args.create_args(Path::new("/bundle"), ["--global"], ["--command"])
+    }
+
+    #[test]
+    fn create_args_for_runc() {
+        let Some(args) = runtime_args(
+            &["--runtime", "/usr/bin/runc"],
+            CgroupManager::Cgroupfs,
+            create,
+        ) else {
+            return;
+        };
+        assert_eq!(
+            args,
+            [
+                "--global",
+                "create",
+                "--bundle",
+                "/bundle",
+                "--pid-file",
+                "/pidfile",
+                "--command",
+                "id"
+            ]
+        );
+    }
+
+    #[test]
+    fn create_args_for_crun_with_root_and_systemd() {
+        let Some(args) = runtime_args(
+            &[
+                "--runtime",
+                "/usr/bin/crun",
+                "--runtime-root",
+                "/run/crun",
+                "--log-level",
+                "debug",
+            ],
+            CgroupManager::Systemd,
+            create,
+        ) else {
+            return;
+        };
+        assert_eq!(
+            args,
+            [
+                "--log=journald:id",
+                "--log-level=debug",
+                "--root=/run/crun",
+                "--systemd-cgroup",
+                "--global",
+                "create",
+                "--bundle",
+                "/bundle",
+                "--pid-file",
+                "/pidfile",
+                "--command",
+                "id"
+            ]
+        );
+    }
+
+    #[test]
+    fn default_args_crun_log_levels() {
+        // crun takes debug, warning and error, the other levels keep its
+        // default.
+        for (level, expected) in [
+            ("trace", None),
+            ("debug", Some("--log-level=debug")),
+            ("info", None),
+            ("warn", Some("--log-level=warning")),
+            ("error", Some("--log-level=error")),
+            ("off", None),
+        ] {
+            let Some(args) = runtime_args(
+                &["--runtime", "/usr/bin/crun", "--log-level", level],
+                CgroupManager::Cgroupfs,
+                |args| args.default_args(),
+            ) else {
+                return;
+            };
+            let mut want = vec!["--log=journald:id"];
+            want.extend(expected);
+            assert_eq!(args, want, "level {level}");
+        }
+
+        // Other runtimes get neither the journald log nor the log level.
+        let Some(args) = runtime_args(
+            &["--runtime", "/usr/bin/runc", "--log-level", "debug"],
+            CgroupManager::Cgroupfs,
+            |args| args.default_args(),
+        ) else {
+            return;
+        };
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn exec_sync_args_without_terminal() {
+        let Some(args) = runtime_args(
+            &["--runtime", "/usr/bin/runc"],
+            CgroupManager::Systemd,
+            |args| args.exec_sync_args(["sh", "-c", "true"]),
+        ) else {
+            return;
+        };
+        assert_eq!(
+            args,
+            [
+                "--systemd-cgroup",
+                "exec",
+                "-d",
+                "--pid-file=/pidfile",
+                "id",
+                "sh",
+                "-c",
+                "true"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_and_create_args_with_terminal() {
+        let mut socket = None;
+        let Some(exec) = runtime_args_with_io(
+            &["--runtime", "/usr/bin/runc"],
+            CgroupManager::Cgroupfs,
+            true,
+            |args| {
+                if let ContainerIOType::Terminal(terminal) = args.container_io.typ() {
+                    socket = Some(terminal.path().display().to_string());
+                }
+                args.exec_sync_args(["true"])
+            },
+        ) else {
+            return;
+        };
+        let console_socket = format!("--console-socket={}", socket.expect("terminal socket"));
+        assert_eq!(
+            exec,
+            [
+                "exec",
+                "-d",
+                console_socket.as_str(),
+                "--tty",
+                "--pid-file=/pidfile",
+                "id",
+                "true"
+            ]
+        );
+
+        let mut socket = None;
+        let Some(create) = runtime_args_with_io(
+            &["--runtime", "/usr/bin/runc"],
+            CgroupManager::Cgroupfs,
+            true,
+            |args| {
+                if let ContainerIOType::Terminal(terminal) = args.container_io.typ() {
+                    socket = Some(terminal.path().display().to_string());
+                }
+                create(args)
+            },
+        ) else {
+            return;
+        };
+        let console_socket = format!("--console-socket={}", socket.expect("terminal socket"));
+        // The console socket follows the command args, the ID comes last.
+        assert_eq!(
+            create,
+            [
+                "--global",
+                "create",
+                "--bundle",
+                "/bundle",
+                "--pid-file",
+                "/pidfile",
+                "--command",
+                console_socket.as_str(),
+                "id"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_the_sockets() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let socket = dir.path().join("conmon.sock");
+        let fd_socket = dir.path().join("conmon-fd.sock");
+        File::create(&socket)?;
+        File::create(&fd_socket)?;
+
+        let reaper = Arc::new(ChildReaper::default());
+        Server::cleanup(reaper.clone(), &socket, &fd_socket).await?;
+        assert!(!socket.exists());
+        assert!(!fd_socket.exists());
+
+        // An fd socket which was never started is fine, a missing main
+        // socket is reported.
+        File::create(&socket)?;
+        Server::cleanup(reaper.clone(), &socket, &fd_socket).await?;
+        assert!(Server::cleanup(reaper, &socket, &fd_socket).await.is_err());
         Ok(())
     }
 }

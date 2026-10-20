@@ -3,25 +3,26 @@ use crate::conmon_capnp::conmon;
 use crate::telemetry::Telemetry;
 use crate::{
     capnp_util,
-    child::{Child, ChildKind},
-    container_io::{ContainerIO, ContainerIOType, SharedContainerIO},
+    child::{Child, ChildKind, sleep_until},
+    container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     notify::NotifySocket,
     pause::Pause,
     server::{GenerateRuntimeArgs, Server},
     version::Version,
 };
-use anyhow::{Context, format_err};
+use anyhow::Context;
 use capnp::{Error, capability::Promise};
 use capnp_rpc::pry;
+use futures::FutureExt;
 use std::{
     path::{Path, PathBuf},
     process,
     rc::Rc,
     time::Duration,
 };
-use tokio::time::Instant;
-use tracing::{Instrument, debug, debug_span, error};
+use tokio::{select, sync::oneshot, task, time::Instant};
+use tracing::{Instrument, Span, debug, debug_span, error};
 use uuid::Uuid;
 
 macro_rules! pry_err {
@@ -89,6 +90,29 @@ macro_rules! capnp_vec_path {
     };
 }
 
+/// The result of an exec_sync.
+struct ExecSyncOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    exit_code: i32,
+    timed_out: bool,
+}
+
+impl Server {
+    /// The deadline of an exec_sync, none without a timeout or if it does not
+    /// fit, which is no timeout either.
+    fn exec_deadline(timeout_sec: u64) -> Option<Instant> {
+        if timeout_sec == 0 {
+            return None;
+        }
+        Instant::now().checked_add(Duration::from_secs(timeout_sec))
+    }
+
+    /// How long the runtime of an exec_sync may take beyond its timeout
+    /// before it gets killed.
+    const EXEC_RUNTIME_GRACE: Duration = Duration::from_secs(60);
+}
+
 #[allow(refining_impl_trait_reachable)]
 impl conmon::Server for Server {
     /// Retrieve version information from the server.
@@ -150,8 +174,8 @@ impl conmon::Server for Server {
         debug!("PID file is {}", pidfile.display());
 
         let child_reaper = self.reaper().clone();
-        let global_args = pry!(req.get_global_args());
-        let command_args = pry!(req.get_command_args());
+        let global_args = capnp_vec_str!(req.get_global_args());
+        let command_args = capnp_vec_str!(req.get_command_args());
         let cgroup_manager = pry!(req.get_cgroup_manager());
         let args = GenerateRuntimeArgs {
             config: self.config(),
@@ -160,15 +184,12 @@ impl conmon::Server for Server {
             pidfile: &pidfile,
             cgroup_manager,
         };
-        let args = pry_err!(args.create_args(bundle_path, global_args, command_args));
+        let args = pry_err!(args.create_args(bundle_path, &global_args, &command_args));
         let stdin = req.get_stdin();
         let runtime = self.config().runtime().to_path_buf();
         let exit_paths = capnp_vec_path!(req.get_exit_paths());
         let oom_exit_paths = capnp_vec_path!(req.get_oom_exit_paths());
         let env_vars = pry!(req.get_env_vars().and_then(capnp_util::into_map));
-
-        let additional_fds = pry_err!(self.fd_socket().take_all(pry!(req.get_additional_fds())));
-        let leak_fds = pry_err!(self.fd_socket().take_all(pry!(req.get_leak_fds())));
 
         // The runtime mounts the socket directory, so it has to exist before
         // the runtime runs.
@@ -179,74 +200,81 @@ impl conmon::Server for Server {
             Some(pry_err!(NotifySocket::bind(bundle_path, sdnotify_socket)))
         };
 
+        // Take both lists at once and last, a failure leaves all descriptors
+        // in place for a retry.
+        let additional_slots = pry!(req.get_additional_fds());
+        let leak_slots = pry!(req.get_leak_fds());
+        let mut additional_fds = pry_err!(
+            self.fd_socket()
+                .take_all(additional_slots.iter().chain(leak_slots.iter()))
+        );
+        let leak_fds = additional_fds.split_off(additional_slots.len() as usize);
+
         Promise::from_future(
             async move {
-                capnp_err!(container_log.write().await.init().await)?;
+                // capnp-rpc drops this future once the client disconnects or
+                // gives up on the call. The runtime may be creating the
+                // container right then, so finish and register it in a task of
+                // its own, otherwise nothing would watch the container.
+                let create = task::spawn_local(
+                    async move {
+                        container_log.write().await.init().await?;
 
-                let (grandchild_pid, token) = capnp_err!(match child_reaper
-                    .create_child(
-                        runtime,
-                        args,
-                        stdin,
-                        &mut container_io,
-                        &pidfile,
-                        env_vars,
-                        notify_socket.is_some(),
-                        additional_fds,
-                    )
-                    .await
-                {
-                    Err(e) => {
-                        // Attach the stderr output of the runtime to the error
-                        // message. With a terminal, the error carries it already.
-                        let stderr = match container_io.typ() {
-                            ContainerIOType::Streams(_) => {
-                                match container_io.read_all_with_timeout(None).await {
-                                    Ok((_, stderr, _)) => stderr,
-                                    Err(read_err) => {
-                                        debug!("Unable to read runtime output: {:#}", read_err);
-                                        vec![]
-                                    }
-                                }
-                            }
-                            ContainerIOType::Terminal(_) => vec![],
+                        let (grandchild_pid, token, call) = match child_reaper
+                            .create_child(
+                                runtime,
+                                args,
+                                stdin,
+                                &mut container_io,
+                                &pidfile,
+                                None,
+                                env_vars,
+                                notify_socket.is_some(),
+                                additional_fds,
+                            )
+                            .await
+                        {
+                            Ok(res) => res,
+                            Err(e) => return Err(container_io.runtime_error(e).await),
                         };
-                        if !stderr.is_empty() {
-                            Err(format_err!("{:#}: {}", e, String::from_utf8_lossy(&stderr)))
-                        } else {
-                            Err(e)
+
+                        // The stdio channels are needed up to this point to
+                        // report the runtime's stderr on a failed create (see
+                        // above). Afterwards nothing consumes them, attach
+                        // sessions use the attach broadcast, so drop them
+                        // instead of retaining output for the lifetime of the
+                        // container.
+                        container_io.drop_stdio();
+
+                        // register grandchild with server
+                        let io = SharedContainerIO::new(container_io);
+                        let child = Child {
+                            id: id.into(),
+                            kind: ChildKind::Container,
+                            pid: grandchild_pid,
+                            exit_paths,
+                            oom_exit_paths,
+                            timeout: None,
+                            io,
+                            cleanup_cmd,
+                            token: token.clone(),
+                        };
+                        child_reaper.watch_grandchild(child, leak_fds, call)?;
+
+                        // Only now does the container exit cancel the token, a
+                        // failure above drops the socket instead.
+                        if let Some(notify_socket) = notify_socket {
+                            notify_socket.spawn(token);
                         }
+                        Ok(grandchild_pid)
                     }
-                    res => res,
-                })?;
-
-                // The stdio channels are needed up to this point to report the
-                // runtime's stderr on a failed create (see above). Afterwards
-                // nothing consumes them, attach sessions use the attach
-                // broadcast, so drop them instead of retaining output for the
-                // lifetime of the container.
-                container_io.drop_stdio();
-
-                // register grandchild with server
-                let io = SharedContainerIO::new(container_io);
-                let child = Child {
-                    id: id.into(),
-                    kind: ChildKind::Container,
-                    pid: grandchild_pid,
-                    exit_paths,
-                    oom_exit_paths,
-                    timeout: None,
-                    io,
-                    cleanup_cmd,
-                    token: token.clone(),
-                };
-                capnp_err!(child_reaper.watch_grandchild(child, leak_fds))?;
-
-                // Only now does the container exit cancel the token, a
-                // failure above drops the socket instead.
-                if let Some(notify_socket) = notify_socket {
-                    notify_socket.spawn(token);
-                }
+                    // Logged here as well, the client may be gone.
+                    .map(|res: anyhow::Result<u32>| {
+                        res.inspect_err(|e| error!("Unable to create container: {e:#}"))
+                    })
+                    .instrument(Span::current()),
+                );
+                let grandchild_pid = capnp_err!(capnp_err!(create.await)?)?;
 
                 results
                     .get()
@@ -271,11 +299,16 @@ impl conmon::Server for Server {
         let _enter = span.enter();
         pry!(set_parent_context(pry!(req.get_metadata())));
 
-        let timeout = req.get_timeout_sec();
+        // The timeout starts now, the runtime may hang before the process
+        // even starts.
+        let time_to_timeout = Self::exec_deadline(req.get_timeout_sec());
 
         let pidfile = ContainerIO::temp_file(Some(self.config().runtime_dir()), "exec_sync", "pid");
 
-        debug!("Got exec sync container request with timeout {}", timeout);
+        debug!(
+            "Got exec sync container request with timeout {}",
+            req.get_timeout_sec()
+        );
 
         let runtime = self.config().runtime().to_path_buf();
         let child_reaper = self.reaper().clone();
@@ -283,7 +316,7 @@ impl conmon::Server for Server {
         let logger = ContainerLog::new();
         let mut container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger));
 
-        let command = pry!(req.get_command());
+        let command = capnp_vec_str!(req.get_command());
         let env_vars = pry!(req.get_env_vars().and_then(capnp_util::into_map));
         let cgroup_manager = pry!(req.get_cgroup_manager());
 
@@ -294,33 +327,56 @@ impl conmon::Server for Server {
             pidfile: pidfile.path(),
             cgroup_manager,
         };
-        let args = pry_err!(args.exec_sync_args(command));
+        let args = pry_err!(args.exec_sync_args(&command));
 
         Promise::from_future(
             async move {
-                match child_reaper
-                    .create_child(
-                        &runtime,
-                        &args,
-                        false,
-                        &mut container_io,
-                        pidfile.path(),
-                        env_vars,
-                        false,
-                        vec![],
-                    )
-                    .await
-                {
-                    Ok((grandchild_pid, token)) => {
-                        let time_to_timeout = if timeout > 0 {
-                            Some(Instant::now() + Duration::from_secs(timeout))
-                        } else {
-                            None
+                // See create_container, the exec has to be watched and its
+                // output drained even if the client goes away.
+                // The runtime may hang, it gets killed only with a grace on top
+                // of the timeout. The client gets its timeout right away, the
+                // task kills the process the runtime started once it finished.
+                let runtime_deadline =
+                    time_to_timeout.and_then(|t| t.checked_add(Self::EXEC_RUNTIME_GRACE));
+                let (started_tx, mut started_rx) = oneshot::channel();
+                let exec = task::spawn_local(
+                    async move {
+                        // The output gets backpressure only once the runtime
+                        // finished, see `ContainerIO::consume_stdio`.
+                        let res = child_reaper
+                            .create_child(
+                                &runtime,
+                                &args,
+                                false,
+                                &mut container_io,
+                                pidfile.path(),
+                                runtime_deadline,
+                                env_vars,
+                                false,
+                                vec![],
+                            )
+                            .await;
+                        let _ = started_tx.send(());
+                        let (grandchild_pid, token, call) = match res {
+                            Ok(res) => res,
+                            Err(e) => {
+                                let timed_out =
+                                    time_to_timeout.is_some_and(|t| Instant::now() >= t);
+                                let e = container_io.runtime_error(e).await;
+                                error!("Unable to create child: {:#}", e);
+                                // The client only sees the response, tell it why.
+                                return Ok(ExecSyncOutput {
+                                    stdout: vec![],
+                                    stderr: format!("{e:#}").into_bytes(),
+                                    exit_code: if timed_out { -3 } else { -2 },
+                                    timed_out,
+                                });
+                            }
                         };
-                        let mut resp = results.get().init_response();
-                        // register grandchild with server
+
+                        // register grandchild with server, a timeout which
+                        // already passed kills it right away
                         let io = SharedContainerIO::new(container_io);
-                        let io_clone = io.clone();
                         let child = Child {
                             id: id.into(),
                             kind: ChildKind::Exec,
@@ -328,30 +384,46 @@ impl conmon::Server for Server {
                             exit_paths: vec![],
                             oom_exit_paths: vec![],
                             timeout: time_to_timeout,
-                            io: io_clone,
+                            io: io.clone(),
                             cleanup_cmd: vec![],
                             token: token.clone(),
                         };
-
-                        let mut exit_rx = capnp_err!(child_reaper.watch_grandchild(child, vec![]))?;
+                        let mut exit_rx = child_reaper.watch_grandchild(child, vec![], call)?;
 
                         let (stdout, stderr, timed_out) =
-                            capnp_err!(io.read_all_with_timeout(time_to_timeout).await)?;
+                            io.read_all_with_timeout(time_to_timeout, &token).await?;
+                        let exit_data = exit_rx.recv().await?;
+                        Ok::<_, anyhow::Error>(ExecSyncOutput {
+                            stdout,
+                            stderr,
+                            exit_code: exit_data.exit_code,
+                            timed_out: timed_out || exit_data.timed_out,
+                        })
+                    }
+                    .instrument(Span::current()),
+                );
 
-                        let exit_data = capnp_err!(exit_rx.recv().await)?;
-                        resp.set_stdout(&stdout);
-                        resp.set_stderr(&stderr);
-                        resp.set_exit_code(exit_data.exit_code);
-                        if timed_out || exit_data.timed_out {
-                            resp.set_timed_out(true);
-                        }
+                let started = select! {
+                    _ = &mut started_rx => true,
+                    () = sleep_until(time_to_timeout) => false,
+                };
+                let output = if started {
+                    capnp_err!(capnp_err!(exec.await)?)?
+                } else {
+                    debug!("Runtime did not start the exec before its timeout");
+                    ExecSyncOutput {
+                        stdout: vec![],
+                        stderr: b"timed out waiting for the runtime to start the process".to_vec(),
+                        exit_code: -3,
+                        timed_out: true,
                     }
-                    Err(e) => {
-                        error!("Unable to create child: {:#}", e);
-                        let mut resp = results.get().init_response();
-                        resp.set_exit_code(-2);
-                    }
-                }
+                };
+
+                let mut resp = results.get().init_response();
+                resp.set_stdout(&output.stdout);
+                resp.set_stderr(&output.stderr);
+                resp.set_exit_code(output.exit_code);
+                resp.set_timed_out(output.timed_out);
                 Ok(())
             }
             .instrument(debug_span!("promise")),
@@ -412,8 +484,16 @@ impl conmon::Server for Server {
         let child = pry_err!(self.reaper().get(id));
 
         Promise::from_future(
-            async move { capnp_err!(child.io().logger().await.write().await.reopen().await) }
-                .instrument(debug_span!("promise")),
+            async move {
+                // A dropped call must not stop a reopen halfway, between the
+                // write of the old file and the open of the new one.
+                let reopen = task::spawn_local(
+                    async move { child.io().logger().await.write().await.reopen().await }
+                        .instrument(Span::current()),
+                );
+                capnp_err!(capnp_err!(reopen.await)?)
+            }
+            .instrument(debug_span!("promise")),
         )
     }
 
@@ -615,6 +695,7 @@ impl conmon::Server for Server {
 
         let streaming_server = self.streaming_server().clone();
         let child = pry_err!(self.reaper().get(id));
+        let id: Box<str> = id.into();
 
         Promise::from_future(
             async move {
@@ -630,7 +711,7 @@ impl conmon::Server for Server {
                 let url = streaming_server
                     .read()
                     .await
-                    .attach_url(child, stdin, stdout, stderr, stop_after_stdin_eof)
+                    .attach_url(id, child, stdin, stdout, stderr, stop_after_stdin_eof)
                     .await;
 
                 results.get().init_response().set_url(&url);
@@ -660,5 +741,19 @@ impl conmon::Server for Server {
         Promise::err(Error::unimplemented(
             "port forwarding is not implemented".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exec_deadline() {
+        assert!(Server::exec_deadline(0).is_none());
+        // Too far in the future to represent, which is no timeout either.
+        assert!(Server::exec_deadline(u64::MAX).is_none());
+        let deadline = Server::exec_deadline(10).expect("deadline");
+        assert!(deadline > Instant::now() + Duration::from_secs(9));
     }
 }
