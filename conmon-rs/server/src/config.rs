@@ -190,13 +190,13 @@ impl Config {
 pub enum Commands {
     /// Run pause, which bind mounts selected namespaces to the local file system.
     ///
-    /// If a namespace is not selected by one of the flags, then it will fallback to the host
-    /// namespace and still create the bind mount to it. All namespaces are mounted to
-    /// /var/run/[ipc,pid,net,user,uts]ns/$POD_ID, whereas the POD_ID is being passed from the
-    /// client.
+    /// Only the namespaces selected by the flags are created and bind mounted to
+    /// $BASE_PATH/[ipc,pid,net,user,uts]ns/$POD_ID, whereas the POD_ID is being passed from the
+    /// client. The bind mounts keep the namespaces alive, so `conmonrs pause` exits once they
+    /// are in place.
     ///
-    /// Tracking of the pause PID will be done by using a file in /var/run/conmonrs/$POD_ID.pid,
-    /// which gets removed together with the mounted namespaces if `conmonrs pause` terminates.
+    /// Only a PID namespace (via `--pid`) dies with its init process, which therefore keeps
+    /// running. Its PID is tracked in $BASE_PATH/conmonrs/$POD_ID.pid.
     ///
     /// UID and GID mappings are required if unsharing of the user namespace (via `--user`) is
     /// selected.
@@ -239,12 +239,12 @@ pub enum Commands {
         uts: bool,
 
         #[arg(long("uid-mappings"), required_if_eq("user", "true"), short('u'))]
-        /// User ID mappings for unsahring the user namespace.
+        /// User ID mappings for unsharing the user namespace.
         /// Allows multiple mappings in the format: "CONTAINER_ID HOST_ID SIZE".
         uid_mappings: Vec<String>,
 
         #[arg(long("gid-mappings"), required_if_eq("user", "true"), short('g'))]
-        /// Group ID mappings for unsahring the user namespace.
+        /// Group ID mappings for unsharing the user namespace.
         /// Allows multiple mappings in the format: "CONTAINER_ID HOST_ID SIZE".
         gid_mappings: Vec<String>,
     },

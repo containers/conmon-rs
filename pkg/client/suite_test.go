@@ -27,6 +27,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"go.podman.io/storage/pkg/stringid"
 	"go.podman.io/storage/pkg/unshare"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -126,6 +127,50 @@ func (tr *testRunner) createRuntimeConfigWithProcessArgs(
 	tr.ctrID = ctrID
 	tr.tmpRootfs = tmpRootfs
 	MustFile(tr.logPath())
+}
+
+// expectNamespaceFile verifies that a namespace bind mount exists at the path:
+// a plain file that is backed by the nsfs filesystem rather than the empty
+// regular file the mount target was created from. The namespace has to be a
+// new one, not the one of the test process.
+func expectNamespaceFile(path string) {
+	stat, err := os.Lstat(path)
+	Expect(err).To(Succeed())
+	Expect(stat.IsDir()).To(BeFalse())
+	Expect(stat.Size()).To(BeZero())
+
+	var statfs unix.Statfs_t
+
+	Expect(unix.Statfs(path, &statfs)).To(Succeed())
+	Expect(statfs.Type).To(BeEquivalentTo(unix.NSFS_MAGIC), "%s is not a namespace", path)
+
+	// The path is <base>/<type>ns/<pod ID>.
+	nsType := strings.TrimSuffix(filepath.Base(filepath.Dir(path)), "ns")
+
+	var bound, own unix.Stat_t
+
+	Expect(unix.Stat(path, &bound)).To(Succeed())
+	Expect(unix.Stat("/proc/self/ns/"+nsType, &own)).To(Succeed())
+	Expect(bound.Ino).NotTo(Equal(own.Ino), "%s is the %s namespace of the host", path, nsType)
+}
+
+// pauseProcessRunning returns true if a conmonrs pause process for the pod is
+// still alive.
+func pauseProcessRunning(podID string) bool {
+	cmd := exec.CommandContext(context.Background(), "ps", "-eo", "args")
+
+	var stdout bytes.Buffer
+
+	cmd.Stdout = &stdout
+	Expect(cmd.Run()).To(Succeed())
+
+	for line := range strings.SplitSeq(stdout.String(), "\n") {
+		if strings.Contains(line, " pause ") && strings.Contains(line, podID) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (tr *testRunner) logPath() string {
