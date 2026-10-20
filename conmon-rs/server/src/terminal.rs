@@ -2,7 +2,7 @@
 
 use crate::{
     attach::SharedContainerAttach,
-    container_io::{ContainerIO, Message, Pipe},
+    container_io::{ContainerIO, Message, Pipe, TempFile},
     container_log::SharedContainerLog,
     listener::{DefaultListener, Listener},
 };
@@ -29,6 +29,7 @@ use tokio::{
     fs,
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, Interest, ReadBuf, unix::AsyncFd},
     net::{UnixListener, UnixStream},
+    select,
     sync::mpsc::{self, Receiver, Sender},
     task,
 };
@@ -37,7 +38,8 @@ use tracing::{Instrument, debug, debug_span, error, trace};
 
 #[derive(Debug)]
 pub struct Terminal {
-    path: PathBuf,
+    /// The socket the runtime connects to, removed with the terminal.
+    path: TempFile,
     connected_rx: Receiver<OwnedFd>,
     message_rx: Option<UnboundedReceiver<Message>>,
     tty: Option<Weak<TerminalFd>>,
@@ -46,8 +48,8 @@ pub struct Terminal {
 }
 
 impl Terminal {
-    pub fn path(&self) -> &PathBuf {
-        &self.path
+    pub fn path(&self) -> &Path {
+        self.path.path()
     }
     pub fn message_rx(&self) -> Option<&UnboundedReceiver<Message>> {
         self.message_rx.as_ref()
@@ -79,30 +81,21 @@ impl Terminal {
     /// Setup a new terminal instance.
     pub fn new(logger: SharedContainerLog, attach: SharedContainerAttach) -> Result<Self> {
         debug!("Creating new terminal");
-        let path = ContainerIO::temp_file_name(None, "conmon-term-", ".sock");
+        // The guard removes the socket again, also if the setup below fails.
+        let temp_file = ContainerIO::temp_file(None, "conmon-term-", ".sock");
+        let path = temp_file.path();
 
         // Bind synchronously so that the socket exists once this returns,
         // without blocking on the listener task to get scheduled.
         debug!("Listening terminal socket on {}", path.display());
         let listener = Listener::<DefaultListener>::default()
-            .bind_long_path(&path)
+            .bind_long_path(path)
             .context("bind terminal socket")?;
-
-        // No terminal owns the socket yet, so remove it here if this fails.
-        if let Err(e) = Self::restrict_permissions(&path) {
-            if let Err(e) = std::fs::remove_file(&path) {
-                debug!(
-                    "Unable to remove terminal socket {}: {:#}",
-                    path.display(),
-                    e
-                );
-            }
-            return Err(e);
-        }
+        Self::restrict_permissions(path)?;
 
         let (connected_tx, connected_rx) = mpsc::channel(10);
         let config = Config {
-            path: path.clone(),
+            path: path.to_path_buf(),
             connected_tx,
         };
 
@@ -116,7 +109,7 @@ impl Terminal {
         );
 
         Ok(Self {
-            path,
+            path: temp_file,
             connected_rx,
             message_rx: None,
             tty: None,
@@ -224,7 +217,22 @@ impl Terminal {
         }
     }
 
+    /// Accept the connection of the runtime and receive the terminal from it.
+    /// The runtime never connects or never sends the descriptor if it fails
+    /// early. The terminal gets dropped then, which closes the channel, so do
+    /// not keep the listener around forever.
     async fn listen(listener: UnixListener, config: Config) -> Result<()> {
+        let dropped = config.connected_tx.clone();
+        select! {
+            res = Self::accept(listener, config) => res,
+            _ = dropped.closed() => {
+                debug!("Terminal dropped before receiving a descriptor, stopping listener");
+                Ok(())
+            }
+        }
+    }
+
+    async fn accept(listener: UnixListener, config: Config) -> Result<()> {
         let stream = listener.accept().await?.0;
         debug!("Got terminal socket stream: {:?}", stream);
 
@@ -279,19 +287,6 @@ impl Terminal {
                     return Err(e.into());
                 }
             }
-        }
-    }
-}
-
-impl Drop for Terminal {
-    fn drop(&mut self) {
-        // A plain unlink does not need the runtime and cannot panic without one.
-        if let Err(e) = std::fs::remove_file(self.path()) {
-            trace!(
-                "Unable to remove socket file path {}: {}",
-                self.path().display(),
-                e
-            )
         }
     }
 }
@@ -367,6 +362,7 @@ mod tests {
     use crate::container_log::ContainerLog;
     use nix::pty;
     use sendfd::SendWithFd;
+    use std::time::Duration;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn new_success() -> Result<()> {
@@ -398,6 +394,23 @@ mod tests {
         let mut file: std::fs::File = res.slave.into();
         file.write_all(b"test")?;
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn listen_stops_without_terminal() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("term.sock");
+        let listener = UnixListener::bind(&path)?;
+        let (connected_tx, connected_rx) = mpsc::channel(1);
+        let config = Config { path, connected_tx };
+
+        // A runtime which connects but never sends the descriptor must not
+        // keep the listener around either once the terminal side is gone.
+        let listen = tokio::spawn(Terminal::listen(listener, config));
+        let _stream = UnixStream::connect(dir.path().join("term.sock")).await?;
+        drop(connected_rx);
+        tokio::time::timeout(Duration::from_secs(5), listen).await???;
         Ok(())
     }
 }

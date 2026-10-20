@@ -43,11 +43,9 @@ use uuid::Uuid;
 const ADDR: &str = "127.0.0.1";
 
 const PROTOCOL_V5: &str = "v5.channel.k8s.io";
-const PROTOCOL_PORT_FORWARD: &str = "SPDY/3.1+portforward.k8s.io";
 
 const EXEC_PATH: &str = "exec";
 const ATTACH_PATH: &str = "attach";
-const PORT_FORWARD_PATH: &str = "port-forward";
 
 const STDIN_BYTE: u8 = 0;
 const STDOUT_BYTE: u8 = 1;
@@ -89,7 +87,6 @@ type State = BoundedHashMap<Uuid, Session>;
 enum Session {
     Exec(Box<ExecSession>),
     Attach(AttachSession),
-    PortForward(PortForwardSession),
 }
 
 #[derive(Debug)]
@@ -114,13 +111,6 @@ struct AttachSession {
     stdout: bool,
     stderr: bool,
     stop_after_stdin_eof: bool,
-}
-
-#[derive(Debug)]
-/// Required port forward session data.
-struct PortForwardSession {
-    #[allow(dead_code)]
-    net_ns_path: Box<str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,11 +202,9 @@ impl StreamingServer {
         let router = Router::new()
             .route(&Self::path_for(EXEC_PATH), get(Self::handle))
             .route(&Self::path_for(ATTACH_PATH), get(Self::handle))
-            .route(&Self::path_for(PORT_FORWARD_PATH), get(Self::handle))
             // for allowing proper error handling on wrong protocol usage (spdy instead of websocket)
             .route(&Self::path_for(EXEC_PATH), post(Self::handle))
             .route(&Self::path_for(ATTACH_PATH), post(Self::handle))
-            .route(&Self::path_for(PORT_FORWARD_PATH), post(Self::handle))
             .fallback(Self::fallback)
             .with_state(state)
             .layer(TraceLayer::new_for_http());
@@ -300,19 +288,6 @@ impl StreamingServer {
         self.url_for(ATTACH_PATH, &uuid)
     }
 
-    /// Returns the URL used for the provided port forward parameters.
-    pub async fn port_forward_url(&self, net_ns_path: String) -> String {
-        let mut state_lock = self.state.write().await;
-        let uuid = Uuid::new_v4();
-        state_lock.insert(
-            uuid,
-            Session::PortForward(PortForwardSession {
-                net_ns_path: net_ns_path.into_boxed_str(),
-            }),
-        );
-        self.url_for(PORT_FORWARD_PATH, &uuid)
-    }
-
     /// Handle a webserver connection which should be upgraded to become a websocket one.
     async fn handle(
         ws: WebSocketUpgrade,
@@ -326,7 +301,7 @@ impl StreamingServer {
             match session {
                 Some(session) => {
                     info!("Got valid session for token {token}: {session:?}");
-                    ws.protocols([PROTOCOL_V5, PROTOCOL_PORT_FORWARD])
+                    ws.protocols([PROTOCOL_V5])
                         .on_upgrade(move |socket| Self::handle_websocket(socket, session))
                 }
                 None => {
@@ -386,10 +361,6 @@ impl StreamingServer {
                 Session::Attach(s) => (
                     Self::attach_loop(s, &mut sender, stdin_rx, resize_rx).await,
                     "attach",
-                ),
-                Session::PortForward(s) => (
-                    Self::port_forward_loop(s, &mut sender, stdin_rx).await,
-                    "port forward",
                 ),
             } {
                 error!("Unable to run {typ} for container: {e:#}");
@@ -479,7 +450,7 @@ impl StreamingServer {
         mut stdin_rx: MpscReceiver<Bytes>,
         mut resize_rx: MpscReceiver<Bytes>,
     ) -> Result<()> {
-        let pidfile = ContainerIO::temp_file_name(
+        let pidfile = ContainerIO::temp_file(
             Some(session.server_config.runtime_dir()),
             "exec_streaming",
             "pid",
@@ -489,7 +460,7 @@ impl StreamingServer {
             config: &session.server_config,
             id: &session.container_id,
             container_io: &session.container_io,
-            pidfile: &pidfile,
+            pidfile: pidfile.path(),
             cgroup_manager: session.cgroup_manager,
         };
         let mut args = args
@@ -504,12 +475,14 @@ impl StreamingServer {
                 &args,
                 session.stdin,
                 &mut session.container_io,
-                &pidfile,
+                pidfile.path(),
                 vec![],
                 vec![],
             )
             .await
             .context("create new child process")?;
+        // The runtime wrote the PID, the file served its purpose.
+        drop(pidfile);
 
         // Extract all values we need before dropping session to free
         // server_config Arc and cgroup_manager before the I/O loop
@@ -579,7 +552,9 @@ impl StreamingServer {
                     Ok(IOMessage::Done) | Err(_) => stderr_done = true,
                 },
 
-                Some(data) = resize_rx.recv() => if stdin_enabled {
+                // Resizing does not depend on stdin, a terminal without it
+                // still has a size.
+                Some(data) = resize_rx.recv() => {
                     Self::handle_resize(&data, &io).await?;
                 },
 
@@ -677,7 +652,9 @@ impl StreamingServer {
                     }
                 },
 
-                Some(data) = resize_rx.recv() => if stdin_enabled {
+                // Resizing does not depend on stdin, a terminal without it
+                // still has a size.
+                Some(data) = resize_rx.recv() => {
                     Self::handle_resize(&data, &io).await?;
                 },
 
@@ -777,15 +754,6 @@ impl StreamingServer {
         }
     }
 
-    /// The port forward specific read/write loop.
-    async fn port_forward_loop(
-        _session: PortForwardSession,
-        _sender: &mut SplitSink<WebSocket, Message>,
-        mut _in_rx: MpscReceiver<Bytes>,
-    ) -> Result<()> {
-        todo!("Requires SPDY protocol implementation from https://github.com/moby/spdystream")
-    }
-
     /// Send a session error on the error stream.
     async fn send_error(sender: &mut SplitSink<WebSocket, Message>, message: String) -> Result<()> {
         let mut frame = vec![STREAM_ERR_BYTE];
@@ -829,9 +797,12 @@ impl StreamingServer {
         let e = serde_json::from_slice::<ResizeEvent>(data.get(1..).unwrap_or_default())
             .context("unmarshal resize event")?;
         trace!("Got resize message: {e:?}");
-        io.resize(e.width, e.height)
-            .await
-            .context("resize terminal")
+        // Clients send resize events regardless of a terminal, they are no
+        // reason to end the session without one.
+        if !io.try_resize(e.width, e.height).await? {
+            debug!("Ignoring resize event, container has no terminal");
+        }
+        Ok(())
     }
 
     /// Prepend a stream type byte and send the data over WebSocket. The frame
@@ -882,6 +853,7 @@ impl Drain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::container_log::ContainerLog;
     use tokio::time::Instant;
 
     #[tokio::test]
@@ -895,6 +867,23 @@ mod tests {
             received += 1;
         }
         assert_eq!(received, DRAIN_MAX_MESSAGES);
+    }
+
+    #[tokio::test]
+    async fn resize_without_terminal_is_ignored() -> Result<()> {
+        let io = SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?);
+        let event = br#"{"Width":80,"Height":24}"#;
+        let mut data = vec![RESIZE_BYTE];
+        data.extend_from_slice(event);
+        StreamingServer::handle_resize(&data, &io).await?;
+
+        // Garbage is still an error.
+        assert!(
+            StreamingServer::handle_resize(&[RESIZE_BYTE, b'x'], &io)
+                .await
+                .is_err()
+        );
+        Ok(())
     }
 
     #[tokio::test]

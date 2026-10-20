@@ -354,6 +354,7 @@ impl Server {
         let socket = self.config().socket();
         let fd_socket = self.config().fd_socket();
         let reaper = self.reaper.clone();
+        self.reaper.clone().start_orphan_sweep();
 
         // Run both signal handler and backend inside spawn_blocking with LocalSet
         // This allows concurrent execution within the LocalSet while preventing

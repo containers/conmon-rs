@@ -1586,57 +1586,21 @@ type ServePortForwardContainerResult struct {
 	URL string
 }
 
-// ServePortForwardContainer can be used to forward ports to a running container.
+// ServePortForwardContainer is meant to forward ports to a running container.
+// The server has no implementation for it yet and always returns
+// ErrUnsupported, without making a request.
 func (c *ConmonClient) ServePortForwardContainer(
 	ctx context.Context,
-	cfg *ServePortForwardContainerConfig,
+	_ *ServePortForwardContainerConfig,
 ) (*ServePortForwardContainerResult, error) {
-	ctx, span := c.startSpan(ctx, "ServePortForwardContainer")
+	_, span := c.startSpan(ctx, "ServePortForwardContainer")
 	if span != nil {
 		defer span.End()
 	}
 
-	rpcClient, err := c.client(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("create RPC client: %w", err)
-	}
-
-	future, free := rpcClient.ServePortForwardContainer(ctx, func(p proto.Conmon_servePortForwardContainer_Params) error {
-		req, err := p.NewRequest()
-		if err != nil {
-			return fmt.Errorf("create request: %w", err)
-		}
-
-		if err := c.setMetadata(ctx, req); err != nil {
-			return err
-		}
-
-		if err := req.SetNetNsPath(cfg.NetNsPath); err != nil {
-			return fmt.Errorf("set network namespace path: %w", err)
-		}
-
-		return nil
-	})
-	defer free()
-
-	result, err := future.Struct()
-	if err != nil {
-		c.resetConn()
-
-		return nil, fmt.Errorf("create result: %w", err)
-	}
-
-	resp, err := result.Response()
-	if err != nil {
-		return nil, fmt.Errorf("set response: %w", err)
-	}
-
-	url, err := resp.Url()
-	if err != nil {
-		return nil, fmt.Errorf("get url: %w", err)
-	}
-
-	return &ServePortForwardContainerResult{URL: url}, nil
+	// A rejected RPC resets the shared connection, which would fail unrelated
+	// requests in flight.
+	return nil, fmt.Errorf("port forwarding: %w", ErrUnsupported)
 }
 
 func (c *ConmonClient) attachHeaptrack(config *ConmonServerConfig, pid uint32) {

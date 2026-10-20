@@ -252,8 +252,7 @@ impl conmon::Server for Server {
 
         let timeout = req.get_timeout_sec();
 
-        let pidfile =
-            ContainerIO::temp_file_name(Some(self.config().runtime_dir()), "exec_sync", "pid");
+        let pidfile = ContainerIO::temp_file(Some(self.config().runtime_dir()), "exec_sync", "pid");
 
         debug!("Got exec sync container request with timeout {}", timeout);
 
@@ -271,7 +270,7 @@ impl conmon::Server for Server {
             config: self.config(),
             id: &id,
             container_io: &container_io,
-            pidfile: &pidfile,
+            pidfile: pidfile.path(),
             cgroup_manager,
         };
         let args = pry_err!(args.exec_sync_args(command));
@@ -284,7 +283,7 @@ impl conmon::Server for Server {
                         &args,
                         false,
                         &mut container_io,
-                        &pidfile,
+                        pidfile.path(),
                         env_vars,
                         vec![],
                     )
@@ -614,7 +613,7 @@ impl conmon::Server for Server {
     fn serve_port_forward_container(
         self: Rc<Server>,
         params: conmon::ServePortForwardContainerParams,
-        mut results: conmon::ServePortForwardContainerResults,
+        _: conmon::ServePortForwardContainerResults,
     ) -> Promise<(), capnp::Error> {
         debug!("Got a serve port forward container request");
         let req = pry!(pry!(params.get()).get_request());
@@ -626,30 +625,10 @@ impl conmon::Server for Server {
         let _enter = span.enter();
         pry!(set_parent_context(pry!(req.get_metadata())));
 
-        let net_ns_path = pry_err!(pry_err!(req.get_net_ns_path()).to_string());
-        let streaming_server = self.streaming_server().clone();
-
-        Promise::from_future(
-            async move {
-                capnp_err!(
-                    streaming_server
-                        .write()
-                        .await
-                        .start_if_required()
-                        .await
-                        .context("start streaming server if required")
-                )?;
-
-                let url = streaming_server
-                    .read()
-                    .await
-                    .port_forward_url(net_ns_path)
-                    .await;
-
-                results.get().init_response().set_url(&url);
-                Ok(())
-            }
-            .instrument(debug_span!("promise")),
-        )
+        // Port forwarding needs an SPDY implementation, which does not exist
+        // yet. Handing out a URL would end in an aborted connection.
+        Promise::err(Error::unimplemented(
+            "port forwarding is not implemented".into(),
+        ))
     }
 }
