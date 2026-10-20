@@ -370,15 +370,13 @@ impl Server {
             }
         }
 
-        if let Some(pause) = Pause::maybe_shared() {
-            pause.stop();
-        }
-
         // Everything below has to happen before the shutdown message: the
         // backend returns on it and drops the local set, which cancels this
         // task. Failures are collected rather than returned early, the server
-        // must stop in any case.
-        let result = Self::cleanup(reaper, socket, fd_socket).await;
+        // must stop in any case. The pause shutdown may wait for a running
+        // initialization, the containers must not wait for that.
+        let (result, ()) =
+            tokio::join!(Self::cleanup(reaper, socket, fd_socket), Pause::shutdown());
 
         debug!("Sending shutdown message");
         shutdown_tx

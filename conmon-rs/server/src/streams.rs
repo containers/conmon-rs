@@ -14,8 +14,6 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error};
 
-/// Capacity of the stdout and stderr channels in chunks.
-
 #[derive(Debug)]
 pub struct Streams {
     logger: SharedContainerLog,
