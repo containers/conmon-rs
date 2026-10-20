@@ -1,4 +1,4 @@
-use crate::{child_reaper::ReapableChild, conmon_capnp::conmon, mutex::lock};
+use crate::{child_reaper::ReapableChild, conmon_capnp::conmon, mutex::lock, process::Process};
 use anyhow::{Context, Result, bail};
 use capnp::enum_list::Reader;
 use libc::pid_t;
@@ -8,14 +8,10 @@ use nix::{
     sched::{CloneFlags, unshare},
     sys::{
         prctl,
-        signal::{Signal, kill},
+        signal::{SigSet, Signal, kill},
         wait::{WaitPidFlag, WaitStatus, waitpid},
     },
     unistd::{ForkResult, Gid, Pid, Uid, fork, getpid, setresgid, setresuid},
-};
-use signal_hook::{
-    consts::{SIGCHLD, TERM_SIGNALS},
-    iterator::Signals,
 };
 use std::{
     env, fmt,
@@ -51,11 +47,11 @@ pub struct Pause {
     uid_mappings: Vec<String>,
     gid_mappings: Vec<String>,
 
-    /// The PID of the long running pause process. It only exists if a PID
-    /// namespace was requested, because that is the only namespace which
-    /// dies with its init process. All other namespaces stay alive through
-    /// their bind mounts alone.
-    pid: Option<Pid>,
+    /// The long running pause process. It only exists if a PID namespace
+    /// was requested, because that is the only namespace which dies with its
+    /// init process. All other namespaces stay alive through their bind
+    /// mounts alone.
+    process: Option<Process>,
 }
 
 impl Pause {
@@ -68,35 +64,10 @@ impl Pause {
     pub fn namespaces(&self) -> &[Namespace] {
         &self.namespaces
     }
-    pub fn pid(&self) -> Option<Pid> {
-        self.pid
-    }
 }
 
 /// The pause instance of this server.
-static PAUSE: OnceCell<Pause> = OnceCell::const_new();
-
-/// Whether an initialization runs. Only one runs at a time, requests which
-/// arrive meanwhile wait for it instead of queueing their own.
-static INIT_RUNNING: LazyLock<watch::Sender<bool>> = LazyLock::new(|| watch::Sender::new(false));
-
-/// The pause subcommand of the running initialization, so that the shutdown
-/// can kill it if it does not finish in time.
-static INIT_CHILD: Mutex<Option<Pid>> = Mutex::new(None);
-
-/// Set once the server shuts down. No initialization starts after that and
-/// one which is still running stops its pause process itself, so that the
-/// shutdown does not leave one behind.
-static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
-
-/// Marks the initialization as finished, whatever happens to its task.
-struct InitRunning;
-
-impl Drop for InitRunning {
-    fn drop(&mut self) {
-        INIT_RUNNING.send_replace(false);
-    }
-}
+static PAUSE: SingleFlight<Pause> = SingleFlight::new();
 
 impl Pause {
     /// Retrieve the global instance of pause, creating it on the first call.
@@ -125,62 +96,31 @@ impl Pause {
             (vec![], vec![])
         };
 
-        if Self::shutting_down() {
-            bail!("server is shutting down")
-        }
-
-        if PAUSE.get().is_none() {
-            // Claim the initialization if none runs.
-            let claimed = INIT_RUNNING.send_if_modified(|running| {
-                let claimed = !*running;
-                *running = true;
-                claimed
-            });
-
-            if claimed {
-                // The task outlives this request, so a request cancelled
-                // meanwhile, for example by a CRI-O timeout, cannot abandon a
-                // half set up pause process. A panic in it leaves the cell
-                // empty, the pause subcommand undoes its own failed setup, so
-                // the next request starts over.
-                let pod_id = pod_id.to_owned();
-                let (base_path, namespaces, uid_mappings, gid_mappings) = (
-                    base_path.clone(),
-                    namespaces.clone(),
-                    uid_mappings.clone(),
-                    gid_mappings.clone(),
-                );
-                let init = task::spawn(
-                    async move {
-                        let _running = InitRunning;
-                        PAUSE
-                            .get_or_try_init(|| {
-                                Self::init_unless_shutting_down(
-                                    &base_path,
-                                    &pod_id,
-                                    &namespaces,
-                                    &uid_mappings,
-                                    &gid_mappings,
-                                )
-                            })
-                            .await
-                            .map(drop)
-                    }
-                    .instrument(Span::current()),
-                );
-                init.await.context("join pause init")??;
-            } else {
-                // Its outcome goes to the request which started it, a retry
-                // runs a new one.
-                Self::wait_for_init().await;
-            }
-        }
+        let pause = {
+            let pod_id = pod_id.to_owned();
+            let (base_path, namespaces, uid_mappings, gid_mappings) = (
+                base_path.clone(),
+                namespaces.clone(),
+                uid_mappings.clone(),
+                gid_mappings.clone(),
+            );
+            PAUSE
+                .get_or_init(move || async move {
+                    Self::init(
+                        &base_path,
+                        &pod_id,
+                        &namespaces,
+                        &uid_mappings,
+                        &gid_mappings,
+                    )
+                    .await
+                    .context("init pause")
+                })
+                .await?
+        };
 
         // The instance may differ from the request if another one created it
         // first, which is also fine to check for the own one.
-        let pause = PAUSE
-            .get()
-            .context("the pause initialization waited for failed, retry")?;
         pause
             .ensure_matches(
                 &base_path,
@@ -192,40 +132,7 @@ impl Pause {
             .context("pause already initialized")?;
 
         // The shutdown may have started meanwhile and stops the instance.
-        if Self::shutting_down() {
-            bail!("server is shutting down")
-        }
-        Ok(pause)
-    }
-
-    fn shutting_down() -> bool {
-        SHUTTING_DOWN.load(Ordering::SeqCst)
-    }
-
-    /// Wait until no initialization runs.
-    async fn wait_for_init() {
-        // Only fails if the sender is gone, which a static never is.
-        let _ = INIT_RUNNING.subscribe().wait_for(|running| !*running).await;
-    }
-
-    /// Initialize a pause instance, unless the server shuts down. If the
-    /// shutdown started meanwhile it may have given up waiting for this, so
-    /// stop the instance here instead of publishing it.
-    async fn init_unless_shutting_down(
-        base_path: &Path,
-        pod_id: &str,
-        namespaces: &[Namespace],
-        uid_mappings: &[String],
-        gid_mappings: &[String],
-    ) -> Result<Self> {
-        if Self::shutting_down() {
-            bail!("server is shutting down")
-        }
-        let pause = Self::init(base_path, pod_id, namespaces, uid_mappings, gid_mappings)
-            .await
-            .context("init pause")?;
-        if Self::shutting_down() {
-            pause.stop();
+        if PAUSE.shutting_down() {
             bail!("server is shutting down")
         }
         Ok(pause)
@@ -241,34 +148,7 @@ impl Pause {
     /// than leaving its pause process behind, and kill its subcommand if it
     /// does not finish. No request initializes one after this.
     pub async fn shutdown() {
-        SHUTTING_DOWN.store(true, Ordering::SeqCst);
-
-        if time::timeout(Self::SHUTDOWN_WAIT, Self::wait_for_init())
-            .await
-            .is_err()
-        {
-            warn!("Pause initialization still running, killing its process");
-            match lock(&INIT_CHILD) {
-                Ok(child) => {
-                    if let Some(pid) = *child
-                        && let Err(e) = kill(pid, Signal::SIGKILL)
-                    {
-                        warn!("Unable to kill pause process {pid}: {:#}", e);
-                    }
-                }
-                Err(e) => warn!("Unable to lock pause process PID: {:#}", e),
-            }
-            if time::timeout(Self::KILL_WAIT, Self::wait_for_init())
-                .await
-                .is_err()
-            {
-                warn!("Pause initialization did not finish, its process may stay behind");
-            }
-        }
-
-        if let Some(pause) = PAUSE.get() {
-            pause.stop();
-        }
+        PAUSE.shutdown(Self::SHUTDOWN_WAIT, Self::KILL_WAIT).await
     }
 
     /// Fail if the pause instance was created for another pod or configuration.
@@ -357,10 +237,13 @@ impl Pause {
             }
         }
 
-        if let Some(pid) = self.pid() {
+        if let Some(process) = &self.process {
+            let pid = process.pid();
             info!("Killing pause PID: {pid}");
-            if let Err(e) = kill(pid, Signal::SIGTERM) {
-                warn!("Unable to kill pause PID {pid}: {:#}", e);
+            match process.signal(Signal::SIGTERM) {
+                Ok(()) => {}
+                Err(Errno::ESRCH | Errno::ECHILD) => debug!("Pause PID {pid} already exited"),
+                Err(e) => warn!("Unable to kill pause PID {pid}: {:#}", e),
             }
         }
 
@@ -407,6 +290,9 @@ impl Pause {
         let arg0 = env::args_os()
             .next()
             .unwrap_or_else(|| env!("CARGO_PKG_NAME").into());
+        // Unlike the runtimes it keeps the OOM score adjustment of the
+        // server: the init of a PID namespace takes every process of the pod
+        // with it.
         let mut child = Command::new("/proc/self/exe")
             .arg0(arg0)
             .arg("pause")
@@ -423,11 +309,14 @@ impl Pause {
             .spawn()
             .context("run pause")?;
 
-        // The shutdown kills it if it takes too long.
-        let child_pid = child.id().map(|pid| Pid::from_raw(pid as pid_t));
-        *lock(&INIT_CHILD)? = child_pid;
+        // The shutdown kills it if it takes too long. It is not reaped before
+        // the wait below, so the PID is still its own here.
+        let process = child
+            .id()
+            .map(|pid| Process::open(Pid::from_raw(pid as pid_t)));
+        PAUSE.set_child(process)?;
         let status = child.wait().await;
-        *lock(&INIT_CHILD)? = None;
+        PAUSE.set_child(None)?;
 
         let mut pause = Self {
             base_path: base_path.to_path_buf(),
@@ -435,7 +324,7 @@ impl Pause {
             namespaces: namespaces.to_vec(),
             uid_mappings: uid_mappings.to_vec(),
             gid_mappings: gid_mappings.to_vec(),
-            pid: None,
+            process: None,
         };
 
         let status = status.context("wait for pause child")?;
@@ -459,8 +348,10 @@ impl Pause {
                 pause.stop()
             })?;
             info!("Pause PID is: {pid}");
+            // Before the reaper may take the exit status, the PID is only
+            // reliable until then.
+            pause.process = Some(Process::open(pid));
             Self::spawn_reaper(pid);
-            pause.pid = Some(pid);
         } else {
             info!("No PID namespace requested, pause process exited after binding");
         }
@@ -604,11 +495,18 @@ impl Pause {
 
         // Only the next child becomes part of a new PID namespace, as its init.
         let holder = if pid {
+            // The init inherits the mask, so no signal arrives before it waits
+            // for them: they stay pending until then.
+            let signals = Self::init_signals();
+            signals.thread_block().context("block init signals")?;
             match unsafe { fork().context("forking PID namespace init")? } {
-                ForkResult::Parent { child } => child,
+                ForkResult::Parent { child } => {
+                    signals.thread_unblock().context("unblock init signals")?;
+                    child
+                }
                 ForkResult::Child => {
                     drop(sock);
-                    return Self::run_init();
+                    return Self::run_init(signals);
                 }
             }
         } else {
@@ -641,17 +539,37 @@ impl Pause {
     /// The init of the PID namespace, which keeps it alive until terminated.
     /// Processes of the pod which lose their parent get reparented to it, so it
     /// reaps them like any init.
-    fn run_init() -> Result<()> {
-        let mut signals = Signals::new(TERM_SIGNALS.iter().copied().chain([SIGCHLD]))
-            .context("register signals")?;
-        for signal in signals.forever() {
-            if signal != SIGCHLD {
-                debug!("Got signal {signal}, exiting pause init");
-                return Ok(());
+    ///
+    /// The signals are blocked since the fork and taken with sigwait, so none
+    /// of them gets lost. Several exits may be reported by a single SIGCHLD,
+    /// every one reaps all exited children.
+    fn run_init(signals: SigSet) -> Result<()> {
+        loop {
+            match signals.wait() {
+                Ok(Signal::SIGCHLD) => Self::reap_children(),
+                Ok(signal) => {
+                    debug!("Got signal {signal}, exiting pause init");
+                    return Ok(());
+                }
+                Err(Errno::EINTR) => continue,
+                Err(e) => return Err(e).context("wait for signals"),
             }
-            Self::reap_children();
         }
-        bail!("signal iterator ended")
+    }
+
+    /// The signals the init waits for: the ones which terminate it and the
+    /// exit of a child.
+    fn init_signals() -> SigSet {
+        let mut signals = SigSet::empty();
+        for signal in [
+            Signal::SIGTERM,
+            Signal::SIGINT,
+            Signal::SIGQUIT,
+            Signal::SIGCHLD,
+        ] {
+            signals.add(signal);
+        }
+        signals
     }
 
     /// Reap all exited children without blocking.
@@ -695,6 +613,178 @@ impl Pause {
         }
 
         Ok(())
+    }
+}
+
+/// A value which has to be undone when it is no longer used.
+trait Stop {
+    fn stop(&self);
+}
+
+impl Stop for Pause {
+    fn stop(&self) {
+        Pause::stop(self)
+    }
+}
+
+/// Creates a value of which a server has a single one, like the pause
+/// instance, once and on demand.
+///
+/// Only one initialization runs at a time, requests which arrive meanwhile
+/// wait for it instead of queueing their own. It runs in a task of its own,
+/// so a request cancelled meanwhile, for example by a CRI-O timeout, cannot
+/// abandon a half set up value. A failed or panicked initialization leaves
+/// the cell empty, so the next request starts over.
+struct SingleFlight<T> {
+    cell: OnceCell<T>,
+
+    /// Whether an initialization runs.
+    running: LazyLock<watch::Sender<bool>>,
+
+    /// The process of the running initialization, so that the shutdown can
+    /// kill it if it does not finish in time.
+    child: Mutex<Option<Process>>,
+
+    /// Set once the server shuts down. No initialization starts after that
+    /// and one which is still running stops its value itself, so that the
+    /// shutdown does not leave one behind.
+    shutting_down: AtomicBool,
+}
+
+/// Marks the initialization as finished, whatever happens to its task.
+struct InitRunning<'a>(&'a watch::Sender<bool>);
+
+impl Drop for InitRunning<'_> {
+    fn drop(&mut self) {
+        self.0.send_replace(false);
+    }
+}
+
+impl<T: Stop + Send + Sync + 'static> SingleFlight<T> {
+    const fn new() -> Self {
+        Self {
+            cell: OnceCell::const_new(),
+            running: LazyLock::new(Self::not_running),
+            child: Mutex::new(None),
+            shutting_down: AtomicBool::new(false),
+        }
+    }
+
+    fn not_running() -> watch::Sender<bool> {
+        watch::Sender::new(false)
+    }
+
+    fn shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
+    }
+
+    /// Retrieve the value, running `init` if there is none and no other
+    /// initialization runs. A request which waited for the initialization of
+    /// another one fails if that failed, its outcome goes to the request
+    /// which started it and a retry runs a new one.
+    async fn get_or_init<F, Fut>(&'static self, init: F) -> Result<&'static T>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T>> + Send,
+    {
+        if self.shutting_down() {
+            bail!("server is shutting down")
+        }
+
+        if self.cell.get().is_none() {
+            // Claim the initialization if none runs.
+            let claimed = self.running.send_if_modified(|running| {
+                let claimed = !*running;
+                *running = true;
+                claimed
+            });
+
+            if claimed {
+                let init = task::spawn(
+                    async move {
+                        let _running = InitRunning(&self.running);
+                        self.cell
+                            .get_or_try_init(|| self.init_unless_shutting_down(init))
+                            .await
+                            .map(drop)
+                    }
+                    .instrument(Span::current()),
+                );
+                init.await.context("join initialization")??;
+            } else {
+                self.wait_for_init().await;
+            }
+        }
+
+        self.cell
+            .get()
+            .context("the initialization waited for failed, retry")
+    }
+
+    /// Wait until no initialization runs.
+    async fn wait_for_init(&self) {
+        // Only fails if the sender is gone, which lives as long as self.
+        let _ = self.running.subscribe().wait_for(|running| !*running).await;
+    }
+
+    /// Run the initialization, unless the server shuts down. If the shutdown
+    /// started meanwhile it may have given up waiting for this, so stop the
+    /// value here instead of publishing it.
+    async fn init_unless_shutting_down<F, Fut>(&self, init: F) -> Result<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        if self.shutting_down() {
+            bail!("server is shutting down")
+        }
+        let value = init().await?;
+        if self.shutting_down() {
+            value.stop();
+            bail!("server is shutting down")
+        }
+        Ok(value)
+    }
+
+    /// Set the process of the running initialization.
+    fn set_child(&self, child: Option<Process>) -> Result<()> {
+        *lock(&self.child)? = child;
+        Ok(())
+    }
+
+    /// Stop the value for the shutdown. Wait up to `wait` for a running
+    /// initialization, kill its process if it does not finish and wait up to
+    /// `kill_wait` for it to clean up. No request initializes one after this.
+    async fn shutdown(&self, wait: Duration, kill_wait: Duration) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+
+        if time::timeout(wait, self.wait_for_init()).await.is_err() {
+            warn!("Initialization still running, killing its process");
+            match lock(&self.child) {
+                Ok(child) => {
+                    if let Some(child) = &*child
+                        && let Err(e) = child.signal(Signal::SIGKILL)
+                    {
+                        warn!(
+                            "Unable to kill initialization process {}: {:#}",
+                            child.pid(),
+                            e
+                        );
+                    }
+                }
+                Err(e) => warn!("Unable to lock initialization process PID: {:#}", e),
+            }
+            if time::timeout(kill_wait, self.wait_for_init())
+                .await
+                .is_err()
+            {
+                warn!("Initialization did not finish, its process may stay behind");
+            }
+        }
+
+        if let Some(value) = self.cell.get() {
+            value.stop();
+        }
     }
 }
 
@@ -925,6 +1015,266 @@ impl Namespace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        process::Command as StdCommand,
+        sync::{Arc, atomic::AtomicUsize},
+    };
+    use tokio::sync::Notify;
+
+    /// A child which gets killed and reaped if a test fails before it did.
+    struct Guarded(std::process::Child);
+
+    impl Guarded {
+        fn spawn(cmd: &mut StdCommand) -> Result<Self> {
+            Ok(Self(cmd.spawn()?))
+        }
+    }
+
+    impl Drop for Guarded {
+        fn drop(&mut self) {
+            // Both do nothing for a child which got waited for already.
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// A value which counts how often it got stopped.
+    struct Value(Arc<AtomicUsize>);
+
+    impl Stop for Value {
+        fn stop(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn flight() -> &'static SingleFlight<Value> {
+        Box::leak(Box::new(SingleFlight::new()))
+    }
+
+    /// An initialization which counts its runs and takes a second.
+    fn slow_init(
+        inits: &Arc<AtomicUsize>,
+        stops: &Arc<AtomicUsize>,
+    ) -> impl FnOnce() -> std::pin::Pin<Box<dyn Future<Output = Result<Value>> + Send>> + Send + 'static
+    {
+        let (inits, stops) = (inits.clone(), stops.clone());
+        move || {
+            Box::pin(async move {
+                inits.fetch_add(1, Ordering::SeqCst);
+                time::sleep(Duration::from_secs(1)).await;
+                Ok(Value(stops))
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_callers_init_once() -> Result<()> {
+        let flight = flight();
+        let (inits, stops) = (Arc::default(), Arc::default());
+
+        let (a, b, c) = tokio::join!(
+            flight.get_or_init(slow_init(&inits, &stops)),
+            flight.get_or_init(slow_init(&inits, &stops)),
+            flight.get_or_init(slow_init(&inits, &stops)),
+        );
+        let (a, b, c) = (a?, b?, c?);
+        assert!(std::ptr::eq(a, b) && std::ptr::eq(b, c));
+        assert_eq!(inits.load(Ordering::SeqCst), 1);
+
+        // Later callers get the value right away.
+        flight.get_or_init(slow_init(&inits, &stops)).await?;
+        assert_eq!(inits.load(Ordering::SeqCst), 1);
+        assert_eq!(stops.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_init_allows_retry() -> Result<()> {
+        let flight = flight();
+        let (inits, stops) = (Arc::default(), Arc::default());
+
+        let failing = || async {
+            time::sleep(Duration::from_secs(1)).await;
+            bail!("init failed")
+        };
+        let (first, waiter) = tokio::join!(
+            flight.get_or_init(failing),
+            flight.get_or_init(slow_init(&inits, &stops)),
+        );
+        assert!(format!("{:#}", first.err().context("no error")?).contains("init failed"));
+        // The waiter does not run its own, it gets the failure.
+        assert!(waiter.is_err());
+        assert_eq!(inits.load(Ordering::SeqCst), 0);
+
+        flight.get_or_init(slow_init(&inits, &stops)).await?;
+        assert_eq!(inits.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_caller_does_not_abandon_init() -> Result<()> {
+        let flight = flight();
+        let (inits, stops) = (Arc::default(), Arc::default());
+
+        let cancelled = time::timeout(
+            Duration::from_millis(100),
+            flight.get_or_init(slow_init(&inits, &stops)),
+        )
+        .await;
+        assert!(cancelled.is_err());
+
+        // The initialization went on, the next caller waits for it.
+        flight.get_or_init(slow_init(&inits, &stops)).await?;
+        assert_eq!(inits.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_waits_for_running_init() -> Result<()> {
+        let flight = flight();
+        let (inits, stops) = (Arc::default(), Arc::<AtomicUsize>::default());
+
+        let caller = task::spawn(flight.get_or_init(slow_init(&inits, &stops)));
+        while !*flight.running.borrow() {
+            task::yield_now().await;
+        }
+
+        let start = time::Instant::now();
+        flight
+            .shutdown(Duration::from_secs(10), Duration::from_secs(1))
+            .await;
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+
+        // It finished after the shutdown started, so it stopped its value
+        // instead of publishing it.
+        assert!(caller.await?.is_err());
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        assert!(flight.cell.get().is_none());
+
+        // Nothing starts after the shutdown.
+        assert!(flight.get_or_init(slow_init(&inits, &stops)).await.is_err());
+        assert_eq!(inits.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_gives_up_on_hanging_init() -> Result<()> {
+        let flight = flight();
+        let stops = Arc::<AtomicUsize>::default();
+        let release = Arc::new(Notify::new());
+
+        let caller = task::spawn(flight.get_or_init({
+            let (stops, release) = (stops.clone(), release.clone());
+            move || async move {
+                release.notified().await;
+                Ok(Value(stops))
+            }
+        }));
+        while !*flight.running.borrow() {
+            task::yield_now().await;
+        }
+
+        let start = time::Instant::now();
+        flight
+            .shutdown(Duration::from_secs(10), Duration::from_secs(1))
+            .await;
+        assert_eq!(start.elapsed(), Duration::from_secs(11));
+        assert_eq!(stops.load(Ordering::SeqCst), 0);
+
+        // Once it finishes late it stops its value itself.
+        release.notify_one();
+        assert!(caller.await?.is_err());
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        assert!(flight.cell.get().is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_kills_init_process() -> Result<()> {
+        let flight = flight();
+        let stops = Arc::<AtomicUsize>::default();
+
+        let caller = task::spawn(flight.get_or_init({
+            let stops = stops.clone();
+            move || async move {
+                let mut child = Command::new("sleep").arg("60").kill_on_drop(true).spawn()?;
+                let pid = Pid::from_raw(child.id().context("no PID")? as pid_t);
+                flight.set_child(Some(Process::open(pid)))?;
+                let status = child.wait().await?;
+                flight.set_child(None)?;
+                assert_eq!(status.signal(), Some(Signal::SIGKILL as i32));
+                Ok(Value(stops))
+            }
+        }));
+        while lock(&flight.child)?.is_none() {
+            task::yield_now().await;
+        }
+
+        flight
+            .shutdown(Duration::from_millis(100), Duration::from_secs(10))
+            .await;
+        assert!(caller.await?.is_err());
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_stops_initialized_value() -> Result<()> {
+        let flight = flight();
+        let (inits, stops) = (Arc::default(), Arc::<AtomicUsize>::default());
+        flight.get_or_init(slow_init(&inits, &stops)).await?;
+
+        flight
+            .shutdown(Duration::from_secs(10), Duration::from_secs(1))
+            .await;
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn process_signal_reaches_child() -> Result<()> {
+        for use_pidfd in [true, false] {
+            let mut child = Guarded::spawn(StdCommand::new("sleep").arg("60"))?;
+            let pid = Pid::from_raw(child.0.id() as pid_t);
+            let mut process = Process::open(pid);
+            if !use_pidfd {
+                process.pidfd = None;
+            }
+
+            process.signal(Signal::SIGTERM)?;
+            assert_eq!(child.0.wait()?.signal(), Some(Signal::SIGTERM as i32));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn process_signal_skips_reaped_child() -> Result<()> {
+        let mut child = StdCommand::new("true").spawn()?;
+        let pid = Pid::from_raw(child.id() as pid_t);
+        let mut process = Process::open(pid);
+        assert!(process.pidfd.is_some());
+        child.wait()?;
+
+        // The PID may belong to another process by now, neither way signals it.
+        assert_eq!(process.signal(Signal::SIGTERM), Err(Errno::ESRCH));
+        process.pidfd = None;
+        assert_eq!(process.signal(Signal::SIGTERM), Err(Errno::ECHILD));
+        Ok(())
+    }
+
+    #[test]
+    fn init_signals() {
+        let signals = Pause::init_signals();
+        for signal in [
+            Signal::SIGTERM,
+            Signal::SIGINT,
+            Signal::SIGQUIT,
+            Signal::SIGCHLD,
+        ] {
+            assert!(signals.contains(signal));
+        }
+        assert!(!signals.contains(Signal::SIGHUP));
+    }
 
     #[test]
     fn ensure_matches_config() {
@@ -935,7 +1285,7 @@ mod tests {
             namespaces: vec![Namespace::Ipc, Namespace::User],
             uid_mappings: mappings.clone(),
             gid_mappings: mappings.clone(),
-            pid: None,
+            process: None,
         };
         let namespaces = [Namespace::User, Namespace::Ipc];
         let base_path = Path::new("/var/run/");

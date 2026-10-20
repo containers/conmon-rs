@@ -5,9 +5,25 @@ use std::{
     io,
     os::unix::io::AsRawFd,
     path::{Path, PathBuf},
+    time::Duration,
 };
-use tokio::net::UnixListener;
+use tokio::{net::UnixListener, time};
 use tokio_seqpacket::UnixSeqpacketListener;
+use tracing::error;
+
+/// How long an accept loop pauses after a failed accept.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Handle a failed accept of a listener which keeps going. Most errors, like
+/// running out of descriptors, fail every accept until something changes, so
+/// pause instead of spinning. Only a connection which failed on its own is
+/// no reason to wait.
+pub async fn accept_failed(e: &io::Error) {
+    error!("Unable to accept connection: {e}");
+    if !matches!(e.raw_os_error(), Some(libc::ECONNABORTED | libc::EPROTO)) {
+        time::sleep(ACCEPT_BACKOFF).await;
+    }
+}
 
 #[cfg(test)]
 use mockall::{automock, predicate::*};

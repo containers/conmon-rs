@@ -98,6 +98,8 @@ mod notify;
 mod oom_watcher;
 #[allow(unsafe_code)]
 mod pause;
+#[allow(unsafe_code)]
+mod process;
 mod rpc;
 #[allow(unsafe_code)]
 mod server;

@@ -1,6 +1,8 @@
 mod cri;
 mod journald;
 mod json;
+#[cfg(test)]
+pub(crate) mod test_helpers;
 
 use crate::conmon_capnp::conmon::log_driver::{self, Owned, Type};
 use crate::{
@@ -11,14 +13,14 @@ use anyhow::{Context, Result};
 use bytes::{Bytes, BytesMut};
 use capnp::struct_list::Reader;
 use std::{
+    fs::{File, OpenOptions},
+    io::Write,
+    mem,
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{
-    fs::{File, OpenOptions},
-    io::AsyncWriteExt,
-    sync::RwLock,
-};
+use tokio::{sync::RwLock, task};
 use tracing::{debug, trace};
 
 pub type SharedContainerLog = Arc<RwLock<ContainerLog>>;
@@ -160,24 +162,37 @@ impl ContainerLog {
         Ok(())
     }
 
-    /// Reopen the container logs.
+    /// Reopen the container logs. All drivers get reopened even if one
+    /// fails, the first error is returned.
     pub async fn reopen(&mut self) -> Result<()> {
+        let mut result = Ok(());
         for driver in &mut self.drivers {
-            driver.reopen().await?;
+            if let Err(e) = driver.reopen().await
+                && result.is_ok()
+            {
+                result = Err(e);
+            }
         }
-        Ok(())
+        result
     }
 
-    /// Write the contents of the provided bytes into all loggers.
+    /// Write the contents of the provided bytes into all loggers. All of
+    /// them get the chunk even if one fails, the first error is returned.
     pub async fn write(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {
+        let mut result = Ok(());
         for driver in &mut self.drivers {
-            driver.write_chunk(pipe, bytes).await?;
+            if let Err(e) = driver.write_chunk(pipe, bytes).await
+                && result.is_ok()
+            {
+                result = Err(e);
+            }
         }
         if self.buffers_lines {
             let lines = self.lines.push(pipe, bytes);
-            self.write_lines(pipe, &lines).await?;
+            let res = self.write_lines(pipe, &lines).await;
+            result = result.and(res);
         }
-        Ok(())
+        result
     }
 
     /// Whether a line of the pipe waits for its ending.
@@ -355,15 +370,17 @@ impl LineBuffer {
 ///
 /// The drivers assemble their entries into `buf`, account each one with
 /// [`LogFile::commit_entry`] and write the buffer with a single call per read
-/// chunk. The file is an async one on purpose: the write and the truncating
-/// open run on the blocking pool, so writeback throttling, a slow disk or
-/// truncating a huge log only stalls this log and not the thread which drives
-/// every container of the pod.
+/// chunk, or per [`LogFile::FLUSH_SIZE`] of entries for chunks of short lines.
+/// The writes and the truncating open run on the blocking pool, so writeback
+/// throttling, a slow disk or truncating a huge log only stalls this log and
+/// not the thread which drives every container of the pod. The buffer moves
+/// to the blocking task and back, unlike an async file, which copies every
+/// write into a buffer of its own that keeps the size of the largest one.
 #[derive(Debug)]
 pub(crate) struct LogFile {
     path: PathBuf,
     mode: Option<u32>,
-    file: Option<File>,
+    file: Option<Arc<File>>,
 
     /// Maximum allowed log size in bytes.
     max_size: Option<usize>,
@@ -379,11 +396,20 @@ pub(crate) struct LogFile {
 impl LogFile {
     const ERR_UNINITIALIZED: &'static str = "logger not initialized";
 
-    /// Initial capacity of the chunk buffer, a read chunk plus line overhead.
+    /// Initial capacity of the chunk buffer, it grows to what the read chunks
+    /// need with their line overhead.
     const BUF_CAPACITY: usize = 8 * 1024;
 
-    /// Buffers which grew beyond this size get shrunk again after a write.
-    const BUF_RETAIN_LIMIT: usize = 64 * 1024;
+    /// The entries get written once they take this much, a chunk of very
+    /// short lines would grow the buffer to many times its size otherwise.
+    const FLUSH_SIZE: usize = 16 * 1024;
+
+    /// Buffers which grew beyond this size get shrunk again after a write,
+    /// for example by a long line. The entry which crosses
+    /// [`LogFile::FLUSH_SIZE`] grows the buffer up to twice that size, which
+    /// is kept, shrinking and growing it again for every write would only
+    /// churn the allocator.
+    const BUF_RETAIN_LIMIT: usize = 2 * Self::FLUSH_SIZE;
 
     pub(crate) fn new(path: impl AsRef<Path>, mode: Option<u32>, max_size: Option<usize>) -> Self {
         Self {
@@ -400,18 +426,25 @@ impl LogFile {
         &self.path
     }
 
-    /// Open the file, truncating any existing content.
+    /// Open the file, truncating any existing content. A symlink in place of
+    /// the log is not followed, the truncation would hit its target.
     pub(crate) async fn open(&mut self) -> Result<()> {
         let mut options = OpenOptions::new();
-        options.create(true).read(true).truncate(true).write(true);
+        options
+            .create(true)
+            .read(true)
+            .truncate(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW);
         if let Some(mode) = self.mode {
             options.mode(mode);
         }
-        let file = options
-            .open(&self.path)
+        let path = self.path.clone();
+        let file = task::spawn_blocking(move || options.open(path))
             .await
+            .context("join log file open")?
             .with_context(|| format!("open log file path '{}'", self.path.display()))?;
-        self.file = Some(file);
+        self.file = Some(Arc::new(file));
         self.bytes_written = 0;
         Ok(())
     }
@@ -433,8 +466,9 @@ impl LogFile {
             debug!("Rotate log file {}", self.path.display());
             if let Err(e) = self.open().await {
                 // The old file stays in place. Drop the uncounted entry and
-                // write the ones which fit into it now, the caller stops on the
-                // error and may not write again.
+                // write the ones which fit into it now. The next entry tries
+                // the rotation again, until then entries which exceed the size
+                // get dropped.
                 self.buf.truncate(start);
                 if let Err(e) = self.flush().await {
                     debug!("Unable to flush log file after failed rotation: {:#}", e);
@@ -446,6 +480,9 @@ impl LogFile {
         } else {
             self.bytes_written = total;
         }
+        if self.buf.len() >= Self::FLUSH_SIZE {
+            self.flush().await?;
+        }
         Ok(())
     }
 
@@ -454,13 +491,14 @@ impl LogFile {
         if self.buf.is_empty() {
             return Ok(());
         }
+        let len = self.buf.len();
         let res = self.write_buf().await;
         if res.is_err() {
             // Drop the chunk even if the write failed. It may have been written
             // partially, retrying it along with the next chunk would duplicate
             // that part. Assume it did not make it, so that a later rotation
             // does not happen early.
-            self.bytes_written = self.bytes_written.saturating_sub(self.buf.len());
+            self.bytes_written = self.bytes_written.saturating_sub(len);
         }
         self.buf.clear();
         if self.buf.capacity() > Self::BUF_RETAIN_LIMIT {
@@ -470,9 +508,23 @@ impl LogFile {
     }
 
     async fn write_buf(&mut self) -> Result<()> {
-        let file = self.file.as_mut().context(Self::ERR_UNINITIALIZED)?;
-        file.write_all(&self.buf).await.context("write log chunk")?;
-        file.flush().await.context("flush log file")
+        let file = self.file.clone().context(Self::ERR_UNINITIALIZED)?;
+        let buf = mem::take(&mut self.buf);
+        let (buf, res) = match task::spawn_blocking(move || {
+            let res = (&*file).write_all(&buf);
+            (buf, res)
+        })
+        .await
+        {
+            Ok(res) => res,
+            Err(e) => {
+                // The buffer went with the task.
+                self.buf = Vec::with_capacity(Self::BUF_CAPACITY);
+                return Err(e).context("join log write");
+            }
+        };
+        self.buf = buf;
+        res.context("write log chunk")
     }
 
     /// Write the pending buffer and reopen the file, which truncates it.
@@ -693,6 +745,100 @@ mod tests {
         sut.buf.extend_from_slice(b"kept\n");
         sut.flush().await?;
         assert_eq!(fs::read_to_string(file.path())?, "kept\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn drivers_share_the_output() -> Result<()> {
+        let (cri, json, log) = test_helpers::container_log(true).await?;
+        let mut log = log.write().await;
+
+        log.write(Pipe::StdOut, b"a\nparti").await?;
+        log.write(Pipe::StdOut, b"al\n").await?;
+        log.finish(Pipe::StdOut).await?;
+
+        // The CRI log writes partial lines as they come, the JSON one joins
+        // them.
+        let ts = test_helpers::TIMESTAMP;
+        assert_eq!(
+            test_helpers::read(&cri)?,
+            format!("{ts} stdout F a\n{ts} stdout P parti\n{ts} stdout F al\n")
+        );
+        let json = test_helpers::read(&json)?;
+        let messages: Vec<_> = json
+            .lines()
+            .map(|line| {
+                let entry: serde_json::Value = serde_json::from_str(line)?;
+                Ok(entry["message"].as_str().unwrap_or_default().to_owned())
+            })
+            .collect::<Result<_>>()?;
+        assert_eq!(messages, ["a", "partial"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failing_driver_does_not_stop_the_others() -> Result<()> {
+        let (cri, json, log) = test_helpers::container_log(false).await?;
+        let mut log = log.write().await;
+        // Only the JSON log gets opened, the CRI one fails every write.
+        if let Driver::Json(json) = &mut log.drivers[1] {
+            json.init().await?;
+        }
+
+        assert!(log.write(Pipe::StdOut, b"line\n").await.is_err());
+        assert!(test_helpers::read(&cri)?.is_empty());
+        assert!(test_helpers::read(&json)?.contains(r#""message":"line""#));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reopen_reopens_all_drivers() -> Result<()> {
+        let (cri, json, log) = test_helpers::container_log(true).await?;
+        let mut log = log.write().await;
+        log.write(Pipe::StdOut, b"before\n").await?;
+
+        // The CRI log cannot be opened again.
+        fs::remove_file(cri.path())?;
+        fs::create_dir(cri.path())?;
+
+        assert!(log.reopen().await.is_err());
+        assert!(test_helpers::read(&json)?.is_empty());
+        fs::remove_dir(cri.path())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_does_not_follow_symlinks() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let target = dir.path().join("target");
+        fs::write(&target, "keep")?;
+        let link = dir.path().join("log");
+        std::os::unix::fs::symlink(&target, &link)?;
+
+        let mut sut = LogFile::new(&link, Some(0o600), None);
+        assert!(sut.open().await.is_err());
+        assert_eq!(fs::read_to_string(&target)?, "keep");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn short_lines_are_written_in_bounded_pieces() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let mut sut = LogFile::new(file.path(), None, None);
+        sut.open().await?;
+
+        let mut expected = String::new();
+        for i in 0..10_000 {
+            let start = sut.buf.len();
+            let entry = format!("{i}\n");
+            sut.buf.extend_from_slice(entry.as_bytes());
+            expected.push_str(&entry);
+            sut.commit_entry(start).await?;
+            assert!(sut.buf.len() < LogFile::FLUSH_SIZE);
+        }
+        sut.flush().await?;
+        assert!(sut.buf.capacity() <= LogFile::BUF_RETAIN_LIMIT);
+        assert_eq!(fs::read_to_string(file.path())?, expected);
         Ok(())
     }
 }

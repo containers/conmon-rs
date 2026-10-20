@@ -1,10 +1,12 @@
 use crate::conmon_capnp::conmon::CgroupManager;
 use crate::{
+    attach::SharedContainerAttach,
     bounded_hashmap::BoundedHashMap,
     child::{Child, ChildKind},
-    child_reaper::{ChildReaper, ReapableChild},
+    child_reaper::{ChildReaper, ExitChannelData, ReapableChild, signals_group},
     config::Config,
-    container_io::{ContainerIO, Message as IOMessage, Pipe, SharedContainerIO},
+    container_io::{ContainerIO, Drain, Message as IOMessage, Pipe, SharedContainerIO},
+    process::Process,
     server::GenerateRuntimeArgs,
 };
 use anyhow::{Context, Result};
@@ -12,11 +14,12 @@ use async_channel::Receiver as IOReceiver;
 use axum::{
     Router,
     extract::{
-        Path, State as AxumState,
+        Path, Request, State as AxumState,
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     },
     http::StatusCode,
-    response::IntoResponse,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use bytes::{BufMut, Bytes, BytesMut};
@@ -24,19 +27,26 @@ use futures::{
     sink::SinkExt,
     stream::{SplitSink, SplitStream, StreamExt},
 };
+use libc::pid_t;
+use nix::{
+    sys::signal::{Signal, kill},
+    unistd::{Pid, getpgid},
+};
 use serde::{Deserialize, Serialize};
-use std::{fmt::Debug, ops::ControlFlow, sync::Arc, time::Duration};
+use std::{collections::VecDeque, fmt::Debug, ops::ControlFlow, sync::Arc};
 use tokio::{
     net::TcpListener,
+    select,
     sync::{
         RwLock,
         broadcast::{self, error::RecvError},
         mpsc::{self, Receiver as MpscReceiver, Sender as MpscSender},
+        watch,
     },
     task::{self, JoinHandle},
-    time::timeout,
+    time::{self, Duration},
 };
-use tower_http::trace::TraceLayer;
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error, info, trace, warn};
 use uuid::Uuid;
 
@@ -54,22 +64,23 @@ const STREAM_ERR_BYTE: u8 = 3;
 const RESIZE_BYTE: u8 = 4;
 const CLOSE_BYTE: u8 = 255;
 
-/// Upper bound for waiting on the next output after the container exited.
-/// The read loops may still be draining the pipes when the exit is observed,
-/// they signal the end with `Message::Done`. The timeout only kicks in if that
-/// never arrives, for example because a grandchild keeps the pipe open.
-const DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
+/// The largest WebSocket message and frame a client may send. Clients send
+/// stdin, which kubectl reads in 32 KiB chunks and the attach sockets cap at
+/// 64 KiB per packet, and small resize events. The defaults of 64 MiB per
+/// message would let a client make the server buffer that much per message.
+const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
-/// Upper bound for the messages forwarded per drain after the container
-/// exited. The output written before the exit is at most what the channels
-/// (100 messages) and the pipe buffers hold. With the default pipe-max-size
-/// of 1 MiB in 4 KiB reads, that is 256 messages per pipe, so this is well
-/// above. It is a heuristic though, a process with CAP_SYS_RESOURCE can grow
-/// its pipes further. More output stems from a grandchild which keeps the
-/// pipe open and writing, which would otherwise keep the session open
-/// forever. Unlike a time limit this does not cut off the output for a slow
-/// client.
-const DRAIN_MAX_MESSAGES: usize = 1024;
+/// How much stdin the read task holds while the container does not take it,
+/// on top of the stdin channel. The socket is still read meanwhile, so that
+/// resize events and the close do not wait behind it.
+const PENDING_STDIN_MAX_BYTES: usize = MAX_MESSAGE_SIZE;
+
+/// How long stdin which the client sent right before closing may take to
+/// reach the container.
+const STDIN_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The latest resize event of a client, older ones are replaced.
+type ResizeRx = watch::Receiver<Option<Bytes>>;
 
 #[derive(Debug, Default)]
 /// The main streaming server structure of this module.
@@ -106,6 +117,7 @@ struct ExecSession {
 #[derive(Debug)]
 /// Required attach session data.
 struct AttachSession {
+    container_id: Box<str>,
     child: ReapableChild,
     stdin: bool,
     stdout: bool,
@@ -207,7 +219,7 @@ impl StreamingServer {
             .route(&Self::path_for(ATTACH_PATH), post(Self::handle))
             .fallback(Self::fallback)
             .with_state(state)
-            .layer(TraceLayer::new_for_http());
+            .layer(middleware::from_fn(Self::trace));
         axum::serve(listener, router)
             .await
             .context("start streaming server")
@@ -221,6 +233,15 @@ impl StreamingServer {
     /// Return the URL for a specific path and Uuid.
     fn url_for(&self, p: &str, uuid: &Uuid) -> String {
         format!("http://{ADDR}:{0}/{p}/{uuid}", self.port)
+    }
+
+    /// Log every request with its response status.
+    async fn trace(request: Request, next: Next) -> Response {
+        let method = request.method().clone();
+        let path = request.uri().path().to_owned();
+        let response = next.run(request).await;
+        debug!("{method} {path}: {}", response.status());
+        response
     }
 
     /// Fallback response.
@@ -267,6 +288,7 @@ impl StreamingServer {
     /// Returns the URL used for the provided attach parameters.
     pub async fn attach_url(
         &self,
+        container_id: Box<str>,
         child: ReapableChild,
         stdin: bool,
         stdout: bool,
@@ -278,6 +300,7 @@ impl StreamingServer {
         state_lock.insert(
             uuid,
             Session::Attach(AttachSession {
+                container_id,
                 child,
                 stdin,
                 stdout,
@@ -300,8 +323,16 @@ impl StreamingServer {
 
             match session {
                 Some(session) => {
-                    info!("Got valid session for token {token}: {session:?}");
+                    // Only what identifies the session, the command of an exec
+                    // may carry secrets.
+                    info!(
+                        "Got valid {} session for container {} and token {token}",
+                        session.typ(),
+                        session.container_id()
+                    );
                     ws.protocols([PROTOCOL_V5])
+                        .max_message_size(MAX_MESSAGE_SIZE)
+                        .max_frame_size(MAX_MESSAGE_SIZE)
                         .on_upgrade(move |socket| Self::handle_websocket(socket, session))
                 }
                 None => {
@@ -319,8 +350,9 @@ impl StreamingServer {
         let (sender, receiver) = socket.split();
         let (stdin_tx, stdin_rx) = mpsc::channel(16);
         // Resize events go through their own channel, so that they do not
-        // queue behind stdin the container does not read.
-        let (resize_tx, resize_rx) = mpsc::channel(16);
+        // queue behind stdin the container does not read. Only the latest
+        // size matters.
+        let (resize_tx, resize_rx) = watch::channel(None);
 
         let mut send_task = Self::write_task(sender, stdin_rx, resize_rx, session);
         let mut recv_task = Self::read_task(receiver, stdin_tx, resize_tx);
@@ -335,7 +367,15 @@ impl StreamingServer {
             },
             rv_b = (&mut recv_task) => {
                 match rv_b {
-                    Ok(_) => info!("All messages received"),
+                    // After a clean close the session forwards the stdin which
+                    // the client sent before, for a short time.
+                    Ok(true) => {
+                        info!("Client closed the connection");
+                        if time::timeout(STDIN_FLUSH_TIMEOUT, &mut send_task).await.is_err() {
+                            debug!("Session did not end after the close, stopping it");
+                        }
+                    }
+                    Ok(false) => info!("Client connection ended"),
                     Err(b) => error!("Error receiving messages: {b:?}")
                 }
                 send_task.abort();
@@ -349,7 +389,7 @@ impl StreamingServer {
     fn write_task(
         mut sender: SplitSink<WebSocket, Message>,
         stdin_rx: MpscReceiver<Bytes>,
-        resize_rx: MpscReceiver<Bytes>,
+        resize_rx: ResizeRx,
         session: Session,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
@@ -391,36 +431,64 @@ impl StreamingServer {
     fn read_task(
         mut receiver: SplitStream<WebSocket>,
         stdin_tx: MpscSender<Bytes>,
-        resize_tx: MpscSender<Bytes>,
-    ) -> JoinHandle<()> {
+        resize_tx: watch::Sender<Option<Bytes>>,
+    ) -> JoinHandle<bool> {
         tokio::spawn(async move {
-            while let Some(Ok(msg)) = receiver.next().await {
-                if Self::read_message(msg, &stdin_tx, &resize_tx)
-                    .await
-                    .is_break()
-                {
-                    break;
+            let mut pending = PendingStdin::default();
+            let mut closed = false;
+            loop {
+                select! {
+                    permit = stdin_tx.reserve(), if !pending.is_empty() => match permit {
+                        Ok(permit) => permit.send(pending.pop()),
+                        // The session ended, nothing takes stdin anymore.
+                        Err(_) => pending.clear(),
+                    },
+                    msg = receiver.next(), if !pending.is_full() => match msg {
+                        Some(Ok(msg)) => {
+                            if Self::read_message(msg, &mut pending, &resize_tx).is_break() {
+                                closed = true;
+                                break;
+                            }
+                        }
+                        _ => break,
+                    },
                 }
             }
+
+            // Stdin sent right before a clean close, like the close of the
+            // stream itself, still has to reach the container. Only for a
+            // short time, a container which does not read it must not delay
+            // the end of the session. A client which went away gets nothing
+            // forwarded anymore.
+            if closed {
+                let flush = async {
+                    while !pending.is_empty() {
+                        if stdin_tx.send(pending.pop()).await.is_err() {
+                            break;
+                        }
+                    }
+                };
+                if time::timeout(STDIN_FLUSH_TIMEOUT, flush).await.is_err() {
+                    debug!("Dropping stdin the container did not take after the close");
+                }
+            }
+            closed
         })
     }
 
     /// Read a single message and return the control flow decision.
-    async fn read_message(
+    fn read_message(
         msg: Message,
-        stdin_tx: &MpscSender<Bytes>,
-        resize_tx: &MpscSender<Bytes>,
+        pending: &mut PendingStdin,
+        resize_tx: &watch::Sender<Option<Bytes>>,
     ) -> ControlFlow<(), ()> {
         match msg {
             Message::Binary(data) if !data.is_empty() => {
                 debug!("Got {} binary bytes", data.len());
-                let tx = if data[0] == RESIZE_BYTE {
-                    resize_tx
+                if data[0] == RESIZE_BYTE {
+                    resize_tx.send_replace(Some(data));
                 } else {
-                    stdin_tx
-                };
-                if let Err(e) = tx.send(data).await {
-                    error!("Unable to send stdin data: {e}");
+                    pending.push(data);
                 }
             }
             Message::Close(c) => {
@@ -443,13 +511,9 @@ impl StreamingServer {
         ControlFlow::Continue(())
     }
 
-    /// The exec specific read/write loop.
-    async fn exec_loop(
-        mut session: ExecSession,
-        sender: &mut SplitSink<WebSocket, Message>,
-        mut stdin_rx: MpscReceiver<Bytes>,
-        mut resize_rx: MpscReceiver<Bytes>,
-    ) -> Result<()> {
+    /// Run the runtime of an exec session and register the process it
+    /// started.
+    async fn start_exec(mut session: ExecSession) -> Result<StartedExec> {
         let pidfile = ContainerIO::temp_file(
             Some(session.server_config.runtime_dir()),
             "exec_streaming",
@@ -468,7 +532,7 @@ impl StreamingServer {
             .context("exec sync args without command")?;
         args.extend(session.command);
 
-        let (grandchild_pid, token) = session
+        let res = session
             .child_reaper
             .create_child(
                 session.server_config.runtime(),
@@ -476,37 +540,31 @@ impl StreamingServer {
                 session.stdin,
                 &mut session.container_io,
                 pidfile.path(),
+                None,
                 vec![],
                 false,
                 vec![],
             )
-            .await
-            .context("create new child process")?;
+            .await;
+        let (grandchild_pid, token, call) = match res {
+            Ok(res) => res,
+            Err(e) => {
+                let e = session.container_io.runtime_error(e).await;
+                return Err(e.context("create new child process"));
+            }
+        };
         // The runtime wrote the PID, the file served its purpose.
         drop(pidfile);
+        // Not reaped before the registration below, so the PID is still its
+        // own.
+        let process = Process::open(Pid::from_raw(grandchild_pid as pid_t));
+        // Backpressure only now that the runtime finished, see
+        // `ContainerIO::consume_stdio`.
+        session.container_io.consume_stdio();
 
-        // Extract all values we need before dropping session to free
-        // server_config Arc and cgroup_manager before the I/O loop
-        let ExecSession {
-            stdin,
-            stdout,
-            stderr,
-            container_id,
-            container_io,
-            child_reaper,
-            server_config: _,
-            cgroup_manager: _,
-            command: _,
-        } = session;
-
-        let stdin_enabled = stdin;
-        let stdout_enabled = stdout;
-        let stderr_enabled = stderr;
-        let io = SharedContainerIO::new(container_io);
-        let child_reaper = child_reaper;
-
+        let io = SharedContainerIO::new(session.container_io);
         let child = Child {
-            id: container_id,
+            id: session.container_id,
             kind: ChildKind::Exec,
             pid: grandchild_pid,
             exit_paths: vec![],
@@ -516,24 +574,68 @@ impl StreamingServer {
             cleanup_cmd: vec![],
             token: token.clone(),
         };
-
-        let mut exit_rx = child_reaper
-            .watch_grandchild(child, vec![])
+        let exit_rx = session
+            .child_reaper
+            .watch_grandchild(child, vec![], call)
             .context("watch grandchild for pid")?;
 
-        let (stdout_rx, stderr_rx) = io
-            .stdio()
-            .await
-            .context("retrieve stdout and stderr channels")?;
+        let mut teardown = ExecTeardown {
+            stdio: None,
+            attach: io.attach().await,
+            token,
+            process,
+        };
+        teardown.stdio = Some(
+            io.stdio()
+                .await
+                .context("retrieve stdout and stderr channels")?,
+        );
+        Ok(StartedExec {
+            io,
+            exit_rx,
+            stdin_enabled: session.stdin,
+            stdout_enabled: session.stdout,
+            stderr_enabled: session.stderr,
+            teardown,
+        })
+    }
 
-        let attach = io.attach().await;
+    /// The exec specific read/write loop.
+    async fn exec_loop(
+        session: ExecSession,
+        sender: &mut SplitSink<WebSocket, Message>,
+        mut stdin_rx: MpscReceiver<Bytes>,
+        mut resize_rx: ResizeRx,
+    ) -> Result<()> {
+        // The runtime runs in a task of its own. A client which goes away
+        // meanwhile must not kill it halfway, the process it started still
+        // gets registered, and torn down once the task finished.
+        let StartedExec {
+            io,
+            mut exit_rx,
+            stdin_enabled,
+            stdout_enabled,
+            stderr_enabled,
+            teardown,
+        } = task::spawn(Self::start_exec(session))
+            .await
+            .context("join exec start")??;
+        let (stdout_rx, stderr_rx) = teardown.stdio.clone().context("no stdio channels")?;
+        let attach = teardown.attach.clone();
         let mut pending_stdin = None;
         let mut stdin_closed = false;
 
         // Streams which are disabled or whose read loop signalled the end are
-        // not polled anymore.
+        // not polled anymore. A disabled one is not read at all, so let its
+        // read loop discard the output instead of waiting.
         let mut stdout_done = !stdout_enabled;
         let mut stderr_done = !stderr_enabled;
+        if stdout_done {
+            stdout_rx.close();
+        }
+        if stderr_done {
+            stderr_rx.close();
+        }
 
         loop {
             tokio::select! {
@@ -555,8 +657,13 @@ impl StreamingServer {
 
                 // Resizing does not depend on stdin, a terminal without it
                 // still has a size.
-                Some(data) = resize_rx.recv() => {
-                    Self::handle_resize(&data, &io).await?;
+                Ok(()) = resize_rx.changed() => {
+                    let data = resize_rx.borrow_and_update().clone();
+                    if let Some(data) = data
+                        && let Err(e) = Self::handle_resize(&data, &io).await
+                    {
+                        warn!("Ignoring resize event: {e:#}");
+                    }
                 },
 
                 // Wait for the container to take the stdin without blocking the
@@ -565,15 +672,31 @@ impl StreamingServer {
                     pending_stdin = None
                 },
 
-                Some(data) = stdin_rx.recv(), if pending_stdin.is_none() => if stdin_enabled && !stdin_closed {
-                    match Self::handle_stdin(data) {
+                res = stdin_rx.recv(), if pending_stdin.is_none() => match res {
+                    // The client closed the connection, everything it sent
+                    // reached the process.
+                    None => break,
+                    Some(_) if !stdin_enabled || stdin_closed => {}
+                    Some(data) => match Self::handle_stdin(data) {
                         // The client closed its stdin. Close the process stdin
                         // as well and keep forwarding the output until it
-                        // exits, a terminal ends the session instead.
-                        ControlFlow::Break(()) if attach.close_container_stdin() => stdin_closed = true,
-                        ControlFlow::Break(()) => break,
+                        // exits. A terminal cannot be closed without ending
+                        // its output, it gets its end of file character
+                        // instead, like from a user pressing Ctrl-D. A process
+                        // reading lines sees the end of its input then, one
+                        // after a line without its ending needs a second one,
+                        // like a user would type it.
+                        ControlFlow::Break(()) => {
+                            stdin_closed = true;
+                            match io.terminal_eof().await {
+                                Some(eof) => pending_stdin = Some(Bytes::from(vec![eof])),
+                                None => {
+                                    attach.close_container_stdin();
+                                }
+                            }
+                        }
                         ControlFlow::Continue(stdin) => pending_stdin = stdin,
-                    }
+                    },
                 },
 
                 Ok(exit_data) = exit_rx.recv() => {
@@ -603,7 +726,7 @@ impl StreamingServer {
         session: AttachSession,
         sender: &mut SplitSink<WebSocket, Message>,
         mut stdin_rx: MpscReceiver<Bytes>,
-        mut resize_rx: MpscReceiver<Bytes>,
+        mut resize_rx: ResizeRx,
     ) -> Result<()> {
         // Extract values we need for the I/O loop
         let stdin_enabled = session.stdin;
@@ -655,8 +778,13 @@ impl StreamingServer {
 
                 // Resizing does not depend on stdin, a terminal without it
                 // still has a size.
-                Some(data) = resize_rx.recv() => {
-                    Self::handle_resize(&data, &io).await?;
+                Ok(()) = resize_rx.changed() => {
+                    let data = resize_rx.borrow_and_update().clone();
+                    if let Some(data) = data
+                        && let Err(e) = Self::handle_resize(&data, &io).await
+                    {
+                        warn!("Ignoring resize event: {e:#}");
+                    }
                 },
 
                 // Wait for the container to take the stdin without blocking the
@@ -665,8 +793,12 @@ impl StreamingServer {
                     pending_stdin = None
                 },
 
-                Some(data) = stdin_rx.recv(), if pending_stdin.is_none() => if stdin_enabled && !stdin_closed {
-                    match Self::handle_stdin(data) {
+                res = stdin_rx.recv(), if pending_stdin.is_none() => match res {
+                    // The client closed the connection, everything it sent
+                    // reached the container.
+                    None => break,
+                    Some(_) if !stdin_enabled || stdin_closed => {}
+                    Some(data) => match Self::handle_stdin(data) {
                         // The client closed its stdin. With stdin once, close
                         // the container stdin as well and keep forwarding the
                         // output until it ends.
@@ -675,7 +807,7 @@ impl StreamingServer {
                         }
                         ControlFlow::Break(()) => break,
                         ControlFlow::Continue(stdin) => pending_stdin = stdin,
-                    }
+                    },
                 },
 
                 _ = token.cancelled() => {
@@ -823,31 +955,128 @@ impl StreamingServer {
     }
 }
 
-/// Bounds forwarding the output after the container exited.
-struct Drain {
-    remaining: usize,
-}
+impl Session {
+    /// The kind of the session for the logs.
+    fn typ(&self) -> &'static str {
+        match self {
+            Session::Exec(_) => "exec",
+            Session::Attach(_) => "attach",
+        }
+    }
 
-impl Default for Drain {
-    fn default() -> Self {
-        Self {
-            remaining: DRAIN_MAX_MESSAGES,
+    fn container_id(&self) -> &str {
+        match self {
+            Session::Exec(s) => &s.container_id,
+            Session::Attach(s) => &s.container_id,
         }
     }
 }
 
-impl Drain {
-    /// Wait for the next message, giving up once the channel stays quiet for
-    /// `DRAIN_TIMEOUT` or `DRAIN_MAX_MESSAGES` were received.
-    async fn recv<F: Future>(&mut self, recv: F) -> Option<F::Output> {
-        let Some(remaining) = self.remaining.checked_sub(1) else {
-            warn!(
-                "Dropping remaining output after forwarding {DRAIN_MAX_MESSAGES} messages since the exit"
-            );
-            return None;
-        };
-        self.remaining = remaining;
-        timeout(DRAIN_TIMEOUT, recv).await.ok()
+/// Stdin of a client which the container did not take yet, bounded by
+/// [`PENDING_STDIN_MAX_BYTES`].
+#[derive(Debug, Default)]
+struct PendingStdin {
+    queue: VecDeque<Bytes>,
+    bytes: usize,
+}
+
+impl PendingStdin {
+    fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    /// Whether the client has to wait, which stops reading the socket.
+    fn is_full(&self) -> bool {
+        self.bytes >= PENDING_STDIN_MAX_BYTES
+    }
+
+    fn push(&mut self, data: Bytes) {
+        self.bytes += data.len();
+        self.queue.push_back(data);
+    }
+
+    /// The oldest message, callers check that there is one.
+    fn pop(&mut self) -> Bytes {
+        let data = self.queue.pop_front().unwrap_or_default();
+        self.bytes -= data.len();
+        data
+    }
+
+    fn clear(&mut self) {
+        self.queue.clear();
+        self.bytes = 0;
+    }
+}
+
+/// An exec process which got started and registered for a session.
+struct StartedExec {
+    io: SharedContainerIO,
+    exit_rx: broadcast::Receiver<ExitChannelData>,
+    stdin_enabled: bool,
+    stdout_enabled: bool,
+    stderr_enabled: bool,
+    teardown: ExecTeardown,
+}
+
+/// Ends an exec session however it ends, also if the client went away and
+/// the loop got aborted, or before the process even got started. The loop
+/// only ends before the exit of the process if the WebSocket is gone.
+struct ExecTeardown {
+    /// The stdout and stderr channels of the process.
+    stdio: Option<(IOReceiver<IOMessage>, IOReceiver<IOMessage>)>,
+    attach: SharedContainerAttach,
+
+    /// Cancelled once the process exited.
+    token: CancellationToken,
+
+    /// The process, which its watcher may reap before the token got
+    /// cancelled, so it does not get signalled by its PID.
+    process: Process,
+}
+
+impl Drop for ExecTeardown {
+    fn drop(&mut self) {
+        // Nothing forwards the output anymore, the read loops discard it
+        // instead of waiting for this session.
+        if let Some((stdout_rx, stderr_rx)) = &self.stdio {
+            stdout_rx.close();
+            stderr_rx.close();
+        }
+
+        if self.token.is_cancelled() {
+            return;
+        }
+        // Without a client the process would wait for stdin forever. Close
+        // it, like the end of the session would for a process started by the
+        // client itself. A terminal cannot be closed without ending its
+        // output, hang it up instead, like a closed connection does.
+        if !self.attach.close_container_stdin() {
+            self.hang_up();
+        }
+    }
+}
+
+impl ExecTeardown {
+    /// Hang up the terminal like a closed connection does: signal the process
+    /// group and the process. Only while the pidfd shows that the process
+    /// was not reaped yet, its group may be gone and taken by another one
+    /// otherwise.
+    fn hang_up(&self) {
+        let pid = self.process.pid();
+        if let Err(e) = self.process.signal(None) {
+            debug!("Not hanging up exec process {pid}, it is gone: {e}");
+            return;
+        }
+        debug!("Hanging up the terminal of exec process {pid}");
+        if let Ok(pgid) = getpgid(Some(pid))
+            && signals_group(pgid, getpgid(None).ok())
+            && let Err(e) = kill(Pid::from_raw(-pgid.as_raw()), Signal::SIGHUP)
+        {
+            debug!("Unable to hang up process group {pgid}: {e}");
+        }
+        if let Err(e) = self.process.signal(Signal::SIGHUP) {
+            debug!("Unable to hang up exec process {pid}: {e}");
+        }
     }
 }
 
@@ -855,19 +1084,81 @@ impl Drain {
 mod tests {
     use super::*;
     use crate::container_log::ContainerLog;
-    use tokio::time::Instant;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpStream,
+        task::LocalSet,
+    };
+
+    /// A masked client frame, as a WebSocket client sends it.
+    fn client_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
+        let mask = [1, 2, 3, 4];
+        let mut frame = vec![0x80 | opcode, 0x80 | payload.len() as u8];
+        frame.extend_from_slice(&mask);
+        frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+        frame
+    }
 
     #[tokio::test]
-    async fn drain_stops_on_busy_channel() {
-        let (tx, rx) = async_channel::bounded(16);
-        tokio::spawn(async move { while tx.send(()).await.is_ok() {} });
+    async fn stdin_before_close_reaches_the_container() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let io = SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?);
+                let (_, child) = ReapableChild::from_child(Child {
+                    id: "id".into(),
+                    kind: ChildKind::Container,
+                    pid: 0,
+                    exit_paths: vec![],
+                    oom_exit_paths: vec![],
+                    timeout: None,
+                    io: io.clone(),
+                    cleanup_cmd: vec![],
+                    token: CancellationToken::new(),
+                });
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                let url = server
+                    .attach_url("id".into(), child, true, true, false, false)
+                    .await;
+                let path = url
+                    .strip_prefix(&format!("http://{ADDR}:{}", server.port))
+                    .context("url")?;
 
-        let mut drain = Drain::default();
-        let mut received = 0;
-        while drain.recv(rx.recv()).await.is_some() {
-            received += 1;
-        }
-        assert_eq!(received, DRAIN_MAX_MESSAGES);
+                let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+                stream
+                    .write_all(
+                        format!(
+                            "GET {path} HTTP/1.1\r\nHost: {ADDR}\r\nUpgrade: websocket\r\n\
+                             Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+                             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                             Sec-WebSocket-Protocol: {PROTOCOL_V5}\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await?;
+                let mut response = vec![];
+                while !response.ends_with(b"\r\n\r\n") {
+                    response.push(stream.read_u8().await?);
+                }
+                assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 101"));
+
+                // More stdin than the channels on the way hold, right before
+                // the close, in one write.
+                let mut frames = vec![];
+                for i in 0..50u8 {
+                    frames.extend(client_frame(0x2, &[STDIN_BYTE, i]));
+                }
+                frames.extend(client_frame(0x8, &1000u16.to_be_bytes()));
+                stream.write_all(&frames).await?;
+
+                let mut attach = io.attach().await;
+                for i in 0..50u8 {
+                    let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
+                    assert_eq!(data, [i].as_slice());
+                }
+                Ok(())
+            })
+            .await
     }
 
     #[tokio::test]
@@ -889,27 +1180,78 @@ mod tests {
 
     #[test]
     fn stdin_messages_are_dispatched_by_their_first_byte() {
-        let stdin = StreamingServer::handle_stdin(Bytes::from_static(&[STDIN_BYTE, b'l', b's']));
-        assert_eq!(
-            stdin,
-            ControlFlow::Continue(Some(Bytes::from_static(b"ls")))
-        );
-
-        let close = StreamingServer::handle_stdin(Bytes::from_static(&[CLOSE_BYTE]));
-        assert_eq!(close, ControlFlow::Break(()));
-
-        // Unknown and empty messages are ignored.
-        let unknown = StreamingServer::handle_stdin(Bytes::from_static(&[42, b'x']));
-        assert_eq!(unknown, ControlFlow::Continue(None));
-        let empty = StreamingServer::handle_stdin(Bytes::new());
-        assert_eq!(empty, ControlFlow::Continue(None));
+        for (data, expected) in [
+            (
+                &[STDIN_BYTE, b'l', b's'][..],
+                ControlFlow::Continue(Some("ls")),
+            ),
+            (&[STDIN_BYTE], ControlFlow::Continue(Some(""))),
+            (&[CLOSE_BYTE], ControlFlow::Break(())),
+            (&[CLOSE_BYTE, b'x'], ControlFlow::Break(())),
+            // Unknown and empty messages are ignored.
+            (&[42, b'x'], ControlFlow::Continue(None)),
+            (&[], ControlFlow::Continue(None)),
+        ] {
+            let expected = expected.map_continue(|stdin: Option<&'static str>| {
+                stdin.map(|stdin| Bytes::from_static(stdin.as_bytes()))
+            });
+            assert_eq!(
+                StreamingServer::handle_stdin(Bytes::copy_from_slice(data)),
+                expected,
+                "{data:?}"
+            );
+        }
     }
 
-    #[tokio::test]
-    async fn drain_stops_on_quiet_channel() {
-        let (_tx, rx) = async_channel::bounded::<()>(1);
-        let start = Instant::now();
-        assert!(Drain::default().recv(rx.recv()).await.is_none());
-        assert!(start.elapsed() < Duration::from_secs(1));
+    #[test]
+    fn exit_code_error_message() -> Result<()> {
+        assert_eq!(
+            serde_json::to_string(&ErrorMessage::new(137))?,
+            r#"{"status":"Failure","reason":"NonZeroExitCode","details":{"causes":[{"reason":"ExitCode","message":"137"}]},"message":"command terminated with non-zero exit code"}"#
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resize_events_bypass_pending_stdin() {
+        let mut pending = PendingStdin::default();
+        let (resize_tx, resize_rx) = watch::channel(None);
+
+        let mut read = |data: &'static [u8]| {
+            StreamingServer::read_message(
+                Message::Binary(Bytes::from_static(data)),
+                &mut pending,
+                &resize_tx,
+            )
+        };
+        assert_eq!(read(&[STDIN_BYTE, b'a']), ControlFlow::Continue(()));
+        assert_eq!(read(&[RESIZE_BYTE, b'1']), ControlFlow::Continue(()));
+        assert_eq!(read(&[RESIZE_BYTE, b'2']), ControlFlow::Continue(()));
+
+        // Only the latest size is kept, the stdin waits on its own.
+        assert_eq!(
+            resize_rx.borrow().as_deref(),
+            Some(&[RESIZE_BYTE, b'2'][..])
+        );
+        assert_eq!(pending.pop(), Bytes::from_static(&[STDIN_BYTE, b'a']));
+        assert!(pending.is_empty());
+
+        let close = StreamingServer::read_message(Message::Close(None), &mut pending, &resize_tx);
+        assert_eq!(close, ControlFlow::Break(()));
+    }
+
+    #[test]
+    fn pending_stdin_is_bounded() {
+        let mut pending = PendingStdin::default();
+        pending.push(Bytes::from(vec![0; PENDING_STDIN_MAX_BYTES - 1]));
+        assert!(!pending.is_full());
+        pending.push(Bytes::from_static(b"x"));
+        assert!(pending.is_full());
+
+        assert_eq!(pending.pop().len(), PENDING_STDIN_MAX_BYTES - 1);
+        assert!(!pending.is_full());
+        pending.clear();
+        assert!(pending.is_empty());
+        assert_eq!(pending.bytes, 0);
     }
 }

@@ -256,14 +256,12 @@ dependencies = [
  "sendfd",
  "serde",
  "serde_json",
- "signal-hook",
  "tempfile",
  "time",
  "tokio",
  "tokio-eventfd",
  "tokio-seqpacket",
  "tokio-util",
- "tower-http",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
@@ -1242,16 +1240,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "signal-hook"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b29ffa27d3d59a049bb328258de100f8012848d1b08d444e08bbc02ac468435e"
-dependencies = [
- "libc",
- "signal-hook-registry",
-]
-
-[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1539,23 +1527,6 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-util",
- "tower-layer",
- "tower-service",
- "tracing",
-]
-
-[[package]]
-name = "tower-http"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08a05a66a4fdd61cbbe0a1d755ffe0ca6aba159dd4820936a0ff8a8278245b9c"
-dependencies = [
- "bitflags",
- "bytes",
- "http",
- "http-body",
- "percent-encoding",
- "pin-project-lite",
  "tower-layer",
  "tower-service",
  "tracing",

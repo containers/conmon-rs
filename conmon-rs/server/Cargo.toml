@@ -30,12 +30,10 @@ opentelemetry-semantic-conventions = { version = "0.33.1", default-features = fa
 sendfd = { version = "0.4.5", default-features = false, features = ["tokio"] }
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
-signal-hook = { version = "0.4.5", default-features = false, features = ["iterator"] }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "signal", "time"] }
 tokio-eventfd = { version = "0.2.2", default-features = false }
 tokio-seqpacket = { version = "0.9.1", default-features = false }
 tokio-util = { version = "0.7.20", default-features = false, features = ["compat"] }
-tower-http = { version = "0.7.1", default-features = false, features = ["trace"] }
 tracing = { version = "0.1.44", default-features = false }
 tracing-opentelemetry = { version = "0.34.0", default-features = false, optional = true }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt"] }
@@ -57,7 +55,7 @@ tracing = [
 mockall = { version = "0.15.0", default-features = false }
 tempfile = { version = "3.27.0", default-features = false }
 time = { version = "0.3.55", default-features = false, features = ["parsing"] }
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
 [build-dependencies]
 capnp = { workspace = true }

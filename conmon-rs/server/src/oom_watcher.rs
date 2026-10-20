@@ -8,7 +8,7 @@ use notify::{
 use std::{
     collections::HashMap,
     fs::File as StdFile,
-    io::{BufRead, BufReader},
+    io::{self, BufRead, BufReader},
     os::fd::AsRawFd,
     path::{Path, PathBuf},
     sync::{
@@ -18,10 +18,11 @@ use std::{
 };
 use tokio::{
     fs::{File, OpenOptions},
-    io::{AsyncReadExt, AsyncWriteExt, ErrorKind},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ErrorKind},
     runtime::Handle,
     sync::mpsc::{Receiver, Sender, channel},
     task,
+    time::{self, Duration},
 };
 use tokio_eventfd::EventFd;
 use tokio_util::sync::CancellationToken;
@@ -66,6 +67,50 @@ pub struct OOMEvent {
     pub oom: bool,
 }
 
+/// The state of a cgroup v1 `memory.oom_control` file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct OomControl {
+    /// Whether the OOM killer is disabled, tasks wait in the OOM then.
+    kill_disable: bool,
+
+    /// Whether the cgroup is in an OOM right now.
+    under_oom: bool,
+
+    /// Processes killed in this cgroup, kernels before 4.13 have no counter.
+    oom_kill: Option<u64>,
+}
+
+impl OomControl {
+    fn parse(content: &str) -> Self {
+        let mut control = Self::default();
+        for line in content.lines() {
+            let Some((key, value)) = line.split_once(' ') else {
+                continue;
+            };
+            let value = value.trim().parse::<u64>().ok();
+            match key {
+                "oom_kill_disable" => control.kill_disable = value.is_some_and(|v| v != 0),
+                "under_oom" => control.under_oom = value.is_some_and(|v| v != 0),
+                "oom_kill" => control.oom_kill = value,
+                _ => {}
+            }
+        }
+        control
+    }
+}
+
+/// The outcome of confirming a cgroup v1 OOM event.
+#[derive(Debug, PartialEq, Eq)]
+enum Confirmation {
+    Oom,
+    /// The cgroup was already gone at the event, which removal signals.
+    Removed,
+    /// No kill showed up while the cgroup exists.
+    Unconfirmed,
+    /// The process exited while confirming.
+    Exited,
+}
+
 impl OOMWatcher {
     pub fn new(
         token: &CancellationToken,
@@ -105,6 +150,8 @@ impl OOMWatcher {
         exit_paths: &[PathBuf],
         tx: Sender<OOMEvent>,
     ) -> Result<()> {
+        // The setup reads procfs and cgroupfs inline, which does not block,
+        // instead of adding a blocking task to every container and exec.
         let memory_cgroup_path = if let Some(path) =
             Self::process_cgroup_subsystem_path_cgroup_v1(pid, "memory")
                 .context("process cgroup memory subsystem path")?
@@ -126,12 +173,23 @@ impl OOMWatcher {
 
         debug!(path, "Setup cgroup v1 oom handling");
 
+        // Taken before registering, an OOM in between is found by the check on
+        // exit. Unknown without the counter or if it cannot be read, then
+        // every event counts.
+        let baseline = match Self::read_oom_control(&memory_cgroup_file_oom_path) {
+            Ok(control) => control.oom_kill,
+            Err(e) => {
+                debug!("Could not read initial OOM kills: {:#}", e);
+                None
+            }
+        };
+
         let oom_cgroup_file = OpenOptions::new()
             .write(true)
-            .open(memory_cgroup_file_oom_path)
+            .open(&memory_cgroup_file_oom_path)
             .await
             .context("opening cgroup oom file")?;
-        let mut oom_event_fd = EventFd::new(0, false).context("creating eventfd")?;
+        let oom_event_fd = EventFd::new(0, false).context("creating eventfd")?;
 
         let mut event_control = OpenOptions::new()
             .write(true)
@@ -153,21 +211,171 @@ impl OOMWatcher {
 
         debug!("Successfully setup cgroup v1 oom detection");
 
-        let mut buffer = [0u8; 16];
-        tokio::select! {
-            _ = token.cancelled() => {
-                debug!("Loop cancelled");
-                let _ = tx.try_send(OOMEvent{ oom: false });
-            }
-            _ = oom_event_fd.read(&mut buffer) => {
-                debug!("Got oom event");
-                Self::write_oom_files(exit_paths).await;
-                let _ = tx.try_send(OOMEvent{ oom: true });
-            }
+        let found_oom =
+            Self::watch_cgroup_v1(&token, oom_event_fd, &memory_cgroup_file_oom_path, baseline)
+                .await;
+        if found_oom {
+            Self::write_oom_files(exit_paths).await;
+        }
+        if let Err(e) = tx.try_send(OOMEvent { oom: found_oom }) {
+            error!("try_send failed: {:#}", e);
         }
 
         debug!("Done watching for ooms");
         Ok(())
+    }
+
+    /// Wait for an OOM of a cgroup v1 memory controller until `token` gets
+    /// cancelled and return whether one happened.
+    ///
+    /// The eventfd also fires for an OOM of an ancestor cgroup, whose victim
+    /// may be a sibling container, and once when the cgroup gets removed. So
+    /// an event gets confirmed by the `oom_kill` counter of the cgroup. The
+    /// kernel signals the eventfd before it kills, so the counter is read
+    /// again a few times. It is not hierarchical either, a victim in a memcg
+    /// nested inside the container is not counted, which `under_oom` covers.
+    /// A missed OOM is worse than a rare false one, like conmon: an event
+    /// counts without a known baseline or counter, and if the cgroup goes
+    /// away or the process exits while the event gets confirmed. An event
+    /// which stayed unconfirmed, like an OOM of a sibling, does not count
+    /// later, a normal stop would be taken for an OOM otherwise.
+    async fn watch_cgroup_v1(
+        token: &CancellationToken,
+        mut event_fd: impl AsyncRead + Unpin,
+        oom_control: &Path,
+        baseline: Option<u64>,
+    ) -> bool {
+        let mut buffer = [0u8; 8];
+        loop {
+            tokio::select! {
+                // An OOM kill often ends the process, which cancels the token.
+                // Handle the event first then.
+                biased;
+                res = event_fd.read(&mut buffer) => {
+                    let count = match res {
+                        Ok(n) if n == buffer.len() => u64::from_ne_bytes(buffer),
+                        res => {
+                            debug!("Unable to read OOM eventfd, checking on exit only: {res:?}");
+                            break;
+                        }
+                    };
+                    debug!("Got OOM event, count {count}");
+                    match Self::confirm_oom_event(token, oom_control, baseline).await {
+                        Confirmation::Oom => return true,
+                        Confirmation::Removed => {
+                            // Removing the cgroup signals the eventfd once. A
+                            // count above that means an OOM was signalled before.
+                            debug!("Memory cgroup removed");
+                            return count > 1;
+                        }
+                        Confirmation::Unconfirmed => {
+                            debug!("OOM event without a kill in this cgroup");
+                        }
+                        Confirmation::Exited => {
+                            return Self::check_oom_on_exit(oom_control, baseline, true).await;
+                        }
+                    }
+                }
+                _ = token.cancelled() => {
+                    debug!("Loop cancelled");
+                    return Self::check_oom_on_exit(oom_control, baseline, false).await;
+                }
+            }
+        }
+        token.cancelled().await;
+        Self::check_oom_on_exit(oom_control, baseline, false).await
+    }
+
+    /// The delays between the reads which confirm an OOM event.
+    const CONFIRM_BACKOFF: [Duration; 4] = [
+        Duration::from_millis(10),
+        Duration::from_millis(50),
+        Duration::from_millis(250),
+        Duration::from_secs(1),
+    ];
+
+    /// Confirm an eventfd event of a cgroup v1 memory controller, see
+    /// [`OOMWatcher::watch_cgroup_v1`].
+    async fn confirm_oom_event(
+        token: &CancellationToken,
+        oom_control: &Path,
+        baseline: Option<u64>,
+    ) -> Confirmation {
+        let Some(baseline) = baseline else {
+            debug!("No OOM kill baseline, taking the event as OOM");
+            return Confirmation::Oom;
+        };
+        let mut delays = Self::CONFIRM_BACKOFF.into_iter();
+        let mut first = true;
+        loop {
+            match Self::read_oom_control(oom_control) {
+                // A cgroup which goes away while the event gets confirmed
+                // counts, a removal on its own does not.
+                Err(e) if e.kind() == ErrorKind::NotFound => {
+                    return if first {
+                        Confirmation::Removed
+                    } else {
+                        Confirmation::Oom
+                    };
+                }
+                Err(e) => {
+                    debug!("Unable to read OOM kills, taking the event as OOM: {:#}", e);
+                    return Confirmation::Oom;
+                }
+                Ok(control) => match control.oom_kill {
+                    Some(kills) if kills > baseline => return Confirmation::Oom,
+                    None => return Confirmation::Oom,
+                    // Without the OOM killer the tasks wait in the OOM.
+                    Some(_) if control.kill_disable && control.under_oom => {
+                        return Confirmation::Oom;
+                    }
+                    Some(_) => match delays.next() {
+                        Some(delay) => {
+                            first = false;
+                            tokio::select! {
+                                _ = time::sleep(delay) => {}
+                                // The counter is final once the process exited.
+                                _ = token.cancelled() => return Confirmation::Exited,
+                            }
+                        }
+                        // A victim in a nested memcg, which the counter of
+                        // this cgroup does not count.
+                        None if control.under_oom => return Confirmation::Oom,
+                        None => return Confirmation::Unconfirmed,
+                    },
+                },
+            }
+        }
+    }
+
+    /// Check for an OOM kill a last time once the process exited. An event
+    /// whose confirmation the exit interrupted counts if the cgroup is gone
+    /// or still under OOM.
+    async fn check_oom_on_exit(
+        oom_control: &Path,
+        baseline: Option<u64>,
+        confirming: bool,
+    ) -> bool {
+        match Self::read_oom_control(oom_control) {
+            // Without a baseline the counter tells nothing, it may stem from
+            // before the container. An event took that into account already.
+            Ok(control) => {
+                baseline
+                    .zip(control.oom_kill)
+                    .is_some_and(|(baseline, kills)| kills > baseline)
+                    || (confirming && control.under_oom)
+            }
+            Err(e) => {
+                debug!("Unable to read OOM kills on exit: {:#}", e);
+                confirming
+            }
+        }
+    }
+
+    /// Read a cgroup v1 `memory.oom_control` file. Inline like the other
+    /// cgroupfs reads, they do not block.
+    fn read_oom_control(path: &Path) -> io::Result<OomControl> {
+        Ok(OomControl::parse(&std::fs::read_to_string(path)?))
     }
 
     async fn oom_handling_cgroup_v2(
@@ -176,6 +384,8 @@ impl OOMWatcher {
         exit_paths: &[PathBuf],
         tx: Sender<OOMEvent>,
     ) -> Result<()> {
+        // The setup reads procfs and cgroupfs inline, which does not block,
+        // instead of adding a blocking task to every container and exec.
         let subsystem_path = if let Some(path) = Self::process_cgroup_subsystem_path_cgroup_v2(pid)
             .context("process cgroup subsystem path")?
         {
@@ -199,18 +409,7 @@ impl OOMWatcher {
         // sibling would be reported for this container. Prefer
         // memory.events.local, the counters in memory.events include events
         // from below, and fall back on kernels without the local file.
-        let parent_path = subsystem_path
-            .parent()
-            .filter(|_| Self::is_only_child(&subsystem_path))
-            .and_then(|parent| {
-                [
-                    parent.join("memory.events.local"),
-                    parent.join("memory.events"),
-                ]
-                .into_iter()
-                .find(|path| path.exists())
-            });
-        let mut parent_events = parent_path.map(MemoryEvents::new);
+        let mut parent_events = Self::wrapper_events_path(&subsystem_path).map(MemoryEvents::new);
 
         let path = events.path.to_str();
         debug!(path, "Setup cgroup v2 handling");
@@ -392,6 +591,20 @@ impl OOMWatcher {
         }
     }
 
+    /// The memory events file of the parent of `leaf`, if it merely wraps it.
+    fn wrapper_events_path(leaf: &Path) -> Option<PathBuf> {
+        leaf.parent()
+            .filter(|_| Self::is_only_child(leaf))
+            .and_then(|parent| {
+                [
+                    parent.join("memory.events.local"),
+                    parent.join("memory.events"),
+                ]
+                .into_iter()
+                .find(|path| path.exists())
+            })
+    }
+
     /// Whether the parent of `leaf` contains no other cgroup than `leaf`, so
     /// that it merely wraps it. The memory limit cannot tell the layouts
     /// apart, crun applies it to both the wrapper and the leaf. A parent
@@ -488,18 +701,8 @@ impl OOMWatcher {
         if let Some(fp) = Self::try_open_cgroup_path(pid)? {
             for line in BufReader::new(fp).lines() {
                 let line = line.context("read line from cgroup file")?;
-                let mut iter = line.split(':').skip(1);
-
-                let system = iter.next().context("no system found in cgroup")?;
-                let path = iter
-                    .next()
-                    .context("no path found in cgroup")?
-                    .strip_prefix("/")
-                    .context("strip root path prefix")?
-                    .trim_end();
-
-                if system.contains(subsystem) || system.is_empty() {
-                    return Ok(PathBuf::from(CGROUP_ROOT).join(subsystem).join(path).into());
+                if let Some(path) = Self::cgroup_v1_path(&line, subsystem)? {
+                    return Ok(path.into());
                 }
             }
 
@@ -516,19 +719,40 @@ impl OOMWatcher {
                 .next()
                 .context("get next line")?
                 .context("read line from cgroup file")?;
-            return Ok(Path::new(CGROUP_ROOT)
-                .join(
-                    line.split(':')
-                        .nth(2)
-                        .context("no path found in cgroup")?
-                        .strip_prefix("/")
-                        .context("strip root path prefix")?
-                        .trim_end(),
-                )
-                .into());
+            return Self::cgroup_v2_path(&line).map(Some);
         }
 
         Ok(None)
+    }
+
+    /// The cgroupfs path of `subsystem` if the `/proc/<pid>/cgroup` line
+    /// `hierarchy-ID:controller-list:cgroup-path` is the one of its hierarchy.
+    /// The path may contain colons itself.
+    fn cgroup_v1_path(line: &str, subsystem: &str) -> Result<Option<PathBuf>> {
+        let mut iter = line.splitn(3, ':').skip(1);
+        let controllers = iter.next().context("no system found in cgroup")?;
+        let path = Self::strip_cgroup_root(iter.next())?;
+
+        if controllers.is_empty() || controllers.split(',').any(|c| c == subsystem) {
+            return Ok(Some(Path::new(CGROUP_ROOT).join(subsystem).join(path)));
+        }
+        Ok(None)
+    }
+
+    /// The cgroupfs path of the unified hierarchy line `0::cgroup-path` of
+    /// `/proc/<pid>/cgroup`.
+    fn cgroup_v2_path(line: &str) -> Result<PathBuf> {
+        let path = Self::strip_cgroup_root(line.splitn(3, ':').nth(2))?;
+        Ok(Path::new(CGROUP_ROOT).join(path))
+    }
+
+    /// The cgroup path relative to the root of its hierarchy.
+    fn strip_cgroup_root(path: Option<&str>) -> Result<&str> {
+        Ok(path
+            .context("no path found in cgroup")?
+            .strip_prefix("/")
+            .context("strip root path prefix")?
+            .trim_end())
     }
 
     fn try_open_cgroup_path(pid: u32) -> Result<Option<StdFile>> {
@@ -561,6 +785,9 @@ impl MemoryEvents {
     }
 
     /// Whether the counters increased since the last OOM found.
+    ///
+    /// The cgroupfs read does not block, so it runs inline instead of adding a
+    /// blocking task to every exit of a container or exec.
     fn check(&mut self) -> bool {
         match OOMWatcher::check_for_oom(&self.path, self.last) {
             Ok((counters, true)) => {
@@ -881,7 +1108,17 @@ mod tests {
         let (tx2, _rx2) = channel(WATCH_EVENT_CHANNEL_SIZE);
         let sub2 = watcher.subscribe(file.path(), tx2).await?;
         drop(sub2);
-        sleep(Duration::from_millis(200)).await;
+        // Unsubscribing happens on the blocking pool, wait until it is done.
+        for _ in 0..200 {
+            if lock(&watcher.subscribers)?
+                .get(file.path())
+                .is_some_and(|subs| subs.len() == 1)
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(lock(&watcher.subscribers)?[file.path()].len(), 1);
 
         file.write_all(b"oom 1\n")?;
         file.flush()?;
@@ -977,6 +1214,284 @@ mod tests {
             .increased_since(&counters)
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn cgroup_paths_from_proc_lines() -> Result<()> {
+        let root = Path::new(CGROUP_ROOT);
+        assert_eq!(
+            OOMWatcher::cgroup_v1_path("4:memory:/kubepods/pod/ctr\n", "memory")?,
+            Some(root.join("memory/kubepods/pod/ctr"))
+        );
+        assert_eq!(
+            OOMWatcher::cgroup_v1_path("3:cpuset,memory:/a:b", "memory")?,
+            Some(root.join("memory/a:b"))
+        );
+        // A controller only matches as a whole.
+        assert_eq!(
+            OOMWatcher::cgroup_v1_path("7:memory_extra:/x", "memory")?,
+            None
+        );
+        assert_eq!(
+            OOMWatcher::cgroup_v1_path("5:cpu,cpuacct:/x", "memory")?,
+            None
+        );
+        assert!(OOMWatcher::cgroup_v1_path("5:memory", "memory").is_err());
+        assert!(OOMWatcher::cgroup_v1_path("5:memory:relative", "memory").is_err());
+
+        assert_eq!(
+            OOMWatcher::cgroup_v2_path("0::/kubepods.slice/crio-1:2.scope\n")?,
+            root.join("kubepods.slice/crio-1:2.scope")
+        );
+        assert_eq!(OOMWatcher::cgroup_v2_path("0::/")?, root.to_path_buf());
+        assert!(OOMWatcher::cgroup_v2_path("0:").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_oom_control() {
+        assert_eq!(
+            OomControl::parse("oom_kill_disable 0\nunder_oom 0\noom_kill 3\n"),
+            OomControl {
+                kill_disable: false,
+                under_oom: false,
+                oom_kill: Some(3),
+            }
+        );
+        // Kernels before 4.13 have no counter.
+        assert_eq!(
+            OomControl::parse("oom_kill_disable 1\nunder_oom 1\n"),
+            OomControl {
+                kill_disable: true,
+                under_oom: true,
+                oom_kill: None,
+            }
+        );
+    }
+
+    /// A fake memory cgroup v1 with its `memory.oom_control` and a pipe which
+    /// stands in for the eventfd.
+    struct FakeCgroupV1 {
+        dir: tempfile::TempDir,
+        event_tx: tokio::io::DuplexStream,
+        event_rx: Option<tokio::io::DuplexStream>,
+        token: CancellationToken,
+    }
+
+    impl FakeCgroupV1 {
+        fn new(oom_control: &str) -> Result<Self> {
+            let dir = tempfile::tempdir()?;
+            std::fs::write(dir.path().join("memory.oom_control"), oom_control)?;
+            let (event_tx, event_rx) = tokio::io::duplex(64);
+            Ok(Self {
+                dir,
+                event_tx,
+                event_rx: Some(event_rx),
+                token: CancellationToken::new(),
+            })
+        }
+
+        fn path(&self) -> PathBuf {
+            self.dir.path().join("memory.oom_control")
+        }
+
+        fn set(&self, oom_control: &str) -> Result<()> {
+            Ok(std::fs::write(self.path(), oom_control)?)
+        }
+
+        /// Signal the eventfd `count` times since the last read.
+        async fn signal(&mut self, count: u64) -> Result<()> {
+            Ok(self.event_tx.write_all(&count.to_ne_bytes()).await?)
+        }
+
+        fn watch(&mut self, baseline: Option<u64>) -> task::JoinHandle<bool> {
+            let event_rx = self.event_rx.take().expect("watched once");
+            let token = self.token.clone();
+            let path = self.path();
+            task::spawn(async move {
+                OOMWatcher::watch_cgroup_v1(&token, event_rx, &path, baseline).await
+            })
+        }
+    }
+
+    const KILLS_0: &str = "oom_kill_disable 0\nunder_oom 0\noom_kill 0\n";
+    const KILLS_1: &str = "oom_kill_disable 0\nunder_oom 0\noom_kill 1\n";
+
+    #[tokio::test]
+    async fn cgroup_v1_event_with_kill_is_oom() -> Result<()> {
+        let mut cgroup = FakeCgroupV1::new(KILLS_0)?;
+        let watch = cgroup.watch(Some(0));
+        cgroup.set(KILLS_1)?;
+        cgroup.signal(1).await?;
+        assert!(timeout(Duration::from_secs(5), watch).await??);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cgroup_v1_event_without_kill_is_no_oom() -> Result<()> {
+        // An OOM of the pod cgroup notifies this one too, the victim was a
+        // sibling.
+        let mut cgroup = FakeCgroupV1::new(KILLS_1)?;
+        let watch = cgroup.watch(Some(1));
+        cgroup.signal(1).await?;
+        cgroup.token.cancel();
+        assert!(!timeout(Duration::from_secs(5), watch).await??);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cgroup_v1_kill_found_on_exit() -> Result<()> {
+        // Whether the event got handled before or not, the kill counts.
+        let mut cgroup = FakeCgroupV1::new(KILLS_0)?;
+        let watch = cgroup.watch(Some(0));
+        cgroup.signal(1).await?;
+        cgroup.set(KILLS_1)?;
+        cgroup.token.cancel();
+        assert!(timeout(Duration::from_secs(5), watch).await??);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cgroup_v1_removal_is_no_oom() -> Result<()> {
+        let mut cgroup = FakeCgroupV1::new(KILLS_0)?;
+        let watch = cgroup.watch(Some(0));
+        std::fs::remove_file(cgroup.path())?;
+        cgroup.signal(1).await?;
+        // No exit needed, the watch ends with the cgroup.
+        assert!(!timeout(Duration::from_secs(5), watch).await??);
+
+        // A notification which came before the removal is one.
+        let mut cgroup = FakeCgroupV1::new(KILLS_0)?;
+        let watch = cgroup.watch(Some(0));
+        std::fs::remove_file(cgroup.path())?;
+        cgroup.signal(2).await?;
+        assert!(timeout(Duration::from_secs(5), watch).await??);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cgroup_v1_event_without_counter_is_oom() -> Result<()> {
+        let mut cgroup = FakeCgroupV1::new("oom_kill_disable 0\nunder_oom 1\n")?;
+        let watch = cgroup.watch(None);
+        cgroup.signal(1).await?;
+        assert!(timeout(Duration::from_secs(5), watch).await??);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cgroup_v1_broken_eventfd_checks_on_exit() -> Result<()> {
+        let mut cgroup = FakeCgroupV1::new(KILLS_0)?;
+        let watch = cgroup.watch(Some(0));
+        // A short read is no event.
+        cgroup.event_tx.write_all(&[1]).await?;
+        cgroup.event_tx.shutdown().await?;
+        cgroup.set(KILLS_1)?;
+        cgroup.token.cancel();
+        assert!(timeout(Duration::from_secs(5), watch).await??);
+        Ok(())
+    }
+
+    /// Longer than all reads which confirm an event.
+    const CONFIRM_TIME: Duration = Duration::from_secs(2);
+
+    #[tokio::test(start_paused = true)]
+    async fn cgroup_v1_kill_counted_after_event() -> Result<()> {
+        // The kernel signals before it kills, the counter follows later.
+        let mut cgroup = FakeCgroupV1::new(KILLS_0)?;
+        let watch = cgroup.watch(Some(0));
+        cgroup.signal(1).await?;
+        sleep(Duration::from_millis(30)).await;
+        cgroup.set(KILLS_1)?;
+        assert!(timeout(Duration::from_secs(5), watch).await??);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cgroup_v1_removed_while_confirming_is_oom() -> Result<()> {
+        // systemd removes the scope before the kill showed up.
+        let mut cgroup = FakeCgroupV1::new(KILLS_0)?;
+        let watch = cgroup.watch(Some(0));
+        cgroup.signal(1).await?;
+        sleep(Duration::from_millis(30)).await;
+        std::fs::remove_file(cgroup.path())?;
+        assert!(timeout(Duration::from_secs(5), watch).await??);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cgroup_v1_removal_after_unconfirmed_event_is_no_oom() -> Result<()> {
+        // A sibling got killed and this container survived it, a later
+        // normal stop removes the cgroup.
+        let mut cgroup = FakeCgroupV1::new(KILLS_0)?;
+        let watch = cgroup.watch(Some(0));
+        cgroup.signal(1).await?;
+        sleep(CONFIRM_TIME).await;
+        assert!(!watch.is_finished());
+
+        // Gone before the exit check.
+        std::fs::remove_file(cgroup.path())?;
+        cgroup.token.cancel();
+        assert!(!timeout(Duration::from_secs(5), watch).await??);
+
+        // Also if the removal signals the eventfd first.
+        let mut cgroup = FakeCgroupV1::new(KILLS_0)?;
+        let watch = cgroup.watch(Some(0));
+        cgroup.signal(1).await?;
+        sleep(CONFIRM_TIME).await;
+        std::fs::remove_file(cgroup.path())?;
+        cgroup.signal(1).await?;
+        assert!(!timeout(Duration::from_secs(5), watch).await??);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cgroup_v1_unconfirmed_event_of_existing_cgroup_is_no_oom() -> Result<()> {
+        // A sibling got killed, the cgroup stays and is not under OOM.
+        let mut cgroup = FakeCgroupV1::new(KILLS_0)?;
+        let watch = cgroup.watch(Some(0));
+        cgroup.signal(1).await?;
+        sleep(CONFIRM_TIME).await;
+        cgroup.token.cancel();
+        assert!(!timeout(Duration::from_secs(5), watch).await??);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cgroup_v1_unknown_baseline_is_no_oom_on_exit() -> Result<()> {
+        // Kills from before the container, without an event since.
+        let mut cgroup = FakeCgroupV1::new("oom_kill_disable 0\nunder_oom 0\noom_kill 5\n")?;
+        let watch = cgroup.watch(None);
+        cgroup.token.cancel();
+        assert!(!timeout(Duration::from_secs(5), watch).await??);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cgroup_v1_under_oom_is_oom() -> Result<()> {
+        // The victim is in a nested memcg, which the counter misses.
+        let mut cgroup = FakeCgroupV1::new("oom_kill_disable 0\nunder_oom 1\noom_kill 0\n")?;
+        let watch = cgroup.watch(Some(0));
+        cgroup.signal(1).await?;
+        assert!(timeout(Duration::from_secs(5), watch).await??);
+
+        // Without the OOM killer the tasks wait in the OOM, which counts
+        // right away.
+        let mut cgroup = FakeCgroupV1::new("oom_kill_disable 1\nunder_oom 1\noom_kill 0\n")?;
+        let start = time::Instant::now();
+        let watch = cgroup.watch(Some(0));
+        cgroup.signal(1).await?;
+        assert!(timeout(Duration::from_secs(5), watch).await??);
+        assert!(start.elapsed() < OOMWatcher::CONFIRM_BACKOFF[0]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cgroup_v1_unknown_baseline_takes_event_as_oom() -> Result<()> {
+        let mut cgroup = FakeCgroupV1::new(KILLS_1)?;
+        let watch = cgroup.watch(None);
+        cgroup.signal(1).await?;
+        assert!(timeout(Duration::from_secs(5), watch).await??);
         Ok(())
     }
 }

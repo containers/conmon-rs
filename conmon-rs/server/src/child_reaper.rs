@@ -1,12 +1,15 @@
 //! Child process reaping and management.
 use crate::fd_mapping::{CommandFdExt, FdMapping};
 use crate::{
-    child::{Child, ChildKind},
-    container_io::{ContainerIO, ContainerIOType, SharedContainerIO},
+    attach::SharedContainerAttach,
+    child::{Child, ChildKind, sleep_until},
+    container_io::{ContainerIO, ContainerIOType, DRAIN_TIMEOUT, Message, SharedContainerIO},
+    init,
     mutex::lock,
     oom_watcher::OOMWatcher,
+    process::pidfd_open,
 };
-use anyhow::{Context, Result, format_err};
+use anyhow::{Context, Result, bail, format_err};
 use futures::future::join_all;
 use libc::pid_t;
 use nix::{
@@ -21,11 +24,14 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::OsStr,
     fmt::Debug,
-    os::fd::{FromRawFd, OwnedFd, RawFd},
+    os::fd::{OwnedFd, RawFd},
     path::{Path, PathBuf},
     process::Stdio,
     str,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
 };
 use tokio::{
@@ -36,14 +42,14 @@ use tokio::{
     signal::unix::{SignalKind, signal},
     sync::{
         Notify,
-        broadcast::{self, Receiver},
-        oneshot,
+        broadcast::{self, Receiver, error::RecvError},
+        oneshot, watch,
     },
     task::{self, JoinHandle},
     time::{self, Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, debug_span, error};
+use tracing::{Instrument, debug, debug_span, error, warn};
 
 #[derive(Debug, Default)]
 pub struct ChildReaper {
@@ -57,6 +63,33 @@ pub struct ChildReaper {
     /// Wakes the orphan sweep up early, for example after a failed runtime
     /// call or on shutdown.
     sweep: Arc<Notify>,
+
+    /// Set by the shutdown while it holds the lock of the grandchildren, so a
+    /// child registered later knows that the shutdown missed it.
+    shutting_down: AtomicBool,
+
+    /// The runtime calls in progress, including the registration of their
+    /// child, which the shutdown waits for.
+    in_flight: Arc<watch::Sender<usize>>,
+
+    /// The watchers of children registered after the shutdown took its
+    /// snapshot, which it waits for as well.
+    late_watchers: Mutex<Vec<TaskHandle>>,
+}
+
+/// Counts a runtime call as in progress until dropped. A successful
+/// [`ChildReaper::create_child`] hands it to the caller, which passes it to
+/// [`ChildReaper::watch_grandchild`], so the call ends with the registration
+/// of its child, or wherever the caller gives up.
+#[derive(Debug)]
+pub struct InFlight(Option<Arc<watch::Sender<usize>>>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if let Some(in_flight) = &self.0 {
+            in_flight.send_modify(|n| *n = n.saturating_sub(1));
+        }
+    }
 }
 
 /// Marks a PID as pending for the lifetime of the guard.
@@ -121,17 +154,23 @@ impl ChildReaper {
         stdin: bool,
         container_io: &mut ContainerIO,
         pidfile: &Path,
+        runtime_deadline: Option<Instant>,
         env_vars: Vec<(String, String)>,
         relays_notify: bool,
         additional_fds: Vec<OwnedFd>,
-    ) -> Result<(u32, CancellationToken)>
+    ) -> Result<(u32, CancellationToken, InFlight)>
     where
         P: AsRef<OsStr> + Debug,
         I: IntoIterator<Item = S> + Debug,
         S: AsRef<OsStr>,
     {
+        let in_flight = self.begin_call()?;
         debug!("Running: {:?} {:?}", cmd, args);
         let mut cmd = Command::new(cmd);
+        // A runtime which gets dropped, for example on a panic, must not keep
+        // running unobserved.
+        cmd.kill_on_drop(true);
+        init::reset_oom_score(&mut cmd);
 
         if stdin {
             cmd.stdin(Stdio::piped());
@@ -176,6 +215,9 @@ impl ChildReaper {
 
         let token = CancellationToken::new();
 
+        // How long a runtime which failed before it exited may take to exit on
+        // its own, none once its deadline passed.
+        let mut grace = Self::CONNECT_AFTER_EXIT_TIMEOUT;
         let connected = match container_io.typ_mut() {
             ContainerIOType::Terminal(terminal) => {
                 // The runtime connects to the console socket before it exits.
@@ -184,6 +226,10 @@ impl ChildReaper {
                 select! {
                     res = terminal.wait_connected(stdin, token.clone()) => {
                         res.context("wait for terminal socket connection")
+                    }
+                    () = sleep_until(runtime_deadline) => {
+                        grace = Duration::ZERO;
+                        Err(format_err!("runtime did not finish in time"))
                     }
                     status = child.wait() => match status.context("wait for child") {
                         // The runtime succeeded, so it did connect and the
@@ -210,11 +256,22 @@ impl ChildReaper {
             }
         };
 
+        let connected = match (connected, runtime_deadline) {
+            // A runtime which hangs gets killed once its deadline passed.
+            (Ok(()), Some(deadline)) => match time::timeout_at(deadline, child.wait()).await {
+                Ok(_) => Ok(()),
+                Err(_) => {
+                    grace = Duration::ZERO;
+                    Err(format_err!("runtime did not finish in time"))
+                }
+            },
+            (res, _) => res,
+        };
         let output = match connected {
             Ok(()) => child.wait_with_output().await.context("wait for runtime")?,
             Err(e) => {
                 token.cancel();
-                let stderr = Self::stop_runtime(child).await;
+                let stderr = Self::stop_runtime(child, grace).await;
                 return Err(self.fail_create(pidfile, e, &stderr).await);
             }
         };
@@ -233,30 +290,60 @@ impl ChildReaper {
         // Read synchronously and mark the process as pending right away, a
         // container process which exits before it is registered must not be
         // taken for an orphan.
-        let grandchild_pid = std::fs::read_to_string(pidfile)
+        let grandchild_pid = match Self::read_pidfile(pidfile) {
+            Ok(pid) => pid,
+            Err(e) => {
+                // Nothing registers the process, so the read loops have to be
+                // stopped here as well.
+                token.cancel();
+                return Err(self.fail_create(pidfile, e, &output.stderr).await);
+            }
+        };
+
+        // Registered by the caller through `watch_grandchild`, which takes it
+        // out of the pending set again and ends the call for the shutdown.
+        lock(&self.pending)?.insert(grandchild_pid);
+
+        Ok((grandchild_pid, token, in_flight))
+    }
+
+    fn read_pidfile(pidfile: &Path) -> Result<u32> {
+        std::fs::read_to_string(pidfile)
             .with_context(|| format!("grandchild pid read error {}", pidfile.display()))?
             .trim()
             .parse::<u32>()
-            .with_context(|| format!("grandchild pid parse error {}", pidfile.display()))?;
-
-        // Registered by the caller through `watch_grandchild`, which takes it
-        // out of the pending set again.
-        lock(&self.pending)?.insert(grandchild_pid);
-
-        Ok((grandchild_pid, token))
+            .with_context(|| format!("grandchild pid parse error {}", pidfile.display()))
     }
 
-    /// Stop a runtime which failed before it exited: give it a bounded time
-    /// to exit on its own, so that it still writes the PID file the cleanup
-    /// needs, kill it otherwise, and return its stderr.
-    async fn stop_runtime(mut child: RuntimeChild) -> Vec<u8> {
-        if time::timeout(Self::CONNECT_AFTER_EXIT_TIMEOUT, child.wait())
-            .await
-            .is_err()
-        {
-            debug!("Runtime did not exit after a failed console connection, killing it");
+    /// Start a runtime call, unless the server shuts down. The shutdown
+    /// waits for the calls in progress, see [`ChildReaper::kill_grandchildren`].
+    fn begin_call(&self) -> Result<InFlight> {
+        // Under the lock the shutdown takes its snapshot with, so that it
+        // either sees this call or this call sees the shutdown.
+        let _map = lock(&self.grandchildren)?;
+        if self.shutting_down.load(Ordering::SeqCst) {
+            bail!("server is shutting down")
+        }
+        self.in_flight.send_modify(|n| *n += 1);
+        Ok(InFlight(Some(self.in_flight.clone())))
+    }
+
+    /// Stop a runtime which failed before it exited: give it `grace` to exit
+    /// on its own, so that it still writes the PID file the cleanup needs,
+    /// kill it otherwise, and return its stderr.
+    async fn stop_runtime(mut child: RuntimeChild, grace: Duration) -> Vec<u8> {
+        if time::timeout(grace, child.wait()).await.is_err() {
+            debug!("Runtime did not exit in time, killing it");
             if let Err(e) = child.start_kill() {
                 debug!("Unable to kill runtime: {e}");
+            }
+            // Its container process gets reparented to this server only once
+            // it is gone, the cleanup relies on that. A runtime stuck in the
+            // kernel is not waited for forever.
+            match time::timeout(Self::CONNECT_AFTER_EXIT_TIMEOUT, child.wait()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => debug!("Unable to wait for runtime: {e}"),
+                Err(_) => warn!("Killed runtime did not exit, cleaning up anyway"),
             }
         }
 
@@ -285,7 +372,7 @@ impl ChildReaper {
     ) -> anyhow::Error {
         // Do not leave a container process behind which the runtime created
         // before it failed, and reap what else it left.
-        Self::cleanup_failed_grandchild(pidfile).await;
+        self.cleanup_failed_grandchild(pidfile).await;
         self.sweep.notify_one();
 
         let stderr = String::from_utf8_lossy(stderr);
@@ -375,12 +462,14 @@ impl ChildReaper {
     }
 
     /// Whether a watcher or a call in progress waits for the child.
+    ///
+    /// Both sets get checked under the lock of the grandchildren, which
+    /// `watch_grandchild` holds while it moves a child from one to the other.
     fn is_claimed(&self, pid: u32) -> bool {
-        let registered = self
-            .grandchildren
-            .lock()
-            .is_ok_and(|map| map.values().flatten().any(|child| child.pid == pid));
-        registered
+        let Ok(map) = self.grandchildren.lock() else {
+            return false;
+        };
+        map.values().flatten().any(|child| child.pid == pid)
             || self
                 .pending
                 .lock()
@@ -446,13 +535,19 @@ impl ChildReaper {
     /// Only this PID is waited for. Reaping any exited child instead would take
     /// the exit status of runtimes of concurrent calls, or of grandchildren
     /// which are not registered yet.
-    async fn cleanup_failed_grandchild(pidfile: &Path) {
+    async fn cleanup_failed_grandchild(&self, pidfile: &Path) {
         let Ok(content) = fs::read_to_string(pidfile).await else {
             return;
         };
         let Ok(pid) = content.trim().parse::<pid_t>() else {
             return;
         };
+        // A stale PID file may name a process which got reused by a container
+        // or exec of this server, which must not be killed.
+        if self.is_claimed(pid as u32) {
+            debug!("Not cleaning up PID {pid} of failed runtime call, it is in use");
+            return;
+        }
         let pid = Pid::from_raw(pid);
 
         // Make sure it is a child, the PID may have been reused otherwise.
@@ -477,33 +572,50 @@ impl ChildReaper {
         ));
     }
 
+    /// Register and watch a child which `create_child` started, which ends
+    /// its call.
     pub fn watch_grandchild(
         &self,
         child: Child,
         leak_fds: Vec<OwnedFd>,
+        call: InFlight,
     ) -> Result<Receiver<ExitChannelData>> {
         let pid = child.pid;
         let (id, mut reapable_grandchild) = ReapableChild::from_child(child);
-        lock(&self.pending)?.remove(&pid);
-
-        // Create channels outside the lock to minimize contention
-        let (exit_rx, mut forget_rx) = reapable_grandchild.watch();
 
         let locked_grandchildren = self.grandchildren();
-        lock(locked_grandchildren)?
-            .entry(id)
-            .or_default()
-            .push(reapable_grandchild);
+        let mut map = lock(locked_grandchildren)?;
+        let (exit_rx, mut forget_rx) = reapable_grandchild.watch();
+        let shutting_down = self.shutting_down.load(Ordering::SeqCst);
+        if shutting_down && let Some(task) = &reapable_grandchild.task {
+            lock(&self.late_watchers)?.push(task.clone());
+        }
+        map.entry(id).or_default().push(reapable_grandchild);
+        // Only once registered, so it is claimed all the time, see
+        // `is_claimed`.
+        lock(&self.pending)?.remove(&pid);
+        drop(call);
+        drop(map);
         let cleanup_grandchildren = locked_grandchildren.clone();
 
         task::spawn(
             async move {
-                forget_rx.recv().await?;
+                // The watcher sends no exit if it went away, for example with a
+                // panic. The child has to be forgotten either way.
+                if let Err(e) = forget_rx.recv().await {
+                    debug!("No exit status for {pid}: {e}");
+                }
                 drop(leak_fds);
                 Self::forget_grandchild(&cleanup_grandchildren, pid)
             }
             .instrument(debug_span!("watch_grandchild", pid)),
         );
+
+        // A call which was in progress while the shutdown killed the others.
+        if shutting_down {
+            kill_grandchild(pid, Signal::SIGKILL);
+            bail!("server is shutting down")
+        }
         Ok(exit_rx)
     }
 
@@ -526,6 +638,9 @@ impl ChildReaper {
         // Collect only PIDs and task handles to avoid cloning entire ReapableChild
         let children: Vec<_> = {
             let map = lock(&self.grandchildren)?;
+            // Children registered after this snapshot get killed on their
+            // registration, see `watch_grandchild`.
+            self.shutting_down.store(true, Ordering::SeqCst);
             map.values()
                 .flatten()
                 .map(|gc| (gc.pid, gc.task.clone()))
@@ -534,15 +649,43 @@ impl ChildReaper {
         // Signal every grandchild first and wait for all of their tasks
         // concurrently, so that the shutdown takes as long as the slowest
         // child instead of the sum of all of them.
-        let mut waits = Vec::with_capacity(children.len());
+        let mut tasks = Vec::with_capacity(children.len());
         for (pid, task) in children {
             let span = debug_span!("kill_grandchild", pid);
             let _enter = span.enter();
             debug!("Killing single grandchild");
             kill_grandchild(pid, s);
-            if let Some(t) = task
-                && let Some(handle) = lock(&t)?.take()
-            {
+            tasks.extend(task);
+        }
+        // An init of a PID namespace only exits once every process of the
+        // namespace is reaped, including zombies reparented to this process.
+        // The sweep keeps running while the watchers are awaited.
+        self.sweep.notify_one();
+        Self::wait_for_watchers(tasks, s).await?;
+
+        // Runtime calls in progress get to finish, the server would kill a
+        // runtime halfway otherwise. Their children got killed on registration.
+        let mut in_flight = self.in_flight.subscribe();
+        if time::timeout(Self::IN_FLIGHT_WAIT, in_flight.wait_for(|n| *n == 0))
+            .await
+            .is_err()
+        {
+            warn!("Runtime calls still in progress, stopping anyway");
+        }
+        let late = std::mem::take(&mut *lock(&self.late_watchers)?);
+        Self::wait_for_watchers(late, s).await?;
+        debug!("Done killing all grandchildren");
+        Ok(())
+    }
+
+    /// How long the shutdown waits for runtime calls in progress, below the
+    /// time the clients give the whole shutdown.
+    const IN_FLIGHT_WAIT: Duration = Duration::from_secs(5);
+
+    async fn wait_for_watchers(tasks: Vec<TaskHandle>, s: Signal) -> Result<()> {
+        let mut waits = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            if let Some(handle) = lock(&task)?.take() {
                 let close_span = debug_span!("close", signal = s.as_str());
                 waits.push(
                     async move {
@@ -556,26 +699,18 @@ impl ChildReaper {
                 );
             }
         }
-        // An init of a PID namespace only exits once every process of the
-        // namespace is reaped, including zombies reparented to this process.
-        // The sweep keeps running while the watchers are awaited.
-        self.sweep.notify_one();
         join_all(waits).await;
-        debug!("Done killing all grandchildren");
         Ok(())
     }
 }
 
 pub fn kill_grandchild(raw_pid: u32, s: Signal) {
     let pid = Pid::from_raw(raw_pid as pid_t);
-    if let Ok(pgid) = getpgid(Some(pid)) {
-        // If process_group is 1, we will end up calling
-        // kill(-1), which kills everything conmon is allowed to.
+    if let Ok(pgid) = getpgid(Some(pid))
+        && signals_group(pgid, getpgid(None).ok())
+    {
         let pgid = i32::from(pgid);
-
-        if pgid > 1
-            && let Err(e) = kill(Pid::from_raw(-pgid), s)
-        {
+        if let Err(e) = kill(Pid::from_raw(-pgid), s) {
             error!(
                 raw_pid,
                 "Failed to kill process group {pgid}, the pid still gets signalled: {:#}", e
@@ -585,6 +720,14 @@ pub fn kill_grandchild(raw_pid: u32, s: Signal) {
     if let Err(e) = kill(pid, s) {
         debug!("Failed killing pid: {:#}", e);
     }
+}
+
+/// Whether the process group of a grandchild gets signalled. Group 1 would
+/// end up as kill(-1), which kills everything conmon-rs is allowed to, and a
+/// grandchild which did not get its own group shares the one of this server,
+/// which would kill it as well.
+pub(crate) fn signals_group(pgid: Pid, own_pgid: Option<Pid>) -> bool {
+    pgid.as_raw() > 1 && Some(pgid) != own_pgid
 }
 
 type TaskHandle = Arc<Mutex<Option<JoinHandle<()>>>>;
@@ -627,6 +770,40 @@ pub struct ExitChannelData {
 }
 
 impl ReapableChild {
+    /// How long the exit files wait for the read loops to drain the output
+    /// at most. They take what the pipes held at the exit within
+    /// milliseconds, the bound only matters if another process keeps the
+    /// pipes open and writing.
+    const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+
+    /// Wait until the output ended, or until it stays quiet for
+    /// [`DRAIN_TIMEOUT`]. A process which inherited the pipes and keeps them
+    /// open must not delay the exit file.
+    async fn wait_for_output(attach: SharedContainerAttach) {
+        let (mut rx, ended) = attach.subscribe();
+        if ended {
+            return;
+        }
+        let drained = async {
+            loop {
+                match time::timeout(DRAIN_TIMEOUT, rx.recv()).await {
+                    Ok(Ok(Message::Data(..)) | Err(RecvError::Lagged(_))) => {}
+                    Ok(Ok(Message::Done) | Err(RecvError::Closed)) => return,
+                    Err(_) => {
+                        debug!("Output quiet after the exit, writing exit files");
+                        return;
+                    }
+                }
+            }
+        };
+        if time::timeout(Self::OUTPUT_DRAIN_TIMEOUT, drained)
+            .await
+            .is_err()
+        {
+            debug!("Output still flowing after the exit, writing exit files anyway");
+        }
+    }
+
     pub fn from_child(child: Child) -> (Box<str>, Self) {
         (
             child.id,
@@ -657,6 +834,7 @@ impl ReapableChild {
         let timeout = self.timeout();
         let stop_token = self.token().clone();
         let cleanup_cmd_raw = self.cleanup_cmd.clone();
+        let io = self.io.clone();
 
         let task = task::spawn(
             async move {
@@ -696,6 +874,12 @@ impl ReapableChild {
                 }
                 oom_watcher.stop();
 
+                // The exit file tells that the log is complete, so let the read
+                // loops write what the process left in the pipes.
+                if !exit_paths.is_empty() {
+                    Self::wait_for_output(io.attach().await).await;
+                }
+
                 let exit_channel_data = ExitChannelData {
                     exit_code,
                     timed_out,
@@ -723,6 +907,7 @@ impl ReapableChild {
 
     fn spawn_cleanup_process(raw_cmd: &[String]) {
         let mut cleanup_cmd = Command::new(&raw_cmd[0]);
+        init::reset_oom_score(&mut cleanup_cmd);
 
         cleanup_cmd.args(&raw_cmd[1..]);
 
@@ -799,17 +984,9 @@ impl ReapableChild {
 
     /// Try to use pidfd_open + async polling. Returns None if pidfd is unavailable.
     async fn try_pidfd_wait(pid: u32) -> Option<i32> {
-        // SAFETY: pidfd_open takes a PID and flags and returns a new descriptor
-        // or a negative error, it does not touch any memory of ours.
         // The readiness comes from epoll and the wait uses WNOHANG, so the
         // descriptor itself does not need to be non-blocking.
-        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::c_int, 0) };
-        if fd < 0 {
-            return None;
-        }
-        // SAFETY: the descriptor was just returned by the kernel and is not
-        // owned by anything else.
-        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd as RawFd) };
+        let owned_fd = pidfd_open(Pid::from_raw(pid as pid_t)).ok()?;
 
         // SAFETY: `owned_fd` is an open pidfd that the `AsyncFd` takes ownership
         // of, so it stays valid and unchanged for the lifetime of the `AsyncFd`.
@@ -893,6 +1070,7 @@ impl ReapableChild {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{container_log::ContainerLog, process::Process};
     use std::process::Command;
 
     /// Spawn a child which exits right away and is never waited for.
@@ -911,10 +1089,34 @@ mod tests {
         Ok(pid)
     }
 
-    /// One test for all of it, the sweep reaps every unclaimed zombie of the
-    /// test process, so zombies of a parallel test would interfere.
+    /// Set for the test process which runs the sweep test.
+    const SWEEP_TEST_ENV: &str = "CONMONRS_SWEEP_TEST";
+
+    /// The sweep reaps every unclaimed zombie of the test process, so it would
+    /// take the children of parallel tests, and their zombies would make it
+    /// flaky. Run it in a process of its own.
+    #[test]
+    fn sweep_reaps_unclaimed_zombies_after_grace() -> Result<()> {
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "child_reaper::tests::sweep_in_own_process",
+                "--ignored",
+            ])
+            .env(SWEEP_TEST_ENV, "1")
+            .output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}");
+        assert!(stdout.contains("1 passed"), "{stdout}");
+        Ok(())
+    }
+
     #[tokio::test]
-    async fn sweep_reaps_unclaimed_zombies_after_grace() -> Result<()> {
+    #[ignore = "run by sweep_reaps_unclaimed_zombies_after_grace in a process of its own"]
+    async fn sweep_in_own_process() -> Result<()> {
+        if std::env::var_os(SWEEP_TEST_ENV).is_none() {
+            return Ok(());
+        }
         let reaper = ChildReaper::default();
         let orphan = spawn_zombie()?;
         let claimed = spawn_zombie()?;
@@ -939,6 +1141,250 @@ mod tests {
 
         waitpid(Pid::from_raw(claimed as pid_t), None)?;
         assert!(!ChildReaper::zombie_children().contains(&claimed));
+        Ok(())
+    }
+
+    /// Wait in real time until the condition holds, without blocking the
+    /// runtime of the test.
+    async fn wait_until(f: impl Fn() -> bool) {
+        for _ in 0..1000 {
+            if f() {
+                return;
+            }
+            task::spawn_blocking(|| thread::sleep(std::time::Duration::from_millis(10)))
+                .await
+                .ok();
+        }
+        panic!("condition never became true");
+    }
+
+    fn is_gone(pid: u32) -> bool {
+        kill(Pid::from_raw(pid as pid_t), None).is_err()
+    }
+
+    /// A shell which nobody but the watcher waits for. It gets killed through
+    /// a pidfd if a test fails before it ended, which cannot hit a reused PID.
+    struct Spawned {
+        pid: u32,
+        process: Process,
+    }
+
+    impl Drop for Spawned {
+        fn drop(&mut self) {
+            let _ = self.process.signal(Signal::SIGKILL);
+        }
+    }
+
+    fn spawn_sh(script: &str) -> Result<Spawned> {
+        let pid = Command::new("sh").args(["-c", script]).spawn()?.id();
+        // Not reaped yet, so the PID is still its own.
+        let process = Process::open(Pid::from_raw(pid as pid_t));
+        Ok(Spawned { pid, process })
+    }
+
+    fn child(
+        pid: u32,
+        timeout: Option<Instant>,
+        exit_path: &Path,
+        cleanup: &[&str],
+    ) -> Result<Child> {
+        Ok(Child {
+            id: "id".into(),
+            kind: ChildKind::Container,
+            pid,
+            exit_paths: vec![exit_path.into()],
+            oom_exit_paths: vec![],
+            timeout,
+            io: SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?),
+            cleanup_cmd: cleanup.iter().map(|s| s.to_string()).collect(),
+            token: CancellationToken::new(),
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_reports_exit_codes() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        for (script, expected) in [("exit 3", 3), ("kill -9 $$", 137), ("exit 0", 0)] {
+            let exit_path = dir.path().join("exit");
+            let sh = spawn_sh(script)?;
+            let (_, mut reapable) =
+                ReapableChild::from_child(child(sh.pid, None, &exit_path, &[])?);
+            let (mut exit_rx, _) = reapable.watch();
+
+            let exit = exit_rx.recv().await?;
+            assert_eq!(exit.exit_code, expected, "{script}");
+            assert!(!exit.timed_out);
+            assert_eq!(std::fs::read_to_string(&exit_path)?, expected.to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_kills_on_timeout() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let exit_path = dir.path().join("exit");
+        let cleaned = dir.path().join("cleaned");
+        let cleanup = ["touch", cleaned.to_str().context("path")?];
+
+        let sh = spawn_sh("exec sleep 60")?;
+        let pid = sh.pid;
+        let timeout = Instant::now() + Duration::from_secs(1);
+        let (_, mut reapable) =
+            ReapableChild::from_child(child(pid, Some(timeout), &exit_path, &cleanup)?);
+        let (mut exit_rx, _) = reapable.watch();
+
+        let exit = exit_rx.recv().await?;
+        assert_eq!(exit.exit_code, -3);
+        assert!(exit.timed_out);
+        assert_eq!(std::fs::read_to_string(&exit_path)?, "-3");
+        wait_until(|| is_gone(pid)).await;
+        wait_until(|| cleaned.exists()).await;
+        Ok(())
+    }
+
+    #[test]
+    fn own_process_group_is_not_signalled() -> Result<()> {
+        let own = getpgid(None)?;
+        assert!(!signals_group(own, Some(own)));
+        assert!(!signals_group(Pid::from_raw(1), Some(own)));
+        assert!(!signals_group(Pid::from_raw(0), None));
+        assert!(signals_group(Pid::from_raw(own.as_raw() + 1), Some(own)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_create_cleanup_spares_claimed_pid() -> Result<()> {
+        let reaper = ChildReaper::default();
+        let dir = tempfile::tempdir()?;
+        let pidfile = dir.path().join("pid");
+        let sh = spawn_sh("exec sleep 60")?;
+        let pid = sh.pid;
+        std::fs::write(&pidfile, pid.to_string())?;
+
+        // A stale PID file naming a process this server waits for.
+        lock(&reaper.pending)?.insert(pid);
+        reaper.cleanup_failed_grandchild(&pidfile).await;
+        assert!(!is_gone(pid) && !ChildReaper::is_zombie(pid));
+
+        lock(&reaper.pending)?.remove(&pid);
+        reaper.cleanup_failed_grandchild(&pidfile).await;
+        wait_until(|| is_gone(pid)).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn registration_keeps_the_child_claimed() -> Result<()> {
+        let reaper = ChildReaper::default();
+        let dir = tempfile::tempdir()?;
+        let sh = spawn_sh("exec sleep 60")?;
+        // As `create_child` leaves it.
+        lock(&reaper.pending)?.insert(sh.pid);
+        assert!(reaper.is_claimed(sh.pid));
+
+        let child = child(sh.pid, None, &dir.path().join("exit"), &[])?;
+        reaper.watch_grandchild(child, vec![], InFlight(None))?;
+        assert!(reaper.is_claimed(sh.pid));
+        assert!(!lock(&reaper.pending)?.contains(&sh.pid));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn registration_after_shutdown_kills_child() -> Result<()> {
+        let reaper = ChildReaper::default();
+        reaper.kill_grandchildren(Signal::SIGKILL).await?;
+
+        // A call which was in progress while the shutdown killed the others.
+        let dir = tempfile::tempdir()?;
+        let sh = spawn_sh("exec sleep 60")?;
+        let pid = sh.pid;
+        assert!(
+            reaper
+                .watch_grandchild(
+                    child(pid, None, &dir.path().join("exit"), &[])?,
+                    vec![],
+                    InFlight(None)
+                )
+                .is_err()
+        );
+        wait_until(|| is_gone(pid)).await;
+
+        // New calls do not start at all.
+        let mut io = ContainerIO::new(false, ContainerLog::new())?;
+        let res = reaper
+            .create_child(
+                "true",
+                ["x"],
+                false,
+                &mut io,
+                &dir.path().join("pid"),
+                None,
+                vec![],
+                false,
+                vec![],
+            )
+            .await;
+        assert!(res.is_err());
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_waits_for_calls_in_progress() -> Result<()> {
+        let reaper = Arc::new(ChildReaper::default());
+        let call = reaper.begin_call()?;
+        let shutdown = task::spawn({
+            let reaper = reaper.clone();
+            async move { reaper.kill_grandchildren(Signal::SIGKILL).await }
+        });
+        time::sleep(Duration::from_secs(1)).await;
+        assert!(!shutdown.is_finished());
+        // No new call starts meanwhile.
+        assert!(reaper.begin_call().is_err());
+
+        drop(call);
+        shutdown.await??;
+
+        // A call which never ends does not keep the shutdown forever.
+        let _call = InFlight(Some(reaper.in_flight.clone()));
+        reaper.in_flight.send_modify(|n| *n += 1);
+        let start = Instant::now();
+        reaper.kill_grandchildren(Signal::SIGKILL).await?;
+        assert_eq!(start.elapsed(), ChildReaper::IN_FLIGHT_WAIT);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exit_files_wait_for_quiet_output() -> Result<()> {
+        let attach = SharedContainerAttach::default();
+        let output = attach.output();
+
+        // Nothing flows, a process holds the pipes open.
+        let start = Instant::now();
+        ReapableChild::wait_for_output(attach.clone()).await;
+        assert_eq!(start.elapsed(), DRAIN_TIMEOUT);
+
+        // Output which keeps flowing is bounded.
+        let writer = task::spawn({
+            let attach = attach.clone();
+            async move {
+                loop {
+                    attach.write(Message::Data(
+                        "data".into(),
+                        crate::container_io::Pipe::StdOut,
+                    ));
+                    time::sleep(DRAIN_TIMEOUT / 2).await;
+                }
+            }
+        });
+        let start = Instant::now();
+        ReapableChild::wait_for_output(attach.clone()).await;
+        assert_eq!(start.elapsed(), ReapableChild::OUTPUT_DRAIN_TIMEOUT);
+        writer.abort();
+
+        // Ended output does not wait at all.
+        drop(output);
+        let start = Instant::now();
+        ReapableChild::wait_for_output(attach).await;
+        assert_eq!(start.elapsed(), Duration::ZERO);
         Ok(())
     }
 }

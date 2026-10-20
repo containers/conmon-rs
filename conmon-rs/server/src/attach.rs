@@ -1,6 +1,6 @@
 use crate::{
     container_io::{Message, Pipe},
-    listener::{DefaultListener, Listener},
+    listener::{self, DefaultListener, Listener},
 };
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
@@ -129,14 +129,12 @@ impl SharedContainerAttach {
         self.read_half_rx.close();
     }
 
-    /// Write a buffer to all attach endpoints.
-    pub fn write(&self, m: Message) -> Result<()> {
-        if self.write_half_tx.receiver_count() > 0 {
-            self.write_half_tx
-                .send(m)
-                .context("send data message to attach clients")?;
+    /// Write a buffer to all attach endpoints. Sending fails only if the last
+    /// client went away meanwhile, which is no reason to stop the output.
+    pub fn write(&self, m: Message) {
+        if self.write_half_tx.send(m).is_err() {
+            trace!("No attach clients left for the output");
         }
-        Ok(())
     }
 
     /// Register the output of a container, which ends once the returned value
@@ -334,7 +332,7 @@ impl Attach {
                         .instrument(debug_span!("write_loop")),
                     );
                 }
-                Err(e) => error!("Unable to accept attach stream: {}", e),
+                Err(e) => listener::accept_failed(&e).await,
             }
         }
     }
@@ -453,6 +451,12 @@ impl Attach {
         Ok(queued == 0)
     }
 
+    /// Whether a send failed because the client closed its end. A client
+    /// which leaves output unread gets the connection reset.
+    fn client_gone(e: &io::Error) -> bool {
+        matches!(e.kind(), ErrorKind::BrokenPipe | ErrorKind::ConnectionReset)
+    }
+
     async fn write_loop(
         socket: Arc<UnixSeqpacket>,
         mut rx: Receiver<Message>,
@@ -483,7 +487,7 @@ impl Attach {
                         Ok(_) => {
                             debug!("Wrote done packet to client")
                         }
-                        Err(ref e) if e.kind() == ErrorKind::BrokenPipe => {}
+                        Err(ref e) if Self::client_gone(e) => {}
                         Err(e) => bail!("unable to write done packet: {:#}", e),
                     }
                     return Ok(());
@@ -503,7 +507,7 @@ impl Attach {
                             Ok(_) => {
                                 debug!("Wrote {} packet {}/{} to client", pipe, idx + 1, len)
                             }
-                            Err(ref e) if e.kind() == ErrorKind::BrokenPipe => {
+                            Err(ref e) if Self::client_gone(e) => {
                                 // The client is gone, so stop receiving output
                                 // for it as well.
                                 debug!("Exiting because the client closed the connection");
@@ -521,7 +525,10 @@ impl Attach {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{container_io::ContainerIO, container_log::ContainerLog};
+    use crate::{
+        container_io::{ContainerIO, StdioSender},
+        container_log::ContainerLog,
+    };
     use nix::sys::socket::{MsgFlags, connect, send};
     use std::{
         io,
@@ -574,7 +581,7 @@ mod tests {
         let stderr = stdout.clone();
 
         drop(stderr);
-        attach.write(Message::Data(Bytes::from_static(b"last"), Pipe::StdOut))?;
+        attach.write(Message::Data(Bytes::from_static(b"last"), Pipe::StdOut));
         drop(stdout);
 
         assert!(matches!(rx.recv().await?, Message::Data(..)));
@@ -596,7 +603,7 @@ mod tests {
             BadFd,
             Pipe::StdErr,
             ContainerLog::new(),
-            Some(message_tx.clone()),
+            Some(StdioSender::new(message_tx.clone(), &Arc::default())),
             attach.clone(),
             stderr,
         )
@@ -608,7 +615,7 @@ mod tests {
             tokio::io::empty(),
             Pipe::StdOut,
             ContainerLog::new(),
-            Some(message_tx),
+            Some(StdioSender::new(message_tx, &Arc::default())),
             attach,
             stdout,
         )
@@ -646,13 +653,16 @@ mod tests {
         drop(client);
 
         let (rx, _) = attach.subscribe();
-        attach.write(Message::Data(Bytes::from_static(b"data"), Pipe::StdOut))?;
-        timeout(
-            Duration::from_secs(5),
-            Attach::write_loop(server, rx, false),
-        )
-        .await??;
-        Ok(())
+        let mut write_loop = task::spawn(Attach::write_loop(server, rx, false));
+        // A process forked by a parallel test may hold the client end until
+        // it execs, a send succeeds then. Keep sending until one fails.
+        for _ in 0..500 {
+            attach.write(Message::Data(Bytes::from_static(b"data"), Pipe::StdOut));
+            if let Ok(res) = timeout(Duration::from_millis(10), &mut write_loop).await {
+                return res?;
+            }
+        }
+        bail!("write loop did not stop")
     }
 
     #[tokio::test]

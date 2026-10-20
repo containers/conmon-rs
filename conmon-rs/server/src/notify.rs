@@ -368,10 +368,21 @@ mod tests {
         drop(first);
         assert!(!path.exists());
 
-        // The socket of a server which exited without cleaning up.
+        // The socket of a server which exited without cleaning up. A process
+        // which a parallel test forks may hold it until it execs.
         let stale = StdUnixDatagram::bind(&path)?;
         drop(stale);
-        let again = NotifySocket::bind(bundle.path(), host)?;
+        let mut again = NotifySocket::bind(bundle.path(), host);
+        for _ in 0..500 {
+            match &again {
+                Err(e) if format!("{e:#}").contains("in use") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    again = NotifySocket::bind(bundle.path(), host);
+                }
+                _ => break,
+            }
+        }
+        let again = again?;
         drop(again);
         assert!(!path.exists());
         Ok(())

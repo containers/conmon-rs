@@ -414,20 +414,37 @@ impl Config {
     }
 }
 
+impl Config {
+    /// Parse a configuration from the arguments for a test. None if `CONMON_*`
+    /// variables are set, the flags also come from the environment, which
+    /// would change what the parsed configuration contains.
+    #[cfg(test)]
+    pub(crate) fn parse_for_test<I, T>(args: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        if std::env::vars_os().any(|(key, _)| key.to_string_lossy().starts_with(prefix!())) {
+            eprintln!("skipping, CONMON_* variables are set");
+            return None;
+        }
+        let args = std::iter::once("conmonrs".into()).chain(args.into_iter().map(Into::into));
+        Some(Self::try_parse_from(args).expect("parse args"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
     fn config(args: &[&str]) -> Config {
-        Config::try_parse_from(["conmonrs"].iter().chain(args)).expect("parse args")
+        Config::parse_for_test(args.iter().copied()).expect("environment checked")
     }
 
     #[test]
     fn validate_requires_the_runtime_flags() {
-        // The flags also come from the environment, which would change what
-        // the parsed configurations below contain.
-        if std::env::vars().any(|(key, _)| key.starts_with(prefix!())) {
-            eprintln!("skipping, CONMON_* variables are set");
+        if Config::parse_for_test::<_, &str>([]).is_none() {
             return;
         }
 
@@ -461,6 +478,79 @@ mod tests {
             ])
             .validate()
             .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_reports_each_check() {
+        let Some(base) = Config::parse_for_test::<_, &str>([]) else {
+            return;
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = dir.path().join("runtime");
+        std::fs::write(&runtime, "").expect("write runtime");
+        let error = |config: &Config| {
+            config
+                .validate()
+                .map(|()| String::new())
+                .unwrap_or_else(|e| format!("{e:#}"))
+        };
+
+        let valid = Config {
+            runtime: runtime.clone(),
+            runtime_dir: dir.path().into(),
+            ..base
+        };
+        assert_eq!(error(&valid), "");
+
+        // Blanks count as unset, that is the default of both flags.
+        let blank_runtime = Config {
+            runtime: "  ".into(),
+            ..valid.clone()
+        };
+        assert_eq!(error(&blank_runtime), "--runtime flag not set");
+        let blank_runtime_dir = Config {
+            runtime_dir: " ".into(),
+            ..valid.clone()
+        };
+        assert_eq!(error(&blank_runtime_dir), "--runtime-dir flag not set");
+
+        let not_utf8 = Config {
+            runtime: OsStr::from_bytes(b"/bin/\xff").into(),
+            ..valid.clone()
+        };
+        assert_eq!(error(&not_utf8), "--runtime does not parse as string");
+
+        let missing_runtime = Config {
+            runtime: dir.path().join("missing"),
+            ..valid.clone()
+        };
+        assert_eq!(
+            error(&missing_runtime),
+            format!(
+                "--runtime '{}' does not exist",
+                dir.path().join("missing").display()
+            )
+        );
+
+        // A runtime root which does not exist yet gets created by prepare.
+        let missing_root = Config {
+            runtime_root: Some(dir.path().join("root")),
+            ..valid.clone()
+        };
+        assert_eq!(error(&missing_root), "");
+        let dir_root = Config {
+            runtime_root: Some(dir.path().into()),
+            ..valid.clone()
+        };
+        assert_eq!(error(&dir_root), "");
+        let file_root = Config {
+            runtime_root: Some(runtime.clone()),
+            ..valid
+        };
+        assert_eq!(
+            error(&file_root),
+            format!("--runtime-root '{}' is not a directory", runtime.display())
         );
     }
 }
