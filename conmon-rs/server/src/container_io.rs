@@ -1,5 +1,7 @@
 use crate::{
-    attach::SharedContainerAttach, container_log::SharedContainerLog, streams::Streams,
+    attach::{AttachOutput, SharedContainerAttach},
+    container_log::SharedContainerLog,
+    streams::Streams,
     terminal::Terminal,
 };
 use anyhow::{Context, Result, bail};
@@ -63,12 +65,6 @@ impl SharedContainerIO {
     /// Retrieve the underlying stdout and stderr channels.
     pub async fn stdio(&self) -> Result<(Receiver<Message>, Receiver<Message>)> {
         self.0.read().await.stdio()
-    }
-
-    /// The number of output pipes, which is the number of `Message::Done`
-    /// messages a consumer sees once the container output ended.
-    pub async fn pipe_count(&self) -> usize {
-        self.0.read().await.pipe_count()
     }
 }
 
@@ -143,7 +139,7 @@ impl ContainerIO {
     /// Create a new container IO instance.
     pub fn new(terminal: bool, logger: SharedContainerLog) -> Result<Self> {
         let logger_clone = logger.clone();
-        let attach = SharedContainerAttach::default();
+        let attach = SharedContainerAttach::new(terminal);
         let attach_clone = attach.clone();
         let typ = if terminal {
             Terminal::new(logger_clone, attach_clone)
@@ -184,14 +180,6 @@ impl ContainerIO {
                 }
             }
             ContainerIOType::Streams(s) => s.stdio(),
-        }
-    }
-
-    /// The number of output pipes of this container.
-    pub fn pipe_count(&self) -> usize {
-        match self.typ() {
-            ContainerIOType::Terminal(_) => 1,
-            ContainerIOType::Streams(_) => 2,
         }
     }
 
@@ -289,6 +277,9 @@ impl ContainerIO {
         logger: SharedContainerLog,
         mut message_tx: Option<Sender<Message>>,
         mut attach: SharedContainerAttach,
+        // Ends the output for the attach endpoints once all clones got
+        // dropped, however this function returns.
+        _attach_output: Arc<AttachOutput>,
     ) -> Result<()>
     where
         T: AsyncRead + Unpin,
@@ -306,11 +297,6 @@ impl ContainerIO {
             match reader.read_buf(&mut buf).await {
                 Ok(0) => {
                     debug!("Nothing more to read");
-
-                    attach
-                        .write(Message::Done)
-                        .await
-                        .context("write to attach endpoints")?;
 
                     Self::forward(&mut message_tx, Message::Done);
 
@@ -348,11 +334,6 @@ impl ContainerIO {
                 Err(e) => match Errno::from_raw(e.raw_os_error().context("get OS error")?) {
                     Errno::EIO => {
                         debug!("Stopping read loop");
-                        attach
-                            .write(Message::Done)
-                            .await
-                            .context("write to attach endpoints")?;
-
                         Self::forward(&mut message_tx, Message::Done);
 
                         return Ok(());
@@ -383,42 +364,47 @@ impl ContainerIO {
         mut attach: SharedContainerAttach,
         token: CancellationToken,
     ) -> Result<()> {
+        // While we're not processing input from a caller, and logically should be able to
+        // catch a Message::Done here, it doesn't quite work that way.
+        // Every child has an io instance that starts this function, though not
+        // all children have input to process. If there is no input from the child
+        // then we leak this function, causing memory to balloon over time.
+        // Thus, we need the select statement and token. Nothing gets written
+        // after the container exited, which could block on descendants holding
+        // the pipe open.
+        let res = select! {
+            res = Self::forward_stdin(&mut writer, &mut attach) => res,
+            _ = token.cancelled() => Ok(()),
+        };
+
+        // Nothing reads the stdin anymore, so let the senders drop their data
+        // instead of waiting for the channel forever.
+        attach.close_stdin();
+        res
+    }
+
+    async fn forward_stdin(
+        mut writer: impl AsyncWrite + Unpin,
+        attach: &mut SharedContainerAttach,
+    ) -> Result<()> {
         let stdin_closed = attach.stdin_closed().clone();
         loop {
-            // While we're not processing input from a caller, and logically should be able to
-            // catch a Message::Done here, it doesn't quite work that way.
-            // Every child has an io instance that starts this function, though not
-            // all children have input to process. If there is no input from the child
-            // then we leak this function, causing memory to balloon over time.
-            // Thus, we need the select statement and token.
             select! {
                 res = attach.read() => {
-                    match res {
-                        Ok(data) => {
-                            Self::handle_stdin_data(&data, &mut writer).await?;
-                        }
-                        Err(e) => {
-                            return Err(e).context("read from stdin attach endpoints");
-                        }
-                    }
+                    let data = res.context("read from stdin attach endpoints")?;
+                    Self::handle_stdin_data(&data, &mut writer).await?;
                 }
-                // A client closed the stdin of the container for good.
-                _ = stdin_closed.cancelled() => {
-                    if let Ok(data) = attach.try_read() {
-                        Self::handle_stdin_data(&data, &mut writer).await?;
-                    }
-                    return Ok(());
-                }
-                _ = token.cancelled() => {
-                    // Closing immediately may race with outstanding data on stdin for short lived
-                    // containers. This means we try to read once again.
-                    if let Ok(data) = attach.try_read() {
-                        Self::handle_stdin_data(&data, &mut writer).await?;
-                    }
-                    return Ok(());
-                }
+                _ = stdin_closed.cancelled() => break,
             }
         }
+
+        // An attach which closes stdin right after sending data may race with
+        // the cancellation, so write everything that was sent before.
+        attach.close_stdin();
+        while let Ok(data) = attach.try_read() {
+            Self::handle_stdin_data(&data, &mut writer).await?;
+        }
+        Ok(())
     }
 
     async fn handle_stdin_data(data: &[u8], mut writer: impl AsyncWrite + Unpin) -> Result<()> {

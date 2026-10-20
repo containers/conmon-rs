@@ -585,6 +585,7 @@ impl conmon::Server for Server {
 
         let id = pry_err!(pry_err!(req.get_id()).to_str());
         let (stdin, stdout, stderr) = (req.get_stdin(), req.get_stdout(), req.get_stderr());
+        let stop_after_stdin_eof = req.get_stop_after_stdin_eof();
 
         let streaming_server = self.streaming_server().clone();
         let child = pry_err!(self.reaper().get(id));
@@ -603,7 +604,7 @@ impl conmon::Server for Server {
                 let url = streaming_server
                     .read()
                     .await
-                    .attach_url(child, stdin, stdout, stderr)
+                    .attach_url(child, stdin, stdout, stderr, stop_after_stdin_eof)
                     .await;
 
                 results.get().init_response().set_url(&url);

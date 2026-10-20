@@ -1495,6 +1495,11 @@ type ServeAttachContainerConfig struct {
 	// Stderr indicates if stderr should be available or not.
 	Stderr bool
 
+	// StopAfterStdinEOF indicates if the container stdin should be closed
+	// once the client closes its stdin (stdin once). The output is then still
+	// forwarded until the container closes it. A terminal is never closed.
+	StopAfterStdinEOF bool
+
 	// CgroupManager can be use to select the cgroup manager.
 	//
 	// To use this option set `ConmonServerConfig.CgroupManager` to
@@ -1540,6 +1545,7 @@ func (c *ConmonClient) ServeAttachContainer(
 		req.SetStdin(cfg.Stdin)
 		req.SetStdout(cfg.Stdout)
 		req.SetStderr(cfg.Stderr)
+		req.SetStopAfterStdinEof(cfg.StopAfterStdinEOF)
 
 		return nil
 	})

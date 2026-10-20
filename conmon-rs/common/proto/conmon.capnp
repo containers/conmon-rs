@@ -223,6 +223,7 @@ interface Conmon {
         stdin @2 :Bool;
         stdout @3 :Bool;
         stderr @4 :Bool;
+        stopAfterStdinEof @5 :Bool;
     }
 
     struct ServeAttachContainerResponse {

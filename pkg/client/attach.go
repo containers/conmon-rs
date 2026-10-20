@@ -63,7 +63,15 @@ type AttachConfig struct {
 	// Whether a terminal was setup for the command this is attaching to.
 	Tty bool
 
-	// Whether stdout/stderr should continue to be processed after stdin is closed.
+	// Whether the container stdin should be closed once the attach stdin
+	// reaches EOF (stdin once). Without a terminal, the output is still
+	// forwarded until the container closes it. A terminal is never closed,
+	// so the attach returns on stdin EOF.
+	//
+	// The server applies the value of the latest attach call to all
+	// connections it accepts afterwards on the same socket, so all attaches
+	// of a container should use the same value, for example derived from
+	// its config.
 	StopAfterStdinEOF bool
 
 	// Whether the container supports stdin or not.
@@ -221,13 +229,15 @@ func (c *ConmonClient) setupStdioChannels(
 		defer span.End()
 	}
 
-	receiveStdoutError = make(chan error)
+	// Buffered, so that the goroutines can always finish, even if nobody
+	// receives their result anymore.
+	receiveStdoutError = make(chan error, 1)
 
 	go func() {
 		receiveStdoutError <- c.redirectResponseToOutputStreams(ctx, cfg, conn)
 	}()
 
-	stdinDone = make(chan error)
+	stdinDone = make(chan error, 1)
 	stdin := cfg.Streams.Stdin
 
 	if stdin != nil {
@@ -439,38 +449,59 @@ func (c *ConmonClient) readStdio(
 	case err = <-stdinDone:
 		c.logger.WithError(err).Trace("Received message on input channel")
 
-		// This particular case is for when we get a non-tty attach
-		// with --leave-stdin-open=true. We want to return as soon
-		// as we receive EOF from the client. However, we should do
-		// this only when stdin is enabled. If there is no stdin
-		// enabled then we wait for output as usual.
-		if cfg.StopAfterStdinEOF {
+		c.tryCloseAttachReaderForID(id)
+
+		// Copying stdin is done, close it. With StopAfterStdinEOF the server
+		// closes the container stdin in turn, so the output written
+		// afterwards still has to be received below.
+		closeErr := conn.CloseWrite()
+
+		// A detach or a failed stdin copy ends the attach right away.
+		if err != nil {
+			if !errors.Is(err, detach.ErrDetach) {
+				err = fmt.Errorf("copy stdin: %w", err)
+			}
+
+			return errors.Join(closeErr, err)
+		}
+
+		if closeErr != nil {
+			c.logger.Errorf("Unable to close conn: %v", closeErr)
+		}
+
+		// The server never closes a terminal, and closes the container stdin
+		// without one only with StopAfterStdinEOF. The EOF of the client then
+		// only ends this attach session, so stop receiving the output as
+		// well, so that nothing gets written to the output streams after the
+		// attach returned.
+		if (cfg.Tty && cfg.StopAfterStdinEOF) || (!cfg.Tty && cfg.ContainerStdin && !cfg.StopAfterStdinEOF) {
+			if closeErr := conn.CloseRead(); closeErr != nil {
+				c.logger.Errorf("Unable to close conn: %v", closeErr)
+			}
+
+			if err := waitForOutput(ctx, receiveStdoutError); err != nil {
+				c.logger.WithError(err).Debug("Output failed after stdin EOF")
+			}
+
 			return nil
 		}
 
-		c.tryCloseAttachReaderForID(id)
-
-		if errors.Is(err, detach.ErrDetach) {
-			if closeErr := conn.CloseWrite(); closeErr != nil {
-				return errors.Join(closeErr, err)
-			}
-
-			return err
-		}
-
-		if err == nil {
-			// copy stdin is done, close it
-			if connErr := conn.CloseWrite(); connErr != nil {
-				c.logger.Errorf("Unable to close conn: %v", connErr)
-			}
-		}
-
 		if cfg.Streams.Stdout != nil || cfg.Streams.Stderr != nil {
-			return <-receiveStdoutError
+			return waitForOutput(ctx, receiveStdoutError)
 		}
 	}
 
 	return nil
+}
+
+// waitForOutput waits until the output got received or the context is done.
+func waitForOutput(ctx context.Context, receiveStdoutError <-chan error) error {
+	select {
+	case err := <-receiveStdoutError:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("wait for output: %w", ctx.Err())
+	}
 }
 
 // SetWindowSizeContainerConfig is the configuration for calling the SetWindowSizeContainer method.
