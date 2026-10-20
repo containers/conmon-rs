@@ -32,7 +32,7 @@ body:
       label: Anything else we need to know?
 
   - type: textarea
-    id: kubeVersion
+    id: conmonrsVersion
     attributes:
       label: conmon-rs version
       value: |
