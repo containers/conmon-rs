@@ -2,6 +2,7 @@ mod cri;
 mod journald;
 mod json;
 
+use crate::conmon_capnp::conmon::log_driver::{Owned, Type};
 use crate::{
     container_io::Pipe, container_log::cri::CriLogger, container_log::journald::JournaldLogger,
     container_log::json::JsonLogger,
@@ -9,7 +10,6 @@ use crate::{
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use capnp::struct_list::Reader;
-use conmon_common::conmon_capnp::conmon::log_driver::{Owned, Type};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,

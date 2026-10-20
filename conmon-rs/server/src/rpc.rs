@@ -1,3 +1,4 @@
+use crate::conmon_capnp::conmon;
 #[cfg(feature = "tracing")]
 use crate::telemetry::Telemetry;
 use crate::{
@@ -12,7 +13,6 @@ use crate::{
 use anyhow::{Context, format_err};
 use capnp::{Error, capability::Promise};
 use capnp_rpc::pry;
-use conmon_common::conmon_capnp::conmon;
 use std::{
     path::{Path, PathBuf},
     process,

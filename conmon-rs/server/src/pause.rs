@@ -1,7 +1,7 @@
 use crate::child_reaper::ReapableChild;
+use crate::conmon_capnp::conmon;
 use anyhow::{Context, Result, bail};
 use capnp::enum_list::Reader;
-use conmon_common::conmon_capnp::conmon;
 use libc::pid_t;
 use nix::{
     errno::Errno,
@@ -19,7 +19,7 @@ use signal_hook::{
     iterator::Signals,
 };
 use std::{
-    env,
+    env, fmt,
     fs::{self, File},
     io::{Read, Write},
     os::unix::net::UnixStream,
@@ -27,7 +27,6 @@ use std::{
     process::{Command, Stdio},
     sync::OnceLock,
 };
-use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, info, trace, warn};
@@ -640,8 +639,7 @@ impl PauseParent<'_> {
     }
 }
 
-#[derive(AsRefStr, Clone, Copy, Debug, Display, EnumString, Eq, IntoStaticStr, PartialEq)]
-#[strum(serialize_all = "lowercase")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// All available linux namespaces.
 pub enum Namespace {
     /// IPC namespace. This creates new namespace for System V IPC POSIX message queues and
@@ -662,7 +660,24 @@ pub enum Namespace {
     Uts,
 }
 
+impl fmt::Display for Namespace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl Namespace {
+    /// The name of the namespace as used in `/proc/<pid>/ns` and the flags.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ipc => "ipc",
+            Self::Pid => "pid",
+            Self::Net => "net",
+            Self::User => "user",
+            Self::Uts => "uts",
+        }
+    }
+
     /// Bind the namespace of the process `pid` to the provided base path and
     /// pod ID.
     pub fn bind<T: AsRef<Path>>(&self, path: T, pod_id: &str, pid: Pid) -> Result<()> {
@@ -677,7 +692,7 @@ impl Namespace {
         let source_path = PathBuf::from("/proc")
             .join(pid.as_raw().to_string())
             .join("ns")
-            .join(self.as_ref());
+            .join(self.as_str());
 
         mount(
             Some(&source_path),

@@ -1,5 +1,6 @@
 #![deny(missing_docs)]
 
+use crate::conmon_capnp::conmon::{self, CgroupManager};
 #[cfg(feature = "tracing")]
 use crate::telemetry::Telemetry;
 use crate::{
@@ -17,9 +18,6 @@ use crate::{
 use anyhow::{Context, Result, format_err};
 use capnp::text_list::Reader;
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp::Side, twoparty};
-#[cfg(feature = "tracing")]
-use clap::crate_name;
-use conmon_common::conmon_capnp::conmon::{self, CgroupManager};
 use futures::{AsyncReadExt, FutureExt};
 use libc::_exit;
 use nix::{
@@ -31,7 +29,7 @@ use nix::{
 use opentelemetry::trace::{FutureExt as OpenTelemetryFutureExt, TracerProvider};
 #[cfg(feature = "tracing")]
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use std::{fs::File, io::Write, os::fd::RawFd, path::Path, process, str::FromStr, sync::Arc};
+use std::{fs::File, io::Write, os::fd::RawFd, path::Path, process, sync::Arc};
 use tokio::{
     fs,
     runtime::{Builder, Handle},
@@ -289,8 +287,7 @@ impl Server {
     }
 
     fn init_logging(&mut self) -> Result<()> {
-        let level = LevelFilter::from_str(self.config().log_level().as_ref())
-            .context("convert log level filter")?;
+        let level = LevelFilter::from(*self.config().log_level());
 
         #[cfg(feature = "tracing")]
         let telemetry_layer = if self.config().enable_tracing() {
@@ -300,7 +297,7 @@ impl Server {
             self.tracer = Some(tracer.clone());
 
             tracing_opentelemetry::layer()
-                .with_tracer(tracer.tracer(crate_name!()))
+                .with_tracer(tracer.tracer(env!("CARGO_PKG_NAME")))
                 .into()
         } else {
             None
