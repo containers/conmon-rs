@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/containers/conmon-rs/pkg/client"
@@ -27,8 +28,8 @@ import (
 	"go.podman.io/common/pkg/resize"
 	"go.podman.io/storage/pkg/idtools"
 	"go.podman.io/storage/pkg/unshare"
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+	utilexec "k8s.io/client-go/util/exec"
 )
 
 var _ = Describe("ConmonClient", func() {
@@ -49,10 +50,10 @@ var _ = Describe("ConmonClient", func() {
 			pid := sut.PID()
 			Expect(pid).To(BeNumerically(">", 0))
 			rss := vmRSSGivenPID(pid)
-			// use Println because GinkgoWriter only writes on failure,
-			// and it's interesting to see this value for successful runs too.
-			GinkgoWriter.Println("VmRSS for server is", rss)
-			Expect(rss).To(BeNumerically("<", maxRSSKB))
+			// Named after the spec, so that a value can be attributed in the
+			// verbose output of a whole run.
+			GinkgoWriter.Printf("VmRSS for server is %d kB in %q\n", rss, CurrentSpecReport().FullText())
+			Expect(rss).To(BeNumerically("<", maxRSSKB), "VmRSS of the server in kB")
 		}
 	})
 
@@ -67,6 +68,103 @@ var _ = Describe("ConmonClient", func() {
 			sut = tr.configGivenEnv()
 			sut2 := tr.configGivenEnv()
 			Expect(sut2.PID()).To(Equal(sut.PID()))
+		})
+
+		It("should start with an output writer which is no file", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+
+			// The server outlives New and keeps writing to it.
+			output := &syncBuffer{}
+			started := make(chan *client.ConmonClient, 1)
+
+			go func() {
+				defer GinkgoRecover()
+
+				started <- tr.configGivenEnvWith(func(cfg *client.ConmonServerConfig) {
+					cfg.Stdout = output
+					cfg.Stderr = output
+				})
+			}()
+
+			Eventually(started, 10*time.Second).Should(Receive(&sut))
+			Eventually(output.String, 10*time.Second).ShouldNot(BeEmpty())
+		})
+
+		It("should start the server with the given environment", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnvWith(func(cfg *client.ConmonServerConfig) {
+				cfg.Env = []string{"CONMON_TEST_ENV=set"}
+			})
+
+			environ := strings.Split(fileContents(fmt.Sprintf("/proc/%d/environ", sut.PID())), "\x00")
+			Expect(environ).To(ContainElement("CONMON_TEST_ENV=set"))
+			Expect(environ).NotTo(ContainElement(HavePrefix("PATH=")))
+		})
+	})
+
+	Describe("Shutdown", func() {
+		// startServer starts a server with a created container and its fd
+		// socket, and returns its PID.
+		startServer := func(terminal bool) uint32 {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(terminal)
+			sut = tr.configGivenEnv()
+			tr.createContainer(sut, terminal)
+
+			remoteFDs, err := sut.RemoteFDs(context.Background())
+			Expect(err).To(Succeed())
+			Expect(remoteFDs.Close()).To(Succeed())
+
+			Expect(filepath.Join(tr.tmpDir, "conmon.sock")).To(BeAnExistingFile())
+			Expect(filepath.Join(tr.tmpDir, "conmon-fd.sock")).To(BeAnExistingFile())
+
+			return sut.PID()
+		}
+
+		// expectServerGone checks that the server is gone and removed its
+		// files.
+		expectServerGone := func(pid uint32) {
+			Eventually(func() error {
+				return syscall.Kill(int(pid), 0)
+			}, 10*time.Second).Should(MatchError(syscall.ESRCH))
+			// The server PID file is removed by New already, the "pidfile"
+			// in the run directory belongs to the container of the bundle.
+			Expect(filepath.Join(tr.tmpDir, "conmon.sock")).NotTo(BeAnExistingFile())
+			Expect(filepath.Join(tr.tmpDir, "conmon-fd.sock")).NotTo(BeAnExistingFile())
+
+			// The runtime reports the killed container as stopped, or
+			// not at all once it got deleted.
+			Eventually(func() bool {
+				stopped := tr.rr.RunCommandCheckOutput("stopped", "list") == nil
+				// Only a listing without the container counts, not a
+				// failed listing.
+				gone := errors.Is(tr.rr.RunCommandCheckOutput(tr.ctrID, "list"), errNoMatch)
+
+				return stopped || gone
+			}, time.Second*5).Should(BeTrue(), "container still created")
+		}
+
+		for _, terminal := range []bool{true, false} {
+			It(testName("should kill created children if being killed", terminal), func() {
+				pid := startServer(terminal)
+
+				// Shutdown should kill the container and clean up
+				Expect(sut.Shutdown()).To(Succeed())
+				sut = nil
+
+				expectServerGone(pid)
+			})
+		}
+
+		It("should kill created children on SIGTERM", func() {
+			pid := startServer(false)
+			Expect(syscall.Kill(int(pid), syscall.SIGTERM)).To(Succeed())
+
+			sut = nil
+
+			expectServerGone(pid)
 		})
 	})
 
@@ -124,26 +222,13 @@ var _ = Describe("ConmonClient", func() {
 				Expect(fileContents(tr.exitPath())).To(Equal("0"))
 			})
 
-			It(testName("should kill created children if being killed", terminal), func() {
+			It(testName("should write a non-zero exit code to the exit file", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfig(terminal)
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh", "-c", "exit 3"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-
-				// Shutdown should kill the container and clean up
-				Expect(sut.Shutdown()).To(Succeed())
-				sut = nil
-
-				// The runtime reports the killed container as stopped, or
-				// not at all once it got deleted.
-				Eventually(func() bool {
-					stopped := tr.rr.RunCommandCheckOutput("stopped", "list") == nil
-					// Only a listing without the container counts, not a
-					// failed listing.
-					gone := errors.Is(tr.rr.RunCommandCheckOutput(tr.ctrID, "list"), errNoMatch)
-
-					return stopped || gone
-				}, time.Second*5).Should(BeTrue(), "container still created")
+				tr.startContainer()
+				Eventually(func() string { return fileContents(tr.exitPath()) }, 10*time.Second).Should(Equal("3"))
 			})
 
 			It(testName("should execute cleanup command when container exits", terminal), func() {
@@ -152,18 +237,9 @@ var _ = Describe("ConmonClient", func() {
 				// The container ID is only known after the runtime config exists.
 				cleanupPath := filepath.Join(tr.tmpDir, "cleanup-"+tr.ctrID)
 				sut = tr.configGivenEnv()
-				tr.createContainerWithConfig(sut, &client.CreateContainerConfig{
-					ID:           tr.ctrID,
-					BundlePath:   tr.tmpDir,
-					Terminal:     terminal,
-					ExitPaths:    []string{tr.exitPath()},
-					OOMExitPaths: []string{tr.oomExitPath()},
-					LogDrivers: []client.ContainerLogDriver{{
-						Type: client.LogDriverTypeContainerRuntimeInterface,
-						Path: tr.logPath(),
-					}},
-					CleanupCmd: []string{"touch", cleanupPath},
-				})
+				cfg := tr.defaultConfig(terminal)
+				cfg.CleanupCmd = []string{"touch", cleanupPath}
+				tr.createContainerWithConfig(sut, cfg)
 				tr.startContainer()
 				Eventually(cleanupPath, 10*time.Second).Should(BeAnExistingFile())
 				Expect(fileContents(cleanupPath)).To(BeEmpty())
@@ -173,15 +249,7 @@ var _ = Describe("ConmonClient", func() {
 				tr = newTestRunner()
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"invalid"}, nil)
 				sut = tr.configGivenEnv()
-				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
-					ID:         tr.ctrID,
-					BundlePath: tr.tmpDir,
-					Terminal:   terminal,
-					LogDrivers: []client.ContainerLogDriver{{
-						Type: client.LogDriverTypeContainerRuntimeInterface,
-						Path: tr.logPath(),
-					}},
-				})
+				_, err := sut.CreateContainer(context.Background(), tr.defaultConfig(terminal))
 				Expect(err).NotTo(Succeed())
 				Expect(err.Error()).To(ContainSubstring(`not found in $PATH`))
 			})
@@ -199,9 +267,15 @@ var _ = Describe("ConmonClient", func() {
 
 			It(testName("should succeed/error to set the window size", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfig(terminal)
+				// Report the size of the terminal until the resize shows up.
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "sh", "-c", "while true; do /busybox stty size; /busybox sleep 0.1; done"},
+					nil,
+				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
+				tr.startContainer()
 
 				err := sut.SetWindowSizeContainer(
 					context.Background(),
@@ -213,11 +287,17 @@ var _ = Describe("ConmonClient", func() {
 						},
 					},
 				)
-				if terminal {
-					Expect(err).To(Succeed())
-				} else {
+				if !terminal {
 					Expect(err).NotTo(Succeed())
+
+					return
 				}
+
+				Expect(err).To(Succeed())
+
+				// stty prints the rows, then the columns.
+				Eventually(func() string { return fileContents(tr.logPath()) }, 10*time.Second).
+					Should(ContainSubstring(" 20 10"))
 			})
 
 			It(testName("should catch out of memory (oom) events", terminal), func() {
@@ -342,6 +422,69 @@ var _ = Describe("ConmonClient", func() {
 
 				return errors.Is(err, os.ErrNotExist)
 			}, time.Second*5).Should(BeTrue())
+		})
+	})
+
+	Describe("ReopenLogContainer", func() {
+		for _, terminal := range []bool{true, false} {
+			It(testName("should continue the log in a new file", terminal), func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "sh", "-c", "i=0; while true; do echo line $i; i=$((i+1)); /busybox sleep 0.1; done"},
+					nil,
+				)
+				sut = tr.configGivenEnv()
+				tr.createContainer(sut, terminal)
+				tr.startContainer()
+
+				atLeastThreeLines := WithTransform(func(lines []int) int { return len(lines) }, BeNumerically(">=", 3))
+				Eventually(func(g Gomega) []int { return logLineNumbers(g, tr.logPath()) }, 10*time.Second).
+					Should(atLeastThreeLines)
+
+				// Rotate the log like a log rotation would do.
+				rotated := tr.logPath() + ".1"
+				Expect(os.Rename(tr.logPath(), rotated)).To(Succeed())
+				Expect(sut.ReopenLogContainer(context.Background(), &client.ReopenLogContainerConfig{
+					ID: tr.ctrID,
+				})).To(Succeed())
+
+				// The reopen wrote everything before it to the old file.
+				oldLines := logLineNumbers(Default, rotated)
+				Expect(oldLines).To(atLeastThreeLines)
+
+				Eventually(func(g Gomega) []int { return logLineNumbers(g, tr.logPath()) }, 10*time.Second).
+					Should(atLeastThreeLines)
+
+				newLines := logLineNumbers(Default, tr.logPath())
+
+				// The old file gets no more lines, the new one continues
+				// right after it.
+				Expect(logLineNumbers(Default, rotated)).To(Equal(oldLines))
+				Expect(oldLines[0]).To(Equal(0))
+
+				for _, lines := range [][]int{oldLines, newLines} {
+					for i := 1; i < len(lines); i++ {
+						Expect(lines[i]).To(Equal(lines[i-1]+1), "lines %v", lines)
+					}
+				}
+
+				Expect(newLines[0]).To(Equal(oldLines[len(oldLines)-1] + 1))
+			})
+		}
+
+		It("should fail for an unknown container", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			Expect(sut.ReopenLogContainer(context.Background(), &client.ReopenLogContainerConfig{
+				ID: "unknown",
+			})).NotTo(Succeed())
+
+			// The failed request keeps the server usable.
+			_, err := sut.Version(context.Background(), &client.VersionConfig{})
+			Expect(err).To(Succeed())
 		})
 	})
 
@@ -503,16 +646,56 @@ var _ = Describe("ConmonClient", func() {
 				tr.createContainer(sut, terminal)
 				tr.startContainer()
 
+				start := time.Now()
 				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
 					ID:       tr.ctrID,
-					Command:  []string{"/busybox", "sleep", "5"},
+					Command:  []string{"/busybox", "sleep", "10"},
 					Timeout:  3,
 					Terminal: terminal,
 				})
 
 				Expect(err).To(Succeed())
+				Expect(time.Since(start)).To(BeNumerically("<", 5*time.Second))
 				Expect(result).NotTo(BeNil())
 				Expect(result.TimedOut).To(BeTrue())
+				// The killed command reports no exit code of its own.
+				Expect(result.ExitCode).To(BeNumerically("<", 0))
+			})
+
+			It(testName("should not outlive the deadline of the context", terminal), func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "20"}, nil)
+				sut = tr.configGivenEnv()
+				tr.createContainer(sut, terminal)
+				tr.startContainer()
+
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+
+				// The server usually reports the timeout before the context
+				// ends the call.
+				result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+					ID:       tr.ctrID,
+					Command:  []string{"/busybox", "sleep", "30"},
+					Terminal: terminal,
+				})
+				if err == nil {
+					Expect(result.TimedOut).To(BeTrue())
+				} else {
+					Expect(err).To(MatchError(context.DeadlineExceeded))
+				}
+
+				// The command got killed with the deadline.
+				Eventually(func(g Gomega) string {
+					result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+						ID:      tr.ctrID,
+						Command: []string{"/busybox", "ps"},
+						Timeout: 10,
+					})
+					g.Expect(err).To(Succeed())
+
+					return string(result.Stdout)
+				}, 4*time.Second).ShouldNot(ContainSubstring("sleep 30"))
 			})
 		}
 	})
@@ -690,6 +873,49 @@ var _ = Describe("ConmonClient", func() {
 			attachErr, _, _ := attachAll("/busybox sleep 1000", true, true, "", true, nil, nil)
 
 			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
+		})
+
+		It("should return once the context is done", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "1000"}, nil)
+			sut = tr.configGivenEnv()
+			tr.createContainer(sut, false)
+			tr.startContainer()
+
+			stdinReader, stdinWriter := io.Pipe()
+			defer stdinWriter.Close()
+
+			stdoutReader, stdoutWriter := io.Pipe()
+
+			// The output stream gets closed once the attach is over.
+			outputClosed := make(chan error, 1)
+
+			go func() {
+				_, err := io.Copy(io.Discard, stdoutReader)
+				outputClosed <- err
+			}()
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+
+			attachErr := make(chan error, 1)
+
+			go func() {
+				attachErr <- sut.AttachContainer(ctx, &client.AttachConfig{
+					ID:                tr.ctrID,
+					SocketPath:        filepath.Join(tr.tmpDir, "attach"),
+					ContainerStdin:    true,
+					StopAfterStdinEOF: true,
+					Streams: client.AttachStreams{
+						Stdin:  &client.In{stdinReader},
+						Stdout: &client.Out{stdoutWriter},
+					},
+				})
+			}()
+
+			Eventually(attachErr, 10*time.Second).Should(Receive(MatchError(context.DeadlineExceeded)))
+			// The attach closed the output before it returned.
+			Eventually(outputClosed, time.Second).Should(Receive(Succeed()))
 		})
 
 		It("should receive the done packet if the output ended before attaching", func() {
@@ -1131,6 +1357,51 @@ var _ = Describe("ConmonClient", func() {
 			Expect(err).NotTo(Succeed())
 		})
 
+		It("should create the namespaces once for concurrent calls", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			basePath := MustTempDir("ns-test-")
+			// Runs after the server shutdown unmounted the namespaces.
+			DeferCleanup(os.RemoveAll, basePath)
+
+			podID := uuid.New().String()
+			cfg := &client.CreateNamespacesConfig{
+				Namespaces: []client.Namespace{client.NamespaceIPC, client.NamespacePID, client.NamespaceUTS},
+				BasePath:   basePath,
+				PodID:      podID,
+			}
+
+			const calls = 10
+
+			responses := make([]*client.CreateNamespacesResponse, calls)
+
+			var wg sync.WaitGroup
+			for i := range calls {
+				wg.Go(func() {
+					defer GinkgoRecover()
+
+					response, err := sut.CreateNamespaces(context.Background(), cfg)
+					Expect(err).To(Succeed())
+
+					responses[i] = response
+				})
+			}
+
+			wg.Wait()
+
+			for _, response := range responses {
+				Expect(response.Namespaces).To(Equal(responses[0].Namespaces))
+			}
+
+			for _, ns := range responses[0].Namespaces {
+				expectNamespaceFile(ns.Path)
+			}
+
+			Expect(pauseProcessCount(podID)).To(Equal(1))
+		})
+
 		It("should fail with user namespace without mappings", func() {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
@@ -1177,27 +1448,43 @@ var _ = Describe("JSONLogger", func() {
 				)
 
 				sut = tr.configGivenEnv()
-				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
-					ID:         tr.ctrID,
-					BundlePath: tr.tmpDir,
-					Terminal:   terminal,
-					LogDrivers: []client.ContainerLogDriver{{
-						Type: client.LogDriverTypeJSONLogger,
-						Path: tr.logPath(),
-					}},
-				})
-				Expect(err).NotTo(HaveOccurred())
+				cfg := tr.defaultConfig(terminal)
+				cfg.LogDrivers = []client.ContainerLogDriver{{
+					Type: client.LogDriverTypeJSONLogger,
+					Path: tr.logPath(),
+				}}
+				tr.createContainerWithConfig(sut, cfg)
 				tr.startContainer()
 
-				logContent, err := os.ReadFile(tr.logPath())
-				Expect(err).NotTo(HaveOccurred())
-				// Check if the log content is in JSON format
-				// This is a basic check assuming that a valid JSON starts and ends with braces '{' and '}'
-				Expect(strings.TrimSpace(string(logContent))).To(SatisfyAll(
-					Not(BeEmpty()),
-					HavePrefix("{"),
-					HaveSuffix("}"),
-				))
+				// The schema is documented in usage.md.
+				type entry struct {
+					Timestamp uint64 `json:"timestamp"`
+					Pipe      string `json:"pipe"`
+					Message   string `json:"message"`
+					Partial   bool   `json:"partial"`
+				}
+
+				var entries []entry
+
+				Eventually(func(g Gomega) []entry {
+					entries = nil
+
+					for line := range strings.Lines(fileContents(tr.logPath())) {
+						var e entry
+						g.Expect(json.Unmarshal([]byte(line), &e)).To(Succeed(), "line %q", line)
+						entries = append(entries, e)
+					}
+
+					return entries
+				}, 10*time.Second).Should(HaveLen(2))
+
+				for i, message := range []string{"hello", "world"} {
+					Expect(entries[i].Timestamp).NotTo(BeZero())
+					Expect(entries[i].Pipe).To(Equal("stdout"))
+					// A terminal ends the lines with "\r\n", which is stripped as well.
+					Expect(entries[i].Message).To(Equal(message))
+					Expect(entries[i].Partial).To(BeFalse())
+				}
 			})
 		}
 	})
@@ -1231,13 +1518,9 @@ var _ = Describe("JournaldLogger", func() {
 				)
 
 				sut = tr.configGivenEnv()
-				_, err := sut.CreateContainer(context.Background(), &client.CreateContainerConfig{
-					ID:         tr.ctrID,
-					BundlePath: tr.tmpDir,
-					Terminal:   terminal,
-					LogDrivers: []client.ContainerLogDriver{{Type: client.LogDriverTypeJournald}},
-				})
-				Expect(err).NotTo(HaveOccurred())
+				cfg := tr.defaultConfig(terminal)
+				cfg.LogDrivers = []client.ContainerLogDriver{{Type: client.LogDriverTypeJournald}}
+				tr.createContainerWithConfig(sut, cfg)
 				tr.startContainer()
 
 				// Verify the journal logs, they arrive asynchronously. The
@@ -1321,20 +1604,14 @@ var _ = Describe("StreamingServer", func() {
 				Expect(err).To(Succeed())
 				Expect(result.URL).NotTo(BeEmpty())
 
-				config := &rest.Config{Insecure: true}
-				executor, err := remotecommand.NewWebSocketExecutor(config, "GET", result.URL)
-				Expect(err).NotTo(HaveOccurred())
-
 				stdout := &bytes.Buffer{}
 				stderr := &bytes.Buffer{}
 
-				streamOptions := remotecommand.StreamOptions{
+				Expect(streamURL(context.Background(), result.URL, remotecommand.StreamOptions{
 					Stdout: stdout,
 					Stderr: stderr,
 					Tty:    terminal,
-				}
-				err = executor.StreamWithContext(context.Background(), streamOptions)
-				Expect(err).NotTo(HaveOccurred())
+				})).To(Succeed())
 
 				if terminal {
 					Expect(stdout.String()).To(Equal("stdoutstderr"))
@@ -1346,6 +1623,33 @@ var _ = Describe("StreamingServer", func() {
 
 				// The PID file of the exec is removed once it got read.
 				Expect(execPIDFiles(tr.tmpDir)).To(BeEmpty())
+			})
+
+			It(testName("should report a non-zero exit code", terminal), func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+				sut = tr.configGivenEnv()
+				tr.createContainer(sut, terminal)
+				tr.startContainer()
+
+				result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
+					ID:      tr.ctrID,
+					Command: []string{"/busybox", "sh", "-c", "exit 3"},
+					Tty:     terminal,
+					Stdout:  true,
+					Stderr:  true,
+				})
+				Expect(err).To(Succeed())
+
+				err = streamURL(context.Background(), result.URL, remotecommand.StreamOptions{
+					Stdout: io.Discard,
+					Stderr: io.Discard,
+					Tty:    terminal,
+				})
+
+				var exitErr utilexec.CodeExitError
+				Expect(errors.As(err, &exitErr)).To(BeTrue(), "error %v", err)
+				Expect(exitErr.Code).To(Equal(3))
 			})
 
 			It(testName("should fail if container does not exist", terminal), func() {
@@ -1381,17 +1685,12 @@ var _ = Describe("StreamingServer", func() {
 				})
 				Expect(err).To(Succeed())
 
-				config := &rest.Config{Insecure: true}
-				executor, err := remotecommand.NewWebSocketExecutor(config, "GET", result.URL)
-				Expect(err).NotTo(HaveOccurred())
-
 				// The runtime fails to start the command, the session reports it.
-				err = executor.StreamWithContext(context.Background(), remotecommand.StreamOptions{
+				Expect(streamURL(context.Background(), result.URL, remotecommand.StreamOptions{
 					Stdout: io.Discard,
 					Stderr: io.Discard,
 					Tty:    terminal,
-				})
-				Expect(err).To(HaveOccurred())
+				})).NotTo(Succeed())
 
 				Eventually(func() []string { return execPIDFiles(tr.tmpDir) }).
 					WithTimeout(10 * time.Second).
@@ -1421,16 +1720,13 @@ var _ = Describe("StreamingServer", func() {
 			})
 			Expect(err).To(Succeed())
 
-			executor, err := remotecommand.NewWebSocketExecutor(&rest.Config{Insecure: true}, "GET", result.URL)
-			Expect(err).NotTo(HaveOccurred())
-
 			stdout := &bytes.Buffer{}
 			stderr := &bytes.Buffer{}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
-			Expect(executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+			Expect(streamURL(ctx, result.URL, remotecommand.StreamOptions{
 				Stdin:  strings.NewReader("attached"),
 				Stdout: stdout,
 				Stderr: stderr,
@@ -1445,7 +1741,11 @@ var _ = Describe("StreamingServer", func() {
 
 		It(testName("should succeed", terminal), func() {
 			tr = newTestRunner()
-			tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "watch", "-n0.5", "echo", "test"}, nil)
+			// The container only answers once attached, then it exits, which
+			// ends the session.
+			tr.createRuntimeConfigWithProcessArgs(
+				terminal, []string{"/busybox", "sh", "-c", "read -r line; echo \"got $line\""}, nil,
+			)
 			sut = tr.configGivenEnv()
 			tr.createContainer(sut, terminal)
 			tr.startContainer()
@@ -1460,27 +1760,32 @@ var _ = Describe("StreamingServer", func() {
 			Expect(err).To(Succeed())
 			Expect(result.URL).NotTo(BeEmpty())
 
-			config := &rest.Config{Insecure: true}
-			executor, err := remotecommand.NewWebSocketExecutor(config, "GET", result.URL)
-			Expect(err).NotTo(HaveOccurred())
-
-			// The stream gets cut off by the context below while the executor
-			// still copies output, so the buffers need a lock.
 			stdout := &syncBuffer{}
 			stderr := &syncBuffer{}
 
-			streamOptions := remotecommand.StreamOptions{
+			// The end of stdin ends a terminal session, so it stays open
+			// until the answer arrived.
+			stdinReader, stdinWriter := io.Pipe()
+
+			go func() {
+				defer GinkgoRecover()
+				defer stdinWriter.Close()
+
+				_, err := stdinWriter.Write([]byte("attached\n"))
+				Expect(err).To(Succeed())
+				Eventually(stdout.String, 10*time.Second).Should(ContainSubstring("got attached"))
+			}()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			Expect(streamURL(ctx, result.URL, remotecommand.StreamOptions{
+				Stdin:  stdinReader,
 				Stdout: stdout,
 				Stderr: stderr,
 				Tty:    terminal,
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-
-			err = executor.StreamWithContext(ctx, streamOptions)
-			Expect(err).To(HaveOccurred())
-			Expect(stdout.String()).To(ContainSubstring("echo test"))
+			})).To(Succeed())
+			Expect(stdout.String()).To(ContainSubstring("got attached"))
 			Expect(stderr.String()).To(BeEmpty())
 		})
 
@@ -1502,16 +1807,13 @@ var _ = Describe("StreamingServer", func() {
 			})
 			Expect(err).To(Succeed())
 
-			executor, err := remotecommand.NewWebSocketExecutor(&rest.Config{Insecure: true}, "GET", result.URL)
-			Expect(err).NotTo(HaveOccurred())
-
 			stdout := &bytes.Buffer{}
 			stderr := &bytes.Buffer{}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
-			Expect(executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+			Expect(streamURL(ctx, result.URL, remotecommand.StreamOptions{
 				Stdin:  strings.NewReader("attached"),
 				Stdout: stdout,
 				Stderr: stderr,

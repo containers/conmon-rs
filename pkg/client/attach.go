@@ -7,7 +7,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/containers/conmon-rs/internal/proto"
 	"go.podman.io/common/pkg/detach"
@@ -19,6 +21,10 @@ const (
 	attachPipeDone      = 0
 	attachPipeStdout    = 2
 	attachPipeStderr    = 3
+
+	// attachOutputStopTimeout bounds the wait for the output to stop once
+	// the context of an attach is done.
+	attachOutputStopTimeout = time.Second
 )
 
 var errTerminalSizeNil = errors.New("terminal size cannot be nil")
@@ -124,6 +130,10 @@ func (c *ConmonClient) storeAttachReader(value *attachReaderValue) uint64 {
 }
 
 // AttachContainer can be used to attach to a running container.
+//
+// Once the context is done, the attach returns its error. The output
+// streams are closed before, unless a write to them stays blocked for longer
+// than a second, which then may still finish and close them afterwards.
 func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) error {
 	ctx, span := c.startSpan(ctx, "AttachContainer")
 	if span != nil {
@@ -167,13 +177,11 @@ func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) e
 
 	result, err := future.Struct()
 	if err != nil {
-		c.resetConn()
-
-		return fmt.Errorf("create result: %w", err)
+		return fmt.Errorf("get result: %w", err)
 	}
 
 	if _, err := result.Response(); err != nil {
-		return fmt.Errorf("set response: %w", err)
+		return fmt.Errorf("get response: %w", err)
 	}
 
 	if err := c.attach(ctx, cfg); err != nil {
@@ -464,6 +472,14 @@ func (c *ConmonClient) readStdio(
 
 	c.logger.Trace("Read stdio on attach")
 
+	// Stopping the output can happen on stdin EOF and once more if the
+	// context ends while waiting for the output.
+	closeRead := sync.OnceFunc(func() {
+		if err := conn.CloseRead(); err != nil {
+			c.logger.Errorf("Unable to close conn: %v", err)
+		}
+	})
+
 	select {
 	case err = <-receiveStdoutError:
 		c.logger.WithError(err).Trace("Received message on output channel")
@@ -508,11 +524,9 @@ func (c *ConmonClient) readStdio(
 		// well, so that nothing gets written to the output streams after the
 		// attach returned.
 		if (cfg.Tty && cfg.StopAfterStdinEOF) || (!cfg.Tty && cfg.ContainerStdin && !cfg.StopAfterStdinEOF) {
-			if closeErr := conn.CloseRead(); closeErr != nil {
-				c.logger.Errorf("Unable to close conn: %v", closeErr)
-			}
+			closeRead()
 
-			if err := waitForOutput(ctx, receiveStdoutError); err != nil {
+			if err := c.waitForOutput(ctx, closeRead, receiveStdoutError); err != nil {
 				c.logger.WithError(err).Debug("Output failed after stdin EOF")
 			}
 
@@ -520,20 +534,48 @@ func (c *ConmonClient) readStdio(
 		}
 
 		if cfg.Streams.Stdout != nil || cfg.Streams.Stderr != nil {
-			return waitForOutput(ctx, receiveStdoutError)
+			return c.waitForOutput(ctx, closeRead, receiveStdoutError)
 		}
+
+	case <-ctx.Done():
+		c.logger.WithError(ctx.Err()).Trace("Context done while attached")
+
+		// Closing stdin ends its copy.
+		c.tryCloseAttachReaderForID(id)
+		c.stopOutput(closeRead, receiveStdoutError)
+
+		return fmt.Errorf("attach: %w", ctx.Err())
 	}
 
 	return nil
 }
 
-// waitForOutput waits until the output got received or the context is done.
-func waitForOutput(ctx context.Context, receiveStdoutError <-chan error) error {
+// waitForOutput waits until the output got received. If the context is done
+// before, the output gets stopped, closeRead closes the read side of the
+// connection.
+func (c *ConmonClient) waitForOutput(ctx context.Context, closeRead func(), receiveStdoutError <-chan error) error {
 	select {
 	case err := <-receiveStdoutError:
 		return err
 	case <-ctx.Done():
+		c.stopOutput(closeRead, receiveStdoutError)
+
 		return fmt.Errorf("wait for output: %w", ctx.Err())
+	}
+}
+
+// stopOutput stops receiving the output and waits for the output goroutine,
+// which closes the output streams, so that nothing writes to or closes them
+// after the attach returned. A write blocked by a stream nobody reads can
+// only be waited for a while, it may still finish afterwards.
+func (c *ConmonClient) stopOutput(closeRead func(), receiveStdoutError <-chan error) {
+	closeRead()
+
+	select {
+	case err := <-receiveStdoutError:
+		c.logger.WithError(err).Trace("Output stopped")
+	case <-time.After(attachOutputStopTimeout):
+		c.logger.Warn("Output still blocked, returning anyway")
 	}
 }
 
@@ -585,13 +627,11 @@ func (c *ConmonClient) SetWindowSizeContainer(ctx context.Context, cfg *SetWindo
 
 	result, err := future.Struct()
 	if err != nil {
-		c.resetConn()
-
-		return fmt.Errorf("create result: %w", err)
+		return fmt.Errorf("get result: %w", err)
 	}
 
 	if _, err := result.Response(); err != nil {
-		return fmt.Errorf("set response: %w", err)
+		return fmt.Errorf("get response: %w", err)
 	}
 
 	return nil

@@ -217,9 +217,7 @@ func (c *ConmonClient) RemoteFDs(ctx context.Context) (*RemoteFDs, error) {
 
 	result, err := future.Struct()
 	if err != nil {
-		c.resetConn()
-
-		return nil, fmt.Errorf("create result: %w", err)
+		return nil, fmt.Errorf("get result: %w", err)
 	}
 
 	res, err := result.Response()
