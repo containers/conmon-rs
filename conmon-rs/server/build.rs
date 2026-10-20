@@ -1,4 +1,5 @@
 use std::{path::Path, process::Command};
+use time::{OffsetDateTime, macros::format_description};
 
 fn run(cmd: &str, args: &[&str]) -> String {
     Command::new(cmd)
@@ -60,13 +61,16 @@ fn main() {
     };
 
     // Honor SOURCE_DATE_EPOCH for reproducible builds.
-    let build_time = match std::env::var("SOURCE_DATE_EPOCH") {
-        Ok(epoch) => run(
-            "date",
-            &["-u", "-d", &format!("@{epoch}"), "+%Y-%m-%d %H:%M:%S"],
-        ),
-        Err(_) => run("date", &["-u", "+%Y-%m-%d %H:%M:%S"]),
-    };
+    let now = std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|epoch| epoch.parse().ok())
+        .and_then(|epoch| OffsetDateTime::from_unix_timestamp(epoch).ok())
+        .unwrap_or_else(OffsetDateTime::now_utc);
+    let build_time = now
+        .format(&format_description!(
+            "[year]-[month]-[day] [hour]:[minute]:[second]"
+        ))
+        .expect("format the build time");
 
     let target = std::env::var("TARGET").unwrap_or_default();
     let rust_version = run("rustc", &["--version"]);

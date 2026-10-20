@@ -187,6 +187,27 @@ impl Server {
         Ok(server)
     }
 
+    /// Add the received descriptors to the state and the slots of the
+    /// connection, all of them or none.
+    fn add_received_fds(
+        guard: &mut ConnectionGuard,
+        received_fds: Vec<OwnedFd>,
+        num_fds: usize,
+    ) -> Result<()> {
+        if received_fds.len() != num_fds {
+            anyhow::bail!(
+                "received {} fds, but expected {num_fds} fds",
+                received_fds.len()
+            )
+        }
+
+        let mut state = lock(&guard.fd_socket.state)?;
+        guard
+            .slots
+            .extend(received_fds.into_iter().map(|fd| state.add(fd)));
+        Ok(())
+    }
+
     async fn serve(conn: UnixSeqpacket, fd_socket: Arc<FdSocket>) -> Result<()> {
         let mut guard = ConnectionGuard {
             fd_socket,
@@ -212,34 +233,20 @@ impl Server {
 
             let num_fds = (id_and_num_fds & 0xffff_ffff) as usize;
 
-            let result: Result<_> = async {
-                let mut received_fds = Vec::with_capacity(num_fds);
-                for msg in ancillary.into_messages() {
-                    if let OwnedAncillaryMessage::FileDescriptors(msg) = msg {
-                        received_fds.extend(msg);
-                    } else {
-                        // ignore other messages
-                    }
+            let mut received_fds = Vec::with_capacity(num_fds);
+            for msg in ancillary.into_messages() {
+                if let OwnedAncillaryMessage::FileDescriptors(msg) = msg {
+                    received_fds.extend(msg);
                 }
-
-                if received_fds.len() != num_fds {
-                    anyhow::bail!(
-                        "received {} fds, but expected {num_fds} fds",
-                        received_fds.len()
-                    )
-                }
-
-                let mut state = lock(&guard.fd_socket.state)?;
-                let start = guard.slots.len();
-                guard
-                    .slots
-                    .extend(received_fds.into_iter().map(|fd| state.add(fd)));
-                Ok(&guard.slots[start..])
+                // other messages are ignored
             }
-            .await;
+
+            let start = guard.slots.len();
+            let result = Self::add_received_fds(&mut guard, received_fds, num_fds);
 
             match result {
-                Ok(slots) => {
+                Ok(()) => {
+                    let slots = &guard.slots[start..];
                     let mut buf = vec![0; 8 + slots.len() * 8];
                     let (chunks, _) = buf.as_chunks_mut::<8>();
                     chunks[0].copy_from_slice(&id_and_num_fds.to_le_bytes());

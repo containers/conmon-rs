@@ -9,7 +9,7 @@ use notify::{
 use std::{
     collections::HashMap,
     fs::File as StdFile,
-    os::unix::prelude::AsRawFd,
+    os::fd::AsRawFd,
     path::{Path, PathBuf},
     sync::{
         Arc, LazyLock, Mutex, Weak,
@@ -29,9 +29,9 @@ use tracing::{Instrument, debug, debug_span, error, trace};
 
 pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as _);
 
-static CGROUP_ROOT: &str = "/sys/fs/cgroup";
+const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
-static MAX_LINEREADER_CAPACITY: usize = 256;
+const MAX_LINEREADER_CAPACITY: usize = 256;
 
 /// Capacity of the channel delivering file watch events to one OOM watcher.
 const WATCH_EVENT_CHANNEL_SIZE: usize = 32;
@@ -109,7 +109,6 @@ impl OOMWatcher {
     ) -> Result<()> {
         let memory_cgroup_path = if let Some(path) =
             Self::process_cgroup_subsystem_path_cgroup_v1(pid, "memory")
-                .await
                 .context("process cgroup memory subsystem path")?
         {
             path
@@ -164,11 +163,7 @@ impl OOMWatcher {
             }
             _ = oom_event_fd.read(&mut buffer) => {
                 debug!("Got oom event");
-                match Self::write_oom_files(exit_paths).await { Err(e) => {
-                    error!("Writing oom files failed: {:#}", e);
-                } _ => {
-                    debug!("Successfully wrote oom files");
-                }}
+                Self::write_oom_files(exit_paths).await;
                 let _ = tx.try_send(OOMEvent{ oom: true });
             }
         }
@@ -184,7 +179,6 @@ impl OOMWatcher {
         tx: Sender<OOMEvent>,
     ) -> Result<()> {
         let subsystem_path = if let Some(path) = Self::process_cgroup_subsystem_path_cgroup_v2(pid)
-            .await
             .context("process cgroup subsystem path")?
         {
             path
@@ -198,7 +192,7 @@ impl OOMWatcher {
             subsystem_path.display()
         );
 
-        let mut events = MemoryEvents::new(subsystem_path.join("memory.events")).await;
+        let mut events = MemoryEvents::new(subsystem_path.join("memory.events"));
 
         // crun places the process in a leaf below the container cgroup, and
         // the OOMs end up recorded in that parent. Only follow the parent in
@@ -218,10 +212,7 @@ impl OOMWatcher {
                 .into_iter()
                 .find(|path| path.exists())
             });
-        let mut parent_events = match parent_path {
-            Some(path) => Some(MemoryEvents::new(path).await),
-            None => None,
-        };
+        let mut parent_events = parent_path.map(MemoryEvents::new);
 
         let path = events.path.to_str();
         debug!(path, "Setup cgroup v2 handling");
@@ -268,7 +259,7 @@ impl OOMWatcher {
                         }
                     };
 
-                    // Skip access events since they're not if any interest
+                    // Skip access events since they're not of any interest
                     if event.kind == EventKind::Access(AccessKind::Open(AccessMode::Any)) {
                         continue;
                     }
@@ -283,18 +274,14 @@ impl OOMWatcher {
 
                     if Self::check_cgroups(&subsystem_path, &mut events, parent_events.as_mut()).await {
                         debug!("Writing OOM files");
-                        if let Err(e) = Self::write_oom_files(exit_paths).await {
-                            error!("Writing OOM files failed: {:#}", e);
-                        }
+                        Self::write_oom_files(exit_paths).await;
                         match tx.try_send(OOMEvent{ oom: true }) {
                             Ok(_) => break,
                             Err(e) => error!("try_send failed: {:#}", e)
                         };
                     } else if Self::file_not_found(&events.path).await {
                         debug!("Assuming memory slice removal race, still reporting one OOM event");
-                        if let Err(e) = Self::write_oom_files(exit_paths).await {
-                            error!("Writing OOM files failed: {:#}", e);
-                        }
+                        Self::write_oom_files(exit_paths).await;
                         match tx.try_send(OOMEvent{ oom: true }) {
                             Ok(_) => break,
                             Err(e) => error!("try_send failed: {:#}", e)
@@ -353,8 +340,8 @@ impl OOMWatcher {
     ) {
         debug!("Last resort check for OOM");
         let found_oom = Self::check_cgroups(leaf, events, parent_events).await;
-        if found_oom && let Err(e) = Self::write_oom_files(exit_paths).await {
-            error!("Writing OOM files failed: {:#}", e)
+        if found_oom {
+            Self::write_oom_files(exit_paths).await;
         }
         if let Err(e) = tx.try_send(OOMEvent { oom: found_oom }) {
             error!("try_send failed: {:#}", e);
@@ -369,7 +356,7 @@ impl OOMWatcher {
         events: &mut MemoryEvents,
         parent_events: Option<&mut MemoryEvents>,
     ) -> bool {
-        if events.check().await {
+        if events.check() {
             return true;
         }
         let Some(parent) = parent_events else {
@@ -378,7 +365,7 @@ impl OOMWatcher {
         // Only list the parent once its counters went up, memory events change
         // often under memory pressure. The counters are the baseline for the
         // next check either way, so an OOM skipped here is not reported later.
-        if !parent.check().await {
+        if !parent.check() {
             return false;
         }
         if Self::is_only_child(leaf) {
@@ -390,7 +377,7 @@ impl OOMWatcher {
 
     /// Read the current OOM counters of a memory events file to establish a
     /// baseline, so that only OOMs during this container's lifetime count.
-    async fn initial_oom_counters(path: &Path) -> OomCounters {
+    fn initial_oom_counters(path: &Path) -> OomCounters {
         match Self::read_oom_counters(path) {
             Ok(counters) => {
                 debug!("Initial OOM counters of {}: {counters:?}", path.display());
@@ -432,7 +419,7 @@ impl OOMWatcher {
             .is_err_and(|e| e.kind() == ErrorKind::NotFound)
     }
 
-    async fn check_for_oom(
+    fn check_for_oom(
         memory_events_file_path: &Path,
         last: OomCounters,
     ) -> Result<(OomCounters, bool)> {
@@ -472,7 +459,9 @@ impl OOMWatcher {
         Ok(counters)
     }
 
-    async fn write_oom_files(exit_paths: &[PathBuf]) -> Result<()> {
+    /// Create the OOM files. Failures are logged, the OOM gets reported
+    /// through the channel either way.
+    async fn write_oom_files(exit_paths: &[PathBuf]) {
         for path in exit_paths {
             let span = debug_span!("write_oom_file");
             async {
@@ -494,10 +483,9 @@ impl OOMWatcher {
             .instrument(span)
             .await;
         }
-        Ok(())
     }
 
-    async fn process_cgroup_subsystem_path_cgroup_v1(
+    fn process_cgroup_subsystem_path_cgroup_v1(
         pid: u32,
         subsystem: &str,
     ) -> Result<Option<PathBuf>> {
@@ -529,7 +517,7 @@ impl OOMWatcher {
         Ok(None)
     }
 
-    async fn process_cgroup_subsystem_path_cgroup_v2(pid: u32) -> Result<Option<PathBuf>> {
+    fn process_cgroup_subsystem_path_cgroup_v2(pid: u32) -> Result<Option<PathBuf>> {
         if let Some(fp) = Self::try_open_cgroup_path(pid)? {
             return Ok(Path::new(CGROUP_ROOT)
                 .join(
@@ -577,14 +565,14 @@ struct MemoryEvents {
 
 impl MemoryEvents {
     /// Track `path`, starting from its current counters.
-    async fn new(path: PathBuf) -> Self {
-        let last = OOMWatcher::initial_oom_counters(&path).await;
+    fn new(path: PathBuf) -> Self {
+        let last = OOMWatcher::initial_oom_counters(&path);
         Self { path, last }
     }
 
     /// Whether the counters increased since the last OOM found.
-    async fn check(&mut self) -> bool {
-        match OOMWatcher::check_for_oom(&self.path, self.last).await {
+    fn check(&mut self) -> bool {
+        match OOMWatcher::check_for_oom(&self.path, self.last) {
             Ok((counters, true)) => {
                 debug!("Found OOM in {}, count {counters:?}", self.path.display());
                 self.last = counters;
@@ -943,8 +931,8 @@ mod tests {
         let parent_file = parent.path().join("memory.events.local");
         std::fs::write(&parent_file, "oom 0\noom_kill 0\n")?;
 
-        let mut events = MemoryEvents::new(leaf.join("memory.events")).await;
-        let mut parent_events = MemoryEvents::new(parent_file.clone()).await;
+        let mut events = MemoryEvents::new(leaf.join("memory.events"));
+        let mut parent_events = MemoryEvents::new(parent_file.clone());
         let mut check =
             async || OOMWatcher::check_cgroups(&leaf, &mut events, Some(&mut parent_events)).await;
 

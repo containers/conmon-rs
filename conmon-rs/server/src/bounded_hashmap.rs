@@ -55,7 +55,6 @@ where
         }
 
         // LRU cache automatically evicts the least recently used item when at capacity
-        // This is O(1) instead of the previous O(n) scan
         let evicted = self.cache.push(k, (Instant::now(), v));
         if evicted.is_some() {
             warn!("Evicted least recently used element due to capacity limit");

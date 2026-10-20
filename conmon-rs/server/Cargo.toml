@@ -61,3 +61,4 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 [build-dependencies]
 capnp = { workspace = true }
 capnpc = { workspace = true }
+time = { version = "0.3.55", default-features = false, features = ["formatting", "macros"] }

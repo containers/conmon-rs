@@ -36,7 +36,7 @@ where
         {
             match err.kind() {
                 ErrorKind::PermissionDenied => {
-                    println!("Missing sufficient privileges to adjust OOM score")
+                    eprintln!("Missing sufficient privileges to adjust OOM score")
                 }
                 _ => bail!("adjusting OOM score {}", err),
             }

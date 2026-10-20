@@ -10,6 +10,7 @@ const CARGO_TREE: &str = include_str!(concat!(env!("OUT_DIR"), "/cargo-tree.txt"
 #[derive(Debug, Default, Eq, PartialEq, Serialize)]
 pub struct Version {
     /// Specifies if the output should contain verbose debug information.
+    #[serde(skip)]
     verbose: bool,
 
     /// The current crate version.

@@ -22,6 +22,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
 
+/// How many read chunks the stdio and terminal channels buffer per pipe.
+pub const STDIO_CHANNEL_SIZE: usize = 100;
+
 /// Buffer size for reading container I/O streams
 const READ_BUFFER_SIZE: usize = 4096;
 
@@ -183,9 +186,7 @@ impl ContainerIO {
                 .context("create new terminal")?
                 .into()
         } else {
-            Streams::new(logger_clone, attach_clone)
-                .context("create new streams")?
-                .into()
+            Streams::new(logger_clone, attach_clone).into()
         };
         Ok(Self {
             typ,

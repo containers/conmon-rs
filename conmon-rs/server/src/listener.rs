@@ -69,8 +69,12 @@ where
 pub trait ListenerImpl {
     type Listener;
     fn bind(&self, path: &Path) -> io::Result<Self::Listener>;
-    fn create_dir_all(&self, path: &Path) -> io::Result<()>;
-    fn open(&self, path: &Path) -> io::Result<File>;
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        fs::create_dir_all(path)
+    }
+    fn open(&self, path: &Path) -> io::Result<File> {
+        File::open(path)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -82,32 +86,16 @@ impl ListenerImpl for DefaultListener {
     fn bind(&self, path: &Path) -> io::Result<Self::Listener> {
         UnixListener::bind(path)
     }
-
-    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
-        fs::create_dir_all(path)
-    }
-
-    fn open(&self, path: &Path) -> io::Result<File> {
-        File::open(path)
-    }
 }
 
 #[derive(Debug, Default)]
-/// The default implementation for the Listener.
+/// The implementation for SOCK_SEQPACKET listeners.
 pub struct SeqpacketListener;
 
 impl ListenerImpl for SeqpacketListener {
     type Listener = UnixSeqpacketListener;
     fn bind(&self, path: &Path) -> io::Result<Self::Listener> {
         UnixSeqpacketListener::bind(path)
-    }
-
-    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
-        fs::create_dir_all(path)
-    }
-
-    fn open(&self, path: &Path) -> io::Result<File> {
-        File::open(path)
     }
 }
 
