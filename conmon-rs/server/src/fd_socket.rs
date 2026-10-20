@@ -8,7 +8,7 @@
 //! Pass file descriptors via `SCM_RIGHTS` ancillary message.
 //!
 //! `request_id: u32`: Request id selected by client
-//! `num_fds: u8`: Number of file descriptors
+//! `num_fds: u32`: Number of file descriptors
 //!
 //! ```txt
 //! u64: (request_id << 32) | num_fds
@@ -212,7 +212,7 @@ impl Server {
                 continue;
             }
 
-            let num_fds = (id_and_num_fds & 0xff) as usize;
+            let num_fds = (id_and_num_fds & 0xffff_ffff) as usize;
 
             let result: Result<_> = async {
                 let mut received_fds = Vec::with_capacity(num_fds);
@@ -251,7 +251,7 @@ impl Server {
                     conn.send(&buf).await?;
                 }
                 Err(err) => {
-                    let mut buf = (id_and_num_fds | 0xff).to_le_bytes().to_vec();
+                    let mut buf = (id_and_num_fds | 0xffff_ffff).to_le_bytes().to_vec();
                     write!(buf, "{err}")?;
                     conn.send(&buf).await?;
                 }

@@ -19,7 +19,7 @@ use tokio::{
     time::{self, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, trace};
+use tracing::{debug, trace};
 
 /// Buffer size for reading container I/O streams
 const READ_BUFFER_SIZE: usize = 4096;
@@ -359,11 +359,7 @@ impl ContainerIO {
                     }
                     Errno::EBADF => bail!(e),
                     Errno::EAGAIN => continue,
-                    _ => error!(
-                        "Unable to read from file descriptor: {} {}",
-                        e,
-                        e.raw_os_error().context("get OS error")?
-                    ),
+                    _ => return Err(e).context("read from container file descriptor"),
                 },
             }
         }
@@ -387,6 +383,7 @@ impl ContainerIO {
         mut attach: SharedContainerAttach,
         token: CancellationToken,
     ) -> Result<()> {
+        let stdin_closed = attach.stdin_closed().clone();
         loop {
             // While we're not processing input from a caller, and logically should be able to
             // catch a Message::Done here, it doesn't quite work that way.
@@ -404,6 +401,13 @@ impl ContainerIO {
                             return Err(e).context("read from stdin attach endpoints");
                         }
                     }
+                }
+                // A client closed the stdin of the container for good.
+                _ = stdin_closed.cancelled() => {
+                    if let Ok(data) = attach.try_read() {
+                        Self::handle_stdin_data(&data, &mut writer).await?;
+                    }
+                    return Ok(());
                 }
                 _ = token.cancelled() => {
                     // Closing immediately may race with outstanding data on stdin for short lived

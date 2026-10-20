@@ -1,7 +1,7 @@
 //! Child process reaping and management.
 use crate::fd_mapping::{CommandFdExt, FdMapping};
 use crate::{
-    child::Child,
+    child::{Child, ChildKind},
     container_io::{ContainerIO, ContainerIOType, SharedContainerIO},
     oom_watcher::OOMWatcher,
 };
@@ -12,7 +12,7 @@ use nix::{
     errno::Errno,
     sys::{
         signal::{Signal, kill},
-        wait::{WaitPidFlag, WaitStatus, waitpid},
+        wait::{Id, WaitPidFlag, WaitStatus, waitid, waitpid},
     },
     unistd::{Pid, getpgid},
 };
@@ -20,7 +20,7 @@ use std::{
     collections::HashMap,
     ffi::OsStr,
     fmt::{Debug, Write},
-    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+    os::fd::{FromRawFd, OwnedFd, RawFd},
     path::{Path, PathBuf},
     process::Stdio,
     str,
@@ -31,12 +31,13 @@ use tokio::{
     fs::{self, File},
     io::{AsyncWriteExt, unix::AsyncFd},
     process::Command,
+    select,
     sync::{
         broadcast::{self, Receiver, Sender},
         oneshot,
     },
     task::{self, JoinHandle},
-    time::{self, Instant},
+    time::{self, Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error};
@@ -56,11 +57,19 @@ impl ChildReaper {
 const FIRST_FD_AFTER_STDIO: RawFd = 3;
 
 impl ChildReaper {
+    /// How long to wait for the console connection of a runtime which already
+    /// exited successfully.
+    const CONNECT_AFTER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+impl ChildReaper {
+    /// Retrieve the container registered under `id`. Execs share the id of
+    /// their container and are skipped.
     pub fn get(&self, id: &str) -> Result<ReapableChild> {
         let lock = lock!(self.grandchildren());
         let r = lock
             .get(id)
-            .and_then(|v| v.last())
+            .and_then(|v| v.iter().find(|c| c.kind == ChildKind::Container))
             .context("child not available")?
             .clone();
         Ok(r)
@@ -96,33 +105,52 @@ impl ChildReaper {
             .envs(env_vars)
             .fd_mappings(
                 additional_fds
-                    .iter()
+                    .into_iter()
                     .enumerate()
                     .map(|(i, fd)| FdMapping {
-                        parent_fd: unsafe { OwnedFd::from_raw_fd(fd.as_raw_fd()) },
+                        parent_fd: fd,
                         child_fd: i as RawFd + FIRST_FD_AFTER_STDIO,
                     })
                     .collect(),
             )?
             .spawn()
-            .context("spawn child process: {}")?;
+            .context("spawn child process")?;
+
+        // The mappings own the passed descriptors and live in the command's
+        // pre_exec hook, dropping the command closes them in the parent.
+        drop(cmd);
 
         debug!(
             "Running child on PID: {}",
             child.id().map_or("unknown".into(), |x| x.to_string())
         );
 
-        // close file descriptors after spawn
-        drop(additional_fds);
-
         let token = CancellationToken::new();
 
         match container_io.typ_mut() {
             ContainerIOType::Terminal(terminal) => {
-                terminal
-                    .wait_connected(stdin, token.clone())
-                    .await
-                    .context("wait for terminal socket connection")?;
+                // The runtime connects to the console socket before it exits.
+                // If it fails before that, waiting for the connection alone
+                // would hang this call forever.
+                select! {
+                    res = terminal.wait_connected(stdin, token.clone()) => {
+                        res.context("wait for terminal socket connection")?;
+                    }
+                    status = child.wait() => {
+                        if status.context("wait for child")?.success() {
+                            // The runtime succeeded, so it did connect and the
+                            // descriptor is queued already.
+                            time::timeout(
+                                Self::CONNECT_AFTER_EXIT_TIMEOUT,
+                                terminal.wait_connected(stdin, token.clone()),
+                            )
+                            .await
+                            .context("runtime exited without connecting the terminal")?
+                            .context("wait for terminal socket connection")?;
+                        }
+                        // A failure is reported below together with its output.
+                    }
+                }
             }
             ContainerIOType::Streams(streams) => {
                 let stdout = child.stdout.take();
@@ -143,18 +171,15 @@ impl ChildReaper {
             };
 
             if !output.stderr.is_empty() {
-                write!(
-                    err_str,
-                    ": {}",
-                    str::from_utf8(&output.stderr).context("convert stderr to utf8")?,
-                )?;
+                write!(err_str, ": {}", String::from_utf8_lossy(&output.stderr))?;
             }
             // token must be cancelled here because the child hasn't been registered yet,
             // meaning there is no other entity that could cancel the read_loops.
             token.cancel();
 
-            // Wait to ensure that all children do not become zombies.
-            Self::check_child_processes();
+            // Do not leave a container process behind which the runtime
+            // created before it failed.
+            Self::cleanup_failed_grandchild(pidfile).await;
 
             error!("Failed: {err_str}");
             bail!(err_str)
@@ -169,32 +194,42 @@ impl ChildReaper {
         Ok((grandchild_pid, token))
     }
 
-    fn check_child_processes() {
-        debug!("Checking child processes");
-        let pid = Pid::from_raw(-1);
-        loop {
-            match waitpid(pid, WaitPidFlag::WNOHANG.into()) {
-                Ok(WaitStatus::Exited(p, code)) => {
-                    debug!("PID {p} exited with status: {code}");
-                    break;
-                }
-                Ok(WaitStatus::StillAlive) => {
-                    debug!("PID {pid} is still in same state");
-                    break;
-                }
-                Ok(_) => {
-                    continue;
-                }
-                Err(Errno::EINTR) => {
-                    debug!("Retrying on EINTR for PID {pid}");
-                    continue;
-                }
-                Err(err) => {
-                    error!("Unable to waitpid on {:#}", err);
-                    break;
-                }
-            };
+    /// Kill and reap the container process of a failed runtime call, if the
+    /// runtime got as far as writing its PID. It got reparented to this
+    /// subreaper and nobody else waits for it.
+    ///
+    /// Only this PID is waited for. Reaping any exited child instead would take
+    /// the exit status of runtimes of concurrent calls, or of grandchildren
+    /// which are not registered yet.
+    async fn cleanup_failed_grandchild(pidfile: &Path) {
+        let Ok(content) = fs::read_to_string(pidfile).await else {
+            return;
+        };
+        let Ok(pid) = content.trim().parse::<pid_t>() else {
+            return;
+        };
+        let pid = Pid::from_raw(pid);
+
+        // Make sure it is a child, the PID may have been reused otherwise.
+        match waitid(
+            Id::Pid(pid),
+            WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                debug!("Not cleaning up PID {pid} of failed runtime call: {e}");
+                return;
+            }
         }
+
+        debug!("Cleaning up PID {pid} of failed runtime call");
+        if let Err(e) = kill(pid, Signal::SIGKILL) {
+            debug!("Unable to kill PID {pid}: {e}");
+        }
+        task::spawn(ReapableChild::wait_for_exit_code_async(
+            CancellationToken::new(),
+            pid.as_raw() as u32,
+        ));
     }
 
     pub fn watch_grandchild(
@@ -307,6 +342,7 @@ type TaskHandle = Arc<Mutex<Option<JoinHandle<()>>>>;
 
 #[derive(Clone, Debug)]
 pub struct ReapableChild {
+    kind: ChildKind,
     exit_paths: Arc<[PathBuf]>,
     oom_exit_paths: Arc<[PathBuf]>,
     pid: u32,
@@ -350,6 +386,7 @@ impl ReapableChild {
         (
             child.id,
             Self {
+                kind: child.kind,
                 exit_paths: Arc::from(child.exit_paths),
                 oom_exit_paths: Arc::from(child.oom_exit_paths),
                 pid: child.pid,
@@ -461,7 +498,7 @@ impl ReapableChild {
 
     /// Wait for a process to exit using pidfd_open for async polling,
     /// with a blocking waitpid fallback for older kernels.
-    async fn wait_for_exit_code_async(token: CancellationToken, pid: u32) -> i32 {
+    pub(crate) async fn wait_for_exit_code_async(token: CancellationToken, pid: u32) -> i32 {
         const FAILED_EXIT_CODE: i32 = -3;
         debug!("Waiting for exit code of pid {pid}");
 

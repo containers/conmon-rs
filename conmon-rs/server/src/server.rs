@@ -46,6 +46,12 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, prelude::*};
 use twoparty::VatNetwork;
 
+/// The tracer provider created by `init_logging`, if the feature is enabled.
+#[cfg(feature = "tracing")]
+type Tracer = Option<SdkTracerProvider>;
+#[cfg(not(feature = "tracing"))]
+type Tracer = ();
+
 #[derive(Debug)]
 /// The main server structure.
 pub struct Server {
@@ -80,12 +86,6 @@ impl Server {
     /// Fd socket instance.
     pub(crate) fn fd_socket(&self) -> &Arc<FdSocket> {
         &self.fd_socket
-    }
-
-    /// OpenTelemetry tracer instance.
-    #[cfg(feature = "tracing")]
-    pub(crate) fn tracer(&self) -> &Option<SdkTracerProvider> {
-        &self.tracer
     }
 
     /// Streaming server instance.
@@ -252,20 +252,24 @@ impl Server {
             return Err(Errno::last()).context("set child subreaper");
         }
 
-        #[cfg(feature = "tracing")]
-        let tracer = self.tracer().clone();
-
         debug!("Configuring Tokio runtime with current_thread");
         let rt = Builder::new_current_thread()
             .enable_io()
             .enable_time()
             .max_blocking_threads(Self::MAX_BLOCKING_THREADS)
             .build()?;
+        #[cfg(feature = "tracing")]
+        let tracer = rt.block_on(self.spawn_tasks())?;
+        #[cfg(not(feature = "tracing"))]
         rt.block_on(self.spawn_tasks())?;
 
+        // Exporting the remaining spans needs the runtime the exporter was
+        // created on, so shut down from a blocking task while it is driven.
         #[cfg(feature = "tracing")]
         if let Some(tracer) = tracer {
-            tracer.shutdown().context("shutdown tracer")?;
+            rt.block_on(task::spawn_blocking(move || tracer.shutdown()))
+                .context("join tracer shutdown")?
+                .context("shutdown tracer")?;
         }
 
         rt.shutdown_timeout(std::time::Duration::from_secs(15));
@@ -334,9 +338,14 @@ impl Server {
         Ok(())
     }
 
-    /// Spawns all required tokio tasks.
-    async fn spawn_tasks(mut self) -> Result<()> {
+    /// Spawns all required tokio tasks and returns the tracer provider which
+    /// `init_logging` created, so that it can be shut down after the runtime.
+    async fn spawn_tasks(mut self) -> Result<Tracer> {
         self.init_logging().context("init logging")?;
+        #[cfg(feature = "tracing")]
+        let tracer = self.tracer.clone();
+        #[cfg(not(feature = "tracing"))]
+        let tracer = ();
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let socket = self.config().socket();
@@ -390,7 +399,8 @@ impl Server {
             })
         })
         .await?;
-        result
+        result?;
+        Ok(tracer)
     }
 
     async fn start_signal_handler<T: AsRef<Path>>(
@@ -415,25 +425,40 @@ impl Server {
             pause.stop();
         }
 
-        debug!("Starting grandchildren cleanup task");
-        // Always use SIGKILL to ensure immediate termination of container processes
-        reaper
-            .kill_grandchildren(Signal::SIGKILL)
-            .await
-            .context("unable to kill grandchildren")?;
+        // Everything below has to happen before the shutdown message: the
+        // backend returns on it and drops the local set, which cancels this
+        // task. Failures are collected rather than returned early, the server
+        // must stop in any case.
+        let result = Self::cleanup(reaper, socket, fd_socket).await;
 
         debug!("Sending shutdown message");
         shutdown_tx
             .send(())
             .map_err(|_| format_err!("unable to send shutdown message"))?;
 
-        debug!("Removing socket file {}", socket.as_ref().display());
-        fs::remove_file(socket)
+        result
+    }
+
+    /// Kill the grandchildren and remove the socket files.
+    async fn cleanup<T: AsRef<Path>>(
+        reaper: Arc<ChildReaper>,
+        socket: T,
+        fd_socket: T,
+    ) -> Result<()> {
+        debug!("Starting grandchildren cleanup task");
+        // Always use SIGKILL to ensure immediate termination of container processes
+        let killed = reaper
+            .kill_grandchildren(Signal::SIGKILL)
             .await
-            .context("remove existing socket file")?;
+            .context("unable to kill grandchildren");
+
+        debug!("Removing socket file {}", socket.as_ref().display());
+        let socket_removed = fs::remove_file(socket)
+            .await
+            .context("remove existing socket file");
 
         debug!("Removing fd socket file {}", fd_socket.as_ref().display());
-        fs::remove_file(fd_socket)
+        let fd_socket_removed = fs::remove_file(fd_socket)
             .await
             .or_else(|err| {
                 if err.kind() == std::io::ErrorKind::NotFound {
@@ -442,7 +467,9 @@ impl Server {
                     Err(err)
                 }
             })
-            .context("remove existing fd socket file")
+            .context("remove existing fd socket file");
+
+        killed.and(socket_removed).and(fd_socket_removed)
     }
 
     async fn start_backend(self, mut shutdown_rx: oneshot::Receiver<()>) -> Result<()> {
@@ -497,14 +524,6 @@ impl GenerateRuntimeArgs<'_> {
         let mut args = Vec::with_capacity(16);
         args.extend(self.default_args().context("build default runtime args")?);
 
-        if let Some(rr) = self.config.runtime_root() {
-            args.push(format!("--root={}", rr.display()));
-        }
-
-        if self.cgroup_manager == CgroupManager::Systemd {
-            args.push(Self::SYSTEMD_CGROUP_ARG.into());
-        }
-
         for arg in global_args {
             args.push(arg?.to_string()?);
         }
@@ -548,14 +567,6 @@ impl GenerateRuntimeArgs<'_> {
         // Pre-allocate capacity for typical arg count
         let mut args = Vec::with_capacity(12);
         args.extend(self.default_args().context("build default runtime args")?);
-
-        if let Some(rr) = self.config.runtime_root() {
-            args.push(format!("--root={}", rr.display()));
-        }
-
-        if self.cgroup_manager == CgroupManager::Systemd {
-            args.push(Self::SYSTEMD_CGROUP_ARG.into());
-        }
 
         // Use static strings to avoid allocations
         args.push("exec".into());

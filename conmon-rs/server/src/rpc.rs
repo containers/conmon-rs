@@ -2,8 +2,8 @@
 use crate::telemetry::Telemetry;
 use crate::{
     capnp_util,
-    child::Child,
-    container_io::{ContainerIO, SharedContainerIO},
+    child::{Child, ChildKind},
+    container_io::{ContainerIO, ContainerIOType, SharedContainerIO},
     container_log::ContainerLog,
     pause::Pause,
     server::{GenerateRuntimeArgs, Server},
@@ -17,7 +17,6 @@ use std::{
     path::{Path, PathBuf},
     process,
     rc::Rc,
-    str,
     time::Duration,
 };
 use tokio::time::Instant;
@@ -183,12 +182,22 @@ impl conmon::Server for Server {
                     .await
                 {
                     Err(e) => {
-                        // Attach the stderr output to the error message
-                        let (_, stderr, _) =
-                            capnp_err!(container_io.read_all_with_timeout(None).await)?;
+                        // Attach the stderr output of the runtime to the error
+                        // message. With a terminal, the error carries it already.
+                        let stderr = match container_io.typ() {
+                            ContainerIOType::Streams(_) => {
+                                match container_io.read_all_with_timeout(None).await {
+                                    Ok((_, stderr, _)) => stderr,
+                                    Err(read_err) => {
+                                        debug!("Unable to read runtime output: {:#}", read_err);
+                                        vec![]
+                                    }
+                                }
+                            }
+                            ContainerIOType::Terminal(_) => vec![],
+                        };
                         if !stderr.is_empty() {
-                            let stderr_str = str::from_utf8(&stderr)?;
-                            Err(format_err!("{:#}: {}", e, stderr_str))
+                            Err(format_err!("{:#}: {}", e, String::from_utf8_lossy(&stderr)))
                         } else {
                             Err(e)
                         }
@@ -207,6 +216,7 @@ impl conmon::Server for Server {
                 let io = SharedContainerIO::new(container_io);
                 let child = Child::new(
                     id,
+                    ChildKind::Container,
                     grandchild_pid,
                     exit_paths,
                     oom_exit_paths,
@@ -292,6 +302,7 @@ impl conmon::Server for Server {
                         let io_clone = io.clone();
                         let child = Child::new(
                             id,
+                            ChildKind::Exec,
                             grandchild_pid,
                             vec![],
                             vec![],

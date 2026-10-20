@@ -3,9 +3,19 @@ use std::path::PathBuf;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+/// What kind of process a child is. Execs are registered under the id of
+/// their container, but only the container itself is the target of
+/// container level operations like attach or log reopening.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChildKind {
+    Container,
+    Exec,
+}
+
 #[derive(Debug)]
 pub struct Child {
     pub(crate) id: Box<str>,
+    pub(crate) kind: ChildKind,
     pub(crate) pid: u32,
     pub(crate) exit_paths: Vec<PathBuf>,
     pub(crate) oom_exit_paths: Vec<PathBuf>,
@@ -19,6 +29,7 @@ impl Child {
     #![allow(clippy::too_many_arguments)]
     pub fn new(
         id: impl Into<Box<str>>,
+        kind: ChildKind,
         pid: u32,
         exit_paths: Vec<PathBuf>,
         oom_exit_paths: Vec<PathBuf>,
@@ -29,6 +40,7 @@ impl Child {
     ) -> Self {
         Self {
             id: id.into(),
+            kind,
             pid,
             exit_paths,
             oom_exit_paths,
