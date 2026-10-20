@@ -17,20 +17,12 @@ struct LogEntry<'a> {
 pub struct JsonLogger {
     /// The log file on disk.
     file: LogFile,
-    max_log_size: Option<usize>,
-    bytes_written: usize,
-
-    /// Reusable buffer for serializing a single entry
-    json_buf: Vec<u8>,
 }
 
 impl JsonLogger {
     pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> Result<JsonLogger> {
         Ok(Self {
-            file: LogFile::new(path, None),
-            max_log_size,
-            bytes_written: 0,
-            json_buf: Vec::with_capacity(512), // Pre-allocate for JSON output
+            file: LogFile::new(path, None, max_log_size),
         })
     }
 
@@ -72,24 +64,14 @@ impl JsonLogger {
                 message: message.trim(),
             };
 
-            // Serialize the entry and its trailing newline into the reusable
-            // buffer first, so that the size check happens before it gets
-            // appended to the chunk.
-            self.json_buf.clear();
-            serde_json::to_writer(&mut self.json_buf, &log_entry).context("serialize log entry")?;
-            self.json_buf.push(b'\n');
-
-            let total = self.bytes_written.saturating_add(self.json_buf.len());
-            if self.max_log_size.is_some_and(|max| total > max) {
-                self.reopen().await?;
-                // The entry which triggered the rotation ends up in the new
-                // file and counts towards its size.
-                self.bytes_written = self.json_buf.len();
-            } else {
-                self.bytes_written = total;
+            let buf = &mut self.file.buf;
+            let start = buf.len();
+            if let Err(e) = serde_json::to_writer(&mut *buf, &log_entry) {
+                buf.truncate(start);
+                return Err(e).context("serialize log entry");
             }
-
-            self.file.buf.extend_from_slice(&self.json_buf);
+            buf.push(b'\n');
+            self.file.commit_entry(start).await?;
         }
 
         // Write the whole chunk at once instead of per line
@@ -115,7 +97,7 @@ mod tests {
             logger.file.path().to_str().context("path")?,
             "/tmp/test.log"
         );
-        assert_eq!(logger.max_log_size, Some(1000));
+        assert_eq!(logger.file.max_size, Some(1000));
         Ok(())
     }
 
@@ -176,9 +158,9 @@ mod tests {
         logger.init().await?;
 
         logger.write(Pipe::StdOut, b"a\nb\nc\n").await?;
-        assert_eq!(logger.bytes_written, logger.json_buf.len());
 
         let contents = fs::read_to_string(file.path())?;
+        assert_eq!(logger.file.bytes_written, contents.len());
         assert_eq!(contents.lines().count(), 1);
         assert!(contents.contains(r#""message":"c""#));
         Ok(())

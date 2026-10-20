@@ -220,7 +220,9 @@ impl Server {
     /// the RPC `LocalSet` permanently, the rest serve file I/O like log
     /// writes, exit files and journald. Without a bound a burst of container
     /// exits or log reopens spawns a thread per operation (tokio's default
-    /// allows 512), each with its own stack and allocator arena.
+    /// allows 512), each with its own stack and allocator arena. Work which
+    /// blocks for an unbounded time, like waiting for a process, must run on
+    /// a dedicated thread instead, otherwise it can starve the pool.
     const MAX_BLOCKING_THREADS: usize = 16;
 
     /// Start the `Server` instance and consume it.

@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use tracing::{debug, trace};
+use tracing::debug;
 
 /// How long a formatted timestamp is reused before it gets refreshed.
 const TIMESTAMP_CACHE_DURATION: Duration = Duration::from_millis(100);
@@ -18,12 +18,6 @@ const TIMESTAMP_CACHE_DURATION: Duration = Duration::from_millis(100);
 pub struct CriLogger {
     /// The log file on disk.
     file: LogFile,
-
-    /// Maximum allowed log size in bytes.
-    max_log_size: Option<usize>,
-
-    /// Current bytes written to the log file.
-    bytes_written: usize,
 
     /// Cached timestamp string to avoid repeated formatting
     cached_timestamp: String,
@@ -36,9 +30,7 @@ impl CriLogger {
     /// Create a new file logger instance.
     pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> Result<CriLogger> {
         Ok(Self {
-            file: LogFile::new(path, Some(0o600)),
-            max_log_size,
-            bytes_written: 0,
+            file: LogFile::new(path, Some(0o600), max_log_size),
             cached_timestamp: String::new(),
             last_timestamp_update: Instant::now(),
         })
@@ -76,13 +68,6 @@ impl CriLogger {
             Pipe::StdErr => b" stderr ",
         };
 
-        // The timestamp, the pipe tag and the "P " or "F " marker.
-        let min_log_len = self
-            .cached_timestamp
-            .len()
-            .checked_add(pipe_tag.len() + 2)
-            .context("min log line len exceeds usize")?;
-
         let mut pos = 0;
         while pos < bytes.len() {
             // Find the next newline or end of buffer
@@ -93,30 +78,9 @@ impl CriLogger {
             let line = &bytes[pos..end];
             pos = end;
 
-            let mut bytes_to_be_written = line.len() + min_log_len;
-            if partial {
-                bytes_to_be_written += 1; // the added newline
-            }
-
-            let total = self.bytes_written.saturating_add(bytes_to_be_written);
-            trace!(
-                "Verifying log size: max_log_size = {:?}, bytes_written = {}, bytes_to_be_written = {}",
-                self.max_log_size, self.bytes_written, bytes_to_be_written,
-            );
-
-            let new_bytes_written = if self.max_log_size.is_some_and(|max| total > max) {
-                self.reopen()
-                    .await
-                    .context("reopen logs because of exceeded size")?;
-                // The line which triggered the rotation ends up in the new file
-                // and counts towards its size.
-                bytes_to_be_written
-            } else {
-                total
-            };
-
             // Assemble the whole line into the chunk buffer
             let buf = &mut self.file.buf;
+            let start = buf.len();
             buf.extend_from_slice(self.cached_timestamp.as_bytes());
             buf.extend_from_slice(pipe_tag);
             buf.extend_from_slice(if partial { b"P " } else { b"F " });
@@ -124,9 +88,7 @@ impl CriLogger {
             if partial {
                 buf.push(b'\n');
             }
-
-            self.bytes_written = new_bytes_written;
-            trace!("Wrote log line of length {}", bytes_to_be_written);
+            self.file.commit_entry(start).await?;
         }
 
         self.file.flush().await

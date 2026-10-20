@@ -179,11 +179,23 @@ impl Attach {
         let addr = UnixAddr::new(&shortened_path).context("create socket addr")?;
         bind(fd.as_raw_fd(), &addr).context("bind socket fd")?;
 
-        let metadata = path.metadata()?;
-        let mut permissions = metadata.permissions();
-        permissions.set_mode(0o700);
-
-        listen(&fd, Backlog::MAXCONN).context("listen on socket fd")?;
+        let setup = || -> Result<()> {
+            let mut permissions = path
+                .metadata()
+                .context("get attach socket metadata")?
+                .permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(path, permissions).context("set attach socket permissions")?;
+            listen(&fd, Backlog::MAXCONN).context("listen on socket fd")
+        };
+        // Nothing listens on the socket if this fails. Remove it, otherwise the
+        // next attempt would take it for a listening one.
+        if let Err(e) = setup() {
+            if let Err(e) = std::fs::remove_file(path) {
+                debug!("Unable to remove attach socket {}: {:#}", path.display(), e);
+            }
+            return Err(e);
+        }
 
         task::spawn(
             async move {

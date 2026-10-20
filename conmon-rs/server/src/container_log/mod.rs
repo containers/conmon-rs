@@ -19,7 +19,7 @@ use tokio::{
     io::AsyncWriteExt,
     sync::RwLock,
 };
-use tracing::debug;
+use tracing::{debug, trace};
 
 pub type SharedContainerLog = Arc<RwLock<ContainerLog>>;
 
@@ -122,16 +122,24 @@ impl ContainerLog {
 
 /// A log file on disk which is written in whole chunks.
 ///
-/// The drivers assemble their lines into `buf` and the buffer is written with
-/// a single call per read chunk. The file is an async one on purpose: the
-/// write and the truncating open run on the blocking pool, so writeback
-/// throttling, a slow disk or truncating a huge log only stalls this log and
-/// not the thread which drives every container of the pod.
+/// The drivers assemble their entries into `buf`, account each one with
+/// [`LogFile::commit_entry`] and write the buffer with a single call per read
+/// chunk. The file is an async one on purpose: the write and the truncating
+/// open run on the blocking pool, so writeback throttling, a slow disk or
+/// truncating a huge log only stalls this log and not the thread which drives
+/// every container of the pod.
 #[derive(Debug)]
 pub(crate) struct LogFile {
     path: PathBuf,
     mode: Option<u32>,
     file: Option<File>,
+
+    /// Maximum allowed log size in bytes.
+    max_size: Option<usize>,
+
+    /// Bytes written to the file since it got opened, including the
+    /// committed entries of `buf`.
+    bytes_written: usize,
 
     /// The pending output of the current chunk.
     pub(crate) buf: Vec<u8>,
@@ -146,11 +154,13 @@ impl LogFile {
     /// Buffers which grew beyond this size get shrunk again after a write.
     const BUF_RETAIN_LIMIT: usize = 64 * 1024;
 
-    pub(crate) fn new(path: impl AsRef<Path>, mode: Option<u32>) -> Self {
+    pub(crate) fn new(path: impl AsRef<Path>, mode: Option<u32>, max_size: Option<usize>) -> Self {
         Self {
             path: path.as_ref().into(),
             mode,
             file: None,
+            max_size,
+            bytes_written: 0,
             buf: Vec::with_capacity(Self::BUF_CAPACITY),
         }
     }
@@ -171,6 +181,40 @@ impl LogFile {
             .await
             .with_context(|| format!("open log file path '{}'", self.path.display()))?;
         self.file = Some(file);
+        self.bytes_written = 0;
+        Ok(())
+    }
+
+    /// Account for the entry appended to `buf` since `start`. If it would
+    /// exceed the maximum log size, the file gets truncated and the entry
+    /// becomes the first one of the new file. The entries of the chunk before
+    /// it are dropped instead of written, the truncation would discard them
+    /// right away.
+    pub(crate) async fn commit_entry(&mut self, start: usize) -> Result<()> {
+        let len = self.buf.len() - start;
+        let total = self.bytes_written.saturating_add(len);
+        trace!(
+            "Verifying log size: max_size = {:?}, bytes_written = {}, entry = {}",
+            self.max_size, self.bytes_written, len,
+        );
+
+        if self.max_size.is_some_and(|max| total > max) {
+            debug!("Rotate log file {}", self.path.display());
+            if let Err(e) = self.open().await {
+                // The old file stays in place. Drop the uncounted entry and
+                // write the ones which fit into it now, the caller stops on the
+                // error and may not write again.
+                self.buf.truncate(start);
+                if let Err(e) = self.flush().await {
+                    debug!("Unable to flush log file after failed rotation: {:#}", e);
+                }
+                return Err(e).context("reopen log file because of exceeded size");
+            }
+            self.buf.drain(..start);
+            self.bytes_written = len;
+        } else {
+            self.bytes_written = total;
+        }
         Ok(())
     }
 
@@ -179,14 +223,25 @@ impl LogFile {
         if self.buf.is_empty() {
             return Ok(());
         }
-        let file = self.file.as_mut().context(Self::ERR_UNINITIALIZED)?;
-        file.write_all(&self.buf).await.context("write log chunk")?;
-        file.flush().await.context("flush log file")?;
+        let res = self.write_buf().await;
+        if res.is_err() {
+            // Drop the chunk even if the write failed. It may have been written
+            // partially, retrying it along with the next chunk would duplicate
+            // that part. Assume it did not make it, so that a later rotation
+            // does not happen early.
+            self.bytes_written = self.bytes_written.saturating_sub(self.buf.len());
+        }
         self.buf.clear();
         if self.buf.capacity() > Self::BUF_RETAIN_LIMIT {
             self.buf.shrink_to(Self::BUF_CAPACITY);
         }
-        Ok(())
+        res
+    }
+
+    async fn write_buf(&mut self) -> Result<()> {
+        let file = self.file.as_mut().context(Self::ERR_UNINITIALIZED)?;
+        file.write_all(&self.buf).await.context("write log chunk")?;
+        file.flush().await.context("flush log file")
     }
 
     /// Write the pending buffer and reopen the file, which truncates it.
@@ -197,5 +252,97 @@ impl LogFile {
         debug!("Reopen log file {}", self.path.display());
         self.flush().await.context("flush log file before reopen")?;
         self.open().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::NamedTempFile;
+
+    #[tokio::test]
+    async fn reopen_resets_size() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let mut sut = LogFile::new(file.path(), None, Some(10));
+        sut.open().await?;
+
+        sut.buf.extend_from_slice(b"12345678\n");
+        sut.commit_entry(0).await?;
+        sut.flush().await?;
+        sut.reopen().await?;
+
+        // The reopened file is empty, so the entry fits without a rotation.
+        sut.buf.extend_from_slice(b"abc\n");
+        sut.commit_entry(0).await?;
+        sut.buf.extend_from_slice(b"def\n");
+        sut.commit_entry(4).await?;
+        sut.flush().await?;
+
+        assert_eq!(fs::read_to_string(file.path())?, "abc\ndef\n");
+        assert_eq!(sut.bytes_written, 8);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rotation_drops_earlier_entries_of_chunk() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let mut sut = LogFile::new(file.path(), None, Some(10));
+        sut.open().await?;
+
+        sut.buf.extend_from_slice(b"first\n");
+        sut.commit_entry(0).await?;
+        sut.buf.extend_from_slice(b"second\n");
+        sut.commit_entry(6).await?;
+        assert_eq!(sut.buf, b"second\n");
+        sut.flush().await?;
+
+        assert_eq!(fs::read_to_string(file.path())?, "second\n");
+        assert_eq!(sut.bytes_written, 7);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_rotation_writes_old_file() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("log");
+        let mut sut = LogFile::new(&path, None, Some(10));
+        sut.open().await?;
+
+        // Keep the open file reachable, then make the truncating open fail by
+        // putting a directory in its place.
+        let old = dir.path().join("old");
+        fs::hard_link(&path, &old)?;
+        fs::remove_file(&path)?;
+        fs::create_dir(&path)?;
+
+        sut.buf.extend_from_slice(b"first\n");
+        sut.commit_entry(0).await?;
+        sut.buf.extend_from_slice(b"second\n");
+        assert!(sut.commit_entry(6).await.is_err());
+
+        assert!(sut.buf.is_empty());
+        assert_eq!(sut.bytes_written, 6);
+        assert_eq!(fs::read_to_string(&old)?, "first\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_flush_drops_chunk() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let mut sut = LogFile::new(file.path(), None, None);
+
+        // Not opened yet, so the write fails.
+        sut.buf.extend_from_slice(b"lost\n");
+        sut.commit_entry(0).await?;
+        assert!(sut.flush().await.is_err());
+        assert!(sut.buf.is_empty());
+        assert_eq!(sut.bytes_written, 0);
+
+        sut.open().await?;
+        sut.buf.extend_from_slice(b"kept\n");
+        sut.flush().await?;
+        assert_eq!(fs::read_to_string(file.path())?, "kept\n");
+        Ok(())
     }
 }

@@ -19,7 +19,7 @@ use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncWriteExt, ErrorKind},
     runtime::Handle,
-    sync::mpsc::{Sender, channel},
+    sync::mpsc::{Receiver, Sender, channel},
     task,
 };
 use tokio_eventfd::EventFd;
@@ -203,11 +203,7 @@ impl OOMWatcher {
             subsystem_path.display()
         );
 
-        let memory_events_file_path = subsystem_path.join("memory.events");
-
-        // Read the initial OOM counters to establish a baseline
-        // This ensures we only detect OOMs that occur during this container's lifetime
-        let mut last_counter = Self::initial_oom_counters(&memory_events_file_path).await;
+        let mut events = MemoryEvents::new(subsystem_path.join("memory.events")).await;
 
         // crun places the process in a leaf below the container cgroup, and
         // the OOMs end up recorded in that parent. Only follow the parent in
@@ -216,9 +212,9 @@ impl OOMWatcher {
         // sibling would be reported for this container. Prefer
         // memory.events.local, the counters in memory.events include events
         // from below, and fall back on kernels without the local file.
-        let parent_memory_events = subsystem_path
+        let parent_path = subsystem_path
             .parent()
-            .filter(|parent| Self::is_wrapper_cgroup(parent))
+            .filter(|_| Self::is_only_child(&subsystem_path))
             .and_then(|parent| {
                 [
                     parent.join("memory.events.local"),
@@ -227,84 +223,44 @@ impl OOMWatcher {
                 .into_iter()
                 .find(|path| path.exists())
             });
-        let mut last_parent_counter = match &parent_memory_events {
-            Some(path) => Self::initial_oom_counters(path).await,
-            None => OomCounters::default(),
+        let mut parent_events = match parent_path {
+            Some(path) => Some(MemoryEvents::new(path).await),
+            None => None,
         };
 
-        let path = memory_events_file_path.to_str();
+        let path = events.path.to_str();
         debug!(path, "Setup cgroup v2 handling");
 
-        let watcher = SharedWatcher::get()?;
-        let (events_tx, mut rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
-        let _subscription = watcher
-            .subscribe(&memory_events_file_path, events_tx.clone())
-            .await
-            .context("watch memory events file")?;
-
-        let mut _parent_subscription = None;
-        if let Some(path) = &parent_memory_events {
-            debug!("Also watching parent memory events: {}", path.display());
-            match watcher.subscribe(path, events_tx).await {
-                Ok(subscription) => _parent_subscription = Some(subscription),
-                Err(e) => debug!("Could not watch parent memory events: {:#}", e),
+        // Adding the watches runs on the blocking pool. The process may exit
+        // in the meantime, which must be reported without waiting for a busy
+        // pool.
+        let mut subscriptions = tokio::select! {
+            _ = token.cancelled() => {
+                debug!("Cancelled while adding the watches");
+                Self::last_resort_check(&subsystem_path, &mut events, parent_events.as_mut(), exit_paths, &tx).await;
+                return Ok(());
             }
-        }
+            res = Self::subscribe(&events, parent_events.as_ref()) => match res {
+                Ok(subscriptions) => subscriptions,
+                // The cgroup may be gone already. Still check for an OOM once
+                // the process exited.
+                Err(e) => {
+                    debug!("Unable to watch memory events, checking on exit only: {:#}", e);
+                    token.cancelled().await;
+                    Self::last_resort_check(&subsystem_path, &mut events, parent_events.as_mut(), exit_paths, &tx).await;
+                    return Ok(());
+                }
+            },
+        };
 
         loop {
             tokio::select! {
                 _ = token.cancelled() => {
                     debug!("Loop cancelled");
-
-                    debug!("Last resort check for OOM");
-                    let mut found_oom = false;
-                    match Self::check_for_oom(&memory_events_file_path, last_counter).await {
-                        Ok((counter, is_oom)) => {
-                            if is_oom {
-                                debug!("Found OOM event count {counter:?}");
-                                found_oom = true;
-                            } else {
-                                debug!("No OOM found in current cgroup");
-                            }
-                        }
-                        // It is still possible to miss an OOM event here if the memory events file
-                        // got removed between the notify event below and the token cancellation.
-                        // In this case, check the parent cgroup for OOM events (for crun with sub-cgroups)
-                        Err(e) => {
-                            debug!("Checking for last resort OOM failed: {:#}, trying parent cgroup", e);
-                            if let Some(path) = &parent_memory_events {
-                                debug!("Checking parent memory events: {}", path.display());
-                                match Self::check_for_oom(path, last_parent_counter).await {
-                                    Ok((counter, is_oom)) => {
-                                        if is_oom {
-                                            debug!("Found OOM event in parent cgroup, count {counter:?}");
-                                            found_oom = true;
-                                        } else {
-                                            debug!("No OOM found in parent cgroup either");
-                                        }
-                                    }
-                                    Err(e) => {
-                                        debug!("Failed to check parent cgroup for OOM: {:#}", e);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if found_oom {
-                        if let Err(e) = Self::write_oom_files(exit_paths).await {
-                            error!("Writing OOM files failed: {:#}", e)
-                        }
-                        if let Err(e) = tx.try_send(OOMEvent{ oom: true }) {
-                            error!("Try send failed: {:#}", e)
-                        };
-                    } else if let Err(e) = tx.try_send(OOMEvent{ oom: false }) {
-                        error!("try_send failed: {:#}", e);
-                    }
-
+                    Self::last_resort_check(&subsystem_path, &mut events, parent_events.as_mut(), exit_paths, &tx).await;
                     break;
                 }
-                Some(res) = rx.recv() => {
+                Some(res) = subscriptions.rx.recv() => {
                     let event = match res {
                         Ok(event) => event,
                         // Watcher errors without a path reach every subscriber of the
@@ -330,38 +286,7 @@ impl OOMWatcher {
                         break
                     }
 
-                    // Check both child and parent cgroups for OOM events
-                    let mut found_oom = false;
-                    match Self::check_for_oom(&memory_events_file_path, last_counter).await {
-                        Ok((counter, is_oom)) => {
-                            if is_oom {
-                                debug!("Found OOM event in child cgroup, count {counter:?}");
-                                found_oom = true;
-                                last_counter = counter;
-                            }
-                        }
-                        Err(e) => {
-                            debug!("Checking child cgroup for OOM failed: {:#}", e);
-                        }
-                    }
-
-                    // Also check parent cgroup (for crun with sub-cgroups)
-                    if !found_oom && let Some(path) = &parent_memory_events {
-                        match Self::check_for_oom(path, last_parent_counter).await {
-                            Ok((counter, is_oom)) => {
-                                if is_oom {
-                                    debug!("Found OOM event in parent cgroup, count {counter:?}");
-                                    found_oom = true;
-                                    last_parent_counter = counter;
-                                }
-                            }
-                            Err(e) => {
-                                debug!("Checking parent cgroup for OOM failed: {:#}", e);
-                            }
-                        }
-                    }
-
-                    if found_oom {
+                    if Self::check_cgroups(&subsystem_path, &mut events, parent_events.as_mut()).await {
                         debug!("Writing OOM files");
                         if let Err(e) = Self::write_oom_files(exit_paths).await {
                             error!("Writing OOM files failed: {:#}", e);
@@ -370,7 +295,7 @@ impl OOMWatcher {
                             Ok(_) => break,
                             Err(e) => error!("try_send failed: {:#}", e)
                         };
-                    } else if Self::file_not_found(&memory_events_file_path).await {
+                    } else if Self::file_not_found(&events.path).await {
                         debug!("Assuming memory slice removal race, still reporting one OOM event");
                         if let Err(e) = Self::write_oom_files(exit_paths).await {
                             error!("Writing OOM files failed: {:#}", e);
@@ -388,6 +313,84 @@ impl OOMWatcher {
 
         debug!("Done watching for ooms");
         Ok(())
+    }
+
+    /// Watch the memory events of the container and, if present, the ones of
+    /// its wrapper cgroup.
+    async fn subscribe(
+        events: &MemoryEvents,
+        parent_events: Option<&MemoryEvents>,
+    ) -> Result<Subscriptions> {
+        let watcher = SharedWatcher::get()?;
+        let (events_tx, rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
+        let subscription = watcher
+            .subscribe(&events.path, events_tx.clone())
+            .await
+            .context("watch memory events file")?;
+
+        let mut parent_subscription = None;
+        if let Some(parent) = parent_events {
+            debug!(
+                "Also watching parent memory events: {}",
+                parent.path.display()
+            );
+            match watcher.subscribe(&parent.path, events_tx).await {
+                Ok(subscription) => parent_subscription = Some(subscription),
+                Err(e) => debug!("Could not watch parent memory events: {:#}", e),
+            }
+        }
+
+        Ok(Subscriptions {
+            rx,
+            _subscription: subscription,
+            _parent_subscription: parent_subscription,
+        })
+    }
+
+    /// Check for an OOM a last time once the process exited, and report the
+    /// result.
+    async fn last_resort_check(
+        leaf: &Path,
+        events: &mut MemoryEvents,
+        parent_events: Option<&mut MemoryEvents>,
+        exit_paths: &[PathBuf],
+        tx: &Sender<OOMEvent>,
+    ) {
+        debug!("Last resort check for OOM");
+        let found_oom = Self::check_cgroups(leaf, events, parent_events).await;
+        if found_oom && let Err(e) = Self::write_oom_files(exit_paths).await {
+            error!("Writing OOM files failed: {:#}", e)
+        }
+        if let Err(e) = tx.try_send(OOMEvent { oom: found_oom }) {
+            error!("try_send failed: {:#}", e);
+        }
+    }
+
+    /// Check the memory events of the container and of its wrapper cgroup for
+    /// new OOMs. An OOM of the parent only counts while it wraps the container
+    /// alone, otherwise it may stem from a sibling.
+    async fn check_cgroups(
+        leaf: &Path,
+        events: &mut MemoryEvents,
+        parent_events: Option<&mut MemoryEvents>,
+    ) -> bool {
+        if events.check().await {
+            return true;
+        }
+        let Some(parent) = parent_events else {
+            return false;
+        };
+        // Only list the parent once its counters went up, memory events change
+        // often under memory pressure. The counters are the baseline for the
+        // next check either way, so an OOM skipped here is not reported later.
+        if !parent.check().await {
+            return false;
+        }
+        if Self::is_only_child(leaf) {
+            return true;
+        }
+        debug!("Ignoring OOM of parent cgroup with siblings");
+        false
     }
 
     /// Read the current OOM counters of a memory events file to establish a
@@ -409,18 +412,20 @@ impl OOMWatcher {
         }
     }
 
-    /// Whether `parent` only wraps a single child cgroup, which is then the
-    /// container's leaf. The memory limit cannot tell the layouts apart, crun
-    /// applies it to both the wrapper and the leaf.
-    fn is_wrapper_cgroup(parent: &Path) -> bool {
+    /// Whether the parent of `leaf` contains no other cgroup than `leaf`, so
+    /// that it merely wraps it. The memory limit cannot tell the layouts
+    /// apart, crun applies it to both the wrapper and the leaf. A parent
+    /// without any child still counts, the leaf may already be gone when
+    /// checking for an OOM after the exit.
+    fn is_only_child(leaf: &Path) -> bool {
+        let (Some(parent), Some(name)) = (leaf.parent(), leaf.file_name()) else {
+            return false;
+        };
         match std::fs::read_dir(parent) {
-            Ok(entries) => {
-                entries
-                    .flatten()
-                    .filter(|entry| entry.file_type().is_ok_and(|typ| typ.is_dir()))
-                    .count()
-                    == 1
-            }
+            Ok(entries) => entries
+                .flatten()
+                .filter(|entry| entry.file_type().is_ok_and(|typ| typ.is_dir()))
+                .all(|entry| entry.file_name() == name),
             Err(_) => false,
         }
     }
@@ -567,6 +572,44 @@ impl OOMWatcher {
             Err(error) => bail!("open cgroup path {}: {}", cgroup_path.display(), error),
         }
     }
+}
+
+/// A memory events file and the OOM counters seen in it so far.
+struct MemoryEvents {
+    path: PathBuf,
+    last: OomCounters,
+}
+
+impl MemoryEvents {
+    /// Track `path`, starting from its current counters.
+    async fn new(path: PathBuf) -> Self {
+        let last = OOMWatcher::initial_oom_counters(&path).await;
+        Self { path, last }
+    }
+
+    /// Whether the counters increased since the last OOM found.
+    async fn check(&mut self) -> bool {
+        match OOMWatcher::check_for_oom(&self.path, self.last).await {
+            Ok((counters, true)) => {
+                debug!("Found OOM in {}, count {counters:?}", self.path.display());
+                self.last = counters;
+                true
+            }
+            Ok(_) => false,
+            Err(e) => {
+                debug!("Checking {} for OOM failed: {:#}", self.path.display(), e);
+                false
+            }
+        }
+    }
+}
+
+/// The watches of a single OOM watcher and the receiver of their events. The
+/// watches get removed on drop.
+struct Subscriptions {
+    rx: Receiver<WatchResult>,
+    _subscription: Subscription,
+    _parent_subscription: Option<Subscription>,
 }
 
 /// A watch event as delivered to subscribers. Errors are shared because
@@ -876,20 +919,56 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_cgroup_has_single_child() -> Result<()> {
+    fn only_child_of_wrapper_cgroup() -> Result<()> {
         let parent = tempfile::tempdir()?;
-        assert!(!OOMWatcher::is_wrapper_cgroup(parent.path()));
-
-        std::fs::create_dir(parent.path().join("container"))?;
+        let leaf = parent.path().join("container");
+        std::fs::create_dir(&leaf)?;
         std::fs::write(parent.path().join("memory.events"), "oom 0\n")?;
-        assert!(OOMWatcher::is_wrapper_cgroup(parent.path()));
+        assert!(OOMWatcher::is_only_child(&leaf));
 
         std::fs::create_dir(parent.path().join("sibling"))?;
-        assert!(!OOMWatcher::is_wrapper_cgroup(parent.path()));
+        assert!(!OOMWatcher::is_only_child(&leaf));
 
-        assert!(!OOMWatcher::is_wrapper_cgroup(
-            &parent.path().join("missing")
+        assert!(!OOMWatcher::is_only_child(
+            &parent.path().join("missing").join("container")
         ));
+
+        std::fs::remove_dir(&leaf)?;
+        std::fs::remove_dir(parent.path().join("sibling"))?;
+        assert!(OOMWatcher::is_only_child(&leaf));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parent_oom_ignored_with_siblings() -> Result<()> {
+        let parent = tempfile::tempdir()?;
+        let leaf = parent.path().join("container");
+        std::fs::create_dir(&leaf)?;
+        std::fs::write(leaf.join("memory.events"), "oom 0\noom_kill 0\n")?;
+        let parent_file = parent.path().join("memory.events.local");
+        std::fs::write(&parent_file, "oom 0\noom_kill 0\n")?;
+
+        let mut events = MemoryEvents::new(leaf.join("memory.events")).await;
+        let mut parent_events = MemoryEvents::new(parent_file.clone()).await;
+        let mut check =
+            async || OOMWatcher::check_cgroups(&leaf, &mut events, Some(&mut parent_events)).await;
+
+        // An OOM recorded in the wrapper is found although the leaf is unchanged.
+        std::fs::write(&parent_file, "oom 1\noom_kill 1\n")?;
+        assert!(check().await);
+        assert!(!check().await);
+
+        // While a sibling exists, its OOMs are not attributed to this container.
+        let sibling = parent.path().join("sibling");
+        std::fs::create_dir(&sibling)?;
+        std::fs::write(&parent_file, "oom 2\noom_kill 2\n")?;
+        assert!(!check().await);
+
+        // Once it is gone again, neither are its earlier OOMs, only new ones.
+        std::fs::remove_dir(&sibling)?;
+        assert!(!check().await);
+        std::fs::write(&parent_file, "oom 3\noom_kill 3\n")?;
+        assert!(check().await);
         Ok(())
     }
 
