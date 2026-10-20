@@ -20,7 +20,7 @@ use std::{
         fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
         unix::{fs::PermissionsExt, io::RawFd},
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Weak},
     task::{Context, Poll, ready},
@@ -88,11 +88,17 @@ impl Terminal {
             .bind_long_path(&path)
             .context("bind terminal socket")?;
 
-        let mut perms = std::fs::metadata(&path)
-            .context("get terminal socket metadata")?
-            .permissions();
-        perms.set_mode(0o700);
-        std::fs::set_permissions(&path, perms).context("set terminal socket permissions")?;
+        // No terminal owns the socket yet, so remove it here if this fails.
+        if let Err(e) = Self::restrict_permissions(&path) {
+            if let Err(e) = std::fs::remove_file(&path) {
+                debug!(
+                    "Unable to remove terminal socket {}: {:#}",
+                    path.display(),
+                    e
+                );
+            }
+            return Err(e);
+        }
 
         let (connected_tx, connected_rx) = mpsc::channel(10);
         let config = Config {
@@ -117,6 +123,15 @@ impl Terminal {
             logger,
             attach,
         })
+    }
+
+    /// Make the terminal socket accessible to its owner only.
+    fn restrict_permissions(path: &Path) -> Result<()> {
+        let mut perms = std::fs::metadata(path)
+            .context("get terminal socket metadata")?
+            .permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(path, perms).context("set terminal socket permissions")
     }
 
     /// Waits for the socket client to be connected.

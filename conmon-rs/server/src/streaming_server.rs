@@ -57,12 +57,22 @@ const STREAM_ERR_BYTE: u8 = 3;
 const RESIZE_BYTE: u8 = 4;
 const CLOSE_BYTE: u8 = 255;
 
-/// Upper bound for waiting on the remaining output after the container
-/// exited. The read loops may still be draining the pipes when the exit is
-/// observed, they signal the end with `Message::Done`. The timeout only kicks
-/// in if that never arrives, for example because a grandchild keeps the pipe
-/// open.
+/// Upper bound for waiting on the next output after the container exited.
+/// The read loops may still be draining the pipes when the exit is observed,
+/// they signal the end with `Message::Done`. The timeout only kicks in if that
+/// never arrives, for example because a grandchild keeps the pipe open.
 const DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Upper bound for the messages forwarded per drain after the container
+/// exited. The output written before the exit is at most what the channels
+/// (100 messages) and the pipe buffers hold. With the default pipe-max-size
+/// of 1 MiB in 4 KiB reads, that is 256 messages per pipe, so this is well
+/// above. It is a heuristic though, a process with CAP_SYS_RESOURCE can grow
+/// its pipes further. More output stems from a grandchild which keeps the
+/// pipe open and writing, which would otherwise keep the session open
+/// forever. Unlike a time limit this does not cut off the output for a slow
+/// client.
+const DRAIN_MAX_MESSAGES: usize = 1024;
 
 #[derive(Debug, Default)]
 /// The main streaming server structure of this module.
@@ -635,7 +645,7 @@ impl StreamingServer {
 
     /// Forward the output which is still queued or arrives shortly after the
     /// container exited, until the remaining read loops signalled the end or
-    /// the channel stays quiet for `DRAIN_TIMEOUT`.
+    /// the [`Drain`] gives up.
     async fn drain_attach(
         attach_rx: &mut broadcast::Receiver<IOMessage>,
         mut remaining_done: usize,
@@ -643,35 +653,37 @@ impl StreamingServer {
         stderr_enabled: bool,
         sender: &mut SplitSink<WebSocket, Message>,
     ) -> Result<()> {
+        let mut drain = Drain::default();
         while remaining_done > 0 {
-            match timeout(DRAIN_TIMEOUT, attach_rx.recv()).await {
-                Ok(Ok(IOMessage::Done)) => remaining_done -= 1,
-                Ok(Ok(message)) => {
+            match drain.recv(attach_rx.recv()).await {
+                Some(Ok(IOMessage::Done)) => remaining_done -= 1,
+                Some(Ok(message)) => {
                     Self::forward_output(message, stdout_enabled, stderr_enabled, sender).await?;
                 }
-                Ok(Err(RecvError::Lagged(n))) => {
+                Some(Err(RecvError::Lagged(n))) => {
                     warn!("Attach client too slow, skipped {n} messages");
                 }
-                Ok(Err(RecvError::Closed)) | Err(_) => return Ok(()),
+                Some(Err(RecvError::Closed)) | None => return Ok(()),
             }
         }
         Ok(())
     }
 
     /// Forward the remaining output of an exec stdio channel after the process
-    /// exited, until the read loop signals that it is done or the channel
-    /// stays quiet for `DRAIN_TIMEOUT`.
+    /// exited, until the read loop signals that it is done or the [`Drain`]
+    /// gives up.
     async fn drain_stdio(
         rx: &IOReceiver<IOMessage>,
         stream_byte: u8,
         sender: &mut SplitSink<WebSocket, Message>,
     ) -> Result<()> {
+        let mut drain = Drain::default();
         loop {
-            match timeout(DRAIN_TIMEOUT, rx.recv()).await {
-                Ok(Ok(IOMessage::Data(data, _))) => {
+            match drain.recv(rx.recv()).await {
+                Some(Ok(IOMessage::Data(data, _))) => {
                     Self::frame_and_send(stream_byte, &data, sender).await?;
                 }
-                Ok(Ok(IOMessage::Done)) | Ok(Err(_)) | Err(_) => return Ok(()),
+                Some(Ok(IOMessage::Done)) | Some(Err(_)) | None => return Ok(()),
             }
         }
     }
@@ -738,5 +750,60 @@ impl StreamingServer {
             .send(Message::Binary(frame.freeze()))
             .await
             .context("send framed data")
+    }
+}
+
+/// Bounds forwarding the output after the container exited.
+struct Drain {
+    remaining: usize,
+}
+
+impl Default for Drain {
+    fn default() -> Self {
+        Self {
+            remaining: DRAIN_MAX_MESSAGES,
+        }
+    }
+}
+
+impl Drain {
+    /// Wait for the next message, giving up once the channel stays quiet for
+    /// `DRAIN_TIMEOUT` or `DRAIN_MAX_MESSAGES` were received.
+    async fn recv<F: Future>(&mut self, recv: F) -> Option<F::Output> {
+        let Some(remaining) = self.remaining.checked_sub(1) else {
+            warn!(
+                "Dropping remaining output after forwarding {DRAIN_MAX_MESSAGES} messages since the exit"
+            );
+            return None;
+        };
+        self.remaining = remaining;
+        timeout(DRAIN_TIMEOUT, recv).await.ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::Instant;
+
+    #[tokio::test]
+    async fn drain_stops_on_busy_channel() {
+        let (tx, rx) = async_channel::bounded(16);
+        tokio::spawn(async move { while tx.send(()).await.is_ok() {} });
+
+        let mut drain = Drain::default();
+        let mut received = 0;
+        while drain.recv(rx.recv()).await.is_some() {
+            received += 1;
+        }
+        assert_eq!(received, DRAIN_MAX_MESSAGES);
+    }
+
+    #[tokio::test]
+    async fn drain_stops_on_quiet_channel() {
+        let (_tx, rx) = async_channel::bounded::<()>(1);
+        let start = Instant::now();
+        assert!(Drain::default().recv(rx.recv()).await.is_none());
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 }

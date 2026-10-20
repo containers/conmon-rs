@@ -25,12 +25,16 @@ use std::{
     process::Stdio,
     str,
     sync::{Arc, Mutex},
+    thread,
 };
 use tokio::{
     fs::{self, File},
     io::{AsyncWriteExt, unix::AsyncFd},
     process::Command,
-    sync::broadcast::{self, Receiver, Sender},
+    sync::{
+        broadcast::{self, Receiver, Sender},
+        oneshot,
+    },
     task::{self, JoinHandle},
     time::{self, Instant},
 };
@@ -396,9 +400,9 @@ impl ReapableChild {
                         kill_grandchild(pid, Signal::SIGKILL);
                         stop_token_for_timeout.cancel();
                         // Reap the zombie: the pidfd future was dropped by the
-                        // timeout so waitpid never ran. spawn_blocking survives
+                        // timeout so waitpid never ran. The thread survives
                         // cancellation and will reap once SIGKILL takes effect.
-                        task::spawn_blocking(move || {
+                        Self::spawn_waitpid_thread(move || {
                             let _ = waitpid(Pid::from_raw(pid as pid_t), None);
                         });
                     }
@@ -465,18 +469,50 @@ impl ReapableChild {
             Some(code) => code,
             None => {
                 debug!("pidfd not available, falling back to blocking waitpid");
-                match task::spawn_blocking(move || Self::wait_for_exit_code_blocking(pid)).await {
-                    Ok(code) => code,
-                    Err(e) => {
-                        error!("waitpid task failed: {:#}", e);
-                        FAILED_EXIT_CODE
-                    }
-                }
+                let (tx, rx) = oneshot::channel();
+                Self::spawn_waitpid_thread(move || {
+                    let _ = tx.send(Self::wait_for_exit_code_blocking(pid));
+                });
+                rx.await.unwrap_or_else(|_| {
+                    error!("waitpid thread exited without a result");
+                    FAILED_EXIT_CODE
+                })
             }
         };
 
         token.cancel();
         exit_code
+    }
+
+    /// Stack size of the waitpid threads, which only wait and log.
+    const WAITPID_STACK_SIZE: usize = 256 * 1024;
+
+    /// Run a blocking waitpid on a dedicated thread. It blocks for the lifetime
+    /// of the process, so it must not occupy a thread of the bounded blocking
+    /// pool, which serves the file I/O of all containers. If no thread can be
+    /// spawned, for example because of a pids limit, queue it on the pool
+    /// rather than failing the wait.
+    fn spawn_waitpid_thread<F: FnOnce() + Send + 'static>(f: F) {
+        // The builder drops the closure on failure, keep it for the fallback.
+        let slot = Arc::new(Mutex::new(Some(f)));
+        fn run<F: FnOnce()>(slot: &Mutex<Option<F>>) {
+            if let Some(f) = slot.lock().ok().and_then(|mut f| f.take()) {
+                f()
+            }
+        }
+
+        let thread_slot = slot.clone();
+        if let Err(e) = thread::Builder::new()
+            .name("waitpid".into())
+            .stack_size(Self::WAITPID_STACK_SIZE)
+            .spawn(move || run(&thread_slot))
+        {
+            error!(
+                "Unable to spawn waitpid thread, using blocking pool: {:#}",
+                e
+            );
+            task::spawn_blocking(move || run(&slot));
+        }
     }
 
     /// Try to use pidfd_open + async polling. Returns None if pidfd is unavailable.
