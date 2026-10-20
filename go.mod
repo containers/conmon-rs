@@ -4,7 +4,6 @@ go 1.27.1
 
 require (
 	capnproto.org/go/capnp/v3 v3.1.0-alpha.2
-	github.com/blang/semver/v4 v4.0.0
 	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.32.1
 	github.com/onsi/gomega v1.42.1
