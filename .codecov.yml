@@ -1,8 +1,10 @@
 ---
 codecov:
+  # Report once all CI jobs finished, with the unit and the integration
+  # uploads in, also when a job failed.
+  require_ci_to_pass: false
   notify:
-    after_n_builds: 1
-    require_ci_to_pass: false
+    wait_for_ci: true
 
 coverage:
   precision: 2
@@ -12,11 +14,18 @@ coverage:
     patch:
       default:
         informational: true
-    # Only the unit tests feed the report, code which the integration suite
-    # covers counts as uncovered. Small drops from such code are expected.
+    # Code paths which only some integration test runs hit, like timeouts,
+    # make the coverage vary a bit between runs.
     project:
       default:
         threshold: 1%
+
+# The integration coverage job may fail without failing CI, its last result
+# carries over to commits without an upload of their own.
+flag_management:
+  individual_flags:
+    - name: integration
+      carryforward: true
 
 comment:
   layout: "header, diff"

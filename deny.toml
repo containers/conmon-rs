@@ -1,3 +1,7 @@
+[graph]
+# Check the optional tracing dependencies as well.
+all-features = true
+
 [advisories]
 unmaintained = "workspace"
 yanked = "warn"

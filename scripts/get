@@ -14,7 +14,7 @@ OUTPUT=conmonrs
 GITHUB_TOKEN=${GITHUB_TOKEN:-}
 
 usage() {
-    printf "Usage: %s [ -t SHA ] [-l TAG ] [-a ARCH] [ -h ]\n\n" "$(basename "$0")"
+    printf "Usage: %s [-o PATH] [-t SHA] [-l TAG] [-a ARCH] [-n] [-h]\n\n" "$(basename "$0")"
     echo "Possible arguments:"
     printf "  -o\tOutput path for the downloaded binary (defaults to './conmonrs')\n"
     printf "  -t\tFull length SHA to be used (defaults to the latest available main)\n"
@@ -78,7 +78,11 @@ parse_args() {
 }
 
 verify_requirements() {
-    CMDS=(curl jq)
+    CMDS=(curl)
+    # Only resolving a tag queries the GitHub API.
+    if [[ $TAG != "" ]]; then
+        CMDS+=(jq)
+    fi
     if ! command -v cosign >/dev/null; then
         CMDS+=(sha256sum)
     fi

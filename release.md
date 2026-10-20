@@ -15,9 +15,13 @@ After that PR being merged, an annotated tag can be pushed to the repository or
 via the GitHub UI. We usually auto-generate the changelog directly from the
 GitHub UI. A ["Create Release" GitHub
 action](https://github.com/containers/conmon-rs/actions/workflows/release.yml)
-should run for that tag which attaches the sources to the release, for example:
-
-- [conmonrs-v0.4.0.tar.gz](https://github.com/containers/conmon-rs/releases/download/v0.4.0/conmonrs-v0.4.0.tar.gz)
+should run for that tag which attaches the sources, the static binaries and
+their checksums to the release, for example
+`https://github.com/containers/conmon-rs/releases/download/vX.Y.Z/conmonrs-vX.Y.Z.tar.gz`.
+It also points the `latest-X.Y.txt` marker in the bucket to the tag. The
+tarball is a `git archive` of the tag, so it has the same content as the
+automatic GitHub archive which [rpm/conmon-rs.spec](rpm/conmon-rs.spec) uses as
+`Source0` (packit replaces that with an archive of the commit for Copr builds).
 
 The same tag also versions the Go module `github.com/containers/conmon-rs`, so
 consumers like CRI-O pick the release up with `go get
@@ -33,12 +37,12 @@ in an appropriate environment:
 > kinit $USER@IPA.REDHAT.COM
 > rhpkg clone conmon-rs
 > cd conmon-rs
-> git checkout rhaos-4.12-rhel-8  # or rhaos-4.12-rhel-9
+> git checkout rhaos-X.Y-rhel-N  # the target OpenShift and RHEL release
 > vim conmon-rs.spec  # edit the Version
 > spectool -g conmon-rs.spec
 > rhpkg new-sources *.tar.gz
-> rpmdev-bumpspec -c "Bump to v0.5.0" conmon-rs.spec
-> git commit -asm "Bump to v0.5.0"
+> rpmdev-bumpspec -c "Bump to vX.Y.Z" conmon-rs.spec
+> git commit -asm "Bump to vX.Y.Z"
 > git push
 > rhpkg build
 ```

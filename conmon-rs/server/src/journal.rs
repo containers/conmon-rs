@@ -1,12 +1,219 @@
-//! A `tracing` writer which forwards the server logs to journald.
+//! A client for the native journal protocol
+//! (<https://systemd.io/JOURNAL_NATIVE_PROTOCOL/>) and a `tracing` writer
+//! which forwards the server logs to journald.
 
-use libsystemd::logging::{Priority, journal_print};
+use nix::{
+    errno::Errno,
+    fcntl::{FcntlArg, SealFlag, fcntl},
+    sys::{
+        memfd::{MFdFlags, memfd_create},
+        socket::{ControlMessage, MsgFlags, UnixAddr, sendmsg, setsockopt, sockopt},
+    },
+};
 use std::{
-    io::{self, Error, Write},
-    str,
+    fs::File,
+    io::{self, ErrorKind, Write},
+    os::{
+        fd::{AsRawFd, OwnedFd},
+        unix::net::UnixDatagram,
+    },
+    path::Path,
+    sync::OnceLock,
+    time::Duration,
 };
 use tracing::{Level, Metadata};
 use tracing_subscriber::fmt::writer::MakeWriter;
+
+/// The datagram socket journald receives native protocol entries on.
+pub const SOCKET_PATH: &str = "/run/systemd/journal/socket";
+
+/// The syslog priorities used for the `PRIORITY` field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Priority {
+    Error = 3,
+    Warning = 4,
+    Notice = 5,
+    Info = 6,
+    Debug = 7,
+}
+
+/// A journal entry, encoded for the native protocol.
+#[derive(Debug, Default)]
+pub struct Entry(Vec<u8>);
+
+impl Entry {
+    /// An entry with the `PRIORITY` and `MESSAGE` fields.
+    pub fn new(priority: Priority, message: impl AsRef<[u8]>) -> Self {
+        let mut entry = Self::default();
+        entry.reset(priority, message);
+        entry
+    }
+
+    /// Start over with the `PRIORITY` and `MESSAGE` fields, keeping the
+    /// allocation.
+    pub fn reset(&mut self, priority: Priority, message: impl AsRef<[u8]>) -> &mut Self {
+        self.0.clear();
+        self.field("PRIORITY", [b'0' + priority as u8])
+            .field("MESSAGE", message)
+    }
+
+    /// Append a field. The key must be a valid journal field name: upper case
+    /// letters, digits and underscores, not starting with a digit or an
+    /// underscore.
+    pub fn field(&mut self, key: &str, value: impl AsRef<[u8]>) -> &mut Self {
+        debug_assert!(Self::valid_key(key), "invalid journal field name {key}");
+        let value = value.as_ref();
+        self.0.extend_from_slice(key.as_bytes());
+        // `KEY=value\n` cannot carry a newline in the value, those values get
+        // their length as 64 bit little endian integer instead.
+        if value.contains(&b'\n') {
+            self.0.push(b'\n');
+            self.0
+                .extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
+        } else {
+            self.0.push(b'=');
+        }
+        self.0.extend_from_slice(value);
+        self.0.push(b'\n');
+        self
+    }
+
+    fn valid_key(key: &str) -> bool {
+        (1..=64).contains(&key.len())
+            && !key.starts_with(|c: char| c == '_' || c.is_ascii_digit())
+            && key
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    }
+
+    /// Append the already encoded fields of another entry.
+    pub fn extend(&mut self, fields: &Entry) -> &mut Self {
+        self.0.extend_from_slice(&fields.0);
+        self
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// How sending waits for a journal which does not keep up, for example while
+/// it restarts or its disk is slow. The modes use separate sockets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Wait {
+    /// Never block, the entry fails with `ErrorKind::WouldBlock`. For the
+    /// server logs, which tracing writes from the runtime threads.
+    Never,
+    /// Block for at most `SEND_TIMEOUT`, then fail with
+    /// `ErrorKind::TimedOut`. For the container logs, which get sent from
+    /// the blocking pool and should not be dropped on a short stall.
+    Bounded,
+}
+
+/// The longest `Wait::Bounded` blocks for one entry.
+const SEND_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The send buffer systemd uses for its journal clients, so that bursts and
+/// entries up to that size do not need a memfd.
+const SEND_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+
+/// Send an entry to the journal socket at a path.
+pub fn send_at(wait: Wait, path: &Path, entry: &Entry) -> io::Result<()> {
+    match send_to(socket(wait)?, path, entry.as_bytes()) {
+        Err(e) if wait == Wait::Bounded && e.kind() == ErrorKind::WouldBlock => {
+            Err(io::Error::new(
+                ErrorKind::TimedOut,
+                format!("journal did not take the entry within {SEND_TIMEOUT:?}"),
+            ))
+        }
+        result => result,
+    }
+}
+
+/// The socket of a mode, created on first use. A failed creation is not
+/// stored, the next entry tries again.
+fn socket(wait: Wait) -> io::Result<&'static UnixDatagram> {
+    static NEVER: OnceLock<UnixDatagram> = OnceLock::new();
+    static BOUNDED: OnceLock<UnixDatagram> = OnceLock::new();
+    let cell = match wait {
+        Wait::Never => &NEVER,
+        Wait::Bounded => &BOUNDED,
+    };
+    if let Some(socket) = cell.get() {
+        return Ok(socket);
+    }
+    let socket = UnixDatagram::unbound()?;
+    match wait {
+        Wait::Never => socket.set_nonblocking(true)?,
+        Wait::Bounded => socket.set_write_timeout(Some(SEND_TIMEOUT))?,
+    }
+    // Best effort like systemd: forcing needs CAP_NET_ADMIN, without it the
+    // kernel caps the size at net.core.wmem_max.
+    if setsockopt(&socket, sockopt::SndBufForce, &SEND_BUFFER_SIZE).is_err() {
+        setsockopt(&socket, sockopt::SndBuf, &SEND_BUFFER_SIZE).ok();
+    }
+    Ok(cell.get_or_init(|| socket))
+}
+
+/// Send the data as one datagram, or as a memfd if it does not fit.
+fn send_to(socket: &UnixDatagram, path: &Path, data: &[u8]) -> io::Result<()> {
+    match socket.send_to(data, path) {
+        Ok(_) => Ok(()),
+        Err(e)
+            if matches!(
+                e.raw_os_error().map(Errno::from_raw),
+                Some(Errno::EMSGSIZE | Errno::ENOBUFS)
+            ) =>
+        {
+            send_memfd(socket, path, data)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether an error means that there is no journal to send to: no socket
+/// file, or no one listening on it.
+pub fn unavailable(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::NotFound | ErrorKind::ConnectionRefused
+    )
+}
+
+/// Send the data in a sealed memfd, the only kind journald accepts, as
+/// `SCM_RIGHTS` of an otherwise empty datagram.
+fn send_memfd(socket: &UnixDatagram, path: &Path, data: &[u8]) -> io::Result<()> {
+    let mut file = File::from(create_memfd()?);
+    file.write_all(data)?;
+    fcntl(
+        &file,
+        FcntlArg::F_ADD_SEALS(
+            SealFlag::F_SEAL_SHRINK
+                | SealFlag::F_SEAL_GROW
+                | SealFlag::F_SEAL_WRITE
+                | SealFlag::F_SEAL_SEAL,
+        ),
+    )?;
+    sendmsg(
+        socket.as_raw_fd(),
+        &[],
+        &[ControlMessage::ScmRights(&[file.as_raw_fd()])],
+        MsgFlags::empty(),
+        Some(&UnixAddr::new(path)?),
+    )?;
+    Ok(())
+}
+
+/// Create a memfd which allows sealing. Like systemd, ask for a
+/// non-executable one first, kernels before 6.3 reject that flag.
+fn create_memfd() -> nix::Result<OwnedFd> {
+    let flags = MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING;
+    let noexec = MFdFlags::from_bits_retain(libc::MFD_NOEXEC_SEAL);
+    match memfd_create(c"conmonrs-journal", flags | noexec) {
+        Err(Errno::EINVAL) => memfd_create(c"conmonrs-journal", flags),
+        result => result,
+    }
+}
 
 /// Writes every log line as one journal entry with the priority derived from
 /// the tracing level.
@@ -18,6 +225,15 @@ pub struct Journal {
 impl Journal {
     const DEFAULT_PRIORITY: Priority = Priority::Notice;
 
+    /// The entry of a formatted event. The journal separates entries itself,
+    /// so the line ending of the event is dropped.
+    fn entry(&self, line: &[u8]) -> Entry {
+        Entry::new(
+            self.priority.unwrap_or(Self::DEFAULT_PRIORITY),
+            line.strip_suffix(b"\n").unwrap_or(line),
+        )
+    }
+
     fn priority_for(level: &Level) -> Priority {
         match *level {
             Level::ERROR => Priority::Error,
@@ -28,11 +244,23 @@ impl Journal {
     }
 }
 
+impl Journal {
+    /// Send without blocking the runtime thread of the event. A system
+    /// without journald is not an error, like with `sd_journal_send`, and a
+    /// journal which does not keep up loses the line, otherwise every event
+    /// would report an error.
+    fn send_at(&self, path: &Path, line: &[u8]) -> io::Result<()> {
+        match send_at(Wait::Never, path, &self.entry(line)) {
+            Err(e) if unavailable(&e) || e.kind() == ErrorKind::WouldBlock => Ok(()),
+            result => result,
+        }
+    }
+}
+
 impl Write for Journal {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let s = str::from_utf8(buf).map_err(Error::other)?;
-        journal_print(self.priority.unwrap_or(Self::DEFAULT_PRIORITY), s).map_err(Error::other)?;
-        Ok(s.len())
+        self.send_at(Path::new(SOCKET_PATH), buf)?;
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -55,30 +283,258 @@ impl<'a> MakeWriter<'a> for Journal {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
+
+    /// Decode the fields of an entry, the way journald does.
+    pub fn decode(mut data: &[u8]) -> Vec<(String, Vec<u8>)> {
+        let mut fields = vec![];
+        while !data.is_empty() {
+            let end = data.iter().position(|b| *b == b'\n').expect("newline");
+            let line = &data[..end];
+            if let Some(eq) = line.iter().position(|b| *b == b'=') {
+                fields.push((
+                    String::from_utf8(line[..eq].to_vec()).expect("utf8 key"),
+                    line[eq + 1..].to_vec(),
+                ));
+                data = &data[end + 1..];
+            } else {
+                let rest = &data[end + 1..];
+                let len = u64::from_le_bytes(rest[..8].try_into().expect("length")) as usize;
+                assert_eq!(rest[8 + len], b'\n', "value ends with a newline");
+                fields.push((
+                    String::from_utf8(line.to_vec()).expect("utf8 key"),
+                    rest[8..8 + len].to_vec(),
+                ));
+                data = &rest[8 + len + 1..];
+            }
+        }
+        fields
+    }
 
     #[test]
     fn priorities_follow_the_level() {
+        assert_eq!(Journal::priority_for(&Level::ERROR), Priority::Error);
+        assert_eq!(Journal::priority_for(&Level::WARN), Priority::Warning);
+        assert_eq!(Journal::priority_for(&Level::INFO), Priority::Info);
+        assert_eq!(Journal::priority_for(&Level::DEBUG), Priority::Debug);
+        assert_eq!(Journal::priority_for(&Level::TRACE), Priority::Debug);
+    }
+
+    #[test]
+    fn writer_drops_the_line_ending() {
+        let journal = Journal {
+            priority: Some(Priority::Warning),
+        };
         assert_eq!(
-            Journal::priority_for(&Level::ERROR) as u8,
-            Priority::Error as u8
+            journal.entry(b"event\n").as_bytes(),
+            b"PRIORITY=4\nMESSAGE=event\n"
         );
         assert_eq!(
-            Journal::priority_for(&Level::WARN) as u8,
-            Priority::Warning as u8
+            decode(journal.entry(b"two\nlines\n").as_bytes())[1],
+            ("MESSAGE".into(), b"two\nlines".to_vec())
         );
         assert_eq!(
-            Journal::priority_for(&Level::INFO) as u8,
-            Priority::Info as u8
+            Journal::default().entry(b"plain").as_bytes(),
+            b"PRIORITY=5\nMESSAGE=plain\n"
         );
+    }
+
+    #[test]
+    fn extend_appends_encoded_fields() {
+        let mut fields = Entry::default();
+        fields.field("A", "1").field("B", "x\ny");
+        let mut entry = Entry::new(Priority::Info, "m");
+        entry.extend(&fields).field("C", "3");
         assert_eq!(
-            Journal::priority_for(&Level::DEBUG) as u8,
-            Priority::Debug as u8
+            decode(entry.as_bytes()),
+            [
+                ("PRIORITY".into(), b"6".to_vec()),
+                ("MESSAGE".into(), b"m".to_vec()),
+                ("A".into(), b"1".to_vec()),
+                ("B".into(), b"x\ny".to_vec()),
+                ("C".into(), b"3".to_vec())
+            ]
         );
+    }
+
+    #[test]
+    fn simple_fields() {
+        let mut entry = Entry::new(Priority::Info, "hello");
+        entry.field("CONTAINER_ID", "abc").field("EMPTY", "");
         assert_eq!(
-            Journal::priority_for(&Level::TRACE) as u8,
-            Priority::Debug as u8
+            entry.as_bytes(),
+            b"PRIORITY=6\nMESSAGE=hello\nCONTAINER_ID=abc\nEMPTY=\n"
         );
+    }
+
+    #[test]
+    fn values_with_newlines_carry_their_length() {
+        let entry = Entry::new(Priority::Error, "a\nb=c\n");
+        let mut expected = b"PRIORITY=3\nMESSAGE\n".to_vec();
+        expected.extend_from_slice(&6u64.to_le_bytes());
+        expected.extend_from_slice(b"a\nb=c\n\n");
+        assert_eq!(entry.as_bytes(), expected);
+        assert_eq!(
+            decode(entry.as_bytes()),
+            [
+                ("PRIORITY".into(), b"3".to_vec()),
+                ("MESSAGE".into(), b"a\nb=c\n".to_vec())
+            ]
+        );
+    }
+
+    #[test]
+    fn binary_values_round_trip() {
+        let value = [0u8, b'\n', 0xff, b'='];
+        let mut entry = Entry::new(Priority::Debug, [0xffu8, 0xfe]);
+        entry.field("BLOB", value);
+        assert_eq!(
+            decode(entry.as_bytes()),
+            [
+                ("PRIORITY".into(), b"7".to_vec()),
+                ("MESSAGE".into(), vec![0xff, 0xfe]),
+                ("BLOB".into(), value.to_vec())
+            ]
+        );
+    }
+
+    #[test]
+    fn valid_keys() {
+        for key in ["MESSAGE", "CONTAINER_ID_FULL", "A1", "X_"] {
+            assert!(Entry::valid_key(key), "{key}");
+        }
+        let long = "A".repeat(65);
+        for key in ["", "_PID", "1A", "lower", "WITH-DASH", "WITH=EQ", &long] {
+            assert!(!Entry::valid_key(key), "{key}");
+        }
+    }
+
+    /// Receive one datagram, with its content or the content of the memfd it
+    /// carries.
+    fn receive(receiver: &UnixDatagram) -> anyhow::Result<(Vec<u8>, bool)> {
+        use nix::sys::socket::{ControlMessageOwned, recvmsg};
+        use std::{
+            io::{IoSliceMut, Read, Seek},
+            os::fd::{FromRawFd, RawFd},
+        };
+
+        let mut buf = vec![0; 4096];
+        let mut iov = [IoSliceMut::new(&mut buf)];
+        let mut cmsg = nix::cmsg_space!([RawFd; 1]);
+        let msg = recvmsg::<()>(
+            receiver.as_raw_fd(),
+            &mut iov,
+            Some(&mut cmsg),
+            MsgFlags::MSG_CMSG_CLOEXEC,
+        )?;
+        let len = msg.bytes;
+        let Some(ControlMessageOwned::ScmRights(fds)) = msg.cmsgs()?.next() else {
+            buf.truncate(len);
+            return Ok((buf, false));
+        };
+        #[allow(unsafe_code)]
+        // SAFETY: SCM_RIGHTS installed a new descriptor which nothing else owns.
+        let mut file = unsafe { File::from_raw_fd(fds[0]) };
+        let seals = fcntl(&file, FcntlArg::F_GET_SEALS)?;
+        assert!(
+            SealFlag::from_bits_truncate(seals)
+                .contains(SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_GROW | SealFlag::F_SEAL_WRITE)
+        );
+        // The descriptor shares the offset with the one of the sender, which
+        // is at the end. journald maps the memfd instead.
+        file.rewind()?;
+        let mut data = vec![];
+        file.read_to_end(&mut data)?;
+        Ok((data, true))
+    }
+
+    /// Entries go inline if they fit into a datagram, otherwise as memfd.
+    #[test]
+    fn send_inline_and_as_memfd() -> anyhow::Result<()> {
+        use nix::sys::socket::{setsockopt, sockopt};
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("socket");
+        let receiver = UnixDatagram::bind(&path)?;
+        let sender = UnixDatagram::unbound()?;
+        // A small send buffer makes the large entry fail inline, whatever
+        // the default of the host is.
+        setsockopt(&sender, sockopt::SndBuf, &4096)?;
+
+        let small = Entry::new(Priority::Info, "small");
+        send_to(&sender, &path, small.as_bytes())?;
+        assert_eq!(receive(&receiver)?, (small.as_bytes().to_vec(), false));
+
+        let large = Entry::new(Priority::Info, "x".repeat(1 << 20));
+        send_to(&sender, &path, large.as_bytes())?;
+        let (data, memfd) = receive(&receiver)?;
+        assert!(memfd);
+        assert!(data == large.as_bytes(), "memfd holds the entry");
+        Ok(())
+    }
+
+    /// Send small entries to a socket which is never read, until the queue
+    /// of the receiver is full and sending fails.
+    fn fill(wait: Wait, path: &Path) -> io::Error {
+        let entry = Entry::new(Priority::Info, "fill");
+        for _ in 0..100_000 {
+            if let Err(e) = send_at(wait, path, &entry) {
+                return e;
+            }
+        }
+        panic!("the receiver queue never filled up");
+    }
+
+    /// The tracing writer drops lines instead of blocking the runtime thread
+    /// when the journal does not keep up.
+    #[test]
+    fn writer_never_blocks() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("socket");
+        let _receiver = UnixDatagram::bind(&path)?;
+
+        let error = fill(Wait::Never, &path);
+        assert_eq!(error.kind(), ErrorKind::WouldBlock);
+
+        let journal = Journal::default();
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            journal.send_at(&path, b"dropped\n")?;
+        }
+        assert!(start.elapsed() < SEND_TIMEOUT);
+        Ok(())
+    }
+
+    /// The container logs wait for a stalled journal, but not forever.
+    #[test]
+    fn bounded_send_times_out() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("socket");
+        let _receiver = UnixDatagram::bind(&path)?;
+
+        let start = std::time::Instant::now();
+        let error = fill(Wait::Bounded, &path);
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert!(start.elapsed() >= SEND_TIMEOUT);
+        Ok(())
+    }
+
+    /// A missing socket and a socket nobody listens on mean that there is
+    /// no journal, which the tracing writer ignores.
+    #[test]
+    fn writer_ignores_a_missing_journal() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let missing = dir.path().join("missing");
+        let stale = dir.path().join("stale");
+        drop(UnixDatagram::bind(&stale)?);
+
+        let entry = Entry::new(Priority::Info, "lost");
+        for path in [&missing, &stale] {
+            let error = send_at(Wait::Never, path, &entry).expect_err("no journal");
+            assert!(unavailable(&error), "{error}");
+            Journal::default().send_at(path, b"lost\n")?;
+        }
+        Ok(())
     }
 }

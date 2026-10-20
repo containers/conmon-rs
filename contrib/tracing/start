@@ -10,10 +10,11 @@ JAEGER_IMG="cr.jaegertracing.io/jaegertracing/jaeger:2.22.0"
 echo "Starting $JAEGER_CTR"
 "$CONTAINER_RUNTIME" run -d --rm --network host --name "$JAEGER_CTR" "$JAEGER_IMG"
 
-PORT=14250
+# The OTLP gRPC port the server exports its spans to.
+PORT=4317
 MAX_CNT=100
 for ((i = 0; i <= "$MAX_CNT"; i++)); do
-    if netstat -tuplen 2>/dev/null | grep -q "$PORT .* LISTEN"; then
+    if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
         break
     fi
 
@@ -22,7 +23,7 @@ for ((i = 0; i <= "$MAX_CNT"; i++)); do
         exit 1
     fi
 
-    echo "Waiting for gRPC port $PORT to listen… ($i)"
+    echo "Waiting for OTLP port $PORT to listen… ($i)"
     sleep 3
 done
 

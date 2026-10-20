@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# List the specs of a ginkgo JSON report which passed, but only after more than
+# one attempt. --flake-attempts lets them pass, which would hide them otherwise.
+# Specs which failed on every attempt fail the run anyway and are left out.
+REPORT=${1:?usage: $0 REPORT}
+
+if [[ ! -f $REPORT ]]; then
+    echo "No report found at $REPORT"
+    exit 0
+fi
+
+# Print one line per flaky spec, escaped for workflow commands with "command",
+# with line breaks replaced by spaces otherwise.
+flakes() {
+    jq -r --arg mode "$1" '
+        .[].SpecReports // [] | .[] |
+        select(.State == "passed" and .NumAttempts > 1) |
+        "passed after \(.NumAttempts) attempts: \((.ContainerHierarchyTexts // []) + [.LeafNodeText] | join(" "))" |
+        if $mode == "command" then
+            gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A")
+        else
+            gsub("[\r\n]"; " ")
+        end
+    ' "$REPORT"
+}
+
+FLAKES=$(flakes text)
+if [[ $FLAKES == "" ]]; then
+    echo "No spec needed a retry"
+    exit 0
+fi
+
+while IFS= read -r FLAKE; do
+    echo "::warning title=Flaky spec::$FLAKE"
+done < <(flakes command)
+
+if [[ ${GITHUB_STEP_SUMMARY:-} != "" ]]; then
+    SUMMARY="### Specs which needed retries"$'\n'
+    while IFS= read -r FLAKE; do
+        SUMMARY+=$'\n'"- $FLAKE"
+    done <<<"$FLAKES"
+    echo "$SUMMARY" >>"$GITHUB_STEP_SUMMARY"
+fi

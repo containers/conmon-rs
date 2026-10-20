@@ -17,7 +17,7 @@ jobs:
     targets:
       - fedora-all-x86_64
       - fedora-all-aarch64
-      # TODO: Reenable once they have a stable Rust version for edition 2024
+      # TODO: Reenable once they ship the rust-version from Cargo.toml
       # - epel-9-x86_64
       # - epel-9-aarch64
     additional_repos:
