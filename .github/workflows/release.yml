@@ -15,7 +15,23 @@ jobs:
         run: make create-release-packages
         env:
           CI_TAG: ${{ github.ref_name }}
+      # The ci workflow built, signed and uploaded the binaries of this commit
+      # when it reached main, which may still be running when the tag gets
+      # pushed. Wait for them, the bucket answers 404 until they exist.
+      - name: Fetch binaries
+        run: |
+          BASE_URL=https://storage.googleapis.com/cri-o/conmon-rs/${{ github.sha }}
+          for ARCH in amd64 arm64 ppc64le s390x; do
+            for FILE in conmonrs.$ARCH conmonrs.$ARCH.bundle; do
+              curl -sSfL --retry-all-errors --retry 30 --retry-delay 20 "$BASE_URL/$FILE" -o "$FILE"
+            done
+          done
+          sha256sum conmonrs.* *.tar.gz > sha256sums.txt
+          cat sha256sums.txt
       - name: Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          files: "*.tar.gz"
+          files: |
+            *.tar.gz
+            conmonrs.*
+            sha256sums.txt

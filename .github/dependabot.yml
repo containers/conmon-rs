@@ -34,3 +34,12 @@ updates:
     open-pull-requests-limit: 10
     labels:
       - "release-note-none"
+  # The Go dependencies follow CRI-O, which vendors the client, so only
+  # security updates get opened.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    labels:
+      - "release-note-none"

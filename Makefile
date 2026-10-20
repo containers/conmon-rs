@@ -1,4 +1,4 @@
-RUNTIME_PATH ?= "/usr/bin/runc"
+RUNTIME_PATH ?= /usr/bin/runc
 PROTO_PATH ?= "conmon-rs/server/proto"
 BINARY := conmonrs
 CONTAINER_RUNTIME ?= podman
@@ -25,6 +25,7 @@ COLOR:=\\033[36m
 NOCOLOR:=\\033[0m
 WIDTH:=25
 
+.PHONY: all
 all: default
 
 .PHONY: help
@@ -107,7 +108,7 @@ verify-prettier: prettier ## Run prettier on the project and fail on changes.
 
 .PHONY: prettier
 prettier: ## Prettify supported files.
-	$(CONTAINER_RUNTIME) run -it --privileged -v ${PWD}:/w -w /w --entrypoint bash node:latest -c \
+	$(CONTAINER_RUNTIME) run --rm -v ${PWD}:/w:z -w /w --entrypoint bash node:latest -c \
 		'npm install -g prettier && prettier -w .'
 
 .PHONY: .install.ginkgo

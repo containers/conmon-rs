@@ -2,7 +2,6 @@
 set -euox pipefail
 
 main() {
-    set -x
     prepare_system
 
     install_critest
@@ -42,7 +41,9 @@ prepare_system() {
 }
 
 install_crio() {
-    curl_retry "https://raw.githubusercontent.com/cri-o/packaging/main/get" |
+    # Pinned to a commit, the script runs as root.
+    PACKAGING_COMMIT=d3d936cd4d7c627f0ed33ecef4bcc8544df10e54
+    curl_retry "https://raw.githubusercontent.com/cri-o/packaging/$PACKAGING_COMMIT/get" |
         sudo bash -s --
 
     cat <<EOT | sudo tee /etc/crio/crio.conf.d/10-crun.conf
