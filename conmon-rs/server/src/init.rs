@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 use libc::{LC_ALL, c_char, c_int, setlocale};
 use nix::sys::stat::{Mode, umask};
 use std::{
+    env,
     ffi::CString,
     fs::File,
     io::{self, ErrorKind, Write},
@@ -48,6 +49,16 @@ where
     pub fn set_default_umask(&self) {
         self.imp.umask(Mode::from_bits_truncate(0o022))
     }
+
+    /// Drop the sd_notify socket of whoever started the server. The server
+    /// does not talk to systemd itself, but every process it runs would
+    /// inherit the socket: the runtime then adds its own notify socket mount
+    /// and `NOTIFY_SOCKET` to the container, the cleanup commands and the
+    /// pause process get it as well. Callers set those up themselves and let
+    /// the server relay the messages, see the `notify` module.
+    pub fn unset_notify_socket(&self) {
+        self.imp.remove_var("NOTIFY_SOCKET")
+    }
 }
 
 #[cfg_attr(test, automock)]
@@ -56,6 +67,7 @@ pub trait InitImpl {
     fn create_file<P: 'static + AsRef<Path>>(&self, path: P) -> io::Result<File>;
     fn write_all_file(&self, file: &mut File, buf: &[u8]) -> io::Result<()>;
     fn umask(&self, mode: Mode);
+    fn remove_var(&self, key: &str);
 }
 
 #[derive(Debug, Default)]
@@ -76,6 +88,12 @@ impl InitImpl for DefaultInit {
 
     fn umask(&self, mode: Mode) {
         umask(mode);
+    }
+
+    fn remove_var(&self, key: &str) {
+        // SAFETY: the server is still single threaded, the runtime and its
+        // threads start later.
+        unsafe { env::remove_var(key) }
     }
 }
 

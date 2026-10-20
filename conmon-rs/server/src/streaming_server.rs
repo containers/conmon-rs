@@ -477,6 +477,7 @@ impl StreamingServer {
                 &mut session.container_io,
                 pidfile.path(),
                 vec![],
+                false,
                 vec![],
             )
             .await

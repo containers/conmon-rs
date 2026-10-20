@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
 	"go.podman.io/common/pkg/resize"
 	"go.podman.io/storage/pkg/idtools"
@@ -93,6 +95,7 @@ var _ = Describe("ConmonClient", func() {
 				Expect(version.Target).NotTo(BeEmpty())
 				Expect(version.RustVersion).NotTo(BeEmpty())
 				Expect(version.CargoVersion).NotTo(BeEmpty())
+				Expect(version.Features).To(ContainElement(client.FeatureSdNotify))
 
 				if verbose {
 					Expect(version.CargoTree).NotTo(BeEmpty())
@@ -279,6 +282,67 @@ var _ = Describe("ConmonClient", func() {
 				Expect(logs).NotTo(BeEmpty())
 			})
 		}
+
+		It("should relay sd_notify messages", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfigWithProcessArgs(
+				false,
+				[]string{"/busybox", "sh", "-c", "/busybox ls $NOTIFY_SOCKET"},
+				func(g generate.Generator) {
+					// What the container engine sets up for the container.
+					g.AddMount(specs.Mount{
+						Destination: "/run/notify",
+						Source:      filepath.Join(tr.tmpDir, "notify"),
+						Options:     []string{"bind", "ro"},
+					})
+					g.AddProcessEnv("NOTIFY_SOCKET", "/run/notify/notify.sock")
+				},
+			)
+			sut = tr.configGivenEnv()
+
+			// The host side, usually the notify socket of systemd.
+			hostPath := filepath.Join(tr.tmpDir, "host.sock")
+			host, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: hostPath, Net: "unixgram"})
+			Expect(err).To(Succeed())
+
+			defer host.Close()
+
+			cfg := tr.defaultConfig(false)
+			cfg.SdNotifySocket = hostPath
+			tr.createContainerWithConfig(sut, cfg)
+
+			// busybox cannot send datagrams, so send from the host side what
+			// the container would send through the mount.
+			ctrPath := filepath.Join(tr.tmpDir, "notify", "notify.sock")
+			conn, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: ctrPath, Net: "unixgram"})
+			Expect(err).To(Succeed())
+
+			defer conn.Close()
+
+			const message = "READY=1\nSTATUS=up"
+
+			_, err = conn.Write([]byte(message))
+			Expect(err).To(Succeed())
+
+			Expect(host.SetReadDeadline(time.Now().Add(10 * time.Second))).To(Succeed())
+
+			buf := make([]byte, 4096)
+			n, err := host.Read(buf)
+			Expect(err).To(Succeed())
+			Expect(string(buf[:n])).To(Equal(message))
+
+			// The socket existed before the runtime mounted its directory.
+			tr.startContainer()
+			Eventually(func() string { return fileContents(tr.logPath()) }, 5*time.Second).
+				Should(ContainSubstring("/run/notify/notify.sock"))
+
+			// The socket goes away with the container.
+			Eventually(func() bool {
+				_, err := os.Stat(ctrPath)
+
+				return errors.Is(err, os.ErrNotExist)
+			}, time.Second*5).Should(BeTrue())
+		})
 	})
 
 	Describe("ExecSync Stress", func() {

@@ -22,6 +22,10 @@ interface Conmon {
         cargoTree @8 :Text;
         # Reserved, do not reuse the ordinal.
         metadataOld @9 :Void;
+        # The optional features this server supports, which the version
+        # alone does not tell. Known values: `sdnotify`, the relay of
+        # sd_notify messages requested by `sdnotifySocket`.
+        features @10 :List(Text);
     }
 
     version @0 (request: VersionRequest) -> (response: VersionResponse);
@@ -46,6 +50,14 @@ interface Conmon {
         cgroupManager @13 :CgroupManager;
         additionalFds @14 :List(UInt64);
         leakFds @15 :List(UInt64);
+        # The host sd_notify socket to relay messages to, usually the
+        # `NOTIFY_SOCKET` of systemd. If set, the server binds
+        # `<bundlePath>/notify/notify.sock` before it runs the runtime and
+        # relays every datagram sent there to the host socket until the
+        # container exits. The caller mounts the `notify` directory into the
+        # container and sets `NOTIFY_SOCKET` for its process, which the
+        # runtime does not see.
+        sdnotifySocket @16 :Text;
     }
 
     struct LogDriver {

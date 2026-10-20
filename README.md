@@ -75,7 +75,10 @@ operations against it:
   runtime's console socket), writes the output to the configured log drivers
   (CRI format, JSON or journald) and watches the container's cgroup for out of
   memory events. When the container exits, the exit code is written to the exit
-  paths and an optional cleanup command is run.
+  paths and an optional cleanup command is run. With `sdnotifySocket` set, the
+  server also relays the sd_notify messages of the container from
+  `<bundle>/notify/notify.sock` to that host socket, like conmon does with
+  `--sdnotify-socket`.
 - **Exec**: `execSyncContainer` runs a command inside a container and returns
   its output and exit code. For interactive execs and attaches
   (`serveExecContainer`, `serveAttachContainer`), the server opens a WebSocket

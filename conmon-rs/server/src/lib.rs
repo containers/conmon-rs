@@ -94,6 +94,7 @@ mod init;
 mod journal;
 mod listener;
 mod mutex;
+mod notify;
 mod oom_watcher;
 #[allow(unsafe_code)]
 mod pause;

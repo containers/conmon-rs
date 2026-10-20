@@ -36,6 +36,10 @@ pub struct Version {
 
     /// The cargo dependency tree, only available in verbose output.
     cargo_tree: &'static str,
+
+    /// The optional features this build supports, which the version alone
+    /// does not tell.
+    features: &'static [&'static str],
 }
 
 impl Version {
@@ -51,7 +55,18 @@ impl Version {
             rust_version: env!("BUILD_RUST_VERSION"),
             cargo_version: env!("BUILD_CARGO_VERSION"),
             cargo_tree: if verbose { CARGO_TREE } else { "" },
+            features: Self::FEATURES,
         }
+    }
+
+    /// The relay of sd_notify messages requested by `sdnotifySocket`.
+    pub const FEATURE_SDNOTIFY: &'static str = "sdnotify";
+
+    const FEATURES: &'static [&'static str] = &[Self::FEATURE_SDNOTIFY];
+
+    /// The optional features this build supports.
+    pub fn features(&self) -> &'static [&'static str] {
+        self.features
     }
 
     /// Whether verbose output is enabled.
