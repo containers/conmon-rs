@@ -3,15 +3,16 @@ use crate::{
     listener::{DefaultListener, Listener},
 };
 use anyhow::{Context, Result, bail};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use nix::{
     errno::Errno,
+    poll::{PollFd, PollFlags, PollTimeout, poll},
     sys::socket::{AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, listen, socket},
 };
 use std::{
     io::{self, IoSlice},
     os::{
-        fd::{AsRawFd, OwnedFd},
+        fd::{AsFd, AsRawFd, OwnedFd},
         unix::fs::PermissionsExt,
     },
     path::{Path, PathBuf},
@@ -21,15 +22,12 @@ use std::{
     },
 };
 use tokio::{
-    io::{AsyncWriteExt, ErrorKind, Interest},
-    net::{
-        UnixListener,
-        unix::{OwnedReadHalf, OwnedWriteHalf},
-    },
+    io::ErrorKind,
     select,
     sync::broadcast::{self, Receiver, Sender, error::RecvError},
     task,
 };
+use tokio_seqpacket::{UnixSeqpacket, UnixSeqpacketListener};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error, trace, warn};
 
@@ -211,6 +209,10 @@ impl Attach {
     /// The size of an attach packet.
     const PACKET_BUF_SIZE: usize = 8192;
 
+    /// The maximum size of a stdin packet from an attach client, a larger one
+    /// gets truncated. The Go client writes at most 32 KiB at once.
+    const STDIN_PACKET_MAX_SIZE: usize = 64 * 1024;
+
     /// The packet indicating that we're done writing.
     const DONE_PACKET: &'static [u8; 1] = &[0];
 
@@ -287,7 +289,8 @@ impl Attach {
         token: CancellationToken,
     ) -> Result<()> {
         debug!("Start listening on attach socket");
-        let listener = UnixListener::from_std(fd.into()).context("create unix listener")?;
+        let mut listener =
+            UnixSeqpacketListener::try_from(fd).context("create seqpacket listener")?;
         loop {
             // The container exit cancels the token, stop accepting then and
             // remove the socket instead of keeping the listener around for the
@@ -303,9 +306,10 @@ impl Attach {
                 }
             };
             match accepted {
-                Ok((stream, _)) => {
+                Ok(socket) => {
                     debug!("Got new attach stream connection");
-                    let (read, write) = stream.into_split();
+                    let read = Arc::new(socket);
+                    let write = read.clone();
 
                     let attach_clone = attach.clone();
                     let token_clone = token.clone();
@@ -338,7 +342,7 @@ impl Attach {
     /// Forward the stdin of a client until it closes, the stdin of the
     /// container got closed or the container exited, which cancels `token`.
     async fn read_loop(
-        read_half: OwnedReadHalf,
+        socket: Arc<UnixSeqpacket>,
         attach: SharedContainerAttach,
         token: CancellationToken,
     ) -> Result<()> {
@@ -350,9 +354,9 @@ impl Attach {
             }
         };
 
-        // `read_buf` grows the buffer back to this capacity once the frozen
-        // parts are used up, so no explicit reserve is needed in the loop.
-        let mut buf = BytesMut::with_capacity(Self::PACKET_BUF_SIZE);
+        // Every read returns a single packet, which gets copied out so that
+        // the queued stdin holds only the data of the packets.
+        let mut buf = vec![0; Self::STDIN_PACKET_MAX_SIZE];
         loop {
             // In situations we're processing output directly from the I/O streams
             // we need a mechanism to figure out when to stop that doesn't involve reading the
@@ -361,33 +365,18 @@ impl Attach {
             // While this could result in a data race, as select statements are racy,
             // we won't interleve these two futures, as one ends execution.
             let read = select! {
-                n = Self::read_packet(&read_half, &mut buf) => n,
+                read = socket.recv(&mut buf) => read,
                 _ = stopped() => return Ok(()),
             };
 
-            // A zero byte read on a SOCK_SEQPACKET socket is either an empty
-            // packet or the peer closing its write side. Only the latter marks
-            // the socket as read closed, so wait for the next readiness and
-            // check that flag rather than guessing from another read.
-            if let Ok(0) = read {
-                let ready = select! {
-                    ready = read_half.ready(Interest::READABLE) => {
-                        ready.context("wait for attach socket readiness")?
-                    }
-                    _ = stopped() => return Ok(()),
-                };
-                if !ready.is_read_closed() {
-                    trace!("Ignoring empty packet");
-                    continue;
-                }
-            }
-
             match read {
-                Ok(n) if n > 0 => {
-                    // Every read returns a single packet, which is forwarded as
-                    // is. Stdin is binary, null bytes are part of the data.
-                    // Splitting and freezing shares the buffer without a copy.
-                    let data = buf.split().freeze();
+                Ok(info) if info.bytes_read() > 0 => {
+                    let n = info.bytes_read();
+                    if info.truncated() {
+                        warn!("Truncated attach stdin packet to {n} bytes");
+                    }
+                    // Stdin is binary, null bytes are part of the data.
+                    let data = Bytes::copy_from_slice(&buf[..n]);
                     debug!("Read {} stdin bytes from client", data.len());
                     // Waiting for the container to take the data must not
                     // outlive the container or its stdin.
@@ -396,20 +385,14 @@ impl Attach {
                         _ = stopped() => return Ok(()),
                     }
                 }
-                Err(e) => match Errno::from_raw(e.raw_os_error().context("get OS error")?) {
-                    Errno::EIO => {
-                        debug!("Stopping read loop because of IO error");
-                        return Ok(());
-                    }
-                    Errno::EBADF => {
-                        return Err(Errno::EBADFD.into());
-                    }
-                    Errno::EAGAIN => {
+                Ok(_) => {
+                    // A zero byte read on a SOCK_SEQPACKET socket is either an
+                    // empty packet or the peer closing its write side, so
+                    // check the socket rather than guessing from another read.
+                    if !Self::input_ended(&socket).context("check attach socket for more input")? {
+                        trace!("Ignoring empty packet");
                         continue;
                     }
-                    _ => return Err(e).context("read from attach socket"),
-                },
-                _ => {
                     // The client closed its write half, no more input will
                     // ever arrive on this connection. The write loop keeps
                     // delivering output independently.
@@ -419,29 +402,61 @@ impl Attach {
                     }
                     return Ok(());
                 }
+                Err(e) => match Errno::from_raw(e.raw_os_error().context("get OS error")?) {
+                    Errno::ECONNRESET => {
+                        // The client closed the connection without reading all
+                        // of its output. The error gets reported only once,
+                        // the stdin queued before is still readable.
+                        debug!("Attach client reset the connection");
+                        continue;
+                    }
+                    Errno::EIO => {
+                        debug!("Stopping read loop because of IO error");
+                        return Ok(());
+                    }
+                    Errno::EBADF => {
+                        return Err(Errno::EBADFD.into());
+                    }
+                    _ => return Err(e).context("read from attach socket"),
+                },
             }
         }
     }
 
-    /// Read the next packet into `buf`.
-    ///
-    /// Every read of a SOCK_SEQPACKET socket returns a single packet. tokio's
-    /// `read_buf` takes a short read as the socket being drained and waits for
-    /// the next readiness event, which leaves packets already queued unread
-    /// until another one arrives. `try_read_buf` only clears the readiness
-    /// once the socket would block.
-    async fn read_packet(read_half: &OwnedReadHalf, buf: &mut BytesMut) -> io::Result<usize> {
-        loop {
-            read_half.readable().await?;
-            match read_half.try_read_buf(buf) {
-                Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
-                res => return res,
+    /// Check if no more input will arrive after a zero byte read. That is the
+    /// case once the peer closed its write side, which a SOCK_SEQPACKET socket
+    /// reports as POLLRDHUP, and no data is queued anymore. Checking the flag
+    /// first makes sure that no data arrives in between.
+    #[allow(unsafe_code)]
+    fn input_ended(socket: &UnixSeqpacket) -> io::Result<bool> {
+        // Besides POLLRDHUP, poll can only report a hangup or an error, which
+        // end the reading as well. The number of ready fds tells that, nix
+        // does not decode the POLLRDHUP bit of the returned events.
+        let events = PollFlags::from_bits_retain(libc::POLLRDHUP);
+        let read_closed = loop {
+            match poll(
+                &mut [PollFd::new(socket.as_fd(), events)],
+                PollTimeout::ZERO,
+            ) {
+                Err(Errno::EINTR) => continue,
+                res => break res? > 0,
             }
+        };
+        if !read_closed {
+            return Ok(false);
         }
+
+        // For a SOCK_SEQPACKET socket, FIONREAD sums up all queued packets.
+        let mut queued: libc::c_int = 0;
+        // SAFETY: FIONREAD writes a single c_int.
+        if unsafe { libc::ioctl(socket.as_raw_fd(), libc::FIONREAD, &mut queued) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(queued == 0)
     }
 
     async fn write_loop(
-        mut write_half: OwnedWriteHalf,
+        socket: Arc<UnixSeqpacket>,
         mut rx: Receiver<Message>,
         output_ended: bool,
     ) -> Result<()> {
@@ -466,13 +481,11 @@ impl Attach {
             match message {
                 Message::Done => {
                     debug!("Exiting because the container output ended");
-                    match write_half.write(Self::DONE_PACKET).await {
+                    match socket.send(Self::DONE_PACKET).await {
                         Ok(_) => {
                             debug!("Wrote done packet to client")
                         }
-                        Err(ref e)
-                            if e.kind() == ErrorKind::WouldBlock
-                                || e.kind() == ErrorKind::BrokenPipe => {}
+                        Err(ref e) if e.kind() == ErrorKind::BrokenPipe => {}
                         Err(e) => bail!("unable to write done packet: {:#}", e),
                     }
                     return Ok(());
@@ -488,11 +501,10 @@ impl Attach {
                         // Send the pipe header and the chunk as one packet
                         // without copying the chunk into a separate buffer.
                         let packet = [IoSlice::new(&header), IoSlice::new(chunk)];
-                        match write_half.write_vectored(&packet).await {
+                        match socket.send_vectored(&packet).await {
                             Ok(_) => {
                                 debug!("Wrote {} packet {}/{} to client", pipe, idx + 1, len)
                             }
-                            Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
                             Err(ref e) if e.kind() == ErrorKind::BrokenPipe => {
                                 // The client is gone, so stop receiving output
                                 // for it as well.
@@ -512,30 +524,35 @@ impl Attach {
 mod tests {
     use super::*;
     use crate::{container_io::ContainerIO, container_log::ContainerLog};
-    use nix::sys::socket::{MsgFlags, Shutdown, connect, send, shutdown, socketpair};
+    use nix::sys::socket::{MsgFlags, connect, send};
     use std::{
         io,
+        net::Shutdown,
         pin::Pin,
         task::{Context as TaskContext, Poll},
     };
     use tokio::{
-        io::{AsyncRead, AsyncReadExt, ReadBuf},
-        net::UnixStream,
+        io::{AsyncRead, ReadBuf},
+        task::JoinHandle,
         time::{Duration, timeout},
     };
 
-    /// A connected pair of packet sockets, like the attach clients use.
-    fn seqpacket_pair() -> Result<(UnixStream, UnixStream)> {
-        let (a, b) = socketpair(
-            AddressFamily::Unix,
-            SockType::SeqPacket,
-            None,
-            SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
-        )?;
-        Ok((
-            UnixStream::from_std(a.into())?,
-            UnixStream::from_std(b.into())?,
-        ))
+    /// A connected pair of packet sockets, like the attach clients use. The
+    /// first one is the server side.
+    fn seqpacket_pair() -> Result<(Arc<UnixSeqpacket>, UnixSeqpacket)> {
+        let (server, client) = UnixSeqpacket::pair()?;
+        Ok((Arc::new(server), client))
+    }
+
+    /// Spawn a read loop for the server side of a packet socket pair and
+    /// return the client side.
+    fn spawn_read_loop(
+        attach: &SharedContainerAttach,
+        token: &CancellationToken,
+    ) -> Result<(UnixSeqpacket, JoinHandle<Result<()>>)> {
+        let (server, client) = seqpacket_pair()?;
+        let task = task::spawn(Attach::read_loop(server, attach.clone(), token.clone()));
+        Ok((client, task))
     }
 
     struct BadFd;
@@ -609,18 +626,17 @@ mod tests {
         let attach = SharedContainerAttach::default();
         drop(attach.output());
 
-        let (server, mut client) = seqpacket_pair()?;
-        let (_, write) = server.into_split();
+        let (server, client) = seqpacket_pair()?;
         let (rx, output_ended) = attach.subscribe();
         assert!(output_ended);
         timeout(
             Duration::from_secs(5),
-            Attach::write_loop(write, rx, output_ended),
+            Attach::write_loop(server, rx, output_ended),
         )
         .await??;
 
         let mut buf = [1];
-        client.read_exact(&mut buf).await?;
+        assert_eq!(client.recv(&mut buf).await?.bytes_read(), 1);
         assert_eq!(&buf, Attach::DONE_PACKET);
         Ok(())
     }
@@ -629,12 +645,15 @@ mod tests {
     async fn write_loop_stops_on_broken_pipe() -> Result<()> {
         let attach = SharedContainerAttach::default();
         let (server, client) = seqpacket_pair()?;
-        let (_, write) = server.into_split();
         drop(client);
 
         let (rx, _) = attach.subscribe();
         attach.write(Message::Data(Bytes::from_static(b"data"), Pipe::StdOut))?;
-        timeout(Duration::from_secs(5), Attach::write_loop(write, rx, false)).await??;
+        timeout(
+            Duration::from_secs(5),
+            Attach::write_loop(server, rx, false),
+        )
+        .await??;
         Ok(())
     }
 
@@ -662,20 +681,12 @@ mod tests {
 
     #[tokio::test]
     async fn read_loop_forwards_packets_with_null_bytes() -> Result<()> {
-        let (client, server) = socketpair(
-            AddressFamily::Unix,
-            SockType::SeqPacket,
-            None,
-            SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
-        )?;
-        let (read_half, _write_half) = UnixStream::from_std(server.into())?.into_split();
-
         let mut attach = SharedContainerAttach::default();
         let token = CancellationToken::new();
-        let task = task::spawn(Attach::read_loop(read_half, attach.clone(), token.clone()));
+        let (client, task) = spawn_read_loop(&attach, &token)?;
 
         for packet in [&b"a\0b"[..], b"\0", b"c"] {
-            send(client.as_raw_fd(), packet, MsgFlags::empty())?;
+            client.send(packet).await?;
         }
 
         for expected in [&b"a\0b"[..], b"\0", b"c"] {
@@ -689,11 +700,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_loop_forwards_large_packets() -> Result<()> {
+        let mut attach = SharedContainerAttach::default();
+        let token = CancellationToken::new();
+        let (client, task) = spawn_read_loop(&attach, &token)?;
+
+        let packets = [
+            vec![1],
+            vec![2; Attach::PACKET_BUF_SIZE],
+            vec![3; 4 * Attach::PACKET_BUF_SIZE],
+            vec![4; Attach::STDIN_PACKET_MAX_SIZE],
+        ];
+        for packet in &packets {
+            client.send(packet).await?;
+        }
+        for expected in &packets {
+            let data = timeout(Duration::from_secs(5), attach.read()).await??;
+            assert_eq!(data, expected);
+        }
+
+        // Larger packets get truncated.
+        client
+            .send(&vec![5; Attach::STDIN_PACKET_MAX_SIZE + 1])
+            .await?;
+        let data = timeout(Duration::from_secs(5), attach.read()).await??;
+        assert_eq!(data, vec![5; Attach::STDIN_PACKET_MAX_SIZE]);
+
+        token.cancel();
+        task.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_loop_forwards_data_after_empty_packets() -> Result<()> {
+        let mut attach = SharedContainerAttach::default();
+        let token = CancellationToken::new();
+        let (client, task) = spawn_read_loop(&attach, &token)?;
+
+        // All of it is queued before the read loop runs, so the client closed
+        // its write side already when the empty packets get read.
+        for packet in [&b""[..], b"z", b"", b"y"] {
+            client.send(packet).await?;
+        }
+        client.shutdown(Shutdown::Write)?;
+
+        for expected in [&b"z"[..], b"y"] {
+            let data = timeout(Duration::from_secs(5), attach.read()).await??;
+            assert_eq!(data, expected);
+        }
+        timeout(Duration::from_secs(5), task).await???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_loop_continues_after_empty_packet() -> Result<()> {
+        let mut attach = SharedContainerAttach::default();
+        let token = CancellationToken::new();
+        let (client, task) = spawn_read_loop(&attach, &token)?;
+
+        client.send(b"").await?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!task.is_finished());
+
+        client.send(b"a").await?;
+        let data = timeout(Duration::from_secs(5), attach.read()).await??;
+        assert_eq!(data, &b"a"[..]);
+        assert!(!task.is_finished());
+
+        token.cancel();
+        task.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn stdin_eof_keeps_listener() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("attach");
         let token = CancellationToken::new();
-        let attach = SharedContainerAttach::default();
+        let mut attach = SharedContainerAttach::default();
         attach.add(&path, token.clone(), true)?;
 
         let connect_client = || -> Result<OwnedFd> {
@@ -708,9 +792,15 @@ mod tests {
         };
 
         // A client which stops after stdin EOF closes the stdin of the
-        // container, but the container keeps running.
+        // container, but the container keeps running. All of its input is
+        // queued before the connection gets accepted.
         let first = connect_client()?;
-        shutdown(first.as_raw_fd(), Shutdown::Write)?;
+        for packet in [&b""[..], b"x"] {
+            send(first.as_raw_fd(), packet, MsgFlags::empty())?;
+        }
+        nix::sys::socket::shutdown(first.as_raw_fd(), nix::sys::socket::Shutdown::Write)?;
+        let data = timeout(Duration::from_secs(5), attach.read()).await??;
+        assert_eq!(data, &b"x"[..]);
         timeout(Duration::from_secs(5), attach.stdin_closed().cancelled()).await?;
         assert!(!token.is_cancelled());
 
@@ -732,13 +822,11 @@ mod tests {
     async fn read_loop_stops_while_waiting_for_stdin() -> Result<()> {
         let attach = SharedContainerAttach::default();
         let token = CancellationToken::new();
-        let (server, mut client) = seqpacket_pair()?;
-        let (read, _write) = server.into_split();
-        let read_loop = task::spawn(Attach::read_loop(read, attach.clone(), token.clone()));
+        let (client, read_loop) = spawn_read_loop(&attach, &token)?;
 
         // Nothing reads the stdin, so the read loop ends up waiting to send.
         for i in 0..=STDIN_CHANNEL_SIZE {
-            client.write_all(&[u8::try_from(i)? + 1]).await?;
+            client.send(&[u8::try_from(i)? + 1]).await?;
         }
         timeout(Duration::from_secs(5), async {
             while attach.read_half_tx.len() < STDIN_CHANNEL_SIZE {
@@ -761,12 +849,11 @@ mod tests {
                 .store(stop_after_stdin_eof, Ordering::Release);
 
             let (server, client) = seqpacket_pair()?;
-            let (read, _write) = server.into_split();
             drop(client);
 
             timeout(
                 Duration::from_secs(5),
-                Attach::read_loop(read, attach.clone(), CancellationToken::new()),
+                Attach::read_loop(server, attach.clone(), CancellationToken::new()),
             )
             .await??;
             assert_eq!(
@@ -778,21 +865,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stdin_without_dropping() -> Result<()> {
+    async fn read_loop_forwards_stdin_after_reset() -> Result<()> {
         let mut attach = SharedContainerAttach::default();
-        let (server, mut client) = seqpacket_pair()?;
-        let (read, _write) = server.into_split();
-        let read_loop = task::spawn(Attach::read_loop(
-            read,
+        attach.stop_after_stdin_eof.store(true, Ordering::Release);
+        let (server, client) = seqpacket_pair()?;
+
+        // Closing a socket with unread data resets the connection, which the
+        // next read reports before the queued stdin.
+        server.send(b"output").await?;
+        client.send(b"x").await?;
+        drop(client);
+
+        let task = task::spawn(Attach::read_loop(
+            server,
             attach.clone(),
             CancellationToken::new(),
         ));
+        let data = timeout(Duration::from_secs(5), attach.read()).await??;
+        assert_eq!(data, &b"x"[..]);
+        timeout(Duration::from_secs(5), task).await???;
+        assert!(attach.stdin_closed.is_cancelled());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stdin_without_dropping() -> Result<()> {
+        let mut attach = SharedContainerAttach::default();
+        let (client, read_loop) = spawn_read_loop(&attach, &CancellationToken::new())?;
 
         // More packets than the channel capacity, which have to wait for the
         // reader instead of getting dropped.
         const PACKETS: u8 = 64;
         for i in 0..PACKETS {
-            client.write_all(&[i + 1]).await?;
+            client.send(&[i + 1]).await?;
         }
         drop(client);
 
