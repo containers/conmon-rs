@@ -5,7 +5,7 @@ use crate::conmon_capnp::conmon::{self, CgroupManager};
 use crate::telemetry::Telemetry;
 use crate::{
     child_reaper::ChildReaper,
-    config::{Commands, Config, LogDriver, LogLevel, Verbosity},
+    config::{Config, LogDriver, LogLevel},
     container_io::{ContainerIO, ContainerIOType},
     fd_socket::FdSocket,
     init::{DefaultInit, Init},
@@ -13,7 +13,6 @@ use crate::{
     listener::{DefaultListener, Listener},
     pause::Pause,
     streaming_server::StreamingServer,
-    version::Version,
 };
 use anyhow::{Context, Result, format_err};
 use capnp::text_list::Reader;
@@ -29,7 +28,7 @@ use nix::{
 use opentelemetry::trace::{FutureExt as OpenTelemetryFutureExt, TracerProvider};
 #[cfg(feature = "tracing")]
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use std::{fs::File, io::Write, os::fd::RawFd, path::Path, process, sync::Arc};
+use std::{fs::File, io::Write, os::fd::RawFd, path::Path, sync::Arc};
 use tokio::{
     fs,
     runtime::{Builder, Handle},
@@ -92,57 +91,17 @@ impl Server {
     }
 
     /// Create a new `Server` instance.
-    pub fn new() -> Result<Self> {
-        let server = Self {
-            config: Arc::new(Config::default()),
+    /// Create a new server for a validated and prepared configuration.
+    pub fn new(config: Config) -> Result<Self> {
+        Self::init().context("init self")?;
+        Ok(Self {
+            config: Arc::new(config),
             reaper: Default::default(),
             fd_socket: Default::default(),
             #[cfg(feature = "tracing")]
             tracer: Default::default(),
             streaming_server: Default::default(),
-        };
-
-        if let Some(v) = server.config().version() {
-            Version::new(v == Verbosity::Full).print();
-            process::exit(0);
-        }
-
-        if let Some(v) = server.config().version_json() {
-            Version::new(v == Verbosity::Full).print_json()?;
-            process::exit(0);
-        }
-
-        if let Some(Commands::Pause {
-            base_path,
-            pod_id,
-            ipc,
-            pid,
-            net,
-            user,
-            uts,
-            uid_mappings,
-            gid_mappings,
-        }) = server.config().command()
-        {
-            Pause::run(
-                base_path,
-                pod_id,
-                *ipc,
-                *pid,
-                *net,
-                *user,
-                *uts,
-                uid_mappings,
-                gid_mappings,
-            )
-            .context("run pause")?;
-            process::exit(0);
-        }
-
-        server.config().validate().context("validate config")?;
-
-        Self::init().context("init self")?;
-        Ok(server)
+        })
     }
 
     /// Close file descriptors inherited from whatever started us.

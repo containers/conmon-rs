@@ -5,6 +5,7 @@ interface Conmon {
     # Version
     struct VersionRequest {
         verbose @0 :Bool;
+        # Reserved, do not reuse the ordinal.
         metadataOld @1 :Void;
         metadata @2 :Metadata;
     }
@@ -19,7 +20,8 @@ interface Conmon {
         rustVersion @6 :Text;
         cargoVersion @7 :Text;
         cargoTree @8 :Text;
-        metadata @9 :Void;
+        # Reserved, do not reuse the ordinal.
+        metadataOld @9 :Void;
     }
 
     version @0 (request: VersionRequest) -> (response: VersionResponse);
@@ -37,6 +39,7 @@ interface Conmon {
         cleanupCmd @7 :List(Text);
         globalArgs @8 :List(Text);
         commandArgs @9 :List(Text);
+        # Reserved, do not reuse the ordinal.
         metadataOld @10 :Void;
         metadata @11 :Metadata;
         envVars @12 :TextTextMap;
@@ -83,6 +86,7 @@ interface Conmon {
         timeoutSec @1 :UInt64;
         command @2 :List(Text);
         terminal @3 :Bool;
+        # Reserved, do not reuse the ordinal.
         metadataOld @4 :Void;
         metadata @5 :Metadata;
         envVars @6 :TextTextMap;
@@ -105,6 +109,7 @@ interface Conmon {
         socketPath @1 :Text;
         execSessionId @2 :Text;
         stopAfterStdinEof @3 :Bool;
+        # Reserved, do not reuse the ordinal.
         metadataOld @4 :Void;
         metadata @5 :Metadata;
     }
@@ -118,6 +123,7 @@ interface Conmon {
     # ReopenLog
     struct ReopenLogRequest {
         id @0 :Text;
+        # Reserved, do not reuse the ordinal.
         metadataOld @1 :Void;
         metadata @2 :Metadata;
     }
@@ -133,6 +139,7 @@ interface Conmon {
         id @0 :Text; # container identifier
         width @1 :UInt16; # columns in characters
         height @2 :UInt16; # rows in characters
+        # Reserved, do not reuse the ordinal.
         metadataOld @3 :Void;
         metadata @4 :Metadata;
     }
@@ -145,6 +152,7 @@ interface Conmon {
     ###############################################
     # CreateNamespaces
     struct CreateNamespacesRequest {
+        # Reserved, do not reuse the ordinal.
         metadataOld @0 :Void;
         namespaces @1 :List(Namespace);
         uidMappings @2 :List(Text); # User ID mappings when unsharing the user namespace.

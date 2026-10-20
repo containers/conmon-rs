@@ -1,8 +1,8 @@
-//! Pseudo terminal implementation.
+//! Pipe based stdio of containers without a terminal.
 
 use crate::{
     attach::SharedContainerAttach,
-    container_io::{ContainerIO, Message, Pipe},
+    container_io::{ContainerIO, Message, Pipe, STDIO_CHANNEL_SIZE},
     container_log::SharedContainerLog,
 };
 use anyhow::{Result, bail};
@@ -15,7 +15,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error};
 
 /// Capacity of the stdout and stderr channels in chunks.
-const STDIO_CHANNEL_SIZE: usize = 100;
 
 #[derive(Debug)]
 pub struct Streams {
@@ -42,20 +41,20 @@ impl Streams {
 
 impl Streams {
     /// Create a new Streams instance.
-    pub fn new(logger: SharedContainerLog, attach: SharedContainerAttach) -> Result<Self> {
+    pub fn new(logger: SharedContainerLog, attach: SharedContainerAttach) -> Self {
         debug!("Creating new IO streams");
 
         let (message_tx_stdout, message_rx_stdout) = async_channel::bounded(STDIO_CHANNEL_SIZE);
         let (message_tx_stderr, message_rx_stderr) = async_channel::bounded(STDIO_CHANNEL_SIZE);
 
-        Ok(Self {
+        Self {
             logger,
             attach,
             message_rx_stdout: Some(message_rx_stdout),
             message_tx_stdout: Some(message_tx_stdout),
             message_rx_stderr: Some(message_rx_stderr),
             message_tx_stderr: Some(message_tx_stderr),
-        })
+        }
     }
 
     /// Retrieve clones of the stdout and stderr receivers.
@@ -179,7 +178,7 @@ mod tests {
         let attach = SharedContainerAttach::default();
         let token = CancellationToken::new();
 
-        let mut sut = Streams::new(logger, attach)?;
+        let mut sut = Streams::new(logger, attach);
 
         let expected = "hello world";
         let mut child = Command::new("echo")

@@ -322,8 +322,9 @@ impl From<LogLevel> for LevelFilter {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
+impl Config {
+    /// Parse the configuration from the command line and the environment.
+    pub fn parse_args() -> Self {
         Self::parse()
     }
 }
@@ -369,28 +370,34 @@ impl Config {
         }
 
         const RUNTIME_ROOT_FLAG: &str = "--runtime-root";
-        if !self.runtime_dir().exists() {
-            fs::create_dir_all(self.runtime_dir())?;
+        if let Some(rr) = self.runtime_root()
+            && rr.exists()
+            && !rr.is_dir()
+        {
+            bail!(
+                "{} '{}' is not a directory",
+                RUNTIME_ROOT_FLAG,
+                rr.display()
+            )
         }
+
+        Ok(())
+    }
+
+    /// Create the runtime directories and remove stale sockets. Separate from
+    /// [`Config::validate`], which only checks and changes nothing on disk.
+    pub fn prepare(&self) -> Result<()> {
+        fs::create_dir_all(self.runtime_dir()).context("create runtime dir")?;
 
         if let Some(rr) = self.runtime_root() {
-            if !rr.exists() {
-                fs::create_dir_all(rr)?;
-            } else if !rr.is_dir() {
-                bail!(
-                    "{} '{}' is not a directory",
-                    RUNTIME_ROOT_FLAG,
-                    rr.display()
-                )
+            fs::create_dir_all(rr).context("create runtime root")?;
+        }
+
+        for socket in [self.socket(), self.fd_socket()] {
+            if socket.exists() {
+                fs::remove_file(&socket)
+                    .with_context(|| format!("remove stale socket {}", socket.display()))?;
             }
-        }
-
-        if self.socket().exists() {
-            fs::remove_file(self.socket())?;
-        }
-
-        if self.fd_socket().exists() {
-            fs::remove_file(self.fd_socket())?;
         }
 
         Ok(())

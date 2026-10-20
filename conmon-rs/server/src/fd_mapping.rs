@@ -82,6 +82,8 @@ fn map_fds(mappings: &mut [FdMapping], child_fds: &[RawFd]) -> io::Result<()> {
             && mapping.parent_fd.as_raw_fd() != mapping.child_fd
         {
             let parent_fd = fcntl(&mapping.parent_fd, FcntlArg::F_DUPFD_CLOEXEC(first_safe_fd))?;
+            // SAFETY: the duplicate was just created and nothing else owns it,
+            // the old descriptor gets closed when the mapping is overwritten.
             unsafe {
                 mapping.parent_fd = OwnedFd::from_raw_fd(parent_fd);
             }
@@ -92,6 +94,9 @@ fn map_fds(mappings: &mut [FdMapping], child_fds: &[RawFd]) -> io::Result<()> {
         if mapping.child_fd == mapping.parent_fd.as_raw_fd() {
             fcntl(&mapping.parent_fd, FcntlArg::F_SETFD(FdFlag::empty()))?;
         } else {
+            // SAFETY: the child descriptor number is not owned by anything
+            // else, the descriptors below first_safe_fd are the ones mapped
+            // here, and the result is leaked on purpose for the exec.
             unsafe {
                 let _ = dup2_raw(&mapping.parent_fd, mapping.child_fd)?.into_raw_fd();
             }

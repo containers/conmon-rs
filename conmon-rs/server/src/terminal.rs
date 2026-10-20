@@ -2,12 +2,11 @@
 
 use crate::{
     attach::SharedContainerAttach,
-    container_io::{ContainerIO, Message, Pipe, TempFile},
+    container_io::{ContainerIO, Message, Pipe, STDIO_CHANNEL_SIZE, TempFile},
     container_log::SharedContainerLog,
     listener::{DefaultListener, Listener},
 };
 use anyhow::{Context as _, Result};
-use async_channel::Receiver as UnboundedReceiver;
 use libc::{TIOCSWINSZ, winsize};
 use nix::{
     fcntl::{self, FcntlArg, OFlag},
@@ -41,7 +40,7 @@ pub struct Terminal {
     /// The socket the runtime connects to, removed with the terminal.
     path: TempFile,
     connected_rx: Receiver<OwnedFd>,
-    message_rx: Option<UnboundedReceiver<Message>>,
+    message_rx: Option<async_channel::Receiver<Message>>,
     tty: Option<Weak<TerminalFd>>,
     logger: SharedContainerLog,
     attach: SharedContainerAttach,
@@ -51,10 +50,10 @@ impl Terminal {
     pub fn path(&self) -> &Path {
         self.path.path()
     }
-    pub fn message_rx(&self) -> Option<&UnboundedReceiver<Message>> {
+    pub fn message_rx(&self) -> Option<&async_channel::Receiver<Message>> {
         self.message_rx.as_ref()
     }
-    pub fn message_rx_mut(&mut self) -> &mut Option<UnboundedReceiver<Message>> {
+    pub fn message_rx_mut(&mut self) -> &mut Option<async_channel::Receiver<Message>> {
         &mut self.message_rx
     }
     fn tty(&self) -> &Option<Weak<TerminalFd>> {
@@ -156,7 +155,7 @@ impl Terminal {
         let attach_clone = self.attach.clone();
         let output = attach_clone.output();
         let logger_clone = self.logger.clone();
-        let (message_tx, message_rx) = async_channel::bounded(100);
+        let (message_tx, message_rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
         self.message_rx = Some(message_rx);
 
         task::spawn({
@@ -250,7 +249,9 @@ impl Terminal {
 
             match stream.recv_with_fd(&mut data_buffer, &mut fd_buffer) {
                 Ok((_, fd_read)) => {
-                    // take ownership of the received file descriptor (prevents fd leak in case of error)
+                    // SAFETY: the descriptor was just received over the socket
+                    // and nothing else owns it, taking ownership right away
+                    // prevents a leak on the error paths below.
                     let fd = (fd_read != 0).then(|| unsafe { OwnedFd::from_raw_fd(fd_buffer[0]) });
 
                     // Allow only one single read

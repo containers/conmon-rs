@@ -89,12 +89,6 @@ impl Drop for PendingPid {
     }
 }
 
-impl ChildReaper {
-    pub fn grandchildren(&self) -> &Arc<Mutex<HashMap<Box<str>, Vec<ReapableChild>>>> {
-        &self.grandchildren
-    }
-}
-
 /// first usable file descriptor after stdin, stdout and stderr
 const FIRST_FD_AFTER_STDIO: RawFd = 3;
 
@@ -102,9 +96,11 @@ impl ChildReaper {
     /// How long to wait for the console connection of a runtime which already
     /// exited successfully.
     const CONNECT_AFTER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
-}
 
-impl ChildReaper {
+    pub fn grandchildren(&self) -> &Arc<Mutex<HashMap<Box<str>, Vec<ReapableChild>>>> {
+        &self.grandchildren
+    }
+
     /// Retrieve the container registered under `id`. Execs share the id of
     /// their container and are skipped.
     pub fn get(&self, id: &str) -> Result<ReapableChild> {
@@ -573,7 +569,7 @@ pub fn kill_grandchild(raw_pid: u32, s: Signal) {
         {
             error!(
                 raw_pid,
-                "Failed to kill process group {pgid}, falling back to killing pid: {:#}", e
+                "Failed to kill process group {pgid}, the pid still gets signalled: {:#}", e
             );
         }
     }
@@ -699,7 +695,7 @@ impl ReapableChild {
                 Self::write_to_exit_paths(exit_code, &exit_paths).await;
 
                 if !cleanup_cmd_raw.is_empty() {
-                    Self::spawn_cleanup_process(&cleanup_cmd_raw).await;
+                    Self::spawn_cleanup_process(&cleanup_cmd_raw);
                 }
 
                 debug!("Sending exit struct to channel: {:?}", exit_channel_data);
@@ -716,7 +712,7 @@ impl ReapableChild {
         (exit_rx, forget_rx)
     }
 
-    async fn spawn_cleanup_process(raw_cmd: &[String]) {
+    fn spawn_cleanup_process(raw_cmd: &[String]) {
         let mut cleanup_cmd = Command::new(&raw_cmd[0]);
 
         cleanup_cmd.args(&raw_cmd[1..]);
@@ -794,10 +790,10 @@ impl ReapableChild {
 
     /// Try to use pidfd_open + async polling. Returns None if pidfd is unavailable.
     async fn try_pidfd_wait(pid: u32) -> Option<i32> {
-        use nix::fcntl::{FcntlArg, OFlag, fcntl};
-
         // SAFETY: pidfd_open takes a PID and flags and returns a new descriptor
         // or a negative error, it does not touch any memory of ours.
+        // The readiness comes from epoll and the wait uses WNOHANG, so the
+        // descriptor itself does not need to be non-blocking.
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::c_int, 0) };
         if fd < 0 {
             return None;
@@ -805,10 +801,6 @@ impl ReapableChild {
         // SAFETY: the descriptor was just returned by the kernel and is not
         // owned by anything else.
         let owned_fd = unsafe { OwnedFd::from_raw_fd(fd as RawFd) };
-
-        let flags = fcntl(&owned_fd, FcntlArg::F_GETFL).ok()?;
-        let flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
-        fcntl(&owned_fd, FcntlArg::F_SETFL(flags)).ok()?;
 
         // SAFETY: `owned_fd` is an open pidfd that the `AsyncFd` takes ownership
         // of, so it stays valid and unchanged for the lifetime of the `AsyncFd`.

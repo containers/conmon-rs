@@ -349,7 +349,7 @@ impl conmon::Server for Server {
         let _enter = span.enter();
         pry!(set_parent_context(pry!(req.get_metadata())));
 
-        debug!("Got a attach container request",);
+        debug!("Got an attach container request");
 
         let exec_session_id = pry_err!(pry_err!(req.get_exec_session_id()).to_str());
         if !exec_session_id.is_empty() {
@@ -438,30 +438,38 @@ impl conmon::Server for Server {
         let _enter = span.enter();
         pry!(set_parent_context(pry!(req.get_metadata())));
 
-        let pause = pry_err!(Pause::init_shared(
-            pry!(pry!(req.get_base_path()).to_str()),
-            pod_id,
-            pry!(req.get_namespaces()),
-            capnp_vec_str!(req.get_uid_mappings()),
-            capnp_vec_str!(req.get_gid_mappings()),
-        ));
+        let base_path = pry!(pry!(req.get_base_path()).to_string());
+        let pod_id = pod_id.to_owned();
+        let namespaces = pry_err!(Pause::parse_namespaces(pry!(req.get_namespaces())));
+        let uid_mappings = capnp_vec_str!(req.get_uid_mappings());
+        let gid_mappings = capnp_vec_str!(req.get_gid_mappings());
 
-        let response = results.get().init_response();
-        let mut namespaces =
-            response.init_namespaces(pry_err!(pause.namespaces().len().try_into()));
+        Promise::from_future(
+            async move {
+                let pause = capnp_err!(
+                    Pause::init_shared(&base_path, &pod_id, namespaces, uid_mappings, gid_mappings)
+                        .await
+                )?;
 
-        for (idx, namespace) in pause.namespaces().iter().enumerate() {
-            let mut ns = namespaces.reborrow().get(pry_err!(idx.try_into()));
-            ns.set_path(
-                namespace
-                    .path(pause.base_path(), pod_id)
-                    .display()
-                    .to_string(),
-            );
-            ns.set_type(namespace.to_capnp_namespace());
-        }
+                let response = results.get().init_response();
+                let mut namespaces =
+                    response.init_namespaces(capnp_err!(pause.namespaces().len().try_into())?);
 
-        Promise::ok(())
+                for (idx, namespace) in pause.namespaces().iter().enumerate() {
+                    let mut ns = namespaces.reborrow().get(capnp_err!(idx.try_into())?);
+                    ns.set_path(
+                        namespace
+                            .path(pause.base_path(), &pod_id)
+                            .display()
+                            .to_string(),
+                    );
+                    ns.set_type(namespace.to_capnp_namespace());
+                }
+
+                Ok(())
+            }
+            .instrument(debug_span!("promise")),
+        )
     }
 
     fn start_fd_socket(

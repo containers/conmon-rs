@@ -414,9 +414,7 @@ impl Attach {
                         debug!("Stopping read loop because of IO error");
                         return Ok(());
                     }
-                    Errno::EBADF => {
-                        return Err(Errno::EBADFD.into());
-                    }
+                    Errno::EBADF => return Err(e).context("attach socket closed"),
                     _ => return Err(e).context("read from attach socket"),
                 },
             }

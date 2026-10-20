@@ -24,10 +24,10 @@ use std::{
     io::{Read, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     sync::OnceLock,
 };
-use tokio::task;
+use tokio::{process::Command, task};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, info, trace, warn};
 
@@ -75,15 +75,14 @@ impl Pause {
     /// A server holds the namespaces of a single pod. Later calls must ask for
     /// the same pod and configuration, they would get other namespaces than
     /// requested otherwise.
-    pub fn init_shared(
+    pub async fn init_shared(
         base_path: &str,
         pod_id: &str,
-        namespaces: Reader<conmon::Namespace>,
+        namespaces: Vec<Namespace>,
         uid_mappings: Vec<String>,
         gid_mappings: Vec<String>,
     ) -> Result<&'static Pause> {
         let base_path = PathBuf::from(base_path);
-        let namespaces = Self::parse_namespaces(namespaces)?;
         let (uid_mappings, gid_mappings) = if namespaces.contains(&Namespace::User) {
             if uid_mappings.is_empty() {
                 bail!("user ID mappings are empty")
@@ -111,6 +110,7 @@ impl Pause {
         }
 
         let pause = Self::init(base_path, pod_id, namespaces, uid_mappings, gid_mappings)
+            .await
             .context("init pause")?;
         if let Some(pid) = pause.pid() {
             Self::spawn_reaper(pid);
@@ -158,7 +158,7 @@ impl Pause {
     }
 
     /// Convert the requested namespaces, dropping duplicates.
-    fn parse_namespaces(requested: Reader<conmon::Namespace>) -> Result<Vec<Namespace>> {
+    pub fn parse_namespaces(requested: Reader<conmon::Namespace>) -> Result<Vec<Namespace>> {
         let mut namespaces = vec![];
         for namespace in requested.iter() {
             let namespace = match namespace? {
@@ -228,7 +228,7 @@ impl Pause {
     }
 
     /// Initialize a new pause instance.
-    fn init(
+    async fn init(
         base_path: PathBuf,
         pod_id: &str,
         namespaces: Vec<Namespace>,
@@ -254,7 +254,7 @@ impl Pause {
         fs::create_dir_all(&base_path).context("create base path")?;
         debug!("Pause base path: {}", base_path.display());
 
-        let program = env::args().next().context("no args set")?;
+        let program = env::current_exe().context("get own executable")?;
         let mut child = Command::new(program)
             .arg("pause")
             .arg("--base-path")
@@ -267,7 +267,7 @@ impl Pause {
             .spawn()
             .context("run pause")?;
 
-        let status = child.wait().context("wait for pause child")?;
+        let status = child.wait().await.context("wait for pause child")?;
         if !status.success() {
             bail!("exit status not ok: {status}")
         }
