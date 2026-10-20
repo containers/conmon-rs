@@ -46,10 +46,20 @@ impl SharedContainerIO {
     /// Resize the shared container IO to the provided with and height.
     /// Errors in case of no terminal containers.
     pub async fn resize(&self, width: u16, height: u16) -> Result<()> {
-        match self.0.read().await.typ() {
-            ContainerIOType::Terminal(t) => t.resize(width, height).context("resize terminal"),
-            ContainerIOType::Streams(_) => bail!("container has no terminal"),
+        if !self.try_resize(width, height).await? {
+            bail!("container has no terminal")
         }
+        Ok(())
+    }
+
+    /// Resize the terminal if the container has one and return whether it
+    /// does.
+    pub async fn try_resize(&self, width: u16, height: u16) -> Result<bool> {
+        match self.0.read().await.typ() {
+            ContainerIOType::Terminal(t) => t.resize(width, height).context("resize terminal")?,
+            ContainerIOType::Streams(_) => return Ok(false),
+        }
+        Ok(true)
     }
 
     /// Retrieve the underlying SharedContainerLog instance.
@@ -65,6 +75,25 @@ impl SharedContainerIO {
     /// Retrieve the underlying stdout and stderr channels.
     pub async fn stdio(&self) -> Result<(Receiver<Message>, Receiver<Message>)> {
         self.0.read().await.stdio()
+    }
+}
+
+/// A file path which gets removed on drop.
+#[derive(Debug)]
+pub struct TempFile(PathBuf);
+
+impl TempFile {
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        // A plain unlink does not need the runtime and cannot panic without one.
+        if let Err(e) = std::fs::remove_file(&self.0) {
+            debug!("Unable to remove temp file {}: {}", self.0.display(), e);
+        }
     }
 }
 
@@ -164,6 +193,13 @@ impl ContainerIO {
             .unwrap_or_else(std::env::temp_dir);
         let unique = uuid::Uuid::new_v4();
         dir.join(format!("{prefix}{unique}{suffix}"))
+    }
+
+    /// A unique file path like [`ContainerIO::temp_file_name`], whose file
+    /// gets removed on drop. This covers early returns and cancelled futures,
+    /// which would leave for example the PID file of an exec behind.
+    pub fn temp_file(directory: Option<&Path>, prefix: &str, suffix: &str) -> TempFile {
+        TempFile(Self::temp_file_name(directory, prefix, suffix))
     }
 
     /// Retrieve clones of the stdout and stderr channels.

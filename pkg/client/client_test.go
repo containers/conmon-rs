@@ -357,6 +357,9 @@ var _ = Describe("ConmonClient", func() {
 				Expect(result.Stdout).To(BeEquivalentTo("hello world"))
 				Expect(result.Stderr).To(BeEmpty())
 
+				// The PID file of the exec is removed once it got read.
+				Expect(execPIDFiles(tr.tmpDir)).To(BeEmpty())
+
 				err = sut.ReopenLogContainer(context.Background(), &client.ReopenLogContainerConfig{
 					ID: tr.ctrID,
 				})
@@ -1179,6 +1182,21 @@ var _ = Describe("StreamingServer", func() {
 		Expect(os.RemoveAll(tr.tmpDir)).To(Succeed())
 	})
 
+	Describe("ServePortForwardContainer", func() {
+		It("should fail because it is not implemented", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			result, err := sut.ServePortForwardContainer(
+				context.Background(),
+				&client.ServePortForwardContainerConfig{NetNsPath: "/proc/self/ns/net"},
+			)
+			Expect(err).To(MatchError(client.ErrUnsupported))
+			Expect(result).To(BeNil())
+		})
+	})
+
 	Describe("ServeExecContainer", func() {
 		for _, terminal := range []bool{true, false} {
 			It(testName("should succeed", terminal), func() {
@@ -1221,6 +1239,9 @@ var _ = Describe("StreamingServer", func() {
 					Expect(stdout.String()).To(Equal("stdout"))
 					Expect(stderr.String()).To(Equal("stderr"))
 				}
+
+				// The PID file of the exec is removed once it got read.
+				Expect(execPIDFiles(tr.tmpDir)).To(BeEmpty())
 			})
 
 			It(testName("should fail if container does not exist", terminal), func() {
@@ -1238,6 +1259,45 @@ var _ = Describe("StreamingServer", func() {
 
 				Expect(err).To(HaveOccurred())
 				Expect(result).To(BeNil())
+			})
+
+			It(testName("should not keep the PID file of a failed exec", terminal), func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+				sut = tr.configGivenEnv()
+				tr.createContainer(sut, terminal)
+				tr.startContainer(sut)
+
+				result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
+					ID:      tr.ctrID,
+					Command: []string{"/does/not/exist"},
+					Tty:     terminal,
+					Stdout:  true,
+					Stderr:  true,
+				})
+				Expect(err).To(Succeed())
+
+				config := &rest.Config{Insecure: true}
+				executor, err := remotecommand.NewWebSocketExecutor(config, "GET", result.URL)
+				Expect(err).NotTo(HaveOccurred())
+
+				// The runtime fails to start the command, the session reports it.
+				err = executor.StreamWithContext(context.Background(), remotecommand.StreamOptions{
+					Stdout: io.Discard,
+					Stderr: io.Discard,
+					Tty:    terminal,
+				})
+				Expect(err).To(HaveOccurred())
+
+				Eventually(func() []string { return execPIDFiles(tr.tmpDir) }).
+					WithTimeout(10 * time.Second).
+					Should(BeEmpty())
+
+				// The helper the runtime left in the PID namespace of the
+				// container is reaped, otherwise the container could not stop.
+				Eventually(func() []int { return zombieChildrenOf(int(sut.PID())) }).
+					WithTimeout(10 * time.Second).
+					Should(BeEmpty())
 			})
 		}
 

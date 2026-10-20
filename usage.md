@@ -108,14 +108,15 @@ work unchanged.
 
 ### Streaming server
 
-`serveExecContainer`, `serveAttachContainer` and `servePortForwardContainer`
-return a URL on a WebSocket server the conmonrs process starts on demand on
-`127.0.0.1` with a random port. Each URL carries a one time token which is
+`serveExecContainer` and `serveAttachContainer` return a URL on a WebSocket
+server the conmonrs process starts on demand on `127.0.0.1` with a random
+port. Each URL carries a one time token which is
 valid for a bounded time. The server speaks the Kubernetes
 `v5.channel.k8s.io` protocol: the first byte of each binary message is the
 stream (`0` stdin, `1` stdout, `2` stderr, `3` errors, `4` terminal resize
 events as JSON, `255` close). CRI-O passes these URLs to the kubelet, which
-connects directly. Port forwarding is not implemented yet.
+connects directly. `servePortForwardContainer` fails with an unimplemented
+error, port forwarding needs an SPDY implementation which does not exist yet.
 
 ### File descriptor socket
 

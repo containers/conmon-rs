@@ -173,15 +173,35 @@ func pauseProcessRunning(podID string) bool {
 	return false
 }
 
+// execPIDFiles returns the PID files of execs left in the runtime directory.
+func execPIDFiles(runtimeDir string) []string {
+	files, err := filepath.Glob(filepath.Join(runtimeDir, "exec_*pid"))
+	Expect(err).To(Succeed())
+
+	return files
+}
+
 // childrenOf returns the PIDs of all processes whose parent is pid, zombies
 // included.
 func childrenOf(pid int) []int {
+	return childrenOfWithState(pid, "")
+}
+
+// zombieChildrenOf returns the PIDs of the zombie children of pid.
+func zombieChildrenOf(pid int) []int {
+	return childrenOfWithState(pid, "Z")
+}
+
+// childrenOfWithState returns the PIDs of all processes whose parent is pid
+// and whose state starts with state, any state if empty.
+func childrenOfWithState(pid int, state string) []int {
 	const procPath = "/proc"
 
 	entries, err := os.ReadDir(procPath)
 	Expect(err).To(Succeed())
 
 	ppid := "PPid:\t" + strconv.Itoa(pid) + "\n"
+	stateLine := "State:\t" + state
 
 	var children []int
 
@@ -193,7 +213,7 @@ func childrenOf(pid int) []int {
 
 		// The process may be gone already.
 		status, err := os.ReadFile(filepath.Join(procPath, entry.Name(), "status"))
-		if err == nil && bytes.Contains(status, []byte(ppid)) {
+		if err == nil && bytes.Contains(status, []byte(ppid)) && bytes.Contains(status, []byte(stateLine)) {
 			children = append(children, child)
 		}
 	}
