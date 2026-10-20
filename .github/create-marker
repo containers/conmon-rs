@@ -7,8 +7,12 @@ VERSION=$(git rev-parse HEAD)
 
 # if in detached head state, we assume we're on a tag
 if [[ $MARKER == HEAD ]]; then
-    # use the major.minor as marker
+    # use the major.minor as marker and the tag as content
     VERSION=$(git describe --tags --exact-match)
-    MARKER=$(echo "$VERSION" | cut -c 2-4)
+    if [[ ! $VERSION =~ ^v([0-9]+\.[0-9]+)\. ]]; then
+        echo "Tag $VERSION does not look like vX.Y.Z" >&2
+        exit 1
+    fi
+    MARKER=${BASH_REMATCH[1]}
 fi
 echo "$VERSION" >"latest-$MARKER.txt"

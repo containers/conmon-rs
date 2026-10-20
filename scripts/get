@@ -79,6 +79,9 @@ parse_args() {
 
 verify_requirements() {
     CMDS=(curl jq)
+    if ! command -v cosign >/dev/null; then
+        CMDS+=(sha256sum)
+    fi
     echo "Checking if all commands are available: ${CMDS[*]}"
     for CMD in "${CMDS[@]}"; do
         if ! command -v "$CMD" >/dev/null; then
@@ -144,14 +147,28 @@ download_binary() {
         popd >/dev/null
         mv "$TMPDIR/${FILES[0]}" "$OUTPUT"
     else
-        curl_retry "$BASE_URL/$COMMIT/conmonrs.$ARCH" -o "$OUTPUT"
+        echo "No cosign found, verifying the checksum only"
+        TMPDIR=$(mktemp -d)
+        trap 'rm -rf $TMPDIR' EXIT
+        pushd "$TMPDIR" >/dev/null
+
+        curl_retry "$BASE_URL/$COMMIT/conmonrs.$ARCH" -o "conmonrs.$ARCH"
+        # Older commits have no checksum file.
+        if curl_retry "$BASE_URL/$COMMIT/conmonrs.$ARCH.sha256" -o "conmonrs.$ARCH.sha256" 2>/dev/null; then
+            sha256sum -c "conmonrs.$ARCH.sha256"
+        else
+            echo "WARNING: no checksum published for this commit, the binary is not verified" >&2
+        fi
+
+        popd >/dev/null
+        mv "$TMPDIR/conmonrs.$ARCH" "$OUTPUT"
     fi
 
     chmod +x "$OUTPUT"
     printf "Installed binary into: %s\n" "$OUTPUT"
 
     if [[ $NO_EXEC == "" ]]; then
-        eval "$(realpath "$OUTPUT")" -v
+        "$(realpath "$OUTPUT")" -v
     fi
 }
 
