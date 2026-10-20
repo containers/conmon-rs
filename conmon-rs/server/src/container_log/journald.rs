@@ -1,10 +1,10 @@
 use crate::{
     container_io::Pipe,
     container_log::{Line, Logger},
+    journal::{self, Entry, Priority, Wait},
 };
 use anyhow::{Context, Result};
-use libsystemd::logging::{Priority, journal_send};
-use std::sync::Arc;
+use std::{io::ErrorKind, path::Path, sync::Arc};
 use tokio::task;
 use tracing::{debug, warn};
 
@@ -13,9 +13,27 @@ use tracing::{debug, warn};
 /// it and podman can put partial lines back together.
 #[derive(Debug)]
 pub struct JournaldLogger {
-    /// The fields attached to every entry. Shared with the blocking tasks
-    /// which send the entries.
-    fields: Arc<[(&'static str, String)]>,
+    /// Shared with the blocking tasks which send the entries.
+    shared: Arc<Shared>,
+}
+
+#[derive(Debug)]
+struct Shared {
+    /// The fields of every entry, encoded once.
+    fields: Entry,
+    /// A temporary socket instead of the one of journald.
+    #[cfg(test)]
+    socket: Option<std::path::PathBuf>,
+}
+
+impl Shared {
+    fn socket(&self) -> &Path {
+        #[cfg(test)]
+        if let Some(socket) = &self.socket {
+            return socket;
+        }
+        Path::new(journal::SOCKET_PATH)
+    }
 }
 
 impl JournaldLogger {
@@ -26,15 +44,18 @@ impl JournaldLogger {
     const PARTIAL_FIELD: (&'static str, &'static str) = ("CONTAINER_PARTIAL_MESSAGE", "true");
 
     pub fn new(id: &str) -> Self {
+        let short_id: String = id.chars().take(Self::SHORT_ID_LEN).collect();
+        let mut fields = Entry::default();
+        fields
+            .field("CONTAINER_ID_FULL", id)
+            .field("CONTAINER_ID", short_id)
+            .field("SYSLOG_IDENTIFIER", "conmonrs");
         Self {
-            fields: Arc::new([
-                ("CONTAINER_ID_FULL", id.to_owned()),
-                (
-                    "CONTAINER_ID",
-                    id.chars().take(Self::SHORT_ID_LEN).collect(),
-                ),
-                ("SYSLOG_IDENTIFIER", "conmonrs".into()),
-            ]),
+            shared: Arc::new(Shared {
+                fields,
+                #[cfg(test)]
+                socket: None,
+            }),
         }
     }
 
@@ -48,19 +69,27 @@ impl JournaldLogger {
 
     /// Send the lines to the journal. A journal which is unavailable, for
     /// example while it restarts, must not end the output of the container,
-    /// so failures are only logged, once per chunk.
-    fn send(fields: &[(&'static str, String)], pipe: Pipe, lines: &[Line]) {
+    /// so failures are only logged, once per chunk. Without a journal, or
+    /// with one which did not take a line in time, the rest of the chunk is
+    /// dropped right away instead of failing the same way line by line.
+    fn send(shared: &Shared, pipe: Pipe, lines: &[Line]) {
         let priority = Self::priority(pipe);
+        let mut entry = Entry::default();
         let mut failed = 0;
         let mut last_error = None;
-        for line in lines {
-            let fields = fields
-                .iter()
-                .map(|(k, v)| (*k, v.as_str()))
-                .chain(line.partial.then_some(Self::PARTIAL_FIELD));
-            if let Err(e) = journal_send(priority, &String::from_utf8_lossy(&line.text), fields) {
-                failed += 1;
+        for (i, line) in lines.iter().enumerate() {
+            entry.reset(priority, &line.text).extend(&shared.fields);
+            if line.partial {
+                entry.field(Self::PARTIAL_FIELD.0, Self::PARTIAL_FIELD.1);
+            }
+            if let Err(e) = journal::send_at(Wait::Bounded, shared.socket(), &entry) {
+                let rest = journal::unavailable(&e) || e.kind() == ErrorKind::TimedOut;
                 last_error = Some(e);
+                if rest {
+                    failed += lines.len() - i;
+                    break;
+                }
+                failed += 1;
             }
         }
         if let Some(e) = last_error {
@@ -86,9 +115,9 @@ impl Logger for JournaldLogger {
     /// single blocking task instead of one per line. The lines share their
     /// buffer, moving them is free.
     async fn write_lines(&mut self, pipe: Pipe, lines: &[Line]) -> Result<()> {
-        let fields = self.fields.clone();
+        let shared = self.shared.clone();
         let lines = lines.to_vec();
-        task::spawn_blocking(move || Self::send(&fields, pipe, &lines))
+        task::spawn_blocking(move || Self::send(&shared, pipe, &lines))
             .await
             .context("journal spawn_blocking")
     }
@@ -97,36 +126,67 @@ impl Logger for JournaldLogger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::container_log::LineBuffer;
+    use crate::{container_log::LineBuffer, journal::tests::decode};
+    use std::os::unix::net::UnixDatagram;
+
+    type Fields = Vec<(String, Vec<u8>)>;
+
+    fn field(key: &str, value: &str) -> (String, Vec<u8>) {
+        (key.to_owned(), value.as_bytes().to_vec())
+    }
+
+    impl JournaldLogger {
+        fn with_socket(id: &str, socket: &Path) -> Self {
+            let mut logger = Self::new(id);
+            Arc::get_mut(&mut logger.shared)
+                .expect("unshared logger")
+                .socket = Some(socket.to_owned());
+            logger
+        }
+    }
+
+    /// The entries the logger sent to the socket. Writing waits for the
+    /// sends, so they are all queued already.
+    fn received(socket: &UnixDatagram) -> Result<Vec<Fields>> {
+        socket.set_nonblocking(true)?;
+        let mut entries = vec![];
+        let mut buf = vec![0; 4096];
+        loop {
+            match socket.recv(&mut buf) {
+                Ok(len) => entries.push(decode(&buf[..len])),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(entries),
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
 
     #[test]
-    fn fields_and_priorities() {
-        let logger = JournaldLogger::new("0123456789abcdef");
-        assert!(
-            logger
-                .fields
-                .contains(&("CONTAINER_ID_FULL", "0123456789abcdef".into()))
-        );
-        assert!(
-            logger
-                .fields
-                .contains(&("CONTAINER_ID", "0123456789ab".into()))
-        );
+    fn priorities() {
+        assert_eq!(JournaldLogger::priority(Pipe::StdOut), Priority::Info);
+        assert_eq!(JournaldLogger::priority(Pipe::StdErr), Priority::Error);
+    }
+
+    #[test]
+    fn short_ids_are_kept() {
+        let logger = JournaldLogger::new("abc");
         assert_eq!(
-            JournaldLogger::priority(Pipe::StdOut) as u8,
-            Priority::Info as u8
-        );
-        assert_eq!(
-            JournaldLogger::priority(Pipe::StdErr) as u8,
-            Priority::Error as u8
+            decode(logger.shared.fields.as_bytes()),
+            [
+                field("CONTAINER_ID_FULL", "abc"),
+                field("CONTAINER_ID", "abc"),
+                field("SYSLOG_IDENTIFIER", "conmonrs"),
+            ]
         );
     }
 
-    /// Writes to the journal of the host if there is one, a missing journal
-    /// only gets logged.
+    /// The entries carry the message, the priority of the pipe, the
+    /// container fields and the partial marker of unfinished lines.
     #[tokio::test]
-    async fn write_lines_to_journal() -> Result<()> {
-        let mut logger = JournaldLogger::new("test");
+    async fn write_lines_sends_entries() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("socket");
+        let socket = UnixDatagram::bind(&path)?;
+        let mut logger = JournaldLogger::with_socket("0123456789abcdef", &path);
         logger.init().await?;
 
         let mut buffer = LineBuffer::default();
@@ -135,6 +195,59 @@ mod tests {
         logger.reopen().await?;
         let lines = buffer.finish(Pipe::StdOut);
         assert!(lines[0].partial);
-        logger.write_lines(Pipe::StdErr, &lines).await
+        logger.write_lines(Pipe::StdErr, &lines).await?;
+
+        let entry = |priority: &str, message: &str, partial: bool| {
+            let mut fields = vec![
+                field("PRIORITY", priority),
+                field("MESSAGE", message),
+                field("CONTAINER_ID_FULL", "0123456789abcdef"),
+                field("CONTAINER_ID", "0123456789ab"),
+                field("SYSLOG_IDENTIFIER", "conmonrs"),
+            ];
+            if partial {
+                fields.push(field("CONTAINER_PARTIAL_MESSAGE", "true"));
+            }
+            fields
+        };
+        assert_eq!(
+            received(&socket)?,
+            [
+                entry("6", "Test log message", false),
+                entry("3", "and another", true),
+            ]
+        );
+        Ok(())
+    }
+
+    /// The output goes to the journal as it is, like with conmon.
+    #[tokio::test]
+    async fn binary_output_is_kept() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("socket");
+        let socket = UnixDatagram::bind(&path)?;
+        let mut logger = JournaldLogger::with_socket("test", &path);
+
+        let mut buffer = LineBuffer::default();
+        let lines = buffer.push(Pipe::StdOut, b"\xff\xfe\x00bin\n");
+        logger.write_lines(Pipe::StdOut, &lines).await?;
+
+        let entries = received(&socket)?;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0][1],
+            ("MESSAGE".into(), b"\xff\xfe\x00bin".to_vec())
+        );
+        Ok(())
+    }
+
+    /// Failing sends get logged and do not fail the write.
+    #[tokio::test]
+    async fn send_failures_are_not_fatal() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut logger = JournaldLogger::with_socket("test", &dir.path().join("missing"));
+        let mut buffer = LineBuffer::default();
+        let lines = buffer.push(Pipe::StdOut, b"lost\n");
+        logger.write_lines(Pipe::StdOut, &lines).await
     }
 }

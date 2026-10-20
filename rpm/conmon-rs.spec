@@ -29,7 +29,21 @@ Cap'n Proto RPC interface.
 %autosetup
 
 %build
-%{__make} release
+# The source tarball has no git metadata, so pass in what --version shows. A
+# commit wins: the build_commit macro, the BUILD_COMMIT environment variable
+# (make rpm) or the one packit puts into the Release of its snapshots
+# (".g<sha>"). Copr builds are snapshots as well, so the version only becomes
+# the tag for other builds without any commit, like the ones of releases.
+%{lua:
+local commit = rpm.expand("%{?build_commit}")
+if commit == "" then commit = os.getenv("BUILD_COMMIT") or "" end
+if commit == "" then commit = string.match(rpm.expand("%{release}"), "%.g(%x+)") or "" end
+if commit ~= "" then
+    print("BUILD_COMMIT=" .. commit .. " ")
+elseif rpm.expand("%{?copr_username}") == "" then
+    print("BUILD_TAG=v" .. rpm.expand("%{version}") .. " ")
+end
+}%{__make} release
 
 %install
 %{__make} DESTDIR=%{buildroot} PREFIX=%{_prefix} install

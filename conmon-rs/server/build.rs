@@ -37,27 +37,28 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BUILD_TAG");
     println!("cargo:rerun-if-env-changed=BUILD_COMMIT");
 
-    // Packagers build from tarballs without git metadata, so they can pass
-    // the commit and tag in. In a worktree `.git` is a file pointing
-    // elsewhere, so ask git where HEAD and the refs are. Tracking a path which
-    // does not exist would rerun this script on every build.
+    // Packagers build from tarballs without git metadata, or from a git
+    // checkout of their packaging, so they can pass the tag and the commit
+    // in. Either one being set wins over git, the other one stays empty.
+    // In a worktree `.git` is a file pointing elsewhere, so ask git where
+    // HEAD and the refs are. Tracking a path which does not exist would
+    // rerun this script on every build.
     let env = |key| std::env::var(key).ok().filter(|v: &String| !v.is_empty());
-    let (tag, commit) = if let Some(commit) = env("BUILD_COMMIT") {
-        (env("BUILD_TAG").unwrap_or_default(), commit)
-    } else if Path::new("../../.git").exists() {
-        for (arg, file) in [("--git-dir", "HEAD"), ("--git-common-dir", "refs")] {
-            let dir = run("git", &["rev-parse", "--path-format=absolute", arg]);
-            let path = Path::new(&dir).join(file);
-            if !dir.is_empty() && path.exists() {
-                println!("cargo:rerun-if-changed={}", path.display());
+    let (tag, commit) = match (env("BUILD_TAG"), env("BUILD_COMMIT")) {
+        (None, None) if Path::new("../../.git").exists() => {
+            for (arg, file) in [("--git-dir", "HEAD"), ("--git-common-dir", "refs")] {
+                let dir = run("git", &["rev-parse", "--path-format=absolute", arg]);
+                let path = Path::new(&dir).join(file);
+                if !dir.is_empty() && path.exists() {
+                    println!("cargo:rerun-if-changed={}", path.display());
+                }
             }
+            (
+                run("git", &["describe", "--tags", "--always", "--dirty"]),
+                run("git", &["rev-parse", "HEAD"]),
+            )
         }
-        (
-            run("git", &["describe", "--tags", "--always", "--dirty"]),
-            run("git", &["rev-parse", "HEAD"]),
-        )
-    } else {
-        (String::new(), String::new())
+        (tag, commit) => (tag.unwrap_or_default(), commit.unwrap_or_default()),
     };
 
     // Honor SOURCE_DATE_EPOCH for reproducible builds.
@@ -72,9 +73,13 @@ fn main() {
         ))
         .expect("format the build time");
 
+    // Report the toolchain cargo builds with, which is not necessarily the
+    // one on PATH.
     let target = std::env::var("TARGET").unwrap_or_default();
-    let rust_version = run("rustc", &["--version"]);
-    let cargo_version = run("cargo", &["--version"]);
+    let rustc = env("RUSTC").unwrap_or_else(|| "rustc".into());
+    let cargo = env("CARGO").unwrap_or_else(|| "cargo".into());
+    let rust_version = run(&rustc, &["--version"]);
+    let cargo_version = run(&cargo, &["--version"]);
 
     // The dependency tree is only informational (`--version full`) and the
     // slowest step of this script, let packagers skip it. It covers the
@@ -84,7 +89,7 @@ fn main() {
     } else {
         let features = enabled_features();
         run(
-            "cargo",
+            &cargo,
             &["tree", "--no-default-features", "--features", &features],
         )
     };

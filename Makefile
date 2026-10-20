@@ -84,6 +84,7 @@ lint: lint-rust lint-go ## Lint Rust and Go sources.
 .PHONY: lint-rust
 lint-rust: ## Lint the Rust sources.
 	cargo fmt && git diff --exit-code
+	cargo clippy --all-targets -- -D warnings
 	cargo clippy --all-targets --all-features -- -D warnings
 
 .PHONY: lint-go
@@ -164,10 +165,10 @@ install: ## Install the binary.
 	install -D -t "${DESTDIR}$(PREFIX)/bin" target/release/conmonrs
 
 # Only meant to build the latest HEAD commit, not a replacement for the distro
-# package.
+# package. The spec passes the commit on to --version.
 .PHONY: rpm
 rpm: ## Build the RPM locally using packit.
-	packit build locally
+	BUILD_COMMIT=$$(git rev-parse HEAD) packit build locally
 
 .PHONY: nixpkgs
 nixpkgs: ## Update the NIX package dependencies.

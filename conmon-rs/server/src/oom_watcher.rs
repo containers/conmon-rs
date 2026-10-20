@@ -1,6 +1,5 @@
 use crate::mutex::lock;
 use anyhow::{Context, Result, bail};
-use linereader::LineReader;
 use nix::sys::statfs::{FsType, statfs};
 use notify::{
     Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
@@ -9,6 +8,7 @@ use notify::{
 use std::{
     collections::HashMap,
     fs::File as StdFile,
+    io::{BufRead, BufReader},
     os::fd::AsRawFd,
     path::{Path, PathBuf},
     sync::{
@@ -30,8 +30,6 @@ use tracing::{Instrument, debug, debug_span, error, trace};
 pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as _);
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
-
-const MAX_LINEREADER_CAPACITY: usize = 256;
 
 /// Capacity of the channel delivering file watch events to one OOM watcher.
 const WATCH_EVENT_CHANNEL_SIZE: usize = 32;
@@ -437,12 +435,10 @@ impl OOMWatcher {
     fn read_oom_counters(path: &Path) -> Result<OomCounters> {
         let fp = StdFile::open(path)
             .with_context(|| format!("open memory events file: {}", path.display()))?;
-        let mut reader = LineReader::with_capacity(MAX_LINEREADER_CAPACITY, fp);
         let mut counters = OomCounters::default();
 
-        while let Some(l) = reader.next_line() {
-            let line = str::from_utf8(l.context("read line from buffer")?)
-                .context("convert line to utf8")?;
+        for line in BufReader::new(fp).lines() {
+            let line = line.context("read line from memory events file")?;
             trace!(line);
 
             let Some((key, value)) = line.split_once(' ') else {
@@ -490,13 +486,9 @@ impl OOMWatcher {
         subsystem: &str,
     ) -> Result<Option<PathBuf>> {
         if let Some(fp) = Self::try_open_cgroup_path(pid)? {
-            let mut reader = LineReader::with_capacity(MAX_LINEREADER_CAPACITY, fp);
-
-            while let Some(line) = reader.next_line() {
-                let mut iter = str::from_utf8(line.context("read line from buffer")?)
-                    .context("convert line to utf8")?
-                    .split(':')
-                    .skip(1);
+            for line in BufReader::new(fp).lines() {
+                let line = line.context("read line from cgroup file")?;
+                let mut iter = line.split(':').skip(1);
 
                 let system = iter.next().context("no system found in cgroup")?;
                 let path = iter
@@ -519,21 +511,19 @@ impl OOMWatcher {
 
     fn process_cgroup_subsystem_path_cgroup_v2(pid: u32) -> Result<Option<PathBuf>> {
         if let Some(fp) = Self::try_open_cgroup_path(pid)? {
+            let line = BufReader::new(fp)
+                .lines()
+                .next()
+                .context("get next line")?
+                .context("read line from cgroup file")?;
             return Ok(Path::new(CGROUP_ROOT)
                 .join(
-                    str::from_utf8(
-                        LineReader::with_capacity(MAX_LINEREADER_CAPACITY, fp)
-                            .next_line()
-                            .context("get next line")?
-                            .context("read line from buffer")?,
-                    )
-                    .context("convert byte slice to utf8")?
-                    .split(':')
-                    .nth(2)
-                    .context("no path found in cgroup")?
-                    .strip_prefix("/")
-                    .context("strip root path prefix")?
-                    .trim_end(),
+                    line.split(':')
+                        .nth(2)
+                        .context("no path found in cgroup")?
+                        .strip_prefix("/")
+                        .context("strip root path prefix")?
+                        .trim_end(),
                 )
                 .into());
         }

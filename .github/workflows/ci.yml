@@ -2,40 +2,21 @@ name: ci
 on:
   pull_request: {}
   push:
-    tags:
-      - "*"
     branches:
       - main
+# Pull requests cancel their outdated runs. Every main commit gets a run of its
+# own: the release workflow needs the binaries of the tagged commit, and a run
+# waiting in a shared group would be replaced by the one of a newer commit.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+permissions:
+  contents: read
 env:
   CARGO_TERM_COLOR: always
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   NIX_VERSION: "2.35.3"
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Setup Cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-build-
-      - run: .github/install-deps
-      - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
-        with:
-          toolchain: stable
-          components: rustfmt
-      - run: cargo build && git diff --exit-code
-
   dependencies:
     runs-on: ubuntu-latest
     steps:
@@ -57,6 +38,10 @@ jobs:
 
   go-lint:
     runs-on: ubuntu-latest
+    # only-new-issues reads the diff of the pull request.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -80,33 +65,56 @@ jobs:
         if: matrix.cosign
       - run: scripts/get
 
+  # The release workflow creates the marker of a tag.
   create-marker:
     runs-on: ubuntu-latest
-    if: github.repository == 'containers/conmon-rs' && (github.ref == 'refs/heads/main' || contains(github.ref, 'refs/tags'))
-    needs: build-static
+    if: github.repository == 'containers/conmon-rs' && github.ref == 'refs/heads/main'
+    needs: [build-static-amd64, build-static]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      # Runs of main commits overlap and finish in any order. The marker only
+      # moves forward, so an older run finishing last cannot move it back and
+      # a failing newer run does not hold it up for the ones after it.
+      - name: Check the current marker
+        id: main
+        run: |
+          CURRENT=$(curl -sSfL "https://storage.googleapis.com/cri-o/conmon-rs/latest-main.txt?ts=$(date +%s)" || true)
+          if [[ ! $CURRENT =~ ^[0-9a-f]{40}$ ]] ||
+            ! git cat-file -e "$CURRENT^{commit}" 2>/dev/null ||
+            git merge-base --is-ancestor "$CURRENT" "$GITHUB_SHA"; then
+            echo "forward=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "The marker already points to the newer commit $CURRENT"
+            echo "forward=false" >>"$GITHUB_OUTPUT"
+          fi
       - run: .github/create-marker
+        if: steps.main.outputs.forward == 'true'
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        if: steps.main.outputs.forward == 'true'
         with:
           credentials_json: ${{ secrets.GCS_CRIO_SA }}
       - uses: google-github-actions/upload-cloud-storage@6397bd7208e18d13ba2619ee21b9873edc94427a # v3.0.0
+        if: steps.main.outputs.forward == 'true'
         with:
           path: .
           glob: latest-*.txt
           destination: cri-o/conmon-rs
 
-  build-static:
+  # The tests only need the amd64 binary, which gets its own job so that they do
+  # not wait for the emulated builds. Both jobs share the steps.
+  build-static-amd64:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       id-token: write
     strategy:
-      fail-fast: false
       matrix:
-        arch: [amd64, arm64, ppc64le, s390x]
+        arch: [amd64]
     name: build-static-${{ matrix.arch }}
-    steps:
+    steps: &build-static-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: cachix/install-nix-action@3715ab1a11cac9e991980d7b4a28d80c7ebdd8f9 # v28
         with:
@@ -157,51 +165,71 @@ jobs:
           path: ${{ github.sha }}
           destination: cri-o/conmon-rs
 
+  build-static:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, ppc64le, s390x]
+    name: build-static-${{ matrix.arch }}
+    steps: *build-static-steps
+
   doc:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Setup Cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-doc-
       - run: .github/install-deps
       - name: Select Toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: stable
           components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The gh-pages workflow publishes the documentation of all features.
       - name: Cargo doc
-        run: cargo doc --no-deps
+        run: cargo doc --locked --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   lint-clippy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Setup Cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-clippy-
       - run: .github/install-deps
       - name: Select Toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: stable
           components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The default features are what gets shipped, all features cover the
+      # optional tracing code.
       - name: Clippy Lint
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: .github/install-deps
+      - name: Read rust-version
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - name: Select Toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Cargo check
+        run: cargo check --locked --all-targets --all-features
 
   lint-rustfmt:
     runs-on: ubuntu-latest
@@ -221,32 +249,30 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Setup Cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-test-unit-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-test-unit-
       - run: .github/install-deps
+      - name: Select Toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-llvm-cov
       - name: Generate code coverage
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked --all-features --lcov --output-path lcov.info
       - name: Upload Results
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: lcov.info
+          flags: unit
           # Required for uploads from the protected main branch, pull requests
           # from forks fall back to tokenless uploads.
           token: ${{ secrets.CODECOV_TOKEN }}
 
   test-integration:
-    needs: build-static
+    needs: build-static-amd64
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -276,15 +302,99 @@ jobs:
             RUNTIME_PATH=/usr/bin/crun \
             CONMON_BINARY=.build/static/conmonrs \
             MAX_RSS_KB=5500 \
-            TEST_FLAGS="--flake-attempts 3"
+            TEST_FLAGS="--flake-attempts 3 --output-dir .build/report --json-report report.json"
+      - name: Report flaky specs
+        if: ${{ !cancelled() }}
+        run: .github/report-flakes .build/report/report.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: test-integration-report
+          path: .build/report/report.json
       # The tests run as root, setup-go saves its cache as the runner user.
       - name: Chown cache
         run: |
           sudo chown -R $(id -u):$(id -g) ~/go/pkg/mod
           sudo chown -R $(id -u):$(id -g) ~/.cache/go-build
 
+  # Runs the integration tests once more against a coverage instrumented debug
+  # build of the server, and with coverage of the Go client. The test-integration
+  # job keeps testing the shipped binary and its memory budget. The debug build
+  # is slower, so a timing sensitive failure here only costs the coverage.
+  test-integration-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Saved by the test-integration job.
+      - name: Restore Testfiles Cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /tmp/conmon-test-images-0
+          key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/files_test.go') }}
+      - run: .github/install-deps
+      - name: Select Toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-llvm-cov
+      - run: .github/install-crun
+      - name: create symlink
+        run: sudo ln -f -s "$(go env GOROOT)"/bin/* /usr/bin/
+      # The environment makes the build instrumented and every server process
+      # write its profile into the target directory on exit.
+      - name: Build instrumented server
+        run: |
+          cargo llvm-cov show-env --sh > "$RUNNER_TEMP/llvm-cov.env"
+          source "$RUNNER_TEMP/llvm-cov.env"
+          cargo llvm-cov clean --workspace
+          cargo build --locked
+      # The memory budget does not apply to an instrumented debug build.
+      - name: Integration tests
+        run: |
+          source "$RUNNER_TEMP/llvm-cov.env"
+          sudo -E make integration \
+            RUNTIME_PATH=/usr/bin/crun \
+            CONMON_BINARY=target/debug/conmonrs \
+            MAX_RSS_KB=1048576 \
+            TEST_FLAGS="--flake-attempts 3 --output-dir .build/report --json-report report.json --cover --coverprofile go-coverage.out"
+      - name: Generate code coverage
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" target .build
+          source "$RUNNER_TEMP/llvm-cov.env"
+          cargo llvm-cov report --lcov --output-path lcov.info
+      - name: Upload Results
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: lcov.info,.build/report/go-coverage.out
+          flags: integration
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Report flaky specs
+        if: ${{ !cancelled() }}
+        run: .github/report-flakes .build/report/report.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: test-integration-coverage-report
+          path: .build/report/report.json
+      - name: Chown cache
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" ~/go/pkg/mod
+          sudo chown -R "$(id -u):$(id -g)" ~/.cache/go-build
+
   test-critest:
-    needs: build-static
+    needs: build-static-amd64
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -318,6 +428,7 @@ jobs:
             --runtime-endpoint=unix:///var/run/crio/crio.sock \
             --parallel=$(nproc) \
             --ginkgo.flake-attempts=3 \
+            --ginkgo.json-report="$PWD/critest-report.json" \
             --ginkgo.randomize-all \
             --ginkgo.timeout=2m \
             --ginkgo.trace \
@@ -328,19 +439,22 @@ jobs:
           sudo journalctl --no-pager > journal.log
           test $TEST_RC -ne 0 && cat journal.log
           exit $TEST_RC
+      - name: Report flaky specs
+        if: ${{ !cancelled() }}
+        run: .github/report-flakes critest-report.json
       - name: Upload logs
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
         with:
-          name: journal.log
-          path: journal.log
+          name: critest-logs
+          path: |
+            journal.log
+            critest-report.json
 
   cargo-deny:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
-        with:
-          toolchain: stable
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
   typos:
