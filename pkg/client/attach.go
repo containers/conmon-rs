@@ -10,7 +10,6 @@ import (
 	"syscall"
 
 	"github.com/containers/conmon-rs/internal/proto"
-	"github.com/google/uuid"
 	"go.podman.io/common/pkg/detach"
 	"go.podman.io/common/pkg/resize"
 )
@@ -57,6 +56,8 @@ type AttachConfig struct {
 	SocketPath string
 
 	// ExecSession ID, if this is an attach for an Exec.
+	//
+	// Deprecated: The server only logs it, attach sessions are per container.
 	ExecSession string
 
 	// Whether a terminal was setup for the command this is attaching to.
@@ -77,10 +78,15 @@ type AttachConfig struct {
 	ContainerStdin bool
 
 	// Whether the output is passed through the caller's std streams, rather than
-	// ones created for the attach session.
+	// ones created for the attach session. Only the pre attach function runs
+	// then.
+	//
+	// Deprecated: Nothing is attached with it, call PreAttachFunc directly.
 	Passthrough bool
 
-	// Channel of resize events.
+	// Channel of resize events. They are applied until the attach returns,
+	// the channel is not read afterwards. Senders should stop or close it
+	// once the attach is over.
 	Resize <-chan resize.TerminalSize
 
 	// The standard streams for this attach session.
@@ -102,6 +108,19 @@ type AttachConfig struct {
 type attachReaderValue struct {
 	stdin      *In
 	socketPath string
+}
+
+// storeAttachReader registers the stdin of an attach session and returns its
+// identifier.
+func (c *ConmonClient) storeAttachReader(value *attachReaderValue) uint64 {
+	id := c.attachReaderID.Add(1)
+
+	c.attachReaderMu.Lock()
+	defer c.attachReaderMu.Unlock()
+
+	c.attachReaders[id] = value
+
+	return id
 }
 
 // AttachContainer can be used to attach to a running container.
@@ -170,16 +189,11 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) (err error
 	if !cfg.Passthrough {
 		c.logger.Debugf("Attaching to container %s", cfg.ID)
 
-		resize.HandleResizing(cfg.Resize, func(size resize.TerminalSize) {
-			c.logger.Debugf("Got a resize event: %+v", size)
+		// The resize events are applied until the attach returns.
+		resizeDone := make(chan struct{})
+		defer close(resizeDone)
 
-			if err := c.SetWindowSizeContainer(ctx, &SetWindowSizeContainerConfig{
-				ID:   cfg.ID,
-				Size: &size,
-			}); err != nil {
-				c.logger.Debugf("Failed to write to control file to resize terminal: %v", err)
-			}
-		})
+		go c.forwardResizeEvents(ctx, cfg, resizeDone)
 
 		conn, err = DialLongSocket("unixpacket", cfg.SocketPath)
 		if err != nil {
@@ -203,9 +217,7 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) (err error
 		return nil
 	}
 
-	id := uuid.NewString()
-
-	receiveStdoutError, stdinDone := c.setupStdioChannels(ctx, cfg, conn, id)
+	receiveStdoutError, stdinDone, id := c.setupStdioChannels(ctx, cfg, conn)
 
 	if cfg.PostAttachFunc != nil {
 		if err := cfg.PostAttachFunc(); err != nil {
@@ -220,9 +232,42 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) (err error
 	return nil
 }
 
+// forwardResizeEvents applies the resize events of the config to the
+// container until the channel gets closed or done is closed, whichever
+// comes first.
+func (c *ConmonClient) forwardResizeEvents(ctx context.Context, cfg *AttachConfig, done <-chan struct{}) {
+	if cfg.Resize == nil {
+		return
+	}
+
+	for {
+		select {
+		case <-done:
+			return
+		case size, ok := <-cfg.Resize:
+			if !ok {
+				return
+			}
+
+			if size.Height < 1 || size.Width < 1 {
+				continue
+			}
+
+			c.logger.Debugf("Got a resize event: %+v", size)
+
+			if err := c.SetWindowSizeContainer(ctx, &SetWindowSizeContainerConfig{
+				ID:   cfg.ID,
+				Size: &size,
+			}); err != nil {
+				c.logger.Debugf("Failed to write to control file to resize terminal: %v", err)
+			}
+		}
+	}
+}
+
 func (c *ConmonClient) setupStdioChannels(
-	ctx context.Context, cfg *AttachConfig, conn *net.UnixConn, id string,
-) (receiveStdoutError, stdinDone chan error) {
+	ctx context.Context, cfg *AttachConfig, conn *net.UnixConn,
+) (receiveStdoutError, stdinDone chan error, id uint64) {
 	ctx, span := c.startSpan(ctx, "setupStdioChannels")
 	if span != nil {
 		defer span.End()
@@ -240,8 +285,7 @@ func (c *ConmonClient) setupStdioChannels(
 	stdin := cfg.Streams.Stdin
 
 	if stdin != nil {
-		value := &attachReaderValue{stdin: stdin, socketPath: cfg.SocketPath}
-		c.attachReaders.Store(id, value)
+		id = c.storeAttachReader(&attachReaderValue{stdin: stdin, socketPath: cfg.SocketPath})
 
 		go func() {
 			_, err := detach.Copy(conn, stdin, cfg.DetachKeys)
@@ -251,7 +295,7 @@ func (c *ConmonClient) setupStdioChannels(
 		}()
 	}
 
-	return receiveStdoutError, stdinDone
+	return receiveStdoutError, stdinDone, id
 }
 
 func (c *ConmonClient) redirectResponseToOutputStreams(
@@ -373,55 +417,45 @@ func (c *ConmonClient) handlePacket(
 	return true, nil
 }
 
-func (c *ConmonClient) tryCloseAttachReaderForID(id string) {
-	c.logger.Tracef("Closing attach reader for ID: %s", id)
+func (c *ConmonClient) tryCloseAttachReaderForID(id uint64) {
+	c.logger.Tracef("Closing attach reader for ID: %d", id)
 
-	if val, ok := c.attachReaders.LoadAndDelete(id); ok {
-		c.closeAttachReader(val)
+	c.attachReaderMu.Lock()
+	value, ok := c.attachReaders[id]
+	delete(c.attachReaders, id)
+	c.attachReaderMu.Unlock()
+
+	if ok {
+		c.closeAttachReader(value)
 	}
 }
 
-func (c *ConmonClient) closeAttachReader(val any) {
-	value, ok := val.(*attachReaderValue)
-	if !ok {
-		c.logger.Error("Ignoring input value of wrong type")
-
-		return
-	}
-
+func (c *ConmonClient) closeAttachReader(value *attachReaderValue) {
 	if err := value.stdin.Close(); err != nil {
 		c.logger.WithError(err).Warn("Unable to close attach reader")
 	}
 
-	// Check if the attach socket is still in use by other connections
-	socketPathInUse := false
+	// Remove the attach socket if no other connection uses it. The check and
+	// the removal happen under the lock, which keeps a registered attach from
+	// losing its socket, an attach still dialing it can.
+	c.attachReaderMu.Lock()
+	defer c.attachReaderMu.Unlock()
 
-	c.attachReaders.Range(func(k, v any) bool {
-		existing, ok := v.(*attachReaderValue)
-		if !ok {
-			return true
+	for _, existing := range c.attachReaders {
+		if existing != value && existing.socketPath == value.socketPath {
+			return
 		}
+	}
 
-		if existing.socketPath == value.socketPath {
-			socketPathInUse = true
+	c.logger.Infof("Attach socket path no longer in use, removing it: %s", value.socketPath)
 
-			return false
-		}
-
-		return true
-	})
-
-	if !socketPathInUse {
-		c.logger.Infof("Attach socket path no longer in use, removing it: %s", value.socketPath)
-
-		if err := os.RemoveAll(value.socketPath); err != nil {
-			c.logger.WithError(err).Warn("Unable to remove attach socket path")
-		}
+	if err := os.RemoveAll(value.socketPath); err != nil {
+		c.logger.WithError(err).Warn("Unable to remove attach socket path")
 	}
 }
 
 func (c *ConmonClient) readStdio(
-	ctx context.Context, cfg *AttachConfig, conn *net.UnixConn, id string, receiveStdoutError, stdinDone chan error,
+	ctx context.Context, cfg *AttachConfig, conn *net.UnixConn, id uint64, receiveStdoutError, stdinDone chan error,
 ) (err error) {
 	_, span := c.startSpan(ctx, "readStdio")
 	if span != nil {
