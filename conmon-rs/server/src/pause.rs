@@ -1,5 +1,4 @@
-use crate::child_reaper::ReapableChild;
-use crate::conmon_capnp::conmon;
+use crate::{child_reaper::ReapableChild, conmon_capnp::conmon, mutex::lock};
 use anyhow::{Context, Result, bail};
 use capnp::enum_list::Reader;
 use libc::pid_t;
@@ -22,14 +21,22 @@ use std::{
     env, fmt,
     fs::{self, File},
     io::{Read, Write},
-    os::unix::net::UnixStream,
+    os::unix::{net::UnixStream, process::ExitStatusExt},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::OnceLock,
+    sync::{
+        LazyLock, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
-use tokio::{process::Command, task};
+use tokio::{
+    process::Command,
+    sync::{OnceCell, watch},
+    task, time,
+};
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, debug_span, info, trace, warn};
+use tracing::{Instrument, Span, debug, debug_span, info, trace, warn};
 
 /// The main structure for this module.
 #[derive(Debug)]
@@ -66,8 +73,30 @@ impl Pause {
     }
 }
 
-/// The global shared multiple pause instance.
-static PAUSE: OnceLock<Pause> = OnceLock::new();
+/// The pause instance of this server.
+static PAUSE: OnceCell<Pause> = OnceCell::const_new();
+
+/// Whether an initialization runs. Only one runs at a time, requests which
+/// arrive meanwhile wait for it instead of queueing their own.
+static INIT_RUNNING: LazyLock<watch::Sender<bool>> = LazyLock::new(|| watch::Sender::new(false));
+
+/// The pause subcommand of the running initialization, so that the shutdown
+/// can kill it if it does not finish in time.
+static INIT_CHILD: Mutex<Option<Pid>> = Mutex::new(None);
+
+/// Set once the server shuts down. No initialization starts after that and
+/// one which is still running stops its pause process itself, so that the
+/// shutdown does not leave one behind.
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Marks the initialization as finished, whatever happens to its task.
+struct InitRunning;
+
+impl Drop for InitRunning {
+    fn drop(&mut self) {
+        INIT_RUNNING.send_replace(false);
+    }
+}
 
 impl Pause {
     /// Retrieve the global instance of pause, creating it on the first call.
@@ -96,27 +125,150 @@ impl Pause {
             (vec![], vec![])
         };
 
-        if let Some(pause) = PAUSE.get() {
-            pause
-                .ensure_matches(
-                    &base_path,
-                    pod_id,
-                    &namespaces,
-                    &uid_mappings,
-                    &gid_mappings,
-                )
-                .context("pause already initialized")?;
-            return Ok(pause);
+        if Self::shutting_down() {
+            bail!("server is shutting down")
         }
 
+        if PAUSE.get().is_none() {
+            // Claim the initialization if none runs.
+            let claimed = INIT_RUNNING.send_if_modified(|running| {
+                let claimed = !*running;
+                *running = true;
+                claimed
+            });
+
+            if claimed {
+                // The task outlives this request, so a request cancelled
+                // meanwhile, for example by a CRI-O timeout, cannot abandon a
+                // half set up pause process. A panic in it leaves the cell
+                // empty, the pause subcommand undoes its own failed setup, so
+                // the next request starts over.
+                let pod_id = pod_id.to_owned();
+                let (base_path, namespaces, uid_mappings, gid_mappings) = (
+                    base_path.clone(),
+                    namespaces.clone(),
+                    uid_mappings.clone(),
+                    gid_mappings.clone(),
+                );
+                let init = task::spawn(
+                    async move {
+                        let _running = InitRunning;
+                        PAUSE
+                            .get_or_try_init(|| {
+                                Self::init_unless_shutting_down(
+                                    &base_path,
+                                    &pod_id,
+                                    &namespaces,
+                                    &uid_mappings,
+                                    &gid_mappings,
+                                )
+                            })
+                            .await
+                            .map(drop)
+                    }
+                    .instrument(Span::current()),
+                );
+                init.await.context("join pause init")??;
+            } else {
+                // Its outcome goes to the request which started it, a retry
+                // runs a new one.
+                Self::wait_for_init().await;
+            }
+        }
+
+        // The instance may differ from the request if another one created it
+        // first, which is also fine to check for the own one.
+        let pause = PAUSE
+            .get()
+            .context("the pause initialization waited for failed, retry")?;
+        pause
+            .ensure_matches(
+                &base_path,
+                pod_id,
+                &namespaces,
+                &uid_mappings,
+                &gid_mappings,
+            )
+            .context("pause already initialized")?;
+
+        // The shutdown may have started meanwhile and stops the instance.
+        if Self::shutting_down() {
+            bail!("server is shutting down")
+        }
+        Ok(pause)
+    }
+
+    fn shutting_down() -> bool {
+        SHUTTING_DOWN.load(Ordering::SeqCst)
+    }
+
+    /// Wait until no initialization runs.
+    async fn wait_for_init() {
+        // Only fails if the sender is gone, which a static never is.
+        let _ = INIT_RUNNING.subscribe().wait_for(|running| !*running).await;
+    }
+
+    /// Initialize a pause instance, unless the server shuts down. If the
+    /// shutdown started meanwhile it may have given up waiting for this, so
+    /// stop the instance here instead of publishing it.
+    async fn init_unless_shutting_down(
+        base_path: &Path,
+        pod_id: &str,
+        namespaces: &[Namespace],
+        uid_mappings: &[String],
+        gid_mappings: &[String],
+    ) -> Result<Self> {
+        if Self::shutting_down() {
+            bail!("server is shutting down")
+        }
         let pause = Self::init(base_path, pod_id, namespaces, uid_mappings, gid_mappings)
             .await
             .context("init pause")?;
-        if let Some(pid) = pause.pid() {
-            Self::spawn_reaper(pid);
+        if Self::shutting_down() {
+            pause.stop();
+            bail!("server is shutting down")
         }
-        let _ = PAUSE.set(pause);
-        PAUSE.get().context("pause not initialized")
+        Ok(pause)
+    }
+
+    /// How long the shutdown waits for a running initialization before it
+    /// kills the pause subcommand, and how long for the cleanup after that.
+    const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
+    const KILL_WAIT: Duration = Duration::from_secs(1);
+
+    /// Stop the pause instance for the shutdown. An initialization still
+    /// running finishes in its own task, wait a bounded time for it rather
+    /// than leaving its pause process behind, and kill its subcommand if it
+    /// does not finish. No request initializes one after this.
+    pub async fn shutdown() {
+        SHUTTING_DOWN.store(true, Ordering::SeqCst);
+
+        if time::timeout(Self::SHUTDOWN_WAIT, Self::wait_for_init())
+            .await
+            .is_err()
+        {
+            warn!("Pause initialization still running, killing its process");
+            match lock(&INIT_CHILD) {
+                Ok(child) => {
+                    if let Some(pid) = *child
+                        && let Err(e) = kill(pid, Signal::SIGKILL)
+                    {
+                        warn!("Unable to kill pause process {pid}: {:#}", e);
+                    }
+                }
+                Err(e) => warn!("Unable to lock pause process PID: {:#}", e),
+            }
+            if time::timeout(Self::KILL_WAIT, Self::wait_for_init())
+                .await
+                .is_err()
+            {
+                warn!("Pause initialization did not finish, its process may stay behind");
+            }
+        }
+
+        if let Some(pause) = PAUSE.get() {
+            pause.stop();
+        }
     }
 
     /// Fail if the pause instance was created for another pod or configuration.
@@ -196,11 +348,6 @@ impl Pause {
         );
     }
 
-    /// Retrieve the global instance of pause if initialized.
-    pub fn maybe_shared() -> Option<&'static Pause> {
-        PAUSE.get()
-    }
-
     /// Stop the global pause instance.
     pub fn stop(&self) {
         info!("Stopping pause");
@@ -229,72 +376,106 @@ impl Pause {
 
     /// Initialize a new pause instance.
     async fn init(
-        base_path: PathBuf,
+        base_path: &Path,
         pod_id: &str,
-        namespaces: Vec<Namespace>,
-        uid_mappings: Vec<String>,
-        gid_mappings: Vec<String>,
+        namespaces: &[Namespace],
+        uid_mappings: &[String],
+        gid_mappings: &[String],
     ) -> Result<Self> {
         debug!("Initializing pause");
 
         let mut args: Vec<String> = vec![format!("--pod-id={pod_id}")];
-        for mapping in &uid_mappings {
+        for mapping in uid_mappings {
             args.push(format!("--uid-mappings={mapping}"));
         }
-        for mapping in &gid_mappings {
+        for mapping in gid_mappings {
             args.push(format!("--gid-mappings={mapping}"));
         }
-        for namespace in &namespaces {
+        for namespace in namespaces {
             args.push(format!("--{namespace}"));
         }
 
         debug!("Pause namespaces: {:?}", namespaces);
         debug!("Pause args: {:?}", args);
 
-        fs::create_dir_all(&base_path).context("create base path")?;
+        fs::create_dir_all(base_path).context("create base path")?;
         debug!("Pause base path: {}", base_path.display());
 
-        let program = env::current_exe().context("get own executable")?;
-        let mut child = Command::new(program)
+        // The running binary, also after a package upgrade replaced the file
+        // current_exe would point at. The name stays the one of this process,
+        // it would show up as "exe" otherwise.
+        let arg0 = env::args_os()
+            .next()
+            .unwrap_or_else(|| env!("CARGO_PKG_NAME").into());
+        let mut child = Command::new("/proc/self/exe")
+            .arg0(arg0)
             .arg("pause")
             .arg("--base-path")
-            .arg(&base_path)
+            .arg(base_path)
             .args(args)
             // The init of a PID namespace outlives this call. It must not keep
             // the output of the server open, only errors are of interest.
             .stdin(Stdio::null())
             .stdout(Stdio::null())
+            // Do not leave it behind if the runtime drops this task on the
+            // shutdown. Its child then stops the init of a PID namespace.
+            .kill_on_drop(true)
             .spawn()
             .context("run pause")?;
 
-        let status = child.wait().await.context("wait for pause child")?;
+        // The shutdown kills it if it takes too long.
+        let child_pid = child.id().map(|pid| Pid::from_raw(pid as pid_t));
+        *lock(&INIT_CHILD)? = child_pid;
+        let status = child.wait().await;
+        *lock(&INIT_CHILD)? = None;
+
+        let mut pause = Self {
+            base_path: base_path.to_path_buf(),
+            pod_id: pod_id.into(),
+            namespaces: namespaces.to_vec(),
+            uid_mappings: uid_mappings.to_vec(),
+            gid_mappings: gid_mappings.to_vec(),
+            pid: None,
+        };
+
+        let status = status.context("wait for pause child")?;
         if !status.success() {
+            // The pause subcommand undoes its own failed setup, but not if it
+            // got killed by the shutdown. Its child stops the init of a PID
+            // namespace then, the bind mounts and PID file stay.
+            if status.signal().is_some() {
+                pause.stop();
+            }
             bail!("exit status not ok: {status}")
         }
 
         // Without a PID namespace the pause process already exited after
         // binding the namespaces and left no PID behind.
-        let pid = if namespaces.contains(&Namespace::Pid) {
-            let pid = fs::read_to_string(Self::pause_pid_path(&base_path, pod_id))
-                .context("read pause PID path")?
-                .trim()
-                .parse::<u32>()
-                .context("parse pause PID")?;
+        if namespaces.contains(&Namespace::Pid) {
+            // The namespaces are bound, do not leave them behind. The init
+            // cannot be stopped without its PID though.
+            let pid = Self::read_pause_pid(base_path, pod_id).inspect_err(|_| {
+                warn!("Unable to read the pause PID, its init process stays behind");
+                pause.stop()
+            })?;
             info!("Pause PID is: {pid}");
-            Some(Pid::from_raw(pid as pid_t))
+            Self::spawn_reaper(pid);
+            pause.pid = Some(pid);
         } else {
             info!("No PID namespace requested, pause process exited after binding");
-            None
-        };
+        }
 
-        Ok(Self {
-            base_path,
-            pod_id: pod_id.to_owned().into_boxed_str(),
-            namespaces,
-            uid_mappings,
-            gid_mappings,
-            pid,
-        })
+        Ok(pause)
+    }
+
+    /// Read the PID of the init which the pause process left behind.
+    fn read_pause_pid(base_path: &Path, pod_id: &str) -> Result<Pid> {
+        let pid = fs::read_to_string(Self::pause_pid_path(base_path, pod_id))
+            .context("read pause PID path")?
+            .trim()
+            .parse::<u32>()
+            .context("parse pause PID")?;
+        Ok(Pid::from_raw(pid as pid_t))
     }
 
     /// Retrieve the pause PID path for a base and pod ID.
@@ -434,12 +615,22 @@ impl Pause {
             getpid()
         };
 
-        // Report the process holding all namespaces
-        sock.write_all(&holder.as_raw().to_ne_bytes())
-            .context("report namespace holder PID")?;
+        // Report the process holding all namespaces and wait for the parent
+        // to bind them.
+        let result = sock
+            .write_all(&holder.as_raw().to_ne_bytes())
+            .context("report namespace holder PID")
+            .and_then(|()| sock.read_exact(&mut res).context("wait for mounts"));
 
-        // Wait for the parent to bind them
-        sock.read_exact(&mut res).context("wait for mounts")?;
+        // The parent may be gone, for example killed by the server shutdown,
+        // then nobody else stops the init of the PID namespace.
+        if result.is_err()
+            && pid
+            && let Err(e) = kill(holder, Signal::SIGKILL)
+        {
+            debug!("Unable to kill pause init {holder}: {:#}", e);
+        }
+        result?;
 
         // The bind mounts keep the namespaces alive on their own, only a PID
         // namespace dies with its init, which stays around.
