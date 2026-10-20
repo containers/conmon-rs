@@ -30,6 +30,8 @@ import (
 	"go.podman.io/storage/pkg/stringid"
 	"go.podman.io/storage/pkg/unshare"
 	"golang.org/x/sys/unix"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 )
 
 const (
@@ -172,6 +174,11 @@ func expectNamespaceFile(path string) {
 // pauseProcessRunning returns true if a conmonrs pause process for the pod is
 // still alive.
 func pauseProcessRunning(podID string) bool {
+	return pauseProcessCount(podID) > 0
+}
+
+// pauseProcessCount returns the number of conmonrs pause processes of the pod.
+func pauseProcessCount(podID string) int {
 	cmd := exec.CommandContext(context.Background(), "ps", "-eo", "args")
 
 	var stdout bytes.Buffer
@@ -179,13 +186,15 @@ func pauseProcessRunning(podID string) bool {
 	cmd.Stdout = &stdout
 	Expect(cmd.Run()).To(Succeed())
 
+	count := 0
+
 	for line := range strings.SplitSeq(stdout.String(), "\n") {
 		if strings.Contains(line, " pause ") && strings.Contains(line, podID) {
-			return true
+			count++
 		}
 	}
 
-	return false
+	return count
 }
 
 // execPIDFiles returns the PID files of execs left in the runtime directory.
@@ -246,6 +255,34 @@ func (tr *testRunner) exitPath() string {
 
 func (tr *testRunner) oomExitPath() string {
 	return filepath.Join(tr.tmpDir, "oom_exit")
+}
+
+// logLineNumbers returns the numbers of the CRI log lines "line <n>" in the
+// file at path, nil if the file does not exist. A line being written fails
+// the assertions of g, so that an Eventually retries.
+func logLineNumbers(g Gomega, path string) []int {
+	contents, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+
+	g.Expect(err).To(Succeed())
+
+	var numbers []int
+
+	for line := range strings.Lines(string(contents)) {
+		// <timestamp> <pipe> <tag> line <n>, a terminal ends it with "\r".
+		fields := strings.Fields(line)
+		g.Expect(fields).To(HaveLen(5), "unexpected log line %q", line)
+		g.Expect(fields[3]).To(Equal("line"))
+
+		number, err := strconv.Atoi(fields[4])
+		g.Expect(err).To(Succeed())
+
+		numbers = append(numbers, number)
+	}
+
+	return numbers
 }
 
 func fileContents(path string) string {
@@ -378,6 +415,12 @@ func MustFile(file string) string {
 }
 
 func (tr *testRunner) configGivenEnv() *client.ConmonClient {
+	return tr.configGivenEnvWith(nil)
+}
+
+// configGivenEnvWith starts a server with the configuration of
+// configGivenEnv, changed by changeConfig if not nil.
+func (tr *testRunner) configGivenEnvWith(changeConfig func(*client.ConmonServerConfig)) *client.ConmonClient {
 	cfg := client.NewConmonServerConfig(runtimePath, tr.rr.runtimeRoot, tr.tmpDir)
 	cfg.ConmonServerPath = conmonPath
 	cfg.LogDriver = client.LogDriverStdout
@@ -388,6 +431,10 @@ func (tr *testRunner) configGivenEnv() *client.ConmonClient {
 
 	if tr.enableTracing {
 		cfg.Tracing = &client.Tracing{Enabled: true}
+	}
+
+	if changeConfig != nil {
+		changeConfig(cfg)
 	}
 
 	sut, err := client.New(cfg)
@@ -668,18 +715,28 @@ func testAttach(
 	useStdErr bool,
 	terminal bool,
 ) {
-	wg := sync.WaitGroup{}
-	wg.Add(2)
-
 	command := "/busybox echo -n " + testString
 
+	attachErr := make(chan error, 1)
+
 	go func() {
-		defer wg.Done()
-		defer GinkgoRecover()
-		// Nothing reads the output once this returns, closing the reader
-		// unblocks the attach if it still writes, also after a failed
-		// assertion.
-		defer reader.Close()
+		attachErr <- sut.AttachContainer(context.Background(), cfg)
+	}()
+
+	func() {
+		// Once the output got verified, the rest of it, like the echo of
+		// the exit of a terminal, is drained until the attach closes the
+		// stream. After a failed assertion the reader gets closed instead,
+		// which ends an attach that still writes.
+		verified := false
+
+		defer func() {
+			if verified {
+				go io.Copy(io.Discard, reader) //nolint:errcheck // only drains
+			} else {
+				reader.Close()
+			}
+		}()
 
 		pipe := ""
 		if useStdErr {
@@ -696,21 +753,11 @@ func testAttach(
 		// terminate the container
 		_, err := fmt.Fprintf(stdinWriter, "exit\n")
 		Expect(err).To(Succeed())
+
+		verified = true
 	}()
 
-	go func() {
-		defer wg.Done()
-		defer GinkgoRecover()
-
-		err := sut.AttachContainer(context.Background(), cfg)
-		// The attach may still be writing output when the reader gets
-		// closed above, that is the only error allowed.
-		if !errors.Is(err, io.ErrClosedPipe) {
-			Expect(err).To(Succeed())
-		}
-	}()
-
-	wg.Wait()
+	Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
 }
 
 func verifyBuffer(reader io.Reader, terminal bool, command, expected string) {
@@ -742,15 +789,14 @@ func verifyBuffer(reader io.Reader, terminal bool, command, expected string) {
 			return ""
 		}
 	}
-	if !terminal {
-		Expect(readSection()).To(Equal(expected))
 
-		return
+	// The terminal echoes the command and prints the prompt. Either way the
+	// output arrives in any number of reads.
+	fullExpectedBuffer := expected
+	if terminal {
+		fullExpectedBuffer = command + "\r\n" + expected + "/ # \x1b[6n"
 	}
 
-	// The terminal echoes the command and prints the prompt, which arrive
-	// in any number of reads.
-	fullExpectedBuffer := command + "\r\n" + expected + "/ # \x1b[6n"
 	str := ""
 
 	for len(str) < len(fullExpectedBuffer) {
@@ -758,4 +804,12 @@ func verifyBuffer(reader io.Reader, terminal bool, command, expected string) {
 	}
 
 	Expect(str).To(Equal(fullExpectedBuffer))
+}
+
+// streamURL runs the exec or attach session served at url until it ends.
+func streamURL(ctx context.Context, url string, options remotecommand.StreamOptions) error {
+	executor, err := remotecommand.NewWebSocketExecutor(&rest.Config{Insecure: true}, "GET", url)
+	Expect(err).NotTo(HaveOccurred())
+
+	return executor.StreamWithContext(ctx, options) //nolint:wrapcheck // the specs check the error itself
 }
