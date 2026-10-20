@@ -4,8 +4,13 @@
 //! it runs the runtime, so that the container engine can bind mount the
 //! `notify` directory into the container and point its `NOTIFY_SOCKET` at it,
 //! the same way podman does with the `--sdnotify-socket` option of conmon.
-//! Every datagram the container sends there is relayed unchanged to the host
-//! socket, usually the one of systemd, until the container exits.
+//! Every datagram the container sends there is relayed to the host socket,
+//! usually the one of systemd, until the container exits.
+//!
+//! systemd attributes the messages to the server, so only the assignments
+//! which cannot affect anything outside of the container pass, the same ones
+//! conmon passes. `MAINPID=` would for example make systemd manage an
+//! arbitrary host process.
 
 use crate::listener::{self, DefaultListener, Listener};
 use anyhow::{Context, Result, bail};
@@ -56,6 +61,19 @@ impl NotifySocket {
 
     /// How many queued messages get relayed after the container exited.
     const DRAIN_MAX_MESSAGES: usize = 64;
+
+    /// The assignments which pass as they are.
+    const PASS_LINES: [&'static [u8]; 5] = [
+        b"READY=1",
+        b"RELOADING=1",
+        b"STOPPING=1",
+        b"WATCHDOG=1",
+        b"WATCHDOG=trigger",
+    ];
+
+    /// The assignments which pass with any value.
+    const PASS_PREFIXES: [&'static [u8]; 4] =
+        [b"STATUS=", b"ERRNO=", b"BUSERROR=", b"MONOTONIC_USEC="];
 
     /// Bind the container side socket below the bundle path, the messages
     /// get relayed to the `host` socket. An `@` prefix denotes an abstract
@@ -182,27 +200,27 @@ impl NotifySocket {
     }
 
     async fn forward(&self, message: &[u8]) {
-        if !Self::check_message(message) {
+        let Some(message) = Self::check_message(message) else {
             return;
-        }
+        };
         if let Err(e) = self.connect_host_again() {
             warn!("Unable to relay notify message: {:#}", e);
             return;
         }
-        if let Err(e) = self.host.send(message).await {
+        if let Err(e) = self.host.send(&message).await {
             warn!("Unable to relay notify message: {e}");
         }
     }
 
     /// Relay without waiting for the host, drop the message if it is full.
     fn forward_now(&self, message: &[u8]) {
-        if !Self::check_message(message) {
+        let Some(message) = Self::check_message(message) else {
             return;
-        }
+        };
         let flags = MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL;
         if let Err(e) = self
             .connect_host_again()
-            .and_then(|()| send(self.host.as_raw_fd(), message, flags).context("send"))
+            .and_then(|()| send(self.host.as_raw_fd(), &message, flags).context("send"))
         {
             warn!("Unable to relay notify message: {:#}", e);
         }
@@ -214,21 +232,48 @@ impl NotifySocket {
         connect(self.host.as_raw_fd(), &self.host_addr).context("connect host socket")
     }
 
-    /// A message which got cut off may miss its ready state or end in the
-    /// middle of an assignment, drop it instead.
-    fn check_message(message: &[u8]) -> bool {
+    /// Returns the part of the message to relay, if any. A message which
+    /// got cut off may miss its ready state or end in the middle of an
+    /// assignment, drop it instead.
+    fn check_message(message: &[u8]) -> Option<Vec<u8>> {
         if message.len() > Self::MAX_MESSAGE_SIZE {
             warn!(
                 "Dropping notify message exceeding {} bytes",
                 Self::MAX_MESSAGE_SIZE
             );
-            return false;
+            return None;
+        }
+        let filtered = Self::filter_message(message);
+        if filtered.len() != message.len() {
+            debug!(
+                "Dropping notify assignments from {:?}",
+                String::from_utf8_lossy(message)
+            );
+        }
+        if filtered.is_empty() {
+            return None;
         }
         trace!(
             "Relaying notify message: {:?}",
-            String::from_utf8_lossy(message)
+            String::from_utf8_lossy(&filtered)
         );
-        true
+        Some(filtered)
+    }
+
+    /// Keep only the allowed assignments, newline separated.
+    fn filter_message(message: &[u8]) -> Vec<u8> {
+        let mut filtered = Vec::with_capacity(message.len());
+        for line in message.split(|&b| b == b'\n' || b == b'\r') {
+            if Self::PASS_LINES.contains(&line)
+                || Self::PASS_PREFIXES.iter().any(|p| line.starts_with(p))
+            {
+                if !filtered.is_empty() {
+                    filtered.push(b'\n');
+                }
+                filtered.extend_from_slice(line);
+            }
+        }
+        filtered
     }
 }
 
@@ -290,6 +335,16 @@ mod tests {
         container.send_to(b"READY=1\nSTATUS=up", &path).await?;
         assert_eq!(recv_string(&host).await?, "READY=1\nSTATUS=up");
 
+        // Only the allowed assignments get relayed, and nothing if none of
+        // them is left.
+        container
+            .send_to(b"MAINPID=1\nREADY=1\nFDSTORE=1", &path)
+            .await?;
+        assert_eq!(recv_string(&host).await?, "READY=1");
+        container.send_to(b"MAINPID=1\nBARRIER=1", &path).await?;
+        container.send_to(b"STATUS=filtered", &path).await?;
+        assert_eq!(recv_string(&host).await?, "STATUS=filtered");
+
         // Too long messages are dropped, the rest still arrives.
         let long = vec![b'x'; NotifySocket::MAX_MESSAGE_SIZE + 1];
         container.send_to(&long, &path).await?;
@@ -315,6 +370,40 @@ mod tests {
         })
         .await?;
         Ok(())
+    }
+
+    #[test]
+    fn filter_message() {
+        for (input, expected) in [
+            (&b"READY=1"[..], &b"READY=1"[..]),
+            (b"READY=1\nSTATUS=up\n", b"READY=1\nSTATUS=up"),
+            (
+                b"RELOADING=1\r\nMONOTONIC_USEC=42",
+                b"RELOADING=1\nMONOTONIC_USEC=42",
+            ),
+            (
+                b"STOPPING=1\nERRNO=2\nBUSERROR=x.y",
+                b"STOPPING=1\nERRNO=2\nBUSERROR=x.y",
+            ),
+            (
+                b"WATCHDOG=1\nWATCHDOG=trigger",
+                b"WATCHDOG=1\nWATCHDOG=trigger",
+            ),
+            (b"STATUS=\xff\xfe", b"STATUS=\xff\xfe"),
+            (b"MAINPID=1\nREADY=1", b"READY=1"),
+            (b"READY=10\nREADY=1 \nWATCHDOG=0\nWATCHDOG_USEC=1", b""),
+            (b"NOTIFYACCESS=all\nFDSTORE=1\nBARRIER=1", b""),
+            (b"EXTEND_TIMEOUT_USEC=1\nWATCHDOG_USEC=1\nFDNAME=x", b""),
+            (b"status=up\n\n", b""),
+            (b"", b""),
+        ] {
+            assert_eq!(
+                NotifySocket::filter_message(input),
+                expected,
+                "{:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
     }
 
     #[tokio::test]

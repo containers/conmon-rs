@@ -1,28 +1,32 @@
 use crate::{
-    container_io::{Message, Pipe},
+    container_io::{Drain, Message, Pipe},
     listener::{self, DefaultListener, Listener},
+    mutex::lock,
 };
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use nix::{
     errno::Errno,
     poll::{PollFd, PollFlags, PollTimeout, poll},
+    sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags},
     sys::socket::{AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, listen, socket},
 };
 use std::{
+    collections::HashMap,
+    fs, future,
     io::{self, IoSlice},
     os::{
-        fd::{AsFd, AsRawFd, OwnedFd},
-        unix::fs::PermissionsExt,
+        fd::{AsFd, AsRawFd, RawFd},
+        unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     },
     path::{Path, PathBuf},
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use tokio::{
-    io::ErrorKind,
+    io::{ErrorKind, Interest, unix::AsyncFd},
     select,
     sync::broadcast::{self, Receiver, Sender, error::RecvError},
     task,
@@ -35,8 +39,12 @@ use tracing::{Instrument, debug, debug_span, error, trace, warn};
 const STDIN_CHANNEL_SIZE: usize = 16;
 
 /// Capacity of the output broadcast channel towards the attach clients. A
-/// client which falls further behind than this loses output, so it matches
-/// what the stdio channels buffer for exec.
+/// client which falls further behind than this loses the oldest output,
+/// which gets logged with the number of skipped messages. The container
+/// output never waits for an attach client, a slow or stuck client must not
+/// block the container or the other clients, and the server does not buffer
+/// output without bound for it either. It matches what the stdio channels
+/// buffer for exec.
 const OUTPUT_CHANNEL_SIZE: usize = 100;
 
 #[derive(Clone, Debug)]
@@ -55,6 +63,39 @@ pub struct SharedContainerAttach {
     stdin_closed: CancellationToken,
     stop_after_stdin_eof: Arc<AtomicBool>,
     terminal: bool,
+
+    /// The listening attach sockets by path.
+    listeners: Arc<Mutex<HashMap<PathBuf, AttachListener>>>,
+}
+
+#[derive(Debug)]
+/// A listening attach socket and the identity of its file, which tells if
+/// the file got removed or replaced meanwhile. The inode stays in use while
+/// the listener is open, so its number cannot be reused until then.
+struct AttachListener {
+    /// Tells the listeners of a path apart.
+    id: u64,
+    dev: u64,
+    ino: u64,
+
+    /// Stops accepting connections, the accepted ones stay.
+    stop: CancellationToken,
+}
+
+impl AttachListener {
+    fn next_id() -> u64 {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Whether the socket file at the path is still the one listened on.
+    fn is_bound_at(&self, path: &Path) -> bool {
+        Self::is_file(path, self.dev, self.ino)
+    }
+
+    fn is_file(path: &Path, dev: u64, ino: u64) -> bool {
+        fs::symlink_metadata(path).is_ok_and(|m| m.dev() == dev && m.ino() == ino)
+    }
 }
 
 impl Default for SharedContainerAttach {
@@ -77,6 +118,7 @@ impl SharedContainerAttach {
             stdin_closed: CancellationToken::new(),
             stop_after_stdin_eof: Arc::default(),
             terminal,
+            listeners: Arc::default(),
         }
     }
 
@@ -148,6 +190,11 @@ impl SharedContainerAttach {
         })
     }
 
+    /// Whether the container has a terminal.
+    pub fn is_terminal(&self) -> bool {
+        self.terminal
+    }
+
     /// The token cancelled once an attach client closed the container stdin.
     pub fn stdin_closed(&self) -> &CancellationToken {
         &self.stdin_closed
@@ -162,6 +209,32 @@ impl SharedContainerAttach {
             self.stdin_closed.cancel();
         }
         !self.terminal
+    }
+
+    /// Forget a listener which stopped on the exit or an error, and remove
+    /// its socket if it is still at the path, unless another listener
+    /// replaced it meanwhile. The caller keeps the listener open, so that
+    /// the inode number of its socket is not reused yet.
+    fn remove_listener(&self, path: &Path, id: u64) {
+        let mut listeners = match lock(&self.listeners) {
+            Ok(listeners) => listeners,
+            Err(e) => {
+                warn!("Unable to lock attach listeners: {:#}", e);
+                return;
+            }
+        };
+        let Some(listener) = listeners.remove(path) else {
+            return;
+        };
+        if listener.id != id {
+            listeners.insert(path.to_path_buf(), listener);
+            return;
+        }
+        if listener.is_bound_at(path)
+            && let Err(e) = fs::remove_file(path)
+        {
+            debug!("Unable to remove attach socket {}: {e}", path.display());
+        }
     }
 
     /// Check if there are any active attach readers.
@@ -199,6 +272,22 @@ impl Drop for AttachOutput {
     }
 }
 
+/// Removes the entry of a listener and its socket however its task ends.
+/// Another listener which replaced it took over the path and the entry with
+/// an id of its own, which stay. The listener must still be open, see
+/// [`SharedContainerAttach::remove_listener`].
+struct ListenerCleanup {
+    attach: SharedContainerAttach,
+    path: PathBuf,
+    id: u64,
+}
+
+impl Drop for ListenerCleanup {
+    fn drop(&mut self) {
+        self.attach.remove_listener(&self.path, self.id);
+    }
+}
+
 #[derive(Clone, Debug)]
 /// Attach handles the attach socket IO of a container.
 struct Attach;
@@ -214,7 +303,7 @@ impl Attach {
     /// The packet indicating that we're done writing.
     const DONE_PACKET: &'static [u8; 1] = &[0];
 
-    /// Create a new attach instance.
+    /// Create a new attach instance, unless one listens on the path already.
     fn create<T>(
         socket_path: T,
         attach: SharedContainerAttach,
@@ -226,12 +315,38 @@ impl Attach {
     {
         let path = socket_path.as_ref();
 
-        if path.exists() {
+        // Held until the new listener got registered, so that a listener
+        // which stops meanwhile does not remove its socket.
+        let mut listeners = lock(&attach.listeners)?;
+        if let Some(listener) = listeners.remove(path) {
+            if !listener.stop.is_cancelled() && listener.is_bound_at(path) {
+                debug!("Already listening on attach socket {}", path.display());
+                listeners.insert(path.to_path_buf(), listener);
+                return Ok(());
+            }
+            // Nobody can connect to a socket which got removed, for example by
+            // an older client, or replaced. Stop accepting on it, otherwise
+            // the listener would wait until the container exits.
             debug!(
-                "Attach path {} already exist, assuming that we're already listening on it",
+                "Attach socket {} got removed or replaced, listening again",
                 path.display()
             );
-            return Ok(());
+            listener.stop.cancel();
+        }
+
+        // A socket of this path which no listener of this server accepts on
+        // is left over, for example by a previous server.
+        match fs::symlink_metadata(path) {
+            Ok(m) if m.file_type().is_socket() => {
+                debug!("Removing stale attach socket {}", path.display());
+                fs::remove_file(path).context("remove stale attach socket")?;
+            }
+            Ok(_) => bail!(
+                "attach socket path {} exists and is no socket",
+                path.display()
+            ),
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e).context("check attach socket path"),
         }
 
         debug!("Creating attach socket: {}", path.display());
@@ -249,30 +364,55 @@ impl Attach {
         let addr = UnixAddr::new(&shortened_path).context("create socket addr")?;
         bind(fd.as_raw_fd(), &addr).context("bind socket fd")?;
 
-        let setup = || -> Result<()> {
-            let mut permissions = path
-                .metadata()
-                .context("get attach socket metadata")?
-                .permissions();
-            permissions.set_mode(0o700);
-            std::fs::set_permissions(path, permissions).context("set attach socket permissions")?;
-            listen(&fd, Backlog::MAXCONN).context("listen on socket fd")
-        };
-        // Nothing listens on the socket if this fails. Remove it, otherwise the
-        // next attempt would take it for a listening one.
-        if let Err(e) = setup() {
-            if let Err(e) = std::fs::remove_file(path) {
+        // Nothing listens on the socket if the setup fails, remove it. The
+        // socket stays open until then, so the file is still the own one.
+        let remove = |e: anyhow::Error| {
+            if let Err(e) = fs::remove_file(path) {
                 debug!("Unable to remove attach socket {}: {:#}", path.display(), e);
             }
-            return Err(e);
-        }
+            e
+        };
+        let held = fd
+            .try_clone()
+            .context("duplicate attach socket")
+            .map_err(remove)?;
+        let setup = || -> Result<(fs::Metadata, UnixSeqpacketListener)> {
+            let metadata = path.metadata().context("get attach socket metadata")?;
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(0o700);
+            fs::set_permissions(path, permissions).context("set attach socket permissions")?;
+            listen(&fd, Backlog::MAXCONN).context("listen on socket fd")?;
+            let listener =
+                UnixSeqpacketListener::try_from(fd).context("create seqpacket listener")?;
+            Ok((metadata, listener))
+        };
+        let (metadata, mut listener) = setup().map_err(remove)?;
+        drop(held);
 
-        let path = path.to_path_buf();
+        let stop = CancellationToken::new();
+        let id = AttachListener::next_id();
+        listeners.insert(
+            path.to_path_buf(),
+            AttachListener {
+                id,
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+                stop: stop.clone(),
+            },
+        );
+        drop(listeners);
+
+        let cleanup = ListenerCleanup {
+            attach,
+            path: path.to_path_buf(),
+            id,
+        };
         task::spawn(
             async move {
-                if let Err(e) = Self::start(fd, path, attach, token).await {
-                    error!("Attach failure: {:#}", e);
-                }
+                Self::start(&mut listener, &cleanup.path, &cleanup.attach, token, stop).await;
+                // The cleanup runs before the listener gets closed.
+                drop(cleanup);
+                drop(listener);
             }
             .instrument(debug_span!("attach")),
         );
@@ -280,27 +420,26 @@ impl Attach {
         Ok(())
     }
 
+    /// Accept connections until the container exits, which cancels `token`,
+    /// or another listener replaces this one, which cancels `stop`.
     async fn start(
-        fd: OwnedFd,
-        path: PathBuf,
-        attach: SharedContainerAttach,
+        listener: &mut UnixSeqpacketListener,
+        path: &Path,
+        attach: &SharedContainerAttach,
         token: CancellationToken,
-    ) -> Result<()> {
-        debug!("Start listening on attach socket");
-        let mut listener =
-            UnixSeqpacketListener::try_from(fd).context("create seqpacket listener")?;
+        stop: CancellationToken,
+    ) {
+        debug!("Start listening on attach socket {}", path.display());
         loop {
-            // The container exit cancels the token, stop accepting then and
-            // remove the socket instead of keeping the listener around for the
-            // lifetime of the server.
             let accepted = select! {
                 accepted = listener.accept() => accepted,
                 _ = token.cancelled() => {
                     debug!("Stopping attach listener because token cancelled");
-                    if let Err(e) = std::fs::remove_file(&path) {
-                        debug!("Unable to remove attach socket {}: {e}", path.display());
-                    }
-                    return Ok(());
+                    return;
+                }
+                _ = stop.cancelled() => {
+                    debug!("Stopping attach listener because it got replaced");
+                    return;
                 }
             };
             match accepted {
@@ -321,10 +460,12 @@ impl Attach {
                     );
 
                     let (write_half_rx, output_ended) = attach.subscribe();
+                    let token_clone = token.clone();
                     task::spawn(
                         async move {
                             if let Err(e) =
-                                Self::write_loop(write, write_half_rx, output_ended).await
+                                Self::write_loop(write, write_half_rx, output_ended, token_clone)
+                                    .await
                             {
                                 error!("Attach write loop failure: {:#}", e);
                             }
@@ -457,18 +598,41 @@ impl Attach {
         matches!(e.kind(), ErrorKind::BrokenPipe | ErrorKind::ConnectionReset)
     }
 
+    /// Forward the container output to a client until the output ended or
+    /// the client went away. Once the container exited, which cancels
+    /// `token`, a process left behind may keep the output open, so forward
+    /// only what arrives shortly after the exit.
     async fn write_loop(
         socket: Arc<UnixSeqpacket>,
         mut rx: Receiver<Message>,
         output_ended: bool,
+        token: CancellationToken,
     ) -> Result<()> {
+        let hangup = Self::hangup(&socket);
+        tokio::pin!(hangup);
+        let mut drain: Option<Drain> = None;
         loop {
             // The done message may have been sent before subscribing, so write
             // it once nothing is queued anymore.
             let message = if output_ended {
                 rx.try_recv().unwrap_or(Message::Done)
             } else {
-                match rx.recv().await {
+                let res = select! {
+                    // The exit starts the drain once, also while the output
+                    // keeps coming.
+                    biased;
+                    () = token.cancelled(), if drain.is_none() => {
+                        debug!("Draining the output because token cancelled");
+                        drain = Some(Drain::default());
+                        continue;
+                    }
+                    () = &mut hangup => {
+                        debug!("Exiting because the client hung up");
+                        return Ok(());
+                    }
+                    res = Self::next_message(&mut rx, drain.as_mut()) => res,
+                };
+                match res {
                     Ok(message) => message,
                     Err(RecvError::Lagged(n)) => {
                         warn!("Attach client too slow, skipped {n} messages");
@@ -520,6 +684,68 @@ impl Attach {
             }
         }
     }
+
+    /// The next output message, bounded by the drain once the container
+    /// exited. If the output did not end after the exit, the client gets
+    /// the done packet anyway.
+    async fn next_message(
+        rx: &mut Receiver<Message>,
+        drain: Option<&mut Drain>,
+    ) -> Result<Message, RecvError> {
+        match drain {
+            Some(drain) => Ok(drain.recv_output(rx, true).await.unwrap_or(Message::Done)),
+            None => rx.recv().await,
+        }
+    }
+
+    /// Wait until the client closed the connection. Without output, a send
+    /// never notices, and a client which only closed its write side still
+    /// receives the output. The hangup gets reported by an epoll instance of
+    /// its own, which watches the socket for nothing but the hangups and
+    /// errors epoll always reports. Neither input nor output wakes it up,
+    /// and its readiness is separate from the one of the socket, which the
+    /// read and write loops use. If that fails, only a failing send ends
+    /// the loop.
+    #[allow(unsafe_code)]
+    async fn hangup(socket: &UnixSeqpacket) {
+        let wait = async || -> Result<()> {
+            let epoll = Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC).context("create epoll")?;
+            epoll
+                .add(socket.as_fd(), EpollEvent::new(EpollFlags::EPOLLET, 0))
+                .context("watch attach socket")?;
+            // SAFETY: the `AsyncFd` takes ownership of the epoll instance, so
+            // it stays valid and unchanged for the lifetime of the `AsyncFd`.
+            let epoll =
+                unsafe { AsyncFd::register_with_interest(EpollFd(epoll), Interest::READABLE) }
+                    .context("register epoll")?;
+            let mut events = [EpollEvent::empty()];
+            loop {
+                let mut guard = epoll.readable().await.context("wait for epoll")?;
+                let n = guard
+                    .get_inner()
+                    .0
+                    .wait(&mut events, PollTimeout::ZERO)
+                    .context("read epoll events")?;
+                if n > 0 {
+                    return Ok(());
+                }
+                guard.clear_ready();
+            }
+        };
+        if let Err(e) = wait().await {
+            warn!("Unable to watch for the attach client to hang up: {:#}", e);
+            future::pending::<()>().await;
+        }
+    }
+}
+
+/// An epoll instance which tokio can wait for.
+struct EpollFd(Epoll);
+
+impl AsRawFd for EpollFd {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.0.as_raw_fd()
+    }
 }
 
 #[cfg(test)]
@@ -530,6 +756,7 @@ mod tests {
         container_log::ContainerLog,
     };
     use nix::sys::socket::{MsgFlags, connect, send};
+    use std::os::fd::OwnedFd;
     use std::{
         io,
         net::Shutdown,
@@ -636,7 +863,7 @@ mod tests {
         assert!(output_ended);
         timeout(
             Duration::from_secs(5),
-            Attach::write_loop(server, rx, output_ended),
+            Attach::write_loop(server, rx, output_ended, CancellationToken::new()),
         )
         .await??;
 
@@ -653,7 +880,12 @@ mod tests {
         drop(client);
 
         let (rx, _) = attach.subscribe();
-        let mut write_loop = task::spawn(Attach::write_loop(server, rx, false));
+        let mut write_loop = task::spawn(Attach::write_loop(
+            server,
+            rx,
+            false,
+            CancellationToken::new(),
+        ));
         // A process forked by a parallel test may hold the client end until
         // it execs, a send succeeds then. Keep sending until one fails.
         for _ in 0..500 {
@@ -663,6 +895,100 @@ mod tests {
             }
         }
         bail!("write loop did not stop")
+    }
+
+    /// Receive a packet of the attach protocol.
+    async fn recv_packet(client: &UnixSeqpacket) -> Result<Vec<u8>> {
+        let mut buf = vec![0; Attach::PACKET_BUF_SIZE];
+        let n = timeout(Duration::from_secs(5), client.recv(&mut buf))
+            .await??
+            .bytes_read();
+        buf.truncate(n);
+        Ok(buf)
+    }
+
+    #[tokio::test]
+    async fn write_loop_stops_on_hangup() -> Result<()> {
+        let attach = SharedContainerAttach::default();
+        let (server, client) = seqpacket_pair()?;
+        let (rx, _) = attach.subscribe();
+        let write_loop = task::spawn(Attach::write_loop(
+            server.clone(),
+            rx,
+            false,
+            CancellationToken::new(),
+        ));
+
+        // Closing only the write side keeps the output flowing.
+        client.shutdown(Shutdown::Write)?;
+        attach.write(Message::Data(Bytes::from_static(b"data"), Pipe::StdOut));
+        assert_eq!(recv_packet(&client).await?, b"\x02data");
+        assert!(!write_loop.is_finished());
+
+        // A process forked by a parallel test may hold the client end until
+        // it execs, which delays the hangup.
+        drop(client);
+        timeout(Duration::from_secs(5), write_loop).await???;
+        assert_eq!(attach.write_half_tx.receiver_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_loop_drains_after_exit() -> Result<()> {
+        let attach = SharedContainerAttach::default();
+        // Output which never ends, like one held open by a process the
+        // container left behind.
+        let _output = attach.output();
+        let (server, client) = seqpacket_pair()?;
+        let (rx, _) = attach.subscribe();
+        let token = CancellationToken::new();
+        let write_loop = task::spawn(Attach::write_loop(server, rx, false, token.clone()));
+
+        attach.write(Message::Data(Bytes::from_static(b"out"), Pipe::StdOut));
+        token.cancel();
+        attach.write(Message::Data(Bytes::from_static(b"err"), Pipe::StdErr));
+
+        assert_eq!(recv_packet(&client).await?, b"\x02out");
+        assert_eq!(recv_packet(&client).await?, b"\x03err");
+        assert_eq!(recv_packet(&client).await?, Attach::DONE_PACKET);
+        timeout(Duration::from_secs(5), write_loop).await???;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn write_loop_drains_after_exit_with_busy_output() -> Result<()> {
+        let attach = SharedContainerAttach::default();
+        let _output = attach.output();
+        let (server, client) = seqpacket_pair()?;
+        let (rx, _) = attach.subscribe();
+        let token = CancellationToken::new();
+
+        // A process left behind which never pauses.
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = std::thread::spawn({
+            let (attach, stop) = (attach.clone(), stop.clone());
+            move || {
+                while !stop.load(Ordering::Relaxed) {
+                    attach.write(Message::Data(Bytes::from_static(b"x"), Pipe::StdOut));
+                }
+            }
+        });
+        let write_loop = task::spawn(Attach::write_loop(server, rx, false, token.clone()));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        token.cancel();
+
+        let res = timeout(Duration::from_secs(10), async {
+            while recv_packet(&client).await? != Attach::DONE_PACKET {}
+            Ok::<_, anyhow::Error>(())
+        })
+        .await;
+        stop.store(true, Ordering::Relaxed);
+        writer
+            .join()
+            .map_err(|_| anyhow::anyhow!("writer panicked"))?;
+        res??;
+        timeout(Duration::from_secs(5), write_loop).await???;
+        Ok(())
     }
 
     #[tokio::test]
@@ -823,6 +1149,122 @@ mod tests {
             }
         })
         .await?;
+        Ok(())
+    }
+
+    /// Wait until the condition holds.
+    async fn wait_for(mut condition: impl FnMut() -> bool) -> Result<()> {
+        timeout(Duration::from_secs(5), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Connect to an attach socket and wait until the connection receives
+    /// the output.
+    async fn attach_client(attach: &SharedContainerAttach, path: &Path) -> Result<UnixSeqpacket> {
+        let readers = attach.write_half_tx.receiver_count();
+        let client = UnixSeqpacket::connect(path).await?;
+        wait_for(|| attach.write_half_tx.receiver_count() > readers).await?;
+        Ok(client)
+    }
+
+    #[tokio::test]
+    async fn listens_again_once_the_socket_got_removed() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("attach");
+        let token = CancellationToken::new();
+        let attach = SharedContainerAttach::default();
+        attach.add(&path, token.clone(), false)?;
+        let ino = fs::metadata(&path)?.ino();
+        let first_stop = lock(&attach.listeners)?
+            .get(&path)
+            .context("no listener")?
+            .stop
+            .clone();
+
+        // Another attach keeps the listener.
+        attach.add(&path, token.clone(), false)?;
+        assert_eq!(fs::metadata(&path)?.ino(), ino);
+        assert!(!first_stop.is_cancelled());
+        let first = attach_client(&attach, &path).await?;
+
+        // Older clients removed the socket once they were done, nobody could
+        // connect to the listener anymore.
+        fs::remove_file(&path)?;
+        attach.add(&path, token.clone(), false)?;
+        assert!(first_stop.is_cancelled());
+        assert_eq!(lock(&attach.listeners)?.len(), 1);
+        let second = attach_client(&attach, &path).await?;
+
+        // The connections of the stopped listener stay.
+        attach.write(Message::Data(Bytes::from_static(b"x"), Pipe::StdOut));
+        assert_eq!(recv_packet(&first).await?, b"\x02x");
+        assert_eq!(recv_packet(&second).await?, b"\x02x");
+
+        // The stopped listener leaves the new socket alone, the exit removes
+        // it.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(path.exists());
+        token.cancel();
+        wait_for(|| !path.exists()).await?;
+        wait_for(|| lock(&attach.listeners).is_ok_and(|l| l.is_empty())).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ended_listener_removes_its_entry_and_socket() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("attach");
+        let attach = SharedContainerAttach::default();
+        attach.add(&path, CancellationToken::new(), false)?;
+        let id = lock(&attach.listeners)?
+            .get(&path)
+            .context("no listener")?
+            .id;
+        let cleanup = |id| ListenerCleanup {
+            attach: attach.clone(),
+            path: path.clone(),
+            id,
+        };
+
+        // One which got replaced, so of another id, leaves them alone.
+        drop(cleanup(id + 1));
+        assert!(lock(&attach.listeners)?.contains_key(&path));
+        assert!(path.exists());
+
+        // Any other end of the task removes both, so that the next attach
+        // listens again instead of taking the dead socket for a live one.
+        drop(cleanup(id));
+        assert!(lock(&attach.listeners)?.is_empty());
+        assert!(!path.exists());
+        attach.add(&path, CancellationToken::new(), false)?;
+        attach_client(&attach, &path).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replaces_a_stale_socket() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("attach");
+        let token = CancellationToken::new();
+
+        // A socket left behind by a previous server.
+        drop(std::os::unix::net::UnixListener::bind(&path)?);
+        let attach = SharedContainerAttach::default();
+        attach.add(&path, token.clone(), false)?;
+        attach_client(&attach, &path).await?;
+        token.cancel();
+        wait_for(|| !path.exists()).await?;
+
+        // Anything else stays.
+        fs::write(&path, b"")?;
+        let attach = SharedContainerAttach::default();
+        assert!(attach.add(&path, CancellationToken::new(), false).is_err());
+        assert!(path.exists());
         Ok(())
     }
 

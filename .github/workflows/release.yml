@@ -11,12 +11,27 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Uploads the release assets.
+    # The binaries come from the bucket, which forks have no access to.
+    if: github.repository == 'containers/conmon-rs'
+    # Uploads the release assets and looks up the ci runs.
     permissions:
+      actions: read
       contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Only a push to main builds and uploads the binaries of a commit, and
+      # only of its head. Fail right away for any other commit instead of
+      # waiting for binaries which never show up.
+      - name: Check for binaries of the commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUNS=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&branch=main" --jq .total_count)
+          if [[ $RUNS == 0 ]]; then
+            echo "::error::No ci run on main built $GITHUB_SHA, so the bucket has no binaries for it. Tag a commit which had its own ci run on main, for example the merge commit of a PR."
+            exit 1
+          fi
       - name: Create Release Packaging
         run: make create-release-packages
         env:
@@ -32,7 +47,24 @@ jobs:
               curl -sSfL --retry-all-errors --retry 30 --retry-delay 20 "$BASE_URL/$FILE" -o "$FILE"
             done
           done
-          sha256sum conmonrs.* *.tar.gz > sha256sums.txt
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      # Like scripts/get, and only binaries signed for this commit.
+      - name: Verify binaries
+        run: |
+          GIT_REF=refs/heads/main
+          for ARCH in amd64 arm64 ppc64le s390x; do
+            cosign verify-blob "conmonrs.$ARCH" \
+              --bundle "conmonrs.$ARCH.bundle" \
+              --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/ci.yml@$GIT_REF" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-github-workflow-name ci \
+              --certificate-github-workflow-repository "$GITHUB_REPOSITORY" \
+              --certificate-github-workflow-ref "$GIT_REF" \
+              --certificate-github-workflow-sha "$GITHUB_SHA"
+          done
+      - name: Checksums
+        run: |
+          sha256sum -- conmonrs.* *.tar.gz > sha256sums.txt
           cat sha256sums.txt
       - name: Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
@@ -55,8 +87,11 @@ jobs:
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           credentials_json: ${{ secrets.GCS_CRIO_SA }}
+      # The marker changes in place, caches must not serve an old one.
       - uses: google-github-actions/upload-cloud-storage@6397bd7208e18d13ba2619ee21b9873edc94427a # v3.0.0
         with:
           path: .
           glob: latest-*.txt
           destination: cri-o/conmon-rs
+          headers: |-
+            cache-control: no-cache

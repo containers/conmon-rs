@@ -5,12 +5,71 @@ use nix::{
     errno::Errno,
     sys::{
         signal::{Signal, kill},
-        wait::{Id, WaitPidFlag, waitid},
+        wait::{Id, WaitPidFlag, WaitStatus, waitid},
     },
-    unistd::Pid,
+    unistd::{Pid, getpgid, getpid},
 };
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::{
+    os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
+    sync::{PoisonError, RwLock, RwLockWriteGuard},
+};
 use tracing::debug;
+
+/// Taken for writing while the server reaps one of its children, and for
+/// reading while it checks that one was not reaped yet and signals it. A
+/// child found unreaped under the read lock stays unreaped until the signals
+/// were sent. So neither its PID nor the ID of its process group, which it
+/// keeps referring to as a zombie, can be taken by another process meanwhile.
+/// The server is the only one which reaps its children.
+static REAP_LOCK: RwLock<()> = RwLock::new(());
+
+/// Hold while reaping a child of the server, see [`REAP_LOCK`].
+pub fn reap_guard() -> RwLockWriteGuard<'static, ()> {
+    REAP_LOCK.write().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Whether the process is a zombie. The state follows the parenthesized
+/// command name in `/proc/<pid>/stat`.
+pub fn is_zombie(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(") ")
+            .is_some_and(|(_, rest)| rest.starts_with('Z'))
+    })
+}
+
+/// Whether a child of this process belongs to the process group. The parent
+/// and the group follow the parenthesized command name in `/proc/<pid>/stat`.
+fn group_has_child(pgid: Pid) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    let own = getpid().as_raw().to_string();
+    let pgid = pgid.as_raw().to_string();
+    entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.parse::<u32>().is_ok())
+        })
+        .any(|entry| {
+            std::fs::read_to_string(entry.path().join("stat")).is_ok_and(|stat| {
+                stat.rsplit_once(") ").is_some_and(|(_, rest)| {
+                    let mut fields = rest.split_whitespace().skip(1);
+                    fields.next() == Some(own.as_str()) && fields.next() == Some(pgid.as_str())
+                })
+            })
+        })
+}
+
+/// Whether the process group of a child gets signalled. Group 1 would end up
+/// as kill(-1), which kills everything conmon-rs is allowed to, and a child
+/// which did not get its own group shares the one of this server, which
+/// would kill it as well.
+pub fn signals_group(pgid: Pid, own_pgid: Option<Pid>) -> bool {
+    pgid.as_raw() > 1 && Some(pgid) != own_pgid
+}
 
 /// Open a pidfd for the process, which also works for one that already
 /// exited but was not reaped yet. The descriptor is close-on-exec.
@@ -67,6 +126,12 @@ impl Process {
         Self { pid, pidfd }
     }
 
+    /// Refer to a child by its PID alone, which gets checked to still belong
+    /// to an unreaped child of the server before every signal.
+    pub fn child(pid: Pid) -> Self {
+        Self { pid, pidfd: None }
+    }
+
     pub fn pid(&self) -> Pid {
         self.pid
     }
@@ -76,18 +141,128 @@ impl Process {
     /// refers to the exited process then and the signal fails with `ESRCH`
     /// instead of hitting another process.
     pub fn signal(&self, signal: impl Into<Option<Signal>>) -> nix::Result<()> {
-        let signal = signal.into();
+        let _guard = REAP_LOCK.read().unwrap_or_else(PoisonError::into_inner);
+        self.signal_unlocked(signal.into())
+    }
+
+    /// Whether the child still runs. A zombie which was not reaped yet does
+    /// not, although it can still be signalled.
+    pub fn is_running(&self) -> bool {
+        let _guard = REAP_LOCK.read().unwrap_or_else(PoisonError::into_inner);
+        self.signal_unlocked(None).is_ok()
+            && matches!(
+                waitid(
+                    Id::Pid(self.pid),
+                    WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+                ),
+                Ok(WaitStatus::StillAlive)
+            )
+    }
+
+    /// Signal the process group of the process and the process itself, once
+    /// it was checked to be unreaped, see [`REAP_LOCK`]. The group only gets
+    /// signalled if [`signals_group`] allows it.
+    ///
+    /// A process which got reaped already may have led a group which still
+    /// has members, like the init of a container without a PID namespace
+    /// whose children hold the pipes. They got reparented to this server,
+    /// the subreaper, so the group gets signalled as long as one of them is
+    /// an unreaped child of the server, which keeps the group ID in use.
+    pub fn signal_group(&self, signal: Signal) -> nix::Result<()> {
+        let _guard = REAP_LOCK.read().unwrap_or_else(PoisonError::into_inner);
+        let own_pgid = getpgid(None).ok();
+        if let Err(e) = self.signal_unlocked(None) {
+            if signals_group(self.pid, own_pgid) && group_has_child(self.pid) {
+                debug!("Signalling the remaining group of PID {}", self.pid);
+                return kill(Pid::from_raw(-self.pid.as_raw()), signal);
+            }
+            return Err(e);
+        }
+        if let Ok(pgid) = getpgid(Some(self.pid))
+            && signals_group(pgid, own_pgid)
+            && let Err(e) = kill(Pid::from_raw(-pgid.as_raw()), signal)
+        {
+            debug!("Unable to signal process group {pgid}: {e}");
+        }
+        self.signal_unlocked(Some(signal))
+    }
+
+    fn signal_unlocked(&self, signal: Option<Signal>) -> nix::Result<()> {
         if let Some(pidfd) = &self.pidfd {
             return pidfd_send_signal(pidfd, signal);
         }
 
         // Without pidfds (Linux before 5.3) check that the process is still a
         // child of this server which was not reaped yet, its PID cannot be
-        // reused then. Only a reap between the check and the signal is left.
+        // reused then. The caller holds the lock which keeps it unreaped.
         waitid(
             Id::Pid(self.pid),
             WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
         )?;
         kill(self.pid, signal)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+    #[test]
+    fn own_process_group_is_not_signalled() -> Result<()> {
+        let own = getpgid(None)?;
+        assert!(!signals_group(own, Some(own)));
+        assert!(!signals_group(Pid::from_raw(1), Some(own)));
+        assert!(!signals_group(Pid::from_raw(0), None));
+        assert!(signals_group(Pid::from_raw(own.as_raw() + 1), Some(own)));
+        Ok(())
+    }
+
+    #[test]
+    fn signal_group_reaches_the_group_until_reaped() -> Result<()> {
+        for use_pidfd in [true, false] {
+            // A shell in a group of its own with a child in the same group.
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", "sleep 60 & wait"])
+                .process_group(0)
+                .spawn()?;
+            let pid = Pid::from_raw(child.id() as i32);
+            let process = if use_pidfd {
+                Process::open(pid)
+            } else {
+                Process::child(pid)
+            };
+
+            process.signal_group(Signal::SIGTERM)?;
+            assert_eq!(child.wait()?.signal(), Some(Signal::SIGTERM as i32));
+            // Its group is gone with it, nothing gets signalled anymore.
+            assert!(process.signal_group(Signal::SIGTERM).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn signal_group_reaches_members_of_reaped_leader() -> Result<()> {
+        // The leader of a group, and a member which outlives it.
+        let mut leader = std::process::Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()?;
+        let pgid = Pid::from_raw(leader.id() as i32);
+        let mut member = std::process::Command::new("sleep")
+            .arg("60")
+            .process_group(pgid.as_raw())
+            .spawn()?;
+        leader.kill()?;
+        leader.wait()?;
+
+        let process = Process::child(pgid);
+        process.signal_group(Signal::SIGTERM)?;
+        assert_eq!(member.wait()?.signal(), Some(Signal::SIGTERM as i32));
+
+        // Without members, nothing gets signalled.
+        assert!(process.signal_group(Signal::SIGTERM).is_err());
+        Ok(())
     }
 }

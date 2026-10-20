@@ -46,13 +46,24 @@ use std::{
     io::{IoSliceMut, Write},
     mem,
     num::Wrapping,
-    os::fd::OwnedFd,
+    os::fd::{OwnedFd, RawFd},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
 use tokio::{runtime::Handle, sync::Mutex as AsyncMutex, task};
 use tokio_seqpacket::{UnixSeqpacket, ancillary::OwnedAncillaryMessage};
 use tracing::{Instrument, debug, debug_span};
+
+/// The most descriptors the kernel passes with one message (`SCM_MAX_FD`),
+/// which is also the limit of the Go client.
+const MAX_FDS: usize = 253;
+
+/// Room for a control message carrying `MAX_FDS` descriptors, more would
+/// get cut off (`MSG_CTRUNC`).
+#[allow(unsafe_code)]
+// SAFETY: CMSG_SPACE only computes a size, it does not access any memory.
+const ANCILLARY_BUF_SIZE: usize =
+    unsafe { libc::CMSG_SPACE((MAX_FDS * size_of::<RawFd>()) as libc::c_uint) } as usize;
 
 #[derive(Debug, Default)]
 pub struct FdSocket {
@@ -232,7 +243,7 @@ impl Server {
         };
         loop {
             let mut buf = [0; 9];
-            let mut ancillary_buf = [0; 1024];
+            let mut ancillary_buf = [0; ANCILLARY_BUF_SIZE];
             let (n, ancillary) = conn
                 .recv_vectored_with_ancillary(&mut [IoSliceMut::new(&mut buf)], &mut ancillary_buf)
                 .await?;
@@ -298,12 +309,12 @@ mod tests {
         fds: &[OwnedFd],
     ) -> Result<Vec<u8>> {
         let header = ((id << 32) | num_fds).to_le_bytes();
-        let mut ancillary_buf = [0; 64];
+        let mut ancillary_buf = [0; ANCILLARY_BUF_SIZE];
         let mut ancillary = AncillaryMessageWriter::new(&mut ancillary_buf);
         ancillary.add_fds(fds.iter().map(AsFd::as_fd))?;
         conn.send_vectored_with_ancillary(&[IoSlice::new(&header)], &mut ancillary)
             .await?;
-        let mut buf = [0; 1024];
+        let mut buf = [0; 8 + MAX_FDS * 8 + 1];
         let n = conn.recv(&mut buf).await?.bytes_read();
         Ok(buf[..n].to_vec())
     }
@@ -340,6 +351,14 @@ mod tests {
         assert_eq!(fd_socket.take_all(slots)?.len(), 2);
         assert!(fd_socket.take_all([slots[0]]).is_err());
         assert!(fd_socket.take_all([])?.is_empty());
+
+        // The most descriptors a message can carry all arrive.
+        let fds = (0..MAX_FDS)
+            .map(|_| Ok(File::open("/dev/null")?.into()))
+            .collect::<Result<Vec<OwnedFd>>>()?;
+        let resp = request(&conn, 9, MAX_FDS as u64, &fds).await?;
+        assert_eq!(word(&resp, 0), (9 << 32) | MAX_FDS as u64);
+        assert_eq!(resp.len(), (MAX_FDS + 1) * 8);
         Ok(())
     }
 }

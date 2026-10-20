@@ -3,11 +3,11 @@ use crate::fd_mapping::{CommandFdExt, FdMapping};
 use crate::{
     attach::SharedContainerAttach,
     child::{Child, ChildKind, sleep_until},
-    container_io::{ContainerIO, ContainerIOType, DRAIN_TIMEOUT, Message, SharedContainerIO},
+    container_io::{ContainerIO, ContainerIOType, Drain, SharedContainerIO},
     init,
     mutex::lock,
-    oom_watcher::OOMWatcher,
-    process::pidfd_open,
+    oom_watcher::{OOMEvent, OOMWatcher},
+    process::{Process, is_zombie, pidfd_open, reap_guard},
 };
 use anyhow::{Context, Result, bail, format_err};
 use futures::future::join_all;
@@ -15,10 +15,10 @@ use libc::pid_t;
 use nix::{
     errno::Errno,
     sys::{
-        signal::{Signal, kill},
+        signal::Signal,
         wait::{Id, WaitPidFlag, WaitStatus, waitid, waitpid},
     },
-    unistd::{Pid, getpgid, getpid},
+    unistd::{Pid, getpid},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -37,12 +37,13 @@ use std::{
 use tokio::{
     fs,
     io::unix::AsyncFd,
-    process::{Child as RuntimeChild, Command},
+    io::{AsyncRead, AsyncReadExt},
+    process::{Child as RuntimeChild, ChildStderr, ChildStdout, Command},
     select,
     signal::unix::{SignalKind, signal},
     sync::{
         Notify,
-        broadcast::{self, Receiver, error::RecvError},
+        broadcast::{self, Receiver},
         oneshot, watch,
     },
     task::{self, JoinHandle},
@@ -50,6 +51,84 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error, warn};
+
+/// The stdout and stderr of a runtime with pipes of its own, read in the
+/// background until they end. Only the end of stderr is kept, it holds the
+/// error, stdout is not of interest.
+struct RuntimeOutput {
+    stderr: Arc<Mutex<Vec<u8>>>,
+    task: JoinHandle<()>,
+}
+
+impl RuntimeOutput {
+    /// How much of the end of stderr is kept.
+    const MAX_STDERR: usize = 64 * 1024;
+
+    fn spawn(stdout: Option<ChildStdout>, stderr: Option<ChildStderr>) -> Self {
+        let buf = Arc::<Mutex<Vec<u8>>>::default();
+        let stderr_buf = buf.clone();
+        let task = task::spawn(async move {
+            tokio::join!(
+                async {
+                    if let Some(stdout) = stdout {
+                        Self::read(stdout, None).await
+                    }
+                },
+                async {
+                    if let Some(stderr) = stderr {
+                        Self::read(stderr, Some(&stderr_buf)).await
+                    }
+                },
+            );
+        });
+        Self { stderr: buf, task }
+    }
+
+    /// Read until the end, keeping the end in `buf` if any.
+    async fn read(mut reader: impl AsyncRead + Unpin, buf: Option<&Mutex<Vec<u8>>>) {
+        let mut chunk = [0; 8192];
+        loop {
+            let n = match reader.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            };
+            let Some(buf) = buf else {
+                continue;
+            };
+            let Ok(mut buf) = buf.lock() else {
+                return;
+            };
+            buf.extend_from_slice(&chunk[..n]);
+            // Dropping the front only once it doubled keeps it amortized.
+            if buf.len() > 2 * Self::MAX_STDERR {
+                let excess = buf.len() - Self::MAX_STDERR;
+                buf.drain(..excess);
+            }
+        }
+    }
+
+    /// Wait for the end of the output for a while, a helper of the runtime
+    /// may hold the pipes open, and return the end of stderr.
+    async fn finish(output: Option<Self>) -> Vec<u8> {
+        let Some(mut output) = output else {
+            return vec![];
+        };
+        if time::timeout(ChildReaper::CONNECT_AFTER_EXIT_TIMEOUT, &mut output.task)
+            .await
+            .is_err()
+        {
+            debug!("Runtime output still held open, giving up on it");
+            output.task.abort();
+        }
+        let mut stderr = match output.stderr.lock() {
+            Ok(mut stderr) => std::mem::take(&mut *stderr),
+            Err(_) => return vec![],
+        };
+        let excess = stderr.len().saturating_sub(Self::MAX_STDERR);
+        stderr.drain(..excess);
+        stderr
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct ChildReaper {
@@ -215,11 +294,21 @@ impl ChildReaper {
 
         let token = CancellationToken::new();
 
+        // With streams, the read loops take the output of the runtime along
+        // with the one of the process. With a terminal, the runtime has pipes
+        // of its own. They get read while waiting for it, a runtime which
+        // writes more than they hold, like with debug logging, would block.
+        let mut output = None;
+
         // How long a runtime which failed before it exited may take to exit on
         // its own, none once its deadline passed.
         let mut grace = Self::CONNECT_AFTER_EXIT_TIMEOUT;
         let connected = match container_io.typ_mut() {
             ContainerIOType::Terminal(terminal) => {
+                output = Some(RuntimeOutput::spawn(
+                    child.stdout.take(),
+                    child.stderr.take(),
+                ));
                 // The runtime connects to the console socket before it exits.
                 // If it fails before that, waiting for the connection alone
                 // would hang this call forever.
@@ -267,24 +356,25 @@ impl ChildReaper {
             },
             (res, _) => res,
         };
-        let output = match connected {
-            Ok(()) => child.wait_with_output().await.context("wait for runtime")?,
+        let status = match connected {
+            Ok(()) => child.wait().await.context("wait for runtime")?,
             Err(e) => {
                 token.cancel();
-                let stderr = Self::stop_runtime(child, grace).await;
+                let stderr = Self::stop_runtime(child, output, grace).await;
                 return Err(self.fail_create(pidfile, e, &stderr).await);
             }
         };
+        let stderr = RuntimeOutput::finish(output).await;
 
-        if !output.status.success() {
+        if !status.success() {
             // token must be cancelled here because the child hasn't been registered yet,
             // meaning there is no other entity that could cancel the read_loops.
             token.cancel();
-            let error = match output.status.code() {
+            let error = match status.code() {
                 Some(code) => format_err!("child command exited with: {code}"),
                 None => format_err!("child command exited with signal"),
             };
-            return Err(self.fail_create(pidfile, error, &output.stderr).await);
+            return Err(self.fail_create(pidfile, error, &stderr).await);
         }
 
         // Read synchronously and mark the process as pending right away, a
@@ -296,7 +386,7 @@ impl ChildReaper {
                 // Nothing registers the process, so the read loops have to be
                 // stopped here as well.
                 token.cancel();
-                return Err(self.fail_create(pidfile, e, &output.stderr).await);
+                return Err(self.fail_create(pidfile, e, &stderr).await);
             }
         };
 
@@ -331,7 +421,11 @@ impl ChildReaper {
     /// Stop a runtime which failed before it exited: give it `grace` to exit
     /// on its own, so that it still writes the PID file the cleanup needs,
     /// kill it otherwise, and return its stderr.
-    async fn stop_runtime(mut child: RuntimeChild, grace: Duration) -> Vec<u8> {
+    async fn stop_runtime(
+        mut child: RuntimeChild,
+        output: Option<RuntimeOutput>,
+        grace: Duration,
+    ) -> Vec<u8> {
         if time::timeout(grace, child.wait()).await.is_err() {
             debug!("Runtime did not exit in time, killing it");
             if let Err(e) = child.start_kill() {
@@ -347,19 +441,8 @@ impl ChildReaper {
             }
         }
 
-        // Its stderr usually holds the reason. A helper of the runtime may
-        // keep the pipes open though, so do not wait for them forever.
-        match time::timeout(Self::CONNECT_AFTER_EXIT_TIMEOUT, child.wait_with_output()).await {
-            Ok(Ok(output)) => output.stderr,
-            Ok(Err(e)) => {
-                debug!("Unable to wait for runtime: {e}");
-                vec![]
-            }
-            Err(_) => {
-                debug!("Runtime output still held open, giving up on it");
-                vec![]
-            }
-        }
+        // Its stderr usually holds the reason.
+        RuntimeOutput::finish(output).await
     }
 
     /// Clean up after a failed runtime call and build its error, with the
@@ -453,7 +536,10 @@ impl ChildReaper {
                 candidates.remove(&pid);
                 continue;
             }
-            match waitpid(Pid::from_raw(pid as pid_t), Some(WaitPidFlag::WNOHANG)) {
+            let reaping = reap_guard();
+            let status = waitpid(Pid::from_raw(pid as pid_t), Some(WaitPidFlag::WNOHANG));
+            drop(reaping);
+            match status {
                 Ok(status) => debug!("Reaped orphaned child {pid}: {status:?}"),
                 Err(e) => debug!("Unable to reap orphaned child {pid}: {e}"),
             }
@@ -480,7 +566,7 @@ impl ChildReaper {
     fn zombie_children() -> Vec<u32> {
         Self::children()
             .into_iter()
-            .filter(|pid| Self::is_zombie(*pid))
+            .filter(|pid| is_zombie(*pid))
             .collect()
     }
 
@@ -519,15 +605,6 @@ impl ChildReaper {
             .collect()
     }
 
-    /// Whether the process is a zombie. The state follows the parenthesized
-    /// command name in `/proc/<pid>/stat`.
-    fn is_zombie(pid: u32) -> bool {
-        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-            stat.rsplit_once(") ")
-                .is_some_and(|(_, rest)| rest.starts_with('Z'))
-        })
-    }
-
     /// Kill and reap the container process of a failed runtime call, if the
     /// runtime got as far as writing its PID. It got reparented to this
     /// subreaper and nobody else waits for it.
@@ -550,22 +627,12 @@ impl ChildReaper {
         }
         let pid = Pid::from_raw(pid);
 
-        // Make sure it is a child, the PID may have been reused otherwise.
-        match waitid(
-            Id::Pid(pid),
-            WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
-        ) {
-            Ok(_) => {}
-            Err(e) => {
-                debug!("Not cleaning up PID {pid} of failed runtime call: {e}");
-                return;
-            }
+        // Only a child, the PID may have been reused otherwise.
+        if let Err(e) = Process::child(pid).signal(Signal::SIGKILL) {
+            debug!("Not cleaning up PID {pid} of failed runtime call: {e}");
+            return;
         }
-
         debug!("Cleaning up PID {pid} of failed runtime call");
-        if let Err(e) = kill(pid, Signal::SIGKILL) {
-            debug!("Unable to kill PID {pid}: {e}");
-        }
         task::spawn(ReapableChild::wait_for_exit_code_async(
             CancellationToken::new(),
             pid.as_raw() as u32,
@@ -704,30 +771,13 @@ impl ChildReaper {
     }
 }
 
+/// Signal a grandchild and its process group, unless it got reaped already,
+/// see [`Process::signal_group`]. The grandchildren got reparented to this
+/// subreaper, so the PID refers to a child.
 pub fn kill_grandchild(raw_pid: u32, s: Signal) {
-    let pid = Pid::from_raw(raw_pid as pid_t);
-    if let Ok(pgid) = getpgid(Some(pid))
-        && signals_group(pgid, getpgid(None).ok())
-    {
-        let pgid = i32::from(pgid);
-        if let Err(e) = kill(Pid::from_raw(-pgid), s) {
-            error!(
-                raw_pid,
-                "Failed to kill process group {pgid}, the pid still gets signalled: {:#}", e
-            );
-        }
+    if let Err(e) = Process::child(Pid::from_raw(raw_pid as pid_t)).signal_group(s) {
+        debug!(raw_pid, "Not signalling grandchild, it is gone: {e}");
     }
-    if let Err(e) = kill(pid, s) {
-        debug!("Failed killing pid: {:#}", e);
-    }
-}
-
-/// Whether the process group of a grandchild gets signalled. Group 1 would
-/// end up as kill(-1), which kills everything conmon-rs is allowed to, and a
-/// grandchild which did not get its own group shares the one of this server,
-/// which would kill it as well.
-pub(crate) fn signals_group(pgid: Pid, own_pgid: Option<Pid>) -> bool {
-    pgid.as_raw() > 1 && Some(pgid) != own_pgid
 }
 
 type TaskHandle = Arc<Mutex<Option<JoinHandle<()>>>>;
@@ -770,38 +820,57 @@ pub struct ExitChannelData {
 }
 
 impl ReapableChild {
-    /// How long the exit files wait for the read loops to drain the output
-    /// at most. They take what the pipes held at the exit within
-    /// milliseconds, the bound only matters if another process keeps the
-    /// pipes open and writing.
-    const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+    /// How long the result of the OOM watcher may take once the timeout of
+    /// a process which exited in time passed. That covers confirming an
+    /// event of a cgroup v1, see `OOMWatcher::CONFIRM_BACKOFF`.
+    const OOM_RESULT_WAIT: Duration = Duration::from_secs(2);
 
-    /// Wait until the output ended, or until it stays quiet for
-    /// [`DRAIN_TIMEOUT`]. A process which inherited the pipes and keeps them
-    /// open must not delay the exit file.
+    /// Wait a bounded time for the result of the OOM watcher, see
+    /// [`ReapableChild::handle_oom`].
+    async fn late_oom(
+        oom_rx: &mut tokio::sync::mpsc::Receiver<OOMEvent>,
+        exit_code: i32,
+        oom_exit_paths: &[PathBuf],
+    ) -> bool {
+        let event = time::timeout(Self::OOM_RESULT_WAIT, oom_rx.recv())
+            .await
+            .ok()
+            .flatten();
+        if event.is_none() {
+            debug!("No OOM result in time");
+        }
+        Self::handle_oom(event, exit_code, oom_exit_paths).await
+    }
+
+    /// Whether the process which exited with `exit_code` got OOM killed. The
+    /// watcher writes the files for the OOMs it could tell on its own, this
+    /// the ones which only the exit status tells.
+    async fn handle_oom(
+        event: Option<OOMEvent>,
+        exit_code: i32,
+        oom_exit_paths: &[PathBuf],
+    ) -> bool {
+        let Some(event) = event else {
+            return false;
+        };
+        let oomed = event.is_oom(exit_code);
+        if oomed && !event.oom {
+            debug!("Taking the kill of the process for an OOM, its cgroup is gone");
+            OOMWatcher::write_oom_files(oom_exit_paths).await;
+        }
+        oomed
+    }
+
+    /// Wait until the output ended, or until the [`Drain`] gives up. A
+    /// process which inherited the pipes and keeps them open must not delay
+    /// the exit file.
     async fn wait_for_output(attach: SharedContainerAttach) {
         let (mut rx, ended) = attach.subscribe();
         if ended {
             return;
         }
-        let drained = async {
-            loop {
-                match time::timeout(DRAIN_TIMEOUT, rx.recv()).await {
-                    Ok(Ok(Message::Data(..)) | Err(RecvError::Lagged(_))) => {}
-                    Ok(Ok(Message::Done) | Err(RecvError::Closed)) => return,
-                    Err(_) => {
-                        debug!("Output quiet after the exit, writing exit files");
-                        return;
-                    }
-                }
-            }
-        };
-        if time::timeout(Self::OUTPUT_DRAIN_TIMEOUT, drained)
-            .await
-            .is_err()
-        {
-            debug!("Output still flowing after the exit, writing exit files anyway");
-        }
+        let mut drain = Drain::default();
+        while drain.recv_output(&mut rx, false).await.is_some() {}
     }
 
     pub fn from_child(child: Child) -> (Box<str>, Self) {
@@ -849,15 +918,27 @@ impl ReapableChild {
                 let wait_for_exit_code = Self::wait_for_exit_code_async(stop_token, pid)
                     .instrument(debug_span!("wait_for_exit_code"));
 
+                // Known once the process got reaped, also if the timeout hits
+                // while waiting for the OOM watcher.
+                let mut reaped = None;
                 let closure = async {
+                    let wait_for_exit_code = async {
+                        let code = wait_for_exit_code.await;
+                        reaped = Some(code);
+                        code
+                    };
                     let (code, oom) = tokio::join!(wait_for_exit_code, oom_rx.recv());
                     exit_code = code;
-                    if let Some(event) = oom {
-                        oomed = event.oom;
-                    }
+                    oomed = Self::handle_oom(oom, code, &oom_exit_paths).await;
                 };
                 if let Some(timeout) = timeout {
-                    if time::timeout_at(timeout, closure).await.is_err() {
+                    let res = time::timeout_at(timeout, closure).await;
+                    if let (Err(_), Some(code)) = (&res, reaped) {
+                        // It exited in time, only the OOM check did not end.
+                        debug!("Process exited before its timeout");
+                        exit_code = code;
+                        oomed = Self::late_oom(&mut oom_rx, code, &oom_exit_paths).await;
+                    } else if res.is_err() {
                         timed_out = true;
                         exit_code = -3;
                         kill_grandchild(pid, Signal::SIGKILL);
@@ -866,7 +947,7 @@ impl ReapableChild {
                         // timeout so waitpid never ran. The thread survives
                         // cancellation and will reap once SIGKILL takes effect.
                         Self::spawn_waitpid_thread(move || {
-                            let _ = waitpid(Pid::from_raw(pid as pid_t), None);
+                            Self::wait_for_exit_code_blocking(pid);
                         });
                     }
                 } else {
@@ -1002,7 +1083,10 @@ impl ReapableChild {
             return None;
         }
 
-        match waitpid(Pid::from_raw(pid as pid_t), WaitPidFlag::WNOHANG.into()) {
+        let reaping = reap_guard();
+        let status = waitpid(Pid::from_raw(pid as pid_t), WaitPidFlag::WNOHANG.into());
+        drop(reaping);
+        match status {
             Ok(WaitStatus::Exited(_, code)) => {
                 debug!("Exited {code}");
                 Some(code)
@@ -1022,10 +1106,28 @@ impl ReapableChild {
         }
     }
 
+    /// Wait for the exit without reaping, which then happens under the
+    /// [`reap_guard`].
     fn wait_for_exit_code_blocking(pid: u32) -> i32 {
         const FAILED_EXIT_CODE: i32 = -3;
+        let pid = Pid::from_raw(pid as pid_t);
         loop {
-            match waitpid(Pid::from_raw(pid as pid_t), None) {
+            match waitid(Id::Pid(pid), WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT) {
+                Ok(_) => {}
+                Err(Errno::EINTR) => continue,
+                Err(Errno::ECHILD) => {
+                    debug!("PID {pid} got reaped already");
+                    return FAILED_EXIT_CODE;
+                }
+                Err(err) => {
+                    error!("Unable to wait for pid {pid}: {:#}", err);
+                    return FAILED_EXIT_CODE;
+                }
+            }
+            let reaping = reap_guard();
+            let status = waitpid(pid, Some(WaitPidFlag::WNOHANG));
+            drop(reaping);
+            match status {
                 Ok(WaitStatus::Exited(_, exit_code)) => {
                     debug!("Exited {}", exit_code);
                     return exit_code;
@@ -1070,7 +1172,12 @@ impl ReapableChild {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{container_log::ContainerLog, process::Process};
+    use crate::{
+        container_io::{DRAIN_MAX_WAIT, DRAIN_TIMEOUT, Message},
+        container_log::ContainerLog,
+        process::Process,
+    };
+    use nix::sys::signal::kill;
     use std::process::Command;
 
     /// Spawn a child which exits right away and is never waited for.
@@ -1079,7 +1186,7 @@ mod tests {
         let pid = child.id();
         std::mem::forget(child);
         let start = Instant::now();
-        while !ChildReaper::is_zombie(pid) {
+        while !is_zombie(pid) {
             assert!(
                 start.elapsed() < Duration::from_secs(5),
                 "child never became a zombie"
@@ -1131,12 +1238,12 @@ mod tests {
         reaper
             .sweep_orphans(&mut candidates, Duration::from_secs(60))
             .await;
-        assert!(ChildReaper::is_zombie(orphan));
+        assert!(is_zombie(orphan));
 
         // Without grace the unclaimed one is reaped, the claimed one stays.
         reaper.sweep_orphans(&mut candidates, Duration::ZERO).await;
-        assert!(!ChildReaper::is_zombie(orphan));
-        assert!(ChildReaper::is_zombie(claimed));
+        assert!(!is_zombie(orphan));
+        assert!(is_zombie(claimed));
         assert!(!candidates.contains_key(&orphan));
 
         waitpid(Pid::from_raw(claimed as pid_t), None)?;
@@ -1242,16 +1349,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn own_process_group_is_not_signalled() -> Result<()> {
-        let own = getpgid(None)?;
-        assert!(!signals_group(own, Some(own)));
-        assert!(!signals_group(Pid::from_raw(1), Some(own)));
-        assert!(!signals_group(Pid::from_raw(0), None));
-        assert!(signals_group(Pid::from_raw(own.as_raw() + 1), Some(own)));
-        Ok(())
-    }
-
     #[tokio::test]
     async fn failed_create_cleanup_spares_claimed_pid() -> Result<()> {
         let reaper = ChildReaper::default();
@@ -1264,7 +1361,7 @@ mod tests {
         // A stale PID file naming a process this server waits for.
         lock(&reaper.pending)?.insert(pid);
         reaper.cleanup_failed_grandchild(&pidfile).await;
-        assert!(!is_gone(pid) && !ChildReaper::is_zombie(pid));
+        assert!(!is_gone(pid) && !is_zombie(pid));
 
         lock(&reaper.pending)?.remove(&pid);
         reaper.cleanup_failed_grandchild(&pidfile).await;
@@ -1328,6 +1425,67 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn late_oom_result_after_timeout_counts() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let oom_path = dir.path().join("oom");
+        let paths = [oom_path.clone()];
+
+        // The watcher still confirms an event while the timeout passes.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        task::spawn(async move {
+            time::sleep(Duration::from_secs(1)).await;
+            tx.send(OOMEvent::possible(true)).await
+        });
+        assert!(ReapableChild::late_oom(&mut rx, 137, &paths).await);
+        assert!(oom_path.exists());
+
+        // A normal exit is none, and no result at all either.
+        std::fs::remove_file(&oom_path)?;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.send(OOMEvent::possible(true)).await?;
+        assert!(!ReapableChild::late_oom(&mut rx, 0, &paths).await);
+        let (_tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let start = Instant::now();
+        assert!(!ReapableChild::late_oom(&mut rx, 137, &paths).await);
+        assert_eq!(start.elapsed(), ReapableChild::OOM_RESULT_WAIT);
+        assert!(!oom_path.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_output_with_terminal_does_not_block() -> Result<()> {
+        let reaper = ChildReaper::default();
+        let dir = tempfile::tempdir()?;
+        let mut io = ContainerIO::new(true, ContainerLog::new())?;
+
+        // More than a pipe holds, the error comes last.
+        let script = "head -c 300000 /dev/zero | tr '\\0' x; head -c 300000 /dev/zero >&2; \
+                      echo the-error >&2; exit 1";
+        let start = Instant::now();
+        let res = time::timeout(
+            Duration::from_secs(20),
+            reaper.create_child(
+                "sh",
+                ["-c", script],
+                false,
+                &mut io,
+                &dir.path().join("pid"),
+                Some(Instant::now() + Duration::from_secs(10)),
+                vec![],
+                false,
+                vec![],
+            ),
+        )
+        .await?;
+        let err = format!("{:#}", res.err().context("runtime failure expected")?);
+        assert!(err.contains("exited with: 1"), "{err}");
+        assert!(err.trim_end().ends_with("the-error"));
+        assert!(err.len() < 2 * RuntimeOutput::MAX_STDERR);
+        assert!(start.elapsed() < Duration::from_secs(10));
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn shutdown_waits_for_calls_in_progress() -> Result<()> {
         let reaper = Arc::new(ChildReaper::default());
         let call = reaper.begin_call()?;
@@ -1377,7 +1535,7 @@ mod tests {
         });
         let start = Instant::now();
         ReapableChild::wait_for_output(attach.clone()).await;
-        assert_eq!(start.elapsed(), ReapableChild::OUTPUT_DRAIN_TIMEOUT);
+        assert_eq!(start.elapsed(), DRAIN_MAX_WAIT);
         writer.abort();
 
         // Ended output does not wait at all.

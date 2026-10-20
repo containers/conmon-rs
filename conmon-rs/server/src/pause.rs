@@ -11,7 +11,7 @@ use nix::{
         signal::{SigSet, Signal, kill},
         wait::{WaitPidFlag, WaitStatus, waitpid},
     },
-    unistd::{ForkResult, Gid, Pid, Uid, fork, getpid, setresgid, setresuid},
+    unistd::{ForkResult, Gid, Pid, SysconfVar, Uid, fork, getpid, setresgid, setresuid, sysconf},
 };
 use std::{
     env, fmt,
@@ -21,7 +21,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
-        LazyLock, Mutex,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -52,6 +52,9 @@ pub struct Pause {
     /// init process. All other namespaces stay alive through their bind
     /// mounts alone.
     process: Option<Process>,
+
+    /// Set once the reaper took the exit of the pause process.
+    exited: Arc<AtomicBool>,
 }
 
 impl Pause {
@@ -135,7 +138,23 @@ impl Pause {
         if PAUSE.shutting_down() {
             bail!("server is shutting down")
         }
+
+        // The PID namespace died with its init, the path would refer to a
+        // dead namespace. A new one cannot replace it, the containers of the
+        // pod which run already would end up in another PID namespace than
+        // the later ones. So the pod has to be recreated.
+        if !pause.is_alive() {
+            bail!("the pause process of the PID namespace exited, recreate the pod")
+        }
         Ok(pause)
+    }
+
+    /// Whether the pause process holding the PID namespace still runs, true
+    /// without one. An init which exited but was not reaped yet does not.
+    fn is_alive(&self) -> bool {
+        self.process
+            .as_ref()
+            .is_none_or(|process| !self.exited.load(Ordering::SeqCst) && process.is_running())
     }
 
     /// How long the shutdown waits for a running initialization before it
@@ -214,7 +233,7 @@ impl Pause {
     /// Reap the init of the PID namespace once it exits, it is a child of the
     /// server, which is the child subreaper. Its PID is known, so waiting for
     /// it does not take the exit status of any other child.
-    fn spawn_reaper(pid: Pid) {
+    fn spawn_reaper(pid: Pid, exited: Arc<AtomicBool>) {
         task::spawn(
             async move {
                 let code = ReapableChild::wait_for_exit_code_async(
@@ -222,7 +241,14 @@ impl Pause {
                     pid.as_raw() as u32,
                 )
                 .await;
-                info!("Pause PID {pid} exited with code {code}");
+                exited.store(true, Ordering::SeqCst);
+                if PAUSE.shutting_down() {
+                    info!("Pause PID {pid} exited with code {code}");
+                } else {
+                    warn!(
+                        "Pause PID {pid} exited unexpectedly with code {code}, the PID namespace is gone"
+                    );
+                }
             }
             .instrument(debug_span!("pause_reaper")),
         );
@@ -325,6 +351,7 @@ impl Pause {
             uid_mappings: uid_mappings.to_vec(),
             gid_mappings: gid_mappings.to_vec(),
             process: None,
+            exited: Arc::default(),
         };
 
         let status = status.context("wait for pause child")?;
@@ -351,7 +378,7 @@ impl Pause {
             // Before the reaper may take the exit status, the PID is only
             // reliable until then.
             pause.process = Some(Process::open(pid));
-            Self::spawn_reaper(pid);
+            Self::spawn_reaper(pid, pause.exited.clone());
         } else {
             info!("No PID namespace requested, pause process exited after binding");
         }
@@ -587,8 +614,24 @@ impl Pause {
         }
     }
 
-    /// Write user or group ID mappings.
+    /// The most ranges a mapping file takes (`UID_GID_MAP_MAX_EXTENTS`),
+    /// Linux before 4.15 takes only 5.
+    const MAX_MAPPINGS: usize = 340;
+
+    /// Write user or group ID mappings. The kernel takes all ranges with a
+    /// single write only, at offset 0 and shorter than a page. Nothing gets
+    /// written without any, the kernel rejects an empty write.
     fn write_mappings(mappings: &[String], pid: Pid, is_group: bool) -> Result<()> {
+        if mappings.is_empty() {
+            return Ok(());
+        }
+        let page_size = sysconf(SysconfVar::PAGE_SIZE)
+            .ok()
+            .flatten()
+            .and_then(|size| usize::try_from(size).ok())
+            .unwrap_or(4096);
+        let buf = Self::mappings_buffer(mappings, page_size)?;
+
         let mut path = PathBuf::from("/proc");
         path.push(pid.as_raw().to_string());
         path.push(if is_group { "gid_map" } else { "uid_map" });
@@ -598,21 +641,47 @@ impl Pause {
             .open(path)
             .context("open mapping file")?;
 
-        for mapping in mappings {
-            // Validate the mapping
-            let mut split = mapping.split_whitespace();
-            if split.clone().count() != 3 {
-                bail!("mapping '{mapping}' has wrong format, expected 'CONTAINER_ID HOST_ID SIZE'");
-            }
-            if !split.all(|x| x.parse::<u32>().is_ok()) {
-                bail!("mapping '{mapping}' has wrong format, expected all to be u32");
-            }
+        let written = file.write(buf.as_bytes()).context("write mappings")?;
+        if written != buf.len() {
+            bail!("wrote {written} of {} bytes of the mappings", buf.len())
+        }
+        Ok(())
+    }
 
-            file.write_all(format!("{mapping}\n").as_bytes())
-                .context("write mapping")?;
+    /// Validate the mappings and build the content of a mapping file from
+    /// them, one `CONTAINER_ID HOST_ID SIZE` line per range.
+    fn mappings_buffer(mappings: &[String], page_size: usize) -> Result<String> {
+        if mappings.len() > Self::MAX_MAPPINGS {
+            bail!(
+                "{} mappings exceed the limit of {}",
+                mappings.len(),
+                Self::MAX_MAPPINGS
+            )
         }
 
-        Ok(())
+        let mut buf = String::new();
+        for mapping in mappings {
+            let fields: Vec<&str> = mapping.split_whitespace().collect();
+            if fields.len() != 3 {
+                bail!("mapping '{mapping}' has wrong format, expected 'CONTAINER_ID HOST_ID SIZE'");
+            }
+            let mut ids = [0u32; 3];
+            for (id, field) in ids.iter_mut().zip(fields) {
+                *id = field.parse().with_context(|| {
+                    format!("mapping '{mapping}' has wrong format, expected all to be u32")
+                })?;
+            }
+            let [container_id, host_id, size] = ids;
+            buf.push_str(&format!("{container_id} {host_id} {size}\n"));
+        }
+
+        if buf.len() >= page_size {
+            bail!(
+                "mappings take {} bytes, the kernel takes less than {page_size}",
+                buf.len()
+            )
+        }
+        Ok(buf)
     }
 }
 
@@ -1277,6 +1346,36 @@ mod tests {
     }
 
     #[test]
+    fn dead_pause_process_is_noticed() -> Result<()> {
+        let pause = |process| Pause {
+            base_path: "/var/run".into(),
+            pod_id: "pod".into(),
+            namespaces: vec![Namespace::Pid],
+            uid_mappings: vec![],
+            gid_mappings: vec![],
+            process,
+            exited: Arc::default(),
+        };
+        assert!(pause(None).is_alive());
+
+        let mut child = Guarded::spawn(StdCommand::new("sleep").arg("60"))?;
+        let running = pause(Some(Process::open(Pid::from_raw(child.0.id() as pid_t))));
+        assert!(running.is_alive());
+        running.exited.store(true, Ordering::SeqCst);
+        assert!(!running.is_alive());
+
+        // Also before the reaper ran, as a zombie and once reaped.
+        let running = pause(Some(Process::open(Pid::from_raw(child.0.id() as pid_t))));
+        child.0.kill()?;
+        let pid = nix::sys::wait::Id::Pid(Pid::from_raw(child.0.id() as pid_t));
+        nix::sys::wait::waitid(pid, WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT)?;
+        assert!(!running.is_alive());
+        child.0.wait()?;
+        assert!(!running.is_alive());
+        Ok(())
+    }
+
+    #[test]
     fn ensure_matches_config() {
         let mappings = vec!["0 0 1".to_string()];
         let pause = Pause {
@@ -1286,6 +1385,7 @@ mod tests {
             uid_mappings: mappings.clone(),
             gid_mappings: mappings.clone(),
             process: None,
+            exited: Arc::default(),
         };
         let namespaces = [Namespace::User, Namespace::Ipc];
         let base_path = Path::new("/var/run/");
@@ -1315,5 +1415,37 @@ mod tests {
                 .ensure_matches(base_path, "pod", &namespaces, &[], &mappings)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn mappings_buffer() -> Result<()> {
+        let mappings = |m: &[&str]| m.iter().map(|m| m.to_string()).collect::<Vec<_>>();
+
+        // All ranges end up in one buffer, normalized to one line each.
+        assert_eq!(
+            Pause::mappings_buffer(&mappings(&["0 1000 1", "1\t100000  65536"]), 4096)?,
+            "0 1000 1\n1 100000 65536\n"
+        );
+        assert_eq!(Pause::mappings_buffer(&[], 4096)?, "");
+        // Nothing gets opened or written without mappings.
+        Pause::write_mappings(&[], Pid::from_raw(pid_t::MAX), false)?;
+
+        for invalid in [&["0 1000"][..], &["0 1000 1 2"], &["0 1000 x"], &["0 -1 1"]] {
+            assert!(Pause::mappings_buffer(&mappings(invalid), 4096).is_err());
+        }
+
+        // A later invalid mapping fails before anything gets written.
+        assert!(Pause::mappings_buffer(&mappings(&["0 0 1", "1 x 1"]), 4096).is_err());
+
+        // The kernel takes less than a page and a limited number of ranges.
+        let line = "4294967295 4294967295 1";
+        let many = vec![line.to_string(); Pause::MAX_MAPPINGS];
+        let err = Pause::mappings_buffer(&many, 4096).unwrap_err();
+        assert!(format!("{err:#}").contains("less than 4096"), "{err:#}");
+        assert!(Pause::mappings_buffer(&many, 65536).is_ok());
+        let too_many = vec!["0 0 1".to_string(); Pause::MAX_MAPPINGS + 1];
+        let err = Pause::mappings_buffer(&too_many, 65536).unwrap_err();
+        assert!(format!("{err:#}").contains("limit of 340"), "{err:#}");
+        Ok(())
     }
 }

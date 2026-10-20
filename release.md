@@ -23,6 +23,12 @@ tarball is a `git archive` of the tag, so it has the same content as the
 automatic GitHub archive which [rpm/conmon-rs.spec](rpm/conmon-rs.spec) uses as
 `Source0` (packit replaces that with an archive of the commit for Copr builds).
 
+The release takes the static binaries which the ci workflow built and signed
+when the commit reached main, so the tag has to point to a commit which had
+its own ci run on main, like the merge commit of the version bump PR. The
+release fails right away otherwise. Those binaries got built before the tag
+existed, the version and commit identify them and their tag stays empty.
+
 The same tag also versions the Go module `github.com/containers/conmon-rs`, so
 consumers like CRI-O pick the release up with `go get
 github.com/containers/conmon-rs@vX.Y.Z`. The Go module has no separate

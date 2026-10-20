@@ -48,6 +48,12 @@ var (
 	errServerNotUp        = errors.New("server did not accept connections")
 )
 
+// ErrServerNotResponding is returned by New if a server accepts connections
+// on the socket of the run directory but does not answer in time. New does
+// not start another server then, it would take over the sockets of the one
+// which runs and orphan its containers.
+var ErrServerNotResponding = errors.New("server accepted the connection but did not respond")
+
 // ConmonClient is the main client structure of this package.
 type ConmonClient struct {
 	serverPID      uint32
@@ -198,12 +204,32 @@ func FromLogrusLevel(level logrus.Level) LogLevel {
 	return LogLevelDebug
 }
 
+// serverProbeTimeout bounds the Version call New uses to check a server which
+// accepted the connection. A running server answers within milliseconds, the
+// call does not wait for any container. A few seconds cover a loaded host,
+// while a caller which holds a lock during New, like CRI-O, does not stall
+// for the whole default timeout. A server which is slower than that is not
+// replaced either, New returns ErrServerNotResponding.
+const serverProbeTimeout = 3 * time.Second
+
 // New creates a new conmon server, starts it and connects a new client to it.
 //
 // If a server is already started with the same `ServerRunDir` specified
 // the client connects to the existing server instead.
 // Note: Other options from the `ConmonServerConfig` will be ignored
 // and the settings of the existing server will remain unchanged.
+//
+// A new server only gets started if no server runs on the socket of the run
+// directory: the socket does not exist or refuses the connection, the
+// process which listens on it exited, or it closed the connection, like a
+// server which shuts down, and exits or stops accepting connections within
+// a few seconds. If a server which runs accepts the connection but does not
+// answer within a few seconds, New returns an error matching
+// ErrServerNotResponding which names the PID of the server. The caller may
+// kill that process to recover, the next New starts a new server then. If
+// dialing the socket fails otherwise, for example because of missing
+// permissions, New returns that error. In neither case it starts a second
+// server.
 func New(config *ConmonServerConfig) (client *ConmonClient, retErr error) {
 	cl, err := config.toClient()
 	if err != nil {
@@ -218,15 +244,13 @@ func New(config *ConmonServerConfig) (client *ConmonClient, retErr error) {
 		defer span.End()
 	}
 
-	if resp, err := cl.Version(ctx, &VersionConfig{}); err == nil {
-		cl.serverPID = resp.ProcessID
+	if connected, err := cl.connectRunningServer(ctx); connected || err != nil {
+		if err != nil {
+			return nil, err
+		}
 
 		return cl, nil
 	}
-
-	// The probe may have reached a stale server without breaking the
-	// connection, the new server needs a new one.
-	cl.resetConn()
 
 	if err := cl.startServer(ctx, config); err != nil {
 		return nil, fmt.Errorf("start server: %w", err)
@@ -262,6 +286,140 @@ func New(config *ConmonServerConfig) (client *ConmonClient, retErr error) {
 	}
 
 	return cl, nil
+}
+
+// connectRunningServer connects to the server which listens on the socket of
+// the run directory. It returns false without an error if there is none, so
+// that a new one has to be started.
+func (c *ConmonClient) connectRunningServer(ctx context.Context) (bool, error) {
+	socketConn, err := DialLongSocket("unix", c.socket())
+	if err != nil {
+		if serverMissing(err) {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("dial server socket %s, not starting another server: %w", c.socket(), err)
+	}
+
+	// Known before the probe, which may not get an answer.
+	pid, pidErr := peerPID(socketConn)
+
+	conn := newRPCConn(ctx, socketConn)
+
+	c.connMu.Lock()
+	c.closeConnLocked()
+	c.conn = conn
+	c.connMu.Unlock()
+
+	probeCtx, cancel := context.WithTimeout(ctx, serverProbeTimeout)
+	defer cancel()
+
+	resp, err := c.Version(probeCtx, &VersionConfig{})
+	if err == nil {
+		c.serverPID = resp.ProcessID
+
+		return true, nil
+	}
+
+	// A failed read or write means that the server closed the connection.
+	closed := conn.broken.Load()
+
+	c.resetConn()
+
+	if c.serverGone(ctx, pid, pidErr == nil, closed) {
+		c.logger.WithError(err).Warnf("Server on %s is gone, starting a new one", c.socket())
+
+		return false, nil
+	}
+
+	server := "PID " + strconv.FormatInt(int64(pid), 10)
+	if pidErr != nil {
+		server = "unknown PID: " + pidErr.Error()
+	}
+
+	return false, fmt.Errorf("%w: server %s on %s: %w", ErrServerNotResponding, server, c.socket(), err)
+}
+
+// serverGoneTimeout bounds the wait for a server which closed the probe
+// connection, for example because it shuts down, to exit or to stop
+// accepting connections.
+const serverGoneTimeout = 3 * time.Second
+
+// serverGone reports whether the server which accepted the probe connection
+// but did not answer is gone, so that a new one can be started. That is the
+// case if its process exited, also if something else still holds its
+// socket, or if it closed the connection and exits or stops accepting
+// connections within serverGoneTimeout.
+func (c *ConmonClient) serverGone(ctx context.Context, pid int32, pidKnown, closed bool) bool {
+	exited := func() bool {
+		return pidKnown && processExited(uint32(pid))
+	}
+
+	if exited() {
+		return true
+	}
+
+	if !closed {
+		return false
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, serverGoneTimeout)
+	defer cancel()
+
+	const interval = 50 * time.Millisecond
+
+	for {
+		if exited() {
+			return true
+		}
+
+		conn, err := DialLongSocket("unix", c.socket())
+		if err != nil {
+			if serverMissing(err) {
+				return true
+			}
+		} else {
+			conn.Close()
+		}
+
+		select {
+		case <-waitCtx.Done():
+			return false
+		case <-time.After(interval):
+		}
+	}
+}
+
+// serverMissing reports whether a dial error means that no server listens on
+// the socket: it does not exist, or it is left over by one which exited.
+func serverMissing(err error) bool {
+	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// peerPID returns the PID of the process which listens on the other end of
+// the connection.
+func peerPID(conn *net.UnixConn) (int32, error) {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return 0, fmt.Errorf("get raw connection: %w", err)
+	}
+
+	var (
+		cred    *syscall.Ucred
+		credErr error
+	)
+
+	if err := raw.Control(func(fd uintptr) {
+		cred, credErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+	}); err != nil {
+		return 0, fmt.Errorf("control raw connection: %w", err)
+	}
+
+	if credErr != nil {
+		return 0, fmt.Errorf("get peer credentials: %w", credErr)
+	}
+
+	return cred.Pid, nil
 }
 
 // ServerVersion contains the version data of the server instance.
@@ -1104,9 +1262,12 @@ type CreateContainerConfig struct {
 	// SdNotifySocket is the path of the host sd_notify socket, usually the
 	// NOTIFY_SOCKET of systemd. If set, the server binds
 	// `<BundlePath>/notify/notify.sock` before it runs the runtime and relays
-	// every message sent there to the host socket until the container exits.
-	// The caller mounts the `notify` directory into the container and sets
-	// NOTIFY_SOCKET for the container process accordingly.
+	// the messages sent there to the host socket until the container exits.
+	// Like conmon, it only passes READY=1, RELOADING=1, STOPPING=1,
+	// WATCHDOG=1, WATCHDOG=trigger, STATUS=, ERRNO=, BUSERROR= and
+	// MONOTONIC_USEC=, it drops all other assignments. The caller mounts
+	// the `notify` directory into the container and sets NOTIFY_SOCKET for
+	// the container process accordingly.
 	SdNotifySocket string
 }
 
@@ -1513,8 +1674,7 @@ func (c *ConmonClient) ShutdownContext(ctx context.Context) error {
 		defer span.End()
 	}
 
-	// Taken out of the map first, so that no attach finds its reader again
-	// and the sockets get removed.
+	// Taken out of the map first, so that no attach finds its reader again.
 	c.attachReaderMu.Lock()
 	readers := slices.Collect(maps.Values(c.attachReaders))
 	clear(c.attachReaders)

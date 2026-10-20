@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"sync"
 	"syscall"
 	"time"
@@ -112,8 +111,7 @@ type AttachConfig struct {
 
 // attachReaderValue is the value of the attachReaders map.
 type attachReaderValue struct {
-	stdin      *In
-	socketPath string
+	stdin *In
 }
 
 // storeAttachReader registers the stdin of an attach session and returns its
@@ -229,6 +227,15 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) (err error
 
 	if cfg.PostAttachFunc != nil {
 		if err := cfg.PostAttachFunc(); err != nil {
+			// Stop copying stdin and receiving the output, like an ended
+			// context does.
+			c.tryCloseAttachReaderForID(id)
+			c.stopOutput(func() {
+				if err := conn.CloseRead(); err != nil {
+					c.logger.Errorf("Unable to close conn: %v", err)
+				}
+			}, receiveStdoutError)
+
 			return fmt.Errorf("run post attach func: %w", err)
 		}
 	}
@@ -293,7 +300,7 @@ func (c *ConmonClient) setupStdioChannels(
 	stdin := cfg.Streams.Stdin
 
 	if stdin != nil {
-		id = c.storeAttachReader(&attachReaderValue{stdin: stdin, socketPath: cfg.SocketPath})
+		id = c.storeAttachReader(&attachReaderValue{stdin: stdin})
 
 		go func() {
 			_, err := detach.Copy(conn, stdin, cfg.DetachKeys)
@@ -438,27 +445,12 @@ func (c *ConmonClient) tryCloseAttachReaderForID(id uint64) {
 	}
 }
 
+// closeAttachReader closes the stdin of an attach session. The attach
+// socket stays, the server keeps listening on it until the container exits
+// and removes it then.
 func (c *ConmonClient) closeAttachReader(value *attachReaderValue) {
 	if err := value.stdin.Close(); err != nil {
 		c.logger.WithError(err).Warn("Unable to close attach reader")
-	}
-
-	// Remove the attach socket if no other connection uses it. The check and
-	// the removal happen under the lock, which keeps a registered attach from
-	// losing its socket, an attach still dialing it can.
-	c.attachReaderMu.Lock()
-	defer c.attachReaderMu.Unlock()
-
-	for _, existing := range c.attachReaders {
-		if existing != value && existing.socketPath == value.socketPath {
-			return
-		}
-	}
-
-	c.logger.Infof("Attach socket path no longer in use, removing it: %s", value.socketPath)
-
-	if err := os.RemoveAll(value.socketPath); err != nil {
-		c.logger.WithError(err).Warn("Unable to remove attach socket path")
 	}
 }
 

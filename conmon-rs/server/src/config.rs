@@ -1,10 +1,25 @@
 //! Configuration related structures
+use crate::{listener, process::is_zombie};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
+use nix::{
+    errno::Errno,
+    sys::{
+        signal::kill,
+        socket::{
+            AddressFamily, SockFlag, SockType, UnixAddr, connect, getsockopt, socket,
+            sockopt::PeerCredentials,
+        },
+    },
+    unistd::Pid,
+};
 use std::{
     fmt, fs,
+    io::ErrorKind,
+    os::fd::{AsFd, AsRawFd},
     path::{Path, PathBuf},
 };
+use tracing::warn;
 use tracing_subscriber::filter::LevelFilter;
 
 macro_rules! prefix {
@@ -394,14 +409,78 @@ impl Config {
             fs::create_dir_all(rr).context("create runtime root")?;
         }
 
-        for socket in [self.socket(), self.fd_socket()] {
-            if socket.exists() {
-                fs::remove_file(&socket)
-                    .with_context(|| format!("remove stale socket {}", socket.display()))?;
+        // A socket left behind gets replaced, but not the one of a server
+        // which still runs, its containers would be lost otherwise.
+        for (socket, typ) in [
+            (self.socket(), SockType::Stream),
+            (self.fd_socket(), SockType::SeqPacket),
+        ] {
+            // A socket which cannot be checked may be in use as well.
+            if Self::socket_in_use(&socket, typ)
+                .with_context(|| format!("check socket {}", socket.display()))?
+            {
+                bail!("socket {} is in use by a running server", socket.display())
+            }
+            match fs::remove_file(&socket) {
+                Err(e) if e.kind() != ErrorKind::NotFound => {
+                    return Err(e)
+                        .with_context(|| format!("remove stale socket {}", socket.display()));
+                }
+                _ => {}
             }
         }
 
         Ok(())
+    }
+
+    /// Whether a server accepts connections on the socket. The connect does
+    /// not wait for a server which does not accept them in time, a full
+    /// backlog counts as in use as well. A socket of a server which exited
+    /// is not in use, also if a process left behind still holds it.
+    fn socket_in_use(path: &Path, typ: SockType) -> Result<bool> {
+        // The path may be too long for a socket address.
+        let (short_path, _dir) = listener::shorten_path(path)?;
+        let fd = socket(
+            AddressFamily::Unix,
+            typ,
+            SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
+            None,
+        )
+        .context("create socket")?;
+        let addr = UnixAddr::new(&short_path).context("create socket address")?;
+        Ok(match connect(fd.as_raw_fd(), &addr) {
+            Ok(()) => Self::peer_running(&fd),
+            Err(Errno::EAGAIN) => true,
+            // Nothing which this server could reach serves it: the socket
+            // is gone, left behind or something else.
+            Err(Errno::ECONNREFUSED | Errno::ENOENT | Errno::ENOTSOCK | Errno::EPROTOTYPE) => false,
+            // Like one of another user left behind, removing it only needs
+            // the permissions of the directory.
+            Err(Errno::EACCES) => {
+                warn!(
+                    "Replacing socket {} which is not accessible",
+                    path.display()
+                );
+                false
+            }
+            // Running out of resources tells nothing about the socket.
+            Err(e) => return Err(e).context("connect socket"),
+        })
+    }
+
+    /// Whether the process which listens on the other end of a connection
+    /// still runs, true if that cannot be told.
+    fn peer_running(fd: &impl AsFd) -> bool {
+        let Ok(credentials) = getsockopt(fd, PeerCredentials) else {
+            return true;
+        };
+        let pid = credentials.pid();
+        // From another PID namespace.
+        if pid <= 0 {
+            return true;
+        }
+        // A zombie does not accept either.
+        kill(Pid::from_raw(pid), None) != Err(Errno::ESRCH) && !is_zombie(pid as u32)
     }
     pub fn socket(&self) -> PathBuf {
         self.runtime_dir().join(SOCKET)
@@ -436,7 +515,11 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+    use std::{
+        ffi::OsStr,
+        fs::Permissions,
+        os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+    };
 
     fn config(args: &[&str]) -> Config {
         Config::parse_for_test(args.iter().copied()).expect("environment checked")
@@ -479,6 +562,58 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn prepare_keeps_the_sockets_of_a_running_server() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let runtime_dir = dir.path().to_str().context("utf8 path")?;
+        let Some(config) = Config::parse_for_test(["--runtime-dir", runtime_dir]) else {
+            return Ok(());
+        };
+
+        // Left behind by a server which is gone. A process which a parallel
+        // test forks may hold it until it execs.
+        drop(std::os::unix::net::UnixListener::bind(config.socket())?);
+        std::fs::write(config.fd_socket(), "")?;
+        let mut res = config.prepare();
+        for _ in 0..500 {
+            match &res {
+                Err(e) if format!("{e:#}").contains("in use") => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    res = config.prepare();
+                }
+                _ => break,
+            }
+        }
+        res?;
+        assert!(!config.socket().exists());
+        assert!(!config.fd_socket().exists());
+
+        // A running server keeps them.
+        let server = std::os::unix::net::UnixListener::bind(config.socket())?;
+        let err = config.prepare().unwrap_err();
+        assert!(format!("{err:#}").contains("in use"), "{err:#}");
+        assert!(config.socket().exists());
+        drop(server);
+        std::fs::remove_file(config.socket())?;
+
+        // A socket of another type is no server of this kind, one of another
+        // user is not reachable either.
+        // Root can connect anyway.
+        let root = nix::unistd::geteuid().is_root();
+        let _other_type = std::os::unix::net::UnixListener::bind(config.fd_socket())?;
+        let _inaccessible = if root {
+            None
+        } else {
+            let listener = std::os::unix::net::UnixListener::bind(config.socket())?;
+            std::fs::set_permissions(config.socket(), Permissions::from_mode(0o000))?;
+            Some(listener)
+        };
+        config.prepare()?;
+        assert!(!config.fd_socket().exists());
+        assert!(!config.socket().exists());
+        Ok(())
     }
 
     #[test]

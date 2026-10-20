@@ -875,6 +875,66 @@ var _ = Describe("ConmonClient", func() {
 			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
 		})
 
+		It("should attach again to the same socket after an attach returned", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfigWithProcessArgs(
+				false, []string{"/busybox", "sh", "-c", "while read -r line; do echo got $line; done"}, nil,
+			)
+			sut = tr.configGivenEnv()
+			tr.createContainer(sut, false)
+			tr.startContainer()
+
+			socketPath := filepath.Join(tr.tmpDir, "attach")
+
+			for _, input := range []string{"one", "two"} {
+				stdinReader, stdinWriter := io.Pipe()
+				stdoutReader, stdoutWriter := io.Pipe()
+
+				output := make(chan string, 10)
+
+				go func() {
+					defer GinkgoRecover()
+
+					data := make([]byte, 64)
+
+					for {
+						n, err := stdoutReader.Read(data)
+						if n > 0 {
+							output <- string(data[:n])
+						}
+
+						if err != nil {
+							return
+						}
+					}
+				}()
+
+				attachErr := make(chan error, 1)
+
+				go func() {
+					attachErr <- sut.AttachContainer(context.Background(), &client.AttachConfig{
+						ID:             tr.ctrID,
+						SocketPath:     socketPath,
+						ContainerStdin: true,
+						Streams: client.AttachStreams{
+							Stdin:  &client.In{stdinReader},
+							Stdout: &client.Out{stdoutWriter},
+						},
+					})
+				}()
+
+				_, err := stdinWriter.Write([]byte(input + "\n"))
+				Expect(err).To(Succeed())
+				Eventually(output, 10*time.Second).Should(Receive(Equal("got " + input + "\n")))
+
+				// Without stdin once, the stdin EOF ends the attach and the
+				// socket stays for the next one.
+				Expect(stdinWriter.Close()).To(Succeed())
+				Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
+				Expect(socketPath).To(BeAnExistingFile())
+			}
+		})
+
 		It("should return once the context is done", func() {
 			tr = newTestRunner()
 			tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "1000"}, nil)

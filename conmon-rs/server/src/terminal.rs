@@ -43,7 +43,12 @@ pub struct Terminal {
     /// The socket the runtime connects to, removed with the terminal.
     path: TempFile,
     connected_rx: Receiver<OwnedFd>,
+
+    /// The output channel. It exists before the runtime connects, so that
+    /// the output of an exec can be consumed while its runtime runs. The
+    /// sender moves into the read loop on the connection.
     message_rx: Option<async_channel::Receiver<Message>>,
+    message_tx: Option<StdioSender>,
     tty: Option<Weak<TerminalFd>>,
     logger: SharedContainerLog,
     attach: SharedContainerAttach,
@@ -113,14 +118,17 @@ impl Terminal {
             .instrument(debug_span!("listen")),
         );
 
+        let consumed = Arc::default();
+        let (message_tx, message_rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
         Ok(Self {
             path: temp_file,
             connected_rx,
-            message_rx: None,
+            message_rx: Some(message_rx),
+            message_tx: Some(StdioSender::new(message_tx, &consumed)),
             tty: None,
             logger,
             attach,
-            consumed: Arc::default(),
+            consumed,
         })
     }
 
@@ -167,9 +175,7 @@ impl Terminal {
         let attach_clone = self.attach.clone();
         let output = attach_clone.output();
         let logger_clone = self.logger.clone();
-        let (message_tx, message_rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
-        let message_tx = StdioSender::new(message_tx, &self.consumed);
-        self.message_rx = Some(message_rx);
+        let message_tx = self.message_tx.take();
 
         task::spawn({
             let fd = fd.clone();
@@ -178,7 +184,7 @@ impl Terminal {
                     &*fd,
                     Pipe::StdOut,
                     logger_clone,
-                    Some(message_tx),
+                    message_tx,
                     attach_clone,
                     output,
                 )
