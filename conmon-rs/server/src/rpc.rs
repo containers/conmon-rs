@@ -136,7 +136,7 @@ impl conmon::Server for Server {
         debug!("Got a create container request");
 
         let log_drivers = pry!(req.get_log_drivers());
-        let container_log = pry_err!(ContainerLog::from(log_drivers));
+        let container_log = pry_err!(ContainerLog::from_request(&id, log_drivers));
         let mut container_io =
             pry_err!(ContainerIO::new(req.get_terminal(), container_log.clone()));
 

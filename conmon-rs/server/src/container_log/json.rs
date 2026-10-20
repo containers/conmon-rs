@@ -1,16 +1,27 @@
-use crate::{container_io::Pipe, container_log::LogFile};
+use crate::{
+    container_io::Pipe,
+    container_log::{Line, LogFile, Logger},
+};
 use anyhow::{Context, Result};
-use memchr::memchr;
 use serde::Serialize;
 use std::{path::Path, time::SystemTime};
 use tracing::debug;
 
-/// Log entry structure for JSON serialization
+/// A single line of output as JSON. The schema is documented in usage.md.
 #[derive(Serialize)]
 struct LogEntry<'a> {
-    timestamp: u64, // Unix timestamp in seconds
+    /// Seconds since the Unix epoch.
+    timestamp: u64,
+
+    /// `stdout` or `stderr`.
     pipe: &'a str,
+
+    /// The line without its ending.
     message: &'a str,
+
+    /// Whether the line had no ending yet, see [`Line`].
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    partial: bool,
 }
 
 #[derive(Debug)]
@@ -20,13 +31,17 @@ pub struct JsonLogger {
 }
 
 impl JsonLogger {
-    pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> Result<JsonLogger> {
-        Ok(Self {
+    pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> JsonLogger {
+        Self {
             file: LogFile::new(path, None, max_log_size),
-        })
+        }
     }
+}
 
-    pub async fn init(&mut self) -> Result<()> {
+impl Logger for JsonLogger {
+    const BUFFERS_LINES: bool = true;
+
+    async fn init(&mut self) -> Result<()> {
         debug!(
             "Initializing JSON logger in path {}",
             self.file.path().display()
@@ -34,31 +49,24 @@ impl JsonLogger {
         self.file.open().await
     }
 
-    pub async fn write(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {
-        // Get Unix timestamp in seconds (more efficient than Debug format)
+    async fn reopen(&mut self) -> Result<()> {
+        debug!("Reopen JSON log {}", self.file.path().display());
+        self.file.reopen().await
+    }
+
+    async fn write_lines(&mut self, pipe: Pipe, lines: &[Line]) -> Result<()> {
         let timestamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        let pipe_str = pipe.as_str();
-
-        let mut pos = 0;
-        while pos < bytes.len() {
-            // Find the next newline or end of buffer
-            let end = memchr(b'\n', &bytes[pos..])
-                .map(|i| pos + i + 1)
-                .unwrap_or(bytes.len());
-            let line = &bytes[pos..end];
-            pos = end;
-
-            // Convert message to UTF-8, trim whitespace
-            let message = String::from_utf8_lossy(line);
-
+        for line in lines {
+            let message = String::from_utf8_lossy(&line.text);
             let log_entry = LogEntry {
                 timestamp,
-                pipe: pipe_str,
-                message: message.trim(),
+                pipe: pipe.as_str(),
+                message: &message,
+                partial: line.partial,
             };
 
             let buf = &mut self.file.buf;
@@ -74,22 +82,26 @@ impl JsonLogger {
         // Write the whole chunk at once instead of per line
         self.file.flush().await
     }
-
-    pub async fn reopen(&mut self) -> Result<()> {
-        debug!("Reopen JSON log {}", self.file.path().display());
-        self.file.reopen().await
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::container_log::LineBuffer;
     use std::fs;
     use tempfile::NamedTempFile;
 
+    /// Write a chunk the way `ContainerLog` does.
+    async fn write(logger: &mut JsonLogger, pipe: Pipe, bytes: &[u8]) -> Result<()> {
+        let mut buffer = LineBuffer::default();
+        let mut lines = buffer.push(pipe, bytes);
+        lines.extend(buffer.finish(pipe));
+        logger.write_lines(pipe, &lines).await
+    }
+
     #[tokio::test]
     async fn test_json_logger_new() -> Result<()> {
-        let logger = JsonLogger::new("/tmp/test.log", Some(1000))?;
+        let logger = JsonLogger::new("/tmp/test.log", Some(1000));
         assert_eq!(
             logger.file.path().to_str().context("path")?,
             "/tmp/test.log"
@@ -101,7 +113,7 @@ mod tests {
     #[tokio::test]
     async fn test_json_logger_init() -> Result<()> {
         let file = NamedTempFile::new()?;
-        let mut logger = JsonLogger::new(file.path(), Some(1000))?;
+        let mut logger = JsonLogger::new(file.path(), Some(1000));
         logger.init().await?;
         Ok(())
     }
@@ -109,12 +121,10 @@ mod tests {
     #[tokio::test]
     async fn test_json_logger_write() -> Result<()> {
         let file = NamedTempFile::new()?;
-        let mut logger = JsonLogger::new(file.path(), Some(1000))?;
+        let mut logger = JsonLogger::new(file.path(), Some(1000));
         logger.init().await?;
 
-        logger
-            .write(Pipe::StdOut, b"Test log message\nsecond")
-            .await?;
+        write(&mut logger, Pipe::StdOut, b"Test log message\nsecond").await?;
 
         let contents = fs::read_to_string(file.path())?;
         let mut lines = contents.lines();
@@ -128,18 +138,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_json_logger_reopen() -> Result<()> {
+    async fn test_json_logger_line_endings() -> Result<()> {
         let file = NamedTempFile::new()?;
-        let mut logger = JsonLogger::new(file.path(), Some(1000))?;
+        let mut logger = JsonLogger::new(file.path(), None);
         logger.init().await?;
 
-        logger
-            .write(Pipe::StdOut, b"Test log message before reopen\n")
-            .await?;
+        write(
+            &mut logger,
+            Pipe::StdErr,
+            b"terminal\r\n  indented \nno newline",
+        )
+        .await?;
+
+        let contents = fs::read_to_string(file.path())?;
+        let mut lines = contents.lines();
+        assert!(
+            lines
+                .next()
+                .context("no line")?
+                .contains(r#""message":"terminal"}"#)
+        );
+        assert!(
+            lines
+                .next()
+                .context("no line")?
+                .contains(r#""message":"  indented "}"#)
+        );
+        assert!(
+            lines
+                .next()
+                .context("no line")?
+                .contains(r#""message":"no newline","partial":true}"#)
+        );
+        assert!(lines.next().is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_json_logger_reopen() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let mut logger = JsonLogger::new(file.path(), Some(1000));
+        logger.init().await?;
+
+        write(
+            &mut logger,
+            Pipe::StdOut,
+            b"Test log message before reopen\n",
+        )
+        .await?;
         logger.reopen().await?;
-        logger
-            .write(Pipe::StdOut, b"Test log message after reopen\n")
-            .await?;
+        write(
+            &mut logger,
+            Pipe::StdOut,
+            b"Test log message after reopen\n",
+        )
+        .await?;
 
         let contents = fs::read_to_string(file.path())?;
         assert!(contents.contains("Test log message after reopen"));
@@ -151,10 +204,10 @@ mod tests {
     async fn test_json_logger_rotation_counts_trigger() -> Result<()> {
         let file = NamedTempFile::new()?;
         // Every entry is about 60 bytes, so the third one triggers a rotation.
-        let mut logger = JsonLogger::new(file.path(), Some(150))?;
+        let mut logger = JsonLogger::new(file.path(), Some(150));
         logger.init().await?;
 
-        logger.write(Pipe::StdOut, b"a\nb\nc\n").await?;
+        write(&mut logger, Pipe::StdOut, b"a\nb\nc\n").await?;
 
         let contents = fs::read_to_string(file.path())?;
         assert_eq!(logger.file.bytes_written, contents.len());
