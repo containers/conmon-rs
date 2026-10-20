@@ -1,13 +1,15 @@
-{ pkgs }:
+{ pkgs, rev, lastModified }:
 with pkgs; rustPlatform.buildRustPackage {
   name = "conmon-rs";
+  # The source has no .git directory, pass the build metadata in.
+  BUILD_COMMIT = rev;
+  SOURCE_DATE_EPOCH = lastModified;
   # Use Pure to avoid exuding the .git directory
   src = nix-gitignore.gitignoreSourcePure [ ../.gitignore ] ./..;
   doCheck = false;
   nativeBuildInputs = with buildPackages; [
     capnproto
     gitMinimal
-    protobuf
   ];
   buildInputs =
     if stdenv.hostPlatform.isMusl then [

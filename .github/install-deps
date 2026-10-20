@@ -2,7 +2,7 @@
 set -euo pipefail
 
 sudo apt-get update
-sudo apt-get install capnproto protobuf-compiler
+sudo apt-get install capnproto
 
 # Install latest crun from GitHub releases
 CRUN_VERSION=$(curl -sSfL -H "Authorization: Bearer ${GITHUB_TOKEN}" \

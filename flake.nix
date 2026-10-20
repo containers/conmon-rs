@@ -25,7 +25,12 @@
           // args
         );
 
-      mkConmonrs = pkgs: pkgs.callPackage ./nix/derivation.nix { };
+      mkConmonrs =
+        pkgs:
+        pkgs.callPackage ./nix/derivation.nix {
+          rev = self.rev or self.dirtyRev or "";
+          lastModified = toString (self.lastModified or 0);
+        };
     in
     {
       packages = forAllSystems (system: {
