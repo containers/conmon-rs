@@ -27,12 +27,17 @@ fn enabled_features() -> String {
 fn main() {
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     println!("cargo:rerun-if-env-changed=CONMONRS_SKIP_CARGO_TREE");
+    println!("cargo:rerun-if-env-changed=BUILD_TAG");
+    println!("cargo:rerun-if-env-changed=BUILD_COMMIT");
 
-    // Packagers build from tarballs without git metadata. In a worktree
-    // `.git` is a file pointing elsewhere, so ask git where HEAD and the refs
-    // are. Tracking a path which does not exist would rerun this script on
-    // every build.
-    let (tag, commit) = if Path::new("../../.git").exists() {
+    // Packagers build from tarballs without git metadata, so they can pass
+    // the commit and tag in. In a worktree `.git` is a file pointing
+    // elsewhere, so ask git where HEAD and the refs are. Tracking a path which
+    // does not exist would rerun this script on every build.
+    let env = |key| std::env::var(key).ok().filter(|v: &String| !v.is_empty());
+    let (tag, commit) = if let Some(commit) = env("BUILD_COMMIT") {
+        (env("BUILD_TAG").unwrap_or_default(), commit)
+    } else if Path::new("../../.git").exists() {
         for (arg, file) in [("--git-dir", "HEAD"), ("--git-common-dir", "refs")] {
             let dir = run("git", &["rev-parse", "--path-format=absolute", arg]);
             let path = Path::new(&dir).join(file);

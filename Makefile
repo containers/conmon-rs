@@ -1,4 +1,3 @@
-MAKEFILE_PATH := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 RUNTIME_PATH ?= "/usr/bin/runc"
 PROTO_PATH ?= "conmon-rs/common/proto"
 BINARY := conmonrs
@@ -8,10 +7,15 @@ GOTOOLS_GOPATH ?= $(BUILD_DIR)/gotools
 GOTOOLS_BINDIR ?= $(GOTOOLS_GOPATH)/bin
 GINKGO_FLAGS ?= -vv --trace --race --randomize-all --flake-attempts 3 --show-node-events --timeout 5m -r pkg/client
 TEST_FLAGS ?=
+# The integration tests build and use the release binary if this is unset.
+CONMON_BINARY ?=
+MAX_RSS_KB ?= 10240
 # The generated Go code embeds a schema which differs between capnp versions,
 # use the one pinned by flake.lock. Set CAPNP=capnp to use the local one.
 CAPNP ?= nix shell --inputs-from . nixpkgs\#capnproto --command capnp
-PACKAGE_NAME ?= $(shell cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "$(BINARY)") | [ .name, .version ] | join("-v")')
+# Evaluated in the recipes, so that a failing cargo stops the build.
+CRATE_VERSION := cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "$(BINARY)") | .version'
+SPEC_FILE := rpm/conmon-rs.spec
 PREFIX ?= /usr
 CI_TAG ?=
 GOLANGCI_LINT_VERSION := v2.15.0
@@ -51,10 +55,8 @@ release: ## Build in release mode.
 	cargo build --release
 
 .PHONY: release-static
-release-static: ## Build the static release binary.
-	RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86_64-unknown-linux-gnu
-	strip -s target/x86_64-unknown-linux-gnu/release/conmonrs
-	ldd target/x86_64-unknown-linux-gnu/release/conmonrs 2>&1 | grep -qE '(statically linked)|(not a dynamic executable)'
+release-static: ## Build the static release binary for the local architecture using nix.
+	nix build .#default
 
 ##@ Test targets:
 .PHONY: unit
@@ -62,20 +64,10 @@ unit: ## Run the unit tests.
 	cargo test --no-fail-fast
 
 .PHONY: integration
-integration: .install.ginkgo release ## Run the integration tests using the release binary.
-	export CONMON_BINARY="$(MAKEFILE_PATH)target/release/$(BINARY)" && \
+integration: .install.ginkgo $(if $(CONMON_BINARY),,release) ## Run the integration tests using $CONMON_BINARY or the release binary.
+	export CONMON_BINARY="$(abspath $(or $(CONMON_BINARY),target/release/$(BINARY)))" && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
-	export MAX_RSS_KB=10240 && \
-	"$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
-
-.PHONY: integration-static
-integration-static: .install.ginkgo ## Run the integration tests using the static release binary.
-	export CONMON_BINARY="$(MAKEFILE_PATH)target/x86_64-unknown-linux-gnu/release/$(BINARY)" && \
-	if [ ! -f "$$CONMON_BINARY" ]; then \
-		$(MAKE) release-static; \
-	fi && \
-	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
-	export MAX_RSS_KB=5500 && \
+	export MAX_RSS_KB="$(MAX_RSS_KB)" && \
 	"$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
 
 ##@ Verify targets:
@@ -97,6 +89,15 @@ lint-go: .install.golangci-lint ## Lint the Go sources.
 .PHONY: verify-dependencies
 verify-dependencies: $(GOTOOLS_BINDIR)/zeitgeist ## Verify the local dependencies.
 	$(GOTOOLS_BINDIR)/zeitgeist validate --local-only --base-path . --config dependencies.yaml
+
+.PHONY: verify-spec
+verify-spec: ## Verify that the RPM spec version matches the crate version.
+	VERSION=$$($(CRATE_VERSION)) && \
+	SPEC_VERSION=$$(sed -n 's/^Version: *//p' $(SPEC_FILE)) && \
+	if [ "$$VERSION" != "$$SPEC_VERSION" ]; then \
+		echo "$(SPEC_FILE) version $$SPEC_VERSION does not match crate version $$VERSION" ; \
+		exit 1 ; \
+	fi
 
 .PHONY: verify-prettier
 verify-prettier: prettier ## Run prettier on the project and fail on changes.
@@ -143,23 +144,24 @@ update-proto: internal/proto/conmon.capnp ## Update the Cap'n Proto protocol.
 		-ogo internal/proto/conmon.capnp
 
 .PHONY: create-release-packages
-create-release-packages: release ## Create the release tarballs.
-	if [ "$(PACKAGE_NAME)" != "conmonrs-$(CI_TAG)" ]; then \
-		echo "crate version and tag mismatch" ; \
+create-release-packages: verify-spec ## Create the release tarballs.
+	VERSION=$$($(CRATE_VERSION)) && \
+	if [ "v$$VERSION" != "$(CI_TAG)" ]; then \
+		echo "crate version v$$VERSION and tag $(CI_TAG) mismatch" ; \
 		exit 1 ; \
 	fi
-	git archive --format tar --prefix=conmonrs-$(CI_TAG)/ $(CI_TAG) | gzip >$(PACKAGE_NAME).tar.gz
+	git archive --format tar --prefix=$(BINARY)-$(CI_TAG)/ $(CI_TAG) | gzip >$(BINARY)-$(CI_TAG).tar.gz
 
 .PHONY: install
 install: ## Install the binary.
 	mkdir -p "${DESTDIR}$(PREFIX)/bin"
 	install -D -t "${DESTDIR}$(PREFIX)/bin" target/release/conmonrs
 
-# Only meant to build the latest HEAD commit + any uncommitted changes
-# Not a replacement for the distro package
+# Only meant to build the latest HEAD commit, not a replacement for the distro
+# package.
 .PHONY: rpm
-rpm: # Build the RPM locally
-	rpkg local
+rpm: ## Build the RPM locally using packit.
+	packit build locally
 
 .PHONY: nixpkgs
 nixpkgs: ## Update the NIX package dependencies.

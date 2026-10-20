@@ -5,33 +5,18 @@
 # Main branch commit build targets can be found at:
 # https://copr.fedorainfracloud.org/coprs/rhcontainerbot/podman-next/
 
-specfile_path: conmon-rs.spec
-
-srpm_build_deps:
-  - cargo
-  - make
-  - rpkg
-
-actions:
-  post-upstream-clone:
-    - "rpkg spec --outdir ./"
-  fix-spec-file:
-    - "bash .packit.sh"
+specfile_path: rpm/conmon-rs.spec
+upstream_package_name: conmon-rs
+downstream_package_name: conmon-rs
+upstream_tag_template: v{version}
 
 jobs:
   - job: copr_build
     trigger: pull_request
-    # keep in sync with https://copr.fedorainfracloud.org/coprs/rhcontainerbot/podman-next
     enable_net: true
     targets:
-      - fedora-development-x86_64
-      - fedora-development-aarch64
-      - fedora-latest-x86_64
-      - fedora-latest-aarch64
-      - fedora-latest-stable-x86_64
-      - fedora-latest-stable-aarch64
-      - fedora-40-x86_64
-      - fedora-40-aarch64
+      - fedora-all-x86_64
+      - fedora-all-aarch64
       # TODO: Reenable once they have a stable Rust version for edition 2024
       # - epel-9-x86_64
       # - epel-9-aarch64

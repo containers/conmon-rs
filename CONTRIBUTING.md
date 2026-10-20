@@ -61,7 +61,14 @@ And you can run the test suite if you have access to elevated permissions:
 
 ```console
 # make unit
-# make integration  # or integration-static
+# make integration
+```
+
+The integration tests use the release binary by default. Set `CONMON_BINARY`
+to test another one, for example the static build of `make release-static`:
+
+```console
+# make integration CONMON_BINARY=result/bin/conmonrs MAX_RSS_KB=5500
 ```
 
 PRs that fix issues should include a reference like `Closes #XXXX` in the
