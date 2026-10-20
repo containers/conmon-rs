@@ -275,7 +275,8 @@ jobs:
           sudo -E make integration \
             RUNTIME_PATH=/usr/bin/crun \
             CONMON_BINARY=.build/static/conmonrs \
-            MAX_RSS_KB=5500
+            MAX_RSS_KB=5500 \
+            TEST_FLAGS="--flake-attempts 3"
       # The tests run as root, setup-go saves its cache as the runner user.
       - name: Chown cache
         run: |

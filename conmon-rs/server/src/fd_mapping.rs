@@ -105,3 +105,26 @@ fn map_fds(mappings: &mut [FdMapping], child_fds: &[RawFd]) -> io::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+
+    fn mapping(child_fd: RawFd) -> Result<FdMapping, std::io::Error> {
+        Ok(FdMapping {
+            parent_fd: File::open("/dev/null")?.into(),
+            child_fd,
+        })
+    }
+
+    #[test]
+    fn child_fds_must_be_unique() -> Result<(), std::io::Error> {
+        let mappings = [mapping(3)?, mapping(4)?];
+        assert_eq!(validate_child_fds(&mappings).unwrap(), vec![3, 4]);
+
+        let mappings = [mapping(3)?, mapping(3)?];
+        assert!(validate_child_fds(&mappings).is_err());
+        Ok(())
+    }
+}
