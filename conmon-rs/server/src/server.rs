@@ -216,6 +216,13 @@ impl Server {
         fds
     }
 
+    /// Upper bound for the threads of the blocking pool. One of them runs
+    /// the RPC `LocalSet` permanently, the rest serve file I/O like log
+    /// writes, exit files and journald. Without a bound a burst of container
+    /// exits or log reopens spawns a thread per operation (tokio's default
+    /// allows 512), each with its own stack and allocator arena.
+    const MAX_BLOCKING_THREADS: usize = 16;
+
     /// Start the `Server` instance and consume it.
     pub fn start(self) -> Result<()> {
         // We need to fork as early as possible, especially before setting up tokio.
@@ -250,6 +257,7 @@ impl Server {
         let rt = Builder::new_current_thread()
             .enable_io()
             .enable_time()
+            .max_blocking_threads(Self::MAX_BLOCKING_THREADS)
             .build()?;
         rt.block_on(self.spawn_tasks())?;
 

@@ -6,7 +6,7 @@ use crate::{
     container_log::SharedContainerLog,
     listener::{DefaultListener, Listener},
 };
-use anyhow::{Context as _, Result, format_err};
+use anyhow::{Context as _, Result};
 use async_channel::Receiver as UnboundedReceiver;
 use libc::{TIOCSWINSZ, winsize};
 use nix::{
@@ -22,13 +22,13 @@ use std::{
     },
     path::PathBuf,
     pin::Pin,
-    sync::{Arc, Weak, mpsc::Sender as StdSender},
+    sync::{Arc, Weak},
     task::{Context, Poll, ready},
 };
 use tokio::{
     fs,
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, Interest, ReadBuf, unix::AsyncFd},
-    net::UnixStream,
+    net::{UnixListener, UnixStream},
     sync::mpsc::{self, Receiver, Sender},
     task,
 };
@@ -66,16 +66,12 @@ impl Terminal {
 #[derive(Debug)]
 struct Config {
     path: PathBuf,
-    ready_tx: StdSender<()>,
     connected_tx: Sender<OwnedFd>,
 }
 
 impl Config {
     fn path(&self) -> &PathBuf {
         &self.path
-    }
-    fn ready_tx(&self) -> &StdSender<()> {
-        &self.ready_tx
     }
 }
 
@@ -84,26 +80,34 @@ impl Terminal {
     pub fn new(logger: SharedContainerLog, attach: SharedContainerAttach) -> Result<Self> {
         debug!("Creating new terminal");
         let path = ContainerIO::temp_file_name(None, "conmon-term-", ".sock");
-        let path_clone = path.clone();
 
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        // Bind synchronously so that the socket exists once this returns,
+        // without blocking on the listener task to get scheduled.
+        debug!("Listening terminal socket on {}", path.display());
+        let listener = Listener::<DefaultListener>::default()
+            .bind_long_path(&path)
+            .context("bind terminal socket")?;
+
+        let mut perms = std::fs::metadata(&path)
+            .context("get terminal socket metadata")?
+            .permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&path, perms).context("set terminal socket permissions")?;
+
         let (connected_tx, connected_rx) = mpsc::channel(10);
+        let config = Config {
+            path: path.clone(),
+            connected_tx,
+        };
 
         task::spawn(
             async move {
-                if let Err(e) = Self::listen(Config {
-                    path: path_clone,
-                    ready_tx,
-                    connected_tx,
-                })
-                .await
-                {
+                if let Err(e) = Self::listen(listener, config).await {
                     error!("Unable to listen on terminal: {:#}", e);
                 };
             }
             .instrument(debug_span!("listen")),
         );
-        ready_rx.recv().context("wait for listener to be ready")?;
 
         Ok(Self {
             path,
@@ -143,7 +147,7 @@ impl Terminal {
                     &*fd,
                     Pipe::StdOut,
                     logger_clone,
-                    message_tx,
+                    Some(message_tx),
                     attach_clone,
                 )
                 .await
@@ -192,21 +196,7 @@ impl Terminal {
         }
     }
 
-    async fn listen(config: Config) -> Result<()> {
-        let path = config.path();
-        debug!("Listening terminal socket on {}", path.display());
-        let listener = Listener::<DefaultListener>::default().bind_long_path(path)?;
-
-        // Update the permissions
-        let mut perms = fs::metadata(path).await?.permissions();
-        perms.set_mode(0o700);
-        fs::set_permissions(path, perms).await?;
-
-        config
-            .ready_tx()
-            .send(())
-            .map_err(|_| format_err!("unable to send ready message"))?;
-
+    async fn listen(listener: UnixListener, config: Config) -> Result<()> {
         let stream = listener.accept().await?.0;
         debug!("Got terminal socket stream: {:?}", stream);
 

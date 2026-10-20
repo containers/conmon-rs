@@ -5,7 +5,7 @@ use crate::{
     container_io::{ContainerIO, Message, Pipe},
     container_log::SharedContainerLog,
 };
-use anyhow::Result;
+use anyhow::{Result, bail};
 use async_channel::{Receiver, Sender};
 use tokio::{
     process::{ChildStderr, ChildStdin, ChildStdout},
@@ -14,14 +14,21 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error};
 
+/// Capacity of the stdout and stderr channels in chunks.
+const STDIO_CHANNEL_SIZE: usize = 100;
+
 #[derive(Debug)]
 pub struct Streams {
     logger: SharedContainerLog,
     attach: SharedContainerAttach,
-    pub message_rx_stdout: Receiver<Message>,
-    message_tx_stdout: Sender<Message>,
-    pub message_rx_stderr: Receiver<Message>,
-    message_tx_stderr: Sender<Message>,
+
+    /// The stdio channels. The senders move into the read loops when the
+    /// streams get attached, the receivers stay here until they are either
+    /// cloned by a consumer or dropped via `drop_stdio`.
+    message_rx_stdout: Option<Receiver<Message>>,
+    message_tx_stdout: Option<Sender<Message>>,
+    message_rx_stderr: Option<Receiver<Message>>,
+    message_tx_stderr: Option<Sender<Message>>,
 }
 
 impl Streams {
@@ -31,12 +38,6 @@ impl Streams {
     pub fn attach(&self) -> &SharedContainerAttach {
         &self.attach
     }
-    pub fn message_tx_stdout(&self) -> &Sender<Message> {
-        &self.message_tx_stdout
-    }
-    pub fn message_tx_stderr(&self) -> &Sender<Message> {
-        &self.message_tx_stderr
-    }
 }
 
 impl Streams {
@@ -44,21 +45,44 @@ impl Streams {
     pub fn new(logger: SharedContainerLog, attach: SharedContainerAttach) -> Result<Self> {
         debug!("Creating new IO streams");
 
-        let (message_tx_stdout, message_rx_stdout) = async_channel::bounded(100);
-        let (message_tx_stderr, message_rx_stderr) = async_channel::bounded(100);
+        let (message_tx_stdout, message_rx_stdout) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+        let (message_tx_stderr, message_rx_stderr) = async_channel::bounded(STDIO_CHANNEL_SIZE);
 
         Ok(Self {
             logger,
             attach,
-            message_rx_stdout,
-            message_tx_stdout,
-            message_rx_stderr,
-            message_tx_stderr,
+            message_rx_stdout: Some(message_rx_stdout),
+            message_tx_stdout: Some(message_tx_stdout),
+            message_rx_stderr: Some(message_rx_stderr),
+            message_tx_stderr: Some(message_tx_stderr),
         })
     }
 
+    /// Retrieve clones of the stdout and stderr receivers.
+    pub fn stdio(&self) -> Result<(Receiver<Message>, Receiver<Message>)> {
+        match (&self.message_rx_stdout, &self.message_rx_stderr) {
+            (Some(stdout), Some(stderr)) => Ok((stdout.clone(), stderr.clone())),
+            _ => bail!("stdio channels have been dropped"),
+        }
+    }
+
+    /// Retrieve the stdout and stderr receivers for reading.
+    pub fn stdio_mut(&mut self) -> Result<(&mut Receiver<Message>, &mut Receiver<Message>)> {
+        match (&mut self.message_rx_stdout, &mut self.message_rx_stderr) {
+            (Some(stdout), Some(stderr)) => Ok((stdout, stderr)),
+            _ => bail!("stdio channels have been dropped"),
+        }
+    }
+
+    /// Drop the stdio receivers. The read loops notice the closed channels on
+    /// their next send and drop their senders too, which frees the buffers.
+    pub fn drop_stdio(&mut self) {
+        self.message_rx_stdout = None;
+        self.message_rx_stderr = None;
+    }
+
     pub fn handle_stdio_receive(
-        &self,
+        &mut self,
         stdin: Option<ChildStdin>,
         stdout: Option<ChildStdout>,
         stderr: Option<ChildStderr>,
@@ -81,7 +105,7 @@ impl Streams {
         if let Some(stdout) = stdout {
             let logger = self.logger().clone();
             let attach = self.attach().clone();
-            let message_tx = self.message_tx_stdout().clone();
+            let message_tx = self.message_tx_stdout.take();
             task::spawn(
                 async move {
                     if let Err(e) =
@@ -98,7 +122,7 @@ impl Streams {
         if let Some(stderr) = stderr {
             let logger = self.logger().clone();
             let attach = self.attach().clone();
-            let message_tx = self.message_tx_stderr().clone();
+            let message_tx = self.message_tx_stderr.take();
             task::spawn(
                 async move {
                     if let Err(e) =
@@ -135,7 +159,7 @@ mod tests {
         let attach = SharedContainerAttach::default();
         let token = CancellationToken::new();
 
-        let sut = Streams::new(logger, attach)?;
+        let mut sut = Streams::new(logger, attach)?;
 
         let expected = "hello world";
         let mut child = Command::new("echo")
@@ -153,11 +177,9 @@ mod tests {
             token.clone(),
         );
 
-        let msg = sut
-            .message_rx_stdout
-            .recv()
-            .await
-            .context("no message on stdout")?;
+        let (stdout_rx, stderr_rx) = sut.stdio()?;
+
+        let msg = stdout_rx.recv().await.context("no message on stdout")?;
 
         assert_eq!(msg_string(msg)?, expected);
 
@@ -165,21 +187,13 @@ mod tests {
         // so the read_loops must be cancelled here instead.
         token.cancel();
 
-        let msg = sut
-            .message_rx_stdout
-            .recv()
-            .await
-            .context("no message on stdout")?;
+        let msg = stdout_rx.recv().await.context("no message on stdout")?;
         assert_eq!(msg, Message::Done);
-        assert!(sut.message_rx_stdout.try_recv().is_err());
+        assert!(stdout_rx.try_recv().is_err());
 
-        let msg = sut
-            .message_rx_stderr
-            .recv()
-            .await
-            .context("no message on stderr")?;
+        let msg = stderr_rx.recv().await.context("no message on stderr")?;
         assert_eq!(msg, Message::Done);
-        assert!(sut.message_rx_stderr.try_recv().is_err());
+        assert!(stderr_rx.try_recv().is_err());
 
         Ok(())
     }

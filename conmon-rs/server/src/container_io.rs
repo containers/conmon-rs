@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use async_channel::{Receiver, Sender};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use nix::errno::Errno;
 use std::{
     fmt,
@@ -63,6 +63,12 @@ impl SharedContainerIO {
     /// Retrieve the underlying stdout and stderr channels.
     pub async fn stdio(&self) -> Result<(Receiver<Message>, Receiver<Message>)> {
         self.0.read().await.stdio()
+    }
+
+    /// The number of output pipes, which is the number of `Message::Done`
+    /// messages a consumer sees once the container output ended.
+    pub async fn pipe_count(&self) -> usize {
+        self.0.read().await.pipe_count()
     }
 }
 
@@ -165,6 +171,8 @@ impl ContainerIO {
     }
 
     /// Retrieve clones of the stdout and stderr channels.
+    ///
+    /// Fails if the channels have been dropped via [`ContainerIO::drop_stdio`].
     pub fn stdio(&self) -> Result<(Receiver<Message>, Receiver<Message>)> {
         match self.typ() {
             ContainerIOType::Terminal(t) => {
@@ -172,12 +180,35 @@ impl ContainerIO {
                     let (_, fake_rx) = async_channel::bounded(1);
                     Ok((message_rx.clone(), fake_rx))
                 } else {
-                    bail!("called before message receiver was registered")
+                    bail!("stdio channel not available")
                 }
             }
-            ContainerIOType::Streams(s) => {
-                Ok((s.message_rx_stdout.clone(), s.message_rx_stderr.clone()))
+            ContainerIOType::Streams(s) => s.stdio(),
+        }
+    }
+
+    /// The number of output pipes of this container.
+    pub fn pipe_count(&self) -> usize {
+        match self.typ() {
+            ContainerIOType::Terminal(_) => 1,
+            ContainerIOType::Streams(_) => 2,
+        }
+    }
+
+    /// Drop the stdout and stderr channels.
+    ///
+    /// The channels buffer the last chunks per pipe for consumers like
+    /// `exec_sync`, which may start reading after the process already produced
+    /// output, and for reporting the runtime's stderr if a create fails. Once
+    /// a container is created nothing consumes them anymore, attach sessions
+    /// use the attach broadcast, so they get dropped. The read loops drop their
+    /// senders on the next send, which frees the channel buffers.
+    pub fn drop_stdio(&mut self) {
+        match self.typ_mut() {
+            ContainerIOType::Terminal(t) => {
+                t.message_rx_mut().take();
             }
+            ContainerIOType::Streams(s) => s.drop_stdio(),
         }
     }
 
@@ -196,8 +227,7 @@ impl ContainerIO {
                 }
             }
             ContainerIOType::Streams(s) => {
-                let stdout_rx = &mut s.message_rx_stdout;
-                let stderr_rx = &mut s.message_rx_stderr;
+                let (stdout_rx, stderr_rx) = s.stdio_mut()?;
                 let (stdout, stderr) = tokio::join!(
                     Self::read_stream_with_timeout(time_to_timeout, stdout_rx),
                     Self::read_stream_with_timeout(time_to_timeout, stderr_rx),
@@ -257,23 +287,22 @@ impl ContainerIO {
         mut reader: T,
         pipe: Pipe,
         logger: SharedContainerLog,
-        message_tx: Sender<Message>,
+        mut message_tx: Option<Sender<Message>>,
         mut attach: SharedContainerAttach,
     ) -> Result<()>
     where
         T: AsyncRead + Unpin,
     {
+        // The read data gets split off and frozen below, which shares the
+        // allocation with the consumers. Once it is used up, `read_buf` grows
+        // the buffer back to this original capacity, so no explicit reserve is
+        // needed in the loop.
         let mut buf = BytesMut::with_capacity(READ_BUFFER_SIZE);
 
         // Cache has_drivers check - drivers are immutable after container creation
         let log_has_drivers = logger.read().await.has_drivers();
 
         loop {
-            // Ensure buffer has space
-            if buf.remaining_mut() == 0 {
-                buf.reserve(READ_BUFFER_SIZE);
-            }
-
             match reader.read_buf(&mut buf).await {
                 Ok(0) => {
                     debug!("Nothing more to read");
@@ -283,9 +312,7 @@ impl ContainerIO {
                         .await
                         .context("write to attach endpoints")?;
 
-                    message_tx
-                        .force_send(Message::Done)
-                        .context("send done message")?;
+                    Self::forward(&mut message_tx, Message::Done);
 
                     return Ok(());
                 }
@@ -301,7 +328,7 @@ impl ContainerIO {
                     if log_has_drivers {
                         let mut locked_logger = logger.write().await;
                         locked_logger
-                            .write(pipe, &data[..])
+                            .write(pipe, &data)
                             .await
                             .context("write to log file")?;
                     }
@@ -315,9 +342,7 @@ impl ContainerIO {
                             .context("write to attach endpoints")?;
                     }
 
-                    message_tx
-                        .force_send(Message::Data(data, pipe))
-                        .context("send data message")?;
+                    Self::forward(&mut message_tx, Message::Data(data, pipe));
                 }
 
                 Err(e) => match Errno::from_raw(e.raw_os_error().context("get OS error")?) {
@@ -328,9 +353,7 @@ impl ContainerIO {
                             .await
                             .context("write to attach endpoints")?;
 
-                        message_tx
-                            .force_send(Message::Done)
-                            .context("send done message")?;
+                        Self::forward(&mut message_tx, Message::Done);
 
                         return Ok(());
                     }
@@ -343,6 +366,19 @@ impl ContainerIO {
                     ),
                 },
             }
+        }
+    }
+
+    /// Forward a message to the stdio channel. If the channel is full, the
+    /// oldest message gets dropped. If all receivers are gone (see
+    /// [`ContainerIO::drop_stdio`]), the sender is dropped as well so that the
+    /// channel buffer gets freed and no further sends are attempted.
+    fn forward(message_tx: &mut Option<Sender<Message>>, message: Message) {
+        if let Some(tx) = message_tx
+            && tx.force_send(message).is_err()
+        {
+            trace!("Stdio channel closed, dropping sender");
+            *message_tx = None;
         }
     }
 

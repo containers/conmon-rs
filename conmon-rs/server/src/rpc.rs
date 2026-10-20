@@ -196,6 +196,13 @@ impl conmon::Server for Server {
                     res => res,
                 })?;
 
+                // The stdio channels are needed up to this point to report the
+                // runtime's stderr on a failed create (see above). Afterwards
+                // nothing consumes them, attach sessions use the attach
+                // broadcast, so drop them instead of retaining output for the
+                // lifetime of the container.
+                container_io.drop_stdio();
+
                 // register grandchild with server
                 let io = SharedContainerIO::new(container_io);
                 let child = Child::new(

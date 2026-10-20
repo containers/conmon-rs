@@ -3,12 +3,14 @@ use crate::{
     listener::{DefaultListener, Listener},
 };
 use anyhow::{Context, Result, bail};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
+use memchr::memchr;
 use nix::{
     errno::Errno,
     sys::socket::{AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, listen, socket},
 };
 use std::{
+    io::IoSlice,
     os::{
         fd::{AsRawFd, OwnedFd},
         unix::fs::PermissionsExt,
@@ -16,18 +18,25 @@ use std::{
     path::{Path, PathBuf},
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, ErrorKind},
+    io::{AsyncReadExt, AsyncWriteExt, ErrorKind, Interest},
     net::{
         UnixListener,
         unix::{OwnedReadHalf, OwnedWriteHalf},
     },
     select,
-    sync::broadcast::{self, Receiver, Sender},
+    sync::broadcast::{self, Receiver, Sender, error::RecvError},
     task,
-    time::{self, Duration},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, debug_span, error};
+use tracing::{Instrument, debug, debug_span, error, trace, warn};
+
+/// Capacity of the stdin broadcast channel towards the container.
+const STDIN_CHANNEL_SIZE: usize = 16;
+
+/// Capacity of the output broadcast channel towards the attach clients. A
+/// client which falls further behind than this loses output, so it matches
+/// what the stdio channels buffer for exec.
+const OUTPUT_CHANNEL_SIZE: usize = 100;
 
 #[derive(Debug)]
 /// A shared container attach abstraction.
@@ -39,8 +48,8 @@ pub struct SharedContainerAttach {
 
 impl Default for SharedContainerAttach {
     fn default() -> Self {
-        let (read_half_tx, read_half_rx) = broadcast::channel(16);
-        let (write_half_tx, _) = broadcast::channel(16);
+        let (read_half_tx, read_half_rx) = broadcast::channel(STDIN_CHANNEL_SIZE);
+        let (write_half_tx, _) = broadcast::channel(OUTPUT_CHANNEL_SIZE);
         Self {
             read_half_rx,
             read_half_tx,
@@ -109,6 +118,11 @@ impl SharedContainerAttach {
     /// Check if there are any active attach readers.
     pub fn has_readers(&self) -> bool {
         self.write_half_tx.receiver_count() > 0
+    }
+
+    /// Subscribe to the container output sent to the attach endpoints.
+    pub fn subscribe(&self) -> Receiver<Message> {
+        self.write_half_tx.subscribe()
     }
 
     /// Retrieve the stdin sender.
@@ -239,62 +253,83 @@ impl Attach {
         token: CancellationToken,
         stop_after_stdin_eof: bool,
     ) -> Result<()> {
+        // `read_buf` grows the buffer back to this capacity once the frozen
+        // parts are used up, so no explicit reserve is needed in the loop.
         let mut buf = BytesMut::with_capacity(Self::PACKET_BUF_SIZE);
         loop {
-            // Ensure buffer has space
-            if buf.remaining_mut() == 0 {
-                buf.reserve(Self::PACKET_BUF_SIZE);
-            }
-
             // In situations we're processing output directly from the I/O streams
             // we need a mechanism to figure out when to stop that doesn't involve reading the
             // number of bytes read.
             // Thus, we need to select on the cancellation token saved in the child.
             // While this could result in a data race, as select statements are racy,
             // we won't interleve these two futures, as one ends execution.
-            select! {
-                n = read_half.read_buf(&mut buf) => {
-                    match n {
-                        Ok(n) if n > 0 => {
-                            // Find null terminator position in the entire buffer
-                            // (read_buf appends, so we must search all accumulated data)
-                            let end = buf.iter().position(|&x| x == 0).unwrap_or(buf.len());
-                            // Split and freeze to Bytes (zero-copy refcounted buffer)
-                            let data = buf.split_to(end).freeze();
-                            // If we found a null terminator, consume it too
-                            if end < buf.len() && buf[0] == 0 {
-                                buf.advance(1);
-                            }
-                            debug!("Read {} stdin bytes from client", data.len());
-                            tx.send(data).context("send data message")?;
-                        }
-                        Err(e) => match Errno::from_raw(e.raw_os_error().context("get OS error")?) {
-                            Errno::EIO => {
-                                debug!("Stopping read loop because of IO error");
-                                return Ok(());
-                            }
-                            Errno::EBADF => {
-                                return Err(Errno::EBADFD.into());
-                            }
-                            Errno::EAGAIN => {
-                                continue;
-                            }
-                            _ => error!(
-                                "Unable to read from file descriptor: {} {}",
-                                e,
-                                e.raw_os_error().context("get OS error")?
-                            ),
-                        },
-                        _ if stop_after_stdin_eof => {
-                            debug!("Stopping read loop because there is nothing more to read");
-                            token.cancel();
-                            return Ok(());
-                        }
-                        _ => time::sleep(Duration::from_millis(500)).await, // avoid busy looping
-                    }
-                }
+            let read = select! {
+                n = read_half.read_buf(&mut buf) => n,
                 _ = token.cancelled() => {
                     debug!("Exiting because token cancelled");
+                    return Ok(());
+                }
+            };
+
+            // A zero byte read on a SOCK_SEQPACKET socket is either an empty
+            // packet or the peer closing its write side. Only the latter marks
+            // the socket as read closed, so wait for the next readiness and
+            // check that flag rather than guessing from another read.
+            if let Ok(0) = read {
+                let ready = select! {
+                    ready = read_half.ready(Interest::READABLE) => {
+                        ready.context("wait for attach socket readiness")?
+                    }
+                    _ = token.cancelled() => {
+                        debug!("Exiting because token cancelled");
+                        return Ok(());
+                    }
+                };
+                if !ready.is_read_closed() {
+                    trace!("Ignoring empty packet");
+                    continue;
+                }
+            }
+
+            match read {
+                Ok(n) if n > 0 => {
+                    // Find null terminator position in the entire buffer
+                    // (read_buf appends, so we must search all accumulated data)
+                    let end = memchr(0, &buf).unwrap_or(buf.len());
+                    // Split and freeze to Bytes (zero-copy refcounted buffer)
+                    let data = buf.split_to(end).freeze();
+                    // If we found a null terminator, consume it too
+                    if end < buf.len() && buf[0] == 0 {
+                        buf.advance(1);
+                    }
+                    debug!("Read {} stdin bytes from client", data.len());
+                    tx.send(data).context("send data message")?;
+                }
+                Err(e) => match Errno::from_raw(e.raw_os_error().context("get OS error")?) {
+                    Errno::EIO => {
+                        debug!("Stopping read loop because of IO error");
+                        return Ok(());
+                    }
+                    Errno::EBADF => {
+                        return Err(Errno::EBADFD.into());
+                    }
+                    Errno::EAGAIN => {
+                        continue;
+                    }
+                    _ => error!(
+                        "Unable to read from file descriptor: {} {}",
+                        e,
+                        e.raw_os_error().context("get OS error")?
+                    ),
+                },
+                _ => {
+                    // The client closed its write half, no more input will
+                    // ever arrive on this connection. The write loop keeps
+                    // delivering output independently.
+                    debug!("Stopping read loop because there is nothing more to read");
+                    if stop_after_stdin_eof {
+                        token.cancel();
+                    }
                     return Ok(());
                 }
             }
@@ -302,9 +337,19 @@ impl Attach {
     }
 
     async fn write_loop(mut write_half: OwnedWriteHalf, mut rx: Receiver<Message>) -> Result<()> {
-        let mut packet = Vec::with_capacity(Self::PACKET_BUF_SIZE);
         loop {
-            match rx.recv().await.context("receive message")? {
+            let message = match rx.recv().await {
+                Ok(message) => message,
+                Err(RecvError::Lagged(n)) => {
+                    warn!("Attach client too slow, skipped {n} messages");
+                    continue;
+                }
+                Err(RecvError::Closed) => {
+                    debug!("Exiting because container I/O is gone");
+                    return Ok(());
+                }
+            };
+            match message {
                 Message::Done => {
                     debug!("Exiting because token cancelled");
                     match write_half.write(Self::DONE_PACKET).await {
@@ -323,12 +368,13 @@ impl Attach {
                         Pipe::StdOut => 2,
                         Pipe::StdErr => 3,
                     };
+                    let header = [p];
                     let len = buf.chunks(Self::PACKET_BUF_SIZE - 1).len();
                     for (idx, chunk) in buf.chunks(Self::PACKET_BUF_SIZE - 1).enumerate() {
-                        packet.clear();
-                        packet.push(p);
-                        packet.extend_from_slice(chunk);
-                        match write_half.write(&packet).await {
+                        // Send the pipe header and the chunk as one packet
+                        // without copying the chunk into a separate buffer.
+                        let packet = [IoSlice::new(&header), IoSlice::new(chunk)];
+                        match write_half.write_vectored(&packet).await {
                             Ok(_) => {
                                 debug!("Wrote {} packet {}/{} to client", pipe, idx + 1, len)
                             }
