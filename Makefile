@@ -8,6 +8,9 @@ GOTOOLS_GOPATH ?= $(BUILD_DIR)/gotools
 GOTOOLS_BINDIR ?= $(GOTOOLS_GOPATH)/bin
 GINKGO_FLAGS ?= -vv --trace --race --randomize-all --flake-attempts 3 --show-node-events --timeout 5m -r pkg/client
 TEST_FLAGS ?=
+# The generated Go code embeds a schema which differs between capnp versions,
+# use the one pinned by flake.lock. Set CAPNP=capnp to use the local one.
+CAPNP ?= nix shell --inputs-from . nixpkgs\#capnproto --command capnp
 PACKAGE_NAME ?= $(shell cargo metadata --no-deps --format-version 1 | jq -r '.packages[2] | [ .name, .version ] | join("-v")')
 PREFIX ?= /usr
 CI_TAG ?=
@@ -135,7 +138,7 @@ internal/proto/conmon.capnp:
 update-proto: internal/proto/conmon.capnp ## Update the Cap'n Proto protocol.
 	$(eval GO_CAPNP_VERSION ?= $(shell grep '^\s*capnproto.org/go/capnp/v3 v3\.' go.mod | grep -o 'v3\..*'))
 	go install capnproto.org/go/capnp/v3/capnpc-go@$(GO_CAPNP_VERSION)
-	capnp compile \
+	$(CAPNP) compile \
 		-I$(shell go env GOMODCACHE)/capnproto.org/go/capnp/v3@$(GO_CAPNP_VERSION)/std \
 		-ogo internal/proto/conmon.capnp
 
