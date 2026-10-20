@@ -33,7 +33,7 @@ debug logs when creating a container:
 
 ```text
 …
-DEBU[…] Using conmonrs version: 1.0.1, tag: v1.0.1, commit: …, build: …, \
+DEBU[…] Using conmonrs version: …, tag: …, commit: …, build: …, \
             target: x86_64-unknown-linux-gnu, rustc …, cargo …  file="oci/runtime_pod.go:147"
 …
 ```
@@ -53,7 +53,7 @@ through the environment variable in parentheses:
 | `--runtime-root <RUNTIME_ROOT>` | `CONMON_RUNTIME_ROOT`     |                         | Root directory passed to the OCI runtime (`--root`).                               |
 | `-l, --log-level <LEVEL>`       | `CONMON_LOG_LEVEL`        | `info`                  | `trace`, `debug`, `info`, `warn`, `error` or `off`.                                |
 | `-d, --log-driver <DRIVER>`     | `CONMON_LOG_DRIVER`       | `systemd`               | Where the server logs to: `systemd` (journald), `stdout` or `none`.                |
-| `--skip-fork`                   | `CONMON_SKIP_FORK`        | `false`                 | Stay in the foreground instead of forking into the background.                     |
+| `--skip-fork`                   | `CONMON_SKIP_FORK`        | `false`                 | Stay in the foreground instead of forking into the background (`1` or `true`).     |
 | `-e, --enable-tracing`          | `CONMON_ENABLE_TRACING`   | `false`                 | Export OpenTelemetry traces (needs a build with the `tracing` feature).            |
 | `-t, --tracing-endpoint <URL>`  | `CONMON_TRACING_ENDPOINT` | `http://127.0.0.1:4317` | OpenTelemetry gRPC endpoint.                                                       |
 | `-v, --version [full]`          | `CONMON_VERSION`          |                         | Print the version, `full` includes the dependency tree.                            |

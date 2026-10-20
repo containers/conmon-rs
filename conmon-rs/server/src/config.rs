@@ -101,7 +101,8 @@ pub struct Config {
     #[arg(
         env(concat!(prefix!(), "SKIP_FORK")),
         long("skip-fork"),
-        value_name("SKIP_FORK")
+        // The environment variable also accepts 1, 0, yes and no.
+        value_parser = clap::builder::BoolishValueParser::new(),
     )]
     /// Do not fork if true.
     skip_fork: bool,

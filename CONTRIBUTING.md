@@ -57,10 +57,12 @@ Test your changes by running:
 $ make lint
 ```
 
-And you can run the test suite if you have access to elevated permissions:
+The unit tests run as a regular user, and so do most integration tests. The
+OOM and namespace specs need elevated permissions for the cgroups and bind
+mounts and skip or fail otherwise:
 
 ```console
-# make unit
+$ make unit
 # make integration
 ```
 
@@ -138,3 +140,8 @@ For general questions, or discussions, please use our [channel on the Kubernetes
 For discussions around issues/bugs and features, you can use the github
 [issues](https://github.com/containers/conmon-rs/issues) and
 [PRs](https://github.com/containers/conmon-rs/pulls) tracking system.
+
+## Code of Conduct
+
+This project follows the
+[containers Code of Conduct](https://github.com/containers/common/blob/main/CODE-OF-CONDUCT.md).

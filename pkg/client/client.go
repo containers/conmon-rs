@@ -1235,7 +1235,8 @@ func (c *ConmonClient) setMetadata(ctx context.Context, req RequestWithMetadata)
 // CreateNamespacesConfig is the configuration for calling the
 // CreateNamespaces method.
 type CreateNamespacesConfig struct {
-	// Namespaces are the list of namespaces to unshare.
+	// Namespaces are the list of namespaces to unshare. A namespace listed
+	// twice is created and reported once.
 	Namespaces []Namespace
 
 	// IDMappings are the user and group ID mappings when unsharing the user
@@ -1252,6 +1253,10 @@ type CreateNamespacesConfig struct {
 
 // CreateNamespacesResponse is the response of the CreateNamespaces method.
 type CreateNamespacesResponse struct {
+	// Namespaces are the created namespaces, one per requested type. A
+	// server holds the namespaces of a single pod and answers later calls
+	// for it from the first one, so the order is that of the first request.
+	// Match the entries by their Type.
 	Namespaces []*NamespacesResponse
 }
 

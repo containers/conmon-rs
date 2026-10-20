@@ -1,12 +1,12 @@
 <p align="center"><img  height="200" src="./.github/logo/conmon-rs.png"></p>
 
-[![ci](https://github.com/containers/conmon-rs/workflows/ci/badge.svg)](https://github.com/containers/conmon-rs/actions)
-[![gh-pages](https://github.com/containers/conmon-rs/workflows/gh-pages/badge.svg)](https://github.com/containers/conmon-rs/actions)
+[![ci](https://github.com/containers/conmon-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/containers/conmon-rs/actions/workflows/ci.yml)
+[![gh-pages](https://github.com/containers/conmon-rs/actions/workflows/gh-pages.yml/badge.svg)](https://github.com/containers/conmon-rs/actions/workflows/gh-pages.yml)
 [![codecov](https://codecov.io/gh/containers/conmon-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/containers/conmon-rs)
 [![dependencies](https://deps.rs/repo/github/containers/conmon-rs/status.svg)](https://deps.rs/repo/github/containers/conmon-rs)
 [![builds](https://img.shields.io/badge/packages-copr-orange.svg)](https://copr.fedorainfracloud.org/coprs/rhcontainerbot/podman-next/package/conmon-rs)
 [![docs](https://img.shields.io/badge/docs-main-blue.svg)](https://containers.github.io/conmon-rs/conmonrs/index.html)
-[![go-docs](https://godoc.org/github.com/containers/conmon-rs?status.svg)](https://pkg.go.dev/github.com/containers/conmon-rs/pkg/client)
+[![go-docs](https://pkg.go.dev/badge/github.com/containers/conmon-rs/pkg/client.svg)](https://pkg.go.dev/github.com/containers/conmon-rs/pkg/client)
 
 A pod level OCI container runtime monitor for Linux.
 

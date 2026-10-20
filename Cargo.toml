@@ -4,7 +4,7 @@ members = ["conmon-rs/server"]
 
 [workspace.package]
 # Checked against rpm/conmon-rs.spec by `make verify-spec`.
-version = "1.0.2"
+version = "1.1.0"
 edition = "2024"
 license = "Apache-2.0"
 
