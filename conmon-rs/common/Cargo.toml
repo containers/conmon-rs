@@ -1,16 +1,16 @@
 [package]
 name = "conmon-common"
 # Version listed below is also used by .packit.sh
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
-capnp = "0.27.0"
+capnp = "0.27.2"
 
 [lints]
 workspace = true
 
 [build-dependencies]
-capnp = { version = "0.27.0", default-features = false }
+capnp = { version = "0.27.2", default-features = false }
 capnpc = { version = "0.27.0", default-features = false }

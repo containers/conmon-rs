@@ -1,6 +1,6 @@
 [package]
 name = "conmonrs"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -12,41 +12,41 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-anyhow = { version = "1.0.102", default-features = false }
+anyhow = { version = "1.0.104", default-features = false }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws"] }
 async-channel = { version = "2.5.0", default-features = false, features = ["std"] }
-bytes = { version = "1.12.0", default-features = false }
-capnp = { version = "0.27.0", default-features = false }
-capnp-rpc = { version = "0.27.0", default-features = false }
-clap = { version = "4.6.1", default-features = false, features = ["cargo", "derive", "env", "error-context", "help", "std", "usage"] }
-conmon-common = { version = "1.0.1", path = "../common" }
-futures = { version = "0.3.32", default-features = false }
-libc = { version = "0.2.186", default-features = false }
+bytes = { version = "1.12.1", default-features = false }
+capnp = { version = "0.27.2", default-features = false }
+capnp-rpc = { version = "0.27.1", default-features = false }
+clap = { version = "4.6.7", default-features = false, features = ["cargo", "derive", "env", "error-context", "help", "std", "usage"] }
+conmon-common = { version = "1.0.2", path = "../common" }
+futures = { version = "0.3.34", default-features = false }
+libc = { version = "0.2.191", default-features = false }
 libsystemd = { version = "0.7.2", default-features = false }
 linereader = { version = "0.4.0", default-features = false }
-lru = { version = "0.18.0", default-features = false }
-memchr = { version = "2.8.1", default-features = false }
-nix = { version = "0.31.3", default-features = false, features = ["fs", "hostname", "mount", "sched", "signal", "socket", "term", "user"] }
+lru = { version = "0.19.0", default-features = false }
+memchr = { version = "2.8.3", default-features = false }
+nix = { version = "0.31.3", default-features = false, features = ["fs", "hostname", "mount", "poll", "sched", "signal", "socket", "term", "user"] }
 notify = { version = "8.2.0", default-features = false }
-opentelemetry = { version = "0.33.0", default-features = false, optional = true }
-opentelemetry_sdk = { version = "0.33.0", default-features = false, features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.33.0", default-features = false, features = ["grpc-tonic", "trace"], optional = true }
-opentelemetry-semantic-conventions = { version = "0.33.0", default-features = false, features = ["semconv_experimental"], optional = true }
-sendfd = { version = "0.4.4", default-features = false, features = ["tokio"] }
-serde = { version = "1.0.228", default-features = false, features = ["derive"] }
-serde_json = { version = "1.0.150", default-features = false, features = ["std"] }
-signal-hook = { version = "0.4.4", default-features = false, features = ["iterator"] }
+opentelemetry = { version = "0.33.1", default-features = false, optional = true }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "trace"], optional = true }
+opentelemetry-semantic-conventions = { version = "0.33.1", default-features = false, features = ["semconv_experimental"], optional = true }
+sendfd = { version = "0.4.5", default-features = false, features = ["tokio"] }
+serde = { version = "1.0.229", default-features = false, features = ["derive"] }
+serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
+signal-hook = { version = "0.4.5", default-features = false, features = ["iterator"] }
 strum = { version = "0.28.0", default-features = false, features = ["derive"] }
-tokio = { version = "1.52.3", default-features = false, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1.54.0", default-features = false, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "time"] }
 tokio-eventfd = { version = "0.2.2", default-features = false }
-tokio-seqpacket = { version = "0.9.0", default-features = false }
-tokio-util = { version = "0.7.18", default-features = false, features = ["compat"] }
-tower-http = { version = "0.7.0", default-features = false, features = ["trace"] }
+tokio-seqpacket = { version = "0.9.1", default-features = false }
+tokio-util = { version = "0.7.20", default-features = false, features = ["compat"] }
+tower-http = { version = "0.7.1", default-features = false, features = ["trace"] }
 tracing = { version = "0.1.44", default-features = false }
 tracing-opentelemetry = { version = "0.34.0", default-features = false, optional = true }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt"] }
-time = { version = "0.3.47", default-features = false, features = ["formatting", "local-offset", "parsing", "std"] }
-uuid = { version = "1.23.3", default-features = false, features = ["v4", "fast-rng"] }
+time = { version = "0.3.55", default-features = false, features = ["formatting", "local-offset", "parsing", "std"] }
+uuid = { version = "1.28.0", default-features = false, features = ["v4", "fast-rng"] }
 
 [features]
 default = []
