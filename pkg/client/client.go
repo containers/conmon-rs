@@ -56,6 +56,8 @@ type ConmonClient struct {
 	tracingEnabled bool
 	tracer         trace.Tracer
 	cgroupManager  CgroupManager
+	featuresMu     sync.Mutex
+	features       map[string]bool
 	connMu         sync.Mutex
 	conn           *rpc.Conn
 	rpcClient      proto.Conmon
@@ -264,6 +266,10 @@ type ServerVersion struct {
 
 	// The cargo dependency tree, only available in verbose output.
 	CargoTree string `json:"cargo_tree"` //nolint:tagliatelle // Rust's serde will use that format.
+
+	// The optional features the server supports, see the `Feature*`
+	// constants.
+	Features []string `json:"features"`
 }
 
 // versionTimeout bounds running the binary for its version.
@@ -614,6 +620,38 @@ type VersionResponse struct {
 	// CargoTree is the used dependency tree.
 	// Only set if request was in verbose mode.
 	CargoTree string
+
+	// Features are the optional features the server supports, see the
+	// `Feature*` constants.
+	Features []string
+}
+
+// FeatureSdNotify is reported by servers which relay sd_notify messages.
+const FeatureSdNotify = "sdnotify"
+
+// requireServerFeature fails with ErrUnsupported if the server does not
+// report the feature. The features are asked once.
+func (c *ConmonClient) requireServerFeature(ctx context.Context, feature, usage string) error {
+	c.featuresMu.Lock()
+	defer c.featuresMu.Unlock()
+
+	if c.features == nil {
+		resp, err := c.Version(ctx, &VersionConfig{})
+		if err != nil {
+			return fmt.Errorf("get server version: %w", err)
+		}
+
+		c.features = make(map[string]bool, len(resp.Features))
+		for _, feature := range resp.Features {
+			c.features[feature] = true
+		}
+	}
+
+	if !c.features[feature] {
+		return fmt.Errorf("%s needs the %q feature of the server: %w", usage, feature, ErrUnsupported)
+	}
+
+	return nil
 }
 
 // Version can be used to retrieve all available version information.
@@ -703,6 +741,22 @@ func (c *ConmonClient) Version(
 		return nil, fmt.Errorf("get cargo tree: %w", err)
 	}
 
+	featureList, err := response.Features()
+	if err != nil {
+		return nil, fmt.Errorf("get features: %w", err)
+	}
+
+	features := make([]string, 0, featureList.Len())
+
+	for i := range featureList.Len() {
+		feature, err := featureList.At(i)
+		if err != nil {
+			return nil, fmt.Errorf("get feature %d: %w", i, err)
+		}
+
+		features = append(features, feature)
+	}
+
 	return &VersionResponse{
 		ProcessID:    response.ProcessId(),
 		Version:      version,
@@ -713,6 +767,7 @@ func (c *ConmonClient) Version(
 		RustVersion:  rustVersion,
 		CargoVersion: cargoVersion,
 		CargoTree:    cargoTree,
+		Features:     features,
 	}, nil
 }
 
@@ -793,6 +848,14 @@ type CreateContainerConfig struct {
 
 	// LeakFDs can be used to keep file descriptors open as long as the container is running.
 	LeakFDs []RemoteFD
+
+	// SdNotifySocket is the path of the host sd_notify socket, usually the
+	// NOTIFY_SOCKET of systemd. If set, the server binds
+	// `<BundlePath>/notify/notify.sock` before it runs the runtime and relays
+	// every message sent there to the host socket until the container exits.
+	// The caller mounts the `notify` directory into the container and sets
+	// NOTIFY_SOCKET for the container process accordingly.
+	SdNotifySocket string
 }
 
 // ContainerLogDriver specifies a selected logging mechanism.
@@ -842,6 +905,13 @@ func (c *ConmonClient) CreateContainer(
 
 	if err := c.validateCgroupManager(cfg.CgroupManager); err != nil {
 		return nil, err
+	}
+
+	// An older server ignores the field, the unit would never get ready.
+	if cfg.SdNotifySocket != "" {
+		if err := c.requireServerFeature(ctx, FeatureSdNotify, "sd_notify socket"); err != nil {
+			return nil, err
+		}
 	}
 
 	rpcClient, err := c.client(ctx)
@@ -906,6 +976,10 @@ func (c *ConmonClient) CreateContainer(
 
 		if err := remoteFDSliceToUInt64List(cfg.LeakFDs, req.NewLeakFds); err != nil {
 			return fmt.Errorf("convert file descriptor slice to slot list: %w", err)
+		}
+
+		if err := req.SetSdnotifySocket(cfg.SdNotifySocket); err != nil {
+			return fmt.Errorf("set sd_notify socket: %w", err)
 		}
 
 		return nil

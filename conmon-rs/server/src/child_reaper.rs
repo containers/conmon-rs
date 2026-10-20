@@ -122,6 +122,7 @@ impl ChildReaper {
         container_io: &mut ContainerIO,
         pidfile: &Path,
         env_vars: Vec<(String, String)>,
+        relays_notify: bool,
         additional_fds: Vec<OwnedFd>,
     ) -> Result<(u32, CancellationToken)>
     where
@@ -134,6 +135,14 @@ impl ChildReaper {
 
         if stdin {
             cmd.stdin(Stdio::piped());
+        }
+
+        // With the server relaying the sd_notify messages, the runtime must
+        // not add its own notify socket mount and `NOTIFY_SOCKET` to the
+        // container on top of what the caller set up. A value passed in the
+        // environment variables on purpose still reaches it.
+        if relays_notify {
+            cmd.env_remove("NOTIFY_SOCKET");
         }
 
         let mut child = cmd

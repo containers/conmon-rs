@@ -6,6 +6,7 @@ use crate::{
     child::{Child, ChildKind},
     container_io::{ContainerIO, ContainerIOType, SharedContainerIO},
     container_log::ContainerLog,
+    notify::NotifySocket,
     pause::Pause,
     server::{GenerateRuntimeArgs, Server},
     version::Version,
@@ -114,6 +115,10 @@ impl conmon::Server for Server {
         response.set_rust_version(version.rust_version());
         response.set_cargo_version(version.cargo_version());
         response.set_cargo_tree(version.cargo_tree());
+        let mut features = response.init_features(version.features().len() as u32);
+        for (i, feature) in version.features().iter().enumerate() {
+            features.set(i as u32, feature);
+        }
 
         Promise::ok(())
     }
@@ -165,6 +170,15 @@ impl conmon::Server for Server {
         let additional_fds = pry_err!(self.fd_socket().take_all(pry!(req.get_additional_fds())));
         let leak_fds = pry_err!(self.fd_socket().take_all(pry!(req.get_leak_fds())));
 
+        // The runtime mounts the socket directory, so it has to exist before
+        // the runtime runs.
+        let sdnotify_socket = pry!(pry!(req.get_sdnotify_socket()).to_str());
+        let notify_socket = if sdnotify_socket.is_empty() {
+            None
+        } else {
+            Some(pry_err!(NotifySocket::bind(bundle_path, sdnotify_socket)))
+        };
+
         Promise::from_future(
             async move {
                 capnp_err!(container_log.write().await.init().await)?;
@@ -177,6 +191,7 @@ impl conmon::Server for Server {
                         &mut container_io,
                         &pidfile,
                         env_vars,
+                        notify_socket.is_some(),
                         additional_fds,
                     )
                     .await
@@ -223,9 +238,15 @@ impl conmon::Server for Server {
                     timeout: None,
                     io,
                     cleanup_cmd,
-                    token,
+                    token: token.clone(),
                 };
                 capnp_err!(child_reaper.watch_grandchild(child, leak_fds))?;
+
+                // Only now does the container exit cancel the token, a
+                // failure above drops the socket instead.
+                if let Some(notify_socket) = notify_socket {
+                    notify_socket.spawn(token);
+                }
 
                 results
                     .get()
@@ -285,6 +306,7 @@ impl conmon::Server for Server {
                         &mut container_io,
                         pidfile.path(),
                         env_vars,
+                        false,
                         vec![],
                     )
                     .await

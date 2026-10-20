@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::{
+    ffi::OsStr,
     fs::{self, File},
     io,
     os::unix::io::AsRawFd,
@@ -35,34 +36,61 @@ where
         P: AsRef<Path>,
     {
         let path = path.as_ref();
-
-        let parent = path.parent().with_context(|| {
-            format!(
-                "tried to specify / as socket to bind to: {}",
-                path.display()
-            )
-        })?;
-        let name = path.file_name().with_context(|| {
-            format!(
-                "tried to specify '..' as socket to bind to: {}",
-                path.display(),
-            )
-        })?;
+        let (parent, _) = split_socket_path(path)?;
 
         self.imp
             .create_dir_all(parent)
             .context("create parent directory")?;
 
-        let parent = self.imp.open(parent).context("open parent directory")?;
-        let fd = parent.as_raw_fd();
-
-        Ok((
-            PathBuf::from("/proc/self/fd")
-                .join(fd.to_string())
-                .join(name),
-            parent,
-        ))
+        shorten_path_with(path, |parent| self.imp.open(parent))
     }
+}
+
+/// Refer to a socket path through its parent directory, so that it fits into
+/// a socket address whatever its length. The directory has to exist and
+/// stays open as long as the returned file, the path is only valid until
+/// then.
+pub fn shorten_path(path: &Path) -> Result<(PathBuf, File)> {
+    shorten_path_with(path, |parent| File::open(parent))
+}
+
+fn shorten_path_with<F>(path: &Path, open: F) -> Result<(PathBuf, File)>
+where
+    F: FnOnce(&Path) -> io::Result<File>,
+{
+    let (parent, name) = split_socket_path(path)?;
+    let parent = open(parent).context("open parent directory")?;
+    let fd = parent.as_raw_fd();
+
+    Ok((
+        PathBuf::from("/proc/self/fd")
+            .join(fd.to_string())
+            .join(name),
+        parent,
+    ))
+}
+
+/// Split a socket path into its parent directory and name, a relative name
+/// lives in the current directory.
+fn split_socket_path(path: &Path) -> Result<(&Path, &OsStr)> {
+    let parent = path.parent().with_context(|| {
+        format!(
+            "tried to specify / as socket to bind to: {}",
+            path.display()
+        )
+    })?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let name = path.file_name().with_context(|| {
+        format!(
+            "tried to specify '..' as socket to bind to: {}",
+            path.display(),
+        )
+    })?;
+    Ok((parent, name))
 }
 
 #[cfg_attr(test, automock(type Listener = UnixListener;))]
