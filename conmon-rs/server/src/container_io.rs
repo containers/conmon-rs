@@ -13,7 +13,6 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use strum::AsRefStr;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     select,
@@ -133,8 +132,7 @@ pub enum Message {
     Done,
 }
 
-#[derive(AsRefStr, Clone, Copy, Debug, PartialEq, Eq)]
-#[strum(serialize_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Available pipe types.
 pub enum Pipe {
     /// Standard output.
@@ -144,9 +142,19 @@ pub enum Pipe {
     StdErr,
 }
 
+impl Pipe {
+    /// The name of the pipe as used in the logs.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StdOut => "stdout",
+            Self::StdErr => "stderr",
+        }
+    }
+}
+
 impl fmt::Display for Pipe {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.as_ref())
+        f.write_str(self.as_str())
     }
 }
 

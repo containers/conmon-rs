@@ -25,6 +25,12 @@ fn enabled_features() -> String {
 }
 
 fn main() {
+    println!("cargo:rerun-if-changed=proto/conmon.capnp");
+    capnpc::CompilerCommand::new()
+        .file("proto/conmon.capnp")
+        .run()
+        .expect("compile the Cap'n Proto schema");
+
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     println!("cargo:rerun-if-env-changed=CONMONRS_SKIP_CARGO_TREE");
     println!("cargo:rerun-if-env-changed=BUILD_TAG");

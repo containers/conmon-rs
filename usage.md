@@ -88,7 +88,7 @@ removed when the server shuts down.
 ### Cap'n Proto RPC
 
 All operations are RPCs on the `conmon.sock` UNIX domain socket, defined in
-[conmon-rs/common/proto/conmon.capnp](conmon-rs/common/proto/conmon.capnp):
+[conmon-rs/server/proto/conmon.capnp](conmon-rs/server/proto/conmon.capnp):
 `version`, `createContainer`, `execSyncContainer`, `attachContainer`,
 `reopenLogContainer`, `setWindowSizeContainer`, `createNamespaces`,
 `startFdSocket`, `serveExecContainer`, `serveAttachContainer` and

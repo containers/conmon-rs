@@ -1,13 +1,17 @@
 [workspace]
 resolver = "2"
-members = [
-	"conmon-rs/common",
-	"conmon-rs/client",
-	"conmon-rs/server",
-]
+members = ["conmon-rs/server"]
 
-[workspace.lints.clippy]
-needless_return = "allow"
+[workspace.package]
+# Checked against rpm/conmon-rs.spec by `make verify-spec`.
+version = "1.0.2"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+capnp = { version = "0.27.2", default-features = false }
+capnpc = { version = "0.27.0", default-features = false }
+tokio = { version = "1.54.0", default-features = false }
 
 [profile.release]
 debug = 0

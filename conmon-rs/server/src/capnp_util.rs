@@ -2,8 +2,8 @@ pub(crate) use map_entry::into_map;
 
 /// Helper functions to convert between capnp maps (List's of MapEntries) and rust maps
 mod map_entry {
+    use crate::conmon_capnp::conmon;
     use capnp::{struct_list::Reader, traits::OwnedStruct};
-    use conmon_common::conmon_capnp::conmon;
 
     /// Convert from a MapEntry capnp struct to a (key, value) tuple.
     pub(crate) trait IntoKeyValue<'a, K, V>: OwnedStruct {

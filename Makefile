@@ -1,5 +1,5 @@
 RUNTIME_PATH ?= "/usr/bin/runc"
-PROTO_PATH ?= "conmon-rs/common/proto"
+PROTO_PATH ?= "conmon-rs/server/proto"
 BINARY := conmonrs
 CONTAINER_RUNTIME ?= podman
 BUILD_DIR ?= .build

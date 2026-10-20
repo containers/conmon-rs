@@ -568,14 +568,13 @@ pub fn kill_grandchild(raw_pid: u32, s: Signal) {
         // kill(-1), which kills everything conmon is allowed to.
         let pgid = i32::from(pgid);
 
-        #[allow(clippy::collapsible_if)]
-        if pgid > 1 {
-            if let Err(e) = kill(Pid::from_raw(-pgid), s) {
-                error!(
-                    raw_pid,
-                    "Failed to kill process group {pgid}, falling back to killing pid: {:#}", e
-                );
-            }
+        if pgid > 1
+            && let Err(e) = kill(Pid::from_raw(-pgid), s)
+        {
+            error!(
+                raw_pid,
+                "Failed to kill process group {pgid}, falling back to killing pid: {:#}", e
+            );
         }
     }
     if let Err(e) = kill(pid, s) {

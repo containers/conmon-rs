@@ -5,6 +5,12 @@
 pub use server::Server;
 pub use version::Version;
 
+/// The generated Cap'n Proto RPC interface.
+pub mod conmon_capnp {
+    #![allow(clippy::all, unused_parens)]
+    include!(concat!(env!("OUT_DIR"), "/proto/conmon_capnp.rs"));
+}
+
 mod attach;
 mod bounded_hashmap;
 mod capnp_util;
@@ -34,4 +40,7 @@ mod streams;
 mod telemetry;
 #[allow(unsafe_code)]
 mod terminal;
+#[cfg(all(target_os = "linux", target_arch = "s390x", target_env = "musl"))]
+#[allow(unsafe_code)]
+mod unwind;
 mod version;

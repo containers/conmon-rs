@@ -61,7 +61,7 @@ The repository contains two components:
 
 1. The Rust server in [conmon-rs/server](./conmon-rs/server), the `conmonrs`
    binary. Its Cap'n Proto interface lives in
-   [conmon-rs/common/proto/conmon.capnp](./conmon-rs/common/proto/conmon.capnp).
+   [conmon-rs/server/proto/conmon.capnp](./conmon-rs/server/proto/conmon.capnp).
 2. The Go client in [pkg/client](./pkg/client), which starts the server, talks
    to it over Cap'n Proto RPC and hides the RPC types behind plain Go
    structures. CRI-O vendors this client.

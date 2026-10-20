@@ -1,3 +1,4 @@
+use crate::conmon_capnp::conmon::CgroupManager;
 use crate::{
     bounded_hashmap::BoundedHashMap,
     child::{Child, ChildKind},
@@ -19,7 +20,6 @@ use axum::{
     routing::{get, post},
 };
 use bytes::{BufMut, Bytes, BytesMut};
-use conmon_common::conmon_capnp::conmon::CgroupManager;
 use futures::{
     sink::SinkExt,
     stream::{SplitSink, SplitStream, StreamExt},

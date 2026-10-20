@@ -2,10 +2,10 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
 };
-use strum::{AsRefStr, Display, EnumIter, EnumString, IntoStaticStr};
+use tracing_subscriber::filter::LevelFilter;
 
 macro_rules! prefix {
     () => {
@@ -251,22 +251,7 @@ pub enum Commands {
     },
 }
 
-#[derive(
-    AsRefStr,
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    Display,
-    EnumIter,
-    EnumString,
-    Eq,
-    Hash,
-    IntoStaticStr,
-    PartialEq,
-    ValueEnum,
-)]
-#[strum(serialize_all = "lowercase")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 /// Available log levels.
 pub enum LogLevel {
     /// Trace level, the most verbose one.
@@ -289,21 +274,7 @@ pub enum LogLevel {
     Off,
 }
 
-#[derive(
-    AsRefStr,
-    Clone,
-    Copy,
-    Debug,
-    Display,
-    EnumIter,
-    EnumString,
-    Eq,
-    Hash,
-    IntoStaticStr,
-    PartialEq,
-    ValueEnum,
-)]
-#[strum(serialize_all = "lowercase")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 /// Available verbosity levels.
 pub enum Verbosity {
     /// The default output verbosity.
@@ -313,22 +284,7 @@ pub enum Verbosity {
     Full,
 }
 
-#[derive(
-    AsRefStr,
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    Display,
-    EnumIter,
-    EnumString,
-    Eq,
-    Hash,
-    IntoStaticStr,
-    PartialEq,
-    ValueEnum,
-)]
-#[strum(serialize_all = "lowercase")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 /// Available log drivers.
 pub enum LogDriver {
     /// Use no log driver.
@@ -340,6 +296,30 @@ pub enum LogDriver {
     #[default]
     /// Use systemd journald as log driver
     Systemd,
+}
+
+/// Formats the level with the name clap derives from the variant, which is
+/// what the command line and the runtime flags use.
+impl fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = self
+            .to_possible_value()
+            .expect("LogLevel has no skipped variants");
+        f.write_str(value.get_name())
+    }
+}
+
+impl From<LogLevel> for LevelFilter {
+    fn from(level: LogLevel) -> Self {
+        match level {
+            LogLevel::Trace => Self::TRACE,
+            LogLevel::Debug => Self::DEBUG,
+            LogLevel::Info => Self::INFO,
+            LogLevel::Warn => Self::WARN,
+            LogLevel::Error => Self::ERROR,
+            LogLevel::Off => Self::OFF,
+        }
+    }
 }
 
 impl Default for Config {

@@ -1,15 +1,12 @@
 # Creating a new release
 
 Creating a new conmon-rs release can be done by proposing a PR to bump the
-versions in the following files:
-
-- [conmon-rs/common/Cargo.toml](conmon-rs/common/Cargo.toml) (`version`)
-- [conmon-rs/server/Cargo.toml](conmon-rs/server/Cargo.toml) (`version` and `conmon-common` dependency version)
-- [conmon-rs/client/Cargo.toml](conmon-rs/client/Cargo.toml) (`version` and `conmon-common` dependency version)
-- [rpm/conmon-rs.spec](rpm/conmon-rs.spec) (`Version`)
+`version` in the `[workspace.package]` section of [Cargo.toml](Cargo.toml)
+and the `Version` in [rpm/conmon-rs.spec](rpm/conmon-rs.spec), and running
+`cargo update --workspace` to update [Cargo.lock](Cargo.lock).
 
 If the Cap'n Proto schema in
-[conmon-rs/common/proto/conmon.capnp](conmon-rs/common/proto/conmon.capnp)
+[conmon-rs/server/proto/conmon.capnp](conmon-rs/server/proto/conmon.capnp)
 changed since the last release, run `make update-proto` and commit the
 regenerated Go code in [internal/proto](internal/proto) as part of that PR, so
 that the Go client in the tag matches the server.

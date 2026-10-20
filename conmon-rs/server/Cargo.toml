@@ -1,25 +1,21 @@
 [package]
 name = "conmonrs"
-version = "1.0.2"
-edition = "2024"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "conmonrs"
 path = "src/main.rs"
-
-[lints]
-workspace = true
 
 [dependencies]
 anyhow = { version = "1.0.104", default-features = false }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws"] }
 async-channel = { version = "2.5.0", default-features = false, features = ["std"] }
 bytes = { version = "1.12.1", default-features = false }
-capnp = { version = "0.27.2", default-features = false }
+capnp = { workspace = true }
 capnp-rpc = { version = "0.27.1", default-features = false }
-clap = { version = "4.6.7", default-features = false, features = ["cargo", "derive", "env", "error-context", "help", "std", "usage"] }
-conmon-common = { version = "1.0.2", path = "../common" }
+clap = { version = "4.6.7", default-features = false, features = ["derive", "env", "error-context", "help", "std", "usage"] }
 futures = { version = "0.3.34", default-features = false }
 libc = { version = "0.2.191", default-features = false }
 libsystemd = { version = "0.7.2", default-features = false }
@@ -36,8 +32,7 @@ sendfd = { version = "0.4.5", default-features = false, features = ["tokio"] }
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
 signal-hook = { version = "0.4.5", default-features = false, features = ["iterator"] }
-strum = { version = "0.28.0", default-features = false, features = ["derive"] }
-tokio = { version = "1.54.0", default-features = false, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "time"] }
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "signal", "time"] }
 tokio-eventfd = { version = "0.2.2", default-features = false }
 tokio-seqpacket = { version = "0.9.1", default-features = false }
 tokio-util = { version = "0.7.20", default-features = false, features = ["compat"] }
@@ -46,7 +41,7 @@ tracing = { version = "0.1.44", default-features = false }
 tracing-opentelemetry = { version = "0.34.0", default-features = false, optional = true }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt"] }
 time = { version = "0.3.55", default-features = false, features = ["formatting", "local-offset", "parsing", "std"] }
-uuid = { version = "1.28.0", default-features = false, features = ["v4", "fast-rng"] }
+uuid = { version = "1.28.0", default-features = false, features = ["v4"] }
 
 [features]
 default = []
@@ -61,3 +56,8 @@ tracing = [
 [dev-dependencies]
 mockall = { version = "0.15.0", default-features = false }
 tempfile = { version = "3.27.0", default-features = false }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[build-dependencies]
+capnp = { workspace = true }
+capnpc = { workspace = true }

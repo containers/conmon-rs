@@ -1,9 +1,8 @@
 /// Open Telemetry related source code.
 use crate::capnp_util;
+use crate::conmon_capnp::conmon;
 use anyhow::{Context, Result};
 use capnp::struct_list::Reader;
-use clap::crate_name;
-use conmon_common::conmon_capnp::conmon;
 use nix::unistd::gethostname;
 use opentelemetry::{KeyValue, global, propagation::Extractor};
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
@@ -37,7 +36,7 @@ impl Telemetry {
             .with_batch_exporter(exporter)
             .with_resource(
                 Resource::builder()
-                    .with_service_name(crate_name!())
+                    .with_service_name(env!("CARGO_PKG_NAME"))
                     .with_attributes([
                         KeyValue::new(PROCESS_PID, process::id() as i64),
                         KeyValue::new(HOST_NAME, hostname),

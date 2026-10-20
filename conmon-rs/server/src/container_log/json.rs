@@ -41,10 +41,7 @@ impl JsonLogger {
             .unwrap_or_default()
             .as_secs();
 
-        let pipe_str = match pipe {
-            Pipe::StdOut => "stdout",
-            Pipe::StdErr => "stderr",
-        };
+        let pipe_str = pipe.as_str();
 
         let mut pos = 0;
         while pos < bytes.len() {
