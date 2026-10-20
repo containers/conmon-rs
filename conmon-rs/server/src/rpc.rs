@@ -341,8 +341,9 @@ impl conmon::Server for Server {
                 let (started_tx, mut started_rx) = oneshot::channel();
                 let exec = task::spawn_local(
                     async move {
-                        // The output gets backpressure only once the runtime
-                        // finished, see `ContainerIO::consume_stdio`.
+                        // Read while the runtime runs, see
+                        // `ContainerIO::collect_stdio`.
+                        container_io.collect_stdio(true, true)?;
                         let res = child_reaper
                             .create_child(
                                 &runtime,
@@ -400,6 +401,11 @@ impl conmon::Server for Server {
                             timed_out: timed_out || exit_data.timed_out,
                         })
                     }
+                    // Logged here as well, the client may have its reply
+                    // already.
+                    .map(|res: anyhow::Result<ExecSyncOutput>| {
+                        res.inspect_err(|e| error!("Unable to run exec: {e:#}"))
+                    })
                     .instrument(Span::current()),
                 );
 

@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use bytes::{Bytes, BytesMut};
 use capnp::struct_list::Reader;
 use std::{
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::Write,
     mem,
     os::unix::fs::OpenOptionsExt,
@@ -37,7 +37,7 @@ trait Logger {
     /// Prepare the logger, for example open its file.
     async fn init(&mut self) -> Result<()>;
 
-    /// Start over, for example truncate the file for log rotation.
+    /// Start over, for example with a new file for log rotation.
     async fn reopen(&mut self) -> Result<()>;
 
     /// Write a raw chunk of output of the given pipe.
@@ -371,7 +371,7 @@ impl LineBuffer {
 /// The drivers assemble their entries into `buf`, account each one with
 /// [`LogFile::commit_entry`] and write the buffer with a single call per read
 /// chunk, or per [`LogFile::FLUSH_SIZE`] of entries for chunks of short lines.
-/// The writes and the truncating open run on the blocking pool, so writeback
+/// The writes and the opens run on the blocking pool, so writeback
 /// throttling, a slow disk or truncating a huge log only stalls this log and
 /// not the thread which drives every container of the pod. The buffer moves
 /// to the blocking task and back, unlike an async file, which copies every
@@ -429,16 +429,7 @@ impl LogFile {
     /// Open the file, truncating any existing content. A symlink in place of
     /// the log is not followed, the truncation would hit its target.
     pub(crate) async fn open(&mut self) -> Result<()> {
-        let mut options = OpenOptions::new();
-        options
-            .create(true)
-            .read(true)
-            .truncate(true)
-            .write(true)
-            .custom_flags(libc::O_NOFOLLOW);
-        if let Some(mode) = self.mode {
-            options.mode(mode);
-        }
+        let options = self.open_options();
         let path = self.path.clone();
         let file = task::spawn_blocking(move || options.open(path))
             .await
@@ -449,10 +440,55 @@ impl LogFile {
         Ok(())
     }
 
+    /// Replace the file with a new empty one, like conmon does: create
+    /// `<path>.tmp` and rename it over the path. Unlike a truncation in
+    /// place, a reader which follows the log, like `kubectl logs -f`, keeps
+    /// the old file with its offset and reads it to its end, before it
+    /// notices the new one. A rename does not follow a symlink at the path
+    /// either.
+    async fn replace(&mut self) -> Result<()> {
+        let options = self.open_options();
+        let path = self.path.clone();
+        let mut tmp = path.clone().into_os_string();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        let file = task::spawn_blocking(move || -> Result<File> {
+            let file = options
+                .open(&tmp)
+                .with_context(|| format!("open log file path '{}'", tmp.display()))?;
+            if let Err(e) = fs::rename(&tmp, &path) {
+                if let Err(e) = fs::remove_file(&tmp) {
+                    debug!("Unable to remove {}: {e}", tmp.display());
+                }
+                return Err(e).with_context(|| format!("rename log file to '{}'", path.display()));
+            }
+            Ok(file)
+        })
+        .await
+        .context("join log file replace")??;
+        self.file = Some(Arc::new(file));
+        self.bytes_written = 0;
+        Ok(())
+    }
+
+    fn open_options(&self) -> OpenOptions {
+        let mut options = OpenOptions::new();
+        options
+            .create(true)
+            .read(true)
+            .truncate(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW);
+        if let Some(mode) = self.mode {
+            options.mode(mode);
+        }
+        options
+    }
+
     /// Account for the entry appended to `buf` since `start`. If it would
-    /// exceed the maximum log size, the file gets truncated and the entry
+    /// exceed the maximum log size, the file gets replaced and the entry
     /// becomes the first one of the new file. The entries of the chunk before
-    /// it are dropped instead of written, the truncation would discard them
+    /// it are dropped instead of written, the rotation would discard them
     /// right away.
     pub(crate) async fn commit_entry(&mut self, start: usize) -> Result<()> {
         let len = self.buf.len() - start;
@@ -464,7 +500,7 @@ impl LogFile {
 
         if self.max_size.is_some_and(|max| total > max) {
             debug!("Rotate log file {}", self.path.display());
-            if let Err(e) = self.open().await {
+            if let Err(e) = self.replace().await {
                 // The old file stays in place. Drop the uncounted entry and
                 // write the ones which fit into it now. The next entry tries
                 // the rotation again, until then entries which exceed the size
@@ -527,14 +563,16 @@ impl LogFile {
         res.context("write log chunk")
     }
 
-    /// Write the pending buffer and reopen the file, which truncates it.
+    /// Write the pending buffer and start a new file at the path. The
+    /// kubelet renamed the old one already, a file still at the path gets
+    /// replaced, like by the rotation.
     ///
     /// The file is not synced to disk: an fsync of a large log can take long
     /// and the data sits in the page cache either way.
     pub(crate) async fn reopen(&mut self) -> Result<()> {
         debug!("Reopen log file {}", self.path.display());
         self.flush().await.context("flush log file before reopen")?;
-        self.open().await
+        self.replace().await
     }
 }
 
@@ -711,8 +749,8 @@ mod tests {
         let mut sut = LogFile::new(&path, None, Some(10));
         sut.open().await?;
 
-        // Keep the open file reachable, then make the truncating open fail by
-        // putting a directory in its place.
+        // Keep the open file reachable, then make the rotation fail by putting
+        // a directory in its place.
         let old = dir.path().join("old");
         fs::hard_link(&path, &old)?;
         fs::remove_file(&path)?;
@@ -726,6 +764,52 @@ mod tests {
         assert!(sut.buf.is_empty());
         assert_eq!(sut.bytes_written, 6);
         assert_eq!(fs::read_to_string(&old)?, "first\n");
+        assert!(!dir.path().join("log.tmp").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rotation_replaces_the_file() -> Result<()> {
+        use std::{io::Read, os::unix::fs::MetadataExt};
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("log");
+        let mut sut = LogFile::new(&path, Some(0o600), Some(10));
+        sut.open().await?;
+        sut.buf.extend_from_slice(b"first\n");
+        sut.commit_entry(0).await?;
+        sut.flush().await?;
+
+        // A reader following the log, like the kubelet.
+        let mut reader = File::open(&path)?;
+        let mut old = String::new();
+        reader.read_to_string(&mut old)?;
+        assert_eq!(old, "first\n");
+        let ino = fs::metadata(&path)?.ino();
+
+        sut.buf.extend_from_slice(b"second\n");
+        sut.commit_entry(0).await?;
+        sut.flush().await?;
+        let metadata = fs::metadata(&path)?;
+        assert_ne!(metadata.ino(), ino);
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+        assert_eq!(fs::read_to_string(&path)?, "second\n");
+        assert!(!dir.path().join("log.tmp").exists());
+
+        // The old file keeps its content, the reader is at its end.
+        assert_eq!(reader.metadata()?.ino(), ino);
+        assert_eq!(reader.read_to_string(&mut old)?, 0);
+        assert_eq!(reader.metadata()?.len(), 6);
+
+        // The reopen after the kubelet renamed the file starts a new one.
+        let rotated = dir.path().join("log.1");
+        fs::rename(&path, &rotated)?;
+        sut.reopen().await?;
+        sut.buf.extend_from_slice(b"third\n");
+        sut.commit_entry(0).await?;
+        sut.flush().await?;
+        assert_eq!(fs::read_to_string(&rotated)?, "second\n");
+        assert_eq!(fs::read_to_string(&path)?, "third\n");
         Ok(())
     }
 

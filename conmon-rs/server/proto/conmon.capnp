@@ -53,8 +53,11 @@ interface Conmon {
         # The host sd_notify socket to relay messages to, usually the
         # `NOTIFY_SOCKET` of systemd. If set, the server binds
         # `<bundlePath>/notify/notify.sock` before it runs the runtime and
-        # relays every datagram sent there to the host socket until the
-        # container exits. The caller mounts the `notify` directory into the
+        # relays the datagrams sent there to the host socket until the
+        # container exits. Like conmon, it only passes the assignments
+        # `READY=1`, `RELOADING=1`, `STOPPING=1`, `WATCHDOG=1`,
+        # `WATCHDOG=trigger`, `STATUS=`, `ERRNO=`, `BUSERROR=` and
+        # `MONOTONIC_USEC=`. The caller mounts the `notify` directory into the
         # container and sets `NOTIFY_SOCKET` for its process, which the
         # runtime does not see.
         sdnotifySocket @16 :Text;

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -152,6 +153,230 @@ func serveTestSocket(t *testing.T, dir string, withBootstrap bool) {
 			conn.Close()
 		}
 	})
+}
+
+// serveSilentSocket listens on the socket of the run directory and accepts
+// connections without ever answering on them, like a hanging server.
+func serveSilentSocket(t *testing.T, dir string) {
+	t.Helper()
+
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", filepath.Join(dir, socketName))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	// Only read once the accepting goroutine is done.
+	var conns []net.Conn
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+
+			conns = append(conns, conn)
+		}
+	}()
+
+	t.Cleanup(func() {
+		listener.Close()
+		<-done
+
+		for _, conn := range conns {
+			conn.Close()
+		}
+	})
+}
+
+func TestNewKeepsServerWhichDoesNotAnswer(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	serveSilentSocket(t, dir)
+
+	start := time.Now()
+	_, err := New(&ConmonServerConfig{
+		ServerRunDir:     dir,
+		ConmonServerPath: "/does/not/exist",
+		Runtime:          "/does/not/exist",
+		ClientLogger:     logrus.New(),
+	})
+
+	if !errors.Is(err, ErrServerNotResponding) {
+		t.Fatalf("got error %v, want %v", err, ErrServerNotResponding)
+	}
+
+	// The listener runs in this process.
+	if pid := "PID " + strconv.Itoa(os.Getpid()); !strings.Contains(err.Error(), pid) {
+		t.Fatalf("error %q does not name %s", err, pid)
+	}
+
+	if elapsed := time.Since(start); elapsed > serverProbeTimeout+time.Second {
+		t.Fatalf("probe took %s, want about %s", elapsed, serverProbeTimeout)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, socketName)); err != nil {
+		t.Fatalf("socket got removed: %v", err)
+	}
+}
+
+// serveClosingSocket listens on the socket of the run directory and closes
+// every connection right away, like a server which shuts down. It returns a
+// function which stops listening.
+func serveClosingSocket(t *testing.T, dir string) func() {
+	t.Helper()
+
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", filepath.Join(dir, socketName))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+
+			conn.Close()
+		}
+	}()
+
+	stop := sync.OnceFunc(func() {
+		listener.Close()
+		<-done
+	})
+	t.Cleanup(stop)
+
+	return stop
+}
+
+func TestNewReplacesServerWhichGoesAway(t *testing.T) {
+	t.Parallel()
+
+	newClient := func(dir string) error {
+		_, err := New(&ConmonServerConfig{
+			ServerRunDir:     dir,
+			ConmonServerPath: "/does/not/exist",
+			Runtime:          "/does/not/exist",
+			ClientLogger:     logrus.New(),
+		})
+
+		return err
+	}
+
+	// A server which shuts down and stops accepting a bit later. Without a
+	// server binary, the start fails, which shows that New tried.
+	dir := t.TempDir()
+	stop := serveClosingSocket(t, dir)
+
+	time.AfterFunc(500*time.Millisecond, stop)
+
+	if err := newClient(dir); err == nil || errors.Is(err, ErrServerNotResponding) ||
+		!strings.Contains(err.Error(), "start server") {
+		t.Fatalf("got error %v, want a failed server start", err)
+	}
+
+	// One which keeps accepting is not replaced.
+	dir = t.TempDir()
+	serveClosingSocket(t, dir)
+
+	if err := newClient(dir); !errors.Is(err, ErrServerNotResponding) {
+		t.Fatalf("got error %v, want %v", err, ErrServerNotResponding)
+	}
+}
+
+func TestServerGoneOnceItsProcessExited(t *testing.T) {
+	t.Parallel()
+
+	cmd := exec.CommandContext(t.Context(), "true")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	c := &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
+
+	// Also if something else still holds its socket open.
+	if !c.serverGone(t.Context(), int32(cmd.Process.Pid), true, false) {
+		t.Fatal("exited server not gone")
+	}
+
+	// A running one which did not close the connection is not gone.
+	if c.serverGone(t.Context(), int32(os.Getpid()), true, false) {
+		t.Fatal("running server gone")
+	}
+
+	if c.serverGone(t.Context(), 0, false, false) {
+		t.Fatal("server with unknown PID gone")
+	}
+}
+
+func TestNewStartsServerOnlyWithoutListener(t *testing.T) {
+	t.Parallel()
+
+	newClient := func(dir string) error {
+		_, err := New(&ConmonServerConfig{
+			ServerRunDir:     dir,
+			ConmonServerPath: "/does/not/exist",
+			Runtime:          "/does/not/exist",
+			ClientLogger:     logrus.New(),
+		})
+
+		return err
+	}
+
+	// The socket of a server which crashed refuses the connection.
+	stale := t.TempDir()
+
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(stale, socketName), Net: "unix"})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	listener.SetUnlinkOnClose(false)
+	listener.Close()
+
+	// Without a server binary, the start fails, which shows that New tried.
+	for _, dir := range []string{stale, t.TempDir()} {
+		err := newClient(dir)
+		if err == nil || errors.Is(err, ErrServerNotResponding) || !strings.Contains(err.Error(), "start server") {
+			t.Fatalf("got error %v, want a failed server start", err)
+		}
+	}
+
+	if os.Geteuid() == 0 {
+		return
+	}
+
+	// A socket which cannot be dialed for other reasons is no reason to
+	// start another server either.
+	locked := t.TempDir()
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	t.Cleanup(func() {
+		if err := os.Chmod(locked, 0o700); err != nil {
+			t.Errorf("chmod: %v", err)
+		}
+	})
+
+	runDir := filepath.Join(locked, "run")
+	cl := &ConmonClient{runDir: runDir, logger: logrus.New()}
+
+	_, err = cl.connectRunningServer(t.Context())
+	if !errors.Is(err, os.ErrPermission) || errors.Is(err, ErrServerNotResponding) {
+		t.Fatalf("got error %v, want a permission error", err)
+	}
 }
 
 func TestClientReplacesUnusableConnection(t *testing.T) {

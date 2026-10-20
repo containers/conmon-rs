@@ -32,11 +32,42 @@ where
     /// - removing timed-out elements from the oldest end (O(k) where k = expired count)
     /// - removing the least recently used element if no space left (automatic via LRU)
     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
-        let now = Instant::now();
+        self.remove_expired(Instant::now());
 
-        // Remove expired items from the LRU end. Since items are inserted
-        // chronologically, the LRU entry is always the oldest. If it's not
-        // expired, no entries are expired — so we can stop early.
+        // LRU cache automatically evicts the least recently used item when at capacity
+        let evicted = self.cache.push(k, (Instant::now(), v));
+        if evicted.is_some() {
+            warn!("Evicted least recently used element due to capacity limit");
+        }
+
+        // Extract the actual value from the evicted (K, (Instant, V)) tuple
+        evicted.map(|(_, (_, val))| val)
+    }
+
+    /// Remove an element from the hashmap and return it if the element has
+    /// not expired. The expired ones get removed as well, so that they do
+    /// not linger until the next insert, they may hold sockets.
+    pub fn remove(&mut self, k: &K) -> Option<V> {
+        let now = Instant::now();
+        self.remove_expired(now);
+
+        if let Some((inserted, value)) = self.cache.pop(k) {
+            if now - inserted > self.max_duration {
+                warn!("Max duration expired for key: {:?}", k);
+                None
+            } else {
+                Some(value)
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Remove expired items from the LRU end. Since items are inserted
+    /// chronologically and never accessed otherwise, the LRU entry is always
+    /// the oldest. If it is not expired, no entries are expired, so this can
+    /// stop early.
+    fn remove_expired(&mut self, now: Instant) {
         let mut expired_count = 0;
         while let Some((_, (inserted, _))) = self.cache.peek_lru() {
             if now - *inserted > self.max_duration {
@@ -49,31 +80,6 @@ where
 
         if expired_count > 0 {
             warn!("Removed {} timed out elements", expired_count);
-        }
-
-        // LRU cache automatically evicts the least recently used item when at capacity
-        let evicted = self.cache.push(k, (Instant::now(), v));
-        if evicted.is_some() {
-            warn!("Evicted least recently used element due to capacity limit");
-        }
-
-        // Extract the actual value from the evicted (K, (Instant, V)) tuple
-        evicted.map(|(_, (_, val))| val)
-    }
-
-    /// Remove an element from the hashmap and return it if the element has not expired.
-    pub fn remove(&mut self, k: &K) -> Option<V> {
-        let now = Instant::now();
-
-        if let Some((inserted, value)) = self.cache.pop(k) {
-            if now - inserted > self.max_duration {
-                warn!("Max duration expired for key: {:?}", k);
-                None
-            } else {
-                Some(value)
-            }
-        } else {
-            None
         }
     }
 
@@ -160,5 +166,12 @@ mod tests {
         // The last element should be also timed out if we wait
         advance(Duration::from_millis(200)).await;
         assert!(sut.remove(&1).is_none());
+
+        // Removing any key removes all expired elements.
+        assert!(sut.insert(0, 0).is_none());
+        assert!(sut.insert(1, 0).is_none());
+        advance(Duration::from_millis(200)).await;
+        assert!(sut.remove(&2).is_none());
+        assert_eq!(sut.len(), 0);
     }
 }

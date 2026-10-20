@@ -1,6 +1,9 @@
 use crate::mutex::lock;
 use anyhow::{Context, Result, bail};
-use nix::sys::statfs::{FsType, statfs};
+use nix::sys::{
+    signal::Signal,
+    statfs::{FsType, statfs},
+};
 use notify::{
     Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
     event::{AccessKind, AccessMode},
@@ -62,9 +65,38 @@ impl OomCounters {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct OOMEvent {
     pub oom: bool,
+
+    /// The cgroup of the process got removed, which hides whether an OOM
+    /// happened, but there is a hint which may also stem from a sibling:
+    /// with cgroup v1, an event before the removal, with cgroup v2, a new
+    /// OOM kill of an outer cgroup or none to tell. So it only counts for a
+    /// process which got killed by SIGKILL, see [`OOMEvent::is_oom`].
+    pub possible_oom: bool,
+}
+
+impl OOMEvent {
+    fn new(oom: bool) -> Self {
+        Self {
+            oom,
+            ..Self::default()
+        }
+    }
+
+    /// A possible OOM if `possible`, none otherwise.
+    pub(crate) fn possible(possible: bool) -> Self {
+        Self {
+            oom: false,
+            possible_oom: possible,
+        }
+    }
+
+    /// Whether the process which exited with `exit_code` got OOM killed.
+    pub fn is_oom(&self, exit_code: i32) -> bool {
+        self.oom || (self.possible_oom && exit_code == 128 + Signal::SIGKILL as i32)
+    }
 }
 
 /// The state of a cgroup v1 `memory.oom_control` file.
@@ -105,6 +137,8 @@ enum Confirmation {
     Oom,
     /// The cgroup was already gone at the event, which removal signals.
     Removed,
+    /// The cgroup went away while confirming.
+    Gone,
     /// No kill showed up while the cgroup exists.
     Unconfirmed,
     /// The process exited while confirming.
@@ -211,13 +245,13 @@ impl OOMWatcher {
 
         debug!("Successfully setup cgroup v1 oom detection");
 
-        let found_oom =
+        let event =
             Self::watch_cgroup_v1(&token, oom_event_fd, &memory_cgroup_file_oom_path, baseline)
                 .await;
-        if found_oom {
+        if event.oom {
             Self::write_oom_files(exit_paths).await;
         }
-        if let Err(e) = tx.try_send(OOMEvent { oom: found_oom }) {
+        if let Err(e) = tx.try_send(event) {
             error!("try_send failed: {:#}", e);
         }
 
@@ -226,7 +260,7 @@ impl OOMWatcher {
     }
 
     /// Wait for an OOM of a cgroup v1 memory controller until `token` gets
-    /// cancelled and return whether one happened.
+    /// cancelled and return what was found.
     ///
     /// The eventfd also fires for an OOM of an ancestor cgroup, whose victim
     /// may be a sibling container, and once when the cgroup gets removed. So
@@ -235,16 +269,19 @@ impl OOMWatcher {
     /// again a few times. It is not hierarchical either, a victim in a memcg
     /// nested inside the container is not counted, which `under_oom` covers.
     /// A missed OOM is worse than a rare false one, like conmon: an event
-    /// counts without a known baseline or counter, and if the cgroup goes
-    /// away or the process exits while the event gets confirmed. An event
-    /// which stayed unconfirmed, like an OOM of a sibling, does not count
-    /// later, a normal stop would be taken for an OOM otherwise.
+    /// counts without a known baseline or counter, and if the process exits
+    /// while the event gets confirmed and the cgroup is still under OOM. An
+    /// event which stayed unconfirmed, like an OOM of a sibling, does not
+    /// count later, a normal stop would be taken for an OOM otherwise. If the
+    /// cgroup goes away after an event, it may have been an OOM which killed
+    /// the last process or the one of a sibling followed by a normal exit,
+    /// see [`OOMEvent::possible_oom`]. The removal alone signals once.
     async fn watch_cgroup_v1(
         token: &CancellationToken,
         mut event_fd: impl AsyncRead + Unpin,
         oom_control: &Path,
         baseline: Option<u64>,
-    ) -> bool {
+    ) -> OOMEvent {
         let mut buffer = [0u8; 8];
         loop {
             tokio::select! {
@@ -261,12 +298,17 @@ impl OOMWatcher {
                     };
                     debug!("Got OOM event, count {count}");
                     match Self::confirm_oom_event(token, oom_control, baseline).await {
-                        Confirmation::Oom => return true,
+                        Confirmation::Oom => return OOMEvent::new(true),
                         Confirmation::Removed => {
                             // Removing the cgroup signals the eventfd once. A
-                            // count above that means an OOM was signalled before.
+                            // count above that means another event came
+                            // before.
                             debug!("Memory cgroup removed");
-                            return count > 1;
+                            return OOMEvent::possible(count > 1);
+                        }
+                        Confirmation::Gone => {
+                            debug!("Memory cgroup removed while confirming the event");
+                            return OOMEvent::possible(true);
                         }
                         Confirmation::Unconfirmed => {
                             debug!("OOM event without a kill in this cgroup");
@@ -278,7 +320,7 @@ impl OOMWatcher {
                 }
                 _ = token.cancelled() => {
                     debug!("Loop cancelled");
-                    return Self::check_oom_on_exit(oom_control, baseline, false).await;
+                    break;
                 }
             }
         }
@@ -309,13 +351,11 @@ impl OOMWatcher {
         let mut first = true;
         loop {
             match Self::read_oom_control(oom_control) {
-                // A cgroup which goes away while the event gets confirmed
-                // counts, a removal on its own does not.
                 Err(e) if e.kind() == ErrorKind::NotFound => {
                     return if first {
                         Confirmation::Removed
                     } else {
-                        Confirmation::Oom
+                        Confirmation::Gone
                     };
                 }
                 Err(e) => {
@@ -349,25 +389,26 @@ impl OOMWatcher {
     }
 
     /// Check for an OOM kill a last time once the process exited. An event
-    /// whose confirmation the exit interrupted counts if the cgroup is gone
-    /// or still under OOM.
+    /// whose confirmation the exit interrupted counts if the cgroup is still
+    /// under OOM, and may have been one if the cgroup is gone.
     async fn check_oom_on_exit(
         oom_control: &Path,
         baseline: Option<u64>,
         confirming: bool,
-    ) -> bool {
+    ) -> OOMEvent {
         match Self::read_oom_control(oom_control) {
             // Without a baseline the counter tells nothing, it may stem from
             // before the container. An event took that into account already.
-            Ok(control) => {
+            Ok(control) => OOMEvent::new(
                 baseline
                     .zip(control.oom_kill)
                     .is_some_and(|(baseline, kills)| kills > baseline)
-                    || (confirming && control.under_oom)
-            }
+                    || (confirming && control.under_oom),
+            ),
+            Err(e) if e.kind() == ErrorKind::NotFound => OOMEvent::possible(confirming),
             Err(e) => {
                 debug!("Unable to read OOM kills on exit: {:#}", e);
-                confirming
+                OOMEvent::new(confirming)
             }
         }
     }
@@ -400,18 +441,34 @@ impl OOMWatcher {
             subsystem_path.display()
         );
 
-        let mut events = MemoryEvents::new(subsystem_path.join("memory.events"));
+        let event = Self::watch_cgroup_v2(&token, &subsystem_path).await;
+        if event.oom {
+            debug!("Writing OOM files");
+            Self::write_oom_files(exit_paths).await;
+        }
+        if let Err(e) = tx.try_send(event) {
+            error!("try_send failed: {:#}", e);
+        }
 
-        // crun places the process in a leaf below the container cgroup, and
-        // the OOMs end up recorded in that parent. Only follow the parent in
-        // that layout, where it merely wraps our leaf. A pod cgroup shared with
-        // sibling containers (runc) must not be watched, otherwise an OOM of a
-        // sibling would be reported for this container. Prefer
-        // memory.events.local, the counters in memory.events include events
-        // from below, and fall back on kernels without the local file.
-        let mut parent_events = Self::wrapper_events_path(&subsystem_path).map(MemoryEvents::new);
+        debug!("Done watching for ooms");
+        Ok(())
+    }
 
-        let path = events.path.to_str();
+    /// Wait for an OOM of the cgroup v2 `leaf` until `token` gets cancelled
+    /// and return what was found.
+    ///
+    /// An OOM counts once the counters of the leaf, or of the cgroup which
+    /// merely wraps it, went up. The leaf may be gone at the exit, the
+    /// systemd cgroup manager removes the scope of a container once its
+    /// processes exited. Then the hierarchical `oom_kill` counter of the
+    /// nearest ancestor which outlives it tells whether a kill happened
+    /// meanwhile, see [`OOMEvent::possible_oom`]. A removal is no OOM
+    /// on its own. cgroupfs reports it with `IN_IGNORED` only, which notify
+    /// drops, the remove event shows up for other file systems.
+    async fn watch_cgroup_v2(token: &CancellationToken, leaf: &Path) -> OOMEvent {
+        let mut cgroup = CgroupV2::new(leaf);
+
+        let path = cgroup.events.path.to_str();
         debug!(path, "Setup cgroup v2 handling");
 
         // Adding the watches runs on the blocking pool. The process may exit
@@ -420,28 +477,34 @@ impl OOMWatcher {
         let mut subscriptions = tokio::select! {
             _ = token.cancelled() => {
                 debug!("Cancelled while adding the watches");
-                Self::last_resort_check(&subsystem_path, &mut events, parent_events.as_mut(), exit_paths, &tx).await;
-                return Ok(());
+                return cgroup.check_on_exit();
             }
-            res = Self::subscribe(&events, parent_events.as_ref()) => match res {
+            res = Self::subscribe(
+                &cgroup.events,
+                cgroup.parent.as_ref(),
+                cgroup.outer.as_ref().map(|(path, _)| path.as_path()),
+            ) => match res {
                 Ok(subscriptions) => subscriptions,
                 // The cgroup may be gone already. Still check for an OOM once
                 // the process exited.
                 Err(e) => {
                     debug!("Unable to watch memory events, checking on exit only: {:#}", e);
                     token.cancelled().await;
-                    Self::last_resort_check(&subsystem_path, &mut events, parent_events.as_mut(), exit_paths, &tx).await;
-                    return Ok(());
+                    return cgroup.check_on_exit();
                 }
             },
         };
 
         loop {
             tokio::select! {
+                // Memory events may change all the time, for example while
+                // processes left in the cgroup hit memory.high, which must
+                // not hold back the exit. The check on exit reads the
+                // counters of an OOM which ended the process anyway.
+                biased;
                 _ = token.cancelled() => {
                     debug!("Loop cancelled");
-                    Self::last_resort_check(&subsystem_path, &mut events, parent_events.as_mut(), exit_paths, &tx).await;
-                    break;
+                    return cgroup.check_on_exit();
                 }
                 Some(res) = subscriptions.rx.recv() => {
                     let event = match res {
@@ -462,36 +525,25 @@ impl OOMWatcher {
                     }
                     debug!("Got OOM file event: {:?}", event);
                     if event.kind.is_remove() {
-                        debug!("Got remove event");
-                        if let Err(e) = tx.try_send(OOMEvent{ oom: false }) {
-                            error!("try_send failed: {:#}", e);
-                        };
-                        break
+                        debug!("Got remove event, checking once the process exited");
+                        break;
                     }
 
-                    if Self::check_cgroups(&subsystem_path, &mut events, parent_events.as_mut()).await {
-                        debug!("Writing OOM files");
-                        Self::write_oom_files(exit_paths).await;
-                        match tx.try_send(OOMEvent{ oom: true }) {
-                            Ok(_) => break,
-                            Err(e) => error!("try_send failed: {:#}", e)
-                        };
-                    } else if Self::file_not_found(&events.path).await {
-                        debug!("Assuming memory slice removal race, still reporting one OOM event");
-                        Self::write_oom_files(exit_paths).await;
-                        match tx.try_send(OOMEvent{ oom: true }) {
-                            Ok(_) => break,
-                            Err(e) => error!("try_send failed: {:#}", e)
-                        };
-                    } else {
-                        debug!("No OOM found in event");
-                    };
+                    if cgroup.check(cgroup.is_outer_event(&event)) {
+                        return OOMEvent::new(true);
+                    }
+                    if Self::file_not_found(&cgroup.events.path) {
+                        debug!("Memory events file gone, checking once the process exited");
+                        break;
+                    }
+                    debug!("No OOM found in event");
                 }
             }
         }
 
-        debug!("Done watching for ooms");
-        Ok(())
+        drop(subscriptions);
+        token.cancelled().await;
+        cgroup.check_on_exit()
     }
 
     /// Watch the memory events of the container and, if present, the ones of
@@ -499,6 +551,7 @@ impl OOMWatcher {
     async fn subscribe(
         events: &MemoryEvents,
         parent_events: Option<&MemoryEvents>,
+        pod_events: Option<&Path>,
     ) -> Result<Subscriptions> {
         let watcher = SharedWatcher::get()?;
         let (events_tx, rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
@@ -513,9 +566,19 @@ impl OOMWatcher {
                 "Also watching parent memory events: {}",
                 parent.path.display()
             );
-            match watcher.subscribe(&parent.path, events_tx).await {
+            match watcher.subscribe(&parent.path, events_tx.clone()).await {
                 Ok(subscription) => parent_subscription = Some(subscription),
                 Err(e) => debug!("Could not watch parent memory events: {:#}", e),
+            }
+        }
+
+        // The kills of siblings advance the baseline of the outer cgroup.
+        let mut pod_subscription = None;
+        if let Some(pod) = pod_events {
+            debug!("Also watching outer memory events: {}", pod.display());
+            match watcher.subscribe(pod, events_tx).await {
+                Ok(subscription) => pod_subscription = Some(subscription),
+                Err(e) => debug!("Could not watch pod memory events: {:#}", e),
             }
         }
 
@@ -523,32 +586,14 @@ impl OOMWatcher {
             rx,
             _subscription: subscription,
             _parent_subscription: parent_subscription,
+            _pod_subscription: pod_subscription,
         })
-    }
-
-    /// Check for an OOM a last time once the process exited, and report the
-    /// result.
-    async fn last_resort_check(
-        leaf: &Path,
-        events: &mut MemoryEvents,
-        parent_events: Option<&mut MemoryEvents>,
-        exit_paths: &[PathBuf],
-        tx: &Sender<OOMEvent>,
-    ) {
-        debug!("Last resort check for OOM");
-        let found_oom = Self::check_cgroups(leaf, events, parent_events).await;
-        if found_oom {
-            Self::write_oom_files(exit_paths).await;
-        }
-        if let Err(e) = tx.try_send(OOMEvent { oom: found_oom }) {
-            error!("try_send failed: {:#}", e);
-        }
     }
 
     /// Check the memory events of the container and of its wrapper cgroup for
     /// new OOMs. An OOM of the parent only counts while it wraps the container
     /// alone, otherwise it may stem from a sibling.
-    async fn check_cgroups(
+    fn check_cgroups(
         leaf: &Path,
         events: &mut MemoryEvents,
         parent_events: Option<&mut MemoryEvents>,
@@ -624,10 +669,8 @@ impl OOMWatcher {
     }
 
     /// Checks if a file does not exist on disk.
-    async fn file_not_found(f: impl AsRef<Path>) -> bool {
-        tokio::fs::metadata(f)
-            .await
-            .is_err_and(|e| e.kind() == ErrorKind::NotFound)
+    fn file_not_found(f: impl AsRef<Path>) -> bool {
+        std::fs::metadata(f).is_err_and(|e| e.kind() == ErrorKind::NotFound)
     }
 
     fn check_for_oom(
@@ -649,6 +692,7 @@ impl OOMWatcher {
         let fp = StdFile::open(path)
             .with_context(|| format!("open memory events file: {}", path.display()))?;
         let mut counters = OomCounters::default();
+        let mut has_oom = false;
 
         for line in BufReader::new(fp).lines() {
             let line = line.context("read line from memory events file")?;
@@ -658,19 +702,28 @@ impl OOMWatcher {
                 continue;
             };
             let target = match key {
-                "oom" => &mut counters.oom,
+                "oom" => {
+                    has_oom = true;
+                    &mut counters.oom
+                }
                 "oom_kill" => &mut counters.oom_kill,
                 _ => continue,
             };
             *target = value.trim_end().parse().context("parse u64 counter")?;
         }
 
+        // Every memory events file has it, also of kernels without the kill
+        // counter. Without, it is no memory events file, or one which is
+        // being written, like a fake one.
+        if !has_oom {
+            bail!("no oom counter in memory events file {}", path.display())
+        }
         Ok(counters)
     }
 
     /// Create the OOM files. Failures are logged, the OOM gets reported
     /// through the channel either way.
-    async fn write_oom_files(exit_paths: &[PathBuf]) {
+    pub async fn write_oom_files(exit_paths: &[PathBuf]) {
         for path in exit_paths {
             let span = debug_span!("write_oom_file");
             async {
@@ -714,15 +767,23 @@ impl OOMWatcher {
 
     fn process_cgroup_subsystem_path_cgroup_v2(pid: u32) -> Result<Option<PathBuf>> {
         if let Some(fp) = Self::try_open_cgroup_path(pid)? {
-            let line = BufReader::new(fp)
-                .lines()
-                .next()
-                .context("get next line")?
-                .context("read line from cgroup file")?;
-            return Self::cgroup_v2_path(&line).map(Some);
+            return Self::unified_cgroup_path(BufReader::new(fp)).map(Some);
         }
 
         Ok(None)
+    }
+
+    /// The cgroupfs path of the unified hierarchy from a `/proc/<pid>/cgroup`
+    /// file. Named cgroup v1 hierarchies, like the one of systemd, are
+    /// listed as well and may come first.
+    fn unified_cgroup_path(cgroup_file: impl BufRead) -> Result<PathBuf> {
+        for line in cgroup_file.lines() {
+            let line = line.context("read line from cgroup file")?;
+            if line.starts_with("0::") {
+                return Self::cgroup_v2_path(&line);
+            }
+        }
+        bail!("no unified hierarchy found in cgroup file")
     }
 
     /// The cgroupfs path of `subsystem` if the `/proc/<pid>/cgroup` line
@@ -771,6 +832,150 @@ impl OOMWatcher {
     }
 }
 
+/// The memory events of a cgroup v2 leaf and of the cgroups above it.
+struct CgroupV2 {
+    leaf: PathBuf,
+    events: MemoryEvents,
+
+    /// The cgroup which merely wraps the leaf, crun places the process in
+    /// a leaf below the container cgroup and the OOMs end up recorded in
+    /// that parent. Only follow the parent in that layout. A pod cgroup
+    /// shared with sibling containers (runc) must not be watched, otherwise
+    /// an OOM of a sibling would be reported for this container. Prefer
+    /// memory.events.local, the counters in memory.events include events
+    /// from below, and fall back on kernels without the local file.
+    parent: Option<MemoryEvents>,
+
+    /// The hierarchical memory events of the pod cgroup, which outlives a
+    /// leaf the systemd cgroup manager removes, or of the parent without
+    /// one, and the OOM counters which the leaf does not account for. They
+    /// advance while the leaf exists, so that only kills after its removal
+    /// stay ambiguous.
+    outer: Option<(PathBuf, OomCounters)>,
+}
+
+impl CgroupV2 {
+    /// How many levels above the leaf the pod cgroup may be: its parent with
+    /// runc, its grandparent with crun, which adds a leaf below the
+    /// container cgroup.
+    const POD_LEVELS: usize = 2;
+
+    fn new(leaf: &Path) -> Self {
+        let outer = Self::pod_cgroup(leaf)
+            .or_else(|| leaf.parent())
+            .and_then(|outer| {
+                let path = outer.join("memory.events");
+                match OOMWatcher::read_oom_counters(&path) {
+                    Ok(counters) => Some((path, counters)),
+                    Err(e) => {
+                        debug!("No OOM baseline of the outer cgroup: {:#}", e);
+                        None
+                    }
+                }
+            });
+        Self {
+            leaf: leaf.to_path_buf(),
+            events: MemoryEvents::new(leaf.join("memory.events")),
+            parent: OOMWatcher::wrapper_events_path(leaf).map(MemoryEvents::new),
+            outer,
+        }
+    }
+
+    /// Whether a watch event concerns the outer cgroup.
+    fn is_outer_event(&self, event: &Event) -> bool {
+        self.outer
+            .as_ref()
+            .is_some_and(|(path, _)| event.paths.contains(path))
+    }
+
+    /// The pod cgroup above the leaf, if there is one within
+    /// [`CgroupV2::POD_LEVELS`]. Further up, like in a QoS cgroup, the
+    /// siblings are other pods.
+    fn pod_cgroup(leaf: &Path) -> Option<&Path> {
+        leaf.ancestors()
+            .skip(1)
+            .take(Self::POD_LEVELS)
+            .find(|ancestor| {
+                ancestor
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(Self::is_pod_cgroup_name)
+            })
+    }
+
+    /// Whether the name is the one the kubelet gives to a pod cgroup, like
+    /// `pod<uid>` with the cgroupfs driver and
+    /// `kubepods-burstable-pod<uid>.slice` with the systemd one.
+    fn is_pod_cgroup_name(name: &str) -> bool {
+        let is_pod = |name: &str| {
+            name.strip_prefix("pod").is_some_and(|uid| {
+                !uid.is_empty()
+                    && uid
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() || c == '-' || c == '_')
+            })
+        };
+        match name.strip_suffix(".slice") {
+            Some(slice) => slice.rsplit('-').next().is_some_and(is_pod),
+            None => is_pod(name),
+        }
+    }
+
+    /// Whether the counters of the leaf or its wrapper went up. After an
+    /// event of the outer cgroup, its kills since the last check stem from
+    /// a sibling otherwise, as long as the leaf still exists. The kernel
+    /// counts a kill in the leaf before its ancestors, so the outer cgroup
+    /// gets read first.
+    fn check(&mut self, outer_changed: bool) -> bool {
+        let outer = self
+            .outer
+            .as_ref()
+            .filter(|_| outer_changed)
+            .and_then(|(path, _)| OOMWatcher::read_oom_counters(path).ok());
+        if OOMWatcher::check_cgroups(&self.leaf, &mut self.events, self.parent.as_mut()) {
+            return true;
+        }
+        if let (Some(counters), Some((_, baseline))) = (outer, self.outer.as_mut())
+            && !OOMWatcher::file_not_found(&self.events.path)
+        {
+            *baseline = counters;
+        }
+        false
+    }
+
+    /// Check for an OOM a last time once the process exited. If the leaf is
+    /// gone, a kill of the outer cgroup since tells that it may have been
+    /// one, and so does an outer cgroup which is gone as well.
+    fn check_on_exit(&mut self) -> OOMEvent {
+        debug!("Last resort check for OOM");
+        if self.check(false) {
+            return OOMEvent::new(true);
+        }
+        if !OOMWatcher::file_not_found(&self.events.path) {
+            return OOMEvent::default();
+        }
+        let Some((path, baseline)) = &self.outer else {
+            debug!("Leaf cgroup gone without outer counters");
+            return OOMEvent::possible(true);
+        };
+        match OOMWatcher::read_oom_counters(path) {
+            Ok(counters) => {
+                debug!(
+                    "Leaf cgroup gone, OOM kills of {}: {} since {}",
+                    path.display(),
+                    counters.oom_kill,
+                    baseline.oom_kill
+                );
+                OOMEvent::possible(counters.oom_kill > baseline.oom_kill)
+            }
+            Err(e) => {
+                debug!("Unable to read outer OOM counters: {:#}", e);
+                OOMEvent::possible(true)
+            }
+        }
+    }
+}
+
 /// A memory events file and the OOM counters seen in it so far.
 struct MemoryEvents {
     path: PathBuf,
@@ -810,6 +1015,7 @@ struct Subscriptions {
     rx: Receiver<WatchResult>,
     _subscription: Subscription,
     _parent_subscription: Option<Subscription>,
+    _pod_subscription: Option<Subscription>,
 }
 
 /// A watch event as delivered to subscribers. Errors are shared because
@@ -1160,26 +1366,259 @@ mod tests {
 
         let mut events = MemoryEvents::new(leaf.join("memory.events"));
         let mut parent_events = MemoryEvents::new(parent_file.clone());
-        let mut check =
-            async || OOMWatcher::check_cgroups(&leaf, &mut events, Some(&mut parent_events)).await;
+        let mut check = || OOMWatcher::check_cgroups(&leaf, &mut events, Some(&mut parent_events));
 
         // An OOM recorded in the wrapper is found although the leaf is unchanged.
         std::fs::write(&parent_file, "oom 1\noom_kill 1\n")?;
-        assert!(check().await);
-        assert!(!check().await);
+        assert!(check());
+        assert!(!check());
 
         // While a sibling exists, its OOMs are not attributed to this container.
         let sibling = parent.path().join("sibling");
         std::fs::create_dir(&sibling)?;
         std::fs::write(&parent_file, "oom 2\noom_kill 2\n")?;
-        assert!(!check().await);
+        assert!(!check());
 
         // Once it is gone again, neither are its earlier OOMs, only new ones.
         std::fs::remove_dir(&sibling)?;
-        assert!(!check().await);
+        assert!(!check());
         std::fs::write(&parent_file, "oom 3\noom_kill 3\n")?;
-        assert!(check().await);
+        assert!(check());
         Ok(())
+    }
+
+    /// Watch a fake cgroup v2 leaf in a task of its own.
+    fn watch_v2(leaf: &Path) -> (CancellationToken, task::JoinHandle<OOMEvent>) {
+        let token = CancellationToken::new();
+        let (stop, leaf) = (token.clone(), leaf.to_path_buf());
+        let task = task::spawn(async move { OOMWatcher::watch_cgroup_v2(&stop, &leaf).await });
+        (token, task)
+    }
+
+    /// Let the watch task take its baselines.
+    async fn baselines_taken() {
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    fn write_events(dir: &Path, oom: u64, oom_kill: u64) -> Result<()> {
+        std::fs::write(
+            dir.join("memory.events"),
+            format!("low 0\nhigh 0\nmax 0\noom {oom}\noom_kill {oom_kill}\n"),
+        )?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cgroup_v2_event_of_leaf_is_oom() -> Result<()> {
+        let pod = tempfile::tempdir()?;
+        let leaf = pod.path().join("ctr");
+        std::fs::create_dir(&leaf)?;
+        write_events(&leaf, 0, 0)?;
+        let (_token, mut task) = watch_v2(&leaf);
+
+        // The watch may not be in place yet, keep counting up.
+        for i in 1..=500 {
+            write_events(&leaf, i, i)?;
+            if let Ok(event) = timeout(Duration::from_millis(10), &mut task).await {
+                assert_eq!(event?, OOMEvent::new(true));
+                return Ok(());
+            }
+        }
+        bail!("no OOM found")
+    }
+
+    #[tokio::test]
+    async fn cgroup_v2_unchanged_leaf_is_no_oom() -> Result<()> {
+        let pod = tempfile::tempdir()?;
+        let leaf = pod.path().join("ctr");
+        std::fs::create_dir_all(&leaf)?;
+        std::fs::create_dir(pod.path().join("sibling"))?;
+        write_events(&leaf, 0, 0)?;
+        write_events(pod.path(), 0, 0)?;
+        let (token, task) = watch_v2(&leaf);
+        baselines_taken().await;
+
+        // A kill of a sibling while the leaf exists does not count.
+        write_events(pod.path(), 1, 1)?;
+        token.cancel();
+        assert_eq!(
+            timeout(Duration::from_secs(5), task).await??,
+            OOMEvent::default()
+        );
+        Ok(())
+    }
+
+    /// A pod cgroup of the systemd driver with a sibling container and the
+    /// scope of a container, which holds the leaf with crun. Returns the
+    /// QoS and pod cgroups, the scope and the leaf.
+    fn fake_pod(root: &Path, crun: bool) -> Result<[PathBuf; 4]> {
+        let qos = root.join("kubepods-burstable.slice");
+        let pod = qos.join("kubepods-burstable-pod12ab_34cd.slice");
+        let scope = pod.join("crio-ctr.scope");
+        let leaf = if crun {
+            scope.join("container")
+        } else {
+            scope.clone()
+        };
+        std::fs::create_dir_all(&leaf)?;
+        std::fs::create_dir(pod.join("crio-sibling.scope"))?;
+        for dir in [&qos, &pod, &scope, &leaf] {
+            write_events(dir, 0, 3)?;
+        }
+        Ok([qos, pod, scope, leaf])
+    }
+
+    /// Watch the leaf, remove the scope, let `after_removal` count kills and
+    /// return what the watch found on exit.
+    async fn removed_scope(
+        crun: bool,
+        before_removal: impl Fn(&Path) -> Result<()>,
+        after_removal: impl Fn(&Path, &Path) -> Result<()>,
+    ) -> Result<OOMEvent> {
+        let root = tempfile::tempdir()?;
+        let [qos, pod, scope, leaf] = fake_pod(root.path(), crun)?;
+        let (token, task) = watch_v2(&leaf);
+        baselines_taken().await;
+
+        before_removal(&pod)?;
+        std::fs::remove_dir_all(&scope)?;
+        after_removal(&qos, &pod)?;
+        sleep(Duration::from_millis(50)).await;
+        // Waiting for the exit, not taken for an OOM on its own.
+        assert!(!task.is_finished());
+
+        token.cancel();
+        Ok(timeout(Duration::from_secs(5), task).await??)
+    }
+
+    #[tokio::test]
+    async fn cgroup_v2_removed_leaf_falls_back_to_pod() -> Result<()> {
+        let possible = OOMEvent {
+            oom: false,
+            possible_oom: true,
+        };
+        for crun in [false, true] {
+            // A kill which the pod counted after the leaf went away.
+            let event = removed_scope(crun, |_| Ok(()), |_, pod| write_events(pod, 0, 4)).await?;
+            assert_eq!(event, possible);
+            assert!(event.is_oom(137));
+            assert!(!event.is_oom(0));
+
+            // Without one, it is no OOM.
+            let event = removed_scope(crun, |_| Ok(()), |_, _| Ok(())).await?;
+            assert_eq!(event, OOMEvent::default());
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cgroup_v2_sibling_kills_do_not_count() -> Result<()> {
+        for crun in [false, true] {
+            // A sibling got killed while the leaf existed, the watch notices
+            // it once its watches are in place.
+            let sibling_kill = |pod: &Path| {
+                for _ in 0..50 {
+                    write_events(pod, 0, 4)?;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                // The leaf goes away only after the events got handled.
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(())
+            };
+            let event = removed_scope(crun, sibling_kill, |_, _| Ok(())).await?;
+            assert_eq!(event, OOMEvent::default());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cgroup_v2_is_not_compared_above_the_pod() -> Result<()> {
+        // The QoS cgroup has other pods.
+        let event = removed_scope(false, |_| Ok(()), |qos, _| write_events(qos, 0, 4)).await?;
+        assert_eq!(event, OOMEvent::default());
+
+        // Without the pod cgroup, nothing tells.
+        let event = removed_scope(
+            false,
+            |_| Ok(()),
+            |_, pod| Ok(std::fs::remove_dir_all(pod)?),
+        )
+        .await?;
+        assert_eq!(event, OOMEvent::possible(true));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cgroup_v2_removed_leaf_without_pod_falls_back_to_parent() -> Result<()> {
+        // A cgroup parent not created by the kubelet.
+        let run = async |sibling_kill: bool, kill: bool, remove_parent: bool| -> Result<OOMEvent> {
+            let root = tempfile::tempdir()?;
+            let parent = root.path().join("custom.slice");
+            let leaf = parent.join("ctr.scope");
+            std::fs::create_dir_all(&leaf)?;
+            std::fs::create_dir(parent.join("sibling.scope"))?;
+            write_events(&parent, 0, 3)?;
+            write_events(&leaf, 0, 3)?;
+            let (token, task) = watch_v2(&leaf);
+            baselines_taken().await;
+
+            if sibling_kill {
+                for _ in 0..50 {
+                    write_events(&parent, 0, 4)?;
+                    sleep(Duration::from_millis(10)).await;
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+            std::fs::remove_dir_all(&leaf)?;
+            if kill {
+                write_events(&parent, 0, 5)?;
+            }
+            if remove_parent {
+                std::fs::remove_dir_all(&parent)?;
+            }
+            token.cancel();
+            Ok(timeout(Duration::from_secs(5), task).await??)
+        };
+
+        assert_eq!(run(false, true, false).await?, OOMEvent::possible(true));
+        assert_eq!(run(false, false, false).await?, OOMEvent::default());
+        assert_eq!(run(true, false, false).await?, OOMEvent::default());
+        assert_eq!(run(false, false, true).await?, OOMEvent::possible(true));
+        Ok(())
+    }
+
+    #[test]
+    fn pod_cgroup_names() {
+        for name in [
+            "kubepods-burstable-pod12ab_34cd.slice",
+            "kubepods-pod12ab_34cd.slice",
+            "pod12ab-34cd",
+        ] {
+            assert!(CgroupV2::is_pod_cgroup_name(name), "{name}");
+        }
+        for name in [
+            "kubepods.slice",
+            "kubepods-burstable.slice",
+            "crio-12ab.scope",
+            "pod",
+            "podman.slice",
+            "libpod-12ab.scope",
+        ] {
+            assert!(!CgroupV2::is_pod_cgroup_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn oom_event_needs_kill_for_ancestor_oom() {
+        assert!(OOMEvent::new(true).is_oom(0));
+        assert!(!OOMEvent::default().is_oom(137));
+        let ancestor = OOMEvent {
+            oom: false,
+            possible_oom: true,
+        };
+        assert!(ancestor.is_oom(137));
+        assert!(!ancestor.is_oom(143));
+        assert!(!ancestor.is_oom(1));
     }
 
     #[test]
@@ -1246,6 +1685,19 @@ mod tests {
         );
         assert_eq!(OOMWatcher::cgroup_v2_path("0::/")?, root.to_path_buf());
         assert!(OOMWatcher::cgroup_v2_path("0:").is_err());
+
+        // A named v1 hierarchy may come before the unified one.
+        assert_eq!(
+            OOMWatcher::unified_cgroup_path(
+                &b"1:name=systemd:/user.slice\n0::/kubepods.slice/ctr\n"[..]
+            )?,
+            root.join("kubepods.slice/ctr")
+        );
+        assert_eq!(
+            OOMWatcher::unified_cgroup_path(&b"0::/ctr\n"[..])?,
+            root.join("ctr")
+        );
+        assert!(OOMWatcher::unified_cgroup_path(&b"1:name=systemd:/x\n"[..]).is_err());
         Ok(())
     }
 
@@ -1306,6 +1758,11 @@ mod tests {
         }
 
         fn watch(&mut self, baseline: Option<u64>) -> task::JoinHandle<bool> {
+            let watch = self.watch_event(baseline);
+            task::spawn(async move { watch.await.is_ok_and(|event| event.oom) })
+        }
+
+        fn watch_event(&mut self, baseline: Option<u64>) -> task::JoinHandle<OOMEvent> {
             let event_rx = self.event_rx.take().expect("watched once");
             let token = self.token.clone();
             let path = self.path();
@@ -1361,12 +1818,13 @@ mod tests {
         // No exit needed, the watch ends with the cgroup.
         assert!(!timeout(Duration::from_secs(5), watch).await??);
 
-        // A notification which came before the removal is one.
+        // A notification which came before the removal may be one.
         let mut cgroup = FakeCgroupV1::new(KILLS_0)?;
-        let watch = cgroup.watch(Some(0));
+        let watch = cgroup.watch_event(Some(0));
         std::fs::remove_file(cgroup.path())?;
         cgroup.signal(2).await?;
-        assert!(timeout(Duration::from_secs(5), watch).await??);
+        let event = timeout(Duration::from_secs(5), watch).await??;
+        assert_eq!(event, OOMEvent::possible(true));
         Ok(())
     }
 
@@ -1408,14 +1866,19 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn cgroup_v1_removed_while_confirming_is_oom() -> Result<()> {
-        // systemd removes the scope before the kill showed up.
+    async fn cgroup_v1_removed_while_confirming_needs_a_kill() -> Result<()> {
+        // systemd removes the scope before the kill showed up. That may also
+        // be an OOM of a sibling under the limit of the pod and a normal
+        // exit, only the exit status tells.
         let mut cgroup = FakeCgroupV1::new(KILLS_0)?;
-        let watch = cgroup.watch(Some(0));
+        let watch = cgroup.watch_event(Some(0));
         cgroup.signal(1).await?;
         sleep(Duration::from_millis(30)).await;
         std::fs::remove_file(cgroup.path())?;
-        assert!(timeout(Duration::from_secs(5), watch).await??);
+        let event = timeout(Duration::from_secs(5), watch).await??;
+        assert_eq!(event, OOMEvent::possible(true));
+        assert!(event.is_oom(128 + Signal::SIGKILL as i32));
+        assert!(!event.is_oom(0));
         Ok(())
     }
 

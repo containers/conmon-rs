@@ -20,7 +20,8 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     select,
-    sync::RwLock,
+    sync::{RwLock, broadcast},
+    task::{self, JoinHandle},
     time::{self, Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
@@ -51,25 +52,34 @@ pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 /// above. It is a heuristic though, a process with CAP_SYS_RESOURCE can grow
 /// its pipes further. More output stems from a grandchild which keeps the
 /// pipe open and writing, which would otherwise keep the drain going forever.
-/// Unlike a time limit this does not cut off the output for a slow client.
 pub(crate) const DRAIN_MAX_MESSAGES: usize = 1024;
+
+/// Upper bound for the time a drain waits for output after the process
+/// exited in total. A grandchild which keeps writing just often enough for
+/// [`DRAIN_TIMEOUT`] would keep it going for minutes otherwise. Only the
+/// waiting counts, not the forwarding, so a slow client still gets the
+/// output which was there already.
+pub(crate) const DRAIN_MAX_WAIT: Duration = Duration::from_secs(1);
 
 /// Bounds forwarding the output after the process exited.
 pub(crate) struct Drain {
     remaining: usize,
+    waited: Duration,
 }
 
 impl Default for Drain {
     fn default() -> Self {
         Self {
             remaining: DRAIN_MAX_MESSAGES,
+            waited: Duration::ZERO,
         }
     }
 }
 
 impl Drain {
     /// Wait for the next message, giving up once the channel stays quiet for
-    /// `DRAIN_TIMEOUT` or `DRAIN_MAX_MESSAGES` were received.
+    /// [`DRAIN_TIMEOUT`], [`DRAIN_MAX_MESSAGES`] were received or the waits
+    /// took [`DRAIN_MAX_WAIT`].
     pub(crate) async fn recv<F: Future>(&mut self, recv: F) -> Option<F::Output> {
         let Some(remaining) = self.remaining.checked_sub(1) else {
             warn!(
@@ -78,7 +88,38 @@ impl Drain {
             return None;
         };
         self.remaining = remaining;
-        time::timeout(DRAIN_TIMEOUT, recv).await.ok()
+        let budget = DRAIN_MAX_WAIT.saturating_sub(self.waited);
+        if budget.is_zero() {
+            debug!("Dropping remaining output after waiting {DRAIN_MAX_WAIT:?} since the exit");
+            return None;
+        }
+        let start = Instant::now();
+        let res = time::timeout(DRAIN_TIMEOUT.min(budget), recv).await.ok();
+        self.waited += start.elapsed();
+        res
+    }
+
+    /// The next message of the attach output with [`Drain::recv`]. A
+    /// receiver which fell behind skips messages, which gets logged, as a
+    /// warning for the receiver of a client. None once the output ended or
+    /// the drain gave up.
+    pub(crate) async fn recv_output(
+        &mut self,
+        rx: &mut broadcast::Receiver<Message>,
+        client: bool,
+    ) -> Option<Message> {
+        loop {
+            match self.recv(rx.recv()).await? {
+                Ok(Message::Done) | Err(broadcast::error::RecvError::Closed) => return None,
+                Ok(message) => return Some(message),
+                Err(broadcast::error::RecvError::Lagged(n)) if client => {
+                    warn!("Attach client too slow, skipped {n} messages")
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    debug!("Skipped {n} attach output messages")
+                }
+            }
+        }
     }
 }
 
@@ -88,9 +129,10 @@ impl Drain {
 /// Until a consumer attached, see [`ContainerIO::consume_stdio`], the channel
 /// keeps the latest chunks only and drops the oldest one when it is full. The
 /// output of a container must never wait for a consumer which may not exist,
-/// and a runtime must never wait for one which reads only after it finished.
-/// Once one attached, a full channel makes the read loop wait, so that a slow
-/// consumer gets all output and the process waits for it instead. The
+/// only the stderr of a failed runtime is of interest. Once one attached, a
+/// full channel makes the read loop wait, so that a slow consumer gets all
+/// output and the process waits for it instead. An exec gets its consumer
+/// before its runtime starts, see [`ContainerIO::collect_stdio`]. The
 /// consumer closes the channel when it is done, the read loop drops the
 /// sender then and keeps reading the pipe.
 #[derive(Debug)]
@@ -241,6 +283,84 @@ pub struct ContainerIO {
     typ: ContainerIOType,
     logger: SharedContainerLog,
     attach: SharedContainerAttach,
+
+    /// Collects the output of an exec while its runtime runs, see
+    /// [`ContainerIO::collect_stdio`].
+    collector: Option<StdioCollector>,
+}
+
+/// The output which an exec wrote while its runtime ran, per pipe.
+#[derive(Debug, Default)]
+pub struct EarlyStdio {
+    pub stdout: EarlyStream,
+    pub stderr: EarlyStream,
+}
+
+/// The output of a pipe up to [`ContainerIO::MAX_STDIO_STREAM_SIZE`].
+#[derive(Debug, Default)]
+pub struct EarlyStream {
+    pub data: Vec<u8>,
+
+    /// Whether the output ended.
+    pub done: bool,
+
+    /// Whether output got dropped because of the size limit. Nothing may be
+    /// appended then, it would leave a gap.
+    pub truncated: bool,
+
+    /// The end of the output which got dropped, where the error of a runtime
+    /// which failed is, up to [`EarlyStream::TAIL_SIZE`].
+    tail: Vec<u8>,
+}
+
+impl EarlyStream {
+    const TAIL_SIZE: usize = 64 * 1024;
+
+    fn push(&mut self, data: &[u8]) {
+        let len = self.data.len() + data.len();
+        if self.truncated || len >= ContainerIO::MAX_STDIO_STREAM_SIZE {
+            self.truncated = true;
+            self.tail.extend_from_slice(data);
+            // Dropping the front only once it doubled keeps it amortized.
+            if self.tail.len() > 2 * Self::TAIL_SIZE {
+                self.tail.drain(..self.tail.len() - Self::TAIL_SIZE);
+            }
+            return;
+        }
+        // Grow like a vector would, but not beyond the limit.
+        if len > self.data.capacity() {
+            let capacity = len
+                .max(2 * self.data.capacity())
+                .min(ContainerIO::MAX_STDIO_STREAM_SIZE);
+            self.data.reserve_exact(capacity - self.data.len());
+        }
+        self.data.extend_from_slice(data);
+    }
+
+    /// The end of the output, also of the part which got dropped.
+    fn end(&self) -> &[u8] {
+        let end = if self.truncated {
+            &self.tail
+        } else {
+            &self.data
+        };
+        &end[end.len().saturating_sub(Self::TAIL_SIZE)..]
+    }
+}
+
+#[derive(Debug)]
+struct StdioCollector {
+    stop: CancellationToken,
+    task: JoinHandle<EarlyStdio>,
+}
+
+impl Drop for StdioCollector {
+    /// The collector must not outlive its exec, which may have failed before
+    /// the output got taken.
+    fn drop(&mut self) {
+        self.stop.cancel();
+        self.task.abort();
+    }
 }
 
 impl ContainerIO {
@@ -329,6 +449,7 @@ impl ContainerIO {
             typ,
             logger,
             attach,
+            collector: None,
         })
     }
 
@@ -382,11 +503,78 @@ impl ContainerIO {
         }
     }
 
+    /// Read the output of an exec from now on, until it gets taken with
+    /// [`ContainerIO::take_early_stdio`] once its runtime finished. The
+    /// process may write a lot before, which the channels alone would drop,
+    /// see [`StdioSender`]. A runtime without a terminal shares the pipes,
+    /// so the reads must not wait for anything: they apply backpressure,
+    /// but take everything up to [`ContainerIO::MAX_STDIO_STREAM_SIZE`] per
+    /// pipe and drop what follows.
+    ///
+    /// The output of a pipe which is not of interest gets read and dropped.
+    pub fn collect_stdio(&mut self, stdout_enabled: bool, stderr_enabled: bool) -> Result<()> {
+        let (stdout, stderr) = self.stdio()?;
+        self.consume_stdio();
+        let stop = CancellationToken::new();
+        let collect = {
+            let stop = stop.clone();
+            async move {
+                let (stdout, stderr) = tokio::join!(
+                    Self::collect(&stdout, &stop, stdout_enabled),
+                    Self::collect(&stderr, &stop, stderr_enabled),
+                );
+                EarlyStdio { stdout, stderr }
+            }
+        };
+        self.collector = Some(StdioCollector {
+            stop,
+            task: task::spawn(collect),
+        });
+        Ok(())
+    }
+
+    /// Collect the output of a channel until `stop`, the remaining messages
+    /// stay queued for the consumer which comes next. Beyond the size limit
+    /// the output gets read and dropped.
+    async fn collect(
+        receiver: &Receiver<Message>,
+        stop: &CancellationToken,
+        enabled: bool,
+    ) -> EarlyStream {
+        let mut stream = EarlyStream::default();
+        loop {
+            let message = select! {
+                biased;
+                () = stop.cancelled() => return stream,
+                message = receiver.recv() => message,
+            };
+            match message {
+                Ok(Message::Data(data, _)) if enabled => stream.push(&data),
+                Ok(Message::Data(..)) => {}
+                Ok(Message::Done) => {
+                    stream.done = true;
+                    return stream;
+                }
+                Err(RecvError) => return stream,
+            }
+        }
+    }
+
+    /// The output collected since [`ContainerIO::collect_stdio`], empty
+    /// without that.
+    pub async fn take_early_stdio(&mut self) -> EarlyStdio {
+        let Some(mut collector) = self.collector.take() else {
+            return EarlyStdio::default();
+        };
+        collector.stop.cancel();
+        (&mut collector.task).await.unwrap_or_else(|e| {
+            error!("Unable to collect the exec output: {e}");
+            EarlyStdio::default()
+        })
+    }
+
     /// Apply backpressure to the read loops from now on, see
-    /// [`StdioSender`]. Called by the consumers of the output of an exec once
-    /// the runtime finished. Earlier the runtime could get stuck on a full
-    /// pipe, the process shares the pipes with it, so only output beyond what
-    /// the channels buffer can get dropped in that window.
+    /// [`StdioSender`].
     pub fn consume_stdio(&self) {
         match self.typ() {
             ContainerIOType::Terminal(t) => t.consume_stdio(),
@@ -399,14 +587,22 @@ impl ContainerIO {
     pub async fn runtime_error(&mut self, e: anyhow::Error) -> anyhow::Error {
         let stderr = match self.typ() {
             ContainerIOType::Streams(_) => {
-                // The runtime exited, only its remaining output is of interest.
-                let exited = CancellationToken::new();
-                exited.cancel();
-                match self.read_all_with_timeout(None, &exited).await {
-                    Ok((_, stderr, _)) => stderr,
-                    Err(read_err) => {
-                        debug!("Unable to read runtime output: {:#}", read_err);
-                        vec![]
+                // The runtime exited, only its remaining output is of
+                // interest. Its error is at the end, also of output which
+                // exceeded the size limit.
+                self.consume_stdio();
+                let early = self.take_early_stdio().await;
+                if early.stderr.truncated {
+                    early.stderr.end().to_vec()
+                } else {
+                    let exited = CancellationToken::new();
+                    exited.cancel();
+                    match self.read_all_with_early(None, &exited, early).await {
+                        Ok((_, stderr, _)) => stderr,
+                        Err(read_err) => {
+                            debug!("Unable to read runtime output: {:#}", read_err);
+                            vec![]
+                        }
                     }
                 }
             }
@@ -423,21 +619,34 @@ impl ContainerIO {
 
     /// Read the output until it ended, but at most until the deadline, and
     /// return it with whether the deadline passed. Once `exited` got
-    /// cancelled, the output still in flight is taken until the pipes stay
-    /// quiet, a background process which holds them open must not keep this
-    /// waiting. The channels get closed afterwards, so that the read loops
-    /// discard what follows.
+    /// cancelled, the output still in flight is taken as long as the
+    /// [`Drain`] does. A background process which holds the pipes open must
+    /// not keep this waiting. The channels get closed afterwards, so that the
+    /// read loops discard what follows.
     pub async fn read_all_with_timeout(
         &mut self,
         time_to_timeout: Option<Instant>,
         exited: &CancellationToken,
     ) -> Result<(Vec<u8>, Vec<u8>, bool)> {
         self.consume_stdio();
+        let early = self.take_early_stdio().await;
+        self.read_all_with_early(time_to_timeout, exited, early)
+            .await
+    }
+
+    /// Read the output after the one collected before, see
+    /// [`ContainerIO::read_all_with_timeout`].
+    async fn read_all_with_early(
+        &mut self,
+        time_to_timeout: Option<Instant>,
+        exited: &CancellationToken,
+        early: EarlyStdio,
+    ) -> Result<(Vec<u8>, Vec<u8>, bool)> {
         match self.typ_mut() {
             ContainerIOType::Terminal(t) => {
                 if let Some(message_rx) = t.message_rx_mut() {
                     let (stdout, timed_out) =
-                        Self::read_stream(time_to_timeout, exited, message_rx).await;
+                        Self::read_stream(time_to_timeout, exited, message_rx, early.stdout).await;
                     Ok((stdout, vec![], timed_out))
                 } else {
                     bail!("read_all_with_timeout called before message_rx was registered");
@@ -446,8 +655,8 @@ impl ContainerIO {
             ContainerIOType::Streams(s) => {
                 let (stdout_rx, stderr_rx) = s.stdio_mut()?;
                 let (stdout, stderr) = tokio::join!(
-                    Self::read_stream(time_to_timeout, exited, stdout_rx),
-                    Self::read_stream(time_to_timeout, exited, stderr_rx),
+                    Self::read_stream(time_to_timeout, exited, stdout_rx, early.stdout),
+                    Self::read_stream(time_to_timeout, exited, stderr_rx, early.stderr),
                 );
                 let timed_out = stdout.1 || stderr.1;
                 Ok((stdout.0, stderr.0, timed_out))
@@ -455,23 +664,30 @@ impl ContainerIO {
         }
     }
 
+    /// Read a stream, after the `early` output collected before.
     async fn read_stream(
         time_to_timeout: Option<Instant>,
         exited: &CancellationToken,
         receiver: &Receiver<Message>,
+        early: EarlyStream,
     ) -> (Vec<u8>, bool) {
         // Also after the size limit, a process which keeps writing must not
         // wait for this consumer.
         let _close = CloseOnDrop(receiver);
 
-        // Pre-allocate with reasonable capacity to avoid reallocations
-        // Start with 4KB which handles most exec_sync outputs; Vec doubling handles growth
-        let mut stdio = Vec::with_capacity(4096);
+        // The collector kept below the limit. Without it, start with 4 KiB,
+        // which handles most exec_sync outputs, doubling handles growth.
+        let mut stdio = early.data;
+        if early.done || early.truncated {
+            return (stdio, false);
+        }
+        stdio.reserve(4096);
         let mut drain = None;
         loop {
             let res = select! {
                 // An exit before the deadline ends the timeout, the drain is
-                // bounded on its own.
+                // bounded on its own. Output after that is dropped, it is
+                // still no timeout.
                 biased;
                 () = exited.cancelled(), if drain.is_none() => {
                     drain = Some(Drain::default());
@@ -767,11 +983,156 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn drain_stops_after_waiting_in_total() {
+        // A process left behind which never pauses long enough for one wait.
+        let (tx, rx) = async_channel::bounded(16);
+        tokio::spawn(async move {
+            while tx.send(()).await.is_ok() {
+                time::sleep(DRAIN_TIMEOUT * 9 / 10).await;
+            }
+        });
+
+        let start = Instant::now();
+        let mut drain = Drain::default();
+        while drain.recv(rx.recv()).await.is_some() {}
+        assert_eq!(start.elapsed(), DRAIN_MAX_WAIT);
+
+        // Time spent forwarding does not count.
+        let (tx, rx) = async_channel::bounded(16);
+        tx.send(()).await.expect("send");
+        let mut drain = Drain::default();
+        assert!(drain.recv(rx.recv()).await.is_some());
+        time::sleep(2 * DRAIN_MAX_WAIT).await;
+        tx.send(()).await.expect("send");
+        assert!(drain.recv(rx.recv()).await.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn drain_stops_on_quiet_channel() {
         let (_tx, rx) = async_channel::bounded::<()>(1);
         let start = Instant::now();
         assert!(Drain::default().recv(rx.recv()).await.is_none());
         assert_eq!(start.elapsed(), DRAIN_TIMEOUT);
+    }
+
+    #[test]
+    fn early_stream_is_bounded_without_gaps() {
+        let mut stream = EarlyStream::default();
+        let chunk = vec![1; ContainerIO::MAX_STDIO_STREAM_SIZE / 4 + 1];
+        for _ in 0..3 {
+            stream.push(&chunk);
+        }
+        assert!(!stream.truncated);
+        assert_eq!(stream.data.len(), 3 * chunk.len());
+
+        // A chunk which does not fit gets dropped, and so does everything
+        // after it, even if it would fit.
+        stream.push(&chunk);
+        assert!(stream.truncated);
+        stream.push(b"x");
+        assert_eq!(stream.data.len(), 3 * chunk.len());
+        assert!(stream.data.capacity() <= ContainerIO::MAX_STDIO_STREAM_SIZE);
+
+        // The end stays known for the error of a runtime.
+        for i in 0..100u8 {
+            stream.push(&vec![i; 1024]);
+        }
+        let end = stream.end();
+        assert_eq!(end.len(), EarlyStream::TAIL_SIZE);
+        assert_eq!(end.last(), Some(&99));
+        assert!(stream.tail.len() <= 2 * EarlyStream::TAIL_SIZE);
+    }
+
+    #[tokio::test]
+    async fn collect_drops_disabled_output() {
+        let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+        for message in [
+            Message::Data(Bytes::from_static(b"x"), Pipe::StdOut),
+            Message::Done,
+        ] {
+            tx.send(message).await.expect("send");
+        }
+        let stream = ContainerIO::collect(&rx, &CancellationToken::new(), false).await;
+        assert!(stream.data.is_empty());
+        assert!(stream.done);
+    }
+
+    #[tokio::test]
+    async fn read_stream_does_not_append_to_truncated_output() {
+        let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+        tx.send(Message::Data(Bytes::from_static(b"later"), Pipe::StdOut))
+            .await
+            .expect("send");
+        let early = EarlyStream {
+            data: b"early".to_vec(),
+            done: false,
+            truncated: true,
+            tail: vec![],
+        };
+        let (stdio, timed_out) =
+            ContainerIO::read_stream(None, &CancellationToken::new(), &rx, early).await;
+        assert_eq!(stdio, b"early");
+        assert!(!timed_out);
+        assert!(rx.is_closed());
+    }
+
+    #[tokio::test]
+    async fn exec_output_during_runtime_is_kept() -> Result<()> {
+        let mut io = ContainerIO::new(false, ContainerLog::new())?;
+        io.collect_stdio(true, true)?;
+
+        // More chunks than the channel holds, all written before the runtime
+        // returned and anything read the output.
+        let mut child = tokio::process::Command::new("sh")
+            .args(["-c", "for i in $(seq 1 300); do echo $i; sleep 0.001; done"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let token = CancellationToken::new();
+        match io.typ_mut() {
+            ContainerIOType::Streams(s) => s.handle_stdio_receive(
+                None,
+                child.stdout.take(),
+                child.stderr.take(),
+                token.clone(),
+            ),
+            ContainerIOType::Terminal(_) => bail!("no streams"),
+        }
+        child.wait().await?;
+        time::sleep(Duration::from_millis(100)).await;
+
+        token.cancel();
+        let (stdout, _, timed_out) = io.read_all_with_timeout(None, &token).await?;
+        assert!(!timed_out);
+        let expected: String = (1..=300).map(|i| format!("{i}\n")).collect();
+        assert_eq!(String::from_utf8(stdout)?, expected);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_stream_after_exit_is_bounded_in_time() {
+        // A process left behind which never pauses long enough for the drain.
+        let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+        tokio::spawn(async move {
+            while tx
+                .send(Message::Data(Bytes::from_static(b"x"), Pipe::StdOut))
+                .await
+                .is_ok()
+            {
+                time::sleep(DRAIN_TIMEOUT * 9 / 10).await;
+            }
+        });
+
+        let exited = CancellationToken::new();
+        exited.cancel();
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(10);
+        let (stdio, timed_out) =
+            ContainerIO::read_stream(Some(deadline), &exited, &rx, EarlyStream::default()).await;
+        assert!(!timed_out);
+        assert_eq!(start.elapsed(), DRAIN_MAX_WAIT);
+        assert_eq!(stdio.len(), 12);
+        assert!(rx.is_closed());
     }
 
     #[tokio::test(start_paused = true)]
@@ -908,7 +1269,8 @@ mod tests {
         });
 
         let (stdout, timed_out) =
-            ContainerIO::read_stream(None, &CancellationToken::new(), &rx).await;
+            ContainerIO::read_stream(None, &CancellationToken::new(), &rx, EarlyStream::default())
+                .await;
         assert!(!timed_out);
         assert!(stdout.len() < ContainerIO::MAX_STDIO_STREAM_SIZE);
         // At most the chunk which crossed the limit is missing.
@@ -927,8 +1289,13 @@ mod tests {
             .await?;
 
         let deadline = Instant::now() + Duration::from_secs(5);
-        let (stdout, timed_out) =
-            ContainerIO::read_stream(Some(deadline), &CancellationToken::new(), &rx).await;
+        let (stdout, timed_out) = ContainerIO::read_stream(
+            Some(deadline),
+            &CancellationToken::new(),
+            &rx,
+            EarlyStream::default(),
+        )
+        .await;
         assert_eq!(stdout, b"partial");
         assert!(timed_out);
         assert_eq!(Instant::now(), deadline);
@@ -949,7 +1316,7 @@ mod tests {
             let exited = exited.clone();
             async move {
                 let deadline = Instant::now() + Duration::from_secs(60);
-                ContainerIO::read_stream(Some(deadline), &exited, &rx).await
+                ContainerIO::read_stream(Some(deadline), &exited, &rx, EarlyStream::default()).await
             }
         });
         task::yield_now().await;
@@ -972,7 +1339,9 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         let read = task::spawn({
             let exited = exited.clone();
-            async move { ContainerIO::read_stream(Some(deadline), &exited, &rx).await }
+            async move {
+                ContainerIO::read_stream(Some(deadline), &exited, &rx, EarlyStream::default()).await
+            }
         });
 
         time::sleep(Duration::from_millis(950)).await;
@@ -996,8 +1365,13 @@ mod tests {
         drop(tx);
 
         let deadline = Instant::now() + Duration::from_secs(5);
-        let (stdout, timed_out) =
-            ContainerIO::read_stream(Some(deadline), &CancellationToken::new(), &rx).await;
+        let (stdout, timed_out) = ContainerIO::read_stream(
+            Some(deadline),
+            &CancellationToken::new(),
+            &rx,
+            EarlyStream::default(),
+        )
+        .await;
         assert_eq!(stdout, b"data");
         assert!(!timed_out);
         Ok(())
