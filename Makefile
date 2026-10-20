@@ -5,10 +5,15 @@ CONTAINER_RUNTIME ?= podman
 BUILD_DIR ?= .build
 GOTOOLS_GOPATH ?= $(BUILD_DIR)/gotools
 GOTOOLS_BINDIR ?= $(GOTOOLS_GOPATH)/bin
-GINKGO_FLAGS ?= -vv --trace --race --randomize-all --flake-attempts 3 --show-node-events --timeout 5m -r pkg/client
+GINKGO_FLAGS ?= -vv --trace --race --randomize-all --show-node-events --timeout 5m -r pkg/client
+# Extra ginkgo flags, CI passes --flake-attempts here so that a flake is
+# visible locally.
 TEST_FLAGS ?=
 # The integration tests build and use the release binary if this is unset.
 CONMON_BINARY ?=
+# The resident set size every spec checks the server against. A dynamically
+# linked release build stays well below 10 MiB, the static musl build CI tests
+# gets 5500 KiB (see .github/workflows/ci.yml).
 MAX_RSS_KB ?= 10240
 # The generated Go code embeds a schema which differs between capnp versions,
 # use the one pinned by flake.lock. Set CAPNP=capnp to use the local one.

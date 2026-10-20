@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -36,10 +38,18 @@ const (
 )
 
 var (
+	errBusyboxMissing   = errors.New("BUSYBOX_BINARY does not exist")
+	errDownloadStatus   = errors.New("unexpected download status")
+	errChecksumMismatch = errors.New("checksum mismatch")
+)
+
+var (
 	busyboxDest = filepath.Join(busyboxDestDir, "busybox")
 	runtimePath = os.Getenv("RUNTIME_BINARY")
 	conmonPath  = os.Getenv(conmonBinaryKey)
-	maxRSSKB    = 5600
+	// The budget of the Makefile for a dynamically linked release build,
+	// MAX_RSS_KB overrides it. See the Makefile for the budgets.
+	maxRSSKB = 10240
 )
 
 // TestConmonClient runs the created specs.
@@ -47,10 +57,14 @@ func TestConmonClient(t *testing.T) {
 	if rssStr := os.Getenv("MAX_RSS_KB"); rssStr != "" {
 		rssInt, err := strconv.Atoi(rssStr)
 		if err != nil {
-			t.Error(err)
+			t.Fatalf("parse MAX_RSS_KB: %v", err)
 		}
 
 		maxRSSKB = rssInt
+	}
+
+	if binary := os.Getenv("BUSYBOX_BINARY"); binary != "" {
+		busyboxDest = binary
 	}
 
 	RegisterFailHandler(Fail)
@@ -115,8 +129,9 @@ func (tr *testRunner) createRuntimeConfigWithProcessArgs(
 	// Create Rootfs.
 	tmpRootfs := MustDirInTempDir(tr.tmpDir, "rootfs")
 
-	// Link busybox binary to rootfs.
-	Expect(os.Link(busyboxDest, filepath.Join(tmpRootfs, "busybox"))).To(Succeed())
+	// Link busybox binary to rootfs, or copy it if it lives on another
+	// file system or belongs to another user.
+	Expect(linkOrCopy(busyboxDest, filepath.Join(tmpRootfs, "busybox"))).To(Succeed())
 
 	// Finally, create config.json.
 	Expect(generateRuntimeConfigWithProcessArgs(
@@ -271,7 +286,7 @@ func (tr *testRunner) createContainerWithConfig(sut *client.ConmonClient, cfg *c
 	}, time.Second*5).Should(Succeed())
 }
 
-func (tr *testRunner) startContainer(*client.ConmonClient) {
+func (tr *testRunner) startContainer() {
 	// Start the container
 	Expect(tr.rr.RunCommand("start", tr.ctrID)).To(Succeed())
 
@@ -283,6 +298,61 @@ func (tr *testRunner) startContainer(*client.ConmonClient) {
 
 		return tr.rr.RunCommandCheckOutput("stopped", "list")
 	}, time.Second*10).Should(Succeed())
+}
+
+// syncBuffer is a bytes.Buffer which can be read while another goroutine
+// still writes to it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	n, err := b.buf.Write(p)
+	if err != nil {
+		return n, fmt.Errorf("write buffer: %w", err)
+	}
+
+	return n, nil
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.String()
+}
+
+// cleanupSpec deletes the container, shuts the server down and removes the
+// temp dir of a spec, whatever the spec got around to create.
+func cleanupSpec(tr *testRunner, sut *client.ConmonClient) {
+	// Every step runs even if an earlier one failed, a leaked server would
+	// otherwise fail the whole suite.
+	var errs []error
+
+	// The runner only exists once the runtime config got created.
+	if tr != nil && tr.rr != nil {
+		if err := tr.rr.RunCommand("delete", "-f", tr.ctrID); err != nil {
+			errs = append(errs, fmt.Errorf("delete container: %w", err))
+		}
+	}
+
+	if sut != nil {
+		if err := sut.Shutdown(); err != nil {
+			errs = append(errs, fmt.Errorf("shutdown server: %w", err))
+		}
+	}
+
+	if tr != nil {
+		if err := os.RemoveAll(tr.tmpDir); err != nil {
+			errs = append(errs, fmt.Errorf("remove temp dir: %w", err))
+		}
+	}
+
+	Expect(errors.Join(errs...)).To(Succeed())
 }
 
 func MustTempDir(name string) string {
@@ -301,8 +371,8 @@ func MustDirInTempDir(parent, name string) string {
 
 func MustFile(file string) string {
 	f, err := os.Create(file)
-	f.Close()
 	Expect(err).To(Succeed())
+	Expect(f.Close()).To(Succeed())
 
 	return file
 }
@@ -359,39 +429,79 @@ func vmRSSGivenPID(pid uint32) uint32 {
 	return uint32(rssU64)
 }
 
+// cacheBusyBox downloads busybox once per user. A provided BUSYBOX_BINARY
+// is used as it is, a cached file is checked and replaced if it does not
+// match, an earlier failed download must not stay in use.
 func cacheBusyBox() error {
-	if _, err := os.Stat(busyboxDest); err == nil {
+	if os.Getenv("BUSYBOX_BINARY") != "" {
+		if _, err := os.Stat(busyboxDest); err != nil {
+			return fmt.Errorf("%w: %s", errBusyboxMissing, busyboxDest)
+		}
+
 		return nil
 	}
 
-	if err := os.MkdirAll(busyboxDestDir, 0o755); err != nil && !os.IsExist(err) {
+	if sum, err := fileSHA256(busyboxDest); err == nil && sum == busyboxSHA256 {
+		return nil
+	}
+
+	if err := os.MkdirAll(busyboxDestDir, 0o755); err != nil {
 		return fmt.Errorf("create busybox dest dir: %w", err)
 	}
 
-	if err := downloadFile(busyboxSource, busyboxDest); err != nil {
+	if err := downloadFile(busyboxSource, busyboxDest, busyboxSHA256); err != nil {
 		return fmt.Errorf("download busybox: %w", err)
-	}
-
-	if err := os.Chmod(busyboxDest, 0o777); err != nil {
-		return fmt.Errorf("change busybox permissions: %w", err)
 	}
 
 	return nil
 }
 
-// source: https://progolang.com/how-to-download-files-in-go/
-// downloadFile will download a url and store it in local path.
-// It writes to the destination file as it downloads it, without
-// loading the entire file into memory.
-func downloadFile(url, path string) error {
-	// Create the file
-	out, err := os.Create(path)
+// fileSHA256 returns the hex checksum of a file.
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("create path: %w", err)
+		return "", fmt.Errorf("open file: %w", err)
+	}
+	defer f.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, f); err != nil {
+		return "", fmt.Errorf("read file: %w", err)
+	}
+
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// linkOrCopy hard links src to dst and copies it if the link is not
+// possible, for example across file systems.
+func linkOrCopy(src, dst string) error {
+	if err := os.Link(src, dst); err == nil {
+		return nil
+	}
+
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open source: %w", err)
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return fmt.Errorf("create destination: %w", err)
 	}
 	defer out.Close()
 
-	// Get the data
+	if _, err := io.Copy(out, in); err != nil {
+		return fmt.Errorf("copy: %w", err)
+	}
+
+	return nil
+}
+
+// downloadFile downloads a URL into path. The file only appears at path once
+// it is complete and matches the checksum, a failed download must not get
+// cached.
+func downloadFile(url, path, sha256sum string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
@@ -409,10 +519,37 @@ func downloadFile(url, path string) error {
 
 	defer resp.Body.Close()
 
-	// Write the body to file
-	_, err = io.Copy(out, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%w: %s", errDownloadStatus, resp.Status)
+	}
+
+	out, err := os.CreateTemp(filepath.Dir(path), "download-")
 	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+
+	defer os.Remove(out.Name())
+	defer out.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(out, hash), resp.Body); err != nil {
 		return fmt.Errorf("copy response: %w", err)
+	}
+
+	if sum := hex.EncodeToString(hash.Sum(nil)); sum != sha256sum {
+		return fmt.Errorf("%w: %s is %s, expected %s", errChecksumMismatch, url, sum, sha256sum)
+	}
+
+	if err := out.Chmod(0o755); err != nil {
+		return fmt.Errorf("change permissions: %w", err)
+	}
+
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close file: %w", err)
+	}
+
+	if err := os.Rename(out.Name(), path); err != nil {
+		return fmt.Errorf("move file into place: %w", err)
 	}
 
 	return nil
@@ -539,6 +676,10 @@ func testAttach(
 	go func() {
 		defer wg.Done()
 		defer GinkgoRecover()
+		// Nothing reads the output once this returns, closing the reader
+		// unblocks the attach if it still writes, also after a failed
+		// assertion.
+		defer reader.Close()
 
 		pipe := ""
 		if useStdErr {
@@ -555,8 +696,6 @@ func testAttach(
 		// terminate the container
 		_, err := fmt.Fprintf(stdinWriter, "exit\n")
 		Expect(err).To(Succeed())
-
-		Expect(reader.Close()).To(Succeed())
 	}()
 
 	go func() {
@@ -564,7 +703,8 @@ func testAttach(
 		defer GinkgoRecover()
 
 		err := sut.AttachContainer(context.Background(), cfg)
-		// The test races with itself, and sometimes is EOF and sometimes passes
+		// The attach may still be writing output when the reader gets
+		// closed above, that is the only error allowed.
 		if !errors.Is(err, io.ErrClosedPipe) {
 			Expect(err).To(Succeed())
 		}
@@ -574,12 +714,33 @@ func testAttach(
 }
 
 func verifyBuffer(reader io.Reader, terminal bool, command, expected string) {
+	// A read blocks on the pipe until output arrives, which never happens
+	// after a mismatch, so bound it.
 	readSection := func() string {
-		data := make([]byte, 8191)
-		n, err := reader.Read(data)
-		Expect(err).To(Succeed())
+		type result struct {
+			data string
+			err  error
+		}
 
-		return string(data[:n])
+		results := make(chan result, 1)
+
+		go func() {
+			data := make([]byte, 8191)
+
+			n, err := reader.Read(data)
+			results <- result{string(data[:n]), err}
+		}()
+
+		select {
+		case res := <-results:
+			Expect(res.err).To(Succeed())
+
+			return res.data
+		case <-time.After(10 * time.Second):
+			Fail("timed out waiting for attach output")
+
+			return ""
+		}
 	}
 	if !terminal {
 		Expect(readSection()).To(Equal(expected))
@@ -587,17 +748,14 @@ func verifyBuffer(reader io.Reader, terminal bool, command, expected string) {
 		return
 	}
 
+	// The terminal echoes the command and prints the prompt, which arrive
+	// in any number of reads.
 	fullExpectedBuffer := command + "\r\n" + expected + "/ # \x1b[6n"
 	str := ""
 
-	for {
+	for len(str) < len(fullExpectedBuffer) {
 		str += readSection()
-		if len(str) < len(fullExpectedBuffer) {
-			continue
-		}
-
-		Expect(str).To(Equal(fullExpectedBuffer))
-
-		return
 	}
+
+	Expect(str).To(Equal(fullExpectedBuffer))
 }

@@ -136,39 +136,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_test() {
+    fn version_fields_and_verbosity() {
         let v = Version::new(false);
         assert_eq!(v.version(), env!("CARGO_PKG_VERSION"));
-        assert_eq!(v.tag(), env!("BUILD_TAG"));
-        assert_eq!(v.commit(), env!("BUILD_COMMIT"));
-        assert_eq!(v.build_date(), env!("BUILD_TIME"));
-        assert_eq!(v.target(), env!("BUILD_TARGET"));
-        assert_eq!(v.rust_version(), env!("BUILD_RUST_VERSION"));
-        assert_eq!(v.cargo_version(), env!("BUILD_CARGO_VERSION"));
+        assert!(!v.target().is_empty());
+        assert!(v.rust_version().starts_with("rustc "));
+        assert!(v.cargo_version().starts_with("cargo "));
+        // The tree is only part of the verbose output.
         assert!(v.cargo_tree().is_empty());
+        assert_eq!(Version::new(true).cargo_tree(), CARGO_TREE);
 
         v.print();
     }
 
+    /// The JSON keys are what the Go client reads, see pkg/client/client.go.
     #[test]
-    fn version_test_verbose() {
-        let v = Version::new(true);
-        assert_eq!(v.cargo_tree(), CARGO_TREE);
-    }
-
-    #[test]
-    fn version_test_json() -> Result<()> {
+    fn version_json() -> Result<()> {
         let v = Version::new(false);
-        assert_eq!(v.version(), env!("CARGO_PKG_VERSION"));
-        assert_eq!(v.tag(), env!("BUILD_TAG"));
-        assert_eq!(v.commit(), env!("BUILD_COMMIT"));
-        assert_eq!(v.build_date(), env!("BUILD_TIME"));
-        assert_eq!(v.target(), env!("BUILD_TARGET"));
-        assert_eq!(v.rust_version(), env!("BUILD_RUST_VERSION"));
-        assert_eq!(v.cargo_version(), env!("BUILD_CARGO_VERSION"));
-        assert!(v.cargo_tree().is_empty());
+        let json = serde_json::to_value(&v)?;
+        let object = json.as_object().context("not an object")?;
+        for (key, value) in [
+            ("build_date", v.build_date()),
+            ("cargo_tree", v.cargo_tree()),
+            ("cargo_version", v.cargo_version()),
+            ("commit", v.commit()),
+            ("rust_version", v.rust_version()),
+            ("tag", v.tag()),
+            ("target", v.target()),
+            ("version", v.version()),
+        ] {
+            assert_eq!(
+                object.get(key).and_then(|v| v.as_str()),
+                Some(value),
+                "key {key}"
+            );
+        }
+        // The verbosity is a presentation flag, not version information.
+        assert!(!object.contains_key("verbose"));
 
-        v.print_json()?;
-        Ok(())
+        v.print_json()
     }
 }

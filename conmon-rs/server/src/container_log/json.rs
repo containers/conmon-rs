@@ -101,11 +101,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_json_logger_new() -> Result<()> {
-        let logger = JsonLogger::new("/tmp/test.log", Some(1000));
-        assert_eq!(
-            logger.file.path().to_str().context("path")?,
-            "/tmp/test.log"
-        );
+        let file = NamedTempFile::new()?;
+        let logger = JsonLogger::new(file.path(), Some(1000));
+        assert_eq!(logger.file.path(), file.path());
         assert_eq!(logger.file.max_size, Some(1000));
         Ok(())
     }

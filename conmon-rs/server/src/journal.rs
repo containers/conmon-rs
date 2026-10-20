@@ -53,3 +53,32 @@ impl<'a> MakeWriter<'a> for Journal {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn priorities_follow_the_level() {
+        assert_eq!(
+            Journal::priority_for(&Level::ERROR) as u8,
+            Priority::Error as u8
+        );
+        assert_eq!(
+            Journal::priority_for(&Level::WARN) as u8,
+            Priority::Warning as u8
+        );
+        assert_eq!(
+            Journal::priority_for(&Level::INFO) as u8,
+            Priority::Info as u8
+        );
+        assert_eq!(
+            Journal::priority_for(&Level::DEBUG) as u8,
+            Priority::Debug as u8
+        );
+        assert_eq!(
+            Journal::priority_for(&Level::TRACE) as u8,
+            Priority::Debug as u8
+        );
+    }
+}

@@ -412,3 +412,54 @@ impl Config {
         self.runtime_dir().join(FD_SOCKET)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(args: &[&str]) -> Config {
+        Config::try_parse_from(["conmonrs"].iter().chain(args)).expect("parse args")
+    }
+
+    #[test]
+    fn validate_requires_the_runtime_flags() {
+        // The flags also come from the environment, which would change what
+        // the parsed configurations below contain.
+        if std::env::vars().any(|(key, _)| key.starts_with(prefix!())) {
+            eprintln!("skipping, CONMON_* variables are set");
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = dir.path().join("runtime");
+        std::fs::write(&runtime, "").expect("write runtime");
+        let runtime = runtime.to_str().expect("utf8 path");
+        let runtime_dir = dir.path().to_str().expect("utf8 path");
+
+        assert!(config(&[]).validate().is_err());
+        assert!(config(&["--runtime", runtime]).validate().is_err());
+        assert!(
+            config(&["--runtime", "/does/not/exist", "--runtime-dir", runtime_dir])
+                .validate()
+                .is_err()
+        );
+        assert!(
+            config(&["--runtime", runtime, "--runtime-dir", runtime_dir])
+                .validate()
+                .is_ok()
+        );
+        // The runtime root must be a directory if it exists.
+        assert!(
+            config(&[
+                "--runtime",
+                runtime,
+                "--runtime-dir",
+                runtime_dir,
+                "--runtime-root",
+                runtime
+            ])
+            .validate()
+            .is_err()
+        );
+    }
+}

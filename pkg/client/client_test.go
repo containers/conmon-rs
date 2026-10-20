@@ -35,6 +35,13 @@ var _ = Describe("ConmonClient", func() {
 		sut *client.ConmonClient
 	)
 
+	// A spec which fails or skips before it created its server must not
+	// make the hooks below look at the server of the previous spec.
+	BeforeEach(func() {
+		tr = nil
+		sut = nil
+	})
+
 	JustAfterEach(func() {
 		if sut != nil {
 			pid := sut.PID()
@@ -48,14 +55,9 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	AfterEach(func() {
-		Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID)).To(Succeed())
-
-		if sut != nil {
-			Expect(sut.Shutdown()).To(Succeed())
-		}
-
-		Expect(os.RemoveAll(tr.tmpDir)).To(Succeed())
+		cleanupSpec(tr, sut)
 	})
+
 	Describe("New", func() {
 		It("should restore from running server", func() {
 			tr = newTestRunner()
@@ -115,7 +117,7 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfig(terminal)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer()
 				Expect(fileContents(tr.exitPath())).To(Equal("0"))
 			})
 
@@ -129,14 +131,16 @@ var _ = Describe("ConmonClient", func() {
 				Expect(sut.Shutdown()).To(Succeed())
 				sut = nil
 
-				// Verify the container process is no longer running by checking container state
-				// The container may be in "stopped" state or removed entirely depending on runtime
+				// The runtime reports the killed container as stopped, or
+				// not at all once it got deleted.
 				Eventually(func() bool {
-					// If we can't find the container in "created" state, it's been handled
-					err := tr.rr.RunCommandCheckOutput("created", "list")
+					stopped := tr.rr.RunCommandCheckOutput("stopped", "list") == nil
+					// Only a listing without the container counts, not a
+					// failed listing.
+					gone := errors.Is(tr.rr.RunCommandCheckOutput(tr.ctrID, "list"), errNoMatch)
 
-					return err != nil
-				}, time.Second*5).Should(BeTrue())
+					return stopped || gone
+				}, time.Second*5).Should(BeTrue(), "container still created")
 			})
 
 			It(testName("should execute cleanup command when container exits", terminal), func() {
@@ -157,7 +161,7 @@ var _ = Describe("ConmonClient", func() {
 					}},
 					CleanupCmd: []string{"touch", cleanupPath},
 				})
-				tr.startContainer(sut)
+				tr.startContainer()
 				Eventually(cleanupPath, 10*time.Second).Should(BeAnExistingFile())
 				Expect(fileContents(cleanupPath)).To(BeEmpty())
 			})
@@ -223,12 +227,16 @@ var _ = Describe("ConmonClient", func() {
 					terminal,
 					[]string{"/busybox", "tail", "/dev/zero"},
 					func(g generate.Generator) {
-						g.SetLinuxResourcesMemoryLimit(1024 * 1024)
+						// Pin the swap as well, otherwise the cgroup swaps on
+						// hosts with swap instead of being killed.
+						const limit = 1024 * 1024
+						g.SetLinuxResourcesMemoryLimit(limit)
+						g.SetLinuxResourcesMemorySwap(limit)
 					},
 				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer()
 
 				Eventually(tr.oomExitPath, 10*time.Second).Should(BeAnExistingFile())
 				Expect(fileContents(tr.oomExitPath())).To(BeEmpty())
@@ -245,10 +253,13 @@ var _ = Describe("ConmonClient", func() {
 				cfg := tr.defaultConfig(terminal)
 				cfg.LogDrivers[0].MaxSize = 50
 				tr.createContainerWithConfig(sut, cfg)
-				tr.startContainer(sut)
+				tr.startContainer()
 
-				logs := fileContents(tr.logPath())
-				Expect(logs).NotTo(ContainSubstring("hello"))
+				// The second line exceeds the size and rotates the log, so
+				// only it survives.
+				Eventually(func() string { return fileContents(tr.logPath()) }, 5*time.Second).
+					Should(ContainSubstring("world"))
+				Expect(fileContents(tr.logPath())).NotTo(ContainSubstring("hello"))
 			})
 			It(testName("should respect global args", terminal), func() {
 				tr = newTestRunner()
@@ -262,7 +273,7 @@ var _ = Describe("ConmonClient", func() {
 				cfg := tr.defaultConfig(terminal)
 				cfg.GlobalArgs = []string{"--log", logFile, "--debug"}
 				tr.createContainerWithConfig(sut, cfg)
-				tr.startContainer(sut)
+				tr.startContainer()
 
 				logs := fileContents(logFile)
 				Expect(logs).NotTo(BeEmpty())
@@ -277,7 +288,7 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "30"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer()
 
 				var wg sync.WaitGroup
 				for i := range 10 {
@@ -308,7 +319,7 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "600"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer()
 
 				pid := sut.PID()
 				rssBefore := vmRSSGivenPID(pid)
@@ -343,7 +354,7 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer()
 
 				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
 					ID:       tr.ctrID,
@@ -374,7 +385,7 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer()
 
 				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
 					ID:       tr.ctrID,
@@ -394,7 +405,7 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer()
 
 				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
 					ID:       tr.ctrID,
@@ -426,7 +437,7 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "20"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer()
 
 				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
 					ID:       tr.ctrID,
@@ -488,7 +499,7 @@ var _ = Describe("ConmonClient", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer()
 
 				stdinReader, stdinWriter := io.Pipe()
 				stdReader, stdWriter := io.Pipe()
@@ -523,7 +534,7 @@ var _ = Describe("ConmonClient", func() {
 			tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh", "-c", script}, changeSpec)
 			sut = tr.configGivenEnv()
 			tr.createContainer(sut, terminal)
-			tr.startContainer(sut)
+			tr.startContainer()
 
 			if beforeAttach != nil {
 				beforeAttach()
@@ -660,6 +671,20 @@ var _ = Describe("ConmonClient", func() {
 		const contribTracingPath = "../../contrib/tracing/"
 
 		BeforeEach(func() {
+			// Tracing is a compile time feature of the server, only a build
+			// with it can export spans. Check before Jaeger gets started.
+			binary := conmonPath
+			if binary == "" {
+				binary = "conmonrs"
+			}
+
+			version, err := exec.Command(binary, "--version-json", "full").Output()
+			Expect(err).NotTo(HaveOccurred())
+
+			if !strings.Contains(string(version), "opentelemetry") {
+				Skip("server built without the tracing feature")
+			}
+
 			cmd := exec.Command(contribTracingPath + "start")
 
 			fmt.Fprintln(os.Stdout)
@@ -725,17 +750,8 @@ var _ = Describe("ConmonClient", func() {
 
 			sut = tr.configGivenEnv()
 
-			// Tracing is a compile time feature of the server, only a build
-			// with it can export spans.
-			version, err := sut.Version(context.Background(), &client.VersionConfig{Verbose: true})
-			Expect(err).NotTo(HaveOccurred())
-
-			if !strings.Contains(version.CargoTree, "opentelemetry") {
-				Skip("server built without the tracing feature")
-			}
-
 			tr.createContainer(sut, false)
-			tr.startContainer(sut)
+			tr.startContainer()
 
 			Eventually(hasTraces, 100*time.Second, time.Second).Should(BeTrue())
 		})
@@ -748,6 +764,13 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	Describe("CreateNamespaces", func() {
+		// The namespaces get bind mounted, which needs privileges.
+		BeforeEach(func() {
+			if unshare.IsRootless() {
+				Skip("does not run rootless")
+			}
+		})
+
 		It("should succeed without namespaces", func() {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
@@ -1070,12 +1093,13 @@ var _ = Describe("JSONLogger", func() {
 		sut *client.ConmonClient
 	)
 
-	AfterEach(func() {
-		Expect(os.RemoveAll(tr.tmpDir)).To(Succeed())
+	BeforeEach(func() {
+		tr = nil
+		sut = nil
+	})
 
-		if sut != nil {
-			Expect(sut.Shutdown()).To(Succeed())
-		}
+	AfterEach(func() {
+		cleanupSpec(tr, sut)
 	})
 
 	Describe("Logging", func() {
@@ -1099,7 +1123,7 @@ var _ = Describe("JSONLogger", func() {
 					}},
 				})
 				Expect(err).NotTo(HaveOccurred())
-				tr.startContainer(sut)
+				tr.startContainer()
 
 				logContent, err := os.ReadFile(tr.logPath())
 				Expect(err).NotTo(HaveOccurred())
@@ -1121,10 +1145,13 @@ var _ = Describe("JournaldLogger", func() {
 		sut *client.ConmonClient
 	)
 
+	BeforeEach(func() {
+		tr = nil
+		sut = nil
+	})
+
 	AfterEach(func() {
-		if sut != nil {
-			Expect(sut.Shutdown()).To(Succeed())
-		}
+		cleanupSpec(tr, sut)
 	})
 
 	Describe("Logging", func() {
@@ -1147,7 +1174,7 @@ var _ = Describe("JournaldLogger", func() {
 					LogDrivers: []client.ContainerLogDriver{{Type: client.LogDriverTypeJournald}},
 				})
 				Expect(err).NotTo(HaveOccurred())
-				tr.startContainer(sut)
+				tr.startContainer()
 
 				// Verify the journal logs, they arrive asynchronously. The
 				// documented short ID field finds both lines.
@@ -1186,14 +1213,13 @@ var _ = Describe("StreamingServer", func() {
 		sut *client.ConmonClient
 	)
 
+	BeforeEach(func() {
+		tr = nil
+		sut = nil
+	})
+
 	AfterEach(func() {
-		Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID)).To(Succeed())
-
-		if sut != nil {
-			Expect(sut.Shutdown()).To(Succeed())
-		}
-
-		Expect(os.RemoveAll(tr.tmpDir)).To(Succeed())
+		cleanupSpec(tr, sut)
 	})
 
 	Describe("ServePortForwardContainer", func() {
@@ -1218,7 +1244,7 @@ var _ = Describe("StreamingServer", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer()
 
 				result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
 					ID:      tr.ctrID,
@@ -1280,7 +1306,7 @@ var _ = Describe("StreamingServer", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
-				tr.startContainer(sut)
+				tr.startContainer()
 
 				result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
 					ID:      tr.ctrID,
@@ -1320,7 +1346,7 @@ var _ = Describe("StreamingServer", func() {
 			tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "10"}, nil)
 			sut = tr.configGivenEnv()
 			tr.createContainer(sut, false)
-			tr.startContainer(sut)
+			tr.startContainer()
 
 			result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
 				ID:      tr.ctrID,
@@ -1358,7 +1384,7 @@ var _ = Describe("StreamingServer", func() {
 			tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "watch", "-n0.5", "echo", "test"}, nil)
 			sut = tr.configGivenEnv()
 			tr.createContainer(sut, terminal)
-			tr.startContainer(sut)
+			tr.startContainer()
 
 			result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
 				ID:     tr.ctrID,
@@ -1374,8 +1400,10 @@ var _ = Describe("StreamingServer", func() {
 			executor, err := remotecommand.NewWebSocketExecutor(config, "GET", result.URL)
 			Expect(err).NotTo(HaveOccurred())
 
-			stdout := &bytes.Buffer{}
-			stderr := &bytes.Buffer{}
+			// The stream gets cut off by the context below while the executor
+			// still copies output, so the buffers need a lock.
+			stdout := &syncBuffer{}
+			stderr := &syncBuffer{}
 
 			streamOptions := remotecommand.StreamOptions{
 				Stdout: stdout,
@@ -1388,7 +1416,6 @@ var _ = Describe("StreamingServer", func() {
 
 			err = executor.StreamWithContext(ctx, streamOptions)
 			Expect(err).To(HaveOccurred())
-			Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID)).To(Succeed())
 			Expect(stdout.String()).To(ContainSubstring("echo test"))
 			Expect(stderr.String()).To(BeEmpty())
 		})
@@ -1400,7 +1427,7 @@ var _ = Describe("StreamingServer", func() {
 			)
 			sut = tr.configGivenEnv()
 			tr.createContainer(sut, false)
-			tr.startContainer(sut)
+			tr.startContainer()
 
 			result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
 				ID:                tr.ctrID,

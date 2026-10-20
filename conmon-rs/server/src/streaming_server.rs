@@ -886,6 +886,24 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn stdin_messages_are_dispatched_by_their_first_byte() {
+        let stdin = StreamingServer::handle_stdin(Bytes::from_static(&[STDIN_BYTE, b'l', b's']));
+        assert_eq!(
+            stdin,
+            ControlFlow::Continue(Some(Bytes::from_static(b"ls")))
+        );
+
+        let close = StreamingServer::handle_stdin(Bytes::from_static(&[CLOSE_BYTE]));
+        assert_eq!(close, ControlFlow::Break(()));
+
+        // Unknown and empty messages are ignored.
+        let unknown = StreamingServer::handle_stdin(Bytes::from_static(&[42, b'x']));
+        assert_eq!(unknown, ControlFlow::Continue(None));
+        let empty = StreamingServer::handle_stdin(Bytes::new());
+        assert_eq!(empty, ControlFlow::Continue(None));
+    }
+
     #[tokio::test]
     async fn drain_stops_on_quiet_channel() {
         let (_tx, rx) = async_channel::bounded::<()>(1);
