@@ -532,6 +532,8 @@ var _ = Describe("ConmonClient", func() {
 				pid := sut.PID()
 				rssBefore := vmRSSGivenPID(pid)
 				GinkgoWriter.Printf("VmRSS before: %d\n", rssBefore)
+				logMemoryDetails(pid, "before")
+				mappingsBefore := mappingRSS(pid)
 
 				for i := range 25 {
 					result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
@@ -549,8 +551,10 @@ var _ = Describe("ConmonClient", func() {
 
 				rssAfter := vmRSSGivenPID(pid)
 				GinkgoWriter.Printf("VmRSS after: %d\n", rssAfter)
+				logMemoryDetails(pid, "after")
+				logGrownMappings(mappingsBefore, mappingRSS(pid))
 				GinkgoWriter.Printf("VmRSS diff: %d\n", rssAfter-rssBefore)
-				Expect(rssAfter - rssBefore).To(BeNumerically("<", 2000))
+				Expect(rssAfter - rssBefore).To(BeNumerically("<", maxRSSGrowthKB))
 			})
 		}
 	})

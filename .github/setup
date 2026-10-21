@@ -55,6 +55,9 @@ default_runtime = "crun"
 runtime_path = "/usr/libexec/crio/crun"
 runtime_type = "pod"
 monitor_path = "/usr/libexec/crio/conmonrs"
+# Exec and attach through the streaming server of conmon-rs, which critest
+# only reaches over WebSocket. crio status config does not show it.
+stream_websockets = ${STREAM_WEBSOCKETS:-false}
 
 # critest verifies the pod sandbox metrics since cri-tools v1.37.0, which
 # CRI-O only serves when they are enabled.
@@ -73,14 +76,16 @@ EOT
 }
 
 install_critest() {
-    URL=https://github.com/kubernetes-sigs/cri-tools
+    # cri-tools publishes no signatures, the checksum is pinned with the
+    # version instead of read from the release.
     CRI_TOOLS_VERSION=v1.37.0
+    CRITEST_SHA256=e39780b83deac72e3d70599a6641f4db7661b63ebe15aa6d9f6d46dde06a4c05
+    TARBALL=critest-$CRI_TOOLS_VERSION-linux-amd64.tar.gz
 
-    git clone --depth 1 --branch $CRI_TOOLS_VERSION $URL
-    pushd cri-tools
-    sudo -E PATH="$PATH" make BINDIR=/usr/local/bin install
-    popd
-    sudo rm -rf cri-tools
+    curl_retry "https://github.com/kubernetes-sigs/cri-tools/releases/download/$CRI_TOOLS_VERSION/$TARBALL" -o "$TARBALL"
+    echo "$CRITEST_SHA256  $TARBALL" | sha256sum -c
+    sudo tar xzf "$TARBALL" -C /usr/local/bin critest
+    rm "$TARBALL"
     sudo critest --version
 }
 

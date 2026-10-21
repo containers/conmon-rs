@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/pprof"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,6 +60,9 @@ var (
 	// The budget of the Makefile for a dynamically linked release build,
 	// MAX_RSS_KB overrides it. See the Makefile for the budgets.
 	maxRSSKB = 10240
+	// How much the resident set of the server may grow over the execs of the
+	// memory leak specs, MAX_RSS_GROWTH_KB overrides it.
+	maxRSSGrowthKB = 2000
 )
 
 // TestConmonClient runs the created specs.
@@ -70,6 +74,15 @@ func TestConmonClient(t *testing.T) {
 		}
 
 		maxRSSKB = rssInt
+	}
+
+	if growthStr := os.Getenv("MAX_RSS_GROWTH_KB"); growthStr != "" {
+		growthInt, err := strconv.Atoi(growthStr)
+		if err != nil {
+			t.Fatalf("parse MAX_RSS_GROWTH_KB: %v", err)
+		}
+
+		maxRSSGrowthKB = growthInt
 	}
 
 	if binary := os.Getenv("BUSYBOX_BINARY"); binary != "" {
@@ -451,6 +464,63 @@ func (tr *testRunner) configGivenEnvWith(changeConfig func(*client.ConmonServerC
 	return sut
 }
 
+// logMemoryDetails prints the threads and the resident memory by kind of a
+// process, which tells a leak from memory the allocator or the kernel keeps.
+func logMemoryDetails(pid uint32, when string) {
+	for _, file := range []string{"status", "smaps_rollup"} {
+		content, err := os.ReadFile(fmt.Sprintf("/proc/%d/%s", pid, file))
+		Expect(err).To(Succeed())
+
+		for line := range strings.SplitSeq(string(content), "\n") {
+			for _, key := range []string{"Threads:", "Rss:", "Anonymous:", "AnonHugePages:", "Private_Dirty:"} {
+				if strings.HasPrefix(line, key) {
+					GinkgoWriter.Printf("Memory %s: %s\n", when, strings.Join(strings.Fields(line), " "))
+				}
+			}
+		}
+	}
+}
+
+// mappingRSS returns the resident kB of each mapping of a process by its start
+// address, permissions and name, so that a heap grown through brk stays the
+// same mapping.
+func mappingRSS(pid uint32) map[string]int {
+	content, err := os.ReadFile(fmt.Sprintf("/proc/%d/smaps", pid))
+	Expect(err).To(Succeed())
+
+	mappings := map[string]int{}
+	mapping := ""
+
+	for line := range strings.SplitSeq(string(content), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+
+		switch {
+		case strings.Contains(fields[0], "-") && !strings.HasSuffix(fields[0], ":"):
+			start, _, _ := strings.Cut(fields[0], "-")
+			mapping = strings.Join(append([]string{start, fields[1]}, fields[5:]...), " ")
+		case fields[0] == "Rss:" && len(fields) > 1:
+			kb, err := strconv.Atoi(fields[1])
+			Expect(err).To(Succeed())
+
+			mappings[mapping] = kb
+		}
+	}
+
+	return mappings
+}
+
+// logGrownMappings prints the mappings which grew by more than 256 kB.
+func logGrownMappings(before, after map[string]int) {
+	for mapping, kb := range after {
+		if grown := kb - before[mapping]; grown > 256 {
+			GinkgoWriter.Printf("Mapping grew by %d kB to %d kB: %s\n", grown, kb, mapping)
+		}
+	}
+}
+
 func vmRSSGivenPID(pid uint32) uint32 {
 	const procPath = "/proc"
 
@@ -801,20 +871,31 @@ func verifyBuffer(reader io.Reader, terminal bool, command, expected string) {
 		}
 	}
 
-	// The terminal echoes the command and prints the prompt. Either way the
-	// output arrives in any number of reads.
-	fullExpectedBuffer := expected
+	// The terminal echoes the command and prints the prompt. The busybox of
+	// the tests asks the terminal for the cursor position after it, the one
+	// of nixpkgs for other architectures shows ~ for the home directory of
+	// root instead and does not ask. Either way the output arrives in any
+	// number of reads.
+	fullExpectedBuffers := []string{expected}
 	if terminal {
-		fullExpectedBuffer = command + "\r\n" + expected + "/ # \x1b[6n"
+		fullExpectedBuffers = []string{
+			command + "\r\n" + expected + "/ # \x1b[6n",
+			command + "\r\n" + expected + "~ # ",
+		}
+	}
+
+	maxLen := 0
+	for _, buf := range fullExpectedBuffers {
+		maxLen = max(maxLen, len(buf))
 	}
 
 	str := ""
 
-	for len(str) < len(fullExpectedBuffer) {
+	for !slices.Contains(fullExpectedBuffers, str) && len(str) < maxLen {
 		str += readSection()
 	}
 
-	Expect(str).To(Equal(fullExpectedBuffer))
+	Expect(str).To(BeElementOf(fullExpectedBuffers))
 }
 
 // streamURL runs the exec or attach session served at url until it ends.

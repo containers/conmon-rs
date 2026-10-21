@@ -14,37 +14,44 @@ permissions:
   contents: read
 env:
   CARGO_TERM_COLOR: always
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   NIX_VERSION: "2.35.3"
+# The jobs are named by what they do: lint-* checks the style of the sources,
+# verify-* checks that generated or pinned things are up to date, build-* and
+# test-* build and test the server, publish-* changes the bucket.
 jobs:
-  dependencies:
+  verify-dependencies:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Verifies the signature of the zeitgeist release binary.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.4
       - run: make verify-dependencies
       - run: make verify-spec
 
-  proto:
+  verify-proto:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - uses: cachix/install-nix-action@3715ab1a11cac9e991980d7b4a28d80c7ebdd8f9 # v28
+      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
         with:
           install_url: https://releases.nixos.org/nix/nix-${{ env.NIX_VERSION }}/install
       - run: make update-proto && git diff --exit-code
 
-  go-lint:
+  lint-go:
     runs-on: ubuntu-latest
-    # only-new-issues reads the diff of the pull request.
-    permissions:
-      contents: read
-      pull-requests: read
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -54,166 +61,21 @@ jobs:
           for GOOS in freebsd darwin; do
             CGO_ENABLED=0 GOOS=$GOOS go build ./pkg/client/
           done
+      # The sources are lint clean, so all issues fail, not only new ones.
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.15.0
-          only-new-issues: true
-
-  get-script:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        cosign: [true, false]
-    name: get-script-${{ matrix.cosign && 'cosign' || 'checksum' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        if: matrix.cosign
-      - run: scripts/get
-
-  # The release workflow creates the marker of a tag.
-  create-marker:
-    runs-on: ubuntu-latest
-    if: github.repository == 'containers/conmon-rs' && github.ref == 'refs/heads/main'
-    needs: [build-static-amd64, build-static]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      # Runs of main commits overlap and finish in any order. The marker only
-      # moves forward, so an older run finishing last cannot move it back and
-      # a failing newer run does not hold it up for the ones after it.
-      - name: Check the current marker
-        id: main
-        run: |
-          CURRENT=$(curl -sSfL "https://storage.googleapis.com/cri-o/conmon-rs/latest-main.txt?ts=$(date +%s)" || true)
-          if [[ ! $CURRENT =~ ^[0-9a-f]{40}$ ]] ||
-            ! git cat-file -e "$CURRENT^{commit}" 2>/dev/null ||
-            git merge-base --is-ancestor "$CURRENT" "$GITHUB_SHA"; then
-            echo "forward=true" >>"$GITHUB_OUTPUT"
-          else
-            echo "The marker already points to the newer commit $CURRENT"
-            echo "forward=false" >>"$GITHUB_OUTPUT"
-          fi
-      - run: .github/create-marker
-        if: steps.main.outputs.forward == 'true'
-      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
-        if: steps.main.outputs.forward == 'true'
-        with:
-          credentials_json: ${{ secrets.GCS_CRIO_SA }}
-      # The marker changes in place, caches must not serve an old one.
-      - uses: google-github-actions/upload-cloud-storage@6397bd7208e18d13ba2619ee21b9873edc94427a # v3.0.0
-        if: steps.main.outputs.forward == 'true'
-        with:
-          path: .
-          glob: latest-*.txt
-          destination: cri-o/conmon-rs
-          headers: |-
-            cache-control: no-cache
-
-  # The tests only need the amd64 binary, which gets its own job so that they do
-  # not wait for the emulated builds. Both jobs share the steps.
-  build-static-amd64:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    strategy:
-      matrix:
-        arch: [amd64]
-    name: build-static-${{ matrix.arch }}
-    steps: &build-static-steps
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: cachix/install-nix-action@3715ab1a11cac9e991980d7b4a28d80c7ebdd8f9 # v28
-        with:
-          install_url: https://releases.nixos.org/nix/nix-${{ env.NIX_VERSION }}/install
-      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
-        with:
-          name: conmon-rs
-          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
-          pushFilter: "(conmon-rs)"
-      - run: nix build .#${{ matrix.arch }}
-      - run: file result/bin/conmonrs | grep static | grep stripped
-      # Every binary gets executed once, a build which links but does not
-      # run would otherwise only show up on the target machines.
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-        if: matrix.arch != 'amd64'
-      - name: Smoke test
-        run: |
-          docker run --rm --platform linux/${{ matrix.arch }} \
-            -v "$PWD/result/bin:/smoke:ro" alpine:3.22 /smoke/conmonrs --version
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: build-static-${{ matrix.arch }}
-          path: |
-            result/bin/conmonrs
-      - run: |
-          mkdir ${{ github.sha }}
-          cp result/bin/conmonrs ${{ github.sha }}/conmonrs.${{ matrix.arch }}
-          cd ${{ github.sha }}
-          sha256sum conmonrs.${{ matrix.arch }} > conmonrs.${{ matrix.arch }}.sha256
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        if: github.ref == 'refs/heads/main' && github.repository == 'containers/conmon-rs'
-      - name: Sign binary
-        if: github.ref == 'refs/heads/main' && github.repository == 'containers/conmon-rs'
-        run: |
-          cd ${{ github.sha }}
-          cosign sign-blob -y conmonrs.${{ matrix.arch }} \
-            --bundle conmonrs.${{ matrix.arch }}.bundle
-      # Forks have no credentials for the bucket.
-      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
-        if: github.ref == 'refs/heads/main' && github.repository == 'containers/conmon-rs'
-        with:
-          credentials_json: ${{ secrets.GCS_CRIO_SA }}
-      - uses: google-github-actions/upload-cloud-storage@6397bd7208e18d13ba2619ee21b9873edc94427a # v3.0.0
-        if: github.ref == 'refs/heads/main' && github.repository == 'containers/conmon-rs'
-        with:
-          path: ${{ github.sha }}
-          destination: cri-o/conmon-rs
-
-  build-static:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [arm64, ppc64le, s390x]
-    name: build-static-${{ matrix.arch }}
-    steps: *build-static-steps
-
-  doc:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: .github/install-deps
-      - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
-        with:
-          toolchain: stable
-          components: rustfmt
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # The gh-pages workflow publishes the documentation of all features.
-      - name: Cargo doc
-        run: cargo doc --locked --no-deps --all-features
-        env:
-          RUSTDOCFLAGS: -D warnings
 
   lint-clippy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
-        with:
-          toolchain: stable
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # The default features are what gets shipped, all features cover the
       # optional tracing code.
       - name: Clippy Lint
@@ -221,48 +83,185 @@ jobs:
           cargo clippy --locked --all-targets -- -D warnings
           cargo clippy --locked --all-targets --all-features -- -D warnings
 
-  msrv:
+  lint-rustfmt:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select Toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt && rustup default stable
+      - name: Rustfmt
+        run: cargo fmt && git diff --exit-code
+
+  lint-typos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
+        with:
+          config: .github/typos.toml
+
+  lint-prettier:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: creyD/prettier_action@8c18391fdc98ed0d884c6345f03975edac71b8f0 # v4.6
+        with:
+          dry: true
+          prettier_options: --write .
+
+  verify-doc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: .github/install-deps
+      - name: Select Toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The gh-pages workflow publishes the documentation of all features.
+      - name: Cargo doc
+        run: cargo doc --locked --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  verify-msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: .github/install-deps
       - name: Read rust-version
         id: msrv
         run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
       - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
-        with:
-          toolchain: ${{ steps.msrv.outputs.version }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        env:
+          TOOLCHAIN: ${{ steps.msrv.outputs.version }}
+        run: rustup toolchain install "$TOOLCHAIN" --profile minimal && rustup default "$TOOLCHAIN"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Cargo check
         run: cargo check --locked --all-targets --all-features
 
-  lint-rustfmt:
+  verify-deny:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          toolchain: stable
-          components: rustfmt
-      - name: Rustfmt
-        run: cargo fmt && git diff --exit-code
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+
+  # The architectures are the packages of flake.nix, .github/release-files and
+  # scripts/get list them as well. Every architecture gets its own build and
+  # publish job: the tests only wait for their build, and each publish only
+  # for its own build. The builds have no access to the signing credentials,
+  # see publish-static.yml.
+  build-static-amd64:
+    uses: ./.github/workflows/build-static.yml
+    with:
+      arch: amd64
+    secrets:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+  build-static-arm64:
+    uses: ./.github/workflows/build-static.yml
+    with:
+      arch: arm64
+    secrets:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+  build-static-ppc64le:
+    uses: ./.github/workflows/build-static.yml
+    with:
+      arch: ppc64le
+    secrets:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+  build-static-s390x:
+    uses: ./.github/workflows/build-static.yml
+    with:
+      arch: s390x
+    secrets:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+  # Attests, signs and uploads the binaries of main. The tests do not wait for
+  # it, an outage of the signing services only holds up the marker.
+  publish-static-amd64:
+    if: github.repository == 'containers/conmon-rs' && github.ref == 'refs/heads/main'
+    needs: build-static-amd64
+    permissions:
+      contents: read
+      id-token: write # signs the binary, see publish-static.yml
+      attestations: write # attests its provenance and SBOM
+    uses: ./.github/workflows/publish-static.yml
+    with:
+      arch: amd64
+      digest: ${{ needs.build-static-amd64.outputs.digest }}
+      artifact-id: ${{ needs.build-static-amd64.outputs.artifact-id }}
+    secrets:
+      GCS_CRIO_SA: ${{ secrets.GCS_CRIO_SA }}
+
+  publish-static-arm64:
+    if: github.repository == 'containers/conmon-rs' && github.ref == 'refs/heads/main'
+    needs: build-static-arm64
+    permissions:
+      contents: read
+      id-token: write # signs the binary, see publish-static.yml
+      attestations: write # attests its provenance and SBOM
+    uses: ./.github/workflows/publish-static.yml
+    with:
+      arch: arm64
+      digest: ${{ needs.build-static-arm64.outputs.digest }}
+      artifact-id: ${{ needs.build-static-arm64.outputs.artifact-id }}
+    secrets:
+      GCS_CRIO_SA: ${{ secrets.GCS_CRIO_SA }}
+
+  publish-static-ppc64le:
+    if: github.repository == 'containers/conmon-rs' && github.ref == 'refs/heads/main'
+    needs: build-static-ppc64le
+    permissions:
+      contents: read
+      id-token: write # signs the binary, see publish-static.yml
+      attestations: write # attests its provenance and SBOM
+    uses: ./.github/workflows/publish-static.yml
+    with:
+      arch: ppc64le
+      digest: ${{ needs.build-static-ppc64le.outputs.digest }}
+      artifact-id: ${{ needs.build-static-ppc64le.outputs.artifact-id }}
+    secrets:
+      GCS_CRIO_SA: ${{ secrets.GCS_CRIO_SA }}
+
+  publish-static-s390x:
+    if: github.repository == 'containers/conmon-rs' && github.ref == 'refs/heads/main'
+    needs: build-static-s390x
+    permissions:
+      contents: read
+      id-token: write # signs the binary, see publish-static.yml
+      attestations: write # attests its provenance and SBOM
+    uses: ./.github/workflows/publish-static.yml
+    with:
+      arch: s390x
+      digest: ${{ needs.build-static-s390x.outputs.digest }}
+      artifact-id: ${{ needs.build-static-s390x.outputs.artifact-id }}
+    secrets:
+      GCS_CRIO_SA: ${{ secrets.GCS_CRIO_SA }}
 
   test-unit:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
-        with:
-          toolchain: stable
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        run: rustup toolchain install stable --profile minimal --component llvm-tools-preview && rustup default stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
@@ -278,37 +277,72 @@ jobs:
           # from forks fall back to tokenless uploads.
           token: ${{ secrets.CODECOV_TOKEN }}
 
-  test-integration:
+  test-integration-amd64:
     needs: build-static-amd64
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    env:
+      ARCH: amd64
+      # The resident set size every spec checks the server against, and how
+      # much it may grow in the memory leak specs, see the Makefile.
+      MAX_RSS_KB: 5500
+      MAX_RSS_GROWTH_KB: 2000
+    steps: &test-integration-steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       # The tests run as root and keep their files per user ID.
       - name: Setup Testfiles Cache
+        if: env.ARCH == 'amd64'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             /tmp/conmon-test-images-0
           key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/files_test.go') }}
+      # The busybox of the tests only runs on x86, the other architectures
+      # use the static one of the nixpkgs of flake.lock, which behaves the same.
+      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+        if: env.ARCH != 'amd64'
+        with:
+          install_url: https://releases.nixos.org/nix/nix-${{ env.NIX_VERSION }}/install
+      - name: Install busybox
+        if: env.ARCH != 'amd64'
+        run: |
+          nix build --inputs-from . nixpkgs#pkgsStatic.busybox --out-link .build/busybox
+          echo "BUSYBOX_BINARY=$PWD/.build/busybox/bin/busybox" >>"$GITHUB_ENV"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: build-static-amd64
+          name: build-static-${{ env.ARCH }}
           path: .build/static
       - run: chmod +x .build/static/conmonrs
+      # What the memory budget of the server depends on.
+      - name: System info
+        run: |
+          uname -a
+          echo "Page size: $(getconf PAGESIZE)"
+          grep -H . /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/hugepages-*/enabled || true
+          file .build/static/conmonrs
+          .build/static/conmonrs --version
       - run: .github/install-crun
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - name: create symlink
-        run: sudo ln -f -s $(go env GOROOT)/bin/* /usr/bin/
+        run: sudo ln -f -s "$(go env GOROOT)"/bin/* /usr/bin/
+      # make integration installs ginkgo, which has no binaries.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .build/gotools/bin/ginkgo
+          key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod') }}
       - name: Integration tests
         run: |
           sudo -E make integration \
             RUNTIME_PATH=/usr/bin/crun \
             CONMON_BINARY=.build/static/conmonrs \
-            MAX_RSS_KB=5500 \
+            MAX_RSS_KB="$MAX_RSS_KB" \
+            MAX_RSS_GROWTH_KB="$MAX_RSS_GROWTH_KB" \
             TEST_FLAGS="--flake-attempts 3 --output-dir .build/report --json-report report.json"
       - name: Report flaky specs
         if: ${{ !cancelled() }}
@@ -316,28 +350,42 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() }}
         with:
-          name: test-integration-report
+          name: test-integration-${{ env.ARCH }}-report
           path: .build/report/report.json
       # The tests run as root, setup-go saves its cache as the runner user.
       - name: Chown cache
         run: |
-          sudo chown -R $(id -u):$(id -g) ~/go/pkg/mod
-          sudo chown -R $(id -u):$(id -g) ~/.cache/go-build
+          sudo chown -R "$(id -u):$(id -g)" ~/go/pkg/mod
+          sudo chown -R "$(id -u):$(id -g)" ~/.cache/go-build
+
+  # The same suite on a native arm64 runner, the build-static jobs only run the
+  # other architectures once under emulation.
+  test-integration-arm64:
+    needs: build-static-arm64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    env:
+      ARCH: arm64
+      MAX_RSS_KB: 5500
+      MAX_RSS_GROWTH_KB: 2000
+    steps: *test-integration-steps
 
   # Runs the integration tests once more against a coverage instrumented debug
-  # build of the server, and with coverage of the Go client. The test-integration
-  # job keeps testing the shipped binary and its memory budget. The debug build
-  # is slower, so a timing sensitive failure here only costs the coverage.
+  # build of the server, and with coverage of the Go client. The
+  # test-integration jobs keep testing the shipped binary and its memory budget.
+  # The debug build is slower, so a timing sensitive failure here only costs
+  # the coverage.
   test-integration-coverage:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      # Saved by the test-integration job.
+      # Saved by the test-integration-amd64 job.
       - name: Restore Testfiles Cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -346,16 +394,15 @@ jobs:
           key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/files_test.go') }}
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
-        with:
-          toolchain: stable
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        run: rustup toolchain install stable --profile minimal --component llvm-tools-preview && rustup default stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-llvm-cov
       - run: .github/install-crun
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - name: create symlink
         run: sudo ln -f -s "$(go env GOROOT)"/bin/* /usr/bin/
       # The environment makes the build instrumented and every server process
@@ -366,6 +413,10 @@ jobs:
           source "$RUNNER_TEMP/llvm-cov.env"
           cargo llvm-cov clean --workspace
           cargo build --locked
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .build/gotools/bin/ginkgo
+          key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod') }}
       # The memory budget does not apply to an instrumented debug build. A
       # failure only costs the coverage, the job stays green and uploads what
       # got covered. A failing job would fail the check, even if allowed to.
@@ -409,13 +460,24 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" ~/go/pkg/mod
           sudo chown -R "$(id -u):$(id -g)" ~/.cache/go-build
 
+  # Runs critest against CRI-O with the static binary. With stream_websockets,
+  # CRI-O hands exec and attach to the streaming server of conmon-rs, which
+  # critest reaches directly over WebSocket. Port forwarding stays with CRI-O.
   test-critest:
     needs: build-static-amd64
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        websockets: [false, true]
+    name: test-critest${{ matrix.websockets && '-websockets' || '' }}
+    env:
+      STREAM_WEBSOCKETS: ${{ matrix.websockets }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -424,13 +486,16 @@ jobs:
           name: build-static-amd64
           path: .build/static
       - run: .github/setup
+      # critest runs the parallel specs with ginkgo, which has no binaries.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .build/gotools/bin/ginkgo
+          key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod') }}
       - name: Install ginkgo
         run: |
-          sudo chown -R $(id -u):$(id -g) ~/go
-          sudo chown -R $(id -u):$(id -g) ~/.cache
-          go install github.com/onsi/ginkgo/v2/ginkgo@$(go list -m -f '{{.Version}}' github.com/onsi/ginkgo/v2)
+          make .install.ginkgo
+          sudo cp .build/gotools/bin/ginkgo /usr/local/bin
           ginkgo version
-          sudo cp $(command -v ginkgo) /usr/local/bin
       - name: Run critest
         shell: bash
         run: |
@@ -439,21 +504,39 @@ jobs:
           sudo cp .build/static/conmonrs /usr/libexec/crio/conmonrs
           sudo chmod +x /usr/libexec/crio/conmonrs
 
+          FLAGS=()
+          if [[ $STREAM_WEBSOCKETS == true ]]; then
+            FLAGS+=(--websocket-exec --websocket-attach)
+          fi
+
           set +o errexit
-          sudo -E PATH=$PATH critest \
+          sudo -E PATH="$PATH" critest \
             --runtime-endpoint=unix:///var/run/crio/crio.sock \
-            --parallel=$(nproc) \
+            --parallel="$(nproc)" \
             --ginkgo.flake-attempts=3 \
             --ginkgo.json-report="$PWD/critest-report.json" \
             --ginkgo.randomize-all \
             --ginkgo.timeout=2m \
             --ginkgo.trace \
-            --ginkgo.v
+            --ginkgo.v \
+            "${FLAGS[@]}"
           TEST_RC=$?
           set -o errexit
 
-          sudo journalctl --no-pager > journal.log
+          # The log belongs to the runner user, which uploads it.
+          # shellcheck disable=SC2024
+          sudo journalctl --no-pager >journal.log
           test $TEST_RC -ne 0 && cat journal.log
+
+          # CRI-O logs these only if conmon-rs served the sessions.
+          if [[ $STREAM_WEBSOCKETS == true ]]; then
+            for KIND in exec attach; do
+              if ! grep -q "Using $KIND URL from container monitor" journal.log; then
+                echo "::error::CRI-O did not hand any $KIND session to conmon-rs"
+                TEST_RC=1
+              fi
+            done
+          fi
           exit $TEST_RC
       - name: Report flaky specs
         if: ${{ !cancelled() }}
@@ -462,30 +545,68 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() }}
         with:
-          name: critest-logs
+          name: test-critest${{ matrix.websockets && '-websockets' || '' }}-logs
           path: |
             journal.log
             critest-report.json
 
-  cargo-deny:
+  test-get-script:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        cosign: [true, false]
+    name: test-get-script-${{ matrix.cosign && 'cosign' || 'checksum' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-
-  typos:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
         with:
-          config: .github/typos.toml
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: matrix.cosign
+        with:
+          cosign-release: v3.1.4
+      - run: scripts/get
 
-  prettier:
+  # The release workflow publishes the marker of a tag.
+  publish-marker:
     runs-on: ubuntu-latest
+    if: github.repository == 'containers/conmon-rs' && github.ref == 'refs/heads/main'
+    needs:
+      - publish-static-amd64
+      - publish-static-arm64
+      - publish-static-ppc64le
+      - publish-static-s390x
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: creyD/prettier_action@8c18391fdc98ed0d884c6345f03975edac71b8f0 # v4.6
         with:
-          dry: true
-          prettier_options: --write .
+          fetch-depth: 0
+          persist-credentials: false
+      # Runs of main commits overlap and finish in any order. The marker only
+      # moves forward, so an older run finishing last cannot move it back and
+      # a failing newer run does not hold it up for the ones after it.
+      - name: Check the current marker
+        id: main
+        run: |
+          CURRENT=$(curl -sSfL "https://storage.googleapis.com/cri-o/conmon-rs/latest-main.txt?ts=$(date +%s)" || true)
+          if [[ ! $CURRENT =~ ^[0-9a-f]{40}$ ]] ||
+            ! git cat-file -e "$CURRENT^{commit}" 2>/dev/null ||
+            git merge-base --is-ancestor "$CURRENT" "$GITHUB_SHA"; then
+            echo "forward=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "The marker already points to the newer commit $CURRENT"
+            echo "forward=false" >>"$GITHUB_OUTPUT"
+          fi
+      - run: .github/create-marker
+        if: steps.main.outputs.forward == 'true'
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        if: steps.main.outputs.forward == 'true'
+        with:
+          credentials_json: ${{ secrets.GCS_CRIO_SA }}
+      # The marker changes in place, caches must not serve an old one.
+      - uses: google-github-actions/upload-cloud-storage@6397bd7208e18d13ba2619ee21b9873edc94427a # v3.0.0
+        if: steps.main.outputs.forward == 'true'
+        with:
+          path: .
+          glob: latest-*.txt
+          destination: cri-o/conmon-rs
+          headers: |-
+            cache-control: no-cache

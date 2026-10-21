@@ -50,6 +50,44 @@ The script automatically verifies the created sigstore signatures if the local
 system has [`cosign`](https://github.com/sigstore/cosign) available in its
 `$PATH`.
 
+The binaries also come with [SLSA](https://slsa.dev) Build L3 provenance and
+an SPDX 2.3 SBOM, both as GitHub artifact attestations. A job without access
+to the signing credentials builds them, the reusable [publish-static
+workflow](.github/workflows/publish-static.yml), which runs no build steps,
+attests and signs them. Verify them with the [GitHub
+CLI](https://cli.github.com):
+
+```console
+> gh attestation verify conmonrs.amd64 \
+    --repo containers/conmon-rs \
+    --signer-workflow containers/conmon-rs/.github/workflows/publish-static.yml \
+    --source-ref refs/heads/main
+```
+
+Add `--predicate-type https://spdx.dev/Document/v2.3` for the SBOM. The
+bucket and the releases carry the attestation bundles as well
+(`conmonrs.$ARCH.intoto.jsonl` and `conmonrs.$ARCH.spdx.intoto.jsonl`), and
+the SBOM itself (`conmonrs.$ARCH.spdx.json`). The cosign signatures
+(`conmonrs.$ARCH.bundle`) have the identity
+`https://github.com/containers/conmon-rs/.github/workflows/publish-static.yml@refs/heads/main`,
+the one of commits from before the attestations is
+`https://github.com/containers/conmon-rs/.github/workflows/ci.yml@refs/heads/main`.
+
+The source tarball and the `sha256sums.txt` of a release have SLSA Build L3
+provenance and cosign signatures of the reusable [build-sources
+workflow](.github/workflows/build-sources.yml) for the tag:
+
+```console
+> gh attestation verify conmonrs-vX.Y.Z.tar.gz \
+    --repo containers/conmon-rs \
+    --signer-workflow containers/conmon-rs/.github/workflows/build-sources.yml \
+    --source-ref refs/tags/vX.Y.Z
+> cosign verify-blob sha256sums.txt \
+    --bundle sha256sums.txt.bundle \
+    --certificate-identity https://github.com/containers/conmon-rs/.github/workflows/build-sources.yml@refs/tags/vX.Y.Z \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
 Every commit on `main` is also built as an RPM in the [podman-next
 copr](https://copr.fedorainfracloud.org/coprs/rhcontainerbot/podman-next/package/conmon-rs).
 

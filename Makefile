@@ -11,10 +11,12 @@ GINKGO_FLAGS ?= -vv --trace --race --randomize-all --show-node-events --timeout 
 TEST_FLAGS ?=
 # The integration tests build and use the release binary if this is unset.
 CONMON_BINARY ?=
-# The resident set size every spec checks the server against. A dynamically
-# linked release build stays well below 10 MiB, the static musl build CI tests
-# gets 5500 KiB (see .github/workflows/ci.yml).
+# The resident set size every spec checks the server against, and how much it
+# may grow over the execs of the memory leak specs. A dynamically linked
+# release build stays well below 10 MiB, the static glibc builds CI tests get
+# 5500 KiB (see .github/workflows/ci.yml).
 MAX_RSS_KB ?= 10240
+MAX_RSS_GROWTH_KB ?= 2000
 # The generated Go code embeds a schema which differs between capnp versions,
 # use the one pinned by flake.lock. Set CAPNP=capnp to use the local one.
 CAPNP ?= nix shell --inputs-from . nixpkgs\#capnproto --command capnp
@@ -74,6 +76,7 @@ integration: .install.ginkgo $(if $(CONMON_BINARY),,release) ## Run the integrat
 	export CONMON_BINARY="$(abspath $(or $(CONMON_BINARY),target/release/$(BINARY)))" && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
 	export MAX_RSS_KB="$(MAX_RSS_KB)" && \
+	export MAX_RSS_GROWTH_KB="$(MAX_RSS_GROWTH_KB)" && \
 	"$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
 
 ##@ Verify targets:
@@ -117,21 +120,35 @@ prettier: ## Prettify supported files.
 	$(CONTAINER_RUNTIME) run --rm -v ${PWD}:/w:z -w /w --entrypoint bash node:latest -c \
 		'npm install -g prettier && prettier -w .'
 
+# ginkgo publishes no binaries, an installed one of the version of go.mod is
+# kept, which CI caches.
 .PHONY: .install.ginkgo
 .install.ginkgo:
-	GOBIN=$(abspath $(GOTOOLS_BINDIR)) \
-		go install "github.com/onsi/ginkgo/v2/ginkgo@$$(go list -m -f {{.Version}} github.com/onsi/ginkgo/v2)"
+	VERSION=$$(go list -m -f {{.Version}} github.com/onsi/ginkgo/v2) && \
+	if ! "$(GOTOOLS_BINDIR)/ginkgo" version 2>/dev/null | grep -qx "Ginkgo Version $${VERSION#v}"; then \
+		GOBIN=$(abspath $(GOTOOLS_BINDIR)) go install "github.com/onsi/ginkgo/v2/ginkgo@$$VERSION"; \
+	fi
 
 .PHONY: .install.golangci-lint
 .install.golangci-lint:
 	GOBIN=$(abspath $(GOTOOLS_BINDIR)) \
 		go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
+# The release binary, its signature gets verified if cosign is available like
+# CI has it.
 $(GOTOOLS_BINDIR)/zeitgeist:
 	mkdir -p $(GOTOOLS_BINDIR)
-	curl -sSfL -o $(GOTOOLS_BINDIR)/zeitgeist \
-		https://github.com/kubernetes-sigs/zeitgeist/releases/download/$(ZEITGEIST_VERSION)/zeitgeist-amd64-linux
-	chmod +x $(GOTOOLS_BINDIR)/zeitgeist
+	URL=https://github.com/kubernetes-sigs/zeitgeist/releases/download/$(ZEITGEIST_VERSION)/zeitgeist-amd64-linux && \
+	curl -sSfL -o $@.tmp "$$URL" && \
+	if command -v cosign >/dev/null; then \
+		curl -sSfL -o $@.sigstore.json "$$URL.sigstore.json" && \
+		cosign verify-blob $@.tmp --bundle $@.sigstore.json \
+			--certificate-identity https://github.com/kubernetes-sigs/zeitgeist/.github/workflows/release.yml@refs/tags/$(ZEITGEIST_VERSION) \
+			--certificate-oidc-issuer https://token.actions.githubusercontent.com && \
+		rm $@.sigstore.json; \
+	fi && \
+	chmod +x $@.tmp && \
+	mv $@.tmp $@
 
 .PHONY: clean
 clean: ## Cleanup the project files.
