@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	neturl "net/url"
 	"os"
 	"os/exec"
@@ -34,6 +35,7 @@ import (
 	"go.podman.io/storage/pkg/stringid"
 	"go.podman.io/storage/pkg/unshare"
 	"golang.org/x/sys/unix"
+	"k8s.io/apimachinery/pkg/util/proxy"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/tools/remotecommand"
@@ -817,12 +819,86 @@ func verifyBuffer(reader io.Reader, terminal bool, command, expected string) {
 	Expect(str).To(Equal(fullExpectedBuffer))
 }
 
-// streamURL runs the exec or attach session served at url until it ends.
-func streamURL(ctx context.Context, url string, options remotecommand.StreamOptions) error {
-	executor, err := remotecommand.NewWebSocketExecutor(&rest.Config{Insecure: true}, "GET", url)
+// streamTransports are the transports of exec and attach sessions: WebSocket
+// with v5.channel.k8s.io like kubectl, and SPDY like the kubelet towards the
+// runtime.
+var streamTransports = []string{"WebSocket", "SPDY"}
+
+// streamURLOver runs the exec or attach session served at url over the
+// transport until it ends.
+func streamURLOver(ctx context.Context, transport, rawURL string, options remotecommand.StreamOptions) error {
+	var (
+		executor remotecommand.Executor
+		err      error
+	)
+
+	if transport == "SPDY" {
+		parsed, parseErr := neturl.Parse(rawURL)
+		Expect(parseErr).NotTo(HaveOccurred())
+
+		executor, err = remotecommand.NewSPDYExecutor(&rest.Config{}, http.MethodPost, parsed)
+	} else {
+		executor, err = remotecommand.NewWebSocketExecutor(&rest.Config{Insecure: true}, http.MethodGet, rawURL)
+	}
+
 	Expect(err).NotTo(HaveOccurred())
 
 	return executor.StreamWithContext(ctx, options) //nolint:wrapcheck // the specs check the error itself
+}
+
+// legacyExec runs the exec session served at url with a WebSocket protocol
+// before v5, which has no close signal for stdin. It returns what the client
+// received on stdout, stderr and the error channel until the server closed
+// the session.
+func legacyExec(rawURL, protocol string) (stdout, stderr, status string, err error) {
+	base64Codec := strings.Contains(protocol, "base64")
+	wsURL := strings.Replace(rawURL, "http://", "ws://", 1)
+	dialer := websocket.Dialer{Subprotocols: []string{protocol}, HandshakeTimeout: 5 * time.Second}
+
+	conn, resp, err := dialer.Dial(wsURL, nil)
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	if err != nil {
+		return "", "", "", fmt.Errorf("dial: %w", err)
+	}
+
+	defer conn.Close()
+
+	if conn.Subprotocol() != protocol {
+		return "", "", "", fmt.Errorf("%w: %q", errProtocol, conn.Subprotocol())
+	}
+
+	received := map[byte]string{}
+
+	for {
+		if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			return "", "", "", fmt.Errorf("set deadline: %w", err)
+		}
+
+		_, message, err := conn.ReadMessage()
+		if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+			break
+		}
+
+		if err != nil {
+			return "", "", "", fmt.Errorf("read message: %w", err)
+		}
+
+		channel, content := message[0], message[1:]
+		if base64Codec {
+			channel -= '0'
+
+			if content, err = base64.StdEncoding.DecodeString(string(content)); err != nil {
+				return "", "", "", fmt.Errorf("decode message: %w", err)
+			}
+		}
+
+		received[channel] += string(content)
+	}
+
+	return received[1], received[2], received[3], nil
 }
 
 // portForwardDialer dials the port forward session served at url over SPDY,
@@ -1057,4 +1133,23 @@ func channelRoundTrip(rawURL string, port int, base64Codec bool, payload string)
 	}
 
 	return string(received[0][2:]), string(received[1][2:]), nil
+}
+
+// kubeletProxy serves the URL through the proxy the kubelet puts in front of
+// the streaming server of the runtime, which forwards SPDY upgrades as they
+// are. It returns the URL of the proxy and a function to stop it.
+func kubeletProxy(rawURL string) (proxyURL string, stop func()) {
+	location, err := neturl.Parse(rawURL)
+	Expect(err).NotTo(HaveOccurred())
+
+	server := httptest.NewServer(proxy.NewUpgradeAwareHandler(location, nil, false, true, proxyResponder{}))
+
+	return server.URL + location.Path, server.Close
+}
+
+// proxyResponder reports errors of the kubelet proxy, like the kubelet does.
+type proxyResponder struct{}
+
+func (proxyResponder) Error(w http.ResponseWriter, _ *http.Request, err error) {
+	http.Error(w, err.Error(), http.StatusInternalServerError)
 }

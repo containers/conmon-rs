@@ -80,6 +80,7 @@ pub mod conmon_capnp {
 mod attach;
 mod bounded_hashmap;
 mod capnp_util;
+mod channel;
 mod child;
 #[allow(unsafe_code)]
 mod child_reaper;
@@ -102,6 +103,7 @@ mod pause;
 mod port_forward;
 #[allow(unsafe_code)]
 mod process;
+mod remotecommand;
 mod rpc;
 #[allow(unsafe_code)]
 mod server;

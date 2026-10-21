@@ -5,10 +5,18 @@ use crate::{
     child::{Child, ChildKind},
     child_reaper::{ChildReaper, ExitChannelData, ReapableChild},
     config::Config,
-    container_io::{ContainerIO, Drain, EarlyStdio, Message as IOMessage, Pipe, SharedContainerIO},
+    container_io::{
+        ContainerIO, ContainerIOType, Drain, EarlyStdio, Message as IOMessage, Pipe,
+        SharedContainerIO,
+    },
     port_forward::{self, PortForward, WebSocketProtocol},
     process::Process,
+    remotecommand::{
+        ClientEvent, ClientInput, ExpectedStreams, Framing, Output, SPDY_PROTOCOLS, STDERR_BYTE,
+        STDOUT_BYTE, SpdyStreams, Status, Stdin, Version, WebSocketInput, spdy_version,
+    },
     server::GenerateRuntimeArgs,
+    spdy::{self, Connection},
 };
 use anyhow::{Context, Result};
 use async_channel::Receiver as IOReceiver;
@@ -17,23 +25,20 @@ use axum::{
     body::Body,
     extract::{
         FromRequestParts, Path, Request, State as AxumState,
-        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
+        ws::{WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, HeaderName, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use bytes::{BufMut, Bytes, BytesMut};
-use futures::{
-    sink::SinkExt,
-    stream::{SplitSink, SplitStream, StreamExt},
-};
+use bytes::Bytes;
+use futures::stream::StreamExt;
 use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
 use libc::pid_t;
 use nix::{sys::signal::Signal, unistd::Pid};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{
     collections::VecDeque,
     fmt::Debug,
@@ -63,8 +68,6 @@ use uuid::Uuid;
 
 const ADDR: &str = "127.0.0.1";
 
-const PROTOCOL_V5: &str = "v5.channel.k8s.io";
-
 const EXEC_PATH: &str = "exec";
 const ATTACH_PATH: &str = "attach";
 const PORT_FORWARD_PATH: &str = "portforward";
@@ -79,13 +82,6 @@ const PROTOCOL_VERSION_HEADER: HeaderName = HeaderName::from_static("x-stream-pr
 /// The protocols the server supports, if it supports none of the client.
 const ACCEPTED_PROTOCOL_VERSIONS_HEADER: HeaderName =
     HeaderName::from_static("x-accepted-stream-protocol-versions");
-
-const STDIN_BYTE: u8 = 0;
-const STDOUT_BYTE: u8 = 1;
-const STDERR_BYTE: u8 = 2;
-const STREAM_ERR_BYTE: u8 = 3;
-const RESIZE_BYTE: u8 = 4;
-const CLOSE_BYTE: u8 = 255;
 
 /// The largest WebSocket message and frame a client may send. Clients send
 /// stdin, which kubectl reads in 32 KiB chunks and the attach sockets cap at
@@ -108,6 +104,14 @@ const STDIN_PING_INTERVAL: Duration = if cfg!(test) {
     Duration::from_millis(100)
 } else {
     Duration::from_secs(5)
+};
+
+/// How often a SPDY session pings the client, to notice a client which went
+/// away also while its stdin waits for the container.
+const SPDY_PING_INTERVAL: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    spdy::PING_INTERVAL
 };
 
 /// How long stdin which the client sent right before closing may take to
@@ -173,62 +177,6 @@ struct ResizeEvent {
     height: u16,
 }
 
-#[derive(Debug, Serialize)]
-/// Error message type used for exec in case that the command fails.
-struct ErrorMessage {
-    status: &'static str,
-    reason: &'static str,
-    details: ErrorDetails,
-    message: String,
-}
-
-impl ErrorMessage {
-    fn new<T>(exit_code: T) -> Self
-    where
-        T: ToString,
-    {
-        Self {
-            status: "Failure",
-            reason: "NonZeroExitCode",
-            details: ErrorDetails {
-                causes: vec![ErrorCause {
-                    reason: "ExitCode",
-                    message: exit_code.to_string(),
-                }],
-            },
-            message: "command terminated with non-zero exit code".into(),
-        }
-    }
-
-    /// An error of the session itself, for example a command which could not
-    /// be started.
-    fn internal(message: String) -> Self {
-        Self {
-            status: "Failure",
-            reason: "InternalError",
-            details: ErrorDetails { causes: vec![] },
-            message,
-        }
-    }
-}
-
-/// The status of a session which succeeded on the error stream. The kubelet
-/// sends it as well, some clients take an empty error stream for a failure.
-const SUCCESS_FRAME: &[u8] = b"\x03{\"metadata\":{},\"status\":\"Success\"}";
-
-#[derive(Debug, Serialize)]
-/// Error details for the ErrorMessage.
-struct ErrorDetails {
-    causes: Vec<ErrorCause>,
-}
-
-#[derive(Debug, Serialize)]
-/// Error cause for the ErrorDetails.
-struct ErrorCause {
-    reason: &'static str,
-    message: String,
-}
-
 impl StreamingServer {
     /// Start the streaming server if not already running.
     pub async fn start_if_required(&mut self) -> Result<()> {
@@ -258,7 +206,7 @@ impl StreamingServer {
         let router = Router::new()
             .route(&Self::path_for(EXEC_PATH), get(Self::handle))
             .route(&Self::path_for(ATTACH_PATH), get(Self::handle))
-            // for allowing proper error handling on wrong protocol usage (spdy instead of websocket)
+            // SPDY clients upgrade with a POST.
             .route(&Self::path_for(EXEC_PATH), post(Self::handle))
             .route(&Self::path_for(ATTACH_PATH), post(Self::handle))
             // Clients upgrade port forward requests to SPDY with a POST.
@@ -375,38 +323,126 @@ impl StreamingServer {
         self.url_for(PORT_FORWARD_PATH, &uuid)
     }
 
-    /// Handle a webserver connection which should be upgraded to become a websocket one.
+    /// Handle an exec or attach request, which the client upgrades to a
+    /// WebSocket or SPDY.
     async fn handle(
-        ws: WebSocketUpgrade,
         Path(token): Path<Uuid>,
         AxumState(state): AxumState<Arc<RwLock<State>>>,
-    ) -> impl IntoResponse {
+        mut request: Request,
+    ) -> Response {
         async move {
             info!("Got request for token: {token}");
-            let session = state.write().await.sessions.remove(&token);
-
-            match session {
-                Some(session) => {
-                    // Only what identifies the session, the command of an exec
-                    // may carry secrets.
-                    info!(
-                        "Got valid {} session for container {} and token {token}",
-                        session.typ(),
-                        session.container_id()
-                    );
-                    ws.protocols([PROTOCOL_V5])
-                        .max_message_size(MAX_MESSAGE_SIZE)
-                        .max_frame_size(MAX_MESSAGE_SIZE)
-                        .on_upgrade(move |socket| Self::handle_websocket(socket, session))
-                }
-                None => {
-                    error!("Unable to find session for token: {token}");
-                    StatusCode::NOT_FOUND.into_response()
-                }
+            // An unknown token comes first, the request cannot succeed.
+            if !state.read().await.sessions.contains_key(&token) {
+                error!("Unable to find session for token: {token}");
+                return StatusCode::NOT_FOUND.into_response();
             }
+            if Self::is_websocket_request(request.headers()) {
+                let requested = Self::websocket_protocols(request.headers());
+                let Some((framing, subprotocol)) =
+                    Framing::negotiate(requested.iter().map(String::as_str))
+                else {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        format!(
+                            "unable to upgrade: requested protocol(s) are not supported: {requested:?}"
+                        ),
+                    )
+                        .into_response();
+                };
+                let (mut parts, _) = request.into_parts();
+                let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+                    Ok(ws) => ws,
+                    Err(rejection) => return rejection.into_response(),
+                };
+                let ws = match subprotocol {
+                    Some(subprotocol) => ws.protocols([subprotocol]),
+                    None => ws,
+                };
+                let Some(session) = Self::take_session(&state, token).await else {
+                    return StatusCode::NOT_FOUND.into_response();
+                };
+                return ws
+                    .max_message_size(MAX_MESSAGE_SIZE)
+                    .max_frame_size(MAX_MESSAGE_SIZE)
+                    .on_upgrade(move |socket| {
+                        Self::handle_websocket(socket, session, framing)
+                            .instrument(debug_span!("websocket", %token))
+                    });
+            }
+
+            let supported = SPDY_PROTOCOLS.map(|(protocol, _)| protocol);
+            let protocol = match Self::spdy_handshake(request.headers(), &supported) {
+                Ok(protocol) => protocol,
+                Err(response) => return *response,
+            };
+            let version = spdy_version(protocol).unwrap_or(Version::V1);
+            let Some(on_upgrade) = request.extensions_mut().remove::<OnUpgrade>() else {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "unable to upgrade: connection does not support upgrades",
+                )
+                    .into_response();
+            };
+            let Some(session) = Self::take_session(&state, token).await else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            task::spawn(
+                async move {
+                    match on_upgrade.await {
+                        Ok(upgraded) => {
+                            Self::handle_spdy(TokioIo::new(upgraded), session, version).await
+                        }
+                        Err(e) => error!("Unable to upgrade connection: {e}"),
+                    }
+                }
+                .instrument(debug_span!("spdy", %token)),
+            );
+            Self::switching_protocols(protocol)
         }
         .instrument(debug_span!("handle_common", %token))
         .await
+    }
+
+    /// Take the exec or attach session of a valid request. Requests which get
+    /// rejected before leave the token, so that the client can retry.
+    async fn take_session(state: &RwLock<State>, token: Uuid) -> Option<Session> {
+        let Some(session) = state.write().await.sessions.remove(&token) else {
+            error!("Unable to find session for token: {token}");
+            return None;
+        };
+        // Only what identifies the session, the command of an exec may carry
+        // secrets.
+        info!(
+            "Got valid {} session for container {} and token {token}",
+            session.typ(),
+            session.container_id()
+        );
+        Some(session)
+    }
+
+    /// The response of a successful SPDY upgrade.
+    fn switching_protocols(protocol: &'static str) -> Response {
+        Response::builder()
+            .status(StatusCode::SWITCHING_PROTOCOLS)
+            .header(header::CONNECTION, "Upgrade")
+            .header(header::UPGRADE, SPDY_31)
+            .header(PROTOCOL_VERSION_HEADER, protocol)
+            .body(Body::empty())
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    }
+
+    /// The WebSocket subprotocols a client requested.
+    fn websocket_protocols(headers: &HeaderMap) -> Vec<String> {
+        headers
+            .get_all(header::SEC_WEBSOCKET_PROTOCOL)
+            .into_iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Handle a port forward request, which the client upgrades to SPDY.
@@ -425,9 +461,11 @@ impl StreamingServer {
             if Self::is_websocket_request(request.headers()) {
                 return Self::upgrade_port_forward_websocket(token, &state, request).await;
             }
-            if let Some(response) = Self::reject_spdy_handshake(request.headers()) {
-                return response;
-            }
+            let protocol = match Self::spdy_handshake(request.headers(), &[port_forward::PROTOCOL])
+            {
+                Ok(protocol) => protocol,
+                Err(response) => return *response,
+            };
             let Some(on_upgrade) = request.extensions_mut().remove::<OnUpgrade>() else {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -448,13 +486,7 @@ impl StreamingServer {
                 }
                 .instrument(debug_span!("port_forward", %token)),
             );
-            Response::builder()
-                .status(StatusCode::SWITCHING_PROTOCOLS)
-                .header(header::CONNECTION, "Upgrade")
-                .header(header::UPGRADE, SPDY_31)
-                .header(PROTOCOL_VERSION_HEADER, port_forward::PROTOCOL)
-                .body(Body::empty())
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+            Self::switching_protocols(protocol)
         }
         .instrument(debug_span!("handle_port_forward", %token))
         .await
@@ -487,16 +519,7 @@ impl StreamingServer {
         state: &RwLock<State>,
         request: Request,
     ) -> Response {
-        let requested: Vec<_> = request
-            .headers()
-            .get_all(header::SEC_WEBSOCKET_PROTOCOL)
-            .into_iter()
-            .filter_map(|v| v.to_str().ok())
-            .flat_map(|v| v.split(','))
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .map(str::to_owned)
-            .collect();
+        let requested = Self::websocket_protocols(request.headers());
         let Some((protocol, subprotocol)) =
             WebSocketProtocol::negotiate(requested.iter().map(String::as_str))
         else {
@@ -539,10 +562,13 @@ impl StreamingServer {
             })
     }
 
-    /// The response which rejects the request, unless it asks for a SPDY/3.1
-    /// upgrade and the port forward protocol. The responses are the ones of
-    /// the SPDY server of Kubernetes.
-    fn reject_spdy_handshake(headers: &HeaderMap) -> Option<Response> {
+    /// Check that the request asks for a SPDY/3.1 upgrade and negotiate one
+    /// of the supported protocols, by the order of the client. The rejections
+    /// are the ones of the SPDY server of Kubernetes.
+    fn spdy_handshake(
+        headers: &HeaderMap,
+        supported: &[&'static str],
+    ) -> Result<&'static str, Box<Response>> {
         let values = |name| {
             headers
                 .get_all(name)
@@ -553,13 +579,13 @@ impl StreamingServer {
             values(name).any(|v| v.to_ascii_lowercase().contains(&value.to_ascii_lowercase()))
         };
         if !contains(header::CONNECTION, "upgrade") || !contains(header::UPGRADE, SPDY_31) {
-            return Some(
+            return Err(Box::new(
                 (
                     StatusCode::BAD_REQUEST,
-                    "unable to upgrade: port forwarding needs a SPDY/3.1 upgrade",
+                    "unable to upgrade: missing WebSocket or SPDY/3.1 upgrade headers in request",
                 )
                     .into_response(),
-            );
+            ));
         }
 
         let protocols: Vec<_> = values(PROTOCOL_VERSION_HEADER)
@@ -568,41 +594,91 @@ impl StreamingServer {
             .filter(|p| !p.is_empty())
             .collect();
         if protocols.is_empty() {
-            return Some(
+            return Err(Box::new(
                 (
                     StatusCode::BAD_REQUEST,
                     format!("unable to upgrade: header {PROTOCOL_VERSION_HEADER} is required"),
                 )
                     .into_response(),
-            );
+            ));
         }
-        if !protocols.contains(&port_forward::PROTOCOL) {
-            return Some((
-                StatusCode::FORBIDDEN,
-                [(ACCEPTED_PROTOCOL_VERSIONS_HEADER, port_forward::PROTOCOL)],
-                format!(
-                    "unable to upgrade: unable to negotiate protocol: client supports {protocols:?}, server accepts [{}]",
-                    port_forward::PROTOCOL
-                ),
-            )
-                .into_response());
-        }
-        None
+        protocols
+            .iter()
+            .find_map(|protocol| supported.iter().find(|s| *s == protocol).copied())
+            .ok_or_else(|| {
+                let mut response = (
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "unable to upgrade: unable to negotiate protocol: client supports {protocols:?}, server accepts {supported:?}"
+                    ),
+                )
+                    .into_response();
+                for protocol in supported {
+                    response.headers_mut().append(
+                        ACCEPTED_PROTOCOL_VERSIONS_HEADER,
+                        header::HeaderValue::from_static(protocol),
+                    );
+                }
+                Box::new(response)
+            })
     }
 
     /// Handle a single websocket connection.
-    async fn handle_websocket(socket: WebSocket, session: Session) {
-        let (sender, receiver) = socket.split();
+    async fn handle_websocket(socket: WebSocket, session: Session, framing: Framing) {
+        let (sender, messages) = socket.split();
+        let mut output = Output::websocket(sender, framing);
+        // A client which went away already ends the session in its loop,
+        // which tears it down.
+        if let Err(e) = output.announce(session.stdout(), session.stderr()).await {
+            debug!("Unable to announce the session: {e:#}");
+        }
+        let input = WebSocketInput { messages, framing };
+        Self::run_session(output, input, session).await;
+        info!("Closing websocket connection");
+    }
+
+    /// Handle a connection which got upgraded to SPDY: wait for the streams of
+    /// the client, then run the session on them.
+    async fn handle_spdy<T>(io: T, session: Session, version: Version)
+    where
+        T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+    {
+        let terminal = session.terminal().await;
+        // A terminal merges stderr into stdout, Kubernetes clients do not
+        // open a stream for it then.
+        let expected = ExpectedStreams {
+            stdin: session.stdin(),
+            stdout: session.stdout(),
+            stderr: session.stderr() && !terminal,
+        };
+        let mut connection =
+            Connection::serve(io, None, Some(SPDY_PING_INTERVAL), move |headers| {
+                SpdyStreams::accept(headers, version)
+            });
+        let streams = match SpdyStreams::wait(&mut connection, expected).await {
+            Ok(streams) => streams,
+            Err(e) => {
+                error!("Unable to start the session: {e:#}");
+                connection.abort();
+                return;
+            }
+        };
+        let (input, output) = streams.into_parts(connection, version).await;
+        Self::run_session(Output::spdy(output), input, session).await;
+        info!("Closing SPDY connection");
+    }
+
+    /// Run a session until it ended or the client went away.
+    async fn run_session(output: Output, input: impl ClientInput, session: Session) {
+        let peer_closed = output.peer_closed();
         let (stdin_tx, stdin_rx) = mpsc::channel(16);
         // Resize events go through their own channel, so that they do not
         // queue behind stdin the container does not read. Only the latest
         // size matters.
         let (resize_tx, resize_rx) = watch::channel(None);
 
-        let peer_closed = Arc::new(AtomicBool::new(false));
-        let sender = Output::new(sender, peer_closed.clone());
-        let mut send_task = Self::write_task(sender, stdin_rx, resize_rx, session);
-        let mut recv_task = Self::read_task(receiver, stdin_tx, resize_tx, peer_closed);
+        let mut send_task = Self::write_task(output, stdin_rx, resize_rx, session);
+        let mut recv_task = Self::read_task(input, stdin_tx, resize_tx, peer_closed);
 
         tokio::select! {
             rv_a = (&mut send_task) => {
@@ -628,14 +704,12 @@ impl StreamingServer {
                 send_task.abort();
             }
         }
-
-        info!("Closing websocket connection");
     }
 
     /// Build a common write task based on the session type.
     fn write_task(
         sender: Output,
-        stdin_rx: MpscReceiver<Bytes>,
+        stdin_rx: MpscReceiver<Stdin>,
         resize_rx: ResizeRx,
         session: Session,
     ) -> JoinHandle<()> {
@@ -654,31 +728,22 @@ impl StreamingServer {
                 error!("Unable to run {typ} for container: {e:#}");
 
                 // Otherwise the client sees a clean close and assumes success.
-                if let Err(e) = Self::send_error(&mut sender, format!("{typ} failed: {e:#}")).await
+                if let Err(e) = sender
+                    .status(&Status::Error(format!("{typ} failed: {e:#}")))
+                    .await
                 {
                     error!("Unable to send error message: {e:#}");
                 }
             }
 
-            if let Err(e) = sender
-                .send(Message::Close(
-                    CloseFrame {
-                        code: close_code::NORMAL,
-                        reason: "done".into(),
-                    }
-                    .into(),
-                ))
-                .await
-            {
-                debug!("Unable to send close message: {e:#}")
-            }
+            sender.close().await;
         })
     }
 
     /// Build a common read task.
     fn read_task(
-        mut receiver: SplitStream<WebSocket>,
-        stdin_tx: MpscSender<Bytes>,
+        mut input: impl ClientInput,
+        stdin_tx: MpscSender<Stdin>,
         resize_tx: watch::Sender<Option<Bytes>>,
         peer_closed: Arc<AtomicBool>,
     ) -> JoinHandle<bool> {
@@ -692,15 +757,15 @@ impl StreamingServer {
                         // The session ended, nothing takes stdin anymore.
                         Err(_) => pending.clear(),
                     },
-                    msg = receiver.next(), if !pending.is_full() => match msg {
-                        Some(Ok(msg)) => {
-                            if Self::read_message(msg, &mut pending, &resize_tx).is_break() {
+                    event = input.next(), if !pending.is_full() => match event {
+                        Some(event) => {
+                            if Self::read_event(event, &mut pending, &resize_tx).is_break() {
                                 peer_closed.store(true, Ordering::Release);
                                 closed = true;
                                 break;
                             }
                         }
-                        _ => break,
+                        None => break,
                     },
                 }
             }
@@ -726,38 +791,20 @@ impl StreamingServer {
         })
     }
 
-    /// Read a single message and return the control flow decision.
-    fn read_message(
-        msg: Message,
+    /// Handle a single event of the client and return the control flow
+    /// decision.
+    fn read_event(
+        event: ClientEvent,
         pending: &mut PendingStdin,
         resize_tx: &watch::Sender<Option<Bytes>>,
     ) -> ControlFlow<(), ()> {
-        match msg {
-            Message::Binary(data) if !data.is_empty() => {
-                debug!("Got {} binary bytes", data.len());
-                if data[0] == RESIZE_BYTE {
-                    resize_tx.send_replace(Some(data));
-                } else {
-                    pending.push(data);
-                }
+        match event {
+            ClientEvent::Stdin(stdin) => pending.push(stdin),
+            ClientEvent::Resize(data) => {
+                resize_tx.send_replace(Some(data));
             }
-            Message::Close(c) => {
-                if let Some(cf) = c {
-                    info!(
-                        "Got websocket close with code {} and reason `{}`",
-                        cf.code, cf.reason
-                    );
-                } else {
-                    warn!("Got close message without close frame");
-                }
-                return ControlFlow::Break(());
-            }
-            Message::Text(t) => trace!("Got text message: {t:?}"),
-            Message::Pong(_) => trace!("Got pong"),
-            Message::Ping(_) => trace!("Got ping"),
-            Message::Binary(_) => trace!("Got unknown binary data"),
+            ClientEvent::Closed => return ControlFlow::Break(()),
         }
-
         ControlFlow::Continue(())
     }
 
@@ -859,7 +906,7 @@ impl StreamingServer {
     async fn exec_loop(
         session: ExecSession,
         sender: &mut Output,
-        mut stdin_rx: MpscReceiver<Bytes>,
+        mut stdin_rx: MpscReceiver<Stdin>,
         mut resize_rx: ResizeRx,
     ) -> Result<()> {
         // The runtime runs in a task of its own. A client which goes away
@@ -928,21 +975,21 @@ impl StreamingServer {
                 () = future::ready(()), if !early_stdout.is_empty() || !early_stderr.is_empty() => {
                     for (frames, stream_byte) in [(&mut early_stdout, STDOUT_BYTE), (&mut early_stderr, STDERR_BYTE)] {
                         if let Some(frame) = frames.pop_front() {
-                            Self::frame_and_send(stream_byte, &frame, sender).await?;
+                            sender.data(stream_byte, &frame).await?;
                         }
                     }
                 },
 
                 res = stdout_rx.recv(), if !stdout_done && early_stdout.is_empty() => match res {
                     Ok(IOMessage::Data(data, _)) => {
-                        Self::frame_and_send(STDOUT_BYTE, &data, sender).await?;
+                        sender.data(STDOUT_BYTE, &data).await?;
                     }
                     Ok(IOMessage::Done) | Err(_) => stdout_done = true,
                 },
 
                 res = stderr_rx.recv(), if !stderr_done && early_stderr.is_empty() => match res {
                     Ok(IOMessage::Data(data, _)) => {
-                        Self::frame_and_send(STDERR_BYTE, &data, sender).await?;
+                        sender.data(STDERR_BYTE, &data).await?;
                     }
                     Ok(IOMessage::Done) | Err(_) => stderr_done = true,
                 },
@@ -968,7 +1015,7 @@ impl StreamingServer {
                 // container, so a client which goes away meanwhile is only
                 // noticed by a failing send.
                 _ = stdin_ping.tick(), if pending_stdin.is_some() => {
-                    sender.send(Message::Ping(Bytes::new())).await?
+                    sender.ping().await?
                 },
 
                 res = stdin_rx.recv(), if pending_stdin.is_none() => match res {
@@ -976,7 +1023,7 @@ impl StreamingServer {
                     // reached the process.
                     None => break,
                     Some(_) if !stdin_enabled || stdin_closed => {}
-                    Some(data) => match Self::handle_stdin(data) {
+                    Some(stdin) => match stdin {
                         // The client closed its stdin. Close the process stdin
                         // as well and keep forwarding the output until it
                         // exits. A terminal cannot be closed without ending
@@ -985,7 +1032,7 @@ impl StreamingServer {
                         // reading lines sees the end of its input then, one
                         // after a line without its ending needs a second one,
                         // like a user would type it.
-                        ControlFlow::Break(()) => {
+                        Stdin::Close => {
                             stdin_closed = true;
                             match io.terminal_eof().await {
                                 Some(eof) => pending_stdin = Some(Bytes::from(vec![eof])),
@@ -994,7 +1041,7 @@ impl StreamingServer {
                                 }
                             }
                         }
-                        ControlFlow::Continue(stdin) => pending_stdin = stdin,
+                        Stdin::Data(data) => pending_stdin = Some(data),
                     },
                 },
 
@@ -1002,7 +1049,7 @@ impl StreamingServer {
                     // Forward what the read loops still deliver before closing.
                     for (frames, stream_byte) in [(&mut early_stdout, STDOUT_BYTE), (&mut early_stderr, STDERR_BYTE)] {
                         for frame in frames.drain(..) {
-                            Self::frame_and_send(stream_byte, &frame, sender).await?;
+                            sender.data(stream_byte, &frame).await?;
                         }
                     }
                     if !stdout_done {
@@ -1012,9 +1059,9 @@ impl StreamingServer {
                         Self::drain_stdio(&stderr_rx, STDERR_BYTE, sender).await?;
                     }
                     if exit_data.exit_code == 0 {
-                        Self::send_success(sender).await?;
+                        sender.status(&Status::Success).await?;
                     } else {
-                        Self::send_status(sender, &ErrorMessage::new(exit_data.exit_code)).await?;
+                        sender.status(&Status::ExitCode(exit_data.exit_code)).await?;
                     }
                     break
                 },
@@ -1050,7 +1097,7 @@ impl StreamingServer {
     async fn attach_loop(
         session: AttachSession,
         sender: &mut Output,
-        mut stdin_rx: MpscReceiver<Bytes>,
+        mut stdin_rx: MpscReceiver<Stdin>,
         mut resize_rx: ResizeRx,
     ) -> Result<()> {
         // Extract values we need for the I/O loop
@@ -1129,7 +1176,7 @@ impl StreamingServer {
                 // container, so a client which goes away meanwhile is only
                 // noticed by a failing send.
                 _ = stdin_ping.tick(), if pending_stdin.is_some() => {
-                    sender.send(Message::Ping(Bytes::new())).await?
+                    sender.ping().await?
                 },
 
                 res = stdin_rx.recv(), if pending_stdin.is_none() => match res {
@@ -1137,14 +1184,14 @@ impl StreamingServer {
                     // reached the container. Nobody gets a status anymore.
                     None => return Ok(()),
                     Some(_) if stdin_closed => {}
-                    Some(data) => match Self::handle_stdin(data) {
+                    Some(stdin) => match stdin {
                         // The client closed its stdin. Without a terminal and
                         // stdin once, that ends the session, like for CRI-O
                         // with conmon. Otherwise keep forwarding the output
                         // until it ends, and with stdin once close the
                         // container stdin.
-                        ControlFlow::Break(()) if !terminal && !stop_after_stdin_eof => break,
-                        ControlFlow::Break(()) => {
+                        Stdin::Close if !terminal && !stop_after_stdin_eof => break,
+                        Stdin::Close => {
                             stdin_closed = true;
                             if stop_after_stdin_eof {
                                 teardown.close_stdin = false;
@@ -1158,7 +1205,7 @@ impl StreamingServer {
                                 }
                             }
                         }
-                        ControlFlow::Continue(stdin) => pending_stdin = stdin,
+                        Stdin::Data(data) => pending_stdin = Some(data),
                     },
                 },
 
@@ -1172,7 +1219,7 @@ impl StreamingServer {
             }
         }
 
-        Self::send_success(sender).await?;
+        sender.status(&Status::Success).await?;
         Ok(())
     }
 
@@ -1185,10 +1232,10 @@ impl StreamingServer {
     ) -> Result<()> {
         match message {
             IOMessage::Data(data, Pipe::StdOut) if stdout_enabled => {
-                Self::frame_and_send(STDOUT_BYTE, &data, sender).await
+                sender.data(STDOUT_BYTE, &data).await
             }
             IOMessage::Data(data, Pipe::StdErr) if stderr_enabled => {
-                Self::frame_and_send(STDERR_BYTE, &data, sender).await
+                sender.data(STDERR_BYTE, &data).await
             }
             IOMessage::Data(..) | IOMessage::Done => Ok(()),
         }
@@ -1221,67 +1268,16 @@ impl StreamingServer {
         loop {
             match drain.recv(rx.recv()).await {
                 Some(Ok(IOMessage::Data(data, _))) => {
-                    Self::frame_and_send(stream_byte, &data, sender).await?;
+                    sender.data(stream_byte, &data).await?;
                 }
                 Some(Ok(IOMessage::Done)) | Some(Err(_)) | None => return Ok(()),
             }
         }
     }
 
-    /// Send a session error on the error stream.
-    async fn send_error(sender: &mut Output, message: String) -> Result<()> {
-        Self::send_status(sender, &ErrorMessage::internal(message)).await
-    }
-
-    /// Send the success status of a session on the error stream.
-    async fn send_success(sender: &mut Output) -> Result<()> {
-        sender
-            .send(Message::Binary(Bytes::from_static(SUCCESS_FRAME)))
-            .await
-    }
-
-    /// Send the final status of a session on the error stream.
-    async fn send_status(sender: &mut Output, status: &impl Serialize) -> Result<()> {
-        sender
-            .send(Message::Binary(Self::status_frame(status)?.into()))
-            .await
-    }
-
-    fn status_frame(status: &impl Serialize) -> Result<Vec<u8>> {
-        let mut frame = vec![STREAM_ERR_BYTE];
-        serde_json::to_writer(&mut frame, status).context("serialize status message")?;
-        Ok(frame)
-    }
-
-    /// Handle a single stdin message from the websocket client. The first
-    /// byte of the message selects the stream, the rest is the payload. Returns
-    /// the payload which has to be sent to the container stdin, if any.
-    fn handle_stdin(data: Bytes) -> ControlFlow<(), Option<Bytes>> {
-        let Some(&msg_type) = data.first() else {
-            return ControlFlow::Continue(None);
-        };
-        // Slicing the reference counted bytes avoids copying the payload.
-        let payload = data.slice(1..);
-
-        match msg_type {
-            STDIN_BYTE => {
-                trace!("Got stdin message of len {}", payload.len());
-                return ControlFlow::Continue(Some(payload));
-            }
-            CLOSE_BYTE => {
-                info!("Got close message");
-                return ControlFlow::Break(());
-            }
-            x => warn!("Unknown start byte for stdin: {x}"),
-        }
-
-        ControlFlow::Continue(None)
-    }
-
-    /// Handle a single resize message from the websocket client.
+    /// Handle a single resize event of the client, its JSON.
     async fn handle_resize(data: &[u8], io: &SharedContainerIO) -> Result<()> {
-        let e = serde_json::from_slice::<ResizeEvent>(data.get(1..).unwrap_or_default())
-            .context("unmarshal resize event")?;
+        let e = serde_json::from_slice::<ResizeEvent>(data).context("unmarshal resize event")?;
         trace!("Got resize message: {e:?}");
         // Clients send resize events regardless of a terminal, they are no
         // reason to end the session without one.
@@ -1289,56 +1285,6 @@ impl StreamingServer {
             debug!("Ignoring resize event, container has no terminal");
         }
         Ok(())
-    }
-
-    /// Prepend a stream type byte and send the data over WebSocket. The frame
-    /// is allocated with its exact size and handed over without copying.
-    async fn frame_and_send(stream_byte: u8, data: &[u8], sender: &mut Output) -> Result<()> {
-        let mut frame = BytesMut::with_capacity(data.len() + 1);
-        frame.put_u8(stream_byte);
-        frame.extend_from_slice(data);
-        sender.send(Message::Binary(frame.freeze())).await
-    }
-}
-
-/// The sending half of a session. A failing send means that the client went
-/// away, which ends the session. After a clean close of the client, sends
-/// fail as well, the output gets dropped then. The session still forwards
-/// the stdin which the client sent before its close to the process, see
-/// [`STDIN_FLUSH_TIMEOUT`], and reads the output meanwhile, so that the
-/// process does not wait for it.
-struct Output {
-    sender: SplitSink<WebSocket, Message>,
-    failed: bool,
-
-    /// Set once the client closed the connection cleanly.
-    peer_closed: Arc<AtomicBool>,
-}
-
-impl Output {
-    fn new(sender: SplitSink<WebSocket, Message>, peer_closed: Arc<AtomicBool>) -> Self {
-        Self {
-            sender,
-            failed: false,
-            peer_closed,
-        }
-    }
-
-    /// Send a message. A failure ends the session, unless the client closed
-    /// the connection cleanly, see [`Output`].
-    async fn send(&mut self, message: Message) -> Result<()> {
-        if self.failed {
-            return Ok(());
-        }
-        match self.sender.send(message).await {
-            Ok(()) => Ok(()),
-            Err(e) if self.peer_closed.load(Ordering::Acquire) => {
-                debug!("Dropping the output of the session after the close: {e}");
-                self.failed = true;
-                Ok(())
-            }
-            Err(e) => Err(e).context("send to client"),
-        }
     }
 }
 
@@ -1357,13 +1303,42 @@ impl Session {
             Session::Attach(s) => &s.container_id,
         }
     }
+
+    fn stdin(&self) -> bool {
+        match self {
+            Session::Exec(s) => s.stdin,
+            Session::Attach(s) => s.stdin,
+        }
+    }
+
+    fn stdout(&self) -> bool {
+        match self {
+            Session::Exec(s) => s.stdout,
+            Session::Attach(s) => s.stdout,
+        }
+    }
+
+    fn stderr(&self) -> bool {
+        match self {
+            Session::Exec(s) => s.stderr,
+            Session::Attach(s) => s.stderr,
+        }
+    }
+
+    /// Whether the process of the session has a terminal.
+    async fn terminal(&self) -> bool {
+        match self {
+            Session::Exec(s) => matches!(s.container_io.typ(), ContainerIOType::Terminal(_)),
+            Session::Attach(s) => s.child.io().terminal_eof().await.is_some(),
+        }
+    }
 }
 
 /// Stdin of a client which the container did not take yet, bounded by
 /// [`PENDING_STDIN_MAX_BYTES`].
 #[derive(Debug, Default)]
 struct PendingStdin {
-    queue: VecDeque<Bytes>,
+    queue: VecDeque<Stdin>,
     bytes: usize,
 }
 
@@ -1377,16 +1352,16 @@ impl PendingStdin {
         self.bytes >= PENDING_STDIN_MAX_BYTES
     }
 
-    fn push(&mut self, data: Bytes) {
-        self.bytes += data.len();
-        self.queue.push_back(data);
+    fn push(&mut self, stdin: Stdin) {
+        self.bytes += stdin.len();
+        self.queue.push_back(stdin);
     }
 
     /// The oldest message, callers check that there is one.
-    fn pop(&mut self) -> Bytes {
-        let data = self.queue.pop_front().unwrap_or_default();
-        self.bytes -= data.len();
-        data
+    fn pop(&mut self) -> Stdin {
+        let stdin = self.queue.pop_front().unwrap_or(Stdin::Close);
+        self.bytes -= stdin.len();
+        stdin
     }
 
     fn clear(&mut self) {
@@ -1487,14 +1462,18 @@ mod tests {
     use super::*;
     use crate::{
         container_log::ContainerLog,
+        remotecommand::{CLOSE_BYTE, STDIN_BYTE, STREAM_ERR_BYTE},
         spdy::testing::{Client, Frame, Headers},
     };
+    use anyhow::bail;
     use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpStream,
         task::LocalSet,
     };
+
+    const PROTOCOL_V5: &str = "v5.channel.k8s.io";
 
     /// A masked client frame, as a WebSocket client sends it.
     fn client_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
@@ -1736,17 +1715,10 @@ mod tests {
     #[tokio::test]
     async fn resize_without_terminal_is_ignored() -> Result<()> {
         let io = SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?);
-        let event = br#"{"Width":80,"Height":24}"#;
-        let mut data = vec![RESIZE_BYTE];
-        data.extend_from_slice(event);
-        StreamingServer::handle_resize(&data, &io).await?;
+        StreamingServer::handle_resize(br#"{"Width":80,"Height":24}"#, &io).await?;
 
         // Garbage is still an error.
-        assert!(
-            StreamingServer::handle_resize(&[RESIZE_BYTE, b'x'], &io)
-                .await
-                .is_err()
-        );
+        assert!(StreamingServer::handle_resize(b"x", &io).await.is_err());
         Ok(())
     }
 
@@ -2153,29 +2125,647 @@ mod tests {
             .await
     }
 
-    #[test]
-    fn stdin_messages_are_dispatched_by_their_first_byte() {
-        for (data, expected) in [
-            (
-                &[STDIN_BYTE, b'l', b's'][..],
-                ControlFlow::Continue(Some("ls")),
-            ),
-            (&[STDIN_BYTE], ControlFlow::Continue(Some(""))),
-            (&[CLOSE_BYTE], ControlFlow::Break(())),
-            (&[CLOSE_BYTE, b'x'], ControlFlow::Break(())),
-            // Unknown and empty messages are ignored.
-            (&[42, b'x'], ControlFlow::Continue(None)),
-            (&[], ControlFlow::Continue(None)),
-        ] {
-            let expected = expected.map_continue(|stdin: Option<&'static str>| {
-                stdin.map(|stdin| Bytes::from_static(stdin.as_bytes()))
-            });
-            assert_eq!(
-                StreamingServer::handle_stdin(Bytes::copy_from_slice(data)),
-                expected,
-                "{data:?}"
-            );
+    /// A container and its child, the token ends the container.
+    fn attach_child(
+        terminal: bool,
+    ) -> Result<(SharedContainerIO, ReapableChild, CancellationToken)> {
+        let io = SharedContainerIO::new(ContainerIO::new(terminal, ContainerLog::new())?);
+        let token = CancellationToken::new();
+        let (_, child) = ReapableChild::from_child(Child {
+            id: "id".into(),
+            kind: ChildKind::Container,
+            pid: 0,
+            exit_paths: vec![],
+            oom_exit_paths: vec![],
+            timeout: None,
+            io: io.clone(),
+            cleanup_cmd: vec![],
+            token: token.clone(),
+        });
+        Ok((io, child, token))
+    }
+
+    /// Send an upgrade request for the URL, return the response head and the
+    /// connection.
+    async fn upgrade(
+        server: &StreamingServer,
+        url: &str,
+        method: &str,
+        headers: &str,
+    ) -> Result<(String, TcpStream)> {
+        let path = url
+            .strip_prefix(&format!("http://{ADDR}:{}", server.port))
+            .context("url")?;
+        let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+        stream
+            .write_all(
+                format!(
+                    "{method} {path} HTTP/1.1\r\nHost: {ADDR}\r\nContent-Length: 0\r\n{headers}\r\n"
+                )
+                .as_bytes(),
+            )
+            .await?;
+        Ok((response_head(&mut stream).await?, stream))
+    }
+
+    const SPDY_EXEC_UPGRADE: &str = "Connection: Upgrade\r\nUpgrade: SPDY/3.1\r\n\
+        X-Stream-Protocol-Version: v5.channel.k8s.io,v4.channel.k8s.io,v3.channel.k8s.io\r\n";
+
+    /// Read SPDY frames until one matches, return it.
+    async fn spdy_frame_until(
+        client: &mut Client<TcpStream>,
+        matches: impl Fn(&Frame) -> bool,
+    ) -> Result<Frame> {
+        loop {
+            match client.frame().await? {
+                Some(frame) if matches(&frame) => return Ok(frame),
+                Some(_) => {}
+                None => bail!("connection ended"),
+            }
         }
+    }
+
+    /// An attach session over SPDY with the streams of a client-go v4 client:
+    /// error 1, stdin 3 and stdout 5.
+    async fn spdy_attach(
+        stop_after_stdin_eof: bool,
+    ) -> Result<(SharedContainerIO, StreamingServer, Client<TcpStream>)> {
+        spdy_attach_with(false, stop_after_stdin_eof).await
+    }
+
+    /// Like [`spdy_attach`], the container may have a terminal, which the
+    /// client does not ask for.
+    async fn spdy_attach_with(
+        terminal: bool,
+        stop_after_stdin_eof: bool,
+    ) -> Result<(SharedContainerIO, StreamingServer, Client<TcpStream>)> {
+        let (io, child, _token) = attach_child(terminal)?;
+        let mut server = StreamingServer::default();
+        server.start_if_required().await?;
+        let url = server
+            .attach_url("id".into(), child, true, true, false, stop_after_stdin_eof)
+            .await;
+        let (response, stream) = upgrade(&server, &url, "POST", SPDY_EXEC_UPGRADE).await?;
+        assert!(response.starts_with("http/1.1 101"), "{response}");
+        // The server does not speak v5 over SPDY.
+        assert!(
+            response.contains("x-stream-protocol-version: v4.channel.k8s.io"),
+            "{response}"
+        );
+
+        let mut client = Client::new(stream)?;
+        for (stream_id, typ) in [(1, "error"), (3, "stdin"), (5, "stdout")] {
+            client.open(stream_id, [("streamType", typ)].into()).await?;
+        }
+        Ok((io, server, client))
+    }
+
+    #[tokio::test]
+    async fn spdy_attach_forwards_stdin_and_output() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let (io, _server, mut client) = spdy_attach(false).await?;
+                client
+                    .send(Frame::Data {
+                        stream_id: 3,
+                        fin: false,
+                        data: Bytes::from_static(b"in"),
+                    })
+                    .await?;
+                let mut attach = io.attach().await;
+                let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
+                assert_eq!(data, b"in".as_slice());
+
+                attach.write(IOMessage::Data(Bytes::from_static(b"out"), Pipe::StdOut));
+                let frame = spdy_frame_until(&mut client, |f| {
+                    matches!(f, Frame::Data { stream_id: 5, .. })
+                })
+                .await?;
+                assert_eq!(
+                    frame,
+                    Frame::Data {
+                        stream_id: 5,
+                        fin: false,
+                        data: Bytes::from_static(b"out")
+                    }
+                );
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn spdy_attach_ends_with_success_on_stdin_close() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let (io, _server, mut client) = spdy_attach(false).await?;
+                client
+                    .send(Frame::Data {
+                        stream_id: 3,
+                        fin: true,
+                        data: Bytes::new(),
+                    })
+                    .await?;
+
+                let status = spdy_frame_until(
+                    &mut client,
+                    |f| matches!(f, Frame::Data { stream_id: 1, data, .. } if !data.is_empty()),
+                )
+                .await?;
+                assert_eq!(
+                    status,
+                    Frame::Data {
+                        stream_id: 1,
+                        fin: false,
+                        data: Bytes::from_static(br#"{"metadata":{},"status":"Success"}"#)
+                    }
+                );
+                // The output and the error stream end, then the connection.
+                let mut ended = vec![];
+                loop {
+                    match client.frame().await? {
+                        Some(Frame::Data {
+                            stream_id,
+                            fin: true,
+                            ..
+                        }) => ended.push(stream_id),
+                        Some(_) => {}
+                        None => break,
+                    }
+                }
+                ended.sort();
+                // Stdin ends only with the session.
+                assert_eq!(ended, [1, 3, 5]);
+                // Without stdin once, the container stdin stays open.
+                assert!(!io.attach().await.stdin_closed().is_cancelled());
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn spdy_stdin_stays_open_until_the_end() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let (io, _server, mut client) = spdy_attach(false).await?;
+                // Client-go takes the end of the stdin stream of the server as
+                // the end of stdin.
+                let early = async {
+                    loop {
+                        if let Some(Frame::Data {
+                            stream_id: 3,
+                            fin: true,
+                            ..
+                        }) = client.frame().await?
+                        {
+                            return anyhow::Ok(());
+                        }
+                    }
+                };
+                assert!(
+                    time::timeout(Duration::from_millis(300), early)
+                        .await
+                        .is_err()
+                );
+
+                client
+                    .send(Frame::Data {
+                        stream_id: 3,
+                        fin: false,
+                        data: Bytes::from_static(b"in"),
+                    })
+                    .await?;
+                let mut attach = io.attach().await;
+                let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
+                assert_eq!(data, b"in".as_slice());
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn spdy_attach_to_a_terminal_without_tty() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                // The client does not ask for a terminal, it opens no resize
+                // stream, the session starts nevertheless.
+                let (io, _server, mut client) = spdy_attach_with(true, false).await?;
+                client
+                    .send(Frame::Data {
+                        stream_id: 3,
+                        fin: false,
+                        data: Bytes::from_static(b"in"),
+                    })
+                    .await?;
+                let mut attach = io.attach().await;
+                let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
+                assert_eq!(data, b"in".as_slice());
+
+                // A resize stream may still come, a second one not.
+                client.open(7, [("streamType", "resize")].into()).await?;
+                client.open(9, [("streamType", "resize")].into()).await?;
+                let reset =
+                    spdy_frame_until(&mut client, |f| matches!(f, Frame::RstStream { .. })).await?;
+                assert!(
+                    matches!(reset, Frame::RstStream { stream_id: 9, .. }),
+                    "{reset:?}"
+                );
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn late_output_streams_end_instead_of_failing() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                // A container with a terminal, the client asks for stdin
+                // without a terminal and opens stderr after the session
+                // started, also for versions without resize streams.
+                for protocol in ["v2.channel.k8s.io", "v4.channel.k8s.io"] {
+                    let (io, child, _token) = attach_child(true)?;
+                    let mut server = StreamingServer::default();
+                    server.start_if_required().await?;
+                    let url = server
+                        .attach_url("id".into(), child, true, true, true, false)
+                        .await;
+                    let (response, stream) = upgrade(
+                        &server,
+                        &url,
+                        "POST",
+                        &format!(
+                            "Connection: Upgrade\r\nUpgrade: SPDY/3.1\r\n\
+                             X-Stream-Protocol-Version: {protocol}\r\n"
+                        ),
+                    )
+                    .await?;
+                    assert!(response.starts_with("http/1.1 101"), "{response}");
+                    let mut client = Client::new(stream)?;
+                    for (stream_id, typ) in [(1, "error"), (3, "stdin"), (5, "stdout")] {
+                        client.open(stream_id, [("streamType", typ)].into()).await?;
+                    }
+                    client
+                        .send(Frame::Data {
+                            stream_id: 3,
+                            fin: false,
+                            data: Bytes::from_static(b"in"),
+                        })
+                        .await?;
+                    let mut attach = io.attach().await;
+                    let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
+                    assert_eq!(data, b"in".as_slice());
+
+                    client.open(7, [("streamType", "stderr")].into()).await?;
+                    let frame = spdy_frame_until(&mut client, |f| {
+                        matches!(
+                            f,
+                            Frame::RstStream { stream_id: 7, .. }
+                                | Frame::Data {
+                                    stream_id: 7,
+                                    fin: true,
+                                    ..
+                                }
+                        )
+                    })
+                    .await?;
+                    assert!(matches!(frame, Frame::Data { .. }), "{protocol}: {frame:?}");
+                }
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn websocket_attach_closes_stdin_once_after_an_early_disconnect() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let (io, _server, stream, _token, response) =
+                    websocket_attach_with("channel.k8s.io", true).await?;
+                assert!(response.starts_with("http/1.1 101"), "{response}");
+                let attach = io.attach().await;
+                // Before the client reads the announce of the session.
+                drop(stream);
+                time::timeout(Duration::from_secs(5), attach.stdin_closed().cancelled()).await?;
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn spdy_attach_closes_stdin_once() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let (io, _server, mut client) = spdy_attach(true).await?;
+                let attach = io.attach().await;
+                client
+                    .send(Frame::Data {
+                        stream_id: 3,
+                        fin: true,
+                        data: Bytes::new(),
+                    })
+                    .await?;
+                time::timeout(Duration::from_secs(5), attach.stdin_closed().cancelled()).await?;
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn spdy_attach_ends_on_disconnect_while_stdin_waits() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let (io, _server, mut client) = spdy_attach(true).await?;
+                let attach = io.attach().await;
+
+                // More stdin than the session holds while nothing reads it,
+                // so the stream queue fills and the connection is not read
+                // anymore, until the client cannot write anymore either.
+                let frame = Bytes::from(vec![b'x'; 32 * 1024]);
+                let fill = async {
+                    loop {
+                        client
+                            .send(Frame::Data {
+                                stream_id: 3,
+                                fin: false,
+                                data: frame.clone(),
+                            })
+                            .await?;
+                    }
+                    #[allow(unreachable_code)]
+                    anyhow::Ok(())
+                };
+                assert!(time::timeout(Duration::from_secs(1), fill).await.is_err());
+                assert!(!attach.stdin_closed().is_cancelled());
+                drop(client);
+
+                // The pings of the session notice and end it, which closes
+                // the stdin once.
+                time::timeout(Duration::from_secs(5), attach.stdin_closed().cancelled()).await?;
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn spdy_streams_after_the_start_get_refused() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let (io, _server, mut client) = spdy_attach(false).await?;
+                // A second stdin stream once the session started.
+                client.open(7, [("streamType", "stdin")].into()).await?;
+                spdy_frame_until(&mut client, |f| {
+                    matches!(f, Frame::RstStream { stream_id: 7, .. })
+                })
+                .await?;
+
+                // Its data does not hold up the session.
+                for _ in 0..32 {
+                    client
+                        .send(Frame::Data {
+                            stream_id: 7,
+                            fin: false,
+                            data: Bytes::from_static(b"late"),
+                        })
+                        .await?;
+                }
+                client
+                    .send(Frame::Data {
+                        stream_id: 3,
+                        fin: false,
+                        data: Bytes::from_static(b"in"),
+                    })
+                    .await?;
+                let mut attach = io.attach().await;
+                let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
+                assert_eq!(data, b"in".as_slice());
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn spdy_upgrades_get_negotiated() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                for (headers, status) in [
+                    ("Connection: Upgrade\r\nUpgrade: SPDY/3.1\r\n", "400"),
+                    (
+                        "Connection: Upgrade\r\nUpgrade: SPDY/3.1\r\n\
+                         X-Stream-Protocol-Version: v5.channel.k8s.io\r\n",
+                        "403",
+                    ),
+                    ("", "400"),
+                ] {
+                    let (_, child, _token) = attach_child(false)?;
+                    let url = server
+                        .attach_url("id".into(), child, false, true, false, false)
+                        .await;
+                    let (response, _) = upgrade(&server, &url, "POST", headers).await?;
+                    assert!(
+                        response.starts_with(&format!("http/1.1 {status}")),
+                        "{response}"
+                    );
+                    if status == "403" {
+                        for protocol in SPDY_PROTOCOLS.map(|(p, _)| p) {
+                            assert!(
+                                response.contains(&format!(
+                                    "x-accepted-stream-protocol-versions: {protocol}"
+                                )),
+                                "{response}"
+                            );
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn rejected_upgrades_keep_the_token() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                let websocket = |protocol: &str| {
+                    format!(
+                        "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+                         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {protocol}\r\n"
+                    )
+                };
+                // An unknown token comes before the protocol.
+                let (_, child, _token) = attach_child(false)?;
+                let url = server
+                    .attach_url("id".into(), child, false, true, false, false)
+                    .await;
+                let unknown = url.replace(
+                    url.rsplit('/').next().context("token")?,
+                    &Uuid::new_v4().to_string(),
+                );
+                let (response, _) = upgrade(&server, &unknown, "POST", "").await?;
+                assert!(response.starts_with("http/1.1 404"), "{response}");
+
+                for (rejected, status, valid) in [
+                    (
+                        "Connection: Upgrade\r\nUpgrade: SPDY/3.1\r\n\
+                         X-Stream-Protocol-Version: v5.channel.k8s.io\r\n"
+                            .to_owned(),
+                        "403",
+                        SPDY_EXEC_UPGRADE.to_owned(),
+                    ),
+                    ("".to_owned(), "400", SPDY_EXEC_UPGRADE.to_owned()),
+                    (
+                        websocket("v3.channel.k8s.io"),
+                        "403",
+                        websocket(PROTOCOL_V5),
+                    ),
+                ] {
+                    let (_, child, _token) = attach_child(false)?;
+                    let url = server
+                        .attach_url("id".into(), child, false, true, false, false)
+                        .await;
+                    let (response, _) = upgrade(&server, &url, "POST", &rejected).await?;
+                    assert!(response.starts_with(&format!("http/1.1 {status}")), "{response}");
+
+                    // The client can retry with a request the server takes,
+                    // which uses the token.
+                    let method = if valid.contains("websocket") { "GET" } else { "POST" };
+                    let (response, _) = upgrade(&server, &url, method, &valid).await?;
+                    assert!(response.starts_with("http/1.1 101"), "{response}");
+                    let (response, _) = upgrade(&server, &url, method, &valid).await?;
+                    assert!(response.starts_with("http/1.1 404"), "{response}");
+                }
+                Ok(())
+            })
+            .await
+    }
+
+    /// An attach session over a WebSocket with the subprotocol, the token
+    /// ends the container.
+    async fn websocket_attach(
+        protocol: &str,
+    ) -> Result<(
+        SharedContainerIO,
+        StreamingServer,
+        TcpStream,
+        CancellationToken,
+        String,
+    )> {
+        websocket_attach_with(protocol, false).await
+    }
+
+    /// Like [`websocket_attach`], with stdin once.
+    async fn websocket_attach_with(
+        protocol: &str,
+        stop_after_stdin_eof: bool,
+    ) -> Result<(
+        SharedContainerIO,
+        StreamingServer,
+        TcpStream,
+        CancellationToken,
+        String,
+    )> {
+        let (io, child, token) = attach_child(false)?;
+        let mut server = StreamingServer::default();
+        server.start_if_required().await?;
+        let url = server
+            .attach_url("id".into(), child, true, true, false, stop_after_stdin_eof)
+            .await;
+        let (response, stream) = upgrade(
+            &server,
+            &url,
+            "GET",
+            &format!(
+                "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+                 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {protocol}\r\n"
+            ),
+        )
+        .await?;
+        Ok((io, server, stream, token, response))
+    }
+
+    #[tokio::test]
+    async fn base64_websocket_attach() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let (io, _server, mut stream, token, response) =
+                    websocket_attach("v4.base64.channel.k8s.io").await?;
+                assert!(response.starts_with("http/1.1 101"), "{response}");
+                assert!(
+                    response.contains("sec-websocket-protocol: v4.base64.channel.k8s.io"),
+                    "{response}"
+                );
+                // An empty message on stdout tells the client that the
+                // session started.
+                assert_eq!(server_frame(&mut stream).await?, (0x1, b"1".to_vec()));
+
+                let stdin = format!("0{}", BASE64.encode("in"));
+                stream
+                    .write_all(&client_frame(0x1, stdin.as_bytes()))
+                    .await?;
+                let mut attach = io.attach().await;
+                let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
+                assert_eq!(data, b"in".as_slice());
+
+                attach.write(IOMessage::Data(Bytes::from_static(b"out"), Pipe::StdOut));
+                assert_eq!(
+                    server_frame(&mut stream).await?,
+                    (0x1, format!("1{}", BASE64.encode("out")).into_bytes())
+                );
+
+                // The v4 status is JSON, encoded like the output.
+                token.cancel();
+                assert_eq!(
+                    server_frame(&mut stream).await?,
+                    (
+                        0x1,
+                        format!(
+                            "3{}",
+                            BASE64.encode(br#"{"metadata":{},"status":"Success"}"#)
+                        )
+                        .into_bytes()
+                    )
+                );
+                assert_eq!(server_frame(&mut stream).await?.0, 0x8);
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn v1_websocket_attach() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let (io, _server, mut stream, token, response) =
+                    websocket_attach("channel.k8s.io").await?;
+                assert!(response.starts_with("http/1.1 101"), "{response}");
+                assert_eq!(server_frame(&mut stream).await?, (0x2, vec![STDOUT_BYTE]));
+
+                // There is no close signal before v5, the session goes on.
+                stream.write_all(&client_frame(0x2, &[CLOSE_BYTE])).await?;
+                let attach = io.attach().await;
+                attach.write(IOMessage::Data(Bytes::from_static(b"out"), Pipe::StdOut));
+                assert_eq!(server_frame(&mut stream).await?, (0x2, b"\x01out".to_vec()));
+
+                // A success has no status before v4.
+                token.cancel();
+                assert_eq!(server_frame(&mut stream).await?.0, 0x8);
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn unsupported_websocket_protocols_get_rejected() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let (_, _server, _, _, response) = websocket_attach("v3.channel.k8s.io").await?;
+                assert!(response.starts_with("http/1.1 403"), "{response}");
+                Ok(())
+            })
+            .await
     }
 
     #[test]
@@ -2191,58 +2781,42 @@ mod tests {
     }
 
     #[test]
-    fn success_status_frame() -> Result<()> {
-        assert_eq!(SUCCESS_FRAME[0], STREAM_ERR_BYTE);
-        assert_eq!(
-            SUCCESS_FRAME,
-            b"\x03{\"metadata\":{},\"status\":\"Success\"}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn exit_code_error_message() -> Result<()> {
-        assert_eq!(
-            serde_json::to_string(&ErrorMessage::new(137))?,
-            r#"{"status":"Failure","reason":"NonZeroExitCode","details":{"causes":[{"reason":"ExitCode","message":"137"}]},"message":"command terminated with non-zero exit code"}"#
-        );
-        Ok(())
-    }
-
-    #[test]
     fn resize_events_bypass_pending_stdin() {
         let mut pending = PendingStdin::default();
         let (resize_tx, resize_rx) = watch::channel(None);
 
-        let mut read = |data: &'static [u8]| {
-            StreamingServer::read_message(
-                Message::Binary(Bytes::from_static(data)),
-                &mut pending,
-                &resize_tx,
-            )
-        };
-        assert_eq!(read(&[STDIN_BYTE, b'a']), ControlFlow::Continue(()));
-        assert_eq!(read(&[RESIZE_BYTE, b'1']), ControlFlow::Continue(()));
-        assert_eq!(read(&[RESIZE_BYTE, b'2']), ControlFlow::Continue(()));
+        let mut read = |event| StreamingServer::read_event(event, &mut pending, &resize_tx);
+        let stdin = || ClientEvent::Stdin(Stdin::Data(Bytes::from_static(b"a")));
+        assert_eq!(read(stdin()), ControlFlow::Continue(()));
+        assert_eq!(
+            read(ClientEvent::Resize(Bytes::from_static(b"1"))),
+            ControlFlow::Continue(())
+        );
+        assert_eq!(
+            read(ClientEvent::Resize(Bytes::from_static(b"2"))),
+            ControlFlow::Continue(())
+        );
 
         // Only the latest size is kept, the stdin waits on its own.
-        assert_eq!(
-            resize_rx.borrow().as_deref(),
-            Some(&[RESIZE_BYTE, b'2'][..])
-        );
-        assert_eq!(pending.pop(), Bytes::from_static(&[STDIN_BYTE, b'a']));
+        assert_eq!(resize_rx.borrow().as_deref(), Some(&b"2"[..]));
+        assert_eq!(pending.pop(), Stdin::Data(Bytes::from_static(b"a")));
         assert!(pending.is_empty());
 
-        let close = StreamingServer::read_message(Message::Close(None), &mut pending, &resize_tx);
+        let close = StreamingServer::read_event(ClientEvent::Closed, &mut pending, &resize_tx);
         assert_eq!(close, ControlFlow::Break(()));
     }
 
     #[test]
     fn pending_stdin_is_bounded() {
         let mut pending = PendingStdin::default();
-        pending.push(Bytes::from(vec![0; PENDING_STDIN_MAX_BYTES - 1]));
+        pending.push(Stdin::Data(Bytes::from(vec![
+            0;
+            PENDING_STDIN_MAX_BYTES - 1
+        ])));
         assert!(!pending.is_full());
-        pending.push(Bytes::from_static(b"x"));
+        pending.push(Stdin::Close);
+        assert!(!pending.is_full());
+        pending.push(Stdin::Data(Bytes::from_static(b"x")));
         assert!(pending.is_full());
 
         assert_eq!(pending.pop().len(), PENDING_STDIN_MAX_BYTES - 1);

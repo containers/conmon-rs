@@ -68,6 +68,7 @@ pub const PING_INTERVAL: Duration = Duration::from_secs(5);
 /// A connection a client upgraded to SPDY/3.1.
 pub struct Connection {
     streams: mpsc::Receiver<Stream>,
+    shared: Arc<Shared>,
 }
 
 impl Connection {
@@ -98,6 +99,7 @@ impl Connection {
             streams: Mutex::default(),
             resets: Mutex::default(),
             resets_ready: Notify::new(),
+            closing: CancellationToken::new(),
             done: CancellationToken::new(),
             activity: Activity::new(),
             last_stream_id: AtomicU32::new(0),
@@ -117,16 +119,39 @@ impl Connection {
         if let Some(interval) = ping_interval {
             tokio::spawn(Self::ping(shared.clone(), interval));
         }
-        tokio::spawn(Self::write(shared, writer, encoder, control_rx, data_rx));
+        tokio::spawn(Self::write(
+            shared.clone(),
+            writer,
+            encoder,
+            control_rx,
+            data_rx,
+        ));
 
         Self {
             streams: streams_rx,
+            shared,
         }
     }
 
     /// The next stream the client opened, `None` once the connection ended.
     pub async fn accept(&mut self) -> Option<Stream> {
         self.streams.recv().await
+    }
+
+    /// End the connection right away.
+    pub fn abort(&self) {
+        self.handle().abort();
+    }
+
+    /// Cancelled once the connection ended.
+    pub fn done(&self) -> CancellationToken {
+        self.handle().done()
+    }
+
+    /// A handle to close the connection, while the connection itself still
+    /// accepts streams.
+    pub fn handle(&self) -> ConnectionHandle {
+        ConnectionHandle(self.shared.clone())
     }
 
     /// Ping the client until the connection ends. The pings of the server
@@ -179,6 +204,7 @@ impl Connection {
         T: AsyncWrite,
     {
         let mut buf = BytesMut::with_capacity(WRITE_BUFFER);
+        let mut closing = false;
         let result = async {
             loop {
                 let mut active = false;
@@ -195,6 +221,12 @@ impl Connection {
                     }
                     _ = shared.resets_ready.notified() => None,
                     Some(data) = data_rx.recv() => Some(data),
+                    // The server closes the connection, the frames queued
+                    // until now go out first.
+                    _ = shared.closing.cancelled(), if !closing => {
+                        closing = true;
+                        None
+                    }
                     else => break,
                 };
                 // Whatever else is queued already goes out with it.
@@ -215,19 +247,22 @@ impl Connection {
                     active = true;
                     Self::encode_data(&mut encoder, &data, &mut buf)?;
                 }
-                if buf.is_empty() {
-                    continue;
+                if !buf.is_empty() {
+                    select! {
+                        biased;
+                        result = writer.write_all(&buf) => result.context("write frames")?,
+                        // A client which does not read anymore must not keep
+                        // the connection open.
+                        _ = shared.done.cancelled() => return Ok(()),
+                    }
+                    buf.clear();
+                    if active {
+                        shared.activity.touch();
+                    }
                 }
-                select! {
-                    biased;
-                    result = writer.write_all(&buf) => result.context("write frames")?,
-                    // A client which does not read anymore must not keep the
-                    // connection open.
-                    _ = shared.done.cancelled() => return Ok(()),
-                }
-                buf.clear();
-                if active {
-                    shared.activity.touch();
+                // The rest goes out with the shutdown below.
+                if closing {
+                    break;
                 }
             }
 
@@ -331,6 +366,29 @@ impl Drop for Unqueued<'_> {
     }
 }
 
+/// Closes or ends a connection, see [`Connection::handle`]. Once the
+/// [`Connection`] is gone, the streams the client opens get refused, the ones
+/// nobody took yet get reset.
+#[derive(Clone)]
+pub struct ConnectionHandle(Arc<Shared>);
+
+impl ConnectionHandle {
+    /// Close the connection once the frames queued so far went out.
+    pub fn close(&self) {
+        self.0.closing.cancel();
+    }
+
+    /// End the connection right away.
+    pub fn abort(&self) {
+        self.0.done.cancel();
+    }
+
+    /// Cancelled once the connection ended.
+    pub fn done(&self) -> CancellationToken {
+        self.0.done.clone()
+    }
+}
+
 /// What the reader, the writer and the streams of a connection share.
 struct Shared {
     control: mpsc::Sender<Frame>,
@@ -342,6 +400,10 @@ struct Shared {
     /// reset only once.
     resets: Mutex<Vec<u32>>,
     resets_ready: Notify,
+
+    /// Cancelled once the server closes the connection after the frames
+    /// queued until then.
+    closing: CancellationToken,
 
     /// Cancelled once the connection ended.
     done: CancellationToken,
@@ -576,7 +638,7 @@ where
         headers: Headers,
         going_away: bool,
     ) -> Result<()> {
-        let refused = if going_away {
+        let refused = if going_away || self.streams.is_closed() {
             Some(STATUS_REFUSED_STREAM)
         } else if self.shared.lock_streams().len() >= MAX_STREAMS {
             warn!("Refusing SPDY stream {stream_id}, too many streams are open");
@@ -627,9 +689,8 @@ where
             },
         };
         select! {
-            result = self.streams.send(stream) => {
-                result.map_err(|_| anyhow!("streams are not accepted anymore"))
-            }
+            // Dropping a stream nobody accepts anymore resets it.
+            _ = self.streams.send(stream) => Ok(()),
             _ = self.shared.done.cancelled() => bail!("connection closed"),
         }
     }
@@ -1309,6 +1370,92 @@ mod tests {
         drop(client);
         let end = time::timeout(Duration::from_secs(5), connection.accept()).await?;
         assert!(end.is_none());
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closing_flushes_before_the_idle_timeout() -> Result<()> {
+        let (mut client, mut connection) = connect(accept_data, Some(Duration::from_secs(60)))?;
+        client.open(1, [("streamtype", "data")].into()).await?;
+        let mut stream = connection.accept().await.context("stream")?;
+        stream.send(Bytes::from_static(b"last")).await?;
+        stream.close().await?;
+        connection.handle().close();
+
+        // Everything queued goes out, then the server closes the connection
+        // instead of waiting for the idle timeout.
+        let mut frames = vec![];
+        while let Some(frame) = client.frame().await? {
+            frames.push(frame);
+        }
+        assert_eq!(
+            frames,
+            [
+                Frame::SynReply {
+                    stream_id: 1,
+                    headers: Headers::default()
+                },
+                Frame::Data {
+                    stream_id: 1,
+                    fin: false,
+                    data: Bytes::from_static(b"last")
+                },
+                Frame::Data {
+                    stream_id: 1,
+                    fin: true,
+                    data: Bytes::new()
+                },
+            ]
+        );
+        time::timeout(Duration::from_secs(1), connection.done().cancelled()).await?;
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closing_a_stuck_connection_ends_with_the_idle_timeout() -> Result<()> {
+        // A client which does not read: the close cannot flush, the idle
+        // watch still ends the connection.
+        let (client, server) = duplex(64);
+        let mut connection =
+            Connection::serve(server, Some(Duration::from_secs(60)), None, accept_data);
+        let mut client = Client::new(client)?;
+        client.open(1, [("streamtype", "data")].into()).await?;
+        let mut stream = connection.accept().await.context("stream")?;
+        let send =
+            tokio::spawn(
+                async move { while stream.send(Bytes::from(vec![0; 1024])).await.is_ok() {} },
+            );
+        time::sleep(Duration::from_secs(1)).await;
+        connection.handle().close();
+        assert!(!connection.done().is_cancelled());
+
+        time::timeout(Duration::from_secs(120), connection.done().cancelled()).await?;
+        time::timeout(Duration::from_secs(5), send).await??;
+        assert!(connection.accept().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streams_get_refused_without_the_connection() -> Result<()> {
+        let (mut client, mut connection) = connect(accept_data, None)?;
+        client.open(1, [("streamtype", "data")].into()).await?;
+        // Opened before, but nobody takes it.
+        client.open(3, [("streamtype", "data")].into()).await?;
+        let _stream = connection.accept().await.context("stream")?;
+        time::sleep(Duration::from_millis(100)).await;
+        drop(connection);
+        client.open(5, [("streamtype", "data")].into()).await?;
+
+        let mut resets = vec![];
+        while resets.len() < 2 {
+            if let Some(Frame::RstStream { stream_id, status }) = client.frame().await? {
+                resets.push((stream_id, status));
+            }
+        }
+        assert_eq!(resets, [(3, STATUS_CANCEL), (5, STATUS_REFUSED_STREAM)]);
+        // The connection goes on.
+        client.send(Frame::Ping { id: 1 }).await?;
+        assert_eq!(client.frame().await?, Some(Frame::Ping { id: 1 }));
         Ok(())
     }
 
