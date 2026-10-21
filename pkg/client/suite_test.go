@@ -5,11 +5,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +25,7 @@ import (
 	"time"
 
 	"github.com/containers/conmon-rs/pkg/client"
+	"github.com/gorilla/websocket"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/opencontainers/runc/libcontainer/specconv"
@@ -31,7 +35,10 @@ import (
 	"go.podman.io/storage/pkg/unshare"
 	"golang.org/x/sys/unix"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/client-go/transport/spdy"
+	"k8s.io/streaming/pkg/httpstream"
 )
 
 const (
@@ -657,7 +664,11 @@ func (rr *RuntimeRunner) RunCommand(args ...string) error {
 	return nil
 }
 
-var errNoMatch = errors.New("regex does not match")
+var (
+	errNoMatch  = errors.New("regex does not match")
+	errNotTCP   = errors.New("not a TCP connection")
+	errProtocol = errors.New("unexpected port forward protocol")
+)
 
 func (rr *RuntimeRunner) RunCommandCheckOutput(pattern string, args ...string) error {
 	stdoutString, err := rr.runCommand(args...)
@@ -812,4 +823,259 @@ func streamURL(ctx context.Context, url string, options remotecommand.StreamOpti
 	Expect(err).NotTo(HaveOccurred())
 
 	return executor.StreamWithContext(ctx, options) //nolint:wrapcheck // the specs check the error itself
+}
+
+// portForwardDialer dials the port forward session served at url over SPDY,
+// like the kubelet does.
+//
+//nolint:ireturn // client-go only exposes the interface
+func portForwardDialer(rawURL string) (httpstream.Dialer, error) {
+	parsed, err := neturl.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse url: %w", err)
+	}
+
+	transport, upgrader, err := spdy.RoundTripperFor(&rest.Config{})
+	if err != nil {
+		return nil, fmt.Errorf("create round tripper: %w", err)
+	}
+
+	return spdy.NewDialerForStreaming(upgrader, &http.Client{Transport: transport}, http.MethodPost, parsed), nil
+}
+
+// tunnelDialer dials the port forward session served at url with SPDY
+// tunneled through a WebSocket, like crictl and critest do with the websocket
+// transport.
+//
+//nolint:ireturn // client-go only exposes the interface
+func tunnelDialer(rawURL string) (httpstream.Dialer, error) {
+	parsed, err := neturl.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse url: %w", err)
+	}
+
+	dialer, err := portforward.NewSPDYOverWebsocketDialerForStreaming(parsed, &rest.Config{})
+	if err != nil {
+		return nil, fmt.Errorf("create tunneling dialer: %w", err)
+	}
+
+	return dialer, nil
+}
+
+// startPortForward forwards a free local port to the port of the session the
+// dialer dials, with the port forwarder of client-go. The stop function ends
+// the forwarding and waits for it.
+func startPortForward(dialer httpstream.Dialer, port int) (local uint16, stop func(), err error) {
+	stopChan := make(chan struct{})
+	readyChan := make(chan struct{})
+
+	forwarder, err := portforward.NewOnAddressesForStreaming(
+		dialer, []string{"127.0.0.1"}, []string{fmt.Sprintf("0:%d", port)},
+		stopChan, readyChan, GinkgoWriter, GinkgoWriter,
+	)
+	if err != nil {
+		return 0, nil, fmt.Errorf("create port forwarder: %w", err)
+	}
+
+	errChan := make(chan error, 1)
+
+	go func() { errChan <- forwarder.ForwardPorts() }()
+
+	select {
+	case <-readyChan:
+	case err := <-errChan:
+		return 0, nil, fmt.Errorf("forward ports: %w", err)
+	}
+
+	stop = func() {
+		close(stopChan)
+
+		if err := <-errChan; err != nil {
+			GinkgoWriter.Printf("Port forwarding ended: %v\n", err)
+		}
+	}
+
+	ports, err := forwarder.GetPorts()
+	if err != nil || len(ports) != 1 {
+		stop()
+
+		return 0, nil, fmt.Errorf("get forwarded ports %v: %w", ports, err)
+	}
+
+	return ports[0].Local, stop, nil
+}
+
+// portForwardRoundTrip sends the payload to the forwarded local port, closes
+// the sending side and returns everything that came back until the remote
+// side closed the connection.
+func portForwardRoundTrip(local uint16, payload string) (string, error) {
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+
+	conn, err := dialer.DialContext(context.Background(), "tcp", fmt.Sprintf("127.0.0.1:%d", local))
+	if err != nil {
+		return "", fmt.Errorf("dial forwarded port: %w", err)
+	}
+	defer conn.Close()
+
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return "", fmt.Errorf("set deadline: %w", err)
+	}
+
+	if _, err := conn.Write([]byte(payload)); err != nil {
+		return "", fmt.Errorf("write payload: %w", err)
+	}
+
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		return "", fmt.Errorf("%w: %T", errNotTCP, conn)
+	}
+
+	if err := tcpConn.CloseWrite(); err != nil {
+		return "", fmt.Errorf("close sending side: %w", err)
+	}
+
+	response, err := io.ReadAll(conn)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	return string(response), nil
+}
+
+// echoServer listens on a free local port and echoes every connection until
+// the client closes its sending side. It returns the listener and its port.
+func echoServer() (listener net.Listener, port int) {
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp4", "127.0.0.1:0")
+	Expect(err).NotTo(HaveOccurred())
+
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	Expect(ok).To(BeTrue())
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+
+			go func() {
+				defer conn.Close()
+
+				if _, err := io.Copy(conn, conn); err != nil {
+					GinkgoWriter.Printf("Echo failed: %v\n", err)
+				}
+			}()
+		}
+	}()
+
+	return listener, addr.Port
+}
+
+// echoOnceServer listens on a free local port, echoes size bytes of every
+// connection and closes it then. The channel protocol cannot close the
+// sending side, so the server has to end the connection.
+func echoOnceServer(size int64) (listener net.Listener, port int) {
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp4", "127.0.0.1:0")
+	Expect(err).NotTo(HaveOccurred())
+
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	Expect(ok).To(BeTrue())
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+
+			go func() {
+				defer conn.Close()
+
+				if _, err := io.CopyN(conn, conn, size); err != nil {
+					GinkgoWriter.Printf("Echo failed: %v\n", err)
+				}
+			}()
+		}
+	}()
+
+	return listener, addr.Port
+}
+
+// channelRoundTrip forwards the port over the WebSocket channel protocol,
+// sends the payload on the data channel and returns what the data channel
+// received until the server closed the session, and the error channel.
+func channelRoundTrip(rawURL string, port int, base64Codec bool, payload string) (data, errs string, err error) {
+	wsURL := strings.Replace(rawURL, "http://", "ws://", 1) + "?port=" + strconv.Itoa(port)
+
+	protocol, messageType := "v4.channel.k8s.io", websocket.BinaryMessage
+	if base64Codec {
+		protocol, messageType = "v4.base64.channel.k8s.io", websocket.TextMessage
+	}
+
+	dialer := websocket.Dialer{Subprotocols: []string{protocol}, HandshakeTimeout: 5 * time.Second}
+
+	conn, resp, err := dialer.Dial(wsURL, nil)
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	if err != nil {
+		return "", "", fmt.Errorf("dial: %w", err)
+	}
+
+	defer conn.Close()
+
+	if conn.Subprotocol() != protocol {
+		return "", "", fmt.Errorf("%w: %q", errProtocol, conn.Subprotocol())
+	}
+
+	encode := func(channel byte, data []byte) []byte {
+		if base64Codec {
+			return append([]byte{'0' + channel}, base64.StdEncoding.EncodeToString(data)...)
+		}
+
+		return append([]byte{channel}, data...)
+	}
+
+	if err := conn.WriteMessage(messageType, encode(0, []byte(payload))); err != nil {
+		return "", "", fmt.Errorf("send payload: %w", err)
+	}
+
+	received := map[byte][]byte{}
+
+	for {
+		if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			return "", "", fmt.Errorf("set deadline: %w", err)
+		}
+
+		_, message, err := conn.ReadMessage()
+		if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+			break
+		}
+
+		if err != nil {
+			return "", "", fmt.Errorf("read message: %w", err)
+		}
+
+		channel, content := message[0], message[1:]
+		if base64Codec {
+			channel -= '0'
+
+			if content, err = base64.StdEncoding.DecodeString(string(content)); err != nil {
+				return "", "", fmt.Errorf("decode message: %w", err)
+			}
+		}
+
+		received[channel] = append(received[channel], content...)
+	}
+
+	// Both channels start with the port.
+	prefix := string([]byte{byte(port), byte(port >> 8)})
+	for channel := range byte(2) {
+		if !strings.HasPrefix(string(received[channel]), prefix) {
+			return "", "", fmt.Errorf("%w: channel %d got %q", errProtocol, channel, received[channel])
+		}
+	}
+
+	return string(received[0][2:]), string(received[1][2:]), nil
 }

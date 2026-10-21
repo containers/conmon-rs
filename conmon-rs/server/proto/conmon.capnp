@@ -260,6 +260,9 @@ interface Conmon {
     struct ServePortForwardContainerRequest {
         metadata @0 :Metadata; # Standard metadata to carry.
         netNsPath @1 :Text;
+        # How long a connection may go without a frame before it gets closed,
+        # 0 disables the timeout.
+        idleTimeoutSec @2 :UInt64;
     }
 
     struct ServePortForwardContainerResponse {

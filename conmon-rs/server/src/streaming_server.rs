@@ -6,6 +6,7 @@ use crate::{
     child_reaper::{ChildReaper, ExitChannelData, ReapableChild},
     config::Config,
     container_io::{ContainerIO, Drain, EarlyStdio, Message as IOMessage, Pipe, SharedContainerIO},
+    port_forward::{self, PortForward, WebSocketProtocol},
     process::Process,
     server::GenerateRuntimeArgs,
 };
@@ -13,11 +14,12 @@ use anyhow::{Context, Result};
 use async_channel::Receiver as IOReceiver;
 use axum::{
     Router,
+    body::Body,
     extract::{
-        Path, Request, State as AxumState,
+        FromRequestParts, Path, Request, State as AxumState,
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     },
-    http::StatusCode,
+    http::{HeaderMap, HeaderName, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -27,6 +29,8 @@ use futures::{
     sink::SinkExt,
     stream::{SplitSink, SplitStream, StreamExt},
 };
+use hyper::upgrade::OnUpgrade;
+use hyper_util::rt::TokioIo;
 use libc::pid_t;
 use nix::{sys::signal::Signal, unistd::Pid};
 use serde::{Deserialize, Serialize};
@@ -35,6 +39,7 @@ use std::{
     fmt::Debug,
     future,
     ops::ControlFlow,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -62,6 +67,18 @@ const PROTOCOL_V5: &str = "v5.channel.k8s.io";
 
 const EXEC_PATH: &str = "exec";
 const ATTACH_PATH: &str = "attach";
+const PORT_FORWARD_PATH: &str = "portforward";
+
+/// The upgrade port forward clients ask for.
+const SPDY_31: &str = "SPDY/3.1";
+
+/// The streaming protocols of a SPDY upgrade request, and the one the server
+/// picked in the response.
+const PROTOCOL_VERSION_HEADER: HeaderName = HeaderName::from_static("x-stream-protocol-version");
+
+/// The protocols the server supports, if it supports none of the client.
+const ACCEPTED_PROTOCOL_VERSIONS_HEADER: HeaderName =
+    HeaderName::from_static("x-accepted-stream-protocol-versions");
 
 const STDIN_BYTE: u8 = 0;
 const STDOUT_BYTE: u8 = 1;
@@ -108,8 +125,13 @@ pub struct StreamingServer {
     state: Arc<RwLock<State>>,
 }
 
-/// State handled by the streaming server.
-type State = BoundedHashMap<Uuid, Session>;
+/// State handled by the streaming server, the sessions waiting for their
+/// client by token.
+#[derive(Debug, Default)]
+struct State {
+    sessions: BoundedHashMap<Uuid, Session>,
+    port_forwards: BoundedHashMap<Uuid, PortForward>,
+}
 
 #[derive(Debug)]
 /// A dedicated session for each provided functionality.
@@ -239,6 +261,11 @@ impl StreamingServer {
             // for allowing proper error handling on wrong protocol usage (spdy instead of websocket)
             .route(&Self::path_for(EXEC_PATH), post(Self::handle))
             .route(&Self::path_for(ATTACH_PATH), post(Self::handle))
+            // Clients upgrade port forward requests to SPDY with a POST.
+            .route(
+                &Self::path_for(PORT_FORWARD_PATH),
+                get(Self::handle_port_forward).post(Self::handle_port_forward),
+            )
             .fallback(Self::fallback)
             .with_state(state)
             .layer(middleware::from_fn(Self::trace));
@@ -287,7 +314,7 @@ impl StreamingServer {
     ) -> String {
         let mut state_lock = self.state.write().await;
         let uuid = Uuid::new_v4();
-        state_lock.insert(
+        state_lock.sessions.insert(
             uuid,
             Session::Exec(
                 ExecSession {
@@ -319,7 +346,7 @@ impl StreamingServer {
     ) -> String {
         let mut state_lock = self.state.write().await;
         let uuid = Uuid::new_v4();
-        state_lock.insert(
+        state_lock.sessions.insert(
             uuid,
             Session::Attach(AttachSession {
                 container_id,
@@ -333,6 +360,21 @@ impl StreamingServer {
         self.url_for(ATTACH_PATH, &uuid)
     }
 
+    /// Returns the URL used for forwarding ports into the network namespace.
+    pub async fn port_forward_url(
+        &self,
+        netns_path: PathBuf,
+        idle_timeout: Option<Duration>,
+    ) -> String {
+        let uuid = Uuid::new_v4();
+        self.state
+            .write()
+            .await
+            .port_forwards
+            .insert(uuid, PortForward::new(netns_path, idle_timeout));
+        self.url_for(PORT_FORWARD_PATH, &uuid)
+    }
+
     /// Handle a webserver connection which should be upgraded to become a websocket one.
     async fn handle(
         ws: WebSocketUpgrade,
@@ -341,7 +383,7 @@ impl StreamingServer {
     ) -> impl IntoResponse {
         async move {
             info!("Got request for token: {token}");
-            let session = state.write().await.remove(&token);
+            let session = state.write().await.sessions.remove(&token);
 
             match session {
                 Some(session) => {
@@ -365,6 +407,167 @@ impl StreamingServer {
         }
         .instrument(debug_span!("handle_common", %token))
         .await
+    }
+
+    /// Handle a port forward request, which the client upgrades to SPDY.
+    async fn handle_port_forward(
+        Path(token): Path<Uuid>,
+        AxumState(state): AxumState<Arc<RwLock<State>>>,
+        mut request: Request,
+    ) -> Response {
+        async move {
+            info!("Got port forward request for token: {token}");
+            let Some(session) = state.write().await.port_forwards.remove(&token) else {
+                error!("Unable to find port forward session for token: {token}");
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            if Self::is_websocket_request(request.headers()) {
+                return Self::upgrade_port_forward_websocket(token, session, request).await;
+            }
+            if let Some(response) = Self::reject_spdy_handshake(request.headers()) {
+                return response;
+            }
+            let Some(on_upgrade) = request.extensions_mut().remove::<OnUpgrade>() else {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "unable to upgrade: connection does not support upgrades",
+                )
+                    .into_response();
+            };
+
+            task::spawn(
+                async move {
+                    match on_upgrade.await {
+                        Ok(upgraded) => session.serve_spdy(TokioIo::new(upgraded)).await,
+                        Err(e) => error!("Unable to upgrade port forward connection: {e}"),
+                    }
+                }
+                .instrument(debug_span!("port_forward", %token)),
+            );
+            Response::builder()
+                .status(StatusCode::SWITCHING_PROTOCOLS)
+                .header(header::CONNECTION, "Upgrade")
+                .header(header::UPGRADE, SPDY_31)
+                .header(PROTOCOL_VERSION_HEADER, port_forward::PROTOCOL)
+                .body(Body::empty())
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+        .instrument(debug_span!("handle_port_forward", %token))
+        .await
+    }
+
+    fn is_websocket_request(headers: &HeaderMap) -> bool {
+        headers
+            .get(header::UPGRADE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+    }
+
+    /// Upgrade a port forward request to a WebSocket, which tunnels SPDY or
+    /// speaks the channel protocol, by the subprotocols of the client.
+    async fn upgrade_port_forward_websocket(
+        token: Uuid,
+        session: PortForward,
+        request: Request,
+    ) -> Response {
+        let requested: Vec<_> = request
+            .headers()
+            .get_all(header::SEC_WEBSOCKET_PROTOCOL)
+            .into_iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let Some((protocol, subprotocol)) =
+            WebSocketProtocol::negotiate(requested.iter().map(String::as_str))
+        else {
+            return (
+                StatusCode::FORBIDDEN,
+                format!(
+                    "unable to upgrade: requested protocol(s) are not supported: {requested:?}"
+                ),
+            )
+                .into_response();
+        };
+        let ports = match protocol {
+            WebSocketProtocol::SpdyTunnel => vec![],
+            WebSocketProtocol::Channels { .. } => {
+                match PortForward::query_ports(request.uri().query()) {
+                    Ok(ports) => ports,
+                    Err(e) => return (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
+                }
+            }
+        };
+
+        let (mut parts, _) = request.into_parts();
+        let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+            Ok(ws) => ws,
+            Err(rejection) => return rejection.into_response(),
+        };
+        let ws = match subprotocol {
+            Some(subprotocol) => ws.protocols([subprotocol]),
+            None => ws,
+        };
+        ws.max_message_size(MAX_MESSAGE_SIZE)
+            .max_frame_size(MAX_MESSAGE_SIZE)
+            .on_upgrade(move |socket| {
+                session
+                    .serve_websocket(socket, protocol, ports)
+                    .instrument(debug_span!("port_forward", %token))
+            })
+    }
+
+    /// The response which rejects the request, unless it asks for a SPDY/3.1
+    /// upgrade and the port forward protocol. The responses are the ones of
+    /// the SPDY server of Kubernetes.
+    fn reject_spdy_handshake(headers: &HeaderMap) -> Option<Response> {
+        let values = |name| {
+            headers
+                .get_all(name)
+                .into_iter()
+                .filter_map(|v| v.to_str().ok())
+        };
+        let contains = |name, value: &str| {
+            values(name).any(|v| v.to_ascii_lowercase().contains(&value.to_ascii_lowercase()))
+        };
+        if !contains(header::CONNECTION, "upgrade") || !contains(header::UPGRADE, SPDY_31) {
+            return Some(
+                (
+                    StatusCode::BAD_REQUEST,
+                    "unable to upgrade: port forwarding needs a SPDY/3.1 upgrade",
+                )
+                    .into_response(),
+            );
+        }
+
+        let protocols: Vec<_> = values(PROTOCOL_VERSION_HEADER)
+            .flat_map(|v| v.split(','))
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
+        if protocols.is_empty() {
+            return Some(
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("unable to upgrade: header {PROTOCOL_VERSION_HEADER} is required"),
+                )
+                    .into_response(),
+            );
+        }
+        if !protocols.contains(&port_forward::PROTOCOL) {
+            return Some((
+                StatusCode::FORBIDDEN,
+                [(ACCEPTED_PROTOCOL_VERSIONS_HEADER, port_forward::PROTOCOL)],
+                format!(
+                    "unable to upgrade: unable to negotiate protocol: client supports {protocols:?}, server accepts [{}]",
+                    port_forward::PROTOCOL
+                ),
+            )
+                .into_response());
+        }
+        None
     }
 
     /// Handle a single websocket connection.
@@ -1262,7 +1465,11 @@ impl ExecTeardown {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::container_log::ContainerLog;
+    use crate::{
+        container_log::ContainerLog,
+        spdy::testing::{Client, Frame, Headers},
+    };
+    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpStream,
@@ -1341,11 +1548,19 @@ mod tests {
         Ok((io, server, stream))
     }
 
-    /// Read a short frame the server sent, its opcode and payload.
-    async fn server_frame(stream: &mut TcpStream) -> Result<(u8, Vec<u8>)> {
+    /// Read a frame the server sent, its opcode and payload.
+    async fn server_frame<R>(stream: &mut R) -> Result<(u8, Vec<u8>)>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
         let mut header = [0; 2];
         time::timeout(Duration::from_secs(5), stream.read_exact(&mut header)).await??;
-        let mut payload = vec![0; usize::from(header[1] & 0x7f)];
+        let len = match header[1] & 0x7f {
+            126 => usize::from(stream.read_u16().await?),
+            127 => usize::try_from(stream.read_u64().await?)?,
+            len => usize::from(len),
+        };
+        let mut payload = vec![0; len];
         stream.read_exact(&mut payload).await?;
         Ok((header[0] & 0x0f, payload))
     }
@@ -1507,6 +1722,372 @@ mod tests {
                 .is_err()
         );
         Ok(())
+    }
+
+    /// Send a port forward request with the extra headers, return the
+    /// response head and the connection.
+    async fn port_forward_request(
+        server: &StreamingServer,
+        url: &str,
+        headers: &str,
+    ) -> Result<(String, TcpStream)> {
+        let path = url
+            .strip_prefix(&format!("http://{ADDR}:{}", server.port))
+            .context("url")?;
+        let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+        stream
+            .write_all(
+                format!(
+                    "POST {path} HTTP/1.1\r\nHost: {ADDR}\r\nContent-Length: 0\r\n{headers}\r\n"
+                )
+                .as_bytes(),
+            )
+            .await?;
+        let mut response = vec![];
+        while !response.ends_with(b"\r\n\r\n") {
+            response.push(stream.read_u8().await?);
+        }
+        Ok((String::from_utf8_lossy(&response).to_lowercase(), stream))
+    }
+
+    const SPDY_UPGRADE: &str = "Connection: Upgrade\r\nUpgrade: SPDY/3.1\r\n";
+
+    #[tokio::test]
+    async fn port_forward_upgrades_to_spdy() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                let url = server
+                    .port_forward_url("/proc/self/ns/net".into(), None)
+                    .await;
+
+                let (response, stream) = port_forward_request(
+                    &server,
+                    &url,
+                    &format!("{SPDY_UPGRADE}X-Stream-Protocol-Version: v4.channel.k8s.io, portforward.k8s.io\r\n"),
+                )
+                .await?;
+                assert!(response.starts_with("http/1.1 101"), "{response}");
+                assert!(response.contains("upgrade: spdy/3.1"), "{response}");
+                assert!(
+                    response.contains("x-stream-protocol-version: portforward.k8s.io"),
+                    "{response}"
+                );
+
+                // The connection speaks SPDY now, a stream without headers
+                // gets rejected.
+                let mut client = Client::new(stream)?;
+                client.open(1, Headers::default()).await?;
+                assert!(matches!(
+                    client.frame().await?,
+                    Some(Frame::RstStream { stream_id: 1, .. })
+                ));
+
+                // The token got used.
+                let (response, _) = port_forward_request(&server, &url, SPDY_UPGRADE).await?;
+                assert!(response.starts_with("http/1.1 404"), "{response}");
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn port_forward_rejects_other_upgrades() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+
+                for (headers, status) in [
+                    (
+                        "Connection: Upgrade\r\nUpgrade: websocket\r\n\
+                         X-Stream-Protocol-Version: portforward.k8s.io\r\n"
+                            .to_owned(),
+                        "400",
+                    ),
+                    (SPDY_UPGRADE.to_owned(), "400"),
+                    (
+                        format!("{SPDY_UPGRADE}X-Stream-Protocol-Version: v4.channel.k8s.io\r\n"),
+                        "403",
+                    ),
+                ] {
+                    let url = server
+                        .port_forward_url("/proc/self/ns/net".into(), None)
+                        .await;
+                    let (response, _) = port_forward_request(&server, &url, &headers).await?;
+                    assert!(
+                        response.starts_with(&format!("http/1.1 {status}")),
+                        "{response}"
+                    );
+                    if status == "403" {
+                        assert!(
+                            response.contains(
+                                "x-accepted-stream-protocol-versions: portforward.k8s.io"
+                            ),
+                            "{response}"
+                        );
+                    }
+                }
+
+                // Exec and attach tokens are no port forward tokens.
+                let io = SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?);
+                let (_, child) = ReapableChild::from_child(Child {
+                    id: "id".into(),
+                    kind: ChildKind::Container,
+                    pid: 0,
+                    exit_paths: vec![],
+                    oom_exit_paths: vec![],
+                    timeout: None,
+                    io,
+                    cleanup_cmd: vec![],
+                    token: CancellationToken::new(),
+                });
+                let url = server
+                    .attach_url("id".into(), child, false, true, false, false)
+                    .await
+                    .replace(ATTACH_PATH, PORT_FORWARD_PATH);
+                let (response, _) = port_forward_request(&server, &url, SPDY_UPGRADE).await?;
+                assert!(response.starts_with("http/1.1 404"), "{response}");
+                Ok(())
+            })
+            .await
+    }
+
+    /// Upgrade a port forward request to a WebSocket with the subprotocols
+    /// and the query, return the response head and the connection.
+    async fn port_forward_websocket(
+        server: &StreamingServer,
+        query: &str,
+        protocols: &str,
+    ) -> Result<(String, TcpStream)> {
+        port_forward_websocket_with(server, query, protocols, None).await
+    }
+
+    async fn port_forward_websocket_with(
+        server: &StreamingServer,
+        query: &str,
+        protocols: &str,
+        idle_timeout: Option<Duration>,
+    ) -> Result<(String, TcpStream)> {
+        let url = server
+            .port_forward_url("/proc/self/ns/net".into(), idle_timeout)
+            .await;
+        let path = url
+            .strip_prefix(&format!("http://{ADDR}:{}", server.port))
+            .context("url")?;
+        let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+        let protocols = if protocols.is_empty() {
+            String::new()
+        } else {
+            format!("Sec-WebSocket-Protocol: {protocols}\r\n")
+        };
+        stream
+            .write_all(
+                format!(
+                    "GET {path}{query} HTTP/1.1\r\nHost: {ADDR}\r\nUpgrade: websocket\r\n\
+                     Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+                     Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n{protocols}\r\n"
+                )
+                .as_bytes(),
+            )
+            .await?;
+        let mut response = vec![];
+        while !response.ends_with(b"\r\n\r\n") {
+            response.push(stream.read_u8().await?);
+        }
+        Ok((String::from_utf8_lossy(&response).to_lowercase(), stream))
+    }
+
+    #[tokio::test]
+    async fn port_forward_over_websocket_channels() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+
+                for base64 in [false, true] {
+                    let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
+                    let port = listener.local_addr()?.port();
+                    let protocol = if base64 {
+                        "v4.base64.channel.k8s.io"
+                    } else {
+                        "v4.channel.k8s.io"
+                    };
+                    let (response, mut stream) =
+                        port_forward_websocket(&server, &format!("?port={port}"), protocol).await?;
+                    assert!(response.starts_with("http/1.1 101"), "{response}");
+                    assert!(
+                        response.contains(&format!("sec-websocket-protocol: {protocol}")),
+                        "{response}"
+                    );
+
+                    // A message of the channel protocol, text for base64.
+                    let message = |channel: u8, data: &[u8]| {
+                        if base64 {
+                            let mut text = vec![b'0' + channel];
+                            text.extend(BASE64.encode(data).into_bytes());
+                            (1, text)
+                        } else {
+                            (2, [&[channel], data].concat())
+                        }
+                    };
+
+                    // The data and the error channel start with the port.
+                    let prefix = port.to_le_bytes();
+                    assert_eq!(server_frame(&mut stream).await?, message(0, &prefix));
+                    assert_eq!(server_frame(&mut stream).await?, message(1, &prefix));
+
+                    let (opcode, payload) = message(0, b"request");
+                    stream.write_all(&client_frame(opcode, &payload)).await?;
+                    let (mut connection, _) = listener.accept().await?;
+                    let mut request = [0; 7];
+                    connection.read_exact(&mut request).await?;
+                    assert_eq!(&request, b"request");
+                    connection.write_all(b"response").await?;
+                    drop(connection);
+
+                    assert_eq!(server_frame(&mut stream).await?, message(0, b"response"));
+                    // The only port is done, which ends the session.
+                    assert_eq!(server_frame(&mut stream).await?.0, 8);
+                }
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn port_forward_over_websocket_ends_idle_sessions_with_stuck_ports() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                // A pod which accepts, but never reads.
+                let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
+                let port = listener.local_addr()?.port();
+                let accepted = tokio::spawn(async move { listener.accept().await });
+
+                let (response, stream) = port_forward_websocket_with(
+                    &server,
+                    &format!("?port={port}"),
+                    "",
+                    Some(Duration::from_millis(500)),
+                )
+                .await?;
+                assert!(response.starts_with("http/1.1 101"), "{response}");
+                let (mut reader, mut writer) = stream.into_split();
+                server_frame(&mut reader).await?;
+                server_frame(&mut reader).await?;
+                let _connection = accepted.await??;
+
+                // More than the socket buffers and the port queue hold.
+                let flood = tokio::spawn(async move {
+                    let frame = client_frame(2, &[&[0], &[0; 60_000][..]].concat());
+                    while writer.write_all(&frame).await.is_ok() {}
+                });
+                let (opcode, _) = time::timeout(Duration::from_secs(10), server_frame(&mut reader))
+                    .await
+                    .context("no close of the idle session")??;
+                assert_eq!(opcode, 8);
+                flood.abort();
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn port_forward_over_websocket_reports_errors() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                let port = tokio::net::TcpListener::bind((ADDR, 0))
+                    .await?
+                    .local_addr()?
+                    .port();
+
+                let (response, mut stream) =
+                    port_forward_websocket(&server, &format!("?port={port}"), "").await?;
+                assert!(response.starts_with("http/1.1 101"), "{response}");
+                server_frame(&mut stream).await?;
+                server_frame(&mut stream).await?;
+
+                let (opcode, payload) = server_frame(&mut stream).await?;
+                assert_eq!((opcode, payload[0]), (2, 1));
+                let error = String::from_utf8_lossy(&payload[1..]).into_owned();
+                assert!(
+                    error.starts_with(&format!(
+                        "error forwarding port {port}: failed to connect to localhost:{port}"
+                    )),
+                    "{error}"
+                );
+                assert_eq!(server_frame(&mut stream).await?.0, 8);
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn port_forward_over_websocket_rejects_invalid_requests() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                for (query, protocols, status) in [
+                    ("", "v4.channel.k8s.io", "400"),
+                    ("?port=0", "", "400"),
+                    ("?port=80", "v5.channel.k8s.io", "403"),
+                ] {
+                    let (response, _) = port_forward_websocket(&server, query, protocols).await?;
+                    assert!(
+                        response.starts_with(&format!("http/1.1 {status}")),
+                        "{response}"
+                    );
+                }
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn port_forward_over_websocket_tunnels_spdy() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                // The tunnel needs no ports, they are in the SPDY streams.
+                let (response, mut stream) = port_forward_websocket(
+                    &server,
+                    "",
+                    "v4.channel.k8s.io, SPDY/3.1+portforward.k8s.io",
+                )
+                .await?;
+                assert!(response.starts_with("http/1.1 101"), "{response}");
+                assert!(
+                    response.contains("sec-websocket-protocol: spdy/3.1+portforward.k8s.io"),
+                    "{response}"
+                );
+
+                // A stream without headers, which gets rejected.
+                let (mut client, mut encoded) = Client::pair()?;
+                client.open(1, Headers::default()).await?;
+                let mut syn_stream = vec![0; 1024];
+                let len = encoded.read(&mut syn_stream).await?;
+                stream
+                    .write_all(&client_frame(2, &syn_stream[..len]))
+                    .await?;
+
+                let (opcode, payload) = server_frame(&mut stream).await?;
+                assert_eq!(opcode, 2);
+                assert_eq!(
+                    payload,
+                    [
+                        0x80, 0x03, 0, 0x03, 0, 0, 0, 0x08, 0, 0, 0, 0x01, 0, 0, 0, 0x05
+                    ]
+                );
+                Ok(())
+            })
+            .await
     }
 
     #[test]

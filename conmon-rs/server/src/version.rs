@@ -62,7 +62,10 @@ impl Version {
     /// The relay of sd_notify messages requested by `sdnotifySocket`.
     pub const FEATURE_SDNOTIFY: &'static str = "sdnotify";
 
-    const FEATURES: &'static [&'static str] = &[Self::FEATURE_SDNOTIFY];
+    /// Forwarding ports by `servePortForwardContainer`.
+    pub const FEATURE_PORT_FORWARD: &'static str = "portforward";
+
+    const FEATURES: &'static [&'static str] = &[Self::FEATURE_SDNOTIFY, Self::FEATURE_PORT_FORWARD];
 
     /// The optional features this build supports.
     pub fn features(&self) -> &'static [&'static str] {
