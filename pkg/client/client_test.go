@@ -1853,72 +1853,313 @@ var _ = Describe("StreamingServer", func() {
 		})
 	})
 
-	Describe("ServeExecContainer", func() {
-		for _, terminal := range []bool{true, false} {
-			It(testName("should succeed", terminal), func() {
+	for _, transport := range streamTransports {
+		Describe("ServeExecContainer over "+transport, func() {
+			for _, terminal := range []bool{true, false} {
+				It(testName("should succeed", terminal), func() {
+					tr = newTestRunner()
+					tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+					sut = tr.configGivenEnv()
+					tr.createContainer(sut, terminal)
+					tr.startContainer()
+
+					result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
+						ID:      tr.ctrID,
+						Command: []string{"/busybox", "sh", "-c", "echo -n stdout && echo -n stderr >&2"},
+						Tty:     terminal,
+						Stdout:  true,
+						Stderr:  true,
+					})
+
+					Expect(err).To(Succeed())
+					Expect(result.URL).NotTo(BeEmpty())
+
+					stdout := &bytes.Buffer{}
+					stderr := &bytes.Buffer{}
+
+					Expect(streamURLOver(context.Background(), transport, result.URL, remotecommand.StreamOptions{
+						Stdout: stdout,
+						Stderr: stderr,
+						Tty:    terminal,
+					})).To(Succeed())
+
+					if terminal {
+						Expect(stdout.String()).To(Equal("stdoutstderr"))
+						Expect(stderr.Len()).To(BeZero())
+					} else {
+						Expect(stdout.String()).To(Equal("stdout"))
+						Expect(stderr.String()).To(Equal("stderr"))
+					}
+
+					// The PID file of the exec is removed once it got read.
+					Expect(execPIDFiles(tr.tmpDir)).To(BeEmpty())
+				})
+
+				It(testName("should report a non-zero exit code", terminal), func() {
+					tr = newTestRunner()
+					tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+					sut = tr.configGivenEnv()
+					tr.createContainer(sut, terminal)
+					tr.startContainer()
+
+					result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
+						ID:      tr.ctrID,
+						Command: []string{"/busybox", "sh", "-c", "exit 3"},
+						Tty:     terminal,
+						Stdout:  true,
+						Stderr:  true,
+					})
+					Expect(err).To(Succeed())
+
+					err = streamURLOver(context.Background(), transport, result.URL, remotecommand.StreamOptions{
+						Stdout: io.Discard,
+						Stderr: io.Discard,
+						Tty:    terminal,
+					})
+
+					var exitErr utilexec.CodeExitError
+					Expect(errors.As(err, &exitErr)).To(BeTrue(), "error %v", err)
+					Expect(exitErr.Code).To(Equal(3))
+				})
+
+				It(testName("should fail if container does not exist", terminal), func() {
+					tr = newTestRunner()
+					tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+					sut = tr.configGivenEnv()
+
+					result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
+						ID:      "wrong",
+						Command: []string{"/busybox", "sh", "-c", "echo -n stdout && echo -n stderr >&2"},
+						Tty:     terminal,
+						Stdout:  true,
+						Stderr:  true,
+					})
+
+					Expect(err).To(HaveOccurred())
+					Expect(result).To(BeNil())
+				})
+
+				It(testName("should not keep the PID file of a failed exec", terminal), func() {
+					tr = newTestRunner()
+					tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+					sut = tr.configGivenEnv()
+					tr.createContainer(sut, terminal)
+					tr.startContainer()
+
+					result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
+						ID:      tr.ctrID,
+						Command: []string{"/does/not/exist"},
+						Tty:     terminal,
+						Stdout:  true,
+						Stderr:  true,
+					})
+					Expect(err).To(Succeed())
+
+					// The runtime fails to start the command, the session reports it.
+					Expect(streamURLOver(context.Background(), transport, result.URL, remotecommand.StreamOptions{
+						Stdout: io.Discard,
+						Stderr: io.Discard,
+						Tty:    terminal,
+					})).NotTo(Succeed())
+
+					Eventually(func() []string { return execPIDFiles(tr.tmpDir) }).
+						WithTimeout(10 * time.Second).
+						Should(BeEmpty())
+
+					// The helper the runtime left in the PID namespace of the
+					// container is reaped, otherwise the container could not stop.
+					Eventually(func() []int { return zombieChildrenOf(int(sut.PID())) }).
+						WithTimeout(10 * time.Second).
+						Should(BeEmpty())
+				})
+			}
+
+			It("should receive the output written after stdin EOF", func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+				tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "10"}, nil)
 				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
+				tr.createContainer(sut, false)
 				tr.startContainer()
 
 				result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
 					ID:      tr.ctrID,
-					Command: []string{"/busybox", "sh", "-c", "echo -n stdout && echo -n stderr >&2"},
-					Tty:     terminal,
+					Command: []string{"/busybox", "sh", "-c", "/busybox cat && echo stdin closed"},
+					Stdin:   true,
 					Stdout:  true,
 					Stderr:  true,
+				})
+				Expect(err).To(Succeed())
+
+				stdout := &bytes.Buffer{}
+				stderr := &bytes.Buffer{}
+
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+
+				Expect(streamURLOver(ctx, transport, result.URL, remotecommand.StreamOptions{
+					Stdin:  strings.NewReader("attached"),
+					Stdout: stdout,
+					Stderr: stderr,
+				})).To(Succeed())
+				Expect(stdout.String()).To(Equal("attachedstdin closed\n"))
+				Expect(stderr.String()).To(BeEmpty())
+			})
+
+			It("should keep an interactive stdin open", func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "10"}, nil)
+				sut = tr.configGivenEnv()
+				tr.createContainer(sut, false)
+				tr.startContainer()
+
+				result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
+					ID:      tr.ctrID,
+					Command: []string{"/busybox", "sh", "-c", "read -r line; echo \"got $line\""},
+					Stdin:   true,
+					Stdout:  true,
+					Stderr:  true,
+				})
+				Expect(err).To(Succeed())
+
+				// The line comes after the session started, stdin stays open
+				// meanwhile.
+				stdinReader, stdinWriter := io.Pipe()
+
+				go func() {
+					defer GinkgoRecover()
+					defer stdinWriter.Close()
+
+					time.Sleep(500 * time.Millisecond)
+
+					_, err := stdinWriter.Write([]byte("later\n"))
+					Expect(err).To(Succeed())
+				}()
+
+				stdout := &bytes.Buffer{}
+
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+
+				Expect(streamURLOver(ctx, transport, result.URL, remotecommand.StreamOptions{
+					Stdin:  stdinReader,
+					Stdout: stdout,
+					Stderr: io.Discard,
+				})).To(Succeed())
+				Expect(stdout.String()).To(Equal("got later\n"))
+			})
+		})
+
+		Describe("ServeAttachContainer over "+transport, func() {
+			const terminal = true
+
+			It(testName("should succeed", terminal), func() {
+				tr = newTestRunner()
+				// The container only answers once attached, then it exits, which
+				// ends the session.
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal, []string{"/busybox", "sh", "-c", "read -r line; echo \"got $line\""}, nil,
+				)
+				sut = tr.configGivenEnv()
+				tr.createContainer(sut, terminal)
+				tr.startContainer()
+
+				result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
+					ID:     tr.ctrID,
+					Stdin:  true,
+					Stdout: true,
+					Stderr: true,
 				})
 
 				Expect(err).To(Succeed())
 				Expect(result.URL).NotTo(BeEmpty())
 
-				stdout := &bytes.Buffer{}
-				stderr := &bytes.Buffer{}
+				stdout := &syncBuffer{}
+				stderr := &syncBuffer{}
 
-				Expect(streamURL(context.Background(), result.URL, remotecommand.StreamOptions{
+				// The end of stdin ends a terminal session, so it stays open
+				// until the answer arrived.
+				stdinReader, stdinWriter := io.Pipe()
+
+				go func() {
+					defer GinkgoRecover()
+					defer stdinWriter.Close()
+
+					_, err := stdinWriter.Write([]byte("attached\n"))
+					Expect(err).To(Succeed())
+					Eventually(stdout.String, 10*time.Second).Should(ContainSubstring("got attached"))
+				}()
+
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+
+				Expect(streamURLOver(ctx, transport, result.URL, remotecommand.StreamOptions{
+					Stdin:  stdinReader,
 					Stdout: stdout,
 					Stderr: stderr,
 					Tty:    terminal,
 				})).To(Succeed())
-
-				if terminal {
-					Expect(stdout.String()).To(Equal("stdoutstderr"))
-					Expect(stderr.Len()).To(BeZero())
-				} else {
-					Expect(stdout.String()).To(Equal("stdout"))
-					Expect(stderr.String()).To(Equal("stderr"))
-				}
-
-				// The PID file of the exec is removed once it got read.
-				Expect(execPIDFiles(tr.tmpDir)).To(BeEmpty())
+				Expect(stdout.String()).To(ContainSubstring("got attached"))
+				Expect(stderr.String()).To(BeEmpty())
 			})
 
-			It(testName("should report a non-zero exit code", terminal), func() {
+			It("should receive the output written after stdin EOF with stdin once", func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+				tr.createRuntimeConfigWithProcessArgs(
+					false, []string{"/busybox", "sh", "-c", "/busybox cat && echo stdin closed"}, nil,
+				)
 				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
+				tr.createContainer(sut, false)
 				tr.startContainer()
 
-				result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
-					ID:      tr.ctrID,
-					Command: []string{"/busybox", "sh", "-c", "exit 3"},
-					Tty:     terminal,
-					Stdout:  true,
-					Stderr:  true,
+				result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
+					ID:                tr.ctrID,
+					Stdin:             true,
+					Stdout:            true,
+					Stderr:            true,
+					StopAfterStdinEOF: true,
 				})
 				Expect(err).To(Succeed())
 
-				err = streamURL(context.Background(), result.URL, remotecommand.StreamOptions{
-					Stdout: io.Discard,
-					Stderr: io.Discard,
-					Tty:    terminal,
-				})
+				stdout := &bytes.Buffer{}
+				stderr := &bytes.Buffer{}
 
-				var exitErr utilexec.CodeExitError
-				Expect(errors.As(err, &exitErr)).To(BeTrue(), "error %v", err)
-				Expect(exitErr.Code).To(Equal(3))
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+
+				Expect(streamURLOver(ctx, transport, result.URL, remotecommand.StreamOptions{
+					Stdin:  strings.NewReader("attached"),
+					Stdout: stdout,
+					Stderr: stderr,
+				})).To(Succeed())
+				Expect(stdout.String()).To(Equal("attachedstdin closed\n"))
+				Expect(stderr.String()).To(BeEmpty())
+			})
+
+			It("should attach to a terminal without asking for one", func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(
+					true, []string{"/busybox", "sh", "-c", "/busybox sleep 1; echo hello"}, nil,
+				)
+				sut = tr.configGivenEnv()
+				tr.createContainer(sut, true)
+				tr.startContainer()
+
+				result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
+					ID:     tr.ctrID,
+					Stdout: true,
+				})
+				Expect(err).To(Succeed())
+
+				stdout := &syncBuffer{}
+
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+
+				// Without a terminal, the client opens no resize stream.
+				Expect(streamURLOver(ctx, transport, result.URL, remotecommand.StreamOptions{
+					Stdout: stdout,
+				})).To(Succeed())
+				Expect(stdout.String()).To(ContainSubstring("hello"))
 			})
 
 			It(testName("should fail if container does not exist", terminal), func() {
@@ -1926,54 +2167,18 @@ var _ = Describe("StreamingServer", func() {
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
 				sut = tr.configGivenEnv()
 
-				result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
-					ID:      "wrong",
-					Command: []string{"/busybox", "sh", "-c", "echo -n stdout && echo -n stderr >&2"},
-					Tty:     terminal,
-					Stdout:  true,
-					Stderr:  true,
+				result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
+					ID: "wrong",
 				})
 
 				Expect(err).To(HaveOccurred())
 				Expect(result).To(BeNil())
 			})
+		})
+	}
 
-			It(testName("should not keep the PID file of a failed exec", terminal), func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
-				tr.startContainer()
-
-				result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
-					ID:      tr.ctrID,
-					Command: []string{"/does/not/exist"},
-					Tty:     terminal,
-					Stdout:  true,
-					Stderr:  true,
-				})
-				Expect(err).To(Succeed())
-
-				// The runtime fails to start the command, the session reports it.
-				Expect(streamURL(context.Background(), result.URL, remotecommand.StreamOptions{
-					Stdout: io.Discard,
-					Stderr: io.Discard,
-					Tty:    terminal,
-				})).NotTo(Succeed())
-
-				Eventually(func() []string { return execPIDFiles(tr.tmpDir) }).
-					WithTimeout(10 * time.Second).
-					Should(BeEmpty())
-
-				// The helper the runtime left in the PID namespace of the
-				// container is reaped, otherwise the container could not stop.
-				Eventually(func() []int { return zombieChildrenOf(int(sut.PID())) }).
-					WithTimeout(10 * time.Second).
-					Should(BeEmpty())
-			})
-		}
-
-		It("should receive the output written after stdin EOF", func() {
+	Describe("through the proxy of the kubelet", func() {
+		It("should exec over SPDY", func() {
 			tr = newTestRunner()
 			tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "10"}, nil)
 			sut = tr.configGivenEnv()
@@ -1982,126 +2187,87 @@ var _ = Describe("StreamingServer", func() {
 
 			result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
 				ID:      tr.ctrID,
-				Command: []string{"/busybox", "sh", "-c", "/busybox cat && echo stdin closed"},
+				Command: []string{"/busybox", "sh", "-c", "/busybox cat && echo -n stderr >&2 && exit 3"},
 				Stdin:   true,
 				Stdout:  true,
 				Stderr:  true,
 			})
 			Expect(err).To(Succeed())
 
+			proxyURL, stop := kubeletProxy(result.URL)
+			defer stop()
+
 			stdout := &bytes.Buffer{}
 			stderr := &bytes.Buffer{}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
-			Expect(streamURL(ctx, result.URL, remotecommand.StreamOptions{
-				Stdin:  strings.NewReader("attached"),
+			err = streamURLOver(ctx, "SPDY", proxyURL, remotecommand.StreamOptions{
+				Stdin:  strings.NewReader("stdin"),
 				Stdout: stdout,
 				Stderr: stderr,
-			})).To(Succeed())
-			Expect(stdout.String()).To(Equal("attachedstdin closed\n"))
-			Expect(stderr.String()).To(BeEmpty())
+			})
+
+			var exitErr utilexec.CodeExitError
+			Expect(errors.As(err, &exitErr)).To(BeTrue(), "error %v", err)
+			Expect(exitErr.Code).To(Equal(3))
+			Expect(stdout.String()).To(Equal("stdin"))
+			Expect(stderr.String()).To(Equal("stderr"))
+		})
+
+		It("should forward a port over SPDY", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			listener, port := echoServer(0)
+			defer listener.Close()
+
+			result, err := sut.ServePortForwardContainer(context.Background(), &client.ServePortForwardContainerConfig{
+				NetNsPath: "/proc/self/ns/net",
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			proxyURL, stopProxy := kubeletProxy(result.URL)
+			defer stopProxy()
+
+			dialer, err := portForwardDialer(proxyURL)
+			Expect(err).NotTo(HaveOccurred())
+
+			local, stop, err := startPortForward(dialer, port)
+			Expect(err).NotTo(HaveOccurred())
+
+			defer stop()
+
+			Expect(portForwardRoundTrip(local, "hello")).To(Equal("hello"))
 		})
 	})
 
-	Describe("ServeAttachContainer", func() {
-		const terminal = true
+	Describe("ServeExecContainer over older WebSocket protocols", func() {
+		for _, protocol := range []string{"v4.channel.k8s.io", "v4.base64.channel.k8s.io"} {
+			It("should report the output and the exit code over "+protocol, func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "10"}, nil)
+				sut = tr.configGivenEnv()
+				tr.createContainer(sut, false)
+				tr.startContainer()
 
-		It(testName("should succeed", terminal), func() {
-			tr = newTestRunner()
-			// The container only answers once attached, then it exits, which
-			// ends the session.
-			tr.createRuntimeConfigWithProcessArgs(
-				terminal, []string{"/busybox", "sh", "-c", "read -r line; echo \"got $line\""}, nil,
-			)
-			sut = tr.configGivenEnv()
-			tr.createContainer(sut, terminal)
-			tr.startContainer()
-
-			result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
-				ID:     tr.ctrID,
-				Stdin:  true,
-				Stdout: true,
-				Stderr: true,
-			})
-
-			Expect(err).To(Succeed())
-			Expect(result.URL).NotTo(BeEmpty())
-
-			stdout := &syncBuffer{}
-			stderr := &syncBuffer{}
-
-			// The end of stdin ends a terminal session, so it stays open
-			// until the answer arrived.
-			stdinReader, stdinWriter := io.Pipe()
-
-			go func() {
-				defer GinkgoRecover()
-				defer stdinWriter.Close()
-
-				_, err := stdinWriter.Write([]byte("attached\n"))
+				result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
+					ID:      tr.ctrID,
+					Command: []string{"/busybox", "sh", "-c", "echo -n stdout && echo -n stderr >&2 && exit 3"},
+					Stdout:  true,
+					Stderr:  true,
+				})
 				Expect(err).To(Succeed())
-				Eventually(stdout.String, 10*time.Second).Should(ContainSubstring("got attached"))
-			}()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-
-			Expect(streamURL(ctx, result.URL, remotecommand.StreamOptions{
-				Stdin:  stdinReader,
-				Stdout: stdout,
-				Stderr: stderr,
-				Tty:    terminal,
-			})).To(Succeed())
-			Expect(stdout.String()).To(ContainSubstring("got attached"))
-			Expect(stderr.String()).To(BeEmpty())
-		})
-
-		It("should receive the output written after stdin EOF with stdin once", func() {
-			tr = newTestRunner()
-			tr.createRuntimeConfigWithProcessArgs(
-				false, []string{"/busybox", "sh", "-c", "/busybox cat && echo stdin closed"}, nil,
-			)
-			sut = tr.configGivenEnv()
-			tr.createContainer(sut, false)
-			tr.startContainer()
-
-			result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
-				ID:                tr.ctrID,
-				Stdin:             true,
-				Stdout:            true,
-				Stderr:            true,
-				StopAfterStdinEOF: true,
+				stdout, stderr, status, err := legacyExec(result.URL, protocol)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(stdout).To(Equal("stdout"))
+				Expect(stderr).To(Equal("stderr"))
+				Expect(status).To(ContainSubstring(`"reason":"NonZeroExitCode"`))
+				Expect(status).To(ContainSubstring(`{"reason":"ExitCode","message":"3"}`))
 			})
-			Expect(err).To(Succeed())
-
-			stdout := &bytes.Buffer{}
-			stderr := &bytes.Buffer{}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-
-			Expect(streamURL(ctx, result.URL, remotecommand.StreamOptions{
-				Stdin:  strings.NewReader("attached"),
-				Stdout: stdout,
-				Stderr: stderr,
-			})).To(Succeed())
-			Expect(stdout.String()).To(Equal("attachedstdin closed\n"))
-			Expect(stderr.String()).To(BeEmpty())
-		})
-
-		It(testName("should fail if container does not exist", terminal), func() {
-			tr = newTestRunner()
-			tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
-			sut = tr.configGivenEnv()
-
-			result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
-				ID: "wrong",
-			})
-
-			Expect(err).To(HaveOccurred())
-			Expect(result).To(BeNil())
-		})
+		}
 	})
 })

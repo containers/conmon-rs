@@ -19,12 +19,12 @@
 //! the port.
 
 use crate::{
+    channel,
     idle::Activity,
     spdy::{Connection, Headers, PING_INTERVAL, Stream, StreamReceiver, StreamSender},
 };
 use anyhow::{Context, Result, bail, ensure};
 use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use nix::{
@@ -201,17 +201,7 @@ struct ChannelOutput {
 impl ChannelOutput {
     /// Send data on a channel, fails once the client went away.
     async fn send(&self, channel: u8, data: &[u8]) -> Result<()> {
-        let message = if self.base64 {
-            let mut text = String::with_capacity(1 + data.len().div_ceil(3) * 4);
-            text.push(char::from(b'0' + channel));
-            BASE64.encode_string(data, &mut text);
-            Message::Text(text.into())
-        } else {
-            let mut frame = BytesMut::with_capacity(1 + data.len());
-            frame.put_u8(channel);
-            frame.put_slice(data);
-            Message::Binary(frame.freeze())
-        };
+        let message = channel::message(self.base64, channel, data);
         self.messages
             .send(message)
             .await
@@ -718,13 +708,8 @@ impl PortForward {
         message: Bytes,
         idle: &CancellationToken,
     ) {
-        let Some(&channel) = message.first() else {
+        let Some((channel, data)) = channel::decode(base64, message) else {
             return;
-        };
-        let channel = if base64 {
-            channel.wrapping_sub(b'0')
-        } else {
-            channel
         };
         let Some(input) = inputs
             .get(usize::from(channel / 2))
@@ -732,18 +717,6 @@ impl PortForward {
         else {
             trace!("Dropping port forward message for channel {channel}");
             return;
-        };
-
-        let data = if base64 {
-            match BASE64.decode(&message[1..]) {
-                Ok(data) => Bytes::from(data),
-                Err(e) => {
-                    debug!("Dropping port forward message with invalid base64: {e}");
-                    return;
-                }
-            }
-        } else {
-            message.slice(1..)
         };
         if !data.is_empty() {
             select! {

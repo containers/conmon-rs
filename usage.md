@@ -113,10 +113,26 @@ return a URL on a server the conmonrs process starts on demand on `127.0.0.1`
 with a random port. Each URL carries a one time token which is valid for a
 bounded time. CRI-O passes these URLs to the kubelet, which connects directly.
 
-Exec and attach speak the Kubernetes `v5.channel.k8s.io` protocol over
-WebSocket: the first byte of each binary message is the stream (`0` stdin,
-`1` stdout, `2` stderr, `3` errors, `4` terminal resize events as JSON, `255`
-close).
+Exec and attach speak the Kubernetes remote command protocols on the same
+URL. Over WebSocket, `v5.channel.k8s.io` is what kubectl uses: the first byte
+of each binary message is the stream (`0` stdin, `1` stdout, `2` stderr, `3`
+errors, `4` terminal resize events as JSON, `255` close). The versions before
+it (`v4.channel.k8s.io`, `channel.k8s.io` and their `base64` variants) frame the
+messages the same way without the close signal, base64 ones as text messages
+with the stream as an ASCII digit offset, and start with an empty message on
+the first output stream. Like for the Kubernetes runtime streaming server, a
+client without a subprotocol gets binary `channel.k8s.io`, and one which only
+requests unsupported subprotocols gets a 403. Over SPDY/3.1, which the kubelet
+uses towards the runtime also for WebSocket clients, the client opens a stream
+per channel by the `streamType` header (`error`, `stdin`, `stdout`, `stderr`
+and with a terminal `resize`, which may also come after the start), the end of
+the stdin stream closes stdin. The server keeps its side of the stdin stream
+open until the session ends, except for `channel.k8s.io`, like the kubelet.
+Streams for stdout or stderr which come after the start end right away. The
+server supports `v4.channel.k8s.io`, `v3`, `v2` and `channel.k8s.io`, the order
+of the client decides. From v4 on, the final status is JSON, before only a
+failure is reported as text. A client which does not take the end of a session
+within a few seconds gets its connection closed.
 
 Port forwarding speaks the Kubernetes `portforward.k8s.io` protocol over
 SPDY/3.1, which the kubelet uses towards the runtime also when the client
