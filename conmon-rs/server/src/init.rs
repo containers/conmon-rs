@@ -63,6 +63,29 @@ where
     }
 }
 
+/// The most malloc arenas of the server. glibc gives every thread an arena
+/// of its own, up to eight per CPU, and on AArch64 it backs them with 2 MiB
+/// transparent huge pages by default, so each costs up to 2 MiB resident. The
+/// runtime and the RPC `LocalSet` each run on one thread, the others only
+/// serve short blocking work, so one arena is enough, the per thread caches
+/// of the allocator absorb most of the contention.
+#[cfg(target_env = "gnu")]
+const MALLOC_ARENAS: c_int = 1;
+
+/// Limit the malloc arenas of the server, see [`MALLOC_ARENAS`]. Runs before
+/// the fork, while the process has a single thread. The runtimes and
+/// containers keep the defaults, an exec starts their allocator anew.
+pub fn limit_malloc_arenas() {
+    #[cfg(target_env = "gnu")]
+    {
+        // SAFETY: mallopt only changes a parameter of the allocator.
+        if unsafe { libc::mallopt(libc::M_ARENA_MAX, MALLOC_ARENAS) } != 1 {
+            // Before the logging gets set up.
+            eprintln!("Unable to limit the malloc arenas");
+        }
+    }
+}
+
 /// The OOM score adjustment the server started with, see [`reset_oom_score`].
 static INHERITED_OOM_SCORE: OnceLock<Box<[u8]>> = OnceLock::new();
 
