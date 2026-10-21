@@ -13,7 +13,7 @@ path = "src/main.rs"
 anyhow = { version = "1.0.104", default-features = false }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws"] }
 async-channel = { version = "2.5.0", default-features = false, features = ["std"] }
-base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
+base64 = { version = "0.23.1", default-features = false, features = ["alloc"] }
 bytes = { version = "1.12.1", default-features = false }
 capnp = { workspace = true }
 capnp-rpc = { version = "0.27.1", default-features = false }
