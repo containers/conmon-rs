@@ -259,7 +259,8 @@ func childrenOfWithState(pid int, state string) []int {
 
 		// The process may be gone already.
 		status, err := os.ReadFile(filepath.Join(procPath, entry.Name(), "status"))
-		if err == nil && bytes.Contains(status, []byte(ppid)) && bytes.Contains(status, []byte(stateLine)) {
+		if err == nil && bytes.Contains(status, []byte(ppid)) &&
+			bytes.Contains(status, []byte(stateLine)) {
 			children = append(children, child)
 		}
 	}
@@ -336,7 +337,10 @@ func (tr *testRunner) createContainer(sut *client.ConmonClient, terminal bool) {
 	tr.createContainerWithConfig(sut, tr.defaultConfig(terminal))
 }
 
-func (tr *testRunner) createContainerWithConfig(sut *client.ConmonClient, cfg *client.CreateContainerConfig) {
+func (tr *testRunner) createContainerWithConfig(
+	sut *client.ConmonClient,
+	cfg *client.CreateContainerConfig,
+) {
 	resp, err := sut.CreateContainer(context.Background(), cfg)
 	Expect(err).To(Succeed())
 	Expect(resp.PID).NotTo(BeEquivalentTo(0))
@@ -442,7 +446,9 @@ func (tr *testRunner) configGivenEnv() *client.ConmonClient {
 
 // configGivenEnvWith starts a server with the configuration of
 // configGivenEnv, changed by changeConfig if not nil.
-func (tr *testRunner) configGivenEnvWith(changeConfig func(*client.ConmonServerConfig)) *client.ConmonClient {
+func (tr *testRunner) configGivenEnvWith(
+	changeConfig func(*client.ConmonServerConfig),
+) *client.ConmonClient {
 	cfg := client.NewConmonServerConfig(runtimePath, tr.rr.runtimeRoot, tr.tmpDir)
 	cfg.ConmonServerPath = conmonPath
 	cfg.LogDriver = client.LogDriverStdout
@@ -476,7 +482,11 @@ func logMemoryDetails(pid uint32, when string) {
 		for line := range strings.SplitSeq(string(content), "\n") {
 			for _, key := range []string{"Threads:", "Rss:", "Anonymous:", "AnonHugePages:", "Private_Dirty:"} {
 				if strings.HasPrefix(line, key) {
-					GinkgoWriter.Printf("Memory %s: %s\n", when, strings.Join(strings.Fields(line), " "))
+					GinkgoWriter.Printf(
+						"Memory %s: %s\n",
+						when,
+						strings.Join(strings.Fields(line), " "),
+					)
 				}
 			}
 		}
@@ -766,7 +776,10 @@ func (rr *RuntimeRunner) runCommand(args ...string) (string, error) {
 	var stderr bytes.Buffer
 
 	//nolint:gosec // test helper with controlled inputs
-	cmd := exec.CommandContext(context.Background(), runtimePath, append(rr.runtimeRootArgs(), args...)...)
+	cmd := exec.CommandContext(
+		context.Background(),
+		runtimePath,
+		append(rr.runtimeRootArgs(), args...)...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
@@ -907,7 +920,11 @@ var streamTransports = []string{"WebSocket", "SPDY"}
 
 // streamURLOver runs the exec or attach session served at url over the
 // transport until it ends.
-func streamURLOver(ctx context.Context, transport, rawURL string, options remotecommand.StreamOptions) error {
+func streamURLOver(
+	ctx context.Context,
+	transport, rawURL string,
+	options remotecommand.StreamOptions,
+) error {
 	var (
 		executor remotecommand.Executor
 		err      error
@@ -919,12 +936,23 @@ func streamURLOver(ctx context.Context, transport, rawURL string, options remote
 
 		executor, err = remotecommand.NewSPDYExecutor(&rest.Config{}, http.MethodPost, parsed)
 	} else {
-		executor, err = remotecommand.NewWebSocketExecutor(&rest.Config{Insecure: true}, http.MethodGet, rawURL)
+		executor, err = remotecommand.NewWebSocketExecutor(
+			&rest.Config{Insecure: true},
+			http.MethodGet,
+			rawURL,
+		)
 	}
 
 	Expect(err).NotTo(HaveOccurred())
 
-	return executor.StreamWithContext(ctx, options) //nolint:wrapcheck // the specs check the error itself
+	if err := executor.StreamWithContext(
+		ctx,
+		options,
+	); err != nil {
+		return fmt.Errorf("create stream with context: %w", err)
+	}
+
+	return nil
 }
 
 // legacyExec runs the exec session served at url with a WebSocket protocol
@@ -997,7 +1025,12 @@ func portForwardDialer(rawURL string) (httpstream.Dialer, error) {
 		return nil, fmt.Errorf("create round tripper: %w", err)
 	}
 
-	return spdy.NewDialerForStreaming(upgrader, &http.Client{Transport: transport}, http.MethodPost, parsed), nil
+	return spdy.NewDialerForStreaming(
+		upgrader,
+		&http.Client{Transport: transport},
+		http.MethodPost,
+		parsed,
+	), nil
 }
 
 // tunnelDialer dials the port forward session served at url with SPDY
@@ -1140,7 +1173,12 @@ func echoServer(size int64) (listener net.Listener, port int) {
 // channelRoundTrip forwards the port over the WebSocket channel protocol,
 // sends the payload on the data channel and returns what the data channel
 // received until the server closed the session, and the error channel.
-func channelRoundTrip(rawURL string, port int, base64Codec bool, payload string) (data, errs string, err error) {
+func channelRoundTrip(
+	rawURL string,
+	port int,
+	base64Codec bool,
+	payload string,
+) (data, errs string, err error) {
 	wsURL := strings.Replace(rawURL, "http://", "ws://", 1) + "?port=" + strconv.Itoa(port)
 
 	protocol, messageType := "v4.channel.k8s.io", websocket.BinaryMessage
@@ -1209,7 +1247,12 @@ func channelRoundTrip(rawURL string, port int, base64Codec bool, payload string)
 	prefix := string([]byte{byte(port), byte(port >> 8)})
 	for channel := range byte(2) {
 		if !strings.HasPrefix(string(received[channel]), prefix) {
-			return "", "", fmt.Errorf("%w: channel %d got %q", errProtocol, channel, received[channel])
+			return "", "", fmt.Errorf(
+				"%w: channel %d got %q",
+				errProtocol,
+				channel,
+				received[channel],
+			)
 		}
 	}
 
@@ -1223,7 +1266,9 @@ func kubeletProxy(rawURL string) (proxyURL string, stop func()) {
 	location, err := neturl.Parse(rawURL)
 	Expect(err).NotTo(HaveOccurred())
 
-	server := httptest.NewServer(proxy.NewUpgradeAwareHandler(location, nil, false, true, proxyResponder{}))
+	server := httptest.NewServer(
+		proxy.NewUpgradeAwareHandler(location, nil, false, true, proxyResponder{}),
+	)
 
 	return server.URL + location.Path, server.Close
 }

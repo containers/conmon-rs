@@ -143,34 +143,37 @@ func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) e
 		return fmt.Errorf("create RPC client: %w", err)
 	}
 
-	future, free := rpcClient.AttachContainer(ctx, func(p proto.Conmon_attachContainer_Params) error {
-		req, err := p.NewRequest()
-		if err != nil {
-			return fmt.Errorf("create request: %w", err)
-		}
-
-		if err := c.setMetadata(ctx, req); err != nil {
-			return err
-		}
-
-		if err := req.SetId(cfg.ID); err != nil {
-			return fmt.Errorf("set ID: %w", err)
-		}
-
-		if err := req.SetSocketPath(cfg.SocketPath); err != nil {
-			return fmt.Errorf("set socket path: %w", err)
-		}
-
-		req.SetStopAfterStdinEof(cfg.StopAfterStdinEOF)
-
-		if cfg.ExecSession != "" {
-			if err := req.SetExecSessionId(cfg.ExecSession); err != nil {
-				return fmt.Errorf("set exec session ID: %w", err)
+	future, free := rpcClient.AttachContainer(
+		ctx,
+		func(p proto.Conmon_attachContainer_Params) error {
+			req, err := p.NewRequest()
+			if err != nil {
+				return fmt.Errorf("create request: %w", err)
 			}
-		}
 
-		return nil
-	})
+			if err := c.setMetadata(ctx, req); err != nil {
+				return err
+			}
+
+			if err := req.SetId(cfg.ID); err != nil {
+				return fmt.Errorf("set ID: %w", err)
+			}
+
+			if err := req.SetSocketPath(cfg.SocketPath); err != nil {
+				return fmt.Errorf("set socket path: %w", err)
+			}
+
+			req.SetStopAfterStdinEof(cfg.StopAfterStdinEOF)
+
+			if cfg.ExecSession != "" {
+				if err := req.SetExecSessionId(cfg.ExecSession); err != nil {
+					return fmt.Errorf("set exec session ID: %w", err)
+				}
+			}
+
+			return nil
+		},
+	)
 	defer free()
 
 	result, err := future.Struct()
@@ -203,7 +206,11 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) (err error
 
 		conn, err = DialLongSocket("unixpacket", cfg.SocketPath)
 		if err != nil {
-			return fmt.Errorf("failed to connect to container's attach socket: %v: %w", cfg.SocketPath, err)
+			return fmt.Errorf(
+				"failed to connect to container's attach socket: %v: %w",
+				cfg.SocketPath,
+				err,
+			)
 		}
 
 		defer func() {
@@ -250,7 +257,11 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) (err error
 // forwardResizeEvents applies the resize events of the config to the
 // container until the channel gets closed or done is closed, whichever
 // comes first.
-func (c *ConmonClient) forwardResizeEvents(ctx context.Context, cfg *AttachConfig, done <-chan struct{}) {
+func (c *ConmonClient) forwardResizeEvents(
+	ctx context.Context,
+	cfg *AttachConfig,
+	done <-chan struct{},
+) {
 	if cfg.Resize == nil {
 		return
 	}
@@ -455,7 +466,11 @@ func (c *ConmonClient) closeAttachReader(value *attachReaderValue) {
 }
 
 func (c *ConmonClient) readStdio(
-	ctx context.Context, cfg *AttachConfig, conn *net.UnixConn, id uint64, receiveStdoutError, stdinDone chan error,
+	ctx context.Context,
+	cfg *AttachConfig,
+	conn *net.UnixConn,
+	id uint64,
+	receiveStdoutError, stdinDone chan error,
 ) (err error) {
 	_, span := c.startSpan(ctx, "readStdio")
 	if span != nil {
@@ -515,7 +530,8 @@ func (c *ConmonClient) readStdio(
 		// only ends this attach session, so stop receiving the output as
 		// well, so that nothing gets written to the output streams after the
 		// attach returned.
-		if (cfg.Tty && cfg.StopAfterStdinEOF) || (!cfg.Tty && cfg.ContainerStdin && !cfg.StopAfterStdinEOF) {
+		if (cfg.Tty && cfg.StopAfterStdinEOF) ||
+			(!cfg.Tty && cfg.ContainerStdin && !cfg.StopAfterStdinEOF) {
 			closeRead()
 
 			if err := c.waitForOutput(ctx, closeRead, receiveStdoutError); err != nil {
@@ -545,7 +561,11 @@ func (c *ConmonClient) readStdio(
 // waitForOutput waits until the output got received. If the context is done
 // before, the output gets stopped, closeRead closes the read side of the
 // connection.
-func (c *ConmonClient) waitForOutput(ctx context.Context, closeRead func(), receiveStdoutError <-chan error) error {
+func (c *ConmonClient) waitForOutput(
+	ctx context.Context,
+	closeRead func(),
+	receiveStdoutError <-chan error,
+) error {
 	select {
 	case err := <-receiveStdoutError:
 		return err
@@ -581,7 +601,10 @@ type SetWindowSizeContainerConfig struct {
 }
 
 // SetWindowSizeContainer can be used to change the window size of a running container.
-func (c *ConmonClient) SetWindowSizeContainer(ctx context.Context, cfg *SetWindowSizeContainerConfig) error {
+func (c *ConmonClient) SetWindowSizeContainer(
+	ctx context.Context,
+	cfg *SetWindowSizeContainerConfig,
+) error {
 	ctx, span := c.startSpan(ctx, "SetWindowSizeContainer")
 	if span != nil {
 		defer span.End()
@@ -596,25 +619,28 @@ func (c *ConmonClient) SetWindowSizeContainer(ctx context.Context, cfg *SetWindo
 		return fmt.Errorf("create RPC client: %w", err)
 	}
 
-	future, free := rpcClient.SetWindowSizeContainer(ctx, func(p proto.Conmon_setWindowSizeContainer_Params) error {
-		req, err := p.NewRequest()
-		if err != nil {
-			return fmt.Errorf("create request: %w", err)
-		}
+	future, free := rpcClient.SetWindowSizeContainer(
+		ctx,
+		func(p proto.Conmon_setWindowSizeContainer_Params) error {
+			req, err := p.NewRequest()
+			if err != nil {
+				return fmt.Errorf("create request: %w", err)
+			}
 
-		if err := c.setMetadata(ctx, req); err != nil {
-			return err
-		}
+			if err := c.setMetadata(ctx, req); err != nil {
+				return err
+			}
 
-		if err := req.SetId(cfg.ID); err != nil {
-			return fmt.Errorf("set ID: %w", err)
-		}
+			if err := req.SetId(cfg.ID); err != nil {
+				return fmt.Errorf("set ID: %w", err)
+			}
 
-		req.SetWidth(cfg.Size.Width)
-		req.SetHeight(cfg.Size.Height)
+			req.SetWidth(cfg.Size.Width)
+			req.SetHeight(cfg.Size.Height)
 
-		return nil
-	})
+			return nil
+		},
+	)
 	defer free()
 
 	result, err := future.Struct()
