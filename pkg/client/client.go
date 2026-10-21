@@ -298,7 +298,11 @@ func (c *ConmonClient) connectRunningServer(ctx context.Context) (bool, error) {
 			return false, nil
 		}
 
-		return false, fmt.Errorf("dial server socket %s, not starting another server: %w", c.socket(), err)
+		return false, fmt.Errorf(
+			"dial server socket %s, not starting another server: %w",
+			c.socket(),
+			err,
+		)
 	}
 
 	// Known before the probe, which may not get an answer.
@@ -337,7 +341,13 @@ func (c *ConmonClient) connectRunningServer(ctx context.Context) (bool, error) {
 		server = "unknown PID: " + pidErr.Error()
 	}
 
-	return false, fmt.Errorf("%w: server %s on %s: %w", ErrServerNotResponding, server, c.socket(), err)
+	return false, fmt.Errorf(
+		"%w: server %s on %s: %w",
+		ErrServerNotResponding,
+		server,
+		c.socket(),
+		err,
+	)
 }
 
 // serverGoneTimeout bounds the wait for a server which closed the probe
@@ -548,7 +558,10 @@ func (c *ConmonClient) startServer(ctx context.Context, config *ConmonServerConf
 
 // setServerOutput sets the stdout and stderr of the server command. The
 // returned function releases the files of the parent.
-func (c *ConmonClient) setServerOutput(cmd *exec.Cmd, config *ConmonServerConfig) (release func(), err error) {
+func (c *ConmonClient) setServerOutput(
+	cmd *exec.Cmd,
+	config *ConmonServerConfig,
+) (release func(), err error) {
 	var stdout, stderr io.Writer = os.Stdout, os.Stderr
 
 	if config.Stdout != nil {
@@ -598,7 +611,10 @@ func (c *ConmonClient) setServerOutput(cmd *exec.Cmd, config *ConmonServerConfig
 // the server, and the processes it starts which inherit its output and may
 // outlive it. The returned function closes the write end of the parent, so
 // that only those keep the copy going.
-func serverOutputFile(logger *logrus.Logger, w io.Writer) (file *os.File, release func(), err error) {
+func serverOutputFile(
+	logger *logrus.Logger,
+	w io.Writer,
+) (file *os.File, release func(), err error) {
 	if file, ok := w.(*os.File); ok {
 		return file, func() {}, nil
 	}
@@ -638,7 +654,9 @@ func sameWriter(a, b io.Writer) (same bool) {
 	return a == b
 }
 
-func (c *ConmonClient) toArgs(config *ConmonServerConfig) (entrypoint string, args []string, err error) {
+func (c *ConmonClient) toArgs(
+	config *ConmonServerConfig,
+) (entrypoint string, args []string, err error) {
 	entrypoint = config.ConmonServerPath
 	if entrypoint == "" {
 		path, err := exec.LookPath(binaryName)
@@ -844,7 +862,10 @@ type rpcConn struct {
 // newRPCConn creates a connection on the socket.
 func newRPCConn(ctx context.Context, socket net.Conn) *rpcConn {
 	r := &rpcConn{}
-	r.conn = rpc.NewConn(rpc.NewStreamTransport(&watchedSocket{Conn: socket, broken: &r.broken}), nil)
+	r.conn = rpc.NewConn(
+		rpc.NewStreamTransport(&watchedSocket{Conn: socket, broken: &r.broken}),
+		nil,
+	)
 
 	// The bootstrap capability is shared by all later calls, the end of the
 	// context of the first one must not break it.
@@ -1038,7 +1059,12 @@ func (c *ConmonClient) requireServerFeature(ctx context.Context, feature, usage 
 	}
 
 	if !c.features[feature] {
-		return fmt.Errorf("%s needs the %q feature of the server: %w", usage, feature, ErrUnsupported)
+		return fmt.Errorf(
+			"%s needs the %q feature of the server: %w",
+			usage,
+			feature,
+			ErrUnsupported,
+		)
 	}
 
 	return nil
@@ -1315,71 +1341,77 @@ func (c *ConmonClient) CreateContainer(
 		return nil, fmt.Errorf("create RPC client: %w", err)
 	}
 
-	future, free := rpcClient.CreateContainer(ctx, func(p proto.Conmon_createContainer_Params) error {
-		req, err := p.NewRequest()
-		if err != nil {
-			return fmt.Errorf("create request: %w", err)
-		}
+	future, free := rpcClient.CreateContainer(
+		ctx,
+		func(p proto.Conmon_createContainer_Params) error {
+			req, err := p.NewRequest()
+			if err != nil {
+				return fmt.Errorf("create request: %w", err)
+			}
 
-		if err := c.setMetadata(ctx, req); err != nil {
-			return err
-		}
+			if err := c.setMetadata(ctx, req); err != nil {
+				return err
+			}
 
-		if err := req.SetId(cfg.ID); err != nil {
-			return fmt.Errorf("set ID: %w", err)
-		}
+			if err := req.SetId(cfg.ID); err != nil {
+				return fmt.Errorf("set ID: %w", err)
+			}
 
-		if err := req.SetBundlePath(cfg.BundlePath); err != nil {
-			return fmt.Errorf("set bundle path: %w", err)
-		}
+			if err := req.SetBundlePath(cfg.BundlePath); err != nil {
+				return fmt.Errorf("set bundle path: %w", err)
+			}
 
-		req.SetTerminal(cfg.Terminal)
-		req.SetStdin(cfg.Stdin)
+			req.SetTerminal(cfg.Terminal)
+			req.SetStdin(cfg.Stdin)
 
-		if err := stringSliceToTextList(cfg.ExitPaths, req.NewExitPaths); err != nil {
-			return fmt.Errorf("convert exit paths string slice to text list: %w", err)
-		}
+			if err := stringSliceToTextList(cfg.ExitPaths, req.NewExitPaths); err != nil {
+				return fmt.Errorf("convert exit paths string slice to text list: %w", err)
+			}
 
-		if err := stringSliceToTextList(cfg.OOMExitPaths, req.NewOomExitPaths); err != nil {
-			return fmt.Errorf("convert oom exit paths string slice to text list: %w", err)
-		}
+			if err := stringSliceToTextList(cfg.OOMExitPaths, req.NewOomExitPaths); err != nil {
+				return fmt.Errorf("convert oom exit paths string slice to text list: %w", err)
+			}
 
-		if err := initLogDrivers(&req, logDrivers); err != nil {
-			return fmt.Errorf("init log drivers: %w", err)
-		}
+			if err := initLogDrivers(&req, logDrivers); err != nil {
+				return fmt.Errorf("init log drivers: %w", err)
+			}
 
-		if err := stringSliceToTextList(cfg.CleanupCmd, req.NewCleanupCmd); err != nil {
-			return fmt.Errorf("convert cleanup command string slice to text list: %w", err)
-		}
+			if err := stringSliceToTextList(cfg.CleanupCmd, req.NewCleanupCmd); err != nil {
+				return fmt.Errorf("convert cleanup command string slice to text list: %w", err)
+			}
 
-		if err := stringSliceToTextList(cfg.GlobalArgs, req.NewGlobalArgs); err != nil {
-			return fmt.Errorf("convert global arguments string slice to text list: %w", err)
-		}
+			if err := stringSliceToTextList(cfg.GlobalArgs, req.NewGlobalArgs); err != nil {
+				return fmt.Errorf("convert global arguments string slice to text list: %w", err)
+			}
 
-		if err := stringSliceToTextList(cfg.CommandArgs, req.NewCommandArgs); err != nil {
-			return fmt.Errorf("convert command arguments string slice to text list: %w", err)
-		}
+			if err := stringSliceToTextList(cfg.CommandArgs, req.NewCommandArgs); err != nil {
+				return fmt.Errorf("convert command arguments string slice to text list: %w", err)
+			}
 
-		if err := stringStringMapToMapEntryList(cfg.EnvVars, req.NewEnvVars); err != nil {
-			return fmt.Errorf("convert environment variables to map entry list: %w", err)
-		}
+			if err := stringStringMapToMapEntryList(cfg.EnvVars, req.NewEnvVars); err != nil {
+				return fmt.Errorf("convert environment variables to map entry list: %w", err)
+			}
 
-		c.setCgroupManager(cfg.CgroupManager, req)
+			c.setCgroupManager(cfg.CgroupManager, req)
 
-		if err := remoteFDSliceToUInt64List(cfg.AdditionalFDs, req.NewAdditionalFds); err != nil {
-			return fmt.Errorf("convert file descriptor slice to slot list: %w", err)
-		}
+			if err := remoteFDSliceToUInt64List(
+				cfg.AdditionalFDs,
+				req.NewAdditionalFds,
+			); err != nil {
+				return fmt.Errorf("convert file descriptor slice to slot list: %w", err)
+			}
 
-		if err := remoteFDSliceToUInt64List(cfg.LeakFDs, req.NewLeakFds); err != nil {
-			return fmt.Errorf("convert file descriptor slice to slot list: %w", err)
-		}
+			if err := remoteFDSliceToUInt64List(cfg.LeakFDs, req.NewLeakFds); err != nil {
+				return fmt.Errorf("convert file descriptor slice to slot list: %w", err)
+			}
 
-		if err := req.SetSdnotifySocket(cfg.SdNotifySocket); err != nil {
-			return fmt.Errorf("set sd_notify socket: %w", err)
-		}
+			if err := req.SetSdnotifySocket(cfg.SdNotifySocket); err != nil {
+				return fmt.Errorf("set sd_notify socket: %w", err)
+			}
 
-		return nil
-	})
+			return nil
+		},
+	)
 	defer free()
 
 	result, err := future.Struct()
@@ -1446,7 +1478,10 @@ type ExecContainerResult struct {
 
 // ExecSyncContainer can be used to execute a command within a running
 // container.
-func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfig) (*ExecContainerResult, error) {
+func (c *ConmonClient) ExecSyncContainer(
+	ctx context.Context,
+	cfg *ExecSyncConfig,
+) (*ExecContainerResult, error) {
 	ctx, span := c.startSpan(ctx, "ExecSyncContainer")
 	if span != nil {
 		defer span.End()
@@ -1466,36 +1501,39 @@ func (c *ConmonClient) ExecSyncContainer(ctx context.Context, cfg *ExecSyncConfi
 		return nil, fmt.Errorf("create RPC client: %w", err)
 	}
 
-	future, free := rpcClient.ExecSyncContainer(ctx, func(p proto.Conmon_execSyncContainer_Params) error {
-		req, err := p.NewRequest()
-		if err != nil {
-			return fmt.Errorf("create request: %w", err)
-		}
+	future, free := rpcClient.ExecSyncContainer(
+		ctx,
+		func(p proto.Conmon_execSyncContainer_Params) error {
+			req, err := p.NewRequest()
+			if err != nil {
+				return fmt.Errorf("create request: %w", err)
+			}
 
-		if err := c.setMetadata(ctx, req); err != nil {
-			return err
-		}
+			if err := c.setMetadata(ctx, req); err != nil {
+				return err
+			}
 
-		if err := req.SetId(cfg.ID); err != nil {
-			return fmt.Errorf("set ID: %w", err)
-		}
+			if err := req.SetId(cfg.ID); err != nil {
+				return fmt.Errorf("set ID: %w", err)
+			}
 
-		req.SetTimeoutSec(execTimeout(ctx, cfg.Timeout))
+			req.SetTimeoutSec(execTimeout(ctx, cfg.Timeout))
 
-		if err := stringSliceToTextList(cfg.Command, req.NewCommand); err != nil {
-			return fmt.Errorf("convert command string slice to text list: %w", err)
-		}
+			if err := stringSliceToTextList(cfg.Command, req.NewCommand); err != nil {
+				return fmt.Errorf("convert command string slice to text list: %w", err)
+			}
 
-		req.SetTerminal(cfg.Terminal)
+			req.SetTerminal(cfg.Terminal)
 
-		if err := stringStringMapToMapEntryList(cfg.EnvVars, req.NewEnvVars); err != nil {
-			return fmt.Errorf("convert environment variables to map entry list: %w", err)
-		}
+			if err := stringStringMapToMapEntryList(cfg.EnvVars, req.NewEnvVars); err != nil {
+				return fmt.Errorf("convert environment variables to map entry list: %w", err)
+			}
 
-		c.setCgroupManager(cfg.CgroupManager, req)
+			c.setCgroupManager(cfg.CgroupManager, req)
 
-		return nil
-	})
+			return nil
+		},
+	)
 	defer free()
 
 	result, err := future.Struct()
@@ -1575,7 +1613,10 @@ func logDriversToProto(logDrivers []ContainerLogDriver) ([]protoLogDriver, error
 			return nil, fmt.Errorf("log driver type: %w", err)
 		}
 
-		res = append(res, protoLogDriver{typ: typ, path: logDriver.Path, maxSize: logDriver.MaxSize})
+		res = append(
+			res,
+			protoLogDriver{typ: typ, path: logDriver.Path, maxSize: logDriver.MaxSize},
+		)
 	}
 
 	return res, nil
@@ -1712,7 +1753,10 @@ type ReopenLogContainerConfig struct {
 
 // ReopenLogContainer can be used to rotate all configured container log
 // drivers.
-func (c *ConmonClient) ReopenLogContainer(ctx context.Context, cfg *ReopenLogContainerConfig) error {
+func (c *ConmonClient) ReopenLogContainer(
+	ctx context.Context,
+	cfg *ReopenLogContainerConfig,
+) error {
 	ctx, span := c.startSpan(ctx, "ReopenLogContainer")
 	if span != nil {
 		defer span.End()
@@ -1723,22 +1767,25 @@ func (c *ConmonClient) ReopenLogContainer(ctx context.Context, cfg *ReopenLogCon
 		return fmt.Errorf("create RPC client: %w", err)
 	}
 
-	future, free := rpcClient.ReopenLogContainer(ctx, func(p proto.Conmon_reopenLogContainer_Params) error {
-		req, err := p.NewRequest()
-		if err != nil {
-			return fmt.Errorf("create request: %w", err)
-		}
+	future, free := rpcClient.ReopenLogContainer(
+		ctx,
+		func(p proto.Conmon_reopenLogContainer_Params) error {
+			req, err := p.NewRequest()
+			if err != nil {
+				return fmt.Errorf("create request: %w", err)
+			}
 
-		if err := c.setMetadata(ctx, req); err != nil {
-			return err
-		}
+			if err := c.setMetadata(ctx, req); err != nil {
+				return err
+			}
 
-		if err := req.SetId(cfg.ID); err != nil {
-			return fmt.Errorf("set ID: %w", err)
-		}
+			if err := req.SetId(cfg.ID); err != nil {
+				return fmt.Errorf("set ID: %w", err)
+			}
 
-		return nil
-	})
+			return nil
+		},
+	)
 	defer free()
 
 	result, err := future.Struct()
@@ -1855,51 +1902,54 @@ func (c *ConmonClient) CreateNamespaces(
 		return nil, fmt.Errorf("create RPC client: %w", err)
 	}
 
-	future, free := rpcClient.CreateNamespaces(ctx, func(p proto.Conmon_createNamespaces_Params) error {
-		req, err := p.NewRequest()
-		if err != nil {
-			return fmt.Errorf("create request: %w", err)
-		}
-
-		if err := c.setMetadata(ctx, req); err != nil {
-			return err
-		}
-
-		namespaceList, err := req.NewNamespaces(int32(len(namespaces)))
-		if err != nil {
-			return fmt.Errorf("init namespaces: %w", err)
-		}
-
-		for i, namespace := range namespaces {
-			namespaceList.Set(i, namespace)
-		}
-
-		if slices.Contains(namespaces, proto.Conmon_Namespace_user) {
-			if err := stringSliceToTextList(
-				mappingsToSlice(cfg.IDMappings.UIDs()),
-				req.NewUidMappings,
-			); err != nil {
-				return fmt.Errorf("convert user ID mappings to text list: %w", err)
+	future, free := rpcClient.CreateNamespaces(
+		ctx,
+		func(p proto.Conmon_createNamespaces_Params) error {
+			req, err := p.NewRequest()
+			if err != nil {
+				return fmt.Errorf("create request: %w", err)
 			}
 
-			if err := stringSliceToTextList(
-				mappingsToSlice(cfg.IDMappings.GIDs()),
-				req.NewGidMappings,
-			); err != nil {
-				return fmt.Errorf("convert group ID mappings to text list: %w", err)
+			if err := c.setMetadata(ctx, req); err != nil {
+				return err
 			}
-		}
 
-		if err := req.SetBasePath(basePath); err != nil {
-			return fmt.Errorf("set base path: %w", err)
-		}
+			namespaceList, err := req.NewNamespaces(int32(len(namespaces)))
+			if err != nil {
+				return fmt.Errorf("init namespaces: %w", err)
+			}
 
-		if err := req.SetPodId(cfg.PodID); err != nil {
-			return fmt.Errorf("set pod ID: %w", err)
-		}
+			for i, namespace := range namespaces {
+				namespaceList.Set(i, namespace)
+			}
 
-		return nil
-	})
+			if slices.Contains(namespaces, proto.Conmon_Namespace_user) {
+				if err := stringSliceToTextList(
+					mappingsToSlice(cfg.IDMappings.UIDs()),
+					req.NewUidMappings,
+				); err != nil {
+					return fmt.Errorf("convert user ID mappings to text list: %w", err)
+				}
+
+				if err := stringSliceToTextList(
+					mappingsToSlice(cfg.IDMappings.GIDs()),
+					req.NewGidMappings,
+				); err != nil {
+					return fmt.Errorf("convert group ID mappings to text list: %w", err)
+				}
+			}
+
+			if err := req.SetBasePath(basePath); err != nil {
+				return fmt.Errorf("set base path: %w", err)
+			}
+
+			if err := req.SetPodId(cfg.PodID); err != nil {
+				return fmt.Errorf("set pod ID: %w", err)
+			}
+
+			return nil
+		},
+	)
 	defer free()
 
 	result, err := future.Struct()
@@ -2038,33 +2088,36 @@ func (c *ConmonClient) ServeExecContainer(
 		return nil, fmt.Errorf("create RPC client: %w", err)
 	}
 
-	future, free := rpcClient.ServeExecContainer(ctx, func(p proto.Conmon_serveExecContainer_Params) error {
-		req, err := p.NewRequest()
-		if err != nil {
-			return fmt.Errorf("create request: %w", err)
-		}
+	future, free := rpcClient.ServeExecContainer(
+		ctx,
+		func(p proto.Conmon_serveExecContainer_Params) error {
+			req, err := p.NewRequest()
+			if err != nil {
+				return fmt.Errorf("create request: %w", err)
+			}
 
-		if err := c.setMetadata(ctx, req); err != nil {
-			return err
-		}
+			if err := c.setMetadata(ctx, req); err != nil {
+				return err
+			}
 
-		if err := req.SetId(cfg.ID); err != nil {
-			return fmt.Errorf("set ID: %w", err)
-		}
+			if err := req.SetId(cfg.ID); err != nil {
+				return fmt.Errorf("set ID: %w", err)
+			}
 
-		if err := stringSliceToTextList(cfg.Command, req.NewCommand); err != nil {
-			return fmt.Errorf("convert command to text list: %w", err)
-		}
+			if err := stringSliceToTextList(cfg.Command, req.NewCommand); err != nil {
+				return fmt.Errorf("convert command to text list: %w", err)
+			}
 
-		req.SetTty(cfg.Tty)
-		req.SetStdin(cfg.Stdin)
-		req.SetStdout(cfg.Stdout)
-		req.SetStderr(cfg.Stderr)
+			req.SetTty(cfg.Tty)
+			req.SetStdin(cfg.Stdin)
+			req.SetStdout(cfg.Stdout)
+			req.SetStderr(cfg.Stderr)
 
-		c.setCgroupManager(cfg.CgroupManager, req)
+			c.setCgroupManager(cfg.CgroupManager, req)
 
-		return nil
-	})
+			return nil
+		},
+	)
 	defer free()
 
 	result, err := future.Struct()
@@ -2132,27 +2185,30 @@ func (c *ConmonClient) ServeAttachContainer(
 		return nil, fmt.Errorf("create RPC client: %w", err)
 	}
 
-	future, free := rpcClient.ServeAttachContainer(ctx, func(p proto.Conmon_serveAttachContainer_Params) error {
-		req, err := p.NewRequest()
-		if err != nil {
-			return fmt.Errorf("create request: %w", err)
-		}
+	future, free := rpcClient.ServeAttachContainer(
+		ctx,
+		func(p proto.Conmon_serveAttachContainer_Params) error {
+			req, err := p.NewRequest()
+			if err != nil {
+				return fmt.Errorf("create request: %w", err)
+			}
 
-		if err := c.setMetadata(ctx, req); err != nil {
-			return err
-		}
+			if err := c.setMetadata(ctx, req); err != nil {
+				return err
+			}
 
-		if err := req.SetId(cfg.ID); err != nil {
-			return fmt.Errorf("set ID: %w", err)
-		}
+			if err := req.SetId(cfg.ID); err != nil {
+				return fmt.Errorf("set ID: %w", err)
+			}
 
-		req.SetStdin(cfg.Stdin)
-		req.SetStdout(cfg.Stdout)
-		req.SetStderr(cfg.Stderr)
-		req.SetStopAfterStdinEof(cfg.StopAfterStdinEOF)
+			req.SetStdin(cfg.Stdin)
+			req.SetStdout(cfg.Stdout)
+			req.SetStderr(cfg.Stderr)
+			req.SetStopAfterStdinEof(cfg.StopAfterStdinEOF)
 
-		return nil
-	})
+			return nil
+		},
+	)
 	defer free()
 
 	result, err := future.Struct()
@@ -2215,24 +2271,27 @@ func (c *ConmonClient) ServePortForwardContainer(
 		return nil, fmt.Errorf("create RPC client: %w", err)
 	}
 
-	future, free := rpcClient.ServePortForwardContainer(ctx, func(p proto.Conmon_servePortForwardContainer_Params) error {
-		req, err := p.NewRequest()
-		if err != nil {
-			return fmt.Errorf("create request: %w", err)
-		}
+	future, free := rpcClient.ServePortForwardContainer(
+		ctx,
+		func(p proto.Conmon_servePortForwardContainer_Params) error {
+			req, err := p.NewRequest()
+			if err != nil {
+				return fmt.Errorf("create request: %w", err)
+			}
 
-		if err := c.setMetadata(ctx, req); err != nil {
-			return err
-		}
+			if err := c.setMetadata(ctx, req); err != nil {
+				return err
+			}
 
-		if err := req.SetNetNsPath(cfg.NetNsPath); err != nil {
-			return fmt.Errorf("set network namespace path: %w", err)
-		}
+			if err := req.SetNetNsPath(cfg.NetNsPath); err != nil {
+				return fmt.Errorf("set network namespace path: %w", err)
+			}
 
-		req.SetIdleTimeoutSec(idleTimeoutSeconds(cfg.IdleTimeout))
+			req.SetIdleTimeoutSec(idleTimeoutSeconds(cfg.IdleTimeout))
 
-		return nil
-	})
+			return nil
+		},
+	)
 	defer free()
 
 	result, err := future.Struct()

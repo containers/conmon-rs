@@ -53,7 +53,11 @@ var _ = Describe("ConmonClient", func() {
 			rss := vmRSSGivenPID(pid)
 			// Named after the spec, so that a value can be attributed in the
 			// verbose output of a whole run.
-			GinkgoWriter.Printf("VmRSS for server is %d kB in %q\n", rss, CurrentSpecReport().FullText())
+			GinkgoWriter.Printf(
+				"VmRSS for server is %d kB in %q\n",
+				rss,
+				CurrentSpecReport().FullText(),
+			)
 			Expect(rss).To(BeNumerically("<", maxRSSKB), "VmRSS of the server in kB")
 		}
 	})
@@ -99,7 +103,10 @@ var _ = Describe("ConmonClient", func() {
 				cfg.Env = []string{"CONMON_TEST_ENV=set"}
 			})
 
-			environ := strings.Split(fileContents(fmt.Sprintf("/proc/%d/environ", sut.PID())), "\x00")
+			environ := strings.Split(
+				fileContents(fmt.Sprintf("/proc/%d/environ", sut.PID())),
+				"\x00",
+			)
 			Expect(environ).To(ContainElement("CONMON_TEST_ENV=set"))
 			Expect(environ).NotTo(ContainElement(HavePrefix("PATH=")))
 		})
@@ -225,11 +232,18 @@ var _ = Describe("ConmonClient", func() {
 
 			It(testName("should write a non-zero exit code to the exit file", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh", "-c", "exit 3"}, nil)
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "sh", "-c", "exit 3"},
+					nil,
+				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer()
-				Eventually(func() string { return fileContents(tr.exitPath()) }, 10*time.Second).Should(Equal("3"))
+				Eventually(
+					func() string { return fileContents(tr.exitPath()) },
+					10*time.Second,
+				).Should(Equal("3"))
 			})
 
 			It(testName("should execute cleanup command when container exits", terminal), func() {
@@ -271,7 +285,12 @@ var _ = Describe("ConmonClient", func() {
 				// Report the size of the terminal until the resize shows up.
 				tr.createRuntimeConfigWithProcessArgs(
 					terminal,
-					[]string{"/busybox", "sh", "-c", "while true; do /busybox stty size; /busybox sleep 0.1; done"},
+					[]string{
+						"/busybox",
+						"sh",
+						"-c",
+						"while true; do /busybox stty size; /busybox sleep 0.1; done",
+					},
 					nil,
 				)
 				sut = tr.configGivenEnv()
@@ -383,7 +402,10 @@ var _ = Describe("ConmonClient", func() {
 
 			// The host side, usually the notify socket of systemd.
 			hostPath := filepath.Join(tr.tmpDir, "host.sock")
-			host, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: hostPath, Net: "unixgram"})
+			host, err := net.ListenUnixgram(
+				"unixgram",
+				&net.UnixAddr{Name: hostPath, Net: "unixgram"},
+			)
 			Expect(err).To(Succeed())
 
 			defer host.Close()
@@ -395,7 +417,11 @@ var _ = Describe("ConmonClient", func() {
 			// busybox cannot send datagrams, so send from the host side what
 			// the container would send through the mount.
 			ctrPath := filepath.Join(tr.tmpDir, "notify", "notify.sock")
-			conn, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: ctrPath, Net: "unixgram"})
+			conn, err := net.DialUnix(
+				"unixgram",
+				nil,
+				&net.UnixAddr{Name: ctrPath, Net: "unixgram"},
+			)
 			Expect(err).To(Succeed())
 
 			defer conn.Close()
@@ -432,29 +458,45 @@ var _ = Describe("ConmonClient", func() {
 				tr = newTestRunner()
 				tr.createRuntimeConfigWithProcessArgs(
 					terminal,
-					[]string{"/busybox", "sh", "-c", "i=0; while true; do echo line $i; i=$((i+1)); /busybox sleep 0.1; done"},
+					[]string{
+						"/busybox",
+						"sh",
+						"-c",
+						"i=0; while true; do echo line $i; i=$((i+1)); /busybox sleep 0.1; done",
+					},
 					nil,
 				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer()
 
-				atLeastThreeLines := WithTransform(func(lines []int) int { return len(lines) }, BeNumerically(">=", 3))
-				Eventually(func(g Gomega) []int { return logLineNumbers(g, tr.logPath()) }, 10*time.Second).
+				atLeastThreeLines := WithTransform(
+					func(lines []int) int { return len(lines) },
+					BeNumerically(">=", 3),
+				)
+				Eventually(
+					func(g Gomega) []int { return logLineNumbers(g, tr.logPath()) },
+					10*time.Second,
+				).
 					Should(atLeastThreeLines)
 
 				// Rotate the log like a log rotation would do.
 				rotated := tr.logPath() + ".1"
 				Expect(os.Rename(tr.logPath(), rotated)).To(Succeed())
-				Expect(sut.ReopenLogContainer(context.Background(), &client.ReopenLogContainerConfig{
-					ID: tr.ctrID,
-				})).To(Succeed())
+				Expect(
+					sut.ReopenLogContainer(context.Background(), &client.ReopenLogContainerConfig{
+						ID: tr.ctrID,
+					}),
+				).To(Succeed())
 
 				// The reopen wrote everything before it to the old file.
 				oldLines := logLineNumbers(Default, rotated)
 				Expect(oldLines).To(atLeastThreeLines)
 
-				Eventually(func(g Gomega) []int { return logLineNumbers(g, tr.logPath()) }, 10*time.Second).
+				Eventually(
+					func(g Gomega) []int { return logLineNumbers(g, tr.logPath()) },
+					10*time.Second,
+				).
 					Should(atLeastThreeLines)
 
 				newLines := logLineNumbers(Default, tr.logPath())
@@ -493,7 +535,11 @@ var _ = Describe("ConmonClient", func() {
 		for _, terminal := range []bool{true, false} {
 			It(testName("should handle many requests", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "30"}, nil)
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "sleep", "30"},
+					nil,
+				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer()
@@ -506,12 +552,22 @@ var _ = Describe("ConmonClient", func() {
 						defer GinkgoRecover()
 						defer wg.Done()
 
-						result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
-							ID:       tr.ctrID,
-							Command:  []string{"/busybox", "echo", "-n", "hello", "world", strconv.Itoa(i)},
-							Terminal: terminal,
-							Timeout:  timeoutUnlimited,
-						})
+						result, err := sut.ExecSyncContainer(
+							context.Background(),
+							&client.ExecSyncConfig{
+								ID: tr.ctrID,
+								Command: []string{
+									"/busybox",
+									"echo",
+									"-n",
+									"hello",
+									"world",
+									strconv.Itoa(i),
+								},
+								Terminal: terminal,
+								Timeout:  timeoutUnlimited,
+							},
+						)
 						Expect(err).To(Succeed())
 						Expect(result).NotTo(BeNil())
 						Expect(string(result.Stdout)).To(Equal(fmt.Sprintf("hello world %d", i)))
@@ -524,7 +580,11 @@ var _ = Describe("ConmonClient", func() {
 
 			It(testName("should not leak memory", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "600"}, nil)
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "sleep", "600"},
+					nil,
+				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer()
@@ -536,12 +596,22 @@ var _ = Describe("ConmonClient", func() {
 				mappingsBefore := mappingRSS(pid)
 
 				for i := range 25 {
-					result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
-						ID:       tr.ctrID,
-						Command:  []string{"/busybox", "echo", "-n", "hello", "world", strconv.Itoa(i)},
-						Terminal: terminal,
-						Timeout:  timeoutUnlimited,
-					})
+					result, err := sut.ExecSyncContainer(
+						context.Background(),
+						&client.ExecSyncConfig{
+							ID: tr.ctrID,
+							Command: []string{
+								"/busybox",
+								"echo",
+								"-n",
+								"hello",
+								"world",
+								strconv.Itoa(i),
+							},
+							Terminal: terminal,
+							Timeout:  timeoutUnlimited,
+						},
+					)
 
 					Expect(err).To(Succeed())
 					Expect(result).NotTo(BeNil())
@@ -563,7 +633,11 @@ var _ = Describe("ConmonClient", func() {
 		for _, terminal := range []bool{true, false} {
 			It(testName("should succeed without timeout", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "sleep", "10"},
+					nil,
+				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer()
@@ -594,7 +668,11 @@ var _ = Describe("ConmonClient", func() {
 
 			It(testName("should succeed with timeout", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "sleep", "10"},
+					nil,
+				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer()
@@ -614,7 +692,11 @@ var _ = Describe("ConmonClient", func() {
 
 			It(testName("should set the correct exit code", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "sleep", "10"},
+					nil,
+				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer()
@@ -646,7 +728,11 @@ var _ = Describe("ConmonClient", func() {
 
 			It(testName("should timeout", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "20"}, nil)
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "sleep", "20"},
+					nil,
+				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer()
@@ -669,7 +755,11 @@ var _ = Describe("ConmonClient", func() {
 
 			It(testName("should not outlive the deadline of the context", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "20"}, nil)
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "sleep", "20"},
+					nil,
+				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer()
@@ -692,11 +782,14 @@ var _ = Describe("ConmonClient", func() {
 
 				// The command got killed with the deadline.
 				Eventually(func(g Gomega) string {
-					result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
-						ID:      tr.ctrID,
-						Command: []string{"/busybox", "ps"},
-						Timeout: 10,
-					})
+					result, err := sut.ExecSyncContainer(
+						context.Background(),
+						&client.ExecSyncConfig{
+							ID:      tr.ctrID,
+							Command: []string{"/busybox", "ps"},
+							Timeout: 10,
+						},
+					)
 					g.Expect(err).To(Succeed())
 
 					return string(result.Stdout)
@@ -783,7 +876,11 @@ var _ = Describe("ConmonClient", func() {
 			changeSpec func(generate.Generator), beforeAttach func(),
 		) (attachErr <-chan error, stdout, stderr <-chan string) {
 			tr = newTestRunner()
-			tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh", "-c", script}, changeSpec)
+			tr.createRuntimeConfigWithProcessArgs(
+				terminal,
+				[]string{"/busybox", "sh", "-c", script},
+				changeSpec,
+			)
 			sut = tr.configGivenEnv()
 			tr.createContainer(sut, terminal)
 			tr.startContainer()
@@ -858,7 +955,13 @@ var _ = Describe("ConmonClient", func() {
 
 		It("should receive all output if stdin stays open", func() {
 			attachErr, stdout, stderr := attachAll(
-				"read -r; echo one; /busybox sleep 0.5; echo two", false, false, "go\n", false, nil, nil,
+				"read -r; echo one; /busybox sleep 0.5; echo two",
+				false,
+				false,
+				"go\n",
+				false,
+				nil,
+				nil,
 			)
 
 			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
@@ -867,7 +970,15 @@ var _ = Describe("ConmonClient", func() {
 		})
 
 		It("should return on stdin EOF if stdin stays open", func() {
-			attachErr, stdout, stderr := attachAll("/busybox sleep 1000", false, false, "", true, nil, nil)
+			attachErr, stdout, stderr := attachAll(
+				"/busybox sleep 1000",
+				false,
+				false,
+				"",
+				true,
+				nil,
+				nil,
+			)
 
 			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
 			Eventually(stdout, 10*time.Second).Should(Receive(BeEmpty()))
@@ -883,7 +994,9 @@ var _ = Describe("ConmonClient", func() {
 		It("should attach again to the same socket after an attach returned", func() {
 			tr = newTestRunner()
 			tr.createRuntimeConfigWithProcessArgs(
-				false, []string{"/busybox", "sh", "-c", "while read -r line; do echo got $line; done"}, nil,
+				false,
+				[]string{"/busybox", "sh", "-c", "while read -r line; do echo got $line; done"},
+				nil,
 			)
 			sut = tr.configGivenEnv()
 			tr.createContainer(sut, false)
@@ -978,14 +1091,22 @@ var _ = Describe("ConmonClient", func() {
 				})
 			}()
 
-			Eventually(attachErr, 10*time.Second).Should(Receive(MatchError(context.DeadlineExceeded)))
+			Eventually(
+				attachErr,
+				10*time.Second,
+			).Should(Receive(MatchError(context.DeadlineExceeded)))
 			// The attach closed the output before it returned.
 			Eventually(outputClosed, time.Second).Should(Receive(Succeed()))
 		})
 
 		It("should receive the done packet if the output ended before attaching", func() {
 			attachErr, stdout, stderr := attachAll(
-				"exec >&- 2>&-; /busybox touch /output-closed; /busybox cat", false, true, "", true, nil,
+				"exec >&- 2>&-; /busybox touch /output-closed; /busybox cat",
+				false,
+				true,
+				"",
+				true,
+				nil,
 				func() {
 					// Attach only once the output got closed, the read loops
 					// see the EOF right away.
@@ -1433,9 +1554,13 @@ var _ = Describe("ConmonClient", func() {
 
 			podID := uuid.New().String()
 			cfg := &client.CreateNamespacesConfig{
-				Namespaces: []client.Namespace{client.NamespaceIPC, client.NamespacePID, client.NamespaceUTS},
-				BasePath:   basePath,
-				PodID:      podID,
+				Namespaces: []client.Namespace{
+					client.NamespaceIPC,
+					client.NamespacePID,
+					client.NamespaceUTS,
+				},
+				BasePath: basePath,
+				PodID:    podID,
 			}
 
 			const calls = 10
@@ -1578,7 +1703,12 @@ var _ = Describe("JournaldLogger", func() {
 				marker := uuid.New().String()
 				tr.createRuntimeConfigWithProcessArgs(
 					terminal,
-					[]string{"/busybox", "sh", "-c", "echo hello " + marker + " && echo foo " + marker + " >&2"},
+					[]string{
+						"/busybox",
+						"sh",
+						"-c",
+						"echo hello " + marker + " && echo foo " + marker + " >&2",
+					},
 					nil,
 				)
 
@@ -1592,7 +1722,9 @@ var _ = Describe("JournaldLogger", func() {
 				// documented short ID field finds both lines.
 				journal := func(args ...string) func(g Gomega) string {
 					return func(g Gomega) string {
-						args := append([]string{"--since", "-1min", "CONTAINER_ID=" + tr.ctrID[:12]}, args...)
+						args := append(
+							[]string{"--since", "-1min", "CONTAINER_ID=" + tr.ctrID[:12]},
+							args...)
 						cmd := exec.Command("journalctl", args...)
 						stdout := strings.Builder{}
 						cmd.Stdout = &stdout
@@ -1645,10 +1777,13 @@ var _ = Describe("StreamingServer", func() {
 
 			// The server runs in the network namespace of the test, which
 			// needs no privileges to connect in.
-			result, err := sut.ServePortForwardContainer(context.Background(), &client.ServePortForwardContainerConfig{
-				NetNsPath:   "/proc/self/ns/net",
-				IdleTimeout: time.Minute,
-			})
+			result, err := sut.ServePortForwardContainer(
+				context.Background(),
+				&client.ServePortForwardContainerConfig{
+					NetNsPath:   "/proc/self/ns/net",
+					IdleTimeout: time.Minute,
+				},
+			)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.URL).To(ContainSubstring("/portforward/"))
 
@@ -1682,9 +1817,12 @@ var _ = Describe("StreamingServer", func() {
 			listener, port := echoServer(0)
 			defer listener.Close()
 
-			result, err := sut.ServePortForwardContainer(context.Background(), &client.ServePortForwardContainerConfig{
-				NetNsPath: "/proc/self/ns/net",
-			})
+			result, err := sut.ServePortForwardContainer(
+				context.Background(),
+				&client.ServePortForwardContainerConfig{
+					NetNsPath: "/proc/self/ns/net",
+				},
+			)
 			Expect(err).NotTo(HaveOccurred())
 
 			dialer, err := tunnelDialer(result.URL)
@@ -1709,26 +1847,35 @@ var _ = Describe("StreamingServer", func() {
 		})
 
 		for _, base64Codec := range []bool{false, true} {
-			It(fmt.Sprintf("should forward a port over the WebSocket channel protocol (base64: %v)", base64Codec), func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfig(false)
-				sut = tr.configGivenEnv()
+			It(
+				fmt.Sprintf(
+					"should forward a port over the WebSocket channel protocol (base64: %v)",
+					base64Codec,
+				),
+				func() {
+					tr = newTestRunner()
+					tr.createRuntimeConfig(false)
+					sut = tr.configGivenEnv()
 
-				payload := strings.Repeat("x", 100*1024)
-				listener, port := echoServer(int64(len(payload)))
+					payload := strings.Repeat("x", 100*1024)
+					listener, port := echoServer(int64(len(payload)))
 
-				defer listener.Close()
+					defer listener.Close()
 
-				result, err := sut.ServePortForwardContainer(context.Background(), &client.ServePortForwardContainerConfig{
-					NetNsPath: "/proc/self/ns/net",
-				})
-				Expect(err).NotTo(HaveOccurred())
+					result, err := sut.ServePortForwardContainer(
+						context.Background(),
+						&client.ServePortForwardContainerConfig{
+							NetNsPath: "/proc/self/ns/net",
+						},
+					)
+					Expect(err).NotTo(HaveOccurred())
 
-				data, errs, err := channelRoundTrip(result.URL, port, base64Codec, payload)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(errs).To(BeEmpty())
-				Expect(data).To(Equal(payload))
-			})
+					data, errs, err := channelRoundTrip(result.URL, port, base64Codec, payload)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(errs).To(BeEmpty())
+					Expect(data).To(Equal(payload))
+				},
+			)
 		}
 
 		It("should report a closed port on the WebSocket error channel", func() {
@@ -1739,9 +1886,12 @@ var _ = Describe("StreamingServer", func() {
 			listener, port := echoServer(0)
 			Expect(listener.Close()).To(Succeed())
 
-			result, err := sut.ServePortForwardContainer(context.Background(), &client.ServePortForwardContainerConfig{
-				NetNsPath: "/proc/self/ns/net",
-			})
+			result, err := sut.ServePortForwardContainer(
+				context.Background(),
+				&client.ServePortForwardContainerConfig{
+					NetNsPath: "/proc/self/ns/net",
+				},
+			)
 			Expect(err).NotTo(HaveOccurred())
 
 			data, errs, err := channelRoundTrip(result.URL, port, false, "request")
@@ -1772,9 +1922,12 @@ var _ = Describe("StreamingServer", func() {
 			listener, port := echoServer(0)
 			Expect(listener.Close()).To(Succeed())
 
-			result, err := sut.ServePortForwardContainer(context.Background(), &client.ServePortForwardContainerConfig{
-				NetNsPath: "/proc/self/ns/net",
-			})
+			result, err := sut.ServePortForwardContainer(
+				context.Background(),
+				&client.ServePortForwardContainerConfig{
+					NetNsPath: "/proc/self/ns/net",
+				},
+			)
 			Expect(err).NotTo(HaveOccurred())
 
 			dialer, err := portForwardDialer(result.URL)
@@ -1815,7 +1968,9 @@ var _ = Describe("StreamingServer", func() {
 
 			tr = newTestRunner()
 			tr.createRuntimeConfigWithProcessArgs(
-				false, []string{"/busybox", "nc", "-lk", "-p", "8080", "-e", "/busybox", "cat"}, nil,
+				false,
+				[]string{"/busybox", "nc", "-lk", "-p", "8080", "-e", "/busybox", "cat"},
+				nil,
 			)
 			sut = tr.configGivenEnv()
 			resp, err := sut.CreateContainer(context.Background(), tr.defaultConfig(false))
@@ -1830,9 +1985,12 @@ var _ = Describe("StreamingServer", func() {
 			// Until nc listens. A failed request ends the forwarder, so each
 			// attempt starts a new one.
 			Eventually(func() (string, error) {
-				result, err := sut.ServePortForwardContainer(context.Background(), &client.ServePortForwardContainerConfig{
-					NetNsPath: netNsPath,
-				})
+				result, err := sut.ServePortForwardContainer(
+					context.Background(),
+					&client.ServePortForwardContainerConfig{
+						NetNsPath: netNsPath,
+					},
+				)
 				if err != nil {
 					return "", fmt.Errorf("serve port forward: %w", err)
 				}
@@ -1858,18 +2016,30 @@ var _ = Describe("StreamingServer", func() {
 			for _, terminal := range []bool{true, false} {
 				It(testName("should succeed", terminal), func() {
 					tr = newTestRunner()
-					tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+					tr.createRuntimeConfigWithProcessArgs(
+						terminal,
+						[]string{"/busybox", "sleep", "10"},
+						nil,
+					)
 					sut = tr.configGivenEnv()
 					tr.createContainer(sut, terminal)
 					tr.startContainer()
 
-					result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
-						ID:      tr.ctrID,
-						Command: []string{"/busybox", "sh", "-c", "echo -n stdout && echo -n stderr >&2"},
-						Tty:     terminal,
-						Stdout:  true,
-						Stderr:  true,
-					})
+					result, err := sut.ServeExecContainer(
+						context.Background(),
+						&client.ServeExecContainerConfig{
+							ID: tr.ctrID,
+							Command: []string{
+								"/busybox",
+								"sh",
+								"-c",
+								"echo -n stdout && echo -n stderr >&2",
+							},
+							Tty:    terminal,
+							Stdout: true,
+							Stderr: true,
+						},
+					)
 
 					Expect(err).To(Succeed())
 					Expect(result.URL).NotTo(BeEmpty())
@@ -1877,11 +2047,18 @@ var _ = Describe("StreamingServer", func() {
 					stdout := &bytes.Buffer{}
 					stderr := &bytes.Buffer{}
 
-					Expect(streamURLOver(context.Background(), transport, result.URL, remotecommand.StreamOptions{
-						Stdout: stdout,
-						Stderr: stderr,
-						Tty:    terminal,
-					})).To(Succeed())
+					Expect(
+						streamURLOver(
+							context.Background(),
+							transport,
+							result.URL,
+							remotecommand.StreamOptions{
+								Stdout: stdout,
+								Stderr: stderr,
+								Tty:    terminal,
+							},
+						),
+					).To(Succeed())
 
 					if terminal {
 						Expect(stdout.String()).To(Equal("stdoutstderr"))
@@ -1897,25 +2074,37 @@ var _ = Describe("StreamingServer", func() {
 
 				It(testName("should report a non-zero exit code", terminal), func() {
 					tr = newTestRunner()
-					tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+					tr.createRuntimeConfigWithProcessArgs(
+						terminal,
+						[]string{"/busybox", "sleep", "10"},
+						nil,
+					)
 					sut = tr.configGivenEnv()
 					tr.createContainer(sut, terminal)
 					tr.startContainer()
 
-					result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
-						ID:      tr.ctrID,
-						Command: []string{"/busybox", "sh", "-c", "exit 3"},
-						Tty:     terminal,
-						Stdout:  true,
-						Stderr:  true,
-					})
+					result, err := sut.ServeExecContainer(
+						context.Background(),
+						&client.ServeExecContainerConfig{
+							ID:      tr.ctrID,
+							Command: []string{"/busybox", "sh", "-c", "exit 3"},
+							Tty:     terminal,
+							Stdout:  true,
+							Stderr:  true,
+						},
+					)
 					Expect(err).To(Succeed())
 
-					err = streamURLOver(context.Background(), transport, result.URL, remotecommand.StreamOptions{
-						Stdout: io.Discard,
-						Stderr: io.Discard,
-						Tty:    terminal,
-					})
+					err = streamURLOver(
+						context.Background(),
+						transport,
+						result.URL,
+						remotecommand.StreamOptions{
+							Stdout: io.Discard,
+							Stderr: io.Discard,
+							Tty:    terminal,
+						},
+					)
 
 					var exitErr utilexec.CodeExitError
 					Expect(errors.As(err, &exitErr)).To(BeTrue(), "error %v", err)
@@ -1924,16 +2113,28 @@ var _ = Describe("StreamingServer", func() {
 
 				It(testName("should fail if container does not exist", terminal), func() {
 					tr = newTestRunner()
-					tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+					tr.createRuntimeConfigWithProcessArgs(
+						terminal,
+						[]string{"/busybox", "sleep", "10"},
+						nil,
+					)
 					sut = tr.configGivenEnv()
 
-					result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
-						ID:      "wrong",
-						Command: []string{"/busybox", "sh", "-c", "echo -n stdout && echo -n stderr >&2"},
-						Tty:     terminal,
-						Stdout:  true,
-						Stderr:  true,
-					})
+					result, err := sut.ServeExecContainer(
+						context.Background(),
+						&client.ServeExecContainerConfig{
+							ID: "wrong",
+							Command: []string{
+								"/busybox",
+								"sh",
+								"-c",
+								"echo -n stdout && echo -n stderr >&2",
+							},
+							Tty:    terminal,
+							Stdout: true,
+							Stderr: true,
+						},
+					)
 
 					Expect(err).To(HaveOccurred())
 					Expect(result).To(BeNil())
@@ -1941,26 +2142,40 @@ var _ = Describe("StreamingServer", func() {
 
 				It(testName("should not keep the PID file of a failed exec", terminal), func() {
 					tr = newTestRunner()
-					tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+					tr.createRuntimeConfigWithProcessArgs(
+						terminal,
+						[]string{"/busybox", "sleep", "10"},
+						nil,
+					)
 					sut = tr.configGivenEnv()
 					tr.createContainer(sut, terminal)
 					tr.startContainer()
 
-					result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
-						ID:      tr.ctrID,
-						Command: []string{"/does/not/exist"},
-						Tty:     terminal,
-						Stdout:  true,
-						Stderr:  true,
-					})
+					result, err := sut.ServeExecContainer(
+						context.Background(),
+						&client.ServeExecContainerConfig{
+							ID:      tr.ctrID,
+							Command: []string{"/does/not/exist"},
+							Tty:     terminal,
+							Stdout:  true,
+							Stderr:  true,
+						},
+					)
 					Expect(err).To(Succeed())
 
 					// The runtime fails to start the command, the session reports it.
-					Expect(streamURLOver(context.Background(), transport, result.URL, remotecommand.StreamOptions{
-						Stdout: io.Discard,
-						Stderr: io.Discard,
-						Tty:    terminal,
-					})).NotTo(Succeed())
+					Expect(
+						streamURLOver(
+							context.Background(),
+							transport,
+							result.URL,
+							remotecommand.StreamOptions{
+								Stdout: io.Discard,
+								Stderr: io.Discard,
+								Tty:    terminal,
+							},
+						),
+					).NotTo(Succeed())
 
 					Eventually(func() []string { return execPIDFiles(tr.tmpDir) }).
 						WithTimeout(10 * time.Second).
@@ -1976,18 +2191,30 @@ var _ = Describe("StreamingServer", func() {
 
 			It("should receive the output written after stdin EOF", func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "10"}, nil)
+				tr.createRuntimeConfigWithProcessArgs(
+					false,
+					[]string{"/busybox", "sleep", "10"},
+					nil,
+				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, false)
 				tr.startContainer()
 
-				result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
-					ID:      tr.ctrID,
-					Command: []string{"/busybox", "sh", "-c", "/busybox cat && echo stdin closed"},
-					Stdin:   true,
-					Stdout:  true,
-					Stderr:  true,
-				})
+				result, err := sut.ServeExecContainer(
+					context.Background(),
+					&client.ServeExecContainerConfig{
+						ID: tr.ctrID,
+						Command: []string{
+							"/busybox",
+							"sh",
+							"-c",
+							"/busybox cat && echo stdin closed",
+						},
+						Stdin:  true,
+						Stdout: true,
+						Stderr: true,
+					},
+				)
 				Expect(err).To(Succeed())
 
 				stdout := &bytes.Buffer{}
@@ -2007,18 +2234,30 @@ var _ = Describe("StreamingServer", func() {
 
 			It("should keep an interactive stdin open", func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "10"}, nil)
+				tr.createRuntimeConfigWithProcessArgs(
+					false,
+					[]string{"/busybox", "sleep", "10"},
+					nil,
+				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, false)
 				tr.startContainer()
 
-				result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
-					ID:      tr.ctrID,
-					Command: []string{"/busybox", "sh", "-c", "read -r line; echo \"got $line\""},
-					Stdin:   true,
-					Stdout:  true,
-					Stderr:  true,
-				})
+				result, err := sut.ServeExecContainer(
+					context.Background(),
+					&client.ServeExecContainerConfig{
+						ID: tr.ctrID,
+						Command: []string{
+							"/busybox",
+							"sh",
+							"-c",
+							"read -r line; echo \"got $line\"",
+						},
+						Stdin:  true,
+						Stdout: true,
+						Stderr: true,
+					},
+				)
 				Expect(err).To(Succeed())
 
 				// The line comes after the session started, stdin stays open
@@ -2057,18 +2296,23 @@ var _ = Describe("StreamingServer", func() {
 				// The container only answers once attached, then it exits, which
 				// ends the session.
 				tr.createRuntimeConfigWithProcessArgs(
-					terminal, []string{"/busybox", "sh", "-c", "read -r line; echo \"got $line\""}, nil,
+					terminal,
+					[]string{"/busybox", "sh", "-c", "read -r line; echo \"got $line\""},
+					nil,
 				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer()
 
-				result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
-					ID:     tr.ctrID,
-					Stdin:  true,
-					Stdout: true,
-					Stderr: true,
-				})
+				result, err := sut.ServeAttachContainer(
+					context.Background(),
+					&client.ServeAttachContainerConfig{
+						ID:     tr.ctrID,
+						Stdin:  true,
+						Stdout: true,
+						Stderr: true,
+					},
+				)
 
 				Expect(err).To(Succeed())
 				Expect(result.URL).NotTo(BeEmpty())
@@ -2086,7 +2330,10 @@ var _ = Describe("StreamingServer", func() {
 
 					_, err := stdinWriter.Write([]byte("attached\n"))
 					Expect(err).To(Succeed())
-					Eventually(stdout.String, 10*time.Second).Should(ContainSubstring("got attached"))
+					Eventually(
+						stdout.String,
+						10*time.Second,
+					).Should(ContainSubstring("got attached"))
 				}()
 
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -2105,19 +2352,24 @@ var _ = Describe("StreamingServer", func() {
 			It("should receive the output written after stdin EOF with stdin once", func() {
 				tr = newTestRunner()
 				tr.createRuntimeConfigWithProcessArgs(
-					false, []string{"/busybox", "sh", "-c", "/busybox cat && echo stdin closed"}, nil,
+					false,
+					[]string{"/busybox", "sh", "-c", "/busybox cat && echo stdin closed"},
+					nil,
 				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, false)
 				tr.startContainer()
 
-				result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
-					ID:                tr.ctrID,
-					Stdin:             true,
-					Stdout:            true,
-					Stderr:            true,
-					StopAfterStdinEOF: true,
-				})
+				result, err := sut.ServeAttachContainer(
+					context.Background(),
+					&client.ServeAttachContainerConfig{
+						ID:                tr.ctrID,
+						Stdin:             true,
+						Stdout:            true,
+						Stderr:            true,
+						StopAfterStdinEOF: true,
+					},
+				)
 				Expect(err).To(Succeed())
 
 				stdout := &bytes.Buffer{}
@@ -2144,10 +2396,13 @@ var _ = Describe("StreamingServer", func() {
 				tr.createContainer(sut, true)
 				tr.startContainer()
 
-				result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
-					ID:     tr.ctrID,
-					Stdout: true,
-				})
+				result, err := sut.ServeAttachContainer(
+					context.Background(),
+					&client.ServeAttachContainerConfig{
+						ID:     tr.ctrID,
+						Stdout: true,
+					},
+				)
 				Expect(err).To(Succeed())
 
 				stdout := &syncBuffer{}
@@ -2164,12 +2419,19 @@ var _ = Describe("StreamingServer", func() {
 
 			It(testName("should fail if container does not exist", terminal), func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sleep", "10"}, nil)
+				tr.createRuntimeConfigWithProcessArgs(
+					terminal,
+					[]string{"/busybox", "sleep", "10"},
+					nil,
+				)
 				sut = tr.configGivenEnv()
 
-				result, err := sut.ServeAttachContainer(context.Background(), &client.ServeAttachContainerConfig{
-					ID: "wrong",
-				})
+				result, err := sut.ServeAttachContainer(
+					context.Background(),
+					&client.ServeAttachContainerConfig{
+						ID: "wrong",
+					},
+				)
 
 				Expect(err).To(HaveOccurred())
 				Expect(result).To(BeNil())
@@ -2185,13 +2447,21 @@ var _ = Describe("StreamingServer", func() {
 			tr.createContainer(sut, false)
 			tr.startContainer()
 
-			result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
-				ID:      tr.ctrID,
-				Command: []string{"/busybox", "sh", "-c", "/busybox cat && echo -n stderr >&2 && exit 3"},
-				Stdin:   true,
-				Stdout:  true,
-				Stderr:  true,
-			})
+			result, err := sut.ServeExecContainer(
+				context.Background(),
+				&client.ServeExecContainerConfig{
+					ID: tr.ctrID,
+					Command: []string{
+						"/busybox",
+						"sh",
+						"-c",
+						"/busybox cat && echo -n stderr >&2 && exit 3",
+					},
+					Stdin:  true,
+					Stdout: true,
+					Stderr: true,
+				},
+			)
 			Expect(err).To(Succeed())
 
 			proxyURL, stop := kubeletProxy(result.URL)
@@ -2224,9 +2494,12 @@ var _ = Describe("StreamingServer", func() {
 			listener, port := echoServer(0)
 			defer listener.Close()
 
-			result, err := sut.ServePortForwardContainer(context.Background(), &client.ServePortForwardContainerConfig{
-				NetNsPath: "/proc/self/ns/net",
-			})
+			result, err := sut.ServePortForwardContainer(
+				context.Background(),
+				&client.ServePortForwardContainerConfig{
+					NetNsPath: "/proc/self/ns/net",
+				},
+			)
 			Expect(err).NotTo(HaveOccurred())
 
 			proxyURL, stopProxy := kubeletProxy(result.URL)
@@ -2248,17 +2521,29 @@ var _ = Describe("StreamingServer", func() {
 		for _, protocol := range []string{"v4.channel.k8s.io", "v4.base64.channel.k8s.io"} {
 			It("should report the output and the exit code over "+protocol, func() {
 				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "10"}, nil)
+				tr.createRuntimeConfigWithProcessArgs(
+					false,
+					[]string{"/busybox", "sleep", "10"},
+					nil,
+				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, false)
 				tr.startContainer()
 
-				result, err := sut.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
-					ID:      tr.ctrID,
-					Command: []string{"/busybox", "sh", "-c", "echo -n stdout && echo -n stderr >&2 && exit 3"},
-					Stdout:  true,
-					Stderr:  true,
-				})
+				result, err := sut.ServeExecContainer(
+					context.Background(),
+					&client.ServeExecContainerConfig{
+						ID: tr.ctrID,
+						Command: []string{
+							"/busybox",
+							"sh",
+							"-c",
+							"echo -n stdout && echo -n stderr >&2 && exit 3",
+						},
+						Stdout: true,
+						Stderr: true,
+					},
+				)
 				Expect(err).To(Succeed())
 
 				stdout, stderr, status, err := legacyExec(result.URL, protocol)

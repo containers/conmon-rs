@@ -10,6 +10,7 @@ linters:
     - bidichk
     - bodyclose
     - canonicalheader
+    - clickhouselint
     - containedctx
     - contextcheck
     - copyloopvar
@@ -109,7 +110,7 @@ linters:
     - wsl_v5
     - zerologlint
     # - depguard
-    # - exhaustruct
+    # - exhaustruct_v5
     # - funcorder
     # - gochecknoglobals
     # - noinlineerr
@@ -171,6 +172,8 @@ formatters:
     - gofmt
     - gofumpt
     - goimports
+    - golines
+    - swaggo
   exclusions:
     generated: lax
     paths:

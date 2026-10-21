@@ -122,7 +122,11 @@ func TestRPCConnUnusableOnceServerGone(t *testing.T) {
 func serveTestSocket(t *testing.T, dir string, withBootstrap bool) {
 	t.Helper()
 
-	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", filepath.Join(dir, socketName))
+	listener, err := (&net.ListenConfig{}).Listen(
+		t.Context(),
+		"unix",
+		filepath.Join(dir, socketName),
+	)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -141,7 +145,10 @@ func serveTestSocket(t *testing.T, dir string, withBootstrap bool) {
 				return
 			}
 
-			conns = append(conns, rpc.NewConn(rpc.NewStreamTransport(socket), serverOptions(withBootstrap)))
+			conns = append(
+				conns,
+				rpc.NewConn(rpc.NewStreamTransport(socket), serverOptions(withBootstrap)),
+			)
 		}
 	}()
 
@@ -160,7 +167,11 @@ func serveTestSocket(t *testing.T, dir string, withBootstrap bool) {
 func serveSilentSocket(t *testing.T, dir string) {
 	t.Helper()
 
-	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", filepath.Join(dir, socketName))
+	listener, err := (&net.ListenConfig{}).Listen(
+		t.Context(),
+		"unix",
+		filepath.Join(dir, socketName),
+	)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -231,7 +242,11 @@ func TestNewKeepsServerWhichDoesNotAnswer(t *testing.T) {
 func serveClosingSocket(t *testing.T, dir string) func() {
 	t.Helper()
 
-	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", filepath.Join(dir, socketName))
+	listener, err := (&net.ListenConfig{}).Listen(
+		t.Context(),
+		"unix",
+		filepath.Join(dir, socketName),
+	)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -337,7 +352,10 @@ func TestNewStartsServerOnlyWithoutListener(t *testing.T) {
 	// The socket of a server which crashed refuses the connection.
 	stale := t.TempDir()
 
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(stale, socketName), Net: "unix"})
+	listener, err := net.ListenUnix(
+		"unix",
+		&net.UnixAddr{Name: filepath.Join(stale, socketName), Net: "unix"},
+	)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -348,7 +366,8 @@ func TestNewStartsServerOnlyWithoutListener(t *testing.T) {
 	// Without a server binary, the start fails, which shows that New tried.
 	for _, dir := range []string{stale, t.TempDir()} {
 		err := newClient(dir)
-		if err == nil || errors.Is(err, ErrServerNotResponding) || !strings.Contains(err.Error(), "start server") {
+		if err == nil || errors.Is(err, ErrServerNotResponding) ||
+			!strings.Contains(err.Error(), "start server") {
 			t.Fatalf("got error %v, want a failed server start", err)
 		}
 	}
@@ -456,7 +475,12 @@ func TestNamespaceConversion(t *testing.T) {
 		t.Errorf("unknown namespace: got %v, want %v", err, errInvalidValue)
 	}
 
-	if _, err := namespaceTypes.fromProto(proto.Conmon_Namespace(42)); !errors.Is(err, errInvalidValue) {
+	if _, err := namespaceTypes.fromProto(
+		proto.Conmon_Namespace(42),
+	); !errors.Is(
+		err,
+		errInvalidValue,
+	) {
 		t.Errorf("unknown namespace from server: got %v, want %v", err, errInvalidValue)
 	}
 }
