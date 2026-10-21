@@ -14,4 +14,8 @@ var (
 	// asks for CgroupManagerPerCommand itself, which the server knows nothing
 	// about.
 	ErrCgroupManagerPerCommand = errors.New("the per command cgroup manager cannot be CgroupManagerPerCommand itself")
+
+	// ErrMissingNetNsPath gets returned if port forwarding is requested
+	// without the path of the network namespace.
+	ErrMissingNetNsPath = errors.New("network namespace path is empty")
 )

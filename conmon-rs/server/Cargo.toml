@@ -38,7 +38,7 @@ serde_json = { version = "1.0.154", default-features = false, features = ["std"]
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "signal", "time"] }
 tokio-eventfd = { version = "0.2.2", default-features = false }
 tokio-seqpacket = { version = "0.9.1", default-features = false }
-tokio-util = { version = "0.7.20", default-features = false, features = ["compat"] }
+tokio-util = { version = "0.7.20", default-features = false, features = ["compat", "time"] }
 tracing = { version = "0.1.44", default-features = false }
 tracing-opentelemetry = { version = "0.34.0", default-features = false, optional = true }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt"] }

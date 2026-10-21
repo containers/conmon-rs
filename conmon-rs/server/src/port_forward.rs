@@ -20,7 +20,7 @@
 
 use crate::{
     idle::Activity,
-    spdy::{Connection, Headers, Stream, StreamReceiver, StreamSender},
+    spdy::{Connection, Headers, PING_INTERVAL, Stream, StreamReceiver, StreamSender},
 };
 use anyhow::{Context, Result, bail, ensure};
 use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
@@ -35,24 +35,27 @@ use percent_encoding::percent_decode_str;
 use std::{
     collections::{HashMap, VecDeque},
     fs::{self, File},
-    future::{self, Future},
+    future::Future,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpStream as StdTcpStream},
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     pin::pin,
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard, mpsc as std_mpsc},
     thread,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, DuplexStream},
-    net::{TcpSocket, TcpStream},
+    net::{TcpSocket, TcpStream, tcp::OwnedWriteHalf},
     select,
     sync::{mpsc, oneshot},
-    task::JoinSet,
-    time::{self, Duration, Instant},
+    task::{JoinHandle, JoinSet},
+    time::{self, Duration},
 };
-use tokio_util::sync::CancellationToken;
+use tokio_util::{
+    sync::CancellationToken,
+    time::{DelayQueue, delay_queue::Key},
+};
 use tracing::{debug, trace, warn};
 
 /// The protocol the client has to ask for in the upgrade request.
@@ -72,9 +75,13 @@ const STREAM_CREATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// accepted or refused right away, unless a firewall drops it.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The stack of the thread which creates sockets within the network
-/// namespace.
+/// The stack of the thread which creates the sockets of a session within its
+/// network namespace.
 const SOCKET_THREAD_STACK_SIZE: usize = 128 * 1024;
+
+/// How long the thread waits for the next connection before it ends, which
+/// leaves the network namespace.
+const SOCKET_THREAD_LINGER: Duration = Duration::from_secs(1);
 
 /// How much a client may send for a connection before it got established in
 /// the pod. Its data gets taken meanwhile, so that it does not hold up the
@@ -217,13 +224,212 @@ impl ChannelOutput {
 pub struct PortForward {
     netns_path: PathBuf,
     idle_timeout: Option<Duration>,
+    ping_interval: Option<Duration>,
 }
 
 /// The streams of a request, until both arrived.
 struct PendingRequest {
     data: Option<Stream>,
     error: Option<Stream>,
-    deadline: Instant,
+
+    /// The deadline of the request in [`Pending::deadlines`].
+    deadline: Key,
+}
+
+/// The requests waiting for their second stream, with their deadlines. Both
+/// are bounded by the streams of a connection.
+struct Pending {
+    requests: HashMap<Arc<str>, PendingRequest>,
+    deadlines: DelayQueue<Arc<str>>,
+}
+
+impl Pending {
+    fn new() -> Self {
+        Self {
+            requests: HashMap::new(),
+            deadlines: DelayQueue::new(),
+        }
+    }
+
+    /// The request, created with its deadline if it is new.
+    fn get_or_insert(&mut self, request_id: &Arc<str>) -> &mut PendingRequest {
+        let Self {
+            requests,
+            deadlines,
+        } = self;
+        requests
+            .entry(request_id.clone())
+            .or_insert_with(|| PendingRequest {
+                data: None,
+                error: None,
+                deadline: deadlines.insert(request_id.clone(), STREAM_CREATION_TIMEOUT),
+            })
+    }
+
+    /// Remove a request which got both streams, with its deadline.
+    fn complete(&mut self, request_id: &str) -> Option<PendingRequest> {
+        let request = self.requests.remove(request_id)?;
+        self.deadlines.remove(&request.deadline);
+        Some(request)
+    }
+}
+
+/// The sockets for a connection into the pod, one per address family.
+type Sockets = Vec<(IpAddr, io::Result<StdTcpStream>)>;
+
+/// The requests for sockets to the thread in the network namespace.
+type SocketRequests = std_mpsc::Sender<oneshot::Sender<Result<Sockets>>>;
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Creates the sockets of a session in its network namespace, which stay in
+/// the namespace they got created in. The runtime connects them. A thread
+/// enters the namespace and serves the connections which follow within the
+/// linger time, then it ends and leaves the namespace, at once when the
+/// session ends. Failures are not kept, every connection which fails gets its
+/// own error.
+struct Namespace {
+    path: PathBuf,
+    linger: Duration,
+
+    /// The requests of the thread which got started last.
+    requests: Mutex<Option<SocketRequests>>,
+
+    /// How many threads got started and ended.
+    #[cfg(test)]
+    threads: AtomicUsize,
+    #[cfg(test)]
+    ended: Arc<AtomicUsize>,
+}
+
+impl Namespace {
+    fn new(path: PathBuf) -> Arc<Self> {
+        Self::with_linger(path, SOCKET_THREAD_LINGER)
+    }
+
+    fn with_linger(path: PathBuf, linger: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            path,
+            linger,
+            requests: Mutex::default(),
+            #[cfg(test)]
+            threads: AtomicUsize::new(0),
+            #[cfg(test)]
+            ended: Arc::default(),
+        })
+    }
+
+    async fn sockets(&self) -> Result<Sockets> {
+        // A thread which ended before it took the request gets replaced
+        // once.
+        for _ in 0..2 {
+            let (tx, rx) = oneshot::channel();
+            self.send(tx)?;
+            if let Ok(sockets) = rx.await {
+                return sockets;
+            }
+        }
+        bail!("socket thread ended")
+    }
+
+    /// Send a request to the thread, which gets started if it ended.
+    fn send(&self, reply: oneshot::Sender<Result<Sockets>>) -> Result<()> {
+        let running = self.lock().clone();
+        let reply = match running {
+            Some(requests) => match requests.send(reply) {
+                Ok(()) => return Ok(()),
+                Err(std_mpsc::SendError(reply)) => reply,
+            },
+            None => reply,
+        };
+        let requests = self.start()?;
+        requests
+            .send(reply)
+            .map_err(|_| anyhow::anyhow!("socket thread ended"))?;
+        *self.lock() = Some(requests);
+        Ok(())
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<SocketRequests>> {
+        self.requests.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn start(&self) -> Result<SocketRequests> {
+        let (tx, rx) = std_mpsc::channel();
+        let (path, linger) = (self.path.clone(), self.linger);
+        #[cfg(test)]
+        let ended = self.ended.clone();
+        thread::Builder::new()
+            .name("portforward".into())
+            .stack_size(SOCKET_THREAD_STACK_SIZE)
+            .spawn(move || {
+                Self::serve(&path, linger, &rx);
+                #[cfg(test)]
+                ended.fetch_add(1, Ordering::Relaxed);
+            })
+            .context("spawn socket thread")?;
+        #[cfg(test)]
+        self.threads.fetch_add(1, Ordering::Relaxed);
+        Ok(tx)
+    }
+
+    /// Create sockets until no request arrived for the linger time or the
+    /// session is gone. The thread enters the namespace for its first
+    /// request, a request which finds it outside of the namespace tries again
+    /// and gets its own error.
+    fn serve(
+        path: &Path,
+        linger: Duration,
+        requests: &std_mpsc::Receiver<oneshot::Sender<Result<Sockets>>>,
+    ) {
+        let mut entered = false;
+        while let Ok(reply) = requests.recv_timeout(linger) {
+            if !entered {
+                if let Err(e) = Self::enter(path) {
+                    let _ = reply.send(Err(e));
+                    continue;
+                }
+                entered = true;
+            }
+            let _ = reply.send(Ok(Self::create_sockets()));
+        }
+    }
+
+    /// Enter the network namespace with the current thread.
+    fn enter(path: &Path) -> Result<()> {
+        let netns = File::open(path)
+            .with_context(|| format!("open network namespace {}", path.display()))?;
+        // Entering the own namespace needs privileges as well, which a server
+        // for a host network pod or in tests may not have.
+        let current = fs::metadata("/proc/thread-self/ns/net").context("stat network namespace")?;
+        let target = netns.metadata().context("stat target network namespace")?;
+        if (current.dev(), current.ino()) != (target.dev(), target.ino()) {
+            setns(&netns, CloneFlags::CLONE_NEWNET)
+                .with_context(|| format!("enter network namespace {}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    fn create_sockets() -> Sockets {
+        [
+            (AddressFamily::Inet, IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            (AddressFamily::Inet6, IpAddr::V6(Ipv6Addr::LOCALHOST)),
+        ]
+        .into_iter()
+        .map(|(family, ip)| {
+            let socket = socket(
+                family,
+                SockType::Stream,
+                SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
+                None,
+            )
+            .map(StdTcpStream::from)
+            .map_err(io::Error::from);
+            (ip, socket)
+        })
+        .collect()
+    }
 }
 
 impl PortForward {
@@ -231,7 +437,15 @@ impl PortForward {
         Self {
             netns_path,
             idle_timeout,
+            ping_interval: Some(PING_INTERVAL),
         }
+    }
+
+    /// Serve SPDY without pinging the client.
+    #[cfg(test)]
+    fn without_pings(mut self) -> Self {
+        self.ping_interval = None;
+        self
     }
 
     /// Serve port forward requests on the upgraded connection until it ends.
@@ -239,24 +453,20 @@ impl PortForward {
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
     {
-        let mut connection = Connection::serve(io, self.idle_timeout, Self::accept);
-        let netns_path: Arc<Path> = self.netns_path.into();
-        let mut pending = HashMap::new();
+        let mut connection =
+            Connection::serve(io, self.idle_timeout, self.ping_interval, Self::accept);
+        let namespace = Namespace::new(self.netns_path);
+        let mut pending = Pending::new();
 
         loop {
-            let deadline = pending.values().map(|r: &PendingRequest| r.deadline).min();
-            let expired = async {
-                match deadline {
-                    Some(deadline) => time::sleep_until(deadline).await,
-                    None => future::pending().await,
-                }
-            };
             select! {
                 stream = connection.accept() => match stream {
-                    Some(stream) => Self::add(&mut pending, stream, &netns_path),
+                    Some(stream) => Self::add(&mut pending, stream, &namespace),
                     None => break,
                 },
-                _ = expired => Self::expire(&mut pending),
+                Some(expired) = pending.deadlines.next() => {
+                    Self::expire(&mut pending, expired.into_inner());
+                }
             }
         }
         debug!("Port forward connection ended");
@@ -331,7 +541,7 @@ impl PortForward {
         let (mut sink, mut messages) = socket.split();
         let (mut from_server, mut to_server) = tokio::io::split(connection);
 
-        let mut to_client = tokio::spawn(async move {
+        let mut to_client: JoinHandle<()> = tokio::spawn(async move {
             let mut buf = BytesMut::new();
             loop {
                 buf.reserve(TUNNEL_BUFFER);
@@ -377,16 +587,16 @@ impl PortForward {
         };
 
         let mut from_client = pin!(from_client);
-        select! {
-            _ = &mut from_client => {
-                let _ = time::timeout(WEBSOCKET_CLOSE_TIMEOUT, &mut to_client).await;
-            }
+        let client_done = select! {
+            _ = &mut from_client => true,
             // The SPDY connection ended, the client answers the close.
-            _ = &mut to_client => {
-                let _ = time::timeout(WEBSOCKET_CLOSE_TIMEOUT, from_client).await;
-            }
+            _ = &mut to_client => false,
+        };
+        if client_done {
+            Self::join_or_abort(to_client, WEBSOCKET_CLOSE_TIMEOUT).await;
+        } else {
+            let _ = time::timeout(WEBSOCKET_CLOSE_TIMEOUT, from_client).await;
         }
-        to_client.abort();
     }
 
     /// Serve the channel protocol: forward a connection per port until all
@@ -399,6 +609,8 @@ impl PortForward {
         // On its own, as a port which does not take its input stops reading
         // the WebSocket.
         let idle = CancellationToken::new();
+        // Ends the watch however the session ends.
+        let _idle_guard = idle.clone().drop_guard();
         tokio::spawn({
             let (activity, idle, timeout) = (activity.clone(), idle.clone(), self.idle_timeout);
             async move {
@@ -428,7 +640,7 @@ impl PortForward {
                 .await;
         });
 
-        let netns_path: Arc<Path> = self.netns_path.into();
+        let namespace = Namespace::new(self.netns_path);
         let mut inputs = Vec::with_capacity(ports.len());
         let mut forwards = JoinSet::new();
         for (i, port) in ports.into_iter().enumerate() {
@@ -449,7 +661,7 @@ impl PortForward {
             let (input_tx, input_rx) = mpsc::channel(CHANNEL_QUEUE);
             inputs.push(input_tx);
             forwards.spawn(Self::forward_channel(
-                netns_path.clone(),
+                namespace.clone(),
                 port,
                 input_rx,
                 output,
@@ -478,13 +690,20 @@ impl PortForward {
                 _ = idle.cancelled() => break,
             }
         }
-        // Ends the idle watch.
-        idle.cancel();
 
         // The ports still forwarded lose their client.
         forwards.abort_all();
         while forwards.join_next().await.is_some() {}
-        let _ = time::timeout(WEBSOCKET_CLOSE_TIMEOUT, writer).await;
+        Self::join_or_abort(writer, WEBSOCKET_CLOSE_TIMEOUT).await;
+    }
+
+    /// Wait for a task, abort it after the timeout. Dropping its handle would
+    /// leave it running, a writer to a client which does not read would hold
+    /// the connection.
+    async fn join_or_abort(mut task: JoinHandle<()>, timeout: Duration) {
+        if time::timeout(timeout, &mut task).await.is_err() {
+            task.abort();
+        }
     }
 
     /// Hand a message of the client to the connection of its channel. Only
@@ -537,13 +756,13 @@ impl PortForward {
 
     /// Forward the connection of a port, the error channel reports a failure.
     async fn forward_channel(
-        netns_path: Arc<Path>,
+        namespace: Arc<Namespace>,
         port: u16,
         mut input: mpsc::Receiver<Bytes>,
         output: ChannelOutput,
     ) {
         debug!("Forwarding port {port} over WebSocket");
-        let result = match Self::drain_until(Self::connect(netns_path, port), &mut input).await {
+        let result = match Self::drain_until(Self::connect(&namespace, port), &mut input).await {
             Ok((connection, early)) => {
                 Self::copy_channel(early, &mut input, &output, connection).await
             }
@@ -567,24 +786,7 @@ impl PortForward {
         connection: TcpStream,
     ) -> Result<()> {
         let (mut from_container, mut to_container) = connection.into_split();
-
-        let upstream = async {
-            for data in early.data {
-                to_container
-                    .write_all(&data)
-                    .await
-                    .context("write to the pod")?;
-            }
-            if !early.ended {
-                while let Some(data) = input.recv().await {
-                    to_container
-                        .write_all(&data)
-                        .await
-                        .context("write to the pod")?;
-                }
-            }
-            anyhow::Ok(())
-        };
+        let upstream = Self::write_input(early, input, &mut to_container);
 
         let downstream = async {
             let mut buf = vec![0; READ_BUFFER];
@@ -637,24 +839,18 @@ impl PortForward {
     /// The request a stream belongs to. Old clients send no ID, their
     /// requests use the IDs of the error streams, the data streams follow
     /// them.
-    fn request_id(stream: &Stream) -> String {
+    fn request_id(stream: &Stream) -> Arc<str> {
         match stream.headers().get(REQUEST_ID_HEADER) {
-            Some(id) if !id.is_empty() => id.to_owned(),
-            _ if Self::is_error_stream(stream) => stream.id().to_string(),
-            _ => (i64::from(stream.id()) - 2).to_string(),
+            Some(id) if !id.is_empty() => id.into(),
+            _ if Self::is_error_stream(stream) => stream.id().to_string().into(),
+            _ => (i64::from(stream.id()) - 2).to_string().into(),
         }
     }
 
     /// Add a stream to its request, which starts once both streams arrived.
-    fn add(pending: &mut HashMap<String, PendingRequest>, stream: Stream, netns_path: &Arc<Path>) {
+    fn add(pending: &mut Pending, stream: Stream, namespace: &Arc<Namespace>) {
         let request_id = Self::request_id(&stream);
-        let request = pending
-            .entry(request_id.clone())
-            .or_insert_with(|| PendingRequest {
-                data: None,
-                error: None,
-                deadline: Instant::now() + STREAM_CREATION_TIMEOUT,
-            });
+        let request = pending.get_or_insert(&request_id);
         let slot = if Self::is_error_stream(&stream) {
             &mut request.error
         } else {
@@ -677,38 +873,39 @@ impl PortForward {
             data: Some(data),
             error: Some(error),
             ..
-        }) = pending.remove(&request_id)
+        }) = pending.complete(&request_id)
         {
-            tokio::spawn(Self::forward(request_id, data, error, netns_path.clone()));
+            tokio::spawn(Self::forward(request_id, data, error, namespace.clone()));
         }
     }
 
-    /// Fail the requests whose second stream did not arrive in time.
-    fn expire(pending: &mut HashMap<String, PendingRequest>) {
-        let now = Instant::now();
-        pending.retain(|request_id, request| {
-            if request.deadline > now {
-                return true;
-            }
-            warn!("Port forward request {request_id} timed out waiting for streams");
-            if let Some(mut error) = request.error.take() {
-                let message = format!("request {request_id}: timed out waiting for streams");
-                tokio::spawn(async move {
-                    let _ = error.send(message.into()).await;
-                    let _ = error.close().await;
-                });
-            }
-            false
-        });
+    /// Fail a request whose second stream did not arrive in time.
+    fn expire(pending: &mut Pending, request_id: Arc<str>) {
+        let Some(mut request) = pending.requests.remove(&request_id) else {
+            return;
+        };
+        warn!("Port forward request {request_id} timed out waiting for streams");
+        if let Some(mut error) = request.error.take() {
+            let message = format!("request {request_id}: timed out waiting for streams");
+            tokio::spawn(async move {
+                let _ = error.send(message.into()).await;
+                let _ = error.close().await;
+            });
+        }
     }
 
     /// Forward a single connection, the error stream reports a failure.
-    async fn forward(request_id: String, data: Stream, mut error: Stream, netns_path: Arc<Path>) {
+    async fn forward(
+        request_id: Arc<str>,
+        data: Stream,
+        mut error: Stream,
+        namespace: Arc<Namespace>,
+    ) {
         let port = Self::port(data.headers()).unwrap_or_default();
         debug!("Forwarding port {port} for request {request_id}");
 
         let (mut from_client, to_client) = data.split();
-        let result = match Self::drain_until(Self::connect(netns_path, port), &mut from_client)
+        let result = match Self::drain_until(Self::connect(&namespace, port), &mut from_client)
             .await
         {
             Ok((connection, early)) => Self::copy(early, from_client, to_client, connection).await,
@@ -772,20 +969,7 @@ impl PortForward {
         let (mut from_container, mut to_container) = connection.into_split();
 
         let upstream = async {
-            for data in early.data {
-                to_container
-                    .write_all(&data)
-                    .await
-                    .context("write to the pod")?;
-            }
-            if !early.ended {
-                while let Some(data) = from_client.recv().await {
-                    to_container
-                        .write_all(&data)
-                        .await
-                        .context("write to the pod")?;
-                }
-            }
+            Self::write_input(early, &mut from_client, &mut to_container).await?;
             if !from_client.is_reset() {
                 to_container
                     .shutdown()
@@ -842,23 +1026,36 @@ impl PortForward {
         if sender.is_reset() { Ok(()) } else { Err(e) }
     }
 
+    /// Write what the client sends to the pod until the client is done,
+    /// starting with what it sent while the connection got established.
+    async fn write_input(
+        early: Early,
+        input: &mut impl Input,
+        to_container: &mut OwnedWriteHalf,
+    ) -> Result<()> {
+        for data in early.data {
+            to_container
+                .write_all(&data)
+                .await
+                .context("write to the pod")?;
+        }
+        if !early.ended {
+            while let Some(data) = input.recv().await {
+                to_container
+                    .write_all(&data)
+                    .await
+                    .context("write to the pod")?;
+            }
+        }
+        Ok(())
+    }
+
     /// Connect to the port in the network namespace of the pod. The pod may
     /// listen on either family, they get tried one after the other like CRI-O
     /// does.
-    async fn connect(netns_path: Arc<Path>, port: u16) -> Result<TcpStream> {
-        let (tx, rx) = oneshot::channel();
-        let path = netns_path.clone();
-        thread::Builder::new()
-            .name("portforward".into())
-            .stack_size(SOCKET_THREAD_STACK_SIZE)
-            .spawn(move || {
-                let _ = tx.send(Self::sockets_in_namespace(&path));
-            })
-            .context("spawn socket thread")?;
-        let sockets = rx.await.context("socket thread ended")??;
-
+    async fn connect(namespace: &Namespace, port: u16) -> Result<TcpStream> {
         let mut errors = vec![];
-        for (ip, socket) in sockets {
+        for (ip, socket) in namespace.sockets().await? {
             let result = match socket {
                 Ok(socket) => time::timeout(
                     CONNECT_TIMEOUT,
@@ -875,43 +1072,9 @@ impl PortForward {
         }
         bail!(
             "failed to connect to localhost:{port} inside network namespace {}: {}",
-            netns_path.display(),
+            namespace.path.display(),
             errors.join(", ")
         )
-    }
-
-    /// Create a socket per address family from a thread which entered the
-    /// network namespace. The sockets stay in the namespace they got created
-    /// in, so the thread ends right away and the runtime connects them.
-    fn sockets_in_namespace(netns_path: &Path) -> Result<Vec<(IpAddr, io::Result<StdTcpStream>)>> {
-        let netns = File::open(netns_path)
-            .with_context(|| format!("open network namespace {}", netns_path.display()))?;
-        // Entering the own namespace needs privileges as well, which a server
-        // for a host network pod or in tests may not have.
-        let current = fs::metadata("/proc/thread-self/ns/net").context("stat network namespace")?;
-        let target = netns.metadata().context("stat target network namespace")?;
-        if (current.dev(), current.ino()) != (target.dev(), target.ino()) {
-            setns(&netns, CloneFlags::CLONE_NEWNET)
-                .with_context(|| format!("enter network namespace {}", netns_path.display()))?;
-        }
-
-        Ok([
-            (AddressFamily::Inet, IpAddr::V4(Ipv4Addr::LOCALHOST)),
-            (AddressFamily::Inet6, IpAddr::V6(Ipv6Addr::LOCALHOST)),
-        ]
-        .into_iter()
-        .map(|(family, ip)| {
-            let socket = socket(
-                family,
-                SockType::Stream,
-                SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
-                None,
-            )
-            .map(StdTcpStream::from)
-            .map_err(io::Error::from);
-            (ip, socket)
-        })
-        .collect())
     }
 }
 
@@ -919,6 +1082,7 @@ impl PortForward {
 mod tests {
     use super::*;
     use crate::spdy::testing::{Client, Frame};
+    use std::future;
     use tokio::net::TcpListener;
 
     /// The network namespace of the tests, which needs no privileges to
@@ -927,7 +1091,11 @@ mod tests {
 
     fn serve() -> Result<Client> {
         let (client, server) = Client::pair()?;
-        tokio::spawn(PortForward::new(NETNS.into(), None).serve_spdy(server));
+        tokio::spawn(
+            PortForward::new(NETNS.into(), None)
+                .without_pings()
+                .serve_spdy(server),
+        );
         Ok(client)
     }
 
@@ -1194,6 +1362,119 @@ mod tests {
                 .contains("before the connection got established"),
             "{err:#}"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hanging_tasks_get_aborted() -> Result<()> {
+        let (alive_tx, alive_rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _alive = alive_tx;
+            future::pending::<()>().await
+        });
+        PortForward::join_or_abort(task, Duration::from_millis(10)).await;
+        // The task got dropped with its sender.
+        assert!(
+            time::timeout(Duration::from_secs(5), alive_rx)
+                .await?
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_requests_free_their_deadline() {
+        let mut pending = Pending::new();
+        let (a, b): (Arc<str>, Arc<str>) = ("a".into(), "b".into());
+        pending.get_or_insert(&a);
+        pending.get_or_insert(&a);
+        pending.get_or_insert(&b);
+        assert_eq!(pending.deadlines.len(), 2);
+        assert!(pending.complete("a").is_some());
+        assert!(pending.complete("a").is_none());
+        assert_eq!(pending.deadlines.len(), 1);
+
+        let expired = time::timeout(Duration::from_secs(60), pending.deadlines.next())
+            .await
+            .expect("expired")
+            .expect("deadline");
+        assert_eq!(expired.into_inner(), b);
+        assert!(pending.deadlines.is_empty());
+    }
+
+    #[tokio::test]
+    async fn namespace_threads_serve_close_connections() -> Result<()> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let port = listener.local_addr()?.port();
+        let namespace = Namespace::with_linger(NETNS.into(), Duration::from_secs(60));
+        for _ in 0..3 {
+            let _connection = PortForward::connect(&namespace, port).await?;
+            listener.accept().await?;
+        }
+        assert_eq!(namespace.threads.load(Ordering::Relaxed), 1);
+
+        // The thread ends without connections, the next one starts another.
+        let namespace = Namespace::with_linger(NETNS.into(), Duration::from_millis(10));
+        let _connection = PortForward::connect(&namespace, port).await?;
+        time::sleep(Duration::from_millis(200)).await;
+        let _connection = PortForward::connect(&namespace, port).await?;
+        assert_eq!(namespace.threads.load(Ordering::Relaxed), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn namespace_threads_end_with_their_session() -> Result<()> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let namespace = Namespace::with_linger(NETNS.into(), Duration::from_secs(60));
+        let _connection = PortForward::connect(&namespace, listener.local_addr()?.port()).await?;
+        let ended = namespace.ended.clone();
+        drop(namespace);
+        time::timeout(Duration::from_secs(5), async {
+            while ended.load(Ordering::Relaxed) == 0 {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("the thread lingers")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn every_connection_gets_its_namespace_error() -> Result<()> {
+        let namespace = Namespace::new("/nonexistent".into());
+        let connects = (0..10).map(|_| PortForward::connect(&namespace, 80));
+        for result in futures::future::join_all(connects).await {
+            let err = result.expect_err("no namespace");
+            assert!(
+                err.chain().any(|e| e.downcast_ref::<io::Error>().is_some()),
+                "{err:#}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn namespace_failures_are_not_kept() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("netns");
+        let namespace = Namespace::new(path.clone());
+        let err = PortForward::connect(&namespace, 80)
+            .await
+            .expect_err("no namespace");
+        // The error keeps its chain.
+        assert!(
+            err.chain().any(|e| e.downcast_ref::<io::Error>().is_some()),
+            "{err:#}"
+        );
+        assert!(
+            format!("{err:#}").contains(&format!("open network namespace {}", path.display())),
+            "{err:#}"
+        );
+
+        // Once the namespace exists, the next connection works.
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        std::os::unix::fs::symlink(NETNS, &path)?;
+        let _connection = PortForward::connect(&namespace, listener.local_addr()?.port()).await?;
         Ok(())
     }
 

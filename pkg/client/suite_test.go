@@ -942,9 +942,11 @@ func portForwardRoundTrip(local uint16, payload string) (string, error) {
 	return string(response), nil
 }
 
-// echoServer listens on a free local port and echoes every connection until
-// the client closes its sending side. It returns the listener and its port.
-func echoServer() (listener net.Listener, port int) {
+// echoServer listens on a free local port and echoes every connection. With
+// a size of 0 until the client closes its sending side, otherwise the size
+// in bytes, then it closes the connection itself. The channel protocol cannot
+// close the sending side, so its server has to end the connection.
+func echoServer(size int64) (listener net.Listener, port int) {
 	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp4", "127.0.0.1:0")
 	Expect(err).NotTo(HaveOccurred())
 
@@ -961,37 +963,14 @@ func echoServer() (listener net.Listener, port int) {
 			go func() {
 				defer conn.Close()
 
-				if _, err := io.Copy(conn, conn); err != nil {
-					GinkgoWriter.Printf("Echo failed: %v\n", err)
+				var err error
+				if size > 0 {
+					_, err = io.CopyN(conn, conn, size)
+				} else {
+					_, err = io.Copy(conn, conn)
 				}
-			}()
-		}
-	}()
 
-	return listener, addr.Port
-}
-
-// echoOnceServer listens on a free local port, echoes size bytes of every
-// connection and closes it then. The channel protocol cannot close the
-// sending side, so the server has to end the connection.
-func echoOnceServer(size int64) (listener net.Listener, port int) {
-	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp4", "127.0.0.1:0")
-	Expect(err).NotTo(HaveOccurred())
-
-	addr, ok := listener.Addr().(*net.TCPAddr)
-	Expect(ok).To(BeTrue())
-
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-
-			go func() {
-				defer conn.Close()
-
-				if _, err := io.CopyN(conn, conn, size); err != nil {
+				if err != nil {
 					GinkgoWriter.Printf("Echo failed: %v\n", err)
 				}
 			}()

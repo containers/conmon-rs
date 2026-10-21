@@ -63,6 +63,14 @@ where
         }
     }
 
+    /// Whether the hashmap holds an element for the key which has not
+    /// expired, without taking it.
+    pub fn contains_key(&self, k: &K) -> bool {
+        self.cache
+            .peek(k)
+            .is_some_and(|(inserted, _)| Instant::now() - *inserted <= self.max_duration)
+    }
+
     /// Remove expired items from the LRU end. Since items are inserted
     /// chronologically and never accessed otherwise, the LRU entry is always
     /// the oldest. If it is not expired, no entries are expired, so this can
@@ -111,6 +119,19 @@ where
 mod tests {
     use super::*;
     use tokio::time::advance;
+
+    #[tokio::test(start_paused = true)]
+    async fn contains_key_leaves_the_element() {
+        let mut sut = BoundedHashMap::default();
+        sut.insert(1, "one");
+        assert!(sut.contains_key(&1));
+        assert!(!sut.contains_key(&2));
+        assert_eq!(sut.remove(&1), Some("one"));
+
+        sut.insert(3, "three");
+        advance(sut.max_duration + Duration::from_secs(1)).await;
+        assert!(!sut.contains_key(&3));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn bounded_hashmap_test() {
