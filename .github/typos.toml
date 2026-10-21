@@ -12,3 +12,6 @@ extend-ignore-re = [
     "ws",
     "consts",
 ]
+[default.extend-words]
+# in-toto, the format of the attestation bundles.
+intoto = "intoto"

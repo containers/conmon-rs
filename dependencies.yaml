@@ -37,3 +37,31 @@ dependencies:
     refPaths:
       - path: .github/workflows/ci.yml
         match: "NIX_VERSION:"
+      - path: .github/workflows/build-static.yml
+        match: "NIX_VERSION:"
+      - path: .github/workflows/publish-static.yml
+        match: "NIX_VERSION:"
+
+  - name: cosign
+    version: 3.1.4
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: "cosign-release: v"
+      - path: .github/workflows/publish-static.yml
+        match: "cosign-release: v"
+      - path: .github/workflows/build-sources.yml
+        match: "cosign-release: v"
+      - path: .github/workflows/release.yml
+        match: "cosign-release: v"
+
+  - name: alpine
+    version: 3.24
+    refPaths:
+      - path: .github/workflows/build-static.yml
+        match: "alpine:"
+
+  - name: ubuntu-arm-runner
+    version: 24.04
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: "runs-on: ubuntu-.*-arm"

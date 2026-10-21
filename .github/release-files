@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Fetch, checksum and verify the files of a release in the current directory:
+# the binaries, which the ci workflow built and the publish-static workflow
+# attested and signed for the tagged commit on main, and the source tarball and
+# checksums, which the build-sources workflow built, attested and signed for the
+# tag. Run by the build-sources and release workflows.
+#
+# The architectures are the packages of flake.nix. The build and publish jobs
+# of the ci workflow and scripts/get list them as well.
+ARCHES=(amd64 arm64 ppc64le s390x)
+BASE_URL=https://storage.googleapis.com/cri-o/conmon-rs
+REPO=${GITHUB_REPOSITORY:?}
+SHA=${GITHUB_SHA:?}
+ISSUER=https://token.actions.githubusercontent.com
+PROVENANCE=https://slsa.dev/provenance/v1
+SPDX=https://spdx.dev/Document/v2.3
+
+# Fail right away for a commit from before the binaries got attested, whose
+# attestations would never show up in the bucket. Other errors of the API stay
+# errors.
+check() {
+    local output
+    if ! output=$(gh api "repos/$REPO/contents/.github/workflows/publish-static.yml?ref=$SHA" --silent 2>&1); then
+        if [[ $output == *"(HTTP 404)"* ]]; then
+            echo "::error::$SHA is from before the binaries got attested, tag a newer commit." >&2
+        else
+            echo "::error::Unable to look up the workflows of $SHA: $output" >&2
+        fi
+        exit 1
+    fi
+}
+
+# The ci run of the commit uploads the binaries, which may take as long as its
+# slowest build when the cache misses. Wait for it, then fetch them.
+fetch() {
+    local run
+    run=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&branch=main" --jq '.workflow_runs[0].id')
+    echo "Waiting for ci run $run of $SHA"
+    gh run watch "$run" --repo "$REPO" --interval 60 >/dev/null
+    local jobs
+    jobs=$(gh run view "$run" --repo "$REPO" --json jobs \
+        --jq '.jobs[] | select(.name | startswith("publish-static-")) | "\(.name) \(.conclusion)"')
+    for arch in "${ARCHES[@]}"; do
+        if ! grep -q "^publish-static-$arch / .* success\$" <<<"$jobs"; then
+            echo "::error::ci run $run did not publish the $arch binary: $(grep "^publish-static-$arch " <<<"$jobs" || echo "no publish-static-$arch job")" >&2
+            exit 1
+        fi
+    done
+    for arch in "${ARCHES[@]}"; do
+        for file in conmonrs.$arch{,.bundle,.intoto.jsonl,.spdx.json,.spdx.intoto.jsonl}; do
+            curl -sSfL --retry-all-errors --retry 5 --retry-delay 10 "$BASE_URL/$SHA/$file" -o "$file"
+        done
+    done
+}
+
+# The files the release publishes.
+files() {
+    local tarball=conmonrs-${GITHUB_REF_NAME:?}.tar.gz
+    for arch in "${ARCHES[@]}"; do
+        printf '%s\n' conmonrs."$arch"{,.bundle,.intoto.jsonl,.spdx.json,.spdx.intoto.jsonl}
+    done
+    printf '%s\n' "$tarball" "$tarball.bundle" sha256sums.txt sha256sums.txt.bundle sources.intoto.jsonl
+}
+
+checksums() {
+    sha256sum -- "${ARCHES[@]/#/conmonrs.}" "conmonrs-${GITHUB_REF_NAME:?}.tar.gz" >sha256sums.txt
+    cat sha256sums.txt
+}
+
+# Verify an attestation through the API and offline with its bundle, which gets
+# published.
+verify_attestation() {
+    local file=$1 bundle=$2 workflow=$3 ref=$4 predicate=$5
+    local args=(
+        --repo "$REPO"
+        --signer-workflow "$REPO/.github/workflows/$workflow"
+        --source-ref "$ref"
+        --source-digest "$SHA"
+        --predicate-type "$predicate"
+        --deny-self-hosted-runners
+    )
+    gh attestation verify "$file" "${args[@]}"
+    gh attestation verify "$file" --bundle "$bundle" "${args[@]}"
+}
+
+verify_signature() {
+    local file=$1 workflow=$2 caller=$3 ref=$4
+    cosign verify-blob "$file" \
+        --bundle "$file.bundle" \
+        --certificate-identity "https://github.com/$REPO/.github/workflows/$workflow@$ref" \
+        --certificate-oidc-issuer "$ISSUER" \
+        --certificate-github-workflow-name "$caller" \
+        --certificate-github-workflow-repository "$REPO" \
+        --certificate-github-workflow-ref "$ref" \
+        --certificate-github-workflow-sha "$SHA"
+}
+
+binaries() {
+    local workflow=publish-static.yml ref=refs/heads/main
+    for arch in "${ARCHES[@]}"; do
+        local file=conmonrs.$arch
+        verify_signature "$file" "$workflow" ci "$ref"
+        verify_attestation "$file" "$file.intoto.jsonl" "$workflow" "$ref" "$PROVENANCE"
+        verify_attestation "$file" "$file.spdx.intoto.jsonl" "$workflow" "$ref" "$SPDX"
+        # The published SBOM has to be the attested one.
+        gh attestation verify "$file" \
+            --bundle "$file.spdx.intoto.jsonl" \
+            --repo "$REPO" \
+            --signer-workflow "$REPO/.github/workflows/$workflow" \
+            --predicate-type "$SPDX" \
+            --format json |
+            jq -S '.[0].verificationResult.statement.predicate' >"$RUNNER_TEMP/$file.spdx.json"
+        if ! jq -S . "$file.spdx.json" | diff -q - "$RUNNER_TEMP/$file.spdx.json" >/dev/null; then
+            echo "$file.spdx.json is not the attested SBOM" >&2
+            exit 1
+        fi
+    done
+}
+
+sources() {
+    local workflow=build-sources.yml ref=${GITHUB_REF:?}
+    for file in "conmonrs-${GITHUB_REF_NAME:?}.tar.gz" sha256sums.txt; do
+        verify_signature "$file" "$workflow" release "$ref"
+        verify_attestation "$file" sources.intoto.jsonl "$workflow" "$ref" "$PROVENANCE"
+    done
+    sha256sum -c sha256sums.txt
+}
+
+case ${1:-} in
+check | fetch | files | checksums | binaries | sources)
+    "$1"
+    ;;
+*)
+    echo "usage: $0 check|fetch|files|checksums|binaries|sources" >&2
+    exit 1
+    ;;
+esac

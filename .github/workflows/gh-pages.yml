@@ -6,21 +6,24 @@ on:
 # Deploys with an SSH key, the token only needs to read.
 permissions:
   contents: read
+# Only the documentation of the latest commit matters.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
 env:
   CARGO_TERM_COLOR: always
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 jobs:
-  update:
+  publish-docs:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: .github/install-deps
       - name: Select Toolchain
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      # Only the docs get published, a cache entry cannot change the binaries.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build Documentation
         run: cargo doc --locked --all-features --no-deps
       - name: Deploy Documentation

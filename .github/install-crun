@@ -2,8 +2,35 @@
 set -euo pipefail
 
 # Install the latest crun from GitHub releases, the integration tests run it.
+# The release binaries are signed with the key of crun-signing-key.asc, whose
+# primary key has this fingerprint.
+FINGERPRINT=AC404C1C0BF735C63FF4D562263D6DF2E163E1EA
+
+case $(uname -m) in
+x86_64) ARCH=amd64 ;;
+aarch64) ARCH=arm64 ;;
+*)
+    echo "Unsupported architecture $(uname -m)" >&2
+    exit 1
+    ;;
+esac
 CRUN_VERSION=$(curl -sSfL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     "https://api.github.com/repos/containers/crun/releases/latest" | grep -oP '"tag_name": "\K[^"]+')
-sudo curl -sSfL "https://github.com/containers/crun/releases/download/${CRUN_VERSION}/crun-${CRUN_VERSION}-linux-amd64" -o /usr/bin/crun
-sudo chmod +x /usr/bin/crun
+URL=https://github.com/containers/crun/releases/download/$CRUN_VERSION/crun-$CRUN_VERSION-linux-$ARCH
+
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+curl -sSfL "$URL" -o "$TMPDIR/crun"
+curl -sSfL "$URL.asc" -o "$TMPDIR/crun.asc"
+
+export GNUPGHOME=$TMPDIR/gnupg
+mkdir -m 700 "$GNUPGHOME"
+gpg --batch --quiet --import "$(dirname "$0")/crun-signing-key.asc"
+if ! gpg --batch --status-fd 1 --verify "$TMPDIR/crun.asc" "$TMPDIR/crun" 2>/dev/null |
+    grep -q "^\[GNUPG:\] VALIDSIG .* $FINGERPRINT\$"; then
+    echo "Invalid signature of crun $CRUN_VERSION" >&2
+    exit 1
+fi
+
+sudo install -m 755 "$TMPDIR/crun" /usr/bin/crun
 crun --version

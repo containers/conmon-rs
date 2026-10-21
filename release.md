@@ -13,21 +13,25 @@ that the Go client in the tag matches the server.
 
 After that PR being merged, an annotated tag can be pushed to the repository or
 via the GitHub UI. We usually auto-generate the changelog directly from the
-GitHub UI. A ["Create Release" GitHub
-action](https://github.com/containers/conmon-rs/actions/workflows/release.yml)
-should run for that tag which attaches the sources, the static binaries and
-their checksums to the release, for example
+GitHub UI. The [release
+workflow](https://github.com/containers/conmon-rs/actions/workflows/release.yml)
+should run for that tag which attaches the sources, the static binaries, their
+checksums, signatures, SLSA provenance and SBOMs to the release, for example
 `https://github.com/containers/conmon-rs/releases/download/vX.Y.Z/conmonrs-vX.Y.Z.tar.gz`.
-It also points the `latest-X.Y.txt` marker in the bucket to the tag. The
+Its build-sources workflow builds the tarball and the checksums in a job
+without the signing credentials, and attests and signs them in a separate one.
+The release job verifies all files once more before publishing them. The
+workflow also points the `latest-X.Y.txt` marker in the bucket to the tag. The
 tarball is a `git archive` of the tag, so it has the same content as the
 automatic GitHub archive which [rpm/conmon-rs.spec](rpm/conmon-rs.spec) uses as
 `Source0` (packit replaces that with an archive of the commit for Copr builds).
 
-The release takes the static binaries which the ci workflow built and signed
-when the commit reached main, so the tag has to point to a commit which had
-its own ci run on main, like the merge commit of the version bump PR. The
-release fails right away otherwise. Those binaries got built before the tag
-existed, the version and commit identify them and their tag stays empty.
+The release takes the static binaries which the ci workflow built, attested
+and signed when the commit reached main, so the tag has to point to a commit
+which had its own ci run on main, like the merge commit of the version bump PR.
+The release fails right away otherwise, and for commits from before the builds
+got attested. Those binaries got built before the tag existed, the version and
+commit identify them and their tag stays empty.
 
 The same tag also versions the Go module `github.com/containers/conmon-rs`, so
 consumers like CRI-O pick the release up with `go get

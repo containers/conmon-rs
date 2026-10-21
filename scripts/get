@@ -140,8 +140,10 @@ download_binary() {
 
         SLUG=containers/conmon-rs
         GIT_REF=refs/heads/main
+        # The publish-static workflow signs, the ci workflow did for older
+        # commits. The ci workflow runs both.
         cosign verify-blob "${FILES[0]}" \
-            --certificate-identity "https://github.com/$SLUG/.github/workflows/ci.yml@$GIT_REF" \
+            --certificate-identity-regexp "^https://github\.com/$SLUG/\.github/workflows/(publish-static|ci)\.yml@$GIT_REF\$" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-github-workflow-name ci \
             --certificate-github-workflow-repository "$SLUG" \

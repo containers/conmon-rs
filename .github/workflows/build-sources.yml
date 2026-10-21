@@ -1,0 +1,103 @@
+name: build-sources
+# Builds the source tarball of a tag and the checksums of it and of the
+# verified binaries of the tagged commit, without access to any signing
+# credentials. The attest job attests their SLSA provenance and signs them, it
+# runs no build steps. Consumers verify this workflow as the signer, which
+# makes the provenance SLSA Build L3 like the one of the binaries.
+on:
+  workflow_call: {}
+permissions: {}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read # looks up the ci runs of the commit
+      attestations: read # verifies the attestations of the binaries
+      contents: read
+    outputs:
+      tarball-digest: ${{ steps.digests.outputs.tarball }}
+      checksums-digest: ${{ steps.digests.outputs.checksums }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Only a push to main builds and uploads the binaries of a commit, and
+      # only of its head. Fail right away for any other commit instead of
+      # waiting for binaries which never show up.
+      - name: Check for binaries of the commit
+        run: |
+          RUNS=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&branch=main" --jq .total_count)
+          if [[ $RUNS == 0 ]]; then
+            echo "::error::No ci run on main built $GITHUB_SHA, so the bucket has no binaries for it. Tag a commit which had its own ci run on main, for example the merge commit of a PR."
+            exit 1
+          fi
+          .github/release-files check
+      - name: Create Release Packaging
+        run: make create-release-packages
+        env:
+          CI_TAG: ${{ github.ref_name }}
+      - run: .github/release-files fetch
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.4
+      - run: .github/release-files binaries
+      - run: .github/release-files checksums
+      - name: Digests
+        id: digests
+        run: |
+          echo "tarball=$(sha256sum "conmonrs-$TAG.tar.gz" | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
+          echo "checksums=$(sha256sum sha256sums.txt | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: |
+            conmonrs-*.tar.gz
+            sha256sums.txt
+            conmonrs.*
+
+  attest:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # signs with cosign and the attestation
+      attestations: write # stores the attestation
+    env:
+      TAG: ${{ github.ref_name }}
+      TARBALL_DIGEST: ${{ needs.build.outputs.tarball-digest }}
+      CHECKSUMS_DIGEST: ${{ needs.build.outputs.checksums-digest }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: release
+      - name: Check the digests
+        run: |
+          cd release
+          printf '%s  %s\n' "$TARBALL_DIGEST" "conmonrs-$TAG.tar.gz" "$CHECKSUMS_DIGEST" sha256sums.txt | sha256sum -c
+          mkdir ../signatures
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: provenance
+        with:
+          subject-path: |
+            release/conmonrs-${{ github.ref_name }}.tar.gz
+            release/sha256sums.txt
+      - name: Keep the attestation bundle
+        env:
+          PROVENANCE: ${{ steps.provenance.outputs.bundle-path }}
+        run: cp "$PROVENANCE" signatures/sources.intoto.jsonl
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.4
+      - name: Sign
+        run: |
+          for FILE in "conmonrs-$TAG.tar.gz" sha256sums.txt; do
+            cosign sign-blob -y "release/$FILE" --bundle "signatures/$FILE.bundle"
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-signatures
+          path: signatures
