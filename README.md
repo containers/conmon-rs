@@ -83,7 +83,9 @@ operations against it:
   its output and exit code. For interactive execs and attaches
   (`serveExecContainer`, `serveAttachContainer`), the server opens a WebSocket
   streaming server on localhost which speaks the Kubernetes `v5.channel.k8s.io`
-  protocol, so CRI-O can hand the URL straight to the kubelet.
+  protocol, so CRI-O can hand the URL straight to the kubelet. The same server
+  forwards ports into the pod network namespace over SPDY or WebSocket
+  (`servePortForwardContainer`).
 - **Attach**: `attachContainer` serves output and stdin of a container on a per
   container attach socket, the protocol conmon speaks as well.
 - **Namespaces**: `createNamespaces` creates the pod level namespaces and bind
@@ -123,7 +125,7 @@ flowchart TB
             exitpaths["Exit paths and<br/>cleanup command"]
         end
         inotify["Shared inotify instance"]
-        streaming["Streaming server<br/>WebSocket on localhost"]
+        streaming["Streaming server<br/>WebSocket and SPDY on localhost"]
         fdsock["fd socket"]
         pause["conmonrs pause<br/>pod namespaces"]
     end

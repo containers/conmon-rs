@@ -108,15 +108,39 @@ work unchanged.
 
 ### Streaming server
 
-`serveExecContainer` and `serveAttachContainer` return a URL on a WebSocket
-server the conmonrs process starts on demand on `127.0.0.1` with a random
-port. Each URL carries a one time token which is
-valid for a bounded time. The server speaks the Kubernetes
-`v5.channel.k8s.io` protocol: the first byte of each binary message is the
-stream (`0` stdin, `1` stdout, `2` stderr, `3` errors, `4` terminal resize
-events as JSON, `255` close). CRI-O passes these URLs to the kubelet, which
-connects directly. `servePortForwardContainer` fails with an unimplemented
-error, port forwarding needs an SPDY implementation which does not exist yet.
+`serveExecContainer`, `serveAttachContainer` and `servePortForwardContainer`
+return a URL on a server the conmonrs process starts on demand on `127.0.0.1`
+with a random port. Each URL carries a one time token which is valid for a
+bounded time. CRI-O passes these URLs to the kubelet, which connects directly.
+
+Exec and attach speak the Kubernetes `v5.channel.k8s.io` protocol over
+WebSocket: the first byte of each binary message is the stream (`0` stdin,
+`1` stdout, `2` stderr, `3` errors, `4` terminal resize events as JSON, `255`
+close).
+
+Port forwarding speaks the Kubernetes `portforward.k8s.io` protocol over
+SPDY/3.1, which the kubelet uses towards the runtime also when the client
+connected with a WebSocket. Per forwarded connection the client opens an
+`error` and a `data` stream with the `port` and `requestID` headers. The
+server connects to that port on `localhost` within the network namespace of
+the request and copies between the connection and the data stream, a failure
+is reported as text on the error stream. Only what the SPDY implementation of
+Kubernetes uses is supported, there is no flow control. Clients which connect
+directly, like crictl with the WebSocket transport, may tunnel the SPDY
+connection through binary WebSocket messages with the
+`SPDY/3.1+portforward.k8s.io` subprotocol.
+
+The URL also serves the older WebSocket channel protocol (`v4.channel.k8s.io`,
+`v4.base64.channel.k8s.io` or no subprotocol), which forwards one connection
+per port of the `port` query parameter. Port `i` gets the data channel `2i`
+and the error channel `2i+1`, every message starts with its channel (an ASCII
+digit offset in base64 text messages) and the first message of each channel
+carries the port as a little endian `u16`. The session ends once all
+connections ended.
+
+`idleTimeoutSec` closes a connection on which nothing went either way, SPDY
+clients ping every few seconds. Servers which support port forwarding report
+the `portforward` feature in `version`.
 
 ### File descriptor socket
 

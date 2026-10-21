@@ -730,7 +730,7 @@ impl conmon::Server for Server {
     fn serve_port_forward_container(
         self: Rc<Server>,
         params: conmon::ServePortForwardContainerParams,
-        _: conmon::ServePortForwardContainerResults,
+        mut results: conmon::ServePortForwardContainerResults,
     ) -> Promise<(), capnp::Error> {
         debug!("Got a serve port forward container request");
         let req = pry!(pry!(params.get()).get_request());
@@ -742,11 +742,39 @@ impl conmon::Server for Server {
         let _enter = span.enter();
         pry!(set_parent_context(pry!(req.get_metadata())));
 
-        // Port forwarding needs an SPDY implementation, which does not exist
-        // yet. Handing out a URL would end in an aborted connection.
-        Promise::err(Error::unimplemented(
-            "port forwarding is not implemented".into(),
-        ))
+        let netns_path = pry_err!(pry_err!(req.get_net_ns_path()).to_str());
+        if netns_path.is_empty() {
+            return Promise::err(Error::failed("network namespace path is empty".into()));
+        }
+        let netns_path = PathBuf::from(netns_path);
+        let idle_timeout = match req.get_idle_timeout_sec() {
+            0 => None,
+            secs => Some(Duration::from_secs(secs)),
+        };
+        let streaming_server = self.streaming_server().clone();
+
+        Promise::from_future(
+            async move {
+                capnp_err!(
+                    streaming_server
+                        .write()
+                        .await
+                        .start_if_required()
+                        .await
+                        .context("start streaming server")
+                )?;
+
+                let url = streaming_server
+                    .read()
+                    .await
+                    .port_forward_url(netns_path, idle_timeout)
+                    .await;
+
+                results.get().init_response().set_url(&url);
+                Ok(())
+            }
+            .instrument(debug_span!("promise")),
+        )
     }
 }
 

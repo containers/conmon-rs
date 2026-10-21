@@ -1015,6 +1015,10 @@ type VersionResponse struct {
 // FeatureSdNotify is reported by servers which relay sd_notify messages.
 const FeatureSdNotify = "sdnotify"
 
+// FeaturePortForward is reported by servers which forward ports, see
+// ServePortForwardContainer.
+const FeaturePortForward = "portforward"
+
 // requireServerFeature fails with ErrUnsupported if the server does not
 // report the feature. The features are asked once.
 func (c *ConmonClient) requireServerFeature(ctx context.Context, feature, usage string) error {
@@ -2173,6 +2177,10 @@ func (c *ConmonClient) ServeAttachContainer(
 type ServePortForwardContainerConfig struct {
 	// NetNsPath is the path to the network namespace of the container.
 	NetNsPath string
+
+	// IdleTimeout closes a connection on which no frame went either way for
+	// this long. Zero disables the timeout.
+	IdleTimeout time.Duration
 }
 
 // ServePortForwardContainerResult is the result for calling the ServePortForwardContainer method.
@@ -2181,20 +2189,74 @@ type ServePortForwardContainerResult struct {
 	URL string
 }
 
-// ServePortForwardContainer is meant to forward ports to a running container.
-// The server has no implementation for it yet and always returns
-// ErrUnsupported, without making a request.
+// ServePortForwardContainer returns a URL on which the server forwards ports
+// into the network namespace. Clients connect with SPDY/3.1 and the Kubernetes
+// portforward.k8s.io protocol. Servers without the FeaturePortForward feature
+// return ErrUnsupported.
 func (c *ConmonClient) ServePortForwardContainer(
 	ctx context.Context,
-	_ *ServePortForwardContainerConfig,
+	cfg *ServePortForwardContainerConfig,
 ) (*ServePortForwardContainerResult, error) {
-	_, span := c.startSpan(ctx, "ServePortForwardContainer")
+	ctx, span := c.startSpan(ctx, "ServePortForwardContainer")
 	if span != nil {
 		defer span.End()
 	}
 
-	// The server would only reject the request, so it does not get sent.
-	return nil, fmt.Errorf("port forwarding: %w", ErrUnsupported)
+	if err := c.requireServerFeature(ctx, FeaturePortForward, "port forwarding"); err != nil {
+		return nil, err
+	}
+
+	rpcClient, err := c.client(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create RPC client: %w", err)
+	}
+
+	future, free := rpcClient.ServePortForwardContainer(ctx, func(p proto.Conmon_servePortForwardContainer_Params) error {
+		req, err := p.NewRequest()
+		if err != nil {
+			return fmt.Errorf("create request: %w", err)
+		}
+
+		if err := c.setMetadata(ctx, req); err != nil {
+			return err
+		}
+
+		if err := req.SetNetNsPath(cfg.NetNsPath); err != nil {
+			return fmt.Errorf("set network namespace path: %w", err)
+		}
+
+		req.SetIdleTimeoutSec(idleTimeoutSeconds(cfg.IdleTimeout))
+
+		return nil
+	})
+	defer free()
+
+	result, err := future.Struct()
+	if err != nil {
+		return nil, fmt.Errorf("get result: %w", err)
+	}
+
+	resp, err := result.Response()
+	if err != nil {
+		return nil, fmt.Errorf("get response: %w", err)
+	}
+
+	url, err := resp.Url()
+	if err != nil {
+		return nil, fmt.Errorf("get url: %w", err)
+	}
+
+	return &ServePortForwardContainerResult{URL: url}, nil
+}
+
+// idleTimeoutSeconds converts an idle timeout to seconds, rounded up so that a
+// short timeout does not disable it.
+func idleTimeoutSeconds(timeout time.Duration) uint64 {
+	if timeout <= 0 {
+		return 0
+	}
+
+	return uint64((timeout + time.Second - 1) / time.Second)
 }
 
 func (c *ConmonClient) attachHeaptrack(config *ConmonServerConfig, pid uint32) {

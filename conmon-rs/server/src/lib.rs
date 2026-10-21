@@ -89,6 +89,7 @@ mod container_log;
 #[allow(unsafe_code)]
 mod fd_mapping;
 mod fd_socket;
+mod idle;
 #[allow(unsafe_code)]
 mod init;
 mod journal;
@@ -98,11 +99,13 @@ mod notify;
 mod oom_watcher;
 #[allow(unsafe_code)]
 mod pause;
+mod port_forward;
 #[allow(unsafe_code)]
 mod process;
 mod rpc;
 #[allow(unsafe_code)]
 mod server;
+mod spdy;
 mod streaming_server;
 mod streams;
 #[cfg(feature = "tracing")]
