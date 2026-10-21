@@ -2202,6 +2202,10 @@ func (c *ConmonClient) ServePortForwardContainer(
 		defer span.End()
 	}
 
+	if cfg == nil || cfg.NetNsPath == "" {
+		return nil, ErrMissingNetNsPath
+	}
+
 	if err := c.requireServerFeature(ctx, FeaturePortForward, "port forwarding"); err != nil {
 		return nil, err
 	}

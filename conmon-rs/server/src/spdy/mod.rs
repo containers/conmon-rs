@@ -24,7 +24,7 @@ use std::{
     mem,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicUsize, Ordering},
     },
 };
 use tokio::{
@@ -59,6 +59,12 @@ const WRITE_BUFFER: usize = 64 * 1024;
 /// How long the last frames may take to go out once the connection ends.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How often the server pings the client, like the kubelet does. A client
+/// which went away shows up as a failed write, also while the reader waits
+/// for a stream which does not take its data and misses the end of the
+/// connection.
+pub const PING_INTERVAL: Duration = Duration::from_secs(5);
+
 /// A connection a client upgraded to SPDY/3.1.
 pub struct Connection {
     streams: mpsc::Receiver<Stream>,
@@ -67,9 +73,15 @@ pub struct Connection {
 impl Connection {
     /// Serve SPDY on the connection. The client opens streams, `accept`
     /// decides about each by its headers, rejected ones get reset. The
-    /// connection ends when the client closes it, violates the protocol, or
-    /// when no frame went either way for the idle timeout.
-    pub fn serve<T, F>(io: T, idle_timeout: Option<Duration>, accept: F) -> Self
+    /// connection ends when the client closes it, violates the protocol, a
+    /// ping fails, or when no frame went either way for the idle timeout.
+    /// The pings of the server do not count, see [`PING_INTERVAL`].
+    pub fn serve<T, F>(
+        io: T,
+        idle_timeout: Option<Duration>,
+        ping_interval: Option<Duration>,
+        accept: F,
+    ) -> Self
     where
         T: AsyncRead + AsyncWrite + Send + 'static,
         F: Fn(&Headers) -> Result<()> + Send + 'static,
@@ -102,6 +114,9 @@ impl Connection {
         // On its own, the reader may wait for a stream which does not take
         // its data.
         tokio::spawn(Self::watch_idle(shared.clone(), idle_timeout));
+        if let Some(interval) = ping_interval {
+            tokio::spawn(Self::ping(shared.clone(), interval));
+        }
         tokio::spawn(Self::write(shared, writer, encoder, control_rx, data_rx));
 
         Self {
@@ -112,6 +127,30 @@ impl Connection {
     /// The next stream the client opened, `None` once the connection ended.
     pub async fn accept(&mut self) -> Option<Stream> {
         self.streams.recv().await
+    }
+
+    /// Ping the client until the connection ends. The pings of the server
+    /// have even IDs, the client echoes them.
+    async fn ping(shared: Arc<Shared>, interval: Duration) {
+        let mut interval = time::interval(interval);
+        interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+        interval.tick().await;
+        let mut id: u32 = 0;
+        loop {
+            select! {
+                _ = interval.tick() => {}
+                _ = shared.done.cancelled() => return,
+            }
+            id = id.wrapping_add(2) & 0x7fff_ffff;
+            // A full queue goes out anyway, which tells as much.
+            let _ = shared.control.try_send(Frame::Ping { id });
+        }
+    }
+
+    /// Whether a frame keeps the connection from being idle, which the
+    /// pings of the server do not.
+    fn is_activity(frame: &Frame) -> bool {
+        !matches!(frame, Frame::Ping { id } if id % 2 == 0)
     }
 
     /// End the connection once no frame went either way for the timeout.
@@ -125,46 +164,56 @@ impl Connection {
         }
     }
 
-    /// Write the queued frames: control frames first, then the resets of the
-    /// streams, then data. The data frames of a stream keep their order, its
-    /// FIN goes through the same queue. A reset follows the SYN_REPLY of its
-    /// stream, which is queued before the stream exists.
+    /// Write the queued frames: control frames first, then the resets of
+    /// streams without queued data, then data. The data frames of a stream
+    /// keep their order, its FIN goes through the same queue, and a reset of a
+    /// stream with queued data follows its last frame. A reset follows the
+    /// SYN_REPLY of its stream, which is queued before the stream exists.
     async fn write<T>(
         shared: Arc<Shared>,
         mut writer: WriteHalf<T>,
         mut encoder: Encoder,
         mut control_rx: mpsc::Receiver<Frame>,
-        mut data_rx: mpsc::Receiver<Frame>,
+        mut data_rx: mpsc::Receiver<QueuedData>,
     ) where
         T: AsyncWrite,
     {
         let mut buf = BytesMut::with_capacity(WRITE_BUFFER);
         let result = async {
             loop {
+                let mut active = false;
+                let mut control = |frame: &Frame, buf: &mut BytesMut| {
+                    active |= Self::is_activity(frame);
+                    encoder.encode(frame, buf)
+                };
                 let data = select! {
                     biased;
                     _ = shared.done.cancelled() => break,
                     Some(frame) = control_rx.recv() => {
-                        encoder.encode(&frame, &mut buf)?;
+                        control(&frame, &mut buf)?;
                         None
                     }
                     _ = shared.resets_ready.notified() => None,
-                    Some(frame) = data_rx.recv() => Some(frame),
+                    Some(data) = data_rx.recv() => Some(data),
                     else => break,
                 };
                 // Whatever else is queued already goes out with it.
                 while let Ok(frame) = control_rx.try_recv() {
-                    encoder.encode(&frame, &mut buf)?;
+                    control(&frame, &mut buf)?;
                 }
-                shared.encode_resets(&mut encoder, &mut buf)?;
-                if let Some(frame) = data {
-                    encoder.encode(&frame, &mut buf)?;
+                for stream_id in shared.take_resets() {
+                    control(&Self::reset_frame(stream_id), &mut buf)?;
+                }
+                if let Some(data) = data {
+                    active = true;
+                    Self::encode_data(&mut encoder, &data, &mut buf)?;
                 }
                 while buf.len() < WRITE_BUFFER {
-                    let Ok(frame) = data_rx.try_recv() else {
+                    let Ok(data) = data_rx.try_recv() else {
                         break;
                     };
-                    encoder.encode(&frame, &mut buf)?;
+                    active = true;
+                    Self::encode_data(&mut encoder, &data, &mut buf)?;
                 }
                 if buf.is_empty() {
                     continue;
@@ -177,15 +226,23 @@ impl Connection {
                     _ = shared.done.cancelled() => return Ok(()),
                 }
                 buf.clear();
-                shared.activity.touch();
+                if active {
+                    shared.activity.touch();
+                }
             }
 
             // The reader queues a GOAWAY or resets before it ends the
-            // connection.
+            // connection, the streams may have queued their last data. Data
+            // of existing streams may follow the GOAWAY.
             while let Ok(frame) = control_rx.try_recv() {
                 encoder.encode(&frame, &mut buf)?;
             }
-            shared.encode_resets(&mut encoder, &mut buf)?;
+            for stream_id in shared.take_resets() {
+                encoder.encode(&Self::reset_frame(stream_id), &mut buf)?;
+            }
+            while let Ok(data) = data_rx.try_recv() {
+                Self::encode_data(&mut encoder, &data, &mut buf)?;
+            }
             time::timeout(SHUTDOWN_TIMEOUT, async {
                 writer.write_all(&buf).await.context("write frames")?;
                 writer.shutdown().await.context("shut down connection")
@@ -200,16 +257,89 @@ impl Connection {
         }
         shared.done.cancel();
     }
+
+    /// Encode a data frame, followed by the reset of its stream if it was the
+    /// last data the stream queued before its reset.
+    fn encode_data(encoder: &mut Encoder, data: &QueuedData, buf: &mut BytesMut) -> Result<()> {
+        encoder.encode(&data.frame, buf)?;
+        if data.queued.remove()
+            && let Frame::Data { stream_id, .. } = data.frame
+        {
+            encoder.encode(&Self::reset_frame(stream_id), buf)?;
+        }
+        Ok(())
+    }
+
+    fn reset_frame(stream_id: u32) -> Frame {
+        Frame::RstStream {
+            stream_id,
+            status: STATUS_CANCEL,
+        }
+    }
+}
+
+/// A data frame in the data queue, with the count of its stream.
+struct QueuedData {
+    frame: Frame,
+    queued: Arc<Queued>,
+}
+
+/// The data frames a stream has in the data queue, and whether it got reset
+/// after them. Both share one word, so that the writer and the reset agree
+/// on who sends the RST_STREAM.
+#[derive(Default)]
+struct Queued(AtomicUsize);
+
+impl Queued {
+    const RESET: usize = 1 << (usize::BITS - 1);
+
+    /// A frame goes into the data queue.
+    fn add(&self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// A frame left the data queue or did not make it, whether the reset of
+    /// the stream is due now.
+    fn remove(&self) -> bool {
+        self.0.fetch_sub(1, Ordering::AcqRel) == Self::RESET | 1
+    }
+
+    /// Reset the stream after its queued frames, whether the reset is due
+    /// right away because there are none.
+    fn reset(&self) -> bool {
+        self.0.fetch_or(Self::RESET, Ordering::AcqRel) & !Self::RESET == 0
+    }
+
+    #[cfg(test)]
+    fn frames(&self) -> usize {
+        self.0.load(Ordering::Acquire) & !Self::RESET
+    }
+}
+
+/// Takes back the count of a frame which did not make it into the data
+/// queue, also when its send got cancelled.
+struct Unqueued<'a> {
+    sender: &'a StreamSender,
+    queued: bool,
+}
+
+impl Drop for Unqueued<'_> {
+    fn drop(&mut self) {
+        if !self.queued && self.sender.queued.remove() {
+            self.sender.shared.queue_reset(self.sender.id);
+        }
+    }
 }
 
 /// What the reader, the writer and the streams of a connection share.
 struct Shared {
     control: mpsc::Sender<Frame>,
-    data: mpsc::Sender<Frame>,
+    data: mpsc::Sender<QueuedData>,
     streams: Mutex<HashMap<u32, StreamState>>,
 
-    /// The streams the server reset, which the writer sends next. Unlike the
-    /// control queue it cannot be full, a stream gets reset only once.
+    /// The streams the server reset without queued data, which the writer
+    /// sends next. Unlike the control queue it cannot be full, a stream gets
+    /// reset only once.
     resets: Mutex<Vec<u32>>,
     resets_ready: Notify,
 
@@ -249,18 +379,8 @@ impl Shared {
         self.resets_ready.notify_one();
     }
 
-    fn encode_resets(&self, encoder: &mut Encoder, buf: &mut BytesMut) -> Result<()> {
-        let resets = mem::take(&mut *self.resets.lock().unwrap_or_else(|e| e.into_inner()));
-        for stream_id in resets {
-            encoder.encode(
-                &Frame::RstStream {
-                    stream_id,
-                    status: STATUS_CANCEL,
-                },
-                buf,
-            )?;
-        }
-        Ok(())
+    fn take_resets(&self) -> Vec<u32> {
+        mem::take(&mut *self.resets.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// The client closed its side of the stream.
@@ -381,7 +501,9 @@ where
                 Ok(None) => return End::Closed,
                 Err(e) => return End::ProtocolError(e),
             };
-            self.shared.activity.touch();
+            if Connection::is_activity(&frame) {
+                self.shared.activity.touch();
+            }
             trace!("Got SPDY frame {frame:?}");
 
             let result = match frame {
@@ -428,7 +550,8 @@ where
                     self.shared.remove(stream_id);
                     Ok(())
                 }
-                // Pings of the client have odd IDs, the server sends none.
+                // Pings of the client have odd IDs and get echoed, even ones are
+                // the echoes of the pings of the server.
                 Frame::Ping { id } if id % 2 == 1 => {
                     self.shared.send_control(Frame::Ping { id }).await
                 }
@@ -499,6 +622,7 @@ where
                 id: stream_id,
                 shared: self.shared.clone(),
                 reset,
+                queued: Arc::default(),
                 closed: false,
             },
         };
@@ -571,6 +695,9 @@ pub struct StreamSender {
     id: u32,
     shared: Arc<Shared>,
     reset: CancellationToken,
+
+    /// The frames of the stream in the data queue.
+    queued: Arc<Queued>,
     closed: bool,
 }
 
@@ -581,44 +708,55 @@ impl StreamSender {
         if self.closed {
             bail!("SPDY stream {} is closed", self.id);
         }
+        self.queue(false, data).await
+    }
+
+    /// Queue a data frame for the writer.
+    async fn queue(&self, fin: bool, data: Bytes) -> Result<()> {
+        self.queued.add();
+        let mut unqueued = Unqueued {
+            sender: self,
+            queued: false,
+        };
+        let frame = QueuedData {
+            frame: Frame::Data {
+                stream_id: self.id,
+                fin,
+                data,
+            },
+            queued: self.queued.clone(),
+        };
         select! {
             biased;
             _ = self.reset.cancelled() => bail!("SPDY stream {} got reset", self.id),
-            result = self.shared.data.send(Frame::Data {
-                stream_id: self.id,
-                fin: false,
-                data,
-            }) => result.map_err(|_| anyhow!("SPDY connection closed")),
+            result = self.shared.data.send(frame) => {
+                result.map_err(|_| anyhow!("SPDY connection closed"))?;
+                unqueued.queued = true;
+                Ok(())
+            }
         }
     }
 
-    /// Close the sending side after the data sent before.
+    /// Close the sending side after the data sent before. A close which got
+    /// cancelled leaves the stream to its drop, which resets it.
     pub async fn close(&mut self) -> Result<()> {
         if self.closed {
             return Ok(());
         }
+        let result = self.queue(true, Bytes::new()).await;
         self.closed = true;
-        let result = select! {
-            biased;
-            _ = self.reset.cancelled() => Err(anyhow!("SPDY stream {} got reset", self.id)),
-            result = self.shared.data.send(Frame::Data {
-                stream_id: self.id,
-                fin: true,
-                data: Bytes::new(),
-            }) => result.map_err(|_| anyhow!("SPDY connection closed")),
-        };
         self.shared.local_closed(self.id);
         result
     }
 
-    /// Reset the stream, both sides end. The reset may go out before data
-    /// queued for the stream, which the client discards then.
+    /// Reset the stream, both sides end. The data queued for the stream
+    /// before goes out first.
     pub fn reset(&mut self) {
         if self.closed && self.reset.is_cancelled() {
             return;
         }
         self.closed = true;
-        if !self.reset.is_cancelled() {
+        if !self.reset.is_cancelled() && self.queued.reset() {
             self.shared.queue_reset(self.id);
         }
         self.shared.remove(self.id);
@@ -720,7 +858,10 @@ mod tests {
         idle_timeout: Option<Duration>,
     ) -> Result<(Client, Connection)> {
         let (client, server) = Client::pair()?;
-        Ok((client, Connection::serve(server, idle_timeout, accept)))
+        Ok((
+            client,
+            Connection::serve(server, idle_timeout, None, accept),
+        ))
     }
 
     fn accept_data(headers: &Headers) -> Result<()> {
@@ -971,7 +1112,7 @@ mod tests {
         // A client which does not read: the writer waits for the connection
         // and the pings fill the control queue.
         let (client, server) = duplex(64);
-        let mut connection = Connection::serve(server, None, accept_data);
+        let mut connection = Connection::serve(server, None, None, accept_data);
         let mut client = Client::new(client)?;
         client.open(1, [("streamtype", "data")].into()).await?;
         let stream = connection.accept().await.context("stream")?;
@@ -995,6 +1136,179 @@ mod tests {
             }
         };
         time::timeout(Duration::from_secs(5), reset).await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queued_data_goes_out_when_the_connection_ends() -> Result<()> {
+        let (mut client, mut connection) = connect(accept_data, None)?;
+        client.open(1, [("streamtype", "data")].into()).await?;
+        let stream = connection.accept().await.context("stream")?;
+        client.frame().await?;
+
+        // Queued without yielding to the writer, which then sees the end of
+        // the connection first.
+        let (_receiver, mut sender) = stream.split();
+        sender.send(Bytes::from_static(b"last")).await?;
+        sender.shared.done.cancel();
+
+        assert_eq!(
+            client.frame().await?,
+            Some(Frame::Data {
+                stream_id: 1,
+                fin: false,
+                data: Bytes::from_static(b"last")
+            })
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resets_follow_the_queued_data() -> Result<()> {
+        for shutdown in [false, true] {
+            let (mut client, mut connection) = connect(accept_data, None)?;
+            client.open(1, [("streamtype", "data")].into()).await?;
+            client.open(3, [("streamtype", "data")].into()).await?;
+            let first = connection.accept().await.context("stream")?;
+            let mut second = connection.accept().await.context("stream")?;
+            client.frame().await?;
+            client.frame().await?;
+
+            // Queued without yielding to the writer.
+            let (_receiver, mut sender) = first.split();
+            sender.send(Bytes::from_static(b"first")).await?;
+            second.send(Bytes::from_static(b"second")).await?;
+            let shared = sender.shared.clone();
+            sender.reset();
+            if shutdown {
+                shared.go_away(GOAWAY_OK);
+                // Data of existing streams may follow the GOAWAY.
+                assert!(matches!(client.frame().await?, Some(Frame::GoAway { .. })));
+            }
+
+            assert_eq!(
+                client.frame().await?,
+                Some(Frame::Data {
+                    stream_id: 1,
+                    fin: false,
+                    data: Bytes::from_static(b"first")
+                })
+            );
+            assert!(matches!(
+                client.frame().await?,
+                Some(Frame::RstStream { stream_id: 1, .. })
+            ));
+            assert_eq!(
+                client.frame().await?,
+                Some(Frame::Data {
+                    stream_id: 3,
+                    fin: false,
+                    data: Bytes::from_static(b"second")
+                })
+            );
+            // Nothing is left behind for the streams.
+            assert_eq!(sender.queued.frames(), 0);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_sends_do_not_lose_the_reset() -> Result<()> {
+        for close in [false, true] {
+            // A client which does not read, so that the data queue fills up.
+            let (client, server) = duplex(64);
+            let mut connection = Connection::serve(server, None, None, accept_data);
+            let mut client = Client::new(client)?;
+            client.open(1, [("streamtype", "data")].into()).await?;
+            let (_receiver, mut sender) = connection.accept().await.context("stream")?.split();
+            let shared = sender.shared.clone();
+
+            // Until a send has to wait, which gets cancelled.
+            while time::timeout(
+                Duration::from_millis(50),
+                sender.send(Bytes::from(vec![0; 1024])),
+            )
+            .await
+            .is_ok()
+            {}
+            if close {
+                assert!(
+                    time::timeout(Duration::from_millis(50), sender.close())
+                        .await
+                        .is_err()
+                );
+                // Not closed, so the drop resets it.
+                drop(sender);
+            } else {
+                sender.reset();
+            }
+
+            // The reset follows the queued data once the client reads.
+            let reset = async {
+                loop {
+                    match client.frame().await? {
+                        Some(Frame::RstStream { stream_id: 1, .. }) => return anyhow::Ok(()),
+                        Some(_) => {}
+                        None => bail!("connection ended without the reset"),
+                    }
+                }
+            };
+            time::timeout(Duration::from_secs(5), reset).await??;
+            assert!(shared.lock_streams().is_empty());
+        }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_server_pings_its_clients() -> Result<()> {
+        let (mut client, server) = Client::pair()?;
+        let _connection = Connection::serve(
+            server,
+            Some(Duration::from_secs(1)),
+            Some(Duration::from_millis(100)),
+            accept_data,
+        );
+        let Some(Frame::Ping { id }) = client.frame().await? else {
+            bail!("no ping");
+        };
+        assert_eq!(id % 2, 0);
+        // Its own pings do not keep the connection from being idle.
+        client.send(Frame::Ping { id }).await?;
+        loop {
+            match client.frame().await? {
+                Some(Frame::Ping { id }) if id % 2 == 0 => {}
+                frame => {
+                    assert!(matches!(frame, Some(Frame::GoAway { .. })), "{frame:?}");
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gone_clients_end_connections_with_stuck_streams() -> Result<()> {
+        let (mut client, server) = Client::pair()?;
+        let mut connection =
+            Connection::serve(server, None, Some(Duration::from_millis(100)), accept_data);
+        client.open(1, [("streamtype", "data")].into()).await?;
+        // Accepted, but never read.
+        let _stream = connection.accept().await.context("stream")?;
+        client.frame().await?;
+        for _ in 0..STREAM_QUEUE + 2 {
+            client
+                .send(Frame::Data {
+                    stream_id: 1,
+                    fin: false,
+                    data: Bytes::from_static(b"data"),
+                })
+                .await?;
+        }
+
+        // Nothing reads the end of the connection, the next ping fails.
+        drop(client);
+        let end = time::timeout(Duration::from_secs(5), connection.accept()).await?;
+        assert!(end.is_none());
         Ok(())
     }
 

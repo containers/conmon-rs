@@ -1636,7 +1636,7 @@ var _ = Describe("StreamingServer", func() {
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
 
-			listener, port := echoServer()
+			listener, port := echoServer(0)
 			defer listener.Close()
 
 			// The server runs in the network namespace of the test, which
@@ -1675,7 +1675,7 @@ var _ = Describe("StreamingServer", func() {
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
 
-			listener, port := echoServer()
+			listener, port := echoServer(0)
 			defer listener.Close()
 
 			result, err := sut.ServePortForwardContainer(context.Background(), &client.ServePortForwardContainerConfig{
@@ -1711,7 +1711,7 @@ var _ = Describe("StreamingServer", func() {
 				sut = tr.configGivenEnv()
 
 				payload := strings.Repeat("x", 100*1024)
-				listener, port := echoOnceServer(int64(len(payload)))
+				listener, port := echoServer(int64(len(payload)))
 
 				defer listener.Close()
 
@@ -1732,7 +1732,7 @@ var _ = Describe("StreamingServer", func() {
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
 
-			listener, port := echoServer()
+			listener, port := echoServer(0)
 			Expect(listener.Close()).To(Succeed())
 
 			result, err := sut.ServePortForwardContainer(context.Background(), &client.ServePortForwardContainerConfig{
@@ -1746,13 +1746,26 @@ var _ = Describe("StreamingServer", func() {
 			Expect(errs).To(ContainSubstring("failed to connect to localhost:%d", port))
 		})
 
+		It("should reject a missing network namespace path", func() {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			// Also without a config.
+			for _, cfg := range []*client.ServePortForwardContainerConfig{nil, {}} {
+				result, err := sut.ServePortForwardContainer(context.Background(), cfg)
+				Expect(err).To(MatchError(client.ErrMissingNetNsPath))
+				Expect(result).To(BeNil())
+			}
+		})
+
 		It("should report a closed port on the error stream", func() {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
 
 			// A port nothing listens on anymore.
-			listener, port := echoServer()
+			listener, port := echoServer(0)
 			Expect(listener.Close()).To(Succeed())
 
 			result, err := sut.ServePortForwardContainer(context.Background(), &client.ServePortForwardContainerConfig{
