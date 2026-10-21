@@ -175,7 +175,7 @@ impl Server {
     /// the RPC `LocalSet` permanently, the rest serve file I/O like log
     /// writes, exit files and journald. Without a bound a burst of container
     /// exits or log reopens spawns a thread per operation (tokio's default
-    /// allows 512), each with its own stack and allocator arena. Work which
+    /// allows 512), each with its own stack. Work which
     /// blocks for an unbounded time, like waiting for a process, must run on
     /// a dedicated thread instead, otherwise it can starve the pool.
     const MAX_BLOCKING_THREADS: usize = 16;
@@ -247,6 +247,7 @@ impl Server {
         init.set_default_umask();
         init.unset_notify_socket();
         init::save_oom_score();
+        init::limit_malloc_arenas();
         // While we could configure this, standard practice has it as -1000,
         // so it may be YAGNI to add configuration.
         init.set_oom_score("-1000")
