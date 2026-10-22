@@ -56,11 +56,11 @@ help:  ## Display this help.
 
 .PHONY: default
 default: ## Build in debug mode.
-	cargo build
+	cargo build --locked
 
 .PHONY: release
 release: ## Build in release mode.
-	cargo build --release
+	cargo build --locked --release
 
 .PHONY: release-static
 release-static: ## Build the static release binary for the local architecture using nix.
@@ -152,7 +152,7 @@ $(GOTOOLS_BINDIR)/zeitgeist:
 
 .PHONY: clean
 clean: ## Cleanup the project files.
-	rm -rf target/
+	rm -rf target/ result
 
 .INTERMEDIATE: internal/proto/conmon.capnp
 internal/proto/conmon.capnp:
@@ -162,10 +162,10 @@ internal/proto/conmon.capnp:
 .PHONY: update-proto
 update-proto: internal/proto/conmon.capnp ## Update the Cap'n Proto protocol.
 	$(eval GO_CAPNP_VERSION ?= $(shell grep '^\s*capnproto.org/go/capnp/v3 v3\.' go.mod | grep -o 'v3\..*'))
-	go install capnproto.org/go/capnp/v3/capnpc-go@$(GO_CAPNP_VERSION)
+	GOBIN=$(abspath $(GOTOOLS_BINDIR)) go install capnproto.org/go/capnp/v3/capnpc-go@$(GO_CAPNP_VERSION)
 	$(CAPNP) compile \
 		-I$(shell go env GOMODCACHE)/capnproto.org/go/capnp/v3@$(GO_CAPNP_VERSION)/std \
-		-ogo internal/proto/conmon.capnp
+		-o$(abspath $(GOTOOLS_BINDIR))/capnpc-go internal/proto/conmon.capnp
 
 .PHONY: create-release-packages
 create-release-packages: verify-spec ## Create the release tarballs.
