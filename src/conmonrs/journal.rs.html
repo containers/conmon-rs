@@ -1,0 +1,541 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `conmon-rs/server/src/journal.rs`."><title>journal.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="conmonrs" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">conmonrs/</div>journal.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! A client for the native journal protocol
+<a href=#2 id=2 data-nosnippet>2</a>//! (&lt;https://systemd.io/JOURNAL_NATIVE_PROTOCOL/&gt;) and a `tracing` writer
+<a href=#3 id=3 data-nosnippet>3</a>//! which forwards the server logs to journald.
+<a href=#4 id=4 data-nosnippet>4</a>
+<a href=#5 id=5 data-nosnippet>5</a></span><span class="kw">use </span>nix::{
+<a href=#6 id=6 data-nosnippet>6</a>    errno::Errno,
+<a href=#7 id=7 data-nosnippet>7</a>    fcntl::{FcntlArg, SealFlag, fcntl},
+<a href=#8 id=8 data-nosnippet>8</a>    sys::{
+<a href=#9 id=9 data-nosnippet>9</a>        memfd::{MFdFlags, memfd_create},
+<a href=#10 id=10 data-nosnippet>10</a>        socket::{ControlMessage, MsgFlags, UnixAddr, sendmsg, setsockopt, sockopt},
+<a href=#11 id=11 data-nosnippet>11</a>    },
+<a href=#12 id=12 data-nosnippet>12</a>};
+<a href=#13 id=13 data-nosnippet>13</a><span class="kw">use </span>std::{
+<a href=#14 id=14 data-nosnippet>14</a>    fs::File,
+<a href=#15 id=15 data-nosnippet>15</a>    io::{<span class="self">self</span>, ErrorKind, Write},
+<a href=#16 id=16 data-nosnippet>16</a>    os::{
+<a href=#17 id=17 data-nosnippet>17</a>        fd::{AsRawFd, OwnedFd},
+<a href=#18 id=18 data-nosnippet>18</a>        unix::net::UnixDatagram,
+<a href=#19 id=19 data-nosnippet>19</a>    },
+<a href=#20 id=20 data-nosnippet>20</a>    path::Path,
+<a href=#21 id=21 data-nosnippet>21</a>    sync::OnceLock,
+<a href=#22 id=22 data-nosnippet>22</a>    time::Duration,
+<a href=#23 id=23 data-nosnippet>23</a>};
+<a href=#24 id=24 data-nosnippet>24</a><span class="kw">use </span>tracing::{Level, Metadata};
+<a href=#25 id=25 data-nosnippet>25</a><span class="kw">use </span>tracing_subscriber::fmt::writer::MakeWriter;
+<a href=#26 id=26 data-nosnippet>26</a>
+<a href=#27 id=27 data-nosnippet>27</a><span class="doccomment">/// The datagram socket journald receives native protocol entries on.
+<a href=#28 id=28 data-nosnippet>28</a></span><span class="kw">pub const </span>SOCKET_PATH: <span class="kw-2">&amp;</span>str = <span class="string">"/run/systemd/journal/socket"</span>;
+<a href=#29 id=29 data-nosnippet>29</a>
+<a href=#30 id=30 data-nosnippet>30</a><span class="doccomment">/// The syslog priorities used for the `PRIORITY` field.
+<a href=#31 id=31 data-nosnippet>31</a></span><span class="attr">#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+<a href=#32 id=32 data-nosnippet>32</a></span><span class="kw">pub enum </span>Priority {
+<a href=#33 id=33 data-nosnippet>33</a>    Error = <span class="number">3</span>,
+<a href=#34 id=34 data-nosnippet>34</a>    Warning = <span class="number">4</span>,
+<a href=#35 id=35 data-nosnippet>35</a>    Notice = <span class="number">5</span>,
+<a href=#36 id=36 data-nosnippet>36</a>    Info = <span class="number">6</span>,
+<a href=#37 id=37 data-nosnippet>37</a>    Debug = <span class="number">7</span>,
+<a href=#38 id=38 data-nosnippet>38</a>}
+<a href=#39 id=39 data-nosnippet>39</a>
+<a href=#40 id=40 data-nosnippet>40</a><span class="doccomment">/// A journal entry, encoded for the native protocol.
+<a href=#41 id=41 data-nosnippet>41</a></span><span class="attr">#[derive(Debug, Default)]
+<a href=#42 id=42 data-nosnippet>42</a></span><span class="kw">pub struct </span>Entry(Vec&lt;u8&gt;);
+<a href=#43 id=43 data-nosnippet>43</a>
+<a href=#44 id=44 data-nosnippet>44</a><span class="kw">impl </span>Entry {
+<a href=#45 id=45 data-nosnippet>45</a>    <span class="doccomment">/// An entry with the `PRIORITY` and `MESSAGE` fields.
+<a href=#46 id=46 data-nosnippet>46</a>    </span><span class="kw">pub fn </span>new(priority: Priority, message: <span class="kw">impl </span>AsRef&lt;[u8]&gt;) -&gt; <span class="self">Self </span>{
+<a href=#47 id=47 data-nosnippet>47</a>        <span class="kw">let </span><span class="kw-2">mut </span>entry = <span class="self">Self</span>::default();
+<a href=#48 id=48 data-nosnippet>48</a>        entry.reset(priority, message);
+<a href=#49 id=49 data-nosnippet>49</a>        entry
+<a href=#50 id=50 data-nosnippet>50</a>    }
+<a href=#51 id=51 data-nosnippet>51</a>
+<a href=#52 id=52 data-nosnippet>52</a>    <span class="doccomment">/// Start over with the `PRIORITY` and `MESSAGE` fields, keeping the
+<a href=#53 id=53 data-nosnippet>53</a>    /// allocation.
+<a href=#54 id=54 data-nosnippet>54</a>    </span><span class="kw">pub fn </span>reset(<span class="kw-2">&amp;mut </span><span class="self">self</span>, priority: Priority, message: <span class="kw">impl </span>AsRef&lt;[u8]&gt;) -&gt; <span class="kw-2">&amp;mut </span><span class="self">Self </span>{
+<a href=#55 id=55 data-nosnippet>55</a>        <span class="self">self</span>.<span class="number">0</span>.clear();
+<a href=#56 id=56 data-nosnippet>56</a>        <span class="self">self</span>.field(<span class="string">"PRIORITY"</span>, [<span class="string">b'0' </span>+ priority <span class="kw">as </span>u8])
+<a href=#57 id=57 data-nosnippet>57</a>            .field(<span class="string">"MESSAGE"</span>, message)
+<a href=#58 id=58 data-nosnippet>58</a>    }
+<a href=#59 id=59 data-nosnippet>59</a>
+<a href=#60 id=60 data-nosnippet>60</a>    <span class="doccomment">/// Append a field. The key must be a valid journal field name: upper case
+<a href=#61 id=61 data-nosnippet>61</a>    /// letters, digits and underscores, not starting with a digit or an
+<a href=#62 id=62 data-nosnippet>62</a>    /// underscore.
+<a href=#63 id=63 data-nosnippet>63</a>    </span><span class="kw">pub fn </span>field(<span class="kw-2">&amp;mut </span><span class="self">self</span>, key: <span class="kw-2">&amp;</span>str, value: <span class="kw">impl </span>AsRef&lt;[u8]&gt;) -&gt; <span class="kw-2">&amp;mut </span><span class="self">Self </span>{
+<a href=#64 id=64 data-nosnippet>64</a>        <span class="macro">debug_assert!</span>(<span class="self">Self</span>::valid_key(key), <span class="string">"invalid journal field name {key}"</span>);
+<a href=#65 id=65 data-nosnippet>65</a>        <span class="kw">let </span>value = value.as_ref();
+<a href=#66 id=66 data-nosnippet>66</a>        <span class="self">self</span>.<span class="number">0</span>.extend_from_slice(key.as_bytes());
+<a href=#67 id=67 data-nosnippet>67</a>        <span class="comment">// `KEY=value\n` cannot carry a newline in the value, those values get
+<a href=#68 id=68 data-nosnippet>68</a>        // their length as 64 bit little endian integer instead.
+<a href=#69 id=69 data-nosnippet>69</a>        </span><span class="kw">if </span>value.contains(<span class="kw-2">&amp;</span><span class="string">b'\n'</span>) {
+<a href=#70 id=70 data-nosnippet>70</a>            <span class="self">self</span>.<span class="number">0</span>.push(<span class="string">b'\n'</span>);
+<a href=#71 id=71 data-nosnippet>71</a>            <span class="self">self</span>.<span class="number">0
+<a href=#72 id=72 data-nosnippet>72</a>                </span>.extend_from_slice(<span class="kw-2">&amp;</span>u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
+<a href=#73 id=73 data-nosnippet>73</a>        } <span class="kw">else </span>{
+<a href=#74 id=74 data-nosnippet>74</a>            <span class="self">self</span>.<span class="number">0</span>.push(<span class="string">b'='</span>);
+<a href=#75 id=75 data-nosnippet>75</a>        }
+<a href=#76 id=76 data-nosnippet>76</a>        <span class="self">self</span>.<span class="number">0</span>.extend_from_slice(value);
+<a href=#77 id=77 data-nosnippet>77</a>        <span class="self">self</span>.<span class="number">0</span>.push(<span class="string">b'\n'</span>);
+<a href=#78 id=78 data-nosnippet>78</a>        <span class="self">self
+<a href=#79 id=79 data-nosnippet>79</a>    </span>}
+<a href=#80 id=80 data-nosnippet>80</a>
+<a href=#81 id=81 data-nosnippet>81</a>    <span class="kw">fn </span>valid_key(key: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#82 id=82 data-nosnippet>82</a>        (<span class="number">1</span>..=<span class="number">64</span>).contains(<span class="kw-2">&amp;</span>key.len())
+<a href=#83 id=83 data-nosnippet>83</a>            &amp;&amp; !key.starts_with(|c: char| c == <span class="string">'_' </span>|| c.is_ascii_digit())
+<a href=#84 id=84 data-nosnippet>84</a>            &amp;&amp; key
+<a href=#85 id=85 data-nosnippet>85</a>                .chars()
+<a href=#86 id=86 data-nosnippet>86</a>                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == <span class="string">'_'</span>)
+<a href=#87 id=87 data-nosnippet>87</a>    }
+<a href=#88 id=88 data-nosnippet>88</a>
+<a href=#89 id=89 data-nosnippet>89</a>    <span class="doccomment">/// Append the already encoded fields of another entry.
+<a href=#90 id=90 data-nosnippet>90</a>    </span><span class="kw">pub fn </span>extend(<span class="kw-2">&amp;mut </span><span class="self">self</span>, fields: <span class="kw-2">&amp;</span>Entry) -&gt; <span class="kw-2">&amp;mut </span><span class="self">Self </span>{
+<a href=#91 id=91 data-nosnippet>91</a>        <span class="self">self</span>.<span class="number">0</span>.extend_from_slice(<span class="kw-2">&amp;</span>fields.<span class="number">0</span>);
+<a href=#92 id=92 data-nosnippet>92</a>        <span class="self">self
+<a href=#93 id=93 data-nosnippet>93</a>    </span>}
+<a href=#94 id=94 data-nosnippet>94</a>
+<a href=#95 id=95 data-nosnippet>95</a>    <span class="kw">pub fn </span>as_bytes(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[u8] {
+<a href=#96 id=96 data-nosnippet>96</a>        <span class="kw-2">&amp;</span><span class="self">self</span>.<span class="number">0
+<a href=#97 id=97 data-nosnippet>97</a>    </span>}
+<a href=#98 id=98 data-nosnippet>98</a>}
+<a href=#99 id=99 data-nosnippet>99</a>
+<a href=#100 id=100 data-nosnippet>100</a><span class="doccomment">/// How sending waits for a journal which does not keep up, for example while
+<a href=#101 id=101 data-nosnippet>101</a>/// it restarts or its disk is slow. The modes use separate sockets.
+<a href=#102 id=102 data-nosnippet>102</a></span><span class="attr">#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+<a href=#103 id=103 data-nosnippet>103</a></span><span class="kw">pub enum </span>Wait {
+<a href=#104 id=104 data-nosnippet>104</a>    <span class="doccomment">/// Never block, the entry fails with `ErrorKind::WouldBlock`. For the
+<a href=#105 id=105 data-nosnippet>105</a>    /// server logs, which tracing writes from the runtime threads.
+<a href=#106 id=106 data-nosnippet>106</a>    </span>Never,
+<a href=#107 id=107 data-nosnippet>107</a>    <span class="doccomment">/// Block for at most `SEND_TIMEOUT`, then fail with
+<a href=#108 id=108 data-nosnippet>108</a>    /// `ErrorKind::TimedOut`. For the container logs, which get sent from
+<a href=#109 id=109 data-nosnippet>109</a>    /// the blocking pool and should not be dropped on a short stall.
+<a href=#110 id=110 data-nosnippet>110</a>    </span>Bounded,
+<a href=#111 id=111 data-nosnippet>111</a>}
+<a href=#112 id=112 data-nosnippet>112</a>
+<a href=#113 id=113 data-nosnippet>113</a><span class="doccomment">/// The longest `Wait::Bounded` blocks for one entry.
+<a href=#114 id=114 data-nosnippet>114</a></span><span class="kw">const </span>SEND_TIMEOUT: Duration = Duration::from_secs(<span class="number">1</span>);
+<a href=#115 id=115 data-nosnippet>115</a>
+<a href=#116 id=116 data-nosnippet>116</a><span class="doccomment">/// The send buffer systemd uses for its journal clients, so that bursts and
+<a href=#117 id=117 data-nosnippet>117</a>/// entries up to that size do not need a memfd.
+<a href=#118 id=118 data-nosnippet>118</a></span><span class="kw">const </span>SEND_BUFFER_SIZE: usize = <span class="number">8 </span>* <span class="number">1024 </span>* <span class="number">1024</span>;
+<a href=#119 id=119 data-nosnippet>119</a>
+<a href=#120 id=120 data-nosnippet>120</a><span class="doccomment">/// Send an entry to the journal socket at a path.
+<a href=#121 id=121 data-nosnippet>121</a></span><span class="kw">pub fn </span>send_at(wait: Wait, path: <span class="kw-2">&amp;</span>Path, entry: <span class="kw-2">&amp;</span>Entry) -&gt; io::Result&lt;()&gt; {
+<a href=#122 id=122 data-nosnippet>122</a>    <span class="kw">match </span>send_to(socket(wait)<span class="question-mark">?</span>, path, entry.as_bytes()) {
+<a href=#123 id=123 data-nosnippet>123</a>        <span class="prelude-val">Err</span>(e) <span class="kw">if </span>wait == Wait::Bounded &amp;&amp; e.kind() == ErrorKind::WouldBlock =&gt; {
+<a href=#124 id=124 data-nosnippet>124</a>            <span class="prelude-val">Err</span>(io::Error::new(
+<a href=#125 id=125 data-nosnippet>125</a>                ErrorKind::TimedOut,
+<a href=#126 id=126 data-nosnippet>126</a>                <span class="macro">format!</span>(<span class="string">"journal did not take the entry within {SEND_TIMEOUT:?}"</span>),
+<a href=#127 id=127 data-nosnippet>127</a>            ))
+<a href=#128 id=128 data-nosnippet>128</a>        }
+<a href=#129 id=129 data-nosnippet>129</a>        result =&gt; result,
+<a href=#130 id=130 data-nosnippet>130</a>    }
+<a href=#131 id=131 data-nosnippet>131</a>}
+<a href=#132 id=132 data-nosnippet>132</a>
+<a href=#133 id=133 data-nosnippet>133</a><span class="doccomment">/// The socket of a mode, created on first use. A failed creation is not
+<a href=#134 id=134 data-nosnippet>134</a>/// stored, the next entry tries again.
+<a href=#135 id=135 data-nosnippet>135</a></span><span class="kw">fn </span>socket(wait: Wait) -&gt; io::Result&lt;<span class="kw-2">&amp;</span><span class="lifetime">'static </span>UnixDatagram&gt; {
+<a href=#136 id=136 data-nosnippet>136</a>    <span class="kw">static </span>NEVER: OnceLock&lt;UnixDatagram&gt; = OnceLock::new();
+<a href=#137 id=137 data-nosnippet>137</a>    <span class="kw">static </span>BOUNDED: OnceLock&lt;UnixDatagram&gt; = OnceLock::new();
+<a href=#138 id=138 data-nosnippet>138</a>    <span class="kw">let </span>cell = <span class="kw">match </span>wait {
+<a href=#139 id=139 data-nosnippet>139</a>        Wait::Never =&gt; <span class="kw-2">&amp;</span>NEVER,
+<a href=#140 id=140 data-nosnippet>140</a>        Wait::Bounded =&gt; <span class="kw-2">&amp;</span>BOUNDED,
+<a href=#141 id=141 data-nosnippet>141</a>    };
+<a href=#142 id=142 data-nosnippet>142</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(socket) = cell.get() {
+<a href=#143 id=143 data-nosnippet>143</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(socket);
+<a href=#144 id=144 data-nosnippet>144</a>    }
+<a href=#145 id=145 data-nosnippet>145</a>    <span class="kw">let </span>socket = UnixDatagram::unbound()<span class="question-mark">?</span>;
+<a href=#146 id=146 data-nosnippet>146</a>    <span class="kw">match </span>wait {
+<a href=#147 id=147 data-nosnippet>147</a>        Wait::Never =&gt; socket.set_nonblocking(<span class="bool-val">true</span>)<span class="question-mark">?</span>,
+<a href=#148 id=148 data-nosnippet>148</a>        Wait::Bounded =&gt; socket.set_write_timeout(<span class="prelude-val">Some</span>(SEND_TIMEOUT))<span class="question-mark">?</span>,
+<a href=#149 id=149 data-nosnippet>149</a>    }
+<a href=#150 id=150 data-nosnippet>150</a>    <span class="comment">// Best effort like systemd: forcing needs CAP_NET_ADMIN, without it the
+<a href=#151 id=151 data-nosnippet>151</a>    // kernel caps the size at net.core.wmem_max.
+<a href=#152 id=152 data-nosnippet>152</a>    </span><span class="kw">if </span>setsockopt(<span class="kw-2">&amp;</span>socket, sockopt::SndBufForce, <span class="kw-2">&amp;</span>SEND_BUFFER_SIZE).is_err() {
+<a href=#153 id=153 data-nosnippet>153</a>        setsockopt(<span class="kw-2">&amp;</span>socket, sockopt::SndBuf, <span class="kw-2">&amp;</span>SEND_BUFFER_SIZE).ok();
+<a href=#154 id=154 data-nosnippet>154</a>    }
+<a href=#155 id=155 data-nosnippet>155</a>    <span class="prelude-val">Ok</span>(cell.get_or_init(|| socket))
+<a href=#156 id=156 data-nosnippet>156</a>}
+<a href=#157 id=157 data-nosnippet>157</a>
+<a href=#158 id=158 data-nosnippet>158</a><span class="doccomment">/// Send the data as one datagram, or as a memfd if it does not fit.
+<a href=#159 id=159 data-nosnippet>159</a></span><span class="kw">fn </span>send_to(socket: <span class="kw-2">&amp;</span>UnixDatagram, path: <span class="kw-2">&amp;</span>Path, data: <span class="kw-2">&amp;</span>[u8]) -&gt; io::Result&lt;()&gt; {
+<a href=#160 id=160 data-nosnippet>160</a>    <span class="kw">match </span>socket.send_to(data, path) {
+<a href=#161 id=161 data-nosnippet>161</a>        <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Ok</span>(()),
+<a href=#162 id=162 data-nosnippet>162</a>        <span class="prelude-val">Err</span>(e)
+<a href=#163 id=163 data-nosnippet>163</a>            <span class="kw">if </span><span class="macro">matches!</span>(
+<a href=#164 id=164 data-nosnippet>164</a>                e.raw_os_error().map(Errno::from_raw),
+<a href=#165 id=165 data-nosnippet>165</a>                <span class="prelude-val">Some</span>(Errno::EMSGSIZE | Errno::ENOBUFS)
+<a href=#166 id=166 data-nosnippet>166</a>            ) =&gt;
+<a href=#167 id=167 data-nosnippet>167</a>        {
+<a href=#168 id=168 data-nosnippet>168</a>            send_memfd(socket, path, data)
+<a href=#169 id=169 data-nosnippet>169</a>        }
+<a href=#170 id=170 data-nosnippet>170</a>        <span class="prelude-val">Err</span>(e) =&gt; <span class="prelude-val">Err</span>(e),
+<a href=#171 id=171 data-nosnippet>171</a>    }
+<a href=#172 id=172 data-nosnippet>172</a>}
+<a href=#173 id=173 data-nosnippet>173</a>
+<a href=#174 id=174 data-nosnippet>174</a><span class="doccomment">/// Whether an error means that there is no journal to send to: no socket
+<a href=#175 id=175 data-nosnippet>175</a>/// file, or no one listening on it.
+<a href=#176 id=176 data-nosnippet>176</a></span><span class="kw">pub fn </span>unavailable(error: <span class="kw-2">&amp;</span>io::Error) -&gt; bool {
+<a href=#177 id=177 data-nosnippet>177</a>    <span class="macro">matches!</span>(
+<a href=#178 id=178 data-nosnippet>178</a>        error.kind(),
+<a href=#179 id=179 data-nosnippet>179</a>        ErrorKind::NotFound | ErrorKind::ConnectionRefused
+<a href=#180 id=180 data-nosnippet>180</a>    )
+<a href=#181 id=181 data-nosnippet>181</a>}
+<a href=#182 id=182 data-nosnippet>182</a>
+<a href=#183 id=183 data-nosnippet>183</a><span class="doccomment">/// Send the data in a sealed memfd, the only kind journald accepts, as
+<a href=#184 id=184 data-nosnippet>184</a>/// `SCM_RIGHTS` of an otherwise empty datagram.
+<a href=#185 id=185 data-nosnippet>185</a></span><span class="kw">fn </span>send_memfd(socket: <span class="kw-2">&amp;</span>UnixDatagram, path: <span class="kw-2">&amp;</span>Path, data: <span class="kw-2">&amp;</span>[u8]) -&gt; io::Result&lt;()&gt; {
+<a href=#186 id=186 data-nosnippet>186</a>    <span class="kw">let </span><span class="kw-2">mut </span>file = File::from(create_memfd()<span class="question-mark">?</span>);
+<a href=#187 id=187 data-nosnippet>187</a>    file.write_all(data)<span class="question-mark">?</span>;
+<a href=#188 id=188 data-nosnippet>188</a>    fcntl(
+<a href=#189 id=189 data-nosnippet>189</a>        <span class="kw-2">&amp;</span>file,
+<a href=#190 id=190 data-nosnippet>190</a>        FcntlArg::F_ADD_SEALS(
+<a href=#191 id=191 data-nosnippet>191</a>            SealFlag::F_SEAL_SHRINK
+<a href=#192 id=192 data-nosnippet>192</a>                | SealFlag::F_SEAL_GROW
+<a href=#193 id=193 data-nosnippet>193</a>                | SealFlag::F_SEAL_WRITE
+<a href=#194 id=194 data-nosnippet>194</a>                | SealFlag::F_SEAL_SEAL,
+<a href=#195 id=195 data-nosnippet>195</a>        ),
+<a href=#196 id=196 data-nosnippet>196</a>    )<span class="question-mark">?</span>;
+<a href=#197 id=197 data-nosnippet>197</a>    sendmsg(
+<a href=#198 id=198 data-nosnippet>198</a>        socket.as_raw_fd(),
+<a href=#199 id=199 data-nosnippet>199</a>        <span class="kw-2">&amp;</span>[],
+<a href=#200 id=200 data-nosnippet>200</a>        <span class="kw-2">&amp;</span>[ControlMessage::ScmRights(<span class="kw-2">&amp;</span>[file.as_raw_fd()])],
+<a href=#201 id=201 data-nosnippet>201</a>        MsgFlags::empty(),
+<a href=#202 id=202 data-nosnippet>202</a>        <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>UnixAddr::new(path)<span class="question-mark">?</span>),
+<a href=#203 id=203 data-nosnippet>203</a>    )<span class="question-mark">?</span>;
+<a href=#204 id=204 data-nosnippet>204</a>    <span class="prelude-val">Ok</span>(())
+<a href=#205 id=205 data-nosnippet>205</a>}
+<a href=#206 id=206 data-nosnippet>206</a>
+<a href=#207 id=207 data-nosnippet>207</a><span class="doccomment">/// Create a memfd which allows sealing. Like systemd, ask for a
+<a href=#208 id=208 data-nosnippet>208</a>/// non-executable one first, kernels before 6.3 reject that flag.
+<a href=#209 id=209 data-nosnippet>209</a></span><span class="kw">fn </span>create_memfd() -&gt; nix::Result&lt;OwnedFd&gt; {
+<a href=#210 id=210 data-nosnippet>210</a>    <span class="kw">let </span>flags = MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING;
+<a href=#211 id=211 data-nosnippet>211</a>    <span class="kw">let </span>noexec = MFdFlags::from_bits_retain(libc::MFD_NOEXEC_SEAL);
+<a href=#212 id=212 data-nosnippet>212</a>    <span class="kw">match </span>memfd_create(<span class="string">c"conmonrs-journal"</span>, flags | noexec) {
+<a href=#213 id=213 data-nosnippet>213</a>        <span class="prelude-val">Err</span>(Errno::EINVAL) =&gt; memfd_create(<span class="string">c"conmonrs-journal"</span>, flags),
+<a href=#214 id=214 data-nosnippet>214</a>        result =&gt; result,
+<a href=#215 id=215 data-nosnippet>215</a>    }
+<a href=#216 id=216 data-nosnippet>216</a>}
+<a href=#217 id=217 data-nosnippet>217</a>
+<a href=#218 id=218 data-nosnippet>218</a><span class="doccomment">/// Writes every log line as one journal entry with the priority derived from
+<a href=#219 id=219 data-nosnippet>219</a>/// the tracing level.
+<a href=#220 id=220 data-nosnippet>220</a></span><span class="attr">#[derive(Default)]
+<a href=#221 id=221 data-nosnippet>221</a></span><span class="kw">pub struct </span>Journal {
+<a href=#222 id=222 data-nosnippet>222</a>    priority: <span class="prelude-ty">Option</span>&lt;Priority&gt;,
+<a href=#223 id=223 data-nosnippet>223</a>}
+<a href=#224 id=224 data-nosnippet>224</a>
+<a href=#225 id=225 data-nosnippet>225</a><span class="kw">impl </span>Journal {
+<a href=#226 id=226 data-nosnippet>226</a>    <span class="kw">const </span>DEFAULT_PRIORITY: Priority = Priority::Notice;
+<a href=#227 id=227 data-nosnippet>227</a>
+<a href=#228 id=228 data-nosnippet>228</a>    <span class="doccomment">/// The entry of a formatted event. The journal separates entries itself,
+<a href=#229 id=229 data-nosnippet>229</a>    /// so the line ending of the event is dropped.
+<a href=#230 id=230 data-nosnippet>230</a>    </span><span class="kw">fn </span>entry(<span class="kw-2">&amp;</span><span class="self">self</span>, line: <span class="kw-2">&amp;</span>[u8]) -&gt; Entry {
+<a href=#231 id=231 data-nosnippet>231</a>        Entry::new(
+<a href=#232 id=232 data-nosnippet>232</a>            <span class="self">self</span>.priority.unwrap_or(<span class="self">Self</span>::DEFAULT_PRIORITY),
+<a href=#233 id=233 data-nosnippet>233</a>            line.strip_suffix(<span class="string">b"\n"</span>).unwrap_or(line),
+<a href=#234 id=234 data-nosnippet>234</a>        )
+<a href=#235 id=235 data-nosnippet>235</a>    }
+<a href=#236 id=236 data-nosnippet>236</a>
+<a href=#237 id=237 data-nosnippet>237</a>    <span class="kw">fn </span>priority_for(level: <span class="kw-2">&amp;</span>Level) -&gt; Priority {
+<a href=#238 id=238 data-nosnippet>238</a>        <span class="kw">match </span><span class="kw-2">*</span>level {
+<a href=#239 id=239 data-nosnippet>239</a>            Level::ERROR =&gt; Priority::Error,
+<a href=#240 id=240 data-nosnippet>240</a>            Level::WARN =&gt; Priority::Warning,
+<a href=#241 id=241 data-nosnippet>241</a>            Level::INFO =&gt; Priority::Info,
+<a href=#242 id=242 data-nosnippet>242</a>            Level::DEBUG | Level::TRACE =&gt; Priority::Debug,
+<a href=#243 id=243 data-nosnippet>243</a>        }
+<a href=#244 id=244 data-nosnippet>244</a>    }
+<a href=#245 id=245 data-nosnippet>245</a>}
+<a href=#246 id=246 data-nosnippet>246</a>
+<a href=#247 id=247 data-nosnippet>247</a><span class="kw">impl </span>Journal {
+<a href=#248 id=248 data-nosnippet>248</a>    <span class="doccomment">/// Send without blocking the runtime thread of the event. A system
+<a href=#249 id=249 data-nosnippet>249</a>    /// without journald is not an error, like with `sd_journal_send`, and a
+<a href=#250 id=250 data-nosnippet>250</a>    /// journal which does not keep up loses the line, otherwise every event
+<a href=#251 id=251 data-nosnippet>251</a>    /// would report an error.
+<a href=#252 id=252 data-nosnippet>252</a>    </span><span class="kw">fn </span>send_at(<span class="kw-2">&amp;</span><span class="self">self</span>, path: <span class="kw-2">&amp;</span>Path, line: <span class="kw-2">&amp;</span>[u8]) -&gt; io::Result&lt;()&gt; {
+<a href=#253 id=253 data-nosnippet>253</a>        <span class="kw">match </span>send_at(Wait::Never, path, <span class="kw-2">&amp;</span><span class="self">self</span>.entry(line)) {
+<a href=#254 id=254 data-nosnippet>254</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>unavailable(<span class="kw-2">&amp;</span>e) || e.kind() == ErrorKind::WouldBlock =&gt; <span class="prelude-val">Ok</span>(()),
+<a href=#255 id=255 data-nosnippet>255</a>            result =&gt; result,
+<a href=#256 id=256 data-nosnippet>256</a>        }
+<a href=#257 id=257 data-nosnippet>257</a>    }
+<a href=#258 id=258 data-nosnippet>258</a>}
+<a href=#259 id=259 data-nosnippet>259</a>
+<a href=#260 id=260 data-nosnippet>260</a><span class="kw">impl </span>Write <span class="kw">for </span>Journal {
+<a href=#261 id=261 data-nosnippet>261</a>    <span class="kw">fn </span>write(<span class="kw-2">&amp;mut </span><span class="self">self</span>, buf: <span class="kw-2">&amp;</span>[u8]) -&gt; io::Result&lt;usize&gt; {
+<a href=#262 id=262 data-nosnippet>262</a>        <span class="self">self</span>.send_at(Path::new(SOCKET_PATH), buf)<span class="question-mark">?</span>;
+<a href=#263 id=263 data-nosnippet>263</a>        <span class="prelude-val">Ok</span>(buf.len())
+<a href=#264 id=264 data-nosnippet>264</a>    }
+<a href=#265 id=265 data-nosnippet>265</a>
+<a href=#266 id=266 data-nosnippet>266</a>    <span class="kw">fn </span>flush(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; io::Result&lt;()&gt; {
+<a href=#267 id=267 data-nosnippet>267</a>        <span class="prelude-val">Ok</span>(())
+<a href=#268 id=268 data-nosnippet>268</a>    }
+<a href=#269 id=269 data-nosnippet>269</a>}
+<a href=#270 id=270 data-nosnippet>270</a>
+<a href=#271 id=271 data-nosnippet>271</a><span class="kw">impl</span>&lt;<span class="lifetime">'a</span>&gt; MakeWriter&lt;<span class="lifetime">'a</span>&gt; <span class="kw">for </span>Journal {
+<a href=#272 id=272 data-nosnippet>272</a>    <span class="kw">type </span>Writer = Journal;
+<a href=#273 id=273 data-nosnippet>273</a>
+<a href=#274 id=274 data-nosnippet>274</a>    <span class="kw">fn </span>make_writer(<span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="self">self</span>) -&gt; <span class="self">Self</span>::Writer {
+<a href=#275 id=275 data-nosnippet>275</a>        Journal::default()
+<a href=#276 id=276 data-nosnippet>276</a>    }
+<a href=#277 id=277 data-nosnippet>277</a>
+<a href=#278 id=278 data-nosnippet>278</a>    <span class="kw">fn </span>make_writer_for(<span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="self">self</span>, meta: <span class="kw-2">&amp;</span>Metadata&lt;<span class="lifetime">'_</span>&gt;) -&gt; <span class="self">Self</span>::Writer {
+<a href=#279 id=279 data-nosnippet>279</a>        Journal {
+<a href=#280 id=280 data-nosnippet>280</a>            priority: <span class="prelude-val">Some</span>(<span class="self">Self</span>::priority_for(meta.level())),
+<a href=#281 id=281 data-nosnippet>281</a>        }
+<a href=#282 id=282 data-nosnippet>282</a>    }
+<a href=#283 id=283 data-nosnippet>283</a>}
+<a href=#284 id=284 data-nosnippet>284</a>
+<a href=#285 id=285 data-nosnippet>285</a><span class="attr">#[cfg(test)]
+<a href=#286 id=286 data-nosnippet>286</a></span><span class="kw">pub mod </span>tests {
+<a href=#287 id=287 data-nosnippet>287</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#288 id=288 data-nosnippet>288</a>
+<a href=#289 id=289 data-nosnippet>289</a>    <span class="doccomment">/// Decode the fields of an entry, the way journald does.
+<a href=#290 id=290 data-nosnippet>290</a>    </span><span class="kw">pub fn </span>decode(<span class="kw-2">mut </span>data: <span class="kw-2">&amp;</span>[u8]) -&gt; Vec&lt;(String, Vec&lt;u8&gt;)&gt; {
+<a href=#291 id=291 data-nosnippet>291</a>        <span class="kw">let </span><span class="kw-2">mut </span>fields = <span class="macro">vec!</span>[];
+<a href=#292 id=292 data-nosnippet>292</a>        <span class="kw">while </span>!data.is_empty() {
+<a href=#293 id=293 data-nosnippet>293</a>            <span class="kw">let </span>end = data.iter().position(|b| <span class="kw-2">*</span>b == <span class="string">b'\n'</span>).expect(<span class="string">"newline"</span>);
+<a href=#294 id=294 data-nosnippet>294</a>            <span class="kw">let </span>line = <span class="kw-2">&amp;</span>data[..end];
+<a href=#295 id=295 data-nosnippet>295</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(eq) = line.iter().position(|b| <span class="kw-2">*</span>b == <span class="string">b'='</span>) {
+<a href=#296 id=296 data-nosnippet>296</a>                fields.push((
+<a href=#297 id=297 data-nosnippet>297</a>                    String::from_utf8(line[..eq].to_vec()).expect(<span class="string">"utf8 key"</span>),
+<a href=#298 id=298 data-nosnippet>298</a>                    line[eq + <span class="number">1</span>..].to_vec(),
+<a href=#299 id=299 data-nosnippet>299</a>                ));
+<a href=#300 id=300 data-nosnippet>300</a>                data = <span class="kw-2">&amp;</span>data[end + <span class="number">1</span>..];
+<a href=#301 id=301 data-nosnippet>301</a>            } <span class="kw">else </span>{
+<a href=#302 id=302 data-nosnippet>302</a>                <span class="kw">let </span>rest = <span class="kw-2">&amp;</span>data[end + <span class="number">1</span>..];
+<a href=#303 id=303 data-nosnippet>303</a>                <span class="kw">let </span>len = u64::from_le_bytes(rest[..<span class="number">8</span>].try_into().expect(<span class="string">"length"</span>)) <span class="kw">as </span>usize;
+<a href=#304 id=304 data-nosnippet>304</a>                <span class="macro">assert_eq!</span>(rest[<span class="number">8 </span>+ len], <span class="string">b'\n'</span>, <span class="string">"value ends with a newline"</span>);
+<a href=#305 id=305 data-nosnippet>305</a>                fields.push((
+<a href=#306 id=306 data-nosnippet>306</a>                    String::from_utf8(line.to_vec()).expect(<span class="string">"utf8 key"</span>),
+<a href=#307 id=307 data-nosnippet>307</a>                    rest[<span class="number">8</span>..<span class="number">8 </span>+ len].to_vec(),
+<a href=#308 id=308 data-nosnippet>308</a>                ));
+<a href=#309 id=309 data-nosnippet>309</a>                data = <span class="kw-2">&amp;</span>rest[<span class="number">8 </span>+ len + <span class="number">1</span>..];
+<a href=#310 id=310 data-nosnippet>310</a>            }
+<a href=#311 id=311 data-nosnippet>311</a>        }
+<a href=#312 id=312 data-nosnippet>312</a>        fields
+<a href=#313 id=313 data-nosnippet>313</a>    }
+<a href=#314 id=314 data-nosnippet>314</a>
+<a href=#315 id=315 data-nosnippet>315</a>    <span class="attr">#[test]
+<a href=#316 id=316 data-nosnippet>316</a>    </span><span class="kw">fn </span>priorities_follow_the_level() {
+<a href=#317 id=317 data-nosnippet>317</a>        <span class="macro">assert_eq!</span>(Journal::priority_for(<span class="kw-2">&amp;</span>Level::ERROR), Priority::Error);
+<a href=#318 id=318 data-nosnippet>318</a>        <span class="macro">assert_eq!</span>(Journal::priority_for(<span class="kw-2">&amp;</span>Level::WARN), Priority::Warning);
+<a href=#319 id=319 data-nosnippet>319</a>        <span class="macro">assert_eq!</span>(Journal::priority_for(<span class="kw-2">&amp;</span>Level::INFO), Priority::Info);
+<a href=#320 id=320 data-nosnippet>320</a>        <span class="macro">assert_eq!</span>(Journal::priority_for(<span class="kw-2">&amp;</span>Level::DEBUG), Priority::Debug);
+<a href=#321 id=321 data-nosnippet>321</a>        <span class="macro">assert_eq!</span>(Journal::priority_for(<span class="kw-2">&amp;</span>Level::TRACE), Priority::Debug);
+<a href=#322 id=322 data-nosnippet>322</a>    }
+<a href=#323 id=323 data-nosnippet>323</a>
+<a href=#324 id=324 data-nosnippet>324</a>    <span class="attr">#[test]
+<a href=#325 id=325 data-nosnippet>325</a>    </span><span class="kw">fn </span>writer_drops_the_line_ending() {
+<a href=#326 id=326 data-nosnippet>326</a>        <span class="kw">let </span>journal = Journal {
+<a href=#327 id=327 data-nosnippet>327</a>            priority: <span class="prelude-val">Some</span>(Priority::Warning),
+<a href=#328 id=328 data-nosnippet>328</a>        };
+<a href=#329 id=329 data-nosnippet>329</a>        <span class="macro">assert_eq!</span>(
+<a href=#330 id=330 data-nosnippet>330</a>            journal.entry(<span class="string">b"event\n"</span>).as_bytes(),
+<a href=#331 id=331 data-nosnippet>331</a>            <span class="string">b"PRIORITY=4\nMESSAGE=event\n"
+<a href=#332 id=332 data-nosnippet>332</a>        </span>);
+<a href=#333 id=333 data-nosnippet>333</a>        <span class="macro">assert_eq!</span>(
+<a href=#334 id=334 data-nosnippet>334</a>            decode(journal.entry(<span class="string">b"two\nlines\n"</span>).as_bytes())[<span class="number">1</span>],
+<a href=#335 id=335 data-nosnippet>335</a>            (<span class="string">"MESSAGE"</span>.into(), <span class="string">b"two\nlines"</span>.to_vec())
+<a href=#336 id=336 data-nosnippet>336</a>        );
+<a href=#337 id=337 data-nosnippet>337</a>        <span class="macro">assert_eq!</span>(
+<a href=#338 id=338 data-nosnippet>338</a>            Journal::default().entry(<span class="string">b"plain"</span>).as_bytes(),
+<a href=#339 id=339 data-nosnippet>339</a>            <span class="string">b"PRIORITY=5\nMESSAGE=plain\n"
+<a href=#340 id=340 data-nosnippet>340</a>        </span>);
+<a href=#341 id=341 data-nosnippet>341</a>    }
+<a href=#342 id=342 data-nosnippet>342</a>
+<a href=#343 id=343 data-nosnippet>343</a>    <span class="attr">#[test]
+<a href=#344 id=344 data-nosnippet>344</a>    </span><span class="kw">fn </span>extend_appends_encoded_fields() {
+<a href=#345 id=345 data-nosnippet>345</a>        <span class="kw">let </span><span class="kw-2">mut </span>fields = Entry::default();
+<a href=#346 id=346 data-nosnippet>346</a>        fields.field(<span class="string">"A"</span>, <span class="string">"1"</span>).field(<span class="string">"B"</span>, <span class="string">"x\ny"</span>);
+<a href=#347 id=347 data-nosnippet>347</a>        <span class="kw">let </span><span class="kw-2">mut </span>entry = Entry::new(Priority::Info, <span class="string">"m"</span>);
+<a href=#348 id=348 data-nosnippet>348</a>        entry.extend(<span class="kw-2">&amp;</span>fields).field(<span class="string">"C"</span>, <span class="string">"3"</span>);
+<a href=#349 id=349 data-nosnippet>349</a>        <span class="macro">assert_eq!</span>(
+<a href=#350 id=350 data-nosnippet>350</a>            decode(entry.as_bytes()),
+<a href=#351 id=351 data-nosnippet>351</a>            [
+<a href=#352 id=352 data-nosnippet>352</a>                (<span class="string">"PRIORITY"</span>.into(), <span class="string">b"6"</span>.to_vec()),
+<a href=#353 id=353 data-nosnippet>353</a>                (<span class="string">"MESSAGE"</span>.into(), <span class="string">b"m"</span>.to_vec()),
+<a href=#354 id=354 data-nosnippet>354</a>                (<span class="string">"A"</span>.into(), <span class="string">b"1"</span>.to_vec()),
+<a href=#355 id=355 data-nosnippet>355</a>                (<span class="string">"B"</span>.into(), <span class="string">b"x\ny"</span>.to_vec()),
+<a href=#356 id=356 data-nosnippet>356</a>                (<span class="string">"C"</span>.into(), <span class="string">b"3"</span>.to_vec())
+<a href=#357 id=357 data-nosnippet>357</a>            ]
+<a href=#358 id=358 data-nosnippet>358</a>        );
+<a href=#359 id=359 data-nosnippet>359</a>    }
+<a href=#360 id=360 data-nosnippet>360</a>
+<a href=#361 id=361 data-nosnippet>361</a>    <span class="attr">#[test]
+<a href=#362 id=362 data-nosnippet>362</a>    </span><span class="kw">fn </span>simple_fields() {
+<a href=#363 id=363 data-nosnippet>363</a>        <span class="kw">let </span><span class="kw-2">mut </span>entry = Entry::new(Priority::Info, <span class="string">"hello"</span>);
+<a href=#364 id=364 data-nosnippet>364</a>        entry.field(<span class="string">"CONTAINER_ID"</span>, <span class="string">"abc"</span>).field(<span class="string">"EMPTY"</span>, <span class="string">""</span>);
+<a href=#365 id=365 data-nosnippet>365</a>        <span class="macro">assert_eq!</span>(
+<a href=#366 id=366 data-nosnippet>366</a>            entry.as_bytes(),
+<a href=#367 id=367 data-nosnippet>367</a>            <span class="string">b"PRIORITY=6\nMESSAGE=hello\nCONTAINER_ID=abc\nEMPTY=\n"
+<a href=#368 id=368 data-nosnippet>368</a>        </span>);
+<a href=#369 id=369 data-nosnippet>369</a>    }
+<a href=#370 id=370 data-nosnippet>370</a>
+<a href=#371 id=371 data-nosnippet>371</a>    <span class="attr">#[test]
+<a href=#372 id=372 data-nosnippet>372</a>    </span><span class="kw">fn </span>values_with_newlines_carry_their_length() {
+<a href=#373 id=373 data-nosnippet>373</a>        <span class="kw">let </span>entry = Entry::new(Priority::Error, <span class="string">"a\nb=c\n"</span>);
+<a href=#374 id=374 data-nosnippet>374</a>        <span class="kw">let </span><span class="kw-2">mut </span>expected = <span class="string">b"PRIORITY=3\nMESSAGE\n"</span>.to_vec();
+<a href=#375 id=375 data-nosnippet>375</a>        expected.extend_from_slice(<span class="kw-2">&amp;</span><span class="number">6u64</span>.to_le_bytes());
+<a href=#376 id=376 data-nosnippet>376</a>        expected.extend_from_slice(<span class="string">b"a\nb=c\n\n"</span>);
+<a href=#377 id=377 data-nosnippet>377</a>        <span class="macro">assert_eq!</span>(entry.as_bytes(), expected);
+<a href=#378 id=378 data-nosnippet>378</a>        <span class="macro">assert_eq!</span>(
+<a href=#379 id=379 data-nosnippet>379</a>            decode(entry.as_bytes()),
+<a href=#380 id=380 data-nosnippet>380</a>            [
+<a href=#381 id=381 data-nosnippet>381</a>                (<span class="string">"PRIORITY"</span>.into(), <span class="string">b"3"</span>.to_vec()),
+<a href=#382 id=382 data-nosnippet>382</a>                (<span class="string">"MESSAGE"</span>.into(), <span class="string">b"a\nb=c\n"</span>.to_vec())
+<a href=#383 id=383 data-nosnippet>383</a>            ]
+<a href=#384 id=384 data-nosnippet>384</a>        );
+<a href=#385 id=385 data-nosnippet>385</a>    }
+<a href=#386 id=386 data-nosnippet>386</a>
+<a href=#387 id=387 data-nosnippet>387</a>    <span class="attr">#[test]
+<a href=#388 id=388 data-nosnippet>388</a>    </span><span class="kw">fn </span>binary_values_round_trip() {
+<a href=#389 id=389 data-nosnippet>389</a>        <span class="kw">let </span>value = [<span class="number">0u8</span>, <span class="string">b'\n'</span>, <span class="number">0xff</span>, <span class="string">b'='</span>];
+<a href=#390 id=390 data-nosnippet>390</a>        <span class="kw">let </span><span class="kw-2">mut </span>entry = Entry::new(Priority::Debug, [<span class="number">0xffu8</span>, <span class="number">0xfe</span>]);
+<a href=#391 id=391 data-nosnippet>391</a>        entry.field(<span class="string">"BLOB"</span>, value);
+<a href=#392 id=392 data-nosnippet>392</a>        <span class="macro">assert_eq!</span>(
+<a href=#393 id=393 data-nosnippet>393</a>            decode(entry.as_bytes()),
+<a href=#394 id=394 data-nosnippet>394</a>            [
+<a href=#395 id=395 data-nosnippet>395</a>                (<span class="string">"PRIORITY"</span>.into(), <span class="string">b"7"</span>.to_vec()),
+<a href=#396 id=396 data-nosnippet>396</a>                (<span class="string">"MESSAGE"</span>.into(), <span class="macro">vec!</span>[<span class="number">0xff</span>, <span class="number">0xfe</span>]),
+<a href=#397 id=397 data-nosnippet>397</a>                (<span class="string">"BLOB"</span>.into(), value.to_vec())
+<a href=#398 id=398 data-nosnippet>398</a>            ]
+<a href=#399 id=399 data-nosnippet>399</a>        );
+<a href=#400 id=400 data-nosnippet>400</a>    }
+<a href=#401 id=401 data-nosnippet>401</a>
+<a href=#402 id=402 data-nosnippet>402</a>    <span class="attr">#[test]
+<a href=#403 id=403 data-nosnippet>403</a>    </span><span class="kw">fn </span>valid_keys() {
+<a href=#404 id=404 data-nosnippet>404</a>        <span class="kw">for </span>key <span class="kw">in </span>[<span class="string">"MESSAGE"</span>, <span class="string">"CONTAINER_ID_FULL"</span>, <span class="string">"A1"</span>, <span class="string">"X_"</span>] {
+<a href=#405 id=405 data-nosnippet>405</a>            <span class="macro">assert!</span>(Entry::valid_key(key), <span class="string">"{key}"</span>);
+<a href=#406 id=406 data-nosnippet>406</a>        }
+<a href=#407 id=407 data-nosnippet>407</a>        <span class="kw">let </span>long = <span class="string">"A"</span>.repeat(<span class="number">65</span>);
+<a href=#408 id=408 data-nosnippet>408</a>        <span class="kw">for </span>key <span class="kw">in </span>[<span class="string">""</span>, <span class="string">"_PID"</span>, <span class="string">"1A"</span>, <span class="string">"lower"</span>, <span class="string">"WITH-DASH"</span>, <span class="string">"WITH=EQ"</span>, <span class="kw-2">&amp;</span>long] {
+<a href=#409 id=409 data-nosnippet>409</a>            <span class="macro">assert!</span>(!Entry::valid_key(key), <span class="string">"{key}"</span>);
+<a href=#410 id=410 data-nosnippet>410</a>        }
+<a href=#411 id=411 data-nosnippet>411</a>    }
+<a href=#412 id=412 data-nosnippet>412</a>
+<a href=#413 id=413 data-nosnippet>413</a>    <span class="doccomment">/// Receive one datagram, with its content or the content of the memfd it
+<a href=#414 id=414 data-nosnippet>414</a>    /// carries.
+<a href=#415 id=415 data-nosnippet>415</a>    </span><span class="kw">fn </span>receive(receiver: <span class="kw-2">&amp;</span>UnixDatagram) -&gt; anyhow::Result&lt;(Vec&lt;u8&gt;, bool)&gt; {
+<a href=#416 id=416 data-nosnippet>416</a>        <span class="kw">use </span>nix::sys::socket::{ControlMessageOwned, recvmsg};
+<a href=#417 id=417 data-nosnippet>417</a>        <span class="kw">use </span>std::{
+<a href=#418 id=418 data-nosnippet>418</a>            io::{IoSliceMut, Read, Seek},
+<a href=#419 id=419 data-nosnippet>419</a>            os::fd::{FromRawFd, RawFd},
+<a href=#420 id=420 data-nosnippet>420</a>        };
+<a href=#421 id=421 data-nosnippet>421</a>
+<a href=#422 id=422 data-nosnippet>422</a>        <span class="kw">let </span><span class="kw-2">mut </span>buf = <span class="macro">vec!</span>[<span class="number">0</span>; <span class="number">4096</span>];
+<a href=#423 id=423 data-nosnippet>423</a>        <span class="kw">let </span><span class="kw-2">mut </span>iov = [IoSliceMut::new(<span class="kw-2">&amp;mut </span>buf)];
+<a href=#424 id=424 data-nosnippet>424</a>        <span class="kw">let </span><span class="kw-2">mut </span>cmsg = <span class="macro">nix::cmsg_space!</span>([RawFd; <span class="number">1</span>]);
+<a href=#425 id=425 data-nosnippet>425</a>        <span class="kw">let </span>msg = recvmsg::&lt;()&gt;(
+<a href=#426 id=426 data-nosnippet>426</a>            receiver.as_raw_fd(),
+<a href=#427 id=427 data-nosnippet>427</a>            <span class="kw-2">&amp;mut </span>iov,
+<a href=#428 id=428 data-nosnippet>428</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;mut </span>cmsg),
+<a href=#429 id=429 data-nosnippet>429</a>            MsgFlags::MSG_CMSG_CLOEXEC,
+<a href=#430 id=430 data-nosnippet>430</a>        )<span class="question-mark">?</span>;
+<a href=#431 id=431 data-nosnippet>431</a>        <span class="kw">let </span>len = msg.bytes;
+<a href=#432 id=432 data-nosnippet>432</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(ControlMessageOwned::ScmRights(fds)) = msg.cmsgs()<span class="question-mark">?</span>.next() <span class="kw">else </span>{
+<a href=#433 id=433 data-nosnippet>433</a>            buf.truncate(len);
+<a href=#434 id=434 data-nosnippet>434</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>((buf, <span class="bool-val">false</span>));
+<a href=#435 id=435 data-nosnippet>435</a>        };
+<a href=#436 id=436 data-nosnippet>436</a>        <span class="attr">#[allow(unsafe_code)]
+<a href=#437 id=437 data-nosnippet>437</a>        </span><span class="comment">// SAFETY: SCM_RIGHTS installed a new descriptor which nothing else owns.
+<a href=#438 id=438 data-nosnippet>438</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>file = <span class="kw">unsafe </span>{ File::from_raw_fd(fds[<span class="number">0</span>]) };
+<a href=#439 id=439 data-nosnippet>439</a>        <span class="kw">let </span>seals = fcntl(<span class="kw-2">&amp;</span>file, FcntlArg::F_GET_SEALS)<span class="question-mark">?</span>;
+<a href=#440 id=440 data-nosnippet>440</a>        <span class="macro">assert!</span>(
+<a href=#441 id=441 data-nosnippet>441</a>            SealFlag::from_bits_truncate(seals)
+<a href=#442 id=442 data-nosnippet>442</a>                .contains(SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_GROW | SealFlag::F_SEAL_WRITE)
+<a href=#443 id=443 data-nosnippet>443</a>        );
+<a href=#444 id=444 data-nosnippet>444</a>        <span class="comment">// The descriptor shares the offset with the one of the sender, which
+<a href=#445 id=445 data-nosnippet>445</a>        // is at the end. journald maps the memfd instead.
+<a href=#446 id=446 data-nosnippet>446</a>        </span>file.rewind()<span class="question-mark">?</span>;
+<a href=#447 id=447 data-nosnippet>447</a>        <span class="kw">let </span><span class="kw-2">mut </span>data = <span class="macro">vec!</span>[];
+<a href=#448 id=448 data-nosnippet>448</a>        file.read_to_end(<span class="kw-2">&amp;mut </span>data)<span class="question-mark">?</span>;
+<a href=#449 id=449 data-nosnippet>449</a>        <span class="prelude-val">Ok</span>((data, <span class="bool-val">true</span>))
+<a href=#450 id=450 data-nosnippet>450</a>    }
+<a href=#451 id=451 data-nosnippet>451</a>
+<a href=#452 id=452 data-nosnippet>452</a>    <span class="doccomment">/// Entries go inline if they fit into a datagram, otherwise as memfd.
+<a href=#453 id=453 data-nosnippet>453</a>    </span><span class="attr">#[test]
+<a href=#454 id=454 data-nosnippet>454</a>    </span><span class="kw">fn </span>send_inline_and_as_memfd() -&gt; anyhow::Result&lt;()&gt; {
+<a href=#455 id=455 data-nosnippet>455</a>        <span class="kw">use </span>nix::sys::socket::{setsockopt, sockopt};
+<a href=#456 id=456 data-nosnippet>456</a>
+<a href=#457 id=457 data-nosnippet>457</a>        <span class="kw">let </span>dir = tempfile::tempdir()<span class="question-mark">?</span>;
+<a href=#458 id=458 data-nosnippet>458</a>        <span class="kw">let </span>path = dir.path().join(<span class="string">"socket"</span>);
+<a href=#459 id=459 data-nosnippet>459</a>        <span class="kw">let </span>receiver = UnixDatagram::bind(<span class="kw-2">&amp;</span>path)<span class="question-mark">?</span>;
+<a href=#460 id=460 data-nosnippet>460</a>        <span class="kw">let </span>sender = UnixDatagram::unbound()<span class="question-mark">?</span>;
+<a href=#461 id=461 data-nosnippet>461</a>        <span class="comment">// A small send buffer makes the large entry fail inline, whatever
+<a href=#462 id=462 data-nosnippet>462</a>        // the default of the host is.
+<a href=#463 id=463 data-nosnippet>463</a>        </span>setsockopt(<span class="kw-2">&amp;</span>sender, sockopt::SndBuf, <span class="kw-2">&amp;</span><span class="number">4096</span>)<span class="question-mark">?</span>;
+<a href=#464 id=464 data-nosnippet>464</a>
+<a href=#465 id=465 data-nosnippet>465</a>        <span class="kw">let </span>small = Entry::new(Priority::Info, <span class="string">"small"</span>);
+<a href=#466 id=466 data-nosnippet>466</a>        send_to(<span class="kw-2">&amp;</span>sender, <span class="kw-2">&amp;</span>path, small.as_bytes())<span class="question-mark">?</span>;
+<a href=#467 id=467 data-nosnippet>467</a>        <span class="macro">assert_eq!</span>(receive(<span class="kw-2">&amp;</span>receiver)<span class="question-mark">?</span>, (small.as_bytes().to_vec(), <span class="bool-val">false</span>));
+<a href=#468 id=468 data-nosnippet>468</a>
+<a href=#469 id=469 data-nosnippet>469</a>        <span class="kw">let </span>large = Entry::new(Priority::Info, <span class="string">"x"</span>.repeat(<span class="number">1 </span>&lt;&lt; <span class="number">20</span>));
+<a href=#470 id=470 data-nosnippet>470</a>        send_to(<span class="kw-2">&amp;</span>sender, <span class="kw-2">&amp;</span>path, large.as_bytes())<span class="question-mark">?</span>;
+<a href=#471 id=471 data-nosnippet>471</a>        <span class="kw">let </span>(data, memfd) = receive(<span class="kw-2">&amp;</span>receiver)<span class="question-mark">?</span>;
+<a href=#472 id=472 data-nosnippet>472</a>        <span class="macro">assert!</span>(memfd);
+<a href=#473 id=473 data-nosnippet>473</a>        <span class="macro">assert!</span>(data == large.as_bytes(), <span class="string">"memfd holds the entry"</span>);
+<a href=#474 id=474 data-nosnippet>474</a>        <span class="prelude-val">Ok</span>(())
+<a href=#475 id=475 data-nosnippet>475</a>    }
+<a href=#476 id=476 data-nosnippet>476</a>
+<a href=#477 id=477 data-nosnippet>477</a>    <span class="doccomment">/// Send small entries to a socket which is never read, until the queue
+<a href=#478 id=478 data-nosnippet>478</a>    /// of the receiver is full and sending fails.
+<a href=#479 id=479 data-nosnippet>479</a>    </span><span class="kw">fn </span>fill(wait: Wait, path: <span class="kw-2">&amp;</span>Path) -&gt; io::Error {
+<a href=#480 id=480 data-nosnippet>480</a>        <span class="kw">let </span>entry = Entry::new(Priority::Info, <span class="string">"fill"</span>);
+<a href=#481 id=481 data-nosnippet>481</a>        <span class="kw">for _ in </span><span class="number">0</span>..<span class="number">100_000 </span>{
+<a href=#482 id=482 data-nosnippet>482</a>            <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = send_at(wait, path, <span class="kw-2">&amp;</span>entry) {
+<a href=#483 id=483 data-nosnippet>483</a>                <span class="kw">return </span>e;
+<a href=#484 id=484 data-nosnippet>484</a>            }
+<a href=#485 id=485 data-nosnippet>485</a>        }
+<a href=#486 id=486 data-nosnippet>486</a>        <span class="macro">panic!</span>(<span class="string">"the receiver queue never filled up"</span>);
+<a href=#487 id=487 data-nosnippet>487</a>    }
+<a href=#488 id=488 data-nosnippet>488</a>
+<a href=#489 id=489 data-nosnippet>489</a>    <span class="doccomment">/// The tracing writer drops lines instead of blocking the runtime thread
+<a href=#490 id=490 data-nosnippet>490</a>    /// when the journal does not keep up.
+<a href=#491 id=491 data-nosnippet>491</a>    </span><span class="attr">#[test]
+<a href=#492 id=492 data-nosnippet>492</a>    </span><span class="kw">fn </span>writer_never_blocks() -&gt; anyhow::Result&lt;()&gt; {
+<a href=#493 id=493 data-nosnippet>493</a>        <span class="kw">let </span>dir = tempfile::tempdir()<span class="question-mark">?</span>;
+<a href=#494 id=494 data-nosnippet>494</a>        <span class="kw">let </span>path = dir.path().join(<span class="string">"socket"</span>);
+<a href=#495 id=495 data-nosnippet>495</a>        <span class="kw">let </span>_receiver = UnixDatagram::bind(<span class="kw-2">&amp;</span>path)<span class="question-mark">?</span>;
+<a href=#496 id=496 data-nosnippet>496</a>
+<a href=#497 id=497 data-nosnippet>497</a>        <span class="kw">let </span>error = fill(Wait::Never, <span class="kw-2">&amp;</span>path);
+<a href=#498 id=498 data-nosnippet>498</a>        <span class="macro">assert_eq!</span>(error.kind(), ErrorKind::WouldBlock);
+<a href=#499 id=499 data-nosnippet>499</a>
+<a href=#500 id=500 data-nosnippet>500</a>        <span class="kw">let </span>journal = Journal::default();
+<a href=#501 id=501 data-nosnippet>501</a>        <span class="kw">let </span>start = std::time::Instant::now();
+<a href=#502 id=502 data-nosnippet>502</a>        <span class="kw">for _ in </span><span class="number">0</span>..<span class="number">100 </span>{
+<a href=#503 id=503 data-nosnippet>503</a>            journal.send_at(<span class="kw-2">&amp;</span>path, <span class="string">b"dropped\n"</span>)<span class="question-mark">?</span>;
+<a href=#504 id=504 data-nosnippet>504</a>        }
+<a href=#505 id=505 data-nosnippet>505</a>        <span class="macro">assert!</span>(start.elapsed() &lt; SEND_TIMEOUT);
+<a href=#506 id=506 data-nosnippet>506</a>        <span class="prelude-val">Ok</span>(())
+<a href=#507 id=507 data-nosnippet>507</a>    }
+<a href=#508 id=508 data-nosnippet>508</a>
+<a href=#509 id=509 data-nosnippet>509</a>    <span class="doccomment">/// The container logs wait for a stalled journal, but not forever.
+<a href=#510 id=510 data-nosnippet>510</a>    </span><span class="attr">#[test]
+<a href=#511 id=511 data-nosnippet>511</a>    </span><span class="kw">fn </span>bounded_send_times_out() -&gt; anyhow::Result&lt;()&gt; {
+<a href=#512 id=512 data-nosnippet>512</a>        <span class="kw">let </span>dir = tempfile::tempdir()<span class="question-mark">?</span>;
+<a href=#513 id=513 data-nosnippet>513</a>        <span class="kw">let </span>path = dir.path().join(<span class="string">"socket"</span>);
+<a href=#514 id=514 data-nosnippet>514</a>        <span class="kw">let </span>_receiver = UnixDatagram::bind(<span class="kw-2">&amp;</span>path)<span class="question-mark">?</span>;
+<a href=#515 id=515 data-nosnippet>515</a>
+<a href=#516 id=516 data-nosnippet>516</a>        <span class="kw">let </span>start = std::time::Instant::now();
+<a href=#517 id=517 data-nosnippet>517</a>        <span class="kw">let </span>error = fill(Wait::Bounded, <span class="kw-2">&amp;</span>path);
+<a href=#518 id=518 data-nosnippet>518</a>        <span class="macro">assert_eq!</span>(error.kind(), ErrorKind::TimedOut);
+<a href=#519 id=519 data-nosnippet>519</a>        <span class="macro">assert!</span>(start.elapsed() &gt;= SEND_TIMEOUT);
+<a href=#520 id=520 data-nosnippet>520</a>        <span class="prelude-val">Ok</span>(())
+<a href=#521 id=521 data-nosnippet>521</a>    }
+<a href=#522 id=522 data-nosnippet>522</a>
+<a href=#523 id=523 data-nosnippet>523</a>    <span class="doccomment">/// A missing socket and a socket nobody listens on mean that there is
+<a href=#524 id=524 data-nosnippet>524</a>    /// no journal, which the tracing writer ignores.
+<a href=#525 id=525 data-nosnippet>525</a>    </span><span class="attr">#[test]
+<a href=#526 id=526 data-nosnippet>526</a>    </span><span class="kw">fn </span>writer_ignores_a_missing_journal() -&gt; anyhow::Result&lt;()&gt; {
+<a href=#527 id=527 data-nosnippet>527</a>        <span class="kw">let </span>dir = tempfile::tempdir()<span class="question-mark">?</span>;
+<a href=#528 id=528 data-nosnippet>528</a>        <span class="kw">let </span>missing = dir.path().join(<span class="string">"missing"</span>);
+<a href=#529 id=529 data-nosnippet>529</a>        <span class="kw">let </span>stale = dir.path().join(<span class="string">"stale"</span>);
+<a href=#530 id=530 data-nosnippet>530</a>        drop(UnixDatagram::bind(<span class="kw-2">&amp;</span>stale)<span class="question-mark">?</span>);
+<a href=#531 id=531 data-nosnippet>531</a>
+<a href=#532 id=532 data-nosnippet>532</a>        <span class="kw">let </span>entry = Entry::new(Priority::Info, <span class="string">"lost"</span>);
+<a href=#533 id=533 data-nosnippet>533</a>        <span class="kw">for </span>path <span class="kw">in </span>[<span class="kw-2">&amp;</span>missing, <span class="kw-2">&amp;</span>stale] {
+<a href=#534 id=534 data-nosnippet>534</a>            <span class="kw">let </span>error = send_at(Wait::Never, path, <span class="kw-2">&amp;</span>entry).expect_err(<span class="string">"no journal"</span>);
+<a href=#535 id=535 data-nosnippet>535</a>            <span class="macro">assert!</span>(unavailable(<span class="kw-2">&amp;</span>error), <span class="string">"{error}"</span>);
+<a href=#536 id=536 data-nosnippet>536</a>            Journal::default().send_at(path, <span class="string">b"lost\n"</span>)<span class="question-mark">?</span>;
+<a href=#537 id=537 data-nosnippet>537</a>        }
+<a href=#538 id=538 data-nosnippet>538</a>        <span class="prelude-val">Ok</span>(())
+<a href=#539 id=539 data-nosnippet>539</a>    }
+<a href=#540 id=540 data-nosnippet>540</a>}
+</code></pre></div></section></main></body></html>

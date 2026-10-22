@@ -1,0 +1,9 @@
+(function() {
+    var type_impls = Object.fromEntries([["conmonrs",[["<details class=\"toggle implementors-toggle\" open><summary><section id=\"impl-Params%3CT%3E\" class=\"impl\"><a href=\"#impl-Params%3CT%3E\" class=\"anchor\">§</a><h3 class=\"code-header\">impl&lt;T&gt; Params&lt;T&gt;</h3></section></summary><div class=\"impl-items\"><section id=\"method.new\" class=\"method\"><h4 class=\"code-header\">pub fn <a href=\"#method.new\" class=\"fn\">new</a>(hook: <a class=\"struct\" href=\"https://doc.rust-lang.org/1.99.1/alloc/boxed/struct.Box.html\" title=\"struct alloc::boxed::Box\">Box</a>&lt;dyn ParamsHook&gt;) -&gt; Params&lt;T&gt;</h4></section><section id=\"method.get\" class=\"method\"><h4 class=\"code-header\">pub fn <a href=\"#method.get\" class=\"fn\">get</a>(&amp;self) -&gt; <a class=\"enum\" href=\"https://doc.rust-lang.org/1.99.1/core/result/enum.Result.html\" title=\"enum core::result::Result\">Result</a>&lt;&lt;T as Owned&gt;::Reader&lt;'_&gt;, Error&gt;<div class=\"where\">where\n    T: Owned,</div></h4></section></div></details>",0,"conmonrs::conmon_capnp::conmon::VersionParams","conmonrs::conmon_capnp::conmon::CreateContainerParams","conmonrs::conmon_capnp::conmon::ExecSyncContainerParams","conmonrs::conmon_capnp::conmon::AttachContainerParams","conmonrs::conmon_capnp::conmon::ReopenLogContainerParams","conmonrs::conmon_capnp::conmon::SetWindowSizeContainerParams","conmonrs::conmon_capnp::conmon::CreateNamespacesParams","conmonrs::conmon_capnp::conmon::StartFdSocketParams","conmonrs::conmon_capnp::conmon::ServeExecContainerParams","conmonrs::conmon_capnp::conmon::ServeAttachContainerParams","conmonrs::conmon_capnp::conmon::ServePortForwardContainerParams"]]]]);
+    if (window.register_type_impls) {
+        window.register_type_impls(type_impls);
+    } else {
+        window.pending_type_impls = type_impls;
+    }
+})()
+//{"start":55,"fragment_lengths":[1652]}
