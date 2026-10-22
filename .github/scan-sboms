@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Scan the SPDX SBOMs of the static binaries with grype, which runs in a
+# container, and apply the VEX document. Print all findings, to the step
+# summary as well in a workflow, and fail for the High and Critical ones which
+# have a fix. Run by make scan, which sets the image and the cache of the
+# vulnerability database.
+#
+# For the SBOM of a file, grype only applies a statement whose product is the
+# vulnerable package itself. The statements of the document name conmon-rs as
+# their product, without a version, and the affected crates as its
+# subcomponents, see .github/verify-vex, so the scan makes the subcomponents
+# the products.
+CONTAINER_RUNTIME=${CONTAINER_RUNTIME:-podman}
+GRYPE_IMAGE=${GRYPE_IMAGE:?}
+GRYPE_DB_DIR=${GRYPE_DB_DIR:?}
+VEX=${VEX:-vex/conmonrs.openvex.json}
+
+if (($# == 0)); then
+    echo "usage: $0 SBOM..." >&2
+    exit 1
+fi
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$GRYPE_DB_DIR"
+"$(dirname "$0")/verify-vex" "$VEX" >/dev/null
+jq '.statements |= map(.products = [.products[].subcomponents[]])' "$VEX" >"$WORK/vex.json"
+
+# grype runs as the calling user, who owns the database and the files to scan,
+# with rootless podman as the same user in the container.
+RUN_ARGS=(--user "$(id -u):$(id -g)")
+if [[ $("$CONTAINER_RUNTIME" info --format '{{.Host.Security.Rootless}}' 2>/dev/null) == true ]]; then
+    RUN_ARGS+=(--userns keep-id)
+fi
+grype() {
+    "$CONTAINER_RUNTIME" run --rm "${RUN_ARGS[@]}" --tmpfs /tmp:mode=1777 \
+        -v "$WORK:/scan:z,ro" \
+        -v "$GRYPE_DB_DIR:/db:z" \
+        -e GRYPE_DB_CACHE_DIR=/db \
+        -e GRYPE_DB_AUTO_UPDATE=false \
+        -e GRYPE_CHECK_FOR_APP_UPDATE=false \
+        "$GRYPE_IMAGE" "$@"
+}
+
+# One update of the database for all SBOMs, the scans do not check for one.
+grype db update >&2
+
+# A table of the matches or the ignored matches of a grype report, the VEX
+# column has the status of the statement which applies.
+table() {
+    jq -r --arg key "$1" '
+        .[$key] |
+        if length == 0 then "No vulnerabilities found.\n" else
+            "| Vulnerability | Severity | Package | Installed | Fixed in | VEX |",
+            "| --- | --- | --- | --- | --- | --- |",
+            (sort_by(.artifact.name, .vulnerability.id)[] |
+                "| [\(.vulnerability.id)](\(.vulnerability.dataSource)) | \(.vulnerability.severity) | \(.artifact.name) | \(.artifact.version) | \(.vulnerability.fix.versions // [] | join(", ")) | \([.appliedIgnoreRules[]?."vex-status" // empty] | unique | join(", ")) |"),
+            ""
+        end
+    ' "$2"
+}
+
+FAILED=0
+REPORT=$WORK/report.md
+for SBOM in "$@"; do
+    NAME=$(jq -er .name "$SBOM")
+    cp "$SBOM" "$WORK/sbom.json"
+    grype -q sbom:/scan/sbom.json --vex /scan/vex.json -o json >"$WORK/grype.json"
+    jq -r --arg name "$NAME" '"### \($name)\n\ngrype \(.descriptor.version), database built \(.descriptor.db.status.built)\n"' "$WORK/grype.json" >>"$REPORT"
+    table matches "$WORK/grype.json" >>"$REPORT"
+    if jq -e '.ignoredMatches | length > 0' "$WORK/grype.json" >/dev/null; then
+        printf '#### Ignored\n\n' >>"$REPORT"
+        table ignoredMatches "$WORK/grype.json" >>"$REPORT"
+    fi
+    FINDINGS=$(jq -r '
+        .matches[] |
+        select((.vulnerability.severity | IN("High", "Critical")) and .vulnerability.fix.state == "fixed") |
+        "\(.vulnerability.id) (\(.vulnerability.severity)) in \(.artifact.name) \(.artifact.version), fixed in \(.vulnerability.fix.versions // [] | join(", "))"
+    ' "$WORK/grype.json")
+    while IFS= read -r FINDING; do
+        if [[ -n $FINDING ]]; then
+            echo "${GITHUB_ACTIONS:+::error::}$NAME: $FINDING" >&2
+            FAILED=1
+        fi
+    done <<<"$FINDINGS"
+done
+
+cat "$REPORT"
+if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+    cat "$REPORT" >>"$GITHUB_STEP_SUMMARY"
+fi
+if ((FAILED)); then
+    echo "Update the affected crates, or add a not_affected VEX statement if conmon-rs is not affected, see release.md." >&2
+fi
+exit "$FAILED"

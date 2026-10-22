@@ -40,6 +40,7 @@ jobs:
           go-version-file: go.mod
       - run: make verify-dependencies
       - run: make verify-spec
+      - run: make verify-vex
 
   verify-proto:
     runs-on: ubuntu-latest
@@ -193,6 +194,78 @@ jobs:
           persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
+  # Scans the SBOMs of the static binaries with grype and the VEX document, see
+  # make scan, which covers the GitHub advisories of the crates which got built
+  # in, like verify-deny does for the RustSec ones of Cargo.lock. Not every
+  # architecture builds in the same crates, so every SBOM gets scanned. The
+  # advisories workflow scans the latest binaries of main every day. The
+  # publish jobs do not wait for the scan: CRI-O CI installs the latest
+  # binaries of main, which a new advisory must not hold back, and a failure
+  # shows on main.
+  verify-vulnerabilities:
+    needs:
+      - build-static-amd64
+      - build-static-arm64
+      - build-static-ppc64le
+      - build-static-s390x
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: build-static-*
+          path: .build/static
+      # The vulnerability database which the daily advisories workflow saves,
+      # grype updates it if it is older. The runs here only restore it, so
+      # that the cache holds a single database.
+      - name: Date
+        id: date
+        run: echo "date=$(date -u +%F)" >>"$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: grype-db
+        with:
+          path: .build/grype-db
+          key: grype-db-${{ steps.date.outputs.date }}
+          restore-keys: grype-db-
+      - name: Scan
+        env:
+          CONTAINER_RUNTIME: docker
+        run: |
+          SBOMS=(.build/static/build-static-*/conmonrs.spdx.json)
+          make scan SBOMS="${SBOMS[*]}"
+
+  # The Go dependencies follow CRI-O, which vendors the client, so a finding
+  # only shows up as a warning and in the summary, without failing the pull
+  # request. Other errors of govulncheck fail. The advisories workflow fails
+  # for a finding every day. The standard library is the one of the Go
+  # toolchain which builds CRI-O, so the latest Go release checks it instead of
+  # the minimum version of go.mod.
+  verify-go-vulnerabilities:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+      # go run would turn the exit code of govulncheck into 1.
+      - name: govulncheck
+        run: |
+          GOBIN=$RUNNER_TEMP go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          STATUS=0
+          "$RUNNER_TEMP/govulncheck" ./... >govulncheck.txt 2>&1 || STATUS=$?
+          cat govulncheck.txt
+          # 3 means vulnerabilities found.
+          if ((STATUS == 3)); then
+            echo "::warning::govulncheck reported vulnerabilities, see the summary"
+            printf '### govulncheck\n\n~~~\n%s\n~~~\n' "$(cat govulncheck.txt)" >>"$GITHUB_STEP_SUMMARY"
+          elif ((STATUS != 0)); then
+            exit "$STATUS"
+          fi
+
   # The architectures are the packages of flake.nix, .github/release-files and
   # scripts/get list them as well. Every architecture gets its own build and
   # publish job: the tests only wait for their build, and each publish only
@@ -226,12 +299,13 @@ jobs:
     permissions:
       contents: read
       id-token: write # signs the binary, see publish-static.yml
-      attestations: write # attests its provenance and SBOM
+      attestations: write # attests its provenance, SBOM and VEX document
     uses: ./.github/workflows/publish-static.yml
     with:
       arch: amd64
       digest: ${{ needs.build-static-amd64.outputs.digest }}
       sbom-digest: ${{ needs.build-static-amd64.outputs.sbom-digest }}
+      vex-digest: ${{ needs.build-static-amd64.outputs.vex-digest }}
       artifact-id: ${{ needs.build-static-amd64.outputs.artifact-id }}
     secrets:
       GCS_CRIO_SA: ${{ secrets.GCS_CRIO_SA }}
@@ -242,12 +316,13 @@ jobs:
     permissions:
       contents: read
       id-token: write # signs the binary, see publish-static.yml
-      attestations: write # attests its provenance and SBOM
+      attestations: write # attests its provenance, SBOM and VEX document
     uses: ./.github/workflows/publish-static.yml
     with:
       arch: arm64
       digest: ${{ needs.build-static-arm64.outputs.digest }}
       sbom-digest: ${{ needs.build-static-arm64.outputs.sbom-digest }}
+      vex-digest: ${{ needs.build-static-arm64.outputs.vex-digest }}
       artifact-id: ${{ needs.build-static-arm64.outputs.artifact-id }}
     secrets:
       GCS_CRIO_SA: ${{ secrets.GCS_CRIO_SA }}
@@ -258,12 +333,13 @@ jobs:
     permissions:
       contents: read
       id-token: write # signs the binary, see publish-static.yml
-      attestations: write # attests its provenance and SBOM
+      attestations: write # attests its provenance, SBOM and VEX document
     uses: ./.github/workflows/publish-static.yml
     with:
       arch: ppc64le
       digest: ${{ needs.build-static-ppc64le.outputs.digest }}
       sbom-digest: ${{ needs.build-static-ppc64le.outputs.sbom-digest }}
+      vex-digest: ${{ needs.build-static-ppc64le.outputs.vex-digest }}
       artifact-id: ${{ needs.build-static-ppc64le.outputs.artifact-id }}
     secrets:
       GCS_CRIO_SA: ${{ secrets.GCS_CRIO_SA }}
@@ -274,12 +350,13 @@ jobs:
     permissions:
       contents: read
       id-token: write # signs the binary, see publish-static.yml
-      attestations: write # attests its provenance and SBOM
+      attestations: write # attests its provenance, SBOM and VEX document
     uses: ./.github/workflows/publish-static.yml
     with:
       arch: s390x
       digest: ${{ needs.build-static-s390x.outputs.digest }}
       sbom-digest: ${{ needs.build-static-s390x.outputs.sbom-digest }}
+      vex-digest: ${{ needs.build-static-s390x.outputs.vex-digest }}
       artifact-id: ${{ needs.build-static-s390x.outputs.artifact-id }}
     secrets:
       GCS_CRIO_SA: ${{ secrets.GCS_CRIO_SA }}

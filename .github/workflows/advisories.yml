@@ -1,7 +1,8 @@
 name: advisories
-# The verify-deny job of the ci workflow only runs on changes. New advisories
-# against the locked dependencies of an unchanged main show up here, like
-# newer versions of the tools of dependencies.yaml.
+# The verify-deny and verify-vulnerabilities jobs of the ci workflow only run
+# on changes. New advisories against the locked dependencies of an unchanged
+# main and its binaries show up here, like newer versions of the tools of
+# dependencies.yaml.
 on:
   schedule:
     - cron: "0 6 * * *"
@@ -41,6 +42,71 @@ jobs:
             printf '### govulncheck\n\n~~~\n%s\n~~~\n' "$(cat govulncheck.txt)" >>"$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+
+  # New vulnerabilities of the crates of the latest binaries of main, which the
+  # verify-vulnerabilities job of the ci workflow only scans on changes. The
+  # scan uses the attested SBOMs of the binaries, and the VEX document of main,
+  # which may have statements the published one of the binaries does not have
+  # yet.
+  verify-vulnerabilities:
+    if: github.repository == 'containers/conmon-rs'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write # deletes the databases of the days before
+      attestations: read # verifies the SBOMs
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch and verify the SBOMs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          COMMIT=$(curl -sSfL --retry 5 "https://storage.googleapis.com/cri-o/conmon-rs/latest-main.txt?ts=$(date +%s)")
+          if [[ ! $COMMIT =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::latest-main.txt does not name a commit: $COMMIT"
+            exit 1
+          fi
+          printf 'The binaries of %s on main.\n\n' "$COMMIT" | tee -a "$GITHUB_STEP_SUMMARY"
+          mkdir -p .build/sboms
+          cd .build/sboms
+          ../../.github/release-files sboms "$COMMIT"
+      # The only job which saves the vulnerability database, one of about
+      # 500 MB a day, and deletes the ones of the days before, so that it does
+      # not push the build caches out. The ci workflow only restores it.
+      - name: Date
+        id: date
+        run: echo "date=$(date -u +%F)" >>"$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: grype-db
+        with:
+          path: .build/grype-db
+          key: grype-db-${{ steps.date.outputs.date }}
+          restore-keys: grype-db-
+      - name: Scan
+        env:
+          CONTAINER_RUNTIME: docker
+        run: |
+          SBOMS=(.build/sboms/*.spdx.json)
+          make scan SBOMS="${SBOMS[*]}"
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ !cancelled() && steps.grype-db.outputs.cache-hit != 'true' }}
+        with:
+          path: .build/grype-db
+          key: grype-db-${{ steps.date.outputs.date }}
+      - name: Delete older databases
+        if: ${{ !cancelled() && steps.grype-db.outputs.cache-hit != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: grype-db-${{ steps.date.outputs.date }}
+        run: |
+          gh cache list --repo "$GITHUB_REPOSITORY" --key grype-db- --limit 100 --json key --jq '.[].key' |
+            while read -r KEY; do
+              if [[ $KEY != "$KEEP" ]]; then
+                gh cache delete "$KEY" --repo "$GITHUB_REPOSITORY"
+              fi
+            done
 
   # Warns about newer upstream releases of the tools of dependencies.yaml.
   verify-dependencies-upstream:
