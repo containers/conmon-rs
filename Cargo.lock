@@ -242,7 +242,6 @@ dependencies = [
 name = "conmonrs-fuzz"
 version = "0.0.0"
 dependencies = [
- "bytes",
  "conmonrs",
  "libfuzzer-sys",
 ]

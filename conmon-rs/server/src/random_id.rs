@@ -27,11 +27,12 @@ impl fmt::Display for RandomId {
     }
 }
 
-/// Like [`fmt::Display`], so that the ID in a debug log matches the one of
-/// the URL and the spans.
+/// The first 8 hex digits of [`fmt::Display`], which tell the IDs in a log
+/// apart without handing them out: the token of a request which got rejected
+/// stays valid.
 impl fmt::Debug for RandomId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
+        write!(f, "{:08x}", self.0 >> 96)
     }
 }
 
@@ -80,7 +81,8 @@ mod tests {
 
         // Leading zeros are written as well.
         assert_eq!(RandomId(1).to_string(), "00000000000000000000000000000001");
-        assert_eq!(format!("{id:?}"), written);
+        assert_eq!(format!("{id:?}"), written[..8]);
+        assert_eq!(format!("{:?}", RandomId(u128::MAX >> 4)), "0fffffff");
     }
 
     #[test]

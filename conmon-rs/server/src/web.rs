@@ -1,8 +1,10 @@
 //! The HTTP side of the streaming server on top of hyper: short responses
 //! and the upgrade of a request to a WebSocket. The WebSocket handshake
-//! checks the request like axum did before, with the same rejections.
+//! checks the request like RFC 6455 says, a request which does not pass gets
+//! a plain text response which tells what is missing.
 
 use bytes::Bytes;
+use futures::stream::{Stream, StreamExt};
 use hyper::{
     Method, Request, StatusCode,
     body::{Body as HttpBody, Frame, SizeHint},
@@ -15,6 +17,10 @@ use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
+};
+use tokio::{
+    task::JoinHandle,
+    time::{self, Duration},
 };
 use tokio_tungstenite::{
     WebSocketStream,
@@ -32,6 +38,66 @@ pub use tokio_tungstenite::tungstenite::{
 
 /// A WebSocket of a client, after the upgrade of its request.
 pub type WebSocket = WebSocketStream<TokioIo<Upgraded>>;
+
+/// How long a client gets to take the end of a WebSocket, the close of the
+/// server and what is queued before it.
+pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The close of the server once it is done.
+pub fn close_message(reason: &str) -> Message {
+    Message::Close(Some(CloseFrame {
+        code: CloseCode::Normal,
+        reason: reason.into(),
+    }))
+}
+
+/// Wait for the task which writes to a WebSocket and closes it, abort it
+/// after [`CLOSE_TIMEOUT`]. Dropping its handle would leave it running, a
+/// writer to a client which does not read would hold the connection. The
+/// output of the writer, `None` if it did not end in time.
+pub async fn join_or_abort<T>(mut writer: JoinHandle<T>) -> Option<T> {
+    match time::timeout(CLOSE_TIMEOUT, &mut writer).await {
+        Ok(output) => output.ok(),
+        Err(_) => {
+            writer.abort();
+            None
+        }
+    }
+}
+
+/// Read the client after the close of the server, until it answered the
+/// close, for up to [`CLOSE_TIMEOUT`]. What it sends meanwhile gets dropped.
+/// A socket closed with input it did not read resets the connection, which
+/// can drop what the client did not read yet, like the close and the output
+/// before it.
+pub async fn await_close_answer<S, E>(messages: &mut S)
+where
+    S: Stream<Item = Result<Message, E>> + Unpin,
+{
+    let answer = async {
+        while let Some(Ok(message)) = messages.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    };
+    if time::timeout(CLOSE_TIMEOUT, answer).await.is_err() {
+        debug!("Client did not answer the close in time");
+    }
+}
+
+/// End a WebSocket: wait for the writer, which sends the close of the
+/// server, see [`join_or_abort`], then for the answer of the client, see
+/// [`await_close_answer`]. The writer tells whether its close went out, a
+/// client gets no time to answer a close it did not get.
+pub async fn finish<S, E>(writer: JoinHandle<bool>, messages: &mut S)
+where
+    S: Stream<Item = Result<Message, E>> + Unpin,
+{
+    if join_or_abort(writer).await == Some(true) {
+        await_close_answer(messages).await;
+    }
+}
 
 /// A response of the streaming server.
 pub type Response = hyper::Response<Body>;
@@ -354,6 +420,45 @@ mod tests {
         );
         assert!(header_eq(&headers, header::SEC_WEBSOCKET_VERSION, "13"));
         assert!(!header_eq(&headers, header::SEC_WEBSOCKET_VERSION, "1"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hanging_writers_get_aborted() {
+        let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
+        let writer = tokio::spawn(async move {
+            let _alive = alive_tx;
+            std::future::pending::<()>().await
+        });
+        assert_eq!(join_or_abort(writer).await, None);
+        // The task got dropped with its sender.
+        assert!(alive_rx.await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closes_which_did_not_go_out_get_no_answer() {
+        let mut messages = futures::stream::pending::<Result<Message, Infallible>>();
+        // A writer which hangs, which does not send its close.
+        let start = time::Instant::now();
+        finish(tokio::spawn(std::future::pending::<bool>()), &mut messages).await;
+        assert_eq!(start.elapsed(), CLOSE_TIMEOUT);
+        // One which did not get its close out.
+        let start = time::Instant::now();
+        finish(tokio::spawn(async { false }), &mut messages).await;
+        assert_eq!(start.elapsed(), Duration::ZERO);
+
+        // A close which went out gets its answer, what comes before it gets
+        // dropped.
+        let start = time::Instant::now();
+        finish(tokio::spawn(async { true }), &mut messages).await;
+        assert_eq!(start.elapsed(), CLOSE_TIMEOUT);
+        let mut messages = futures::stream::iter([
+            Ok::<_, Infallible>(Message::Binary(Bytes::from_static(b"late"))),
+            Ok(close_message("")),
+        ])
+        .chain(futures::stream::pending());
+        let start = time::Instant::now();
+        finish(tokio::spawn(async { true }), &mut messages).await;
+        assert_eq!(start.elapsed(), Duration::ZERO);
     }
 
     #[tokio::test]

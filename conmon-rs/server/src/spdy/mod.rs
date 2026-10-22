@@ -22,8 +22,6 @@ use crate::{
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::{Bytes, BytesMut};
 pub use frame::Headers;
-#[cfg(feature = "fuzzing")]
-pub use frame::fuzzing;
 use frame::{
     Decoder, Encoder, Frame, GOAWAY_OK, GOAWAY_PROTOCOL_ERROR, STATUS_CANCEL,
     STATUS_PROTOCOL_ERROR, STATUS_REFUSED_STREAM,
@@ -37,12 +35,12 @@ use std::{
     },
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf},
     select,
     sync::{Notify, mpsc},
     time::{self, Duration},
 };
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use tracing::{debug, trace, warn};
 
 /// How many control frames wait for the connection.
@@ -69,8 +67,10 @@ const DATA_BUFFER: u32 = 4 * 1024 * 1024;
 const ACCEPT_QUEUE: usize = 16;
 
 /// The most streams a client may have open at once. A Kubernetes port forward
-/// uses two per forwarded connection.
-const MAX_STREAMS: usize = 1024;
+/// uses two per forwarded connection. A stream counts until the server let
+/// go of it, also after the client reset it, so that a client which opens
+/// and resets streams cannot make the server hold more of them.
+pub(crate) const MAX_STREAMS: usize = 1024;
 
 /// How many bytes the writer collects before writing them to the connection.
 const WRITE_BUFFER: usize = 64 * 1024;
@@ -123,6 +123,7 @@ impl Connection {
             done: CancellationToken::new(),
             activity: Activity::new(),
             last_stream_id: AtomicU32::new(0),
+            live_streams: AtomicUsize::new(0),
         });
         tokio::spawn(
             Reader {
@@ -207,12 +208,15 @@ impl Connection {
 
     /// End the connection once no frame went either way for the timeout.
     async fn watch_idle(shared: Arc<Shared>, timeout: Option<Duration>) {
-        select! {
-            _ = shared.activity.idle(timeout) => {
-                debug!("Closing idle SPDY connection");
-                shared.go_away(GOAWAY_OK);
-            }
-            _ = shared.done.cancelled() => {}
+        let ended = shared.done.cancelled();
+        if shared
+            .activity
+            .until_idle(timeout, ended, || {})
+            .await
+            .is_none()
+        {
+            debug!("Closing idle SPDY connection");
+            shared.go_away(GOAWAY_OK);
         }
     }
 
@@ -442,6 +446,9 @@ struct Shared {
 
     /// The last stream the client opened, for the GOAWAY.
     last_stream_id: AtomicU32,
+
+    /// The streams the server holds, see [`Live`].
+    live_streams: AtomicUsize,
 }
 
 /// An open stream as the reader sees it.
@@ -551,6 +558,29 @@ impl Shared {
             state.reset.cancel();
         }
     }
+
+    /// Whether the client may open another stream, see [`MAX_STREAMS`].
+    fn has_room(&self) -> bool {
+        self.lock_streams().len() < MAX_STREAMS
+            && self.live_streams.load(Ordering::Acquire) < MAX_STREAMS
+    }
+}
+
+/// Counts a stream in [`Shared::live_streams`] until both of its halves got
+/// dropped, the stream may hold its headers and data until then.
+struct Live(Arc<Shared>);
+
+impl Live {
+    fn new(shared: &Arc<Shared>) -> Arc<Self> {
+        shared.live_streams.fetch_add(1, Ordering::AcqRel);
+        Arc::new(Self(shared.clone()))
+    }
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.0.live_streams.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Reads the frames of the client and dispatches them to the streams.
@@ -563,8 +593,11 @@ struct Reader<T, F> {
 
 /// Why the reader stopped.
 enum End {
-    /// The client closed the connection, nothing takes streams anymore or
-    /// the connection ended otherwise, like when it was idle.
+    /// The client closed the connection.
+    ClientClosed,
+
+    /// Nothing takes streams anymore or the connection ended otherwise, like
+    /// when it was idle.
     Closed,
 
     /// The client violated the protocol, the connection cannot continue.
@@ -578,7 +611,8 @@ where
 {
     async fn run(mut self) {
         let shared = self.shared.clone();
-        if let End::ProtocolError(e) = self.read().await {
+        let end = self.read().await;
+        if let End::ProtocolError(e) = &end {
             warn!("Closing SPDY connection: {e:#}");
             shared.go_away(GOAWAY_PROTOCOL_ERROR);
         }
@@ -587,6 +621,24 @@ where
         // Ends the data of all streams, the reset tokens are children of
         // `done` and got cancelled with it.
         shared.lock_streams().clear();
+
+        // Nothing gets accepted anymore.
+        drop(self.streams);
+        if !matches!(end, End::ClientClosed) {
+            Self::drain(&mut self.reader).await;
+        }
+    }
+
+    /// Read the client after the end of the connection until it closed it
+    /// as well, for up to [`SHUTDOWN_TIMEOUT`]. A socket closed with input
+    /// it did not read resets the connection, which can drop the last
+    /// frames of the server, like the status of a session.
+    async fn drain(reader: &mut ReadHalf<T>) {
+        let mut buf = [0; 4096];
+        let drained = async { while matches!(reader.read(&mut buf).await, Ok(1..)) {} };
+        if time::timeout(SHUTDOWN_TIMEOUT, drained).await.is_err() {
+            debug!("SPDY client did not close the connection in time");
+        }
     }
 
     async fn read(&mut self) -> End {
@@ -600,7 +652,7 @@ where
             };
             let frame = match frame {
                 Ok(Some(frame)) => frame,
-                Ok(None) => return End::Closed,
+                Ok(None) => return End::ClientClosed,
                 Err(e) => return End::ProtocolError(e),
             };
             if Connection::is_activity(&frame) {
@@ -680,11 +732,11 @@ where
     ) -> Result<()> {
         let refused = if going_away || self.streams.is_closed() {
             Some(STATUS_REFUSED_STREAM)
-        } else if self.shared.lock_streams().len() >= MAX_STREAMS {
-            warn!("Refusing SPDY stream {stream_id}, too many streams are open");
+        } else if !self.shared.has_room() {
+            debug!("Refusing SPDY stream {stream_id}, too many streams are open");
             Some(STATUS_REFUSED_STREAM)
         } else if let Err(e) = (self.accept)(&headers) {
-            warn!("Rejecting SPDY stream {stream_id}: {e:#}");
+            debug!("Rejecting SPDY stream {stream_id}: {e:#}");
             Some(STATUS_CANCEL)
         } else {
             None
@@ -714,11 +766,13 @@ where
             })
             .await?;
 
+        let live = Live::new(&self.shared);
         let stream = Stream {
             headers,
             receiver: StreamReceiver {
                 data: data_rx,
                 reset: reset.clone(),
+                _live: live.clone(),
             },
             sender: StreamSender {
                 id: stream_id,
@@ -726,6 +780,7 @@ where
                 reset,
                 queued: Arc::default(),
                 closed: false,
+                _live: live,
             },
         };
         select! {
@@ -754,6 +809,17 @@ impl Stream {
         self.sender.id
     }
 
+    /// Whether the stream got reset or the connection ended.
+    pub fn is_reset(&self) -> bool {
+        self.receiver.is_reset()
+    }
+
+    /// Resolves once the stream got reset or the connection ended, also
+    /// after the stream got dropped.
+    pub fn reset_watch(&self) -> WaitForCancellationFutureOwned {
+        self.receiver.reset.clone().cancelled_owned()
+    }
+
     /// Split the stream into the data of the client and the sending side,
     /// to use both at the same time.
     pub fn split(self) -> (StreamReceiver, StreamSender) {
@@ -761,11 +827,13 @@ impl Stream {
     }
 
     /// Send data, see [`StreamSender::send`].
+    #[cfg(test)]
     pub async fn send(&mut self, data: Bytes) -> Result<()> {
         self.sender.send(data).await
     }
 
     /// Close the sending side, see [`StreamSender::close`].
+    #[cfg(test)]
     pub async fn close(&mut self) -> Result<()> {
         self.sender.close().await
     }
@@ -775,6 +843,7 @@ impl Stream {
 pub struct StreamReceiver {
     data: mpsc::Receiver<Held>,
     reset: CancellationToken,
+    _live: Arc<Live>,
 }
 
 impl StreamReceiver {
@@ -806,6 +875,7 @@ pub struct StreamSender {
     /// The frames of the stream in the data queue.
     queued: Arc<Queued>,
     closed: bool,
+    _live: Arc<Live>,
 }
 
 impl StreamSender {
@@ -888,12 +958,143 @@ impl Drop for StreamSender {
     }
 }
 
+/// The entry points of the fuzz targets.
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing {
+    pub use super::frame::fuzzing::{frames, header_block};
+    use super::{
+        Connection,
+        frame::{Encoder, Frame, Headers},
+    };
+    use anyhow::bail;
+    use bytes::{Bytes, BytesMut};
+    use tokio::{
+        io::AsyncWriteExt,
+        runtime, task,
+        time::{self, Duration},
+    };
+
+    /// The frames a client sends, by the input: each starts with a byte
+    /// which picks the frame and its FIN flag, followed by the stream and
+    /// what the frame needs. Raw bytes may break the framing.
+    fn client_frames(input: &[u8]) -> BytesMut {
+        let mut input = input.iter().copied();
+        let mut encoder = Encoder::default();
+        let mut buf = BytesMut::new();
+        while let Some(op) = input.next() {
+            let mut next = || input.next().unwrap_or_default();
+            let (fin, id) = (op & 0x80 != 0, u32::from(next()));
+            let frame = match op & 0x7f {
+                0 => Frame::SynStream {
+                    stream_id: id,
+                    fin,
+                    headers: [(
+                        "streamType",
+                        ["data", "error", "other"][usize::from(next() % 3)],
+                    )]
+                    .into(),
+                },
+                1 => {
+                    let (byte, len) = (next(), next());
+                    Frame::Data {
+                        stream_id: id,
+                        fin,
+                        data: Bytes::from(vec![byte; usize::from(len)]),
+                    }
+                }
+                2 => Frame::RstStream {
+                    stream_id: id,
+                    status: u32::from(next()),
+                },
+                3 => Frame::Ping { id },
+                4 => Frame::GoAway {
+                    last_stream_id: id,
+                    status: 0,
+                },
+                5 => Frame::Headers { stream_id: id, fin },
+                6 => Frame::SynReply {
+                    stream_id: id,
+                    headers: Headers::default(),
+                },
+                _ => {
+                    buf.extend((0..id).map(|_| next()));
+                    continue;
+                }
+            };
+            // The encoder takes every frame it builds.
+            let _ = encoder.encode(&frame, &mut buf);
+        }
+        buf
+    }
+
+    /// Serve a connection to a client which sends the frames the input
+    /// describes, then closes the connection. The streams the server
+    /// accepts take their data, answer, close or get dropped. The connection
+    /// has to end with the client, also with streams which do not.
+    pub fn connection(input: &[u8]) {
+        let frames = client_frames(input);
+        let runtime = runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (client, server) = tokio::io::duplex(64 * 1024);
+            let (mut from_server, mut to_server) = tokio::io::split(client);
+            let mut connection = Connection::serve(server, None, None, |headers| {
+                match headers.get("streamType") {
+                    Some("data" | "error") => Ok(()),
+                    _ => bail!("unexpected stream type"),
+                }
+            });
+            // The client reads while it writes, a server which answers more
+            // than the pipe holds would wait for it otherwise.
+            let client = task::spawn(async move {
+                let write = async {
+                    let _ = to_server.write_all(&frames).await;
+                    let _ = to_server.shutdown().await;
+                };
+                let mut sink = tokio::io::sink();
+                let _ = tokio::join!(write, tokio::io::copy(&mut from_server, &mut sink));
+            });
+            let served = async {
+                let mut streams = vec![];
+                while let Some(stream) = connection.accept().await {
+                    streams.push(task::spawn(async move {
+                        let id = stream.id();
+                        let (mut receiver, mut sender) = stream.split();
+                        match id % 3 {
+                            0 => {}
+                            1 => {
+                                while receiver.recv().await.is_some() {}
+                                let _ = sender.send(Bytes::from_static(b"done")).await;
+                                let _ = sender.close().await;
+                            }
+                            _ => {
+                                let _ = sender.send(Bytes::from_static(b"hello")).await;
+                                let _ = sender.close().await;
+                                while receiver.recv_held().await.is_some() {}
+                            }
+                        }
+                    }));
+                }
+                for stream in streams {
+                    let _ = stream.await;
+                }
+                let _ = client.await;
+            };
+            time::timeout(Duration::from_secs(30), served)
+                .await
+                .expect("the connection ended with the client");
+        });
+    }
+}
+
 /// A SPDY client for the tests of the protocols on top.
 #[cfg(test)]
 pub mod testing {
     use super::frame::{Decoder, Encoder};
     pub use super::frame::{Frame, Headers};
-    use anyhow::Result;
+    use anyhow::{Result, bail};
     use bytes::BytesMut;
     use tokio::{
         io::{AsyncRead, AsyncWrite, AsyncWriteExt, DuplexStream, duplex},
@@ -951,6 +1152,17 @@ pub mod testing {
         /// tests, which run with paused time.
         pub async fn frame(&mut self) -> Result<Option<Frame>> {
             time::timeout(Duration::from_secs(60), self.decoder.read(&mut self.io)).await?
+        }
+
+        /// Read frames until one matches, return it.
+        pub async fn frame_until(&mut self, matches: impl Fn(&Frame) -> bool) -> Result<Frame> {
+            loop {
+                match self.frame().await? {
+                    Some(frame) if matches(&frame) => return Ok(frame),
+                    Some(_) => {}
+                    None => bail!("connection ended"),
+                }
+            }
         }
     }
 }
@@ -1496,6 +1708,31 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn ended_connections_read_the_client_until_it_closed() -> Result<()> {
+        let (mut client, mut connection) = connect(accept_data, None)?;
+        connection.handle().close();
+        assert_eq!(client.frame().await?, None);
+        time::timeout(Duration::from_secs(1), connection.done().cancelled()).await?;
+        let accepted = time::timeout(Duration::from_secs(1), connection.accept()).await?;
+        assert!(accepted.is_none());
+
+        // Input the server does not read would reset the connection, which
+        // could drop its last frames.
+        time::sleep(Duration::from_millis(50)).await;
+        let data = Bytes::from(vec![0; 60_000]);
+        for _ in 0..40 {
+            client
+                .send(Frame::Data {
+                    stream_id: 1,
+                    fin: false,
+                    data: data.clone(),
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
     #[tokio::test(start_paused = true)]
     async fn closing_a_stuck_connection_ends_with_the_idle_timeout() -> Result<()> {
         // A client which does not read: the close cannot flush, the idle
@@ -1612,6 +1849,51 @@ mod tests {
             .await?;
         let stream = connection.accept().await.context("stream")?;
         assert_eq!(stream.id(), last + 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streams_reset_by_the_client_count_until_dropped() -> Result<()> {
+        let (mut client, mut connection) = connect(accept_data, None)?;
+        let mut streams = Vec::with_capacity(MAX_STREAMS);
+        for i in 0..MAX_STREAMS as u32 {
+            let stream_id = 2 * i + 1;
+            client
+                .open(stream_id, [("streamtype", "data")].into())
+                .await?;
+            client
+                .send(Frame::RstStream {
+                    stream_id,
+                    status: STATUS_CANCEL,
+                })
+                .await?;
+            streams.push(connection.accept().await.context("stream")?);
+        }
+        // The client reset all of them, the server still holds them.
+        let last = 2 * MAX_STREAMS as u32 + 1;
+        client.open(last, [("streamtype", "data")].into()).await?;
+        client
+            .frame_until(|f| {
+                matches!(
+                    f,
+                    Frame::RstStream {
+                        stream_id,
+                        status: STATUS_REFUSED_STREAM
+                    } if *stream_id == last
+                )
+            })
+            .await?;
+        assert!(streams.iter().all(Stream::is_reset));
+
+        // Once the server let go of one, the next one gets accepted.
+        streams.pop();
+        client
+            .open(last + 2, [("streamtype", "data")].into())
+            .await?;
+        let stream = connection.accept().await.context("stream")?;
+        assert_eq!(stream.id(), last + 2);
+        drop(streams);
+        assert_eq!(stream.sender.shared.live_streams.load(Ordering::Acquire), 1);
         Ok(())
     }
 

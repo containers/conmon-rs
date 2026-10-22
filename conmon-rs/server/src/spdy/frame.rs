@@ -43,8 +43,15 @@ pub const MAX_DATA_FRAME_LEN: usize = 0xff_ffff;
 const DATA_CHUNK_LEN: usize = 64 * 1024;
 
 /// The largest decompressed header block, which bounds what a small
-/// compressed block may expand to.
-const MAX_HEADER_BLOCK_LEN: usize = 64 * 1024;
+/// compressed block may expand to. Kubernetes clients send around a hundred
+/// bytes, a stream holds its headers as long as it is open. A larger block
+/// fails the connection, like any header block which does not decode, the
+/// compression context of the connection would be out of sync otherwise.
+const MAX_HEADER_BLOCK_LEN: usize = 8 * 1024;
+
+/// The most headers of a stream, Kubernetes clients send up to three. Each
+/// takes more memory than the bytes of its block.
+const MAX_HEADERS: usize = 32;
 
 /// RST_STREAM status: the frame violates the protocol.
 pub const STATUS_PROTOCOL_ERROR: u32 = 1;
@@ -358,6 +365,10 @@ impl Decoder {
 
         ensure!(block.len() >= 4, "header block truncated");
         let count = block.get_u32() as usize;
+        ensure!(
+            count <= MAX_HEADERS,
+            "header block has more than {MAX_HEADERS} headers"
+        );
         // Each pair takes at least the two lengths.
         ensure!(count <= block.len() / 8, "header block truncated");
         let mut headers = Vec::with_capacity(count);
@@ -454,6 +465,11 @@ impl Encoder {
     /// zlib decompressor reads like compressed ones. Compressing the blocks
     /// of the server would gain nothing, they are empty.
     fn header_block(&mut self, headers: &Headers) -> Vec<u8> {
+        self.deflate(&Self::serialize(headers))
+    }
+
+    /// The uncompressed header block.
+    fn serialize(headers: &Headers) -> Vec<u8> {
         let mut raw = Vec::new();
         raw.put_u32(headers.0.len() as u32);
         for (name, value) in &headers.0 {
@@ -462,7 +478,7 @@ impl Encoder {
             raw.put_u32(value.len() as u32);
             raw.put_slice(value.as_bytes());
         }
-        self.deflate(&raw)
+        raw
     }
 
     /// Wrap a serialized header block into stored deflate blocks, the first
@@ -498,7 +514,7 @@ impl Encoder {
 /// The entry points of the fuzz targets.
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing {
-    use super::{Decoder, Encoder};
+    use super::{Decoder, Encoder, MAX_HEADER_BLOCK_LEN};
     use futures::FutureExt;
 
     /// Decode frames until the input ends or is invalid. Reading a slice is
@@ -511,12 +527,23 @@ pub mod fuzzing {
     /// Decode the input as a compressed header block, which is what a
     /// client controls, parse it as a decompressed one, and decode it once
     /// deflated like the server does, which always gets past the
-    /// decompression to the parsing.
+    /// decompression to the parsing. Headers which got parsed come back the
+    /// same once encoded, unless they exceed the limit.
     pub fn header_block(raw: &[u8]) {
         let _ = Decoder::default().header_block(raw);
-        let _ = Decoder::parse_header_block(raw);
         let block = Encoder::default().deflate(raw);
-        let _ = Decoder::default().header_block(&block);
+        let decoded = Decoder::default().header_block(&block);
+        let Ok(headers) = Decoder::parse_header_block(raw) else {
+            assert!(decoded.is_err());
+            return;
+        };
+        let serialized = Encoder::serialize(&headers);
+        let decoded = Decoder::default().header_block(&Encoder::default().deflate(&serialized));
+        if serialized.len() <= MAX_HEADER_BLOCK_LEN {
+            assert_eq!(decoded.ok(), Some(headers));
+        } else {
+            assert!(decoded.is_err());
+        }
     }
 }
 
@@ -754,6 +781,16 @@ mod tests {
         }
 
         assert_eq!(decode_all(&mut decoder, &buf).await?, frames);
+        Ok(())
+    }
+
+    #[test]
+    fn header_counts_are_limited() -> Result<()> {
+        let headers = |n| Headers((0..n).map(|i| (format!("h{i}"), String::new())).collect());
+        let raw = Encoder::serialize(&headers(MAX_HEADERS));
+        assert_eq!(Decoder::parse_header_block(&raw)?, headers(MAX_HEADERS));
+        let raw = Encoder::serialize(&headers(MAX_HEADERS + 1));
+        assert!(Decoder::parse_header_block(&raw).is_err());
         Ok(())
     }
 
