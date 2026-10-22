@@ -14,7 +14,7 @@ use crate::{
     container_log::ContainerLog,
     process::Process,
     remotecommand::{Output, STDERR_BYTE, STDOUT_BYTE, Status, Stdin},
-    server::GenerateRuntimeArgs,
+    server::{GenerateRuntimeArgs, Server},
 };
 use anyhow::{Context, Result};
 use async_channel::Receiver as IOReceiver;
@@ -91,6 +91,9 @@ impl StreamingServer {
             .create_child(
                 RuntimeCall {
                     stdin: session.stdin,
+                    // The process has no timeout, a runtime which hangs
+                    // still gets killed.
+                    deadline: Server::exec_runtime_deadline(None),
                     ..RuntimeCall::new(session.server_config.runtime(), &args, pidfile.path())
                 },
                 &mut container_io,

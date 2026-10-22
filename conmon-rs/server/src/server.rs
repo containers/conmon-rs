@@ -38,12 +38,12 @@ use tokio::{
     signal::unix::{SignalKind, signal},
     sync::{RwLock, oneshot},
     task::{self, LocalSet},
-    time::{self, Duration},
+    time::{self, Duration, Instant},
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
 #[cfg(feature = "tracing")]
 use tracing::warn;
-use tracing::{Instrument, Span, debug, debug_span, info};
+use tracing::{Instrument, Span, debug, debug_span, error, info};
 #[cfg(feature = "tracing")]
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, prelude::*};
@@ -54,6 +54,23 @@ use twoparty::VatNetwork;
 type Tracer = Option<SdkTracerProvider>;
 #[cfg(not(feature = "tracing"))]
 type Tracer = ();
+
+/// How long the clients wait for the server to exit on a shutdown before
+/// they kill it, `serverStopTimeout` in `pkg/client/client.go`.
+const CLIENT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+// The whole shutdown ends before the clients kill the server.
+const _: () = assert!(Server::SHUTDOWN_TIMEOUT.as_nanos() < CLIENT_STOP_TIMEOUT.as_nanos());
+
+// The cleanup gets what the tracer and the runtime leave of the shutdown.
+// That leaves the grandchildren and a running initialization of the pause
+// instance time after what the pause shutdown and the sockets take.
+const _: () = assert!(
+    Server::CLEANUP_TIMEOUT.as_nanos()
+        > Server::SOCKET_REMOVAL_TIMEOUT.as_nanos()
+            + Pause::KILL_WAIT.as_nanos()
+            + Pause::STOP_WAIT.as_nanos()
+);
 
 #[derive(Debug)]
 /// The main server structure.
@@ -239,55 +256,66 @@ impl Server {
             .max_blocking_threads(Self::MAX_BLOCKING_THREADS)
             .thread_stack_size(Self::BLOCKING_THREAD_STACK_SIZE)
             .build()?;
+        // Nothing returns early from here on: a thread of the blocking pool
+        // which is stuck, like on a hung file system, ends with the process.
+        // Dropping the runtime would wait for it instead, so it gets shut
+        // down with a timeout however the server ends.
+        let (tracer, result) = rt.block_on(self.spawn_tasks());
         #[cfg(feature = "tracing")]
-        let tracer = rt.block_on(self.spawn_tasks())?;
+        let result = result.and(Self::shutdown_tracer(&rt, tracer));
         #[cfg(not(feature = "tracing"))]
-        rt.block_on(self.spawn_tasks())?;
-
-        // Exporting the remaining spans needs the runtime the exporter was
-        // created on, so shut down from a blocking task while it is driven.
-        #[cfg(feature = "tracing")]
-        let result = tracer.map_or(Ok(()), |tracer| {
-            let shutdown = rt.block_on(async {
-                time::timeout(
-                    Self::TRACER_SHUTDOWN_TIMEOUT,
-                    task::spawn_blocking(move || tracer.shutdown()),
-                )
-                .await
-            });
-            match shutdown {
-                Ok(res) => res
-                    .context("join tracer shutdown")?
-                    .context("shutdown tracer"),
-                Err(_) => {
-                    warn!("Tracer did not shut down in time");
-                    Ok(())
-                }
-            }
-        });
-        #[cfg(not(feature = "tracing"))]
-        let result = Ok(());
-
-        // A thread of the blocking pool which is stuck, like on a hung file
-        // system, ends with the process. Dropping the runtime would wait for
-        // it instead, so this comes before returning a failure.
+        let () = tracer;
         rt.shutdown_timeout(Self::RUNTIME_SHUTDOWN_TIMEOUT);
         result
     }
 
-    /// How long the cleanup of the shutdown may take: the grandchildren and
-    /// the pause instance get less, this bounds the rest, like removing the
-    /// sockets through a blocking pool which stuck threads may fill up.
-    /// Together with the timeouts below it stays below the 10 seconds the
-    /// clients give the whole shutdown.
-    const CLEANUP_TIMEOUT: Duration = Duration::from_millis(8500);
-
-    /// How long the tracer may take to export the remaining spans.
+    /// Export the remaining spans. That needs the runtime the exporter was
+    /// created on, so shut down from a blocking task while it is driven.
     #[cfg(feature = "tracing")]
+    fn shutdown_tracer(rt: &tokio::runtime::Runtime, tracer: Tracer) -> Result<()> {
+        let Some(tracer) = tracer else {
+            return Ok(());
+        };
+        let shutdown = rt.block_on(async {
+            time::timeout(
+                Self::TRACER_SHUTDOWN_TIMEOUT,
+                task::spawn_blocking(move || tracer.shutdown()),
+            )
+            .await
+        });
+        match shutdown {
+            Ok(res) => res
+                .context("join tracer shutdown")?
+                .context("shutdown tracer"),
+            Err(_) => {
+                warn!("Tracer did not shut down in time");
+                Ok(())
+            }
+        }
+    }
+
+    /// How long the shutdown may take from the signal on, below the
+    /// [`CLIENT_STOP_TIMEOUT`] of the clients. Every part of the shutdown
+    /// gets its time from it.
+    const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(9500);
+
+    /// How long the tracer may take to export the remaining spans, at the
+    /// end of the shutdown.
     const TRACER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 
-    /// How long the runtime waits for the threads of the blocking pool.
+    /// How long the runtime waits for the threads of the blocking pool, at
+    /// the very end of the shutdown.
     const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
+
+    /// How long the cleanup may take: the grandchildren, the pause instance
+    /// and the sockets, whatever the tracer and the runtime leave.
+    const CLEANUP_TIMEOUT: Duration = Self::SHUTDOWN_TIMEOUT
+        .saturating_sub(Self::TRACER_SHUTDOWN_TIMEOUT)
+        .saturating_sub(Self::RUNTIME_SHUTDOWN_TIMEOUT);
+
+    /// How long the removal of the sockets may take at the end of the
+    /// cleanup, through a blocking pool which stuck threads may fill up.
+    const SOCKET_REMOVAL_TIMEOUT: Duration = Duration::from_millis(500);
 
     fn init() -> Result<()> {
         // The server keeps the C locale, unlike conmon, so that the errors
@@ -360,15 +388,24 @@ impl Server {
         Ok(())
     }
 
-    /// Spawns all required tokio tasks and returns the tracer provider which
-    /// `init_logging` created, so that it can be shut down after the runtime.
-    async fn spawn_tasks(mut self) -> Result<Tracer> {
-        self.init_logging().context("init logging")?;
+    /// Spawns all required tokio tasks until the server ends, and returns
+    /// the tracer provider which `init_logging` created along with the
+    /// result, so that it can be shut down after the runtime also on a
+    /// failure.
+    async fn spawn_tasks(mut self) -> (Tracer, Result<()>) {
+        let logging = self.init_logging().context("init logging");
         #[cfg(feature = "tracing")]
         let tracer = self.tracer.clone();
         #[cfg(not(feature = "tracing"))]
         let tracer = ();
+        if let Err(e) = logging {
+            return (tracer, Err(e));
+        }
+        (tracer, self.run_tasks().await)
+    }
 
+    /// Run the backend and the signal handler until the server ends.
+    async fn run_tasks(self) -> Result<()> {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let socket = self.config().socket();
         let fd_socket = self.config().fd_socket();
@@ -389,8 +426,7 @@ impl Server {
                 self.start_backend(shutdown_rx),
                 debug_span!("backend"),
             ))
-            .await?;
-        Ok(tracer)
+            .await
     }
 
     /// Run the future inside the span, which also carries the OpenTelemetry
@@ -406,14 +442,29 @@ impl Server {
         future.instrument(span)
     }
 
+    /// Wait for SIGTERM or SIGINT and clean up, then end the backend with
+    /// the result, which the server exits with. A server which cannot listen
+    /// for the signals ends right away, after the same cleanup.
     async fn start_signal_handler<T: AsRef<Path>>(
         reaper: Arc<ChildReaper>,
         socket: T,
         fd_socket: T,
-        shutdown_tx: oneshot::Sender<()>,
-    ) -> Result<()> {
-        let mut sigterm = signal(SignalKind::terminate())?;
-        let mut sigint = signal(SignalKind::interrupt())?;
+        shutdown_tx: oneshot::Sender<Result<()>>,
+    ) {
+        let signalled = Self::wait_for_signal().await;
+        let shutdown = Self::shutdown(reaper, socket, fd_socket, Pause::shutdown).await;
+        let result = Self::all_ok([signalled, shutdown]);
+        // The backend returns it, the server exits non-zero on a failure.
+        debug!("Sending shutdown message");
+        if shutdown_tx.send(result).is_err() {
+            debug!("Backend already ended");
+        }
+    }
+
+    /// Wait for SIGTERM or SIGINT.
+    async fn wait_for_signal() -> Result<()> {
+        let mut sigterm = signal(SignalKind::terminate()).context("listen for SIGTERM")?;
+        let mut sigint = signal(SignalKind::interrupt()).context("listen for SIGINT")?;
 
         tokio::select! {
             _ = sigterm.recv() => {
@@ -423,71 +474,107 @@ impl Server {
                 info!("Received SIGINT");
             }
         }
+        Ok(())
+    }
 
-        // Everything below has to happen before the shutdown message: the
-        // backend returns on it and drops the local set, which cancels this
-        // task. Failures are collected rather than returned early, the server
-        // must stop in any case. The pause shutdown may wait for a running
-        // initialization, the containers must not wait for that.
-        let cleanup =
-            async { tokio::join!(Self::cleanup(reaper, socket, fd_socket), Pause::shutdown()).0 };
-        let result = time::timeout(Self::CLEANUP_TIMEOUT, cleanup)
-            .await
-            .unwrap_or_else(|_| Err(format_err!("cleanup did not finish in time")));
-
-        debug!("Sending shutdown message");
-        shutdown_tx
-            .send(())
-            .map_err(|()| format_err!("unable to send shutdown message"))?;
-
+    /// Clean up and stop the pause instance through `pause` within the
+    /// [`Server::CLEANUP_TIMEOUT`], and report what did not finish.
+    async fn shutdown<T: AsRef<Path>, F: Future<Output = Result<()>>>(
+        reaper: Arc<ChildReaper>,
+        socket: T,
+        fd_socket: T,
+        pause: impl FnOnce(Instant) -> F,
+    ) -> Result<()> {
+        // The pause shutdown may wait for a running initialization, the
+        // containers must not wait for that.
+        let deadline = Instant::now() + Self::CLEANUP_TIMEOUT;
+        let (cleaned, paused) = tokio::join!(
+            Self::cleanup(reaper, socket, fd_socket, deadline),
+            Self::until(deadline, pause(deadline)),
+        );
+        let result = Self::all_ok([cleaned, paused.context("stop pause")]);
+        if let Err(e) = &result {
+            error!("Shutdown did not finish: {e:#}");
+        }
         result
     }
 
-    /// Kill the grandchildren and remove the socket files.
+    /// The result of the server once the signal handler sent the shutdown
+    /// message, see [`Server::start_signal_handler`].
+    fn shutdown_result(received: Result<Result<()>, oneshot::error::RecvError>) -> Result<()> {
+        received.context("signal handler ended without a result")?
+    }
+
+    /// Kill the grandchildren and remove the socket files, until the
+    /// `deadline`. Failures are collected rather than returned early, the
+    /// server must stop in any case.
     async fn cleanup<T: AsRef<Path>>(
         reaper: Arc<ChildReaper>,
         socket: T,
         fd_socket: T,
+        deadline: Instant,
     ) -> Result<()> {
         debug!("Starting grandchildren cleanup task");
-        let killed = reaper
-            .kill_grandchildren()
+        let reaper_deadline = deadline
+            .checked_sub(Self::SOCKET_REMOVAL_TIMEOUT)
+            .unwrap_or(deadline);
+        let killed = Self::until(deadline, reaper.kill_grandchildren(reaper_deadline))
             .await
-            .context("unable to kill grandchildren");
+            .context("kill grandchildren");
 
         debug!("Removing socket file {}", socket.as_ref().display());
-        let socket_removed = fs::remove_file(socket)
-            .await
-            .context("remove existing socket file");
+        let socket_removed = Self::until(deadline, async {
+            fs::remove_file(socket).await.map_err(Into::into)
+        })
+        .await
+        .context("remove socket file");
 
         debug!("Removing fd socket file {}", fd_socket.as_ref().display());
-        let fd_socket_removed = fs::remove_file(fd_socket)
-            .await
-            .or_else(|err| {
-                if err.kind() == std::io::ErrorKind::NotFound {
-                    Ok(())
-                } else {
-                    Err(err)
-                }
-            })
-            .context("remove existing fd socket file");
+        let fd_socket_removed = Self::until(deadline, async {
+            match fs::remove_file(fd_socket).await {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+                _ => Ok(()),
+            }
+        })
+        .await
+        .context("remove fd socket file");
 
-        killed.and(socket_removed).and(fd_socket_removed)
+        Self::all_ok([killed, socket_removed, fd_socket_removed])
+    }
+
+    /// Run the future until the deadline, fail if it did not finish by then.
+    async fn until(deadline: Instant, future: impl Future<Output = Result<()>>) -> Result<()> {
+        time::timeout_at(deadline, future)
+            .await
+            .unwrap_or_else(|_| Err(format_err!("did not finish in time")))
+    }
+
+    /// Succeed if all succeeded, fail with every failure otherwise.
+    fn all_ok(results: impl IntoIterator<Item = Result<()>>) -> Result<()> {
+        let failures: Vec<_> = results
+            .into_iter()
+            .filter_map(Result::err)
+            .map(|e| format!("{e:#}"))
+            .collect();
+        if failures.is_empty() {
+            return Ok(());
+        }
+        Err(format_err!("{}", failures.join(", ")))
     }
 
     /// The read and write buffers of an RPC connection, which most messages
     /// fit into. Larger segments bypass them.
     const RPC_BUFFER_SIZE: usize = 4096;
 
-    async fn start_backend(self, mut shutdown_rx: oneshot::Receiver<()>) -> Result<()> {
+    async fn start_backend(self, mut shutdown_rx: oneshot::Receiver<Result<()>>) -> Result<()> {
         let listener = listener::bind_long_path(&self.config().socket(), UnixListener::bind)?;
         let client: conmon::Client = capnp_rpc::new_client(self);
 
         loop {
             let stream = tokio::select! {
-                _ = &mut shutdown_rx => {
+                result = &mut shutdown_rx => {
                     debug!("Received shutdown message");
-                    return Ok(())
+                    return Self::shutdown_result(result);
                 }
                 stream = listener.accept() => match stream {
                     Ok((stream, _)) => stream,
@@ -879,15 +966,110 @@ mod tests {
         File::create(&fd_socket)?;
 
         let reaper = Arc::new(ChildReaper::default());
-        Server::cleanup(reaper.clone(), &socket, &fd_socket).await?;
+        let deadline = || Instant::now() + Duration::from_secs(10);
+        Server::cleanup(reaper.clone(), &socket, &fd_socket, deadline()).await?;
         assert!(!socket.exists());
         assert!(!fd_socket.exists());
 
         // An fd socket which was never started is fine, a missing main
         // socket is reported.
         File::create(&socket)?;
-        Server::cleanup(reaper.clone(), &socket, &fd_socket).await?;
-        assert!(Server::cleanup(reaper, &socket, &fd_socket).await.is_err());
+        Server::cleanup(reaper.clone(), &socket, &fd_socket, deadline()).await?;
+        let err = Server::cleanup(reaper, &socket, &fd_socket, deadline())
+            .await
+            .err()
+            .map(|e| format!("{e:#}"));
+        assert!(err.is_some_and(|e| e.starts_with("remove socket file: ")));
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_parts_report_what_did_not_finish() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert!(Server::until(deadline, async { Ok(()) }).await.is_ok());
+        let hung = Server::until(deadline, std::future::pending()).await;
+        assert_eq!(Instant::now(), deadline);
+
+        let err = Server::all_ok([
+            Ok(()),
+            hung.context("remove socket file"),
+            Err(format_err!("PIDs [1] did not exit")).context("kill grandchildren"),
+        ])
+        .err()
+        .map(|e| format!("{e:#}"));
+        assert_eq!(
+            err.as_deref(),
+            Some(
+                "remove socket file: did not finish in time, \
+                 kill grandchildren: PIDs [1] did not exit"
+            )
+        );
+        assert!(Server::all_ok([Ok(()), Ok(())]).is_ok());
+    }
+
+    /// Collects the log of a test.
+    #[derive(Clone, Default)]
+    struct Log(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for Log {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_| std::io::Error::other("poisoned"))?
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unfinished_shutdown_is_logged_and_ends_the_server_with_it() -> Result<()> {
+        let log = Log::default();
+        let writer = log.clone();
+        let _subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .set_default();
+        let dir = tempfile::tempdir()?;
+        let socket = dir.path().join("conmon.sock");
+        let fd_socket = dir.path().join("conmon-fd.sock");
+        File::create(&socket)?;
+
+        // Like a stop of the pause instance which hangs.
+        let start = Instant::now();
+        let result = Server::shutdown(
+            Arc::new(ChildReaper::default()),
+            &socket,
+            &fd_socket,
+            |_| std::future::pending(),
+        )
+        .await;
+        assert_eq!(start.elapsed(), Server::CLEANUP_TIMEOUT);
+        // The other parts finished nevertheless.
+        assert!(!socket.exists());
+
+        let err = result.err().map(|e| format!("{e:#}"));
+        assert_eq!(err.as_deref(), Some("stop pause: did not finish in time"));
+        let log = String::from_utf8(log.0.lock().map_err(|_| format_err!("poisoned"))?.clone())?;
+        assert!(
+            log.contains("ERROR") && log.contains("Shutdown did not finish: stop pause"),
+            "{log}"
+        );
+
+        // The backend ends the server with it, which then exits non-zero.
+        let (tx, rx) = oneshot::channel();
+        tx.send(Err(format_err!("stop pause: did not finish in time")))
+            .map_err(|_| format_err!("send"))?;
+        assert!(Server::shutdown_result(rx.await).is_err());
+        let (tx, rx) = oneshot::channel();
+        tx.send(Ok(())).map_err(|_| format_err!("send"))?;
+        Server::shutdown_result(rx.await)?;
+        let (tx, rx) = oneshot::channel::<Result<()>>();
+        drop(tx);
+        assert!(Server::shutdown_result(rx.await).is_err());
         Ok(())
     }
 }

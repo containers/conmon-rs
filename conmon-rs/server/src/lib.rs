@@ -20,6 +20,8 @@ use version::Version;
 /// Run conmonrs: print the version, run the `pause` subcommand or start the
 /// server, depending on the command line.
 pub fn run() -> Result<()> {
+    // Before the heap grows, see the function.
+    init::disable_thp();
     let config = Config::parse_args();
 
     if let Some(v) = config.version() {

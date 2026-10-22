@@ -2144,6 +2144,9 @@ func (c *ConmonClient) closeUnusedPidfdLocked() error {
 
 const (
 	// serverStopTimeout bounds the wait for the server to exit on Shutdown.
+	// The server finishes its shutdown before, it checks its budget against
+	// a copy of this value at compile time, see CLIENT_STOP_TIMEOUT in
+	// conmon-rs/server/src/server.rs.
 	serverStopTimeout = 10 * time.Second
 
 	// serverCleanupTimeout bounds each wait for a server which New started

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -732,6 +733,40 @@ var _ = Describe("ConmonClient", func() {
 			Expect(result.ExitCode).To(Equal(client.ExecExitCodeNotStarted))
 			Expect(result.TimedOut).To(BeFalse())
 			Expect(result.Stderr).NotTo(BeEmpty())
+		}, SpecTimeout(specTimeout))
+
+		It("should not pass its transparent huge pages setting on", func(ctx SpecContext) {
+			thpEnabled := func(pid string) string {
+				status, err := os.ReadFile("/proc/" + pid + "/status")
+				Expect(err).To(Succeed())
+
+				thp := regexp.MustCompile(`THP_enabled:\s+(\d)`)
+
+				// Empty on kernels before 5.0, which do not report it.
+				match := thp.FindStringSubmatch(string(status))
+				if match == nil {
+					return ""
+				}
+
+				return match[1]
+			}
+			if thpEnabled("self") != "1" {
+				Skip("transparent huge pages disabled or not reported for the tests")
+			}
+
+			runContainer(ctx, false, []string{"/busybox", "sleep", "10"})
+
+			// The server turns them off for itself only.
+			Expect(thpEnabled(strconv.FormatUint(uint64(sut.PID()), 10))).To(Equal("0"))
+
+			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+				ID:      tr.ctrID,
+				Command: []string{"/busybox", "grep", "THP_enabled", "/proc/self/status"},
+				Timeout: 10,
+			})
+			Expect(err).To(Succeed())
+			Expect(result.ExitCode).To(BeEquivalentTo(0))
+			Expect(string(result.Stdout)).To(MatchRegexp(`THP_enabled:\s+1`))
 		}, SpecTimeout(specTimeout))
 
 		for _, terminal := range []bool{true, false} {

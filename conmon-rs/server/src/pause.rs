@@ -3,9 +3,9 @@ use crate::{
     config::PauseArgs,
     conmon_capnp::conmon,
     mutex::lock,
-    process::{Process, read_pid_file},
+    process::{Process, child_pid, read_pid_file},
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, format_err};
 use capnp::enum_list::Reader;
 use libc::pid_t;
 use nix::{
@@ -35,7 +35,8 @@ use std::{
 use tokio::{
     process::Command,
     sync::{OnceCell, watch},
-    task, time,
+    task,
+    time::{self, Instant},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span, debug, debug_span, info, trace, warn};
@@ -163,22 +164,21 @@ impl Pause {
             .is_none_or(|process| !self.exited.load(Ordering::SeqCst) && process.is_running())
     }
 
-    /// How long the shutdown waits for a running initialization before it
-    /// kills the pause subcommand, how long for the cleanup after that, and
-    /// how long for the unmounts of the pause instance. All together stay
-    /// below the 10 seconds the clients give the whole shutdown.
-    const SHUTDOWN_WAIT: Duration = Duration::from_secs(6);
-    const KILL_WAIT: Duration = Duration::from_secs(1);
-    const STOP_WAIT: Duration = Duration::from_secs(1);
+    /// How long before the deadline of the shutdown it kills the pause
+    /// subcommand of a running initialization, and how long it leaves for
+    /// the unmounts of the pause instance, see [`Pause::shutdown`].
+    pub const KILL_WAIT: Duration = Duration::from_secs(1);
+    pub const STOP_WAIT: Duration = Duration::from_secs(1);
 
-    /// Stop the pause instance for the shutdown. An initialization still
-    /// running finishes in its own task, wait a bounded time for it rather
-    /// than leaving its pause process behind, and kill its subcommand if it
-    /// does not finish. No request initializes one after this.
-    pub async fn shutdown() {
+    /// Stop the pause instance for the shutdown, until the `deadline`. An
+    /// initialization still running finishes in its own task, wait for it
+    /// rather than leaving its pause process behind, and kill its subcommand
+    /// if it does not finish. No request initializes one after this. It fails
+    /// if the initialization or the stop did not finish in time.
+    pub async fn shutdown(deadline: Instant) -> Result<()> {
         PAUSE
-            .shutdown(Self::SHUTDOWN_WAIT, Self::KILL_WAIT, Self::STOP_WAIT)
-            .await;
+            .shutdown(deadline, Self::KILL_WAIT, Self::STOP_WAIT)
+            .await
     }
 
     /// Fail if the pause instance was created for another pod or configuration.
@@ -345,12 +345,10 @@ impl Pause {
             .context("run pause")?;
 
         // The shutdown kills it if it takes too long. It is not reaped before
-        // the wait below, so the PID is still its own here.
-        let process = child
-            .id()
-            .and_then(|pid| i32::try_from(pid).ok())
-            .map(|pid| Process::open(Pid::from_raw(pid)));
-        PAUSE.set_child(process)?;
+        // the wait below, so the PID is still its own here. Dropping it on a
+        // failure kills it.
+        let process = Process::open(child_pid(child.id()).context("PID of pause child")?);
+        PAUSE.set_child(Some(process))?;
         let status = child.wait().await;
         PAUSE.set_child(None)?;
 
@@ -428,17 +426,17 @@ impl Pause {
     /// that stays around.
     #[expect(unsafe_code, reason = "forking")]
     pub fn run(args: &PauseArgs) -> Result<()> {
-        let PauseArgs {
-            base_path,
-            pod_id,
+        let &PauseArgs {
+            ref base_path,
+            ref pod_id,
             ipc,
             pid,
             net,
             user,
             uts,
-            uid_mappings,
-            gid_mappings,
-        } = args.clone();
+            ref uid_mappings,
+            ref gid_mappings,
+        } = args;
         let requested = [
             (ipc, Namespace::Ipc),
             (pid, Namespace::Pid),
@@ -481,13 +479,13 @@ impl Pause {
                 drop(sock_child);
 
                 let mut parent = PauseParent {
-                    base_path: &base_path,
-                    pod_id: &pod_id,
+                    base_path,
+                    pod_id,
                     child,
                     namespaces: &namespaces,
                     holder: None,
                 };
-                let result = parent.run(&uid_mappings, &gid_mappings, sock_parent);
+                let result = parent.run(uid_mappings, gid_mappings, sock_parent);
                 if result.is_err() {
                     parent.cleanup();
                 }
@@ -844,14 +842,28 @@ impl<T: Stop + Send + Sync + 'static> SingleFlight<T> {
         Ok(())
     }
 
-    /// Stop the value for the shutdown. Wait up to `wait` for a running
-    /// initialization, kill its process if it does not finish and wait up to
-    /// `kill_wait` for it to clean up, then up to `stop_wait` for the stop of
-    /// the value. No request initializes one after this.
-    async fn shutdown(&'static self, wait: Duration, kill_wait: Duration, stop_wait: Duration) {
+    /// Stop the value for the shutdown, until the `deadline`. Wait for a
+    /// running initialization until `kill_wait` and `stop_wait` before it,
+    /// kill its process if it does not finish and wait until `stop_wait`
+    /// before the deadline for it to clean up, then for the stop of the
+    /// value. No request initializes one after this.
+    async fn shutdown(
+        &'static self,
+        deadline: Instant,
+        kill_wait: Duration,
+        stop_wait: Duration,
+    ) -> Result<()> {
         self.shutting_down.store(true, Ordering::SeqCst);
+        let stop_deadline = deadline.checked_sub(stop_wait).unwrap_or(deadline);
+        let kill_deadline = stop_deadline
+            .checked_sub(kill_wait)
+            .unwrap_or(stop_deadline);
 
-        if time::timeout(wait, self.wait_for_init()).await.is_err() {
+        let mut result = Ok(());
+        if time::timeout_at(kill_deadline, self.wait_for_init())
+            .await
+            .is_err()
+        {
             warn!("Initialization still running, killing its process");
             match lock(&self.child) {
                 Ok(child) => {
@@ -867,23 +879,26 @@ impl<T: Stop + Send + Sync + 'static> SingleFlight<T> {
                 }
                 Err(e) => warn!("Unable to lock initialization process PID: {e:#}"),
             }
-            if time::timeout(kill_wait, self.wait_for_init())
+            if time::timeout_at(stop_deadline, self.wait_for_init())
                 .await
                 .is_err()
             {
-                warn!("Initialization did not finish, its process may stay behind");
+                result = Err(format_err!(
+                    "initialization did not finish, its process may stay behind"
+                ));
             }
         }
 
         // A stop which hangs, like an unmount on a hung file system, must
         // not keep the server from stopping.
         if let Some(value) = self.cell.get()
-            && time::timeout(stop_wait, stop_blocking(move || value.stop()))
+            && time::timeout_at(deadline, stop_blocking(move || value.stop()))
                 .await
                 .is_err()
         {
-            warn!("Stopping did not finish in time, leaving it behind");
+            result = Err(format_err!("stop did not finish in time"));
         }
+        result
     }
 }
 
@@ -1241,11 +1256,11 @@ mod tests {
         let start = time::Instant::now();
         flight
             .shutdown(
-                Duration::from_secs(10),
+                start + Duration::from_secs(12),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
             )
-            .await;
+            .await?;
         assert_eq!(start.elapsed(), Duration::from_secs(1));
 
         // It finished after the shutdown started, so it stopped its value
@@ -1278,14 +1293,20 @@ mod tests {
         }
 
         let start = time::Instant::now();
-        flight
+        let err = flight
             .shutdown(
-                Duration::from_secs(10),
+                start + Duration::from_secs(12),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
             )
-            .await;
+            .await
+            .err()
+            .map(|e| e.to_string());
         assert_eq!(start.elapsed(), Duration::from_secs(11));
+        assert_eq!(
+            err.as_deref(),
+            Some("initialization did not finish, its process may stay behind")
+        );
         assert_eq!(stops.load(Ordering::SeqCst), 0);
 
         // Once it finishes late it stops its value itself.
@@ -1305,7 +1326,7 @@ mod tests {
             let stops = stops.clone();
             move || async move {
                 let mut child = Command::new("sleep").arg("60").kill_on_drop(true).spawn()?;
-                let pid = Pid::from_raw(child.id().context("no PID")? as pid_t);
+                let pid = child_pid(child.id())?;
                 flight.set_child(Some(Process::open(pid)))?;
                 let status = child.wait().await?;
                 flight.set_child(None)?;
@@ -1319,11 +1340,11 @@ mod tests {
 
         flight
             .shutdown(
-                Duration::from_millis(100),
+                time::Instant::now() + Duration::from_millis(11100),
                 Duration::from_secs(10),
                 Duration::from_secs(1),
             )
-            .await;
+            .await?;
         assert!(caller.await?.is_err());
         assert_eq!(stops.load(Ordering::SeqCst), 1);
         Ok(())
@@ -1337,11 +1358,11 @@ mod tests {
 
         flight
             .shutdown(
-                Duration::from_secs(10),
+                time::Instant::now() + Duration::from_secs(12),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
             )
-            .await;
+            .await?;
         assert_eq!(stops.load(Ordering::SeqCst), 1);
         Ok(())
     }
@@ -1384,14 +1405,18 @@ mod tests {
             }
         });
         let start = time::Instant::now();
-        flight
+        let res = flight
             .shutdown(
-                Duration::from_secs(10),
+                start + Duration::from_millis(200),
                 Duration::from_secs(1),
                 Duration::from_millis(200),
             )
             .await;
         let elapsed = start.elapsed();
+        assert_eq!(
+            res.err().map(|e| e.to_string()).as_deref(),
+            Some("stop did not finish in time")
+        );
         assert!(elapsed >= Duration::from_millis(200), "{elapsed:?}");
         assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
         assert!(ticker.is_finished());
@@ -1407,7 +1432,7 @@ mod tests {
     fn process_signal_reaches_child() -> Result<()> {
         for use_pidfd in [true, false] {
             let mut child = Guarded::spawn(StdCommand::new("sleep").arg("60"))?;
-            let pid = Pid::from_raw(child.0.id() as pid_t);
+            let pid = child_pid(child.0.id())?;
             let mut process = Process::open(pid);
             if !use_pidfd {
                 process.pidfd = None;
@@ -1422,7 +1447,7 @@ mod tests {
     #[test]
     fn process_signal_skips_reaped_child() -> Result<()> {
         let mut child = StdCommand::new("true").spawn()?;
-        let pid = Pid::from_raw(child.id() as pid_t);
+        let pid = child_pid(child.id())?;
         let mut process = Process::open(pid);
         assert!(process.pidfd.is_some());
         child.wait()?;
@@ -1462,15 +1487,15 @@ mod tests {
         assert!(pause(None).is_alive());
 
         let mut child = Guarded::spawn(StdCommand::new("sleep").arg("60"))?;
-        let running = pause(Some(Process::open(Pid::from_raw(child.0.id() as pid_t))));
+        let running = pause(Some(Process::open(child_pid(child.0.id())?)));
         assert!(running.is_alive());
         running.exited.store(true, Ordering::SeqCst);
         assert!(!running.is_alive());
 
         // Also before the reaper ran, as a zombie and once reaped.
-        let running = pause(Some(Process::open(Pid::from_raw(child.0.id() as pid_t))));
+        let running = pause(Some(Process::open(child_pid(child.0.id())?)));
         child.0.kill()?;
-        let pid = nix::sys::wait::Id::Pid(Pid::from_raw(child.0.id() as pid_t));
+        let pid = nix::sys::wait::Id::Pid(child_pid(child.0.id())?);
         nix::sys::wait::waitid(pid, WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT)?;
         assert!(!running.is_alive());
         child.0.wait()?;
