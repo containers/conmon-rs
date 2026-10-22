@@ -66,16 +66,32 @@ var _ = Describe("ConmonClient", func() {
 		cleanupSpec(tr, sut)
 	})
 
+	// runContainer starts a server with a started container which runs the
+	// process.
+	runContainer := func(ctx context.Context, terminal bool, processArgs []string) {
+		tr = newTestRunner()
+		tr.createRuntimeConfigWithProcessArgs(terminal, processArgs, nil)
+		sut = tr.configGivenEnv()
+		tr.createContainer(ctx, sut, terminal)
+		tr.startContainer()
+	}
+
 	Describe("New", func() {
-		It("should restore from running server", func() {
+		It("should restore from running server", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
 			sut2 := tr.configGivenEnv()
 			Expect(sut2.PID()).To(Equal(sut.PID()))
-		})
 
-		It("should start with an output writer which is no file", func() {
+			// Only the client goes away, the cleanup stops the server.
+			Expect(sut2.Close()).To(Succeed())
+
+			_, err := sut.Version(ctx, &client.VersionConfig{})
+			Expect(err).To(Succeed())
+		}, SpecTimeout(specTimeout))
+
+		It("should start with an output writer which is no file", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 
@@ -94,9 +110,9 @@ var _ = Describe("ConmonClient", func() {
 
 			Eventually(started, 10*time.Second).Should(Receive(&sut))
 			Eventually(output.String, 10*time.Second).ShouldNot(BeEmpty())
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should start the server with the given environment", func() {
+		It("should start the server with the given environment", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnvWith(func(cfg *client.ConmonServerConfig) {
@@ -109,19 +125,65 @@ var _ = Describe("ConmonClient", func() {
 			environ := strings.Split(contents, "\x00")
 			Expect(environ).To(ContainElement("CONMON_TEST_ENV=set"))
 			Expect(environ).NotTo(ContainElement(HavePrefix("PATH=")))
-		})
+		}, SpecTimeout(specTimeout))
+
+		It("should start a new server once the old one got killed", func(ctx SpecContext) {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			old := sut
+			oldPID := old.PID()
+			socket := filepath.Join(tr.tmpDir, "conmon.sock")
+
+			// A link keeps the inode of the old socket, which a new socket
+			// would otherwise get again once the old one is gone.
+			oldSocket := socket + ".old"
+			Expect(os.Link(socket, oldSocket)).To(Succeed())
+
+			// A crash leaves the socket behind.
+			Expect(syscall.Kill(int(oldPID), syscall.SIGKILL)).To(Succeed())
+			Eventually(func() error {
+				return syscall.Kill(int(oldPID), 0)
+			}, 10*time.Second).Should(MatchError(syscall.ESRCH))
+			Expect(socket).To(BeAnExistingFile())
+
+			// The client of the old server fails fast, it does not wait for
+			// an answer.
+			start := time.Now()
+			_, err := old.Version(ctx, &client.VersionConfig{})
+			Expect(err).To(HaveOccurred())
+			Expect(time.Since(start)).To(BeNumerically("<", time.Second))
+
+			// The cleanup shuts down the new server.
+			sut = tr.configGivenEnv()
+			Expect(sut.PID()).NotTo(Equal(oldPID))
+
+			oldInfo, err := os.Lstat(oldSocket)
+			Expect(err).NotTo(HaveOccurred())
+			newInfo, err := os.Lstat(socket)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(os.SameFile(oldInfo, newInfo)).To(BeFalse(), "stale socket not replaced")
+
+			_, err = sut.Version(ctx, &client.VersionConfig{})
+			Expect(err).To(Succeed())
+
+			Expect(old.Close()).To(Succeed())
+			_, err = old.Version(ctx, &client.VersionConfig{})
+			Expect(err).To(MatchError(client.ErrClientClosed))
+		}, SpecTimeout(specTimeout))
 	})
 
 	Describe("Shutdown", func() {
 		// startServer starts a server with a created container and its fd
 		// socket, and returns its PID.
-		startServer := func(terminal bool) uint32 {
+		startServer := func(ctx context.Context, terminal bool) uint32 {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(terminal)
 			sut = tr.configGivenEnv()
-			tr.createContainer(sut, terminal)
+			tr.createContainer(ctx, sut, terminal)
 
-			remoteFDs, err := sut.RemoteFDs(context.Background())
+			remoteFDs, err := sut.RemoteFDs(ctx)
 			Expect(err).To(Succeed())
 			Expect(remoteFDs.Close()).To(Succeed())
 
@@ -155,25 +217,29 @@ var _ = Describe("ConmonClient", func() {
 		}
 
 		for _, terminal := range []bool{true, false} {
-			It(testName("should kill created children if being killed", terminal), func() {
-				pid := startServer(terminal)
+			It(
+				testName("should kill created children if being killed", terminal),
+				func(ctx SpecContext) {
+					pid := startServer(ctx, terminal)
 
-				// Shutdown should kill the container and clean up
-				Expect(sut.Shutdown()).To(Succeed())
-				sut = nil
+					// Shutdown should kill the container and clean up
+					Expect(sut.Shutdown()).To(Succeed())
+					sut = nil
 
-				expectServerGone(pid)
-			})
+					expectServerGone(pid)
+				},
+				SpecTimeout(specTimeout),
+			)
 		}
 
-		It("should kill created children on SIGTERM", func() {
-			pid := startServer(false)
+		It("should kill created children on SIGTERM", func(ctx SpecContext) {
+			pid := startServer(ctx, false)
 			Expect(syscall.Kill(int(pid), syscall.SIGTERM)).To(Succeed())
 
 			sut = nil
 
 			expectServerGone(pid)
-		})
+		}, SpecTimeout(specTimeout))
 	})
 
 	Describe("Version", func() {
@@ -183,13 +249,13 @@ var _ = Describe("ConmonClient", func() {
 				name += " with verbose output"
 			}
 
-			It(name, func() {
+			It(name, func(ctx SpecContext) {
 				tr = newTestRunner()
 				tr.createRuntimeConfig(false)
 				sut = tr.configGivenEnv()
 
 				version, err := sut.Version(
-					context.Background(),
+					ctx,
 					&client.VersionConfig{Verbose: verbose},
 				)
 				Expect(err).To(Succeed())
@@ -201,78 +267,83 @@ var _ = Describe("ConmonClient", func() {
 				Expect(version.Target).NotTo(BeEmpty())
 				Expect(version.RustVersion).NotTo(BeEmpty())
 				Expect(version.CargoVersion).NotTo(BeEmpty())
-				Expect(version.Features).To(ContainElement(client.FeatureSdNotify))
+				Expect(version.Features).To(ContainElements(
+					client.FeatureSdNotify,
+					client.FeaturePortForward,
+					client.FeatureIdleTimeout,
+					client.FeatureStreamingProtocols,
+				))
 
 				if verbose {
 					Expect(version.CargoTree).NotTo(BeEmpty())
 				} else {
 					Expect(version.CargoTree).To(BeEmpty())
 				}
-			})
+			}, SpecTimeout(specTimeout))
 		}
 	})
 
 	Describe("CreateContainer", func() {
 		for _, terminal := range []bool{true, false} {
-			It(testName("should create a simple container", terminal), func() {
+			It(testName("should create a simple container", terminal), func(ctx SpecContext) {
 				tr = newTestRunner()
 				tr.createRuntimeConfig(terminal)
 				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
-			})
+				tr.createContainer(ctx, sut, terminal)
+			}, SpecTimeout(specTimeout))
 
-			It(testName("should write exit file", terminal), func() {
+			It(testName("should write exit file", terminal), func(ctx SpecContext) {
 				tr = newTestRunner()
 				tr.createRuntimeConfig(terminal)
 				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
+				tr.createContainer(ctx, sut, terminal)
 				tr.startContainer()
 				// The container may still run, the exit file comes with its
 				// exit.
 				Eventually(fileContents, 10*time.Second).
 					WithArguments(tr.exitPath()).
 					Should(Equal("0"))
-			})
+			}, SpecTimeout(specTimeout))
 
-			It(testName("should write a non-zero exit code to the exit file", terminal), func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					terminal,
-					[]string{"/busybox", "sh", "-c", "exit 3"},
-					nil,
-				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
-				tr.startContainer()
-				Eventually(fileContents, 10*time.Second).
-					WithArguments(tr.exitPath()).
-					Should(Equal("3"))
-			})
+			It(
+				testName("should write a non-zero exit code to the exit file", terminal),
+				func(ctx SpecContext) {
+					runContainer(ctx, terminal, []string{"/busybox", "sh", "-c", "exit 3"})
+					Eventually(fileContents, 10*time.Second).
+						WithArguments(tr.exitPath()).
+						Should(Equal("3"))
+				},
+				SpecTimeout(specTimeout),
+			)
 
-			It(testName("should execute cleanup command when container exits", terminal), func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfig(terminal)
-				// The container ID is only known after the runtime config exists.
-				cleanupPath := filepath.Join(tr.tmpDir, "cleanup-"+tr.ctrID)
-				sut = tr.configGivenEnv()
-				cfg := tr.defaultConfig(terminal)
-				cfg.CleanupCmd = []string{"touch", cleanupPath}
-				tr.createContainerWithConfig(sut, cfg)
-				tr.startContainer()
-				Eventually(cleanupPath, 10*time.Second).Should(BeAnExistingFile())
-				Expect(fileContents(cleanupPath)).To(BeEmpty())
-			})
+			It(
+				testName("should execute cleanup command when container exits", terminal),
+				func(ctx SpecContext) {
+					tr = newTestRunner()
+					tr.createRuntimeConfig(terminal)
+					// The container ID is only known after the runtime config exists.
+					cleanupPath := filepath.Join(tr.tmpDir, "cleanup-"+tr.ctrID)
+					sut = tr.configGivenEnv()
+					cfg := tr.defaultConfig(terminal)
+					cfg.CleanupCmd = []string{"touch", cleanupPath}
+					tr.createContainerWithConfig(ctx, sut, cfg)
+					tr.startContainer()
+					Eventually(cleanupPath, 10*time.Second).Should(BeAnExistingFile())
+					Expect(fileContents(cleanupPath)).To(BeEmpty())
+				},
+				SpecTimeout(specTimeout),
+			)
 
-			It(testName("should return error if invalid command", terminal), func() {
+			It(testName("should return error if invalid command", terminal), func(ctx SpecContext) {
 				tr = newTestRunner()
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"invalid"}, nil)
 				sut = tr.configGivenEnv()
-				_, err := sut.CreateContainer(context.Background(), tr.defaultConfig(terminal))
+				_, err := sut.CreateContainer(ctx, tr.defaultConfig(terminal))
 				Expect(err).NotTo(Succeed())
 				Expect(err.Error()).To(ContainSubstring(`not found in $PATH`))
-			})
+			}, SpecTimeout(specTimeout))
 
-			It(testName("should handle long run dir", terminal), func() {
+			It(testName("should handle long run dir", terminal), func(ctx SpecContext) {
 				tr = newTestRunner()
 				tr.tmpDir = MustDirInTempDir(
 					tr.tmpDir,
@@ -280,76 +351,90 @@ var _ = Describe("ConmonClient", func() {
 				)
 				tr.createRuntimeConfig(terminal)
 				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
-			})
+				tr.createContainer(ctx, sut, terminal)
+			}, SpecTimeout(specTimeout))
 
-			It(testName("should succeed/error to set the window size", terminal), func() {
-				tr = newTestRunner()
-				// Report the size of the terminal until the resize shows up.
-				tr.createRuntimeConfigWithProcessArgs(
-					terminal,
-					[]string{
-						"/busybox",
-						"sh",
-						"-c",
-						"while true; do /busybox stty size; /busybox sleep 0.1; done",
-					},
-					nil,
-				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
-				tr.startContainer()
-
-				err := sut.SetWindowSizeContainer(
-					context.Background(),
-					&client.SetWindowSizeContainerConfig{
-						ID: tr.ctrID,
-						Size: &resize.TerminalSize{
-							Width:  10,
-							Height: 20,
+			It(
+				testName("should succeed/error to set the window size", terminal),
+				func(ctx SpecContext) {
+					tr = newTestRunner()
+					// Report the size of the terminal until the resize shows up.
+					tr.createRuntimeConfigWithProcessArgs(
+						terminal,
+						[]string{
+							"/busybox",
+							"sh",
+							"-c",
+							sttyLoop,
 						},
-					},
-				)
-				if !terminal {
-					Expect(err).NotTo(Succeed())
+						nil,
+					)
+					sut = tr.configGivenEnv()
+					tr.createContainer(ctx, sut, terminal)
+					tr.startContainer()
 
-					return
-				}
+					err := sut.SetWindowSizeContainer(
+						ctx,
+						&client.SetWindowSizeContainerConfig{
+							ID: tr.ctrID,
+							Size: &resize.TerminalSize{
+								Width:  10,
+								Height: 20,
+							},
+						},
+					)
+					if !terminal {
+						Expect(err).To(MatchError(ContainSubstring("container has no terminal")))
+						Expect(err).NotTo(MatchError(client.ErrContainerNotFound))
 
-				Expect(err).To(Succeed())
+						return
+					}
 
-				// stty prints the rows, then the columns.
-				Eventually(fileContents, 10*time.Second).
-					WithArguments(tr.logPath()).
-					Should(ContainSubstring(" 20 10"))
-			})
+					Expect(err).To(Succeed())
 
-			It(testName("should catch out of memory (oom) events", terminal), func() {
-				if unshare.IsRootless() {
-					Skip("does not run rootless")
-				}
+					// stty prints the rows, then the columns.
+					Eventually(fileContents, 10*time.Second).
+						WithArguments(tr.logPath()).
+						Should(ContainSubstring(" 20 10"))
+				},
+				SpecTimeout(specTimeout),
+			)
 
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					terminal,
-					[]string{"/busybox", "tail", "/dev/zero"},
-					func(g generate.Generator) {
-						// Pin the swap as well, otherwise the cgroup swaps on
-						// hosts with swap instead of being killed.
-						const limit = 1024 * 1024
-						g.SetLinuxResourcesMemoryLimit(limit)
-						g.SetLinuxResourcesMemorySwap(limit)
-					},
-				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
-				tr.startContainer()
+			It(
+				testName("should catch out of memory (oom) events", terminal),
+				func(ctx SpecContext) {
+					if unshare.IsRootless() {
+						Skip("does not run rootless")
+					}
 
-				Eventually(tr.oomExitPath, 10*time.Second).Should(BeAnExistingFile())
-				Expect(fileContents(tr.oomExitPath())).To(BeEmpty())
-			})
+					tr = newTestRunner()
+					tr.createRuntimeConfigWithProcessArgs(
+						terminal,
+						[]string{"/busybox", "tail", "/dev/zero"},
+						func(g generate.Generator) {
+							// Pin the swap as well, otherwise the cgroup swaps on
+							// hosts with swap instead of being killed.
+							const limit = 1024 * 1024
+							g.SetLinuxResourcesMemoryLimit(limit)
+							g.SetLinuxResourcesMemorySwap(limit)
+						},
+					)
+					sut = tr.configGivenEnv()
+					tr.createContainer(ctx, sut, terminal)
+					tr.startContainer()
 
-			It(testName("should reopen logs based on max size", terminal), func() {
+					Eventually(tr.oomExitPath, 10*time.Second).Should(BeAnExistingFile())
+					Expect(fileContents(tr.oomExitPath())).To(BeEmpty())
+
+					// Killed by SIGKILL, like a shell reports it.
+					Eventually(fileContents, 10*time.Second).
+						WithArguments(tr.exitPath()).
+						Should(Equal("137"))
+				},
+				SpecTimeout(specTimeout),
+			)
+
+			It(testName("should reopen logs based on max size", terminal), func(ctx SpecContext) {
 				tr = newTestRunner()
 				tr.createRuntimeConfigWithProcessArgs(
 					terminal,
@@ -359,7 +444,7 @@ var _ = Describe("ConmonClient", func() {
 				sut = tr.configGivenEnv()
 				cfg := tr.defaultConfig(terminal)
 				cfg.LogDrivers[0].MaxSize = 50
-				tr.createContainerWithConfig(sut, cfg)
+				tr.createContainerWithConfig(ctx, sut, cfg)
 				tr.startContainer()
 
 				// The second line exceeds the size and rotates the log, so
@@ -368,8 +453,8 @@ var _ = Describe("ConmonClient", func() {
 					WithArguments(tr.logPath()).
 					Should(ContainSubstring("world"))
 				Expect(fileContents(tr.logPath())).NotTo(ContainSubstring("hello"))
-			})
-			It(testName("should respect global args", terminal), func() {
+			}, SpecTimeout(specTimeout))
+			It(testName("should respect global args", terminal), func(ctx SpecContext) {
 				tr = newTestRunner()
 				tr.createRuntimeConfigWithProcessArgs(
 					terminal,
@@ -380,14 +465,14 @@ var _ = Describe("ConmonClient", func() {
 				sut = tr.configGivenEnv()
 				cfg := tr.defaultConfig(terminal)
 				cfg.GlobalArgs = []string{"--log", logFile, "--debug"}
-				tr.createContainerWithConfig(sut, cfg)
+				tr.createContainerWithConfig(ctx, sut, cfg)
 				tr.startContainer()
 
 				Expect(fileContents(logFile)).NotTo(BeEmpty())
-			})
+			}, SpecTimeout(specTimeout))
 		}
 
-		It("should relay sd_notify messages", func() {
+		It("should relay sd_notify messages", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfigWithProcessArgs(
 				false,
@@ -416,7 +501,7 @@ var _ = Describe("ConmonClient", func() {
 
 			cfg := tr.defaultConfig(false)
 			cfg.SdNotifySocket = hostPath
-			tr.createContainerWithConfig(sut, cfg)
+			tr.createContainerWithConfig(ctx, sut, cfg)
 
 			// busybox cannot send datagrams, so send from the host side what
 			// the container would send through the mount.
@@ -454,26 +539,18 @@ var _ = Describe("ConmonClient", func() {
 
 				return errors.Is(err, os.ErrNotExist)
 			}, time.Second*5).Should(BeTrue())
-		})
+		}, SpecTimeout(specTimeout))
 	})
 
 	Describe("ReopenLogContainer", func() {
 		for _, terminal := range []bool{true, false} {
-			It(testName("should continue the log in a new file", terminal), func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					terminal,
-					[]string{
-						"/busybox",
-						"sh",
-						"-c",
-						"i=0; while true; do echo line $i; i=$((i+1)); /busybox sleep 0.1; done",
-					},
-					nil,
-				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
-				tr.startContainer()
+			It(testName("should continue the log in a new file", terminal), func(ctx SpecContext) {
+				runContainer(ctx, terminal, []string{
+					"/busybox",
+					"sh",
+					"-c",
+					"i=0; while true; do echo line $i; i=$((i+1)); /busybox sleep 0.1; done",
+				})
 
 				atLeastThreeLines := WithTransform(
 					func(lines []int) int { return len(lines) },
@@ -489,7 +566,7 @@ var _ = Describe("ConmonClient", func() {
 				rotated := tr.logPath() + ".1"
 				Expect(os.Rename(tr.logPath(), rotated)).To(Succeed())
 				Expect(
-					sut.ReopenLogContainer(context.Background(), &client.ReopenLogContainerConfig{
+					sut.ReopenLogContainer(ctx, &client.ReopenLogContainerConfig{
 						ID: tr.ctrID,
 					}),
 				).To(Succeed())
@@ -518,36 +595,31 @@ var _ = Describe("ConmonClient", func() {
 				}
 
 				Expect(newLines[0]).To(Equal(oldLines[len(oldLines)-1] + 1))
-			})
+			}, SpecTimeout(specTimeout))
 		}
 
-		It("should fail for an unknown container", func() {
+		It("should fail for an unknown container", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
 
-			Expect(sut.ReopenLogContainer(context.Background(), &client.ReopenLogContainerConfig{
+			Expect(sut.ReopenLogContainer(ctx, &client.ReopenLogContainerConfig{
 				ID: "unknown",
-			})).NotTo(Succeed())
+			})).To(MatchError(client.ErrContainerNotFound))
 
 			// The failed request keeps the server usable.
-			_, err := sut.Version(context.Background(), &client.VersionConfig{})
+			_, err := sut.Version(ctx, &client.VersionConfig{})
 			Expect(err).To(Succeed())
-		})
+		}, SpecTimeout(specTimeout))
 	})
 
 	Describe("ExecSync Stress", func() {
 		for _, terminal := range []bool{true, false} {
-			It(testName("should handle many requests", terminal), func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					terminal,
-					[]string{"/busybox", "sleep", "30"},
-					nil,
-				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
-				tr.startContainer()
+			It(testName("should handle many requests", terminal), func(ctx SpecContext) {
+				runContainer(ctx, terminal, []string{"/busybox", "sleep", "30"})
+
+				resources := resourcesOf(sut.PID())
+				execCtx := withoutDeadline(ctx)
 
 				var wg sync.WaitGroup
 				for i := range 10 {
@@ -558,7 +630,7 @@ var _ = Describe("ConmonClient", func() {
 						defer wg.Done()
 
 						result, err := sut.ExecSyncContainer(
-							context.Background(),
+							execCtx,
 							&client.ExecSyncConfig{
 								ID: tr.ctrID,
 								Command: []string{
@@ -581,28 +653,24 @@ var _ = Describe("ConmonClient", func() {
 				}
 
 				wg.Wait()
-			})
 
-			It(testName("should not leak memory", terminal), func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					terminal,
-					[]string{"/busybox", "sleep", "600"},
-					nil,
-				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
-				tr.startContainer()
+				expectNoResourceLeak(sut.PID(), resources)
+			}, SpecTimeout(specTimeout))
+
+			It(testName("should not leak memory", terminal), func(ctx SpecContext) {
+				runContainer(ctx, terminal, []string{"/busybox", "sleep", "600"})
 
 				pid := sut.PID()
 				rssBefore := vmRSSGivenPID(pid)
 				GinkgoWriter.Printf("VmRSS before: %d\n", rssBefore)
 				logMemoryDetails(pid, "before")
 				mappingsBefore := mappingRSS(pid)
+				resources := resourcesOf(pid)
+				execCtx := withoutDeadline(ctx)
 
 				for i := range 25 {
 					result, err := sut.ExecSyncContainer(
-						context.Background(),
+						execCtx,
 						&client.ExecSyncConfig{
 							ID: tr.ctrID,
 							Command: []string{
@@ -630,24 +698,35 @@ var _ = Describe("ConmonClient", func() {
 				logGrownMappings(mappingsBefore, mappingRSS(pid))
 				GinkgoWriter.Printf("VmRSS diff: %d\n", rssAfter-rssBefore)
 				Expect(rssAfter - rssBefore).To(BeNumerically("<", maxRSSGrowthKB))
-			})
+
+				expectNoResourceLeak(pid, resources)
+			}, SpecTimeout(specTimeout))
 		}
 	})
 
 	Describe("ExecSyncContainer", func() {
-		for _, terminal := range []bool{true, false} {
-			It(testName("should succeed without timeout", terminal), func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					terminal,
-					[]string{"/busybox", "sleep", "10"},
-					nil,
-				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
-				tr.startContainer()
+		It("should not start a command in an unknown container", func(ctx SpecContext) {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
 
-				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+			// The runtime fails, which the result tells, not an error.
+			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+				ID:      "unknown",
+				Command: []string{"/busybox", "true"},
+				Timeout: 10,
+			})
+			Expect(err).To(Succeed())
+			Expect(result.ExitCode).To(Equal(client.ExecExitCodeNotStarted))
+			Expect(result.TimedOut).To(BeFalse())
+			Expect(result.Stderr).NotTo(BeEmpty())
+		}, SpecTimeout(specTimeout))
+
+		for _, terminal := range []bool{true, false} {
+			It(testName("should succeed without timeout", terminal), func(ctx SpecContext) {
+				runContainer(ctx, terminal, []string{"/busybox", "sleep", "10"})
+
+				result, err := sut.ExecSyncContainer(withoutDeadline(ctx), &client.ExecSyncConfig{
 					ID:       tr.ctrID,
 					Command:  []string{"/busybox", "echo", "-n", "hello", "world"},
 					Timeout:  timeoutUnlimited,
@@ -662,26 +741,18 @@ var _ = Describe("ConmonClient", func() {
 				// The PID file of the exec is removed once it got read.
 				Expect(execPIDFiles(tr.tmpDir)).To(BeEmpty())
 
-				err = sut.ReopenLogContainer(context.Background(), &client.ReopenLogContainerConfig{
+				err = sut.ReopenLogContainer(ctx, &client.ReopenLogContainerConfig{
 					ID: tr.ctrID,
 				})
 				Expect(err).To(Succeed())
 
 				Expect(fileContents(tr.logPath())).To(BeEmpty())
-			})
+			}, SpecTimeout(specTimeout))
 
-			It(testName("should succeed with timeout", terminal), func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					terminal,
-					[]string{"/busybox", "sleep", "10"},
-					nil,
-				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
-				tr.startContainer()
+			It(testName("should succeed with timeout", terminal), func(ctx SpecContext) {
+				runContainer(ctx, terminal, []string{"/busybox", "sleep", "10"})
 
-				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+				result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
 					ID:       tr.ctrID,
 					Command:  []string{"/busybox", "echo", "-n", "hello", "world"},
 					Timeout:  10,
@@ -692,20 +763,12 @@ var _ = Describe("ConmonClient", func() {
 				Expect(result.ExitCode).To(BeEquivalentTo(0))
 				Expect(result.Stdout).To(BeEquivalentTo("hello world"))
 				Expect(result.Stderr).To(BeEmpty())
-			})
+			}, SpecTimeout(specTimeout))
 
-			It(testName("should set the correct exit code", terminal), func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					terminal,
-					[]string{"/busybox", "sleep", "10"},
-					nil,
-				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
-				tr.startContainer()
+			It(testName("should set the correct exit code", terminal), func(ctx SpecContext) {
+				runContainer(ctx, terminal, []string{"/busybox", "sleep", "10"})
 
-				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+				result, err := sut.ExecSyncContainer(withoutDeadline(ctx), &client.ExecSyncConfig{
 					ID:       tr.ctrID,
 					Command:  []string{"/busybox", "invalid"},
 					Timeout:  timeoutUnlimited,
@@ -728,21 +791,13 @@ var _ = Describe("ConmonClient", func() {
 					Expect(result.Stdout).To(BeEmpty())
 					Expect(result.Stderr).To(BeEquivalentTo(expectedStr))
 				}
-			})
+			}, SpecTimeout(specTimeout))
 
-			It(testName("should timeout", terminal), func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					terminal,
-					[]string{"/busybox", "sleep", "20"},
-					nil,
-				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
-				tr.startContainer()
+			It(testName("should timeout", terminal), func(ctx SpecContext) {
+				runContainer(ctx, terminal, []string{"/busybox", "sleep", "20"})
 
 				start := time.Now()
-				result, err := sut.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+				result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
 					ID:       tr.ctrID,
 					Command:  []string{"/busybox", "sleep", "10"},
 					Timeout:  3,
@@ -755,54 +810,68 @@ var _ = Describe("ConmonClient", func() {
 				Expect(result.TimedOut).To(BeTrue())
 				// The killed command reports no exit code of its own.
 				Expect(result.ExitCode).To(BeNumerically("<", 0))
-			})
+			}, SpecTimeout(specTimeout))
 
-			It(testName("should not outlive the deadline of the context", terminal), func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					terminal,
-					[]string{"/busybox", "sleep", "20"},
-					nil,
-				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
-				tr.startContainer()
+			It(
+				testName("should not outlive the deadline of the context", terminal),
+				func(ctx SpecContext) {
+					runContainer(ctx, terminal, []string{"/busybox", "sleep", "20"})
 
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
+					execCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+					defer cancel()
 
-				// The server usually reports the timeout before the context
-				// ends the call.
-				result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
-					ID:       tr.ctrID,
-					Command:  []string{"/busybox", "sleep", "30"},
-					Terminal: terminal,
-				})
-				if err == nil {
-					Expect(result.TimedOut).To(BeTrue())
-				} else {
-					Expect(err).To(MatchError(context.DeadlineExceeded))
-				}
+					// The server usually reports the timeout before the context
+					// ends the call.
+					result, err := sut.ExecSyncContainer(execCtx, &client.ExecSyncConfig{
+						ID:       tr.ctrID,
+						Command:  []string{"/busybox", "sleep", "30"},
+						Terminal: terminal,
+					})
+					if err == nil {
+						Expect(result.TimedOut).To(BeTrue())
+					} else {
+						Expect(err).To(MatchError(context.DeadlineExceeded))
+					}
 
-				// The command got killed with the deadline.
-				Eventually(func(g Gomega) string {
-					result, err := sut.ExecSyncContainer(
-						context.Background(),
-						&client.ExecSyncConfig{
-							ID:      tr.ctrID,
-							Command: []string{"/busybox", "ps"},
-							Timeout: 10,
-						},
-					)
-					g.Expect(err).To(Succeed())
+					// The command got killed with the deadline.
+					Eventually(func(g Gomega) string {
+						result, err := sut.ExecSyncContainer(
+							ctx,
+							&client.ExecSyncConfig{
+								ID:      tr.ctrID,
+								Command: []string{"/busybox", "ps"},
+								Timeout: 10,
+							},
+						)
+						g.Expect(err).To(Succeed())
 
-					return string(result.Stdout)
-				}, 4*time.Second).ShouldNot(ContainSubstring("sleep 30"))
-			})
+						return string(result.Stdout)
+					}, 4*time.Second).ShouldNot(ContainSubstring("sleep 30"))
+				},
+				SpecTimeout(specTimeout),
+			)
 		}
 	})
 
 	Describe("Attach", func() {
+		It("should fail to attach to or resize an unknown container", func(ctx SpecContext) {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			socketPath := filepath.Join(tr.tmpDir, "attach")
+			Expect(sut.AttachContainer(ctx, &client.AttachConfig{
+				ID:         "unknown",
+				SocketPath: socketPath,
+			})).To(MatchError(client.ErrContainerNotFound))
+			Expect(socketPath).NotTo(BeAnExistingFile())
+
+			Expect(sut.SetWindowSizeContainer(ctx, &client.SetWindowSizeContainerConfig{
+				ID:   "unknown",
+				Size: &resize.TerminalSize{Width: 10, Height: 20},
+			})).To(MatchError(client.ErrContainerNotFound))
+		}, SpecTimeout(specTimeout))
+
 		matrix := []struct {
 			terminal       bool
 			pipe           string
@@ -843,12 +912,8 @@ var _ = Describe("ConmonClient", func() {
 				name += " leaving stdin open"
 			}
 
-			It(testName(name, test.terminal), func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"/busybox", "sh"}, nil)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
-				tr.startContainer()
+			It(testName(name, test.terminal), func(ctx SpecContext) {
+				runContainer(ctx, terminal, []string{"/busybox", "sh"})
 
 				stdinReader, stdinWriter := io.Pipe()
 				stdReader, stdWriter := io.Pipe()
@@ -868,14 +933,15 @@ var _ = Describe("ConmonClient", func() {
 					cfg.Streams.Stderr = &client.Out{stdWriter}
 				}
 
-				testAttach(sut, cfg, stdinWriter, stdReader, pipe, pipe == "stderr", terminal)
-			})
+				testAttach(ctx, sut, cfg, stdinWriter, stdReader, pipe, pipe == "stderr", terminal)
+			}, SpecTimeout(specTimeout))
 		}
 
 		// attachAll attaches stdin, stdout and stderr to a container running the
 		// script, writes the input and closes stdin if requested. The
 		// beforeAttach function runs after starting the container.
 		attachAll := func(
+			ctx context.Context,
 			script string, terminal, stopAfterStdinEOF bool, input string, closeStdin bool,
 			changeSpec func(generate.Generator), beforeAttach func(),
 		) (attachErr <-chan error, stdout, stderr <-chan string) {
@@ -886,7 +952,7 @@ var _ = Describe("ConmonClient", func() {
 				changeSpec,
 			)
 			sut = tr.configGivenEnv()
-			tr.createContainer(sut, terminal)
+			tr.createContainer(ctx, sut, terminal)
 			tr.startContainer()
 
 			if beforeAttach != nil {
@@ -941,24 +1007,26 @@ var _ = Describe("ConmonClient", func() {
 			errCh := make(chan error, 1)
 
 			go func() {
-				errCh <- sut.AttachContainer(context.Background(), cfg)
+				errCh <- sut.AttachContainer(ctx, cfg)
 			}()
 
 			return errCh, readAll(stdoutReader), readAll(stderrReader)
 		}
 
-		It("should receive the output written after stdin EOF", func() {
+		It("should receive the output written after stdin EOF", func(ctx SpecContext) {
 			attachErr, stdout, stderr := attachAll(
+				ctx,
 				"/busybox cat && echo stdin closed", false, true, "attached", true, nil, nil,
 			)
 
 			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
 			Eventually(stdout, 10*time.Second).Should(Receive(Equal("attachedstdin closed\n")))
 			Eventually(stderr, 10*time.Second).Should(Receive(BeEmpty()))
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should receive all output if stdin stays open", func() {
+		It("should receive all output if stdin stays open", func(ctx SpecContext) {
 			attachErr, stdout, stderr := attachAll(
+				ctx,
 				"read -r; echo one; /busybox sleep 0.5; echo two",
 				false,
 				false,
@@ -971,10 +1039,11 @@ var _ = Describe("ConmonClient", func() {
 			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
 			Eventually(stdout, 10*time.Second).Should(Receive(Equal("one\ntwo\n")))
 			Eventually(stderr, 10*time.Second).Should(Receive(BeEmpty()))
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should return on stdin EOF if stdin stays open", func() {
+		It("should return on stdin EOF if stdin stays open", func(ctx SpecContext) {
 			attachErr, stdout, stderr := attachAll(
+				ctx,
 				"/busybox sleep 1000",
 				false,
 				false,
@@ -987,82 +1056,121 @@ var _ = Describe("ConmonClient", func() {
 			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
 			Eventually(stdout, 10*time.Second).Should(Receive(BeEmpty()))
 			Eventually(stderr, 10*time.Second).Should(Receive(BeEmpty()))
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should return on stdin EOF with terminal and stdin once", func() {
-			attachErr, _, _ := attachAll("/busybox sleep 1000", true, true, "", true, nil, nil)
+		It("should return on stdin EOF with terminal and stdin once", func(ctx SpecContext) {
+			attachErr, _, _ := attachAll(ctx, "/busybox sleep 1000", true, true, "", true, nil, nil)
 
 			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should attach again to the same socket after an attach returned", func() {
-			tr = newTestRunner()
-			tr.createRuntimeConfigWithProcessArgs(
-				false,
-				[]string{"/busybox", "sh", "-c", "while read -r line; do echo got $line; done"},
-				nil,
-			)
-			sut = tr.configGivenEnv()
-			tr.createContainer(sut, false)
-			tr.startContainer()
+		It(
+			"should attach again to the same socket after an attach returned",
+			func(ctx SpecContext) {
+				runContainer(
+					ctx,
+					false,
+					[]string{"/busybox", "sh", "-c", "while read -r line; do echo got $line; done"},
+				)
 
-			socketPath := filepath.Join(tr.tmpDir, "attach")
+				socketPath := filepath.Join(tr.tmpDir, "attach")
 
-			for _, input := range []string{"one", "two"} {
-				stdinReader, stdinWriter := io.Pipe()
-				stdoutReader, stdoutWriter := io.Pipe()
+				// What the server holds once it listens on the socket, the
+				// later attaches must not add to it.
+				var resources serverResources
 
-				output := make(chan string, 10)
+				for i, input := range []string{"one", "two", "three"} {
+					stdinReader, stdinWriter := io.Pipe()
+					stdoutReader, stdoutWriter := io.Pipe()
 
-				go func() {
-					defer GinkgoRecover()
+					output := make(chan string, 10)
 
-					data := make([]byte, 64)
+					go func() {
+						defer GinkgoRecover()
 
-					for {
-						n, err := stdoutReader.Read(data)
-						if n > 0 {
-							output <- string(data[:n])
+						data := make([]byte, 64)
+
+						for {
+							n, err := stdoutReader.Read(data)
+							if n > 0 {
+								output <- string(data[:n])
+							}
+
+							if err != nil {
+								return
+							}
 						}
+					}()
 
-						if err != nil {
-							return
-						}
+					attachErr := make(chan error, 1)
+
+					go func() {
+						attachErr <- sut.AttachContainer(ctx, &client.AttachConfig{
+							ID:             tr.ctrID,
+							SocketPath:     socketPath,
+							ContainerStdin: true,
+							Streams: client.AttachStreams{
+								Stdin:  &client.In{stdinReader},
+								Stdout: &client.Out{stdoutWriter},
+							},
+						})
+					}()
+
+					_, err := stdinWriter.Write([]byte(input + "\n"))
+					Expect(err).To(Succeed())
+					Eventually(output, 10*time.Second).Should(Receive(Equal("got " + input + "\n")))
+
+					// Without stdin once, the stdin EOF ends the attach and the
+					// socket stays for the next one.
+					Expect(stdinWriter.Close()).To(Succeed())
+					Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
+					Expect(socketPath).To(BeAnExistingFile())
+
+					if i == 0 {
+						resources = resourcesOf(sut.PID())
 					}
-				}()
+				}
 
-				attachErr := make(chan error, 1)
+				expectNoResourceLeak(sut.PID(), resources)
+			},
+			SpecTimeout(specTimeout),
+		)
 
-				go func() {
-					attachErr <- sut.AttachContainer(context.Background(), &client.AttachConfig{
-						ID:             tr.ctrID,
-						SocketPath:     socketPath,
-						ContainerStdin: true,
-						Streams: client.AttachStreams{
-							Stdin:  &client.In{stdinReader},
-							Stdout: &client.Out{stdoutWriter},
-						},
-					})
-				}()
+		It("should apply resize events", func(ctx SpecContext) {
+			runContainer(ctx, true, []string{"/busybox", "sh", "-c", sttyLoop})
 
-				_, err := stdinWriter.Write([]byte(input + "\n"))
-				Expect(err).To(Succeed())
-				Eventually(output, 10*time.Second).Should(Receive(Equal("got " + input + "\n")))
+			stdoutReader, stdoutWriter := io.Pipe()
+			stdout := &syncBuffer{}
 
-				// Without stdin once, the stdin EOF ends the attach and the
-				// socket stays for the next one.
-				Expect(stdinWriter.Close()).To(Succeed())
-				Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
-				Expect(socketPath).To(BeAnExistingFile())
-			}
-		})
+			go io.Copy(stdout, stdoutReader) //nolint:errcheck // ends with the attach
 
-		It("should return once the context is done", func() {
-			tr = newTestRunner()
-			tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "1000"}, nil)
-			sut = tr.configGivenEnv()
-			tr.createContainer(sut, false)
-			tr.startContainer()
+			resizeEvents := make(chan resize.TerminalSize, 1)
+			resizeEvents <- resize.TerminalSize{Width: 30, Height: 40}
+
+			attachCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+
+			attachErr := make(chan error, 1)
+
+			go func() {
+				attachErr <- sut.AttachContainer(attachCtx, &client.AttachConfig{
+					ID:         tr.ctrID,
+					SocketPath: filepath.Join(tr.tmpDir, "attach"),
+					Tty:        true,
+					Resize:     resizeEvents,
+					Streams:    client.AttachStreams{Stdout: &client.Out{stdoutWriter}},
+				})
+			}()
+
+			// stty prints the rows, then the columns.
+			Eventually(stdout.String, 10*time.Second).Should(ContainSubstring("40 30"))
+
+			cancel()
+			Eventually(attachErr, 10*time.Second).Should(Receive(MatchError(context.Canceled)))
+		}, SpecTimeout(specTimeout))
+
+		It("should return once the context is done", func(ctx SpecContext) {
+			runContainer(ctx, false, []string{"/busybox", "sleep", "1000"})
 
 			stdinReader, stdinWriter := io.Pipe()
 			defer stdinWriter.Close()
@@ -1077,13 +1185,13 @@ var _ = Describe("ConmonClient", func() {
 				outputClosed <- err
 			}()
 
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			attachCtx, cancel := context.WithTimeout(ctx, time.Second)
 			defer cancel()
 
 			attachErr := make(chan error, 1)
 
 			go func() {
-				attachErr <- sut.AttachContainer(ctx, &client.AttachConfig{
+				attachErr <- sut.AttachContainer(attachCtx, &client.AttachConfig{
 					ID:                tr.ctrID,
 					SocketPath:        filepath.Join(tr.tmpDir, "attach"),
 					ContainerStdin:    true,
@@ -1101,36 +1209,42 @@ var _ = Describe("ConmonClient", func() {
 			).Should(Receive(MatchError(context.DeadlineExceeded)))
 			// The attach closed the output before it returned.
 			Eventually(outputClosed, time.Second).Should(Receive(Succeed()))
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should receive the done packet if the output ended before attaching", func() {
-			attachErr, stdout, stderr := attachAll(
-				"exec >&- 2>&-; /busybox touch /output-closed; /busybox cat",
-				false,
-				true,
-				"",
-				true,
-				nil,
-				func() {
-					// Attach only once the output got closed, the read loops
-					// see the EOF right away.
-					Eventually(func() string {
-						return filepath.Join(tr.tmpRootfs, "output-closed")
-					}, 10*time.Second).Should(BeAnExistingFile())
-				},
-			)
+		It(
+			"should receive the done packet if the output ended before attaching",
+			func(ctx SpecContext) {
+				attachErr, stdout, stderr := attachAll(
+					ctx,
+					"exec >&- 2>&-; /busybox touch /output-closed; /busybox cat",
+					false,
+					true,
+					"",
+					true,
+					nil,
+					func() {
+						// Attach only once the output got closed, the read loops
+						// see the EOF right away.
+						Eventually(func() string {
+							return filepath.Join(tr.tmpRootfs, "output-closed")
+						}, 10*time.Second).Should(BeAnExistingFile())
+					},
+				)
 
-			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
-			Eventually(stdout, 10*time.Second).Should(Receive(BeEmpty()))
-			Eventually(stderr, 10*time.Second).Should(Receive(BeEmpty()))
-		})
+				Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
+				Eventually(stdout, 10*time.Second).Should(Receive(BeEmpty()))
+				Eventually(stderr, 10*time.Second).Should(Receive(BeEmpty()))
+			},
+			SpecTimeout(specTimeout),
+		)
 
-		It("should catch out of memory (oom) events after stdin EOF", func() {
+		It("should catch out of memory (oom) events after stdin EOF", func(ctx SpecContext) {
 			if unshare.IsRootless() {
 				Skip("does not run rootless")
 			}
 
 			attachErr, _, _ := attachAll(
+				ctx,
 				"/busybox cat; /busybox tail /dev/zero", false, true, "", true,
 				func(g generate.Generator) {
 					// Pin the swap limit as well, otherwise the cgroup swaps
@@ -1144,7 +1258,10 @@ var _ = Describe("ConmonClient", func() {
 
 			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
 			Eventually(tr.oomExitPath, 10*time.Second).Should(BeAnExistingFile())
-		})
+			Eventually(fileContents, 10*time.Second).
+				WithArguments(tr.exitPath()).
+				Should(Equal("137"))
+		}, SpecTimeout(specTimeout))
 	})
 
 	Describe("Tracing", func() {
@@ -1223,18 +1340,18 @@ var _ = Describe("ConmonClient", func() {
 			}
 		}
 
-		It("should succeed", func() {
+		It("should succeed", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			tr.enableTracing = true
 
 			sut = tr.configGivenEnv()
 
-			tr.createContainer(sut, false)
+			tr.createContainer(ctx, sut, false)
 			tr.startContainer()
 
 			Eventually(hasTraces, 100*time.Second, time.Second).Should(BeTrue())
-		})
+		}, SpecTimeout(3*time.Minute))
 
 		AfterEach(func() {
 			cmd := exec.Command(contribTracingPath + "stop")
@@ -1251,7 +1368,7 @@ var _ = Describe("ConmonClient", func() {
 			}
 		})
 
-		It("should succeed without namespaces", func() {
+		It("should succeed without namespaces", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
@@ -1259,29 +1376,29 @@ var _ = Describe("ConmonClient", func() {
 			podID := uuid.New().String()
 
 			response, err := sut.CreateNamespaces(
-				context.Background(),
+				ctx,
 				&client.CreateNamespacesConfig{
 					PodID: podID,
 				},
 			)
 			Expect(err).To(Succeed())
 			Expect(response).NotTo(BeNil())
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should fail without pod ID", func() {
+		It("should fail without pod ID", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
 
 			response, err := sut.CreateNamespaces(
-				context.Background(),
+				ctx,
 				&client.CreateNamespacesConfig{},
 			)
 			Expect(err).NotTo(Succeed())
 			Expect(response).To(BeNil())
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should succeed without user namespace", func() {
+		It("should succeed without user namespace", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
@@ -1289,7 +1406,7 @@ var _ = Describe("ConmonClient", func() {
 			podID := uuid.New().String()
 
 			response, err := sut.CreateNamespaces(
-				context.Background(),
+				ctx,
 				&client.CreateNamespacesConfig{
 					PodID: podID,
 					Namespaces: []client.Namespace{
@@ -1330,9 +1447,9 @@ var _ = Describe("ConmonClient", func() {
 
 			// The user namespace was not requested and is not bound.
 			Expect(filepath.Join(basePath, "userns", podID)).NotTo(BeAnExistingFile())
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should not keep a pause process without PID namespace", func() {
+		It("should not keep a pause process without PID namespace", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
@@ -1344,7 +1461,7 @@ var _ = Describe("ConmonClient", func() {
 			podID := uuid.New().String()
 
 			response, err := sut.CreateNamespaces(
-				context.Background(),
+				ctx,
 				&client.CreateNamespacesConfig{
 					Namespaces: []client.Namespace{
 						client.NamespaceIPC,
@@ -1367,53 +1484,57 @@ var _ = Describe("ConmonClient", func() {
 			// Without a PID namespace no pause process stays behind.
 			Expect(filepath.Join(basePath, "conmonrs", podID+".pid")).NotTo(BeAnExistingFile())
 			Expect(pauseProcessRunning(podID)).To(BeFalse())
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should not keep a pause process with user namespace and without PID namespace", func() {
-			tr = newTestRunner()
-			tr.createRuntimeConfig(false)
-			sut = tr.configGivenEnv()
+		It(
+			"should not keep a pause process with user namespace and without PID namespace",
+			func(ctx SpecContext) {
+				tr = newTestRunner()
+				tr.createRuntimeConfig(false)
+				sut = tr.configGivenEnv()
 
-			basePath := MustTempDir("ns-test-")
-			// Runs after the server shutdown unmounted the namespaces.
-			DeferCleanup(os.RemoveAll, basePath)
+				basePath := MustTempDir("ns-test-")
+				// Runs after the server shutdown unmounted the namespaces.
+				DeferCleanup(os.RemoveAll, basePath)
 
-			podID := uuid.New().String()
+				podID := uuid.New().String()
 
-			uids := []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}}
-			gids := []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}}
+				uids := []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}}
+				gids := []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}}
 
-			response, err := sut.CreateNamespaces(
-				context.Background(),
-				&client.CreateNamespacesConfig{
-					Namespaces: []client.Namespace{
-						client.NamespaceIPC,
-						client.NamespaceNet,
-						client.NamespaceUTS,
-						client.NamespaceUser,
-						// Duplicates are reported once.
-						client.NamespaceNet,
+				response, err := sut.CreateNamespaces(
+					ctx,
+					&client.CreateNamespacesConfig{
+						Namespaces: []client.Namespace{
+							client.NamespaceIPC,
+							client.NamespaceNet,
+							client.NamespaceUTS,
+							client.NamespaceUser,
+							// Duplicates are reported once.
+							client.NamespaceNet,
+						},
+						IDMappings: idtools.NewIDMappingsFromMaps(uids, gids),
+						BasePath:   basePath,
+						PodID:      podID,
 					},
-					IDMappings: idtools.NewIDMappingsFromMaps(uids, gids),
-					BasePath:   basePath,
-					PodID:      podID,
-				},
-			)
-			Expect(err).To(Succeed())
-			Expect(response).NotTo(BeNil())
-			Expect(response.Namespaces).To(HaveLen(4))
-			Expect(response.Namespaces[3].Type).To(Equal(client.NamespaceUser))
+				)
+				Expect(err).To(Succeed())
+				Expect(response).NotTo(BeNil())
+				Expect(response.Namespaces).To(HaveLen(4))
+				Expect(response.Namespaces[3].Type).To(Equal(client.NamespaceUser))
 
-			// The namespaces are bound on the host and outlive the pause process.
-			for _, ns := range response.Namespaces {
-				expectNamespaceFile(ns.Path)
-			}
+				// The namespaces are bound on the host and outlive the pause process.
+				for _, ns := range response.Namespaces {
+					expectNamespaceFile(ns.Path)
+				}
 
-			Expect(filepath.Join(basePath, "conmonrs", podID+".pid")).NotTo(BeAnExistingFile())
-			Expect(pauseProcessRunning(podID)).To(BeFalse())
-		})
+				Expect(filepath.Join(basePath, "conmonrs", podID+".pid")).NotTo(BeAnExistingFile())
+				Expect(pauseProcessRunning(podID)).To(BeFalse())
+			},
+			SpecTimeout(specTimeout),
+		)
 
-		It("should succeed with user namespace and custom base path", func() {
+		It("should succeed with user namespace and custom base path", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
@@ -1428,7 +1549,7 @@ var _ = Describe("ConmonClient", func() {
 			gids := []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}}
 
 			response, err := sut.CreateNamespaces(
-				context.Background(),
+				ctx,
 				&client.CreateNamespacesConfig{
 					Namespaces: []client.Namespace{
 						client.NamespaceIPC,
@@ -1459,9 +1580,9 @@ var _ = Describe("ConmonClient", func() {
 			// The PID namespace needs the pause process to stay alive.
 			Expect(filepath.Join(basePath, "conmonrs", podID+".pid")).To(BeAnExistingFile())
 			Expect(pauseProcessRunning(podID)).To(BeTrue())
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should reap orphans in the pod PID namespace", func() {
+		It("should reap orphans in the pod PID namespace", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
@@ -1473,7 +1594,7 @@ var _ = Describe("ConmonClient", func() {
 			podID := uuid.New().String()
 
 			response, err := sut.CreateNamespaces(
-				context.Background(),
+				ctx,
 				&client.CreateNamespacesConfig{
 					Namespaces: []client.Namespace{client.NamespacePID},
 					BasePath:   basePath,
@@ -1492,7 +1613,7 @@ var _ = Describe("ConmonClient", func() {
 			// reparented to the pause process, the init of the PID namespace.
 			//nolint:gosec // test helper with controlled inputs
 			cmd := exec.CommandContext(
-				context.Background(),
+				ctx,
 				"nsenter", "--pid="+response.Namespaces[0].Path, "--",
 				"sh", "-c", "sleep 1 & exit 0",
 			)
@@ -1503,9 +1624,9 @@ var _ = Describe("ConmonClient", func() {
 			Eventually(func() []int { return childrenOf(pausePID) }).
 				WithTimeout(10 * time.Second).
 				Should(BeEmpty())
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should fail for another pod or configuration", func() {
+		It("should fail for another pod or configuration", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
@@ -1519,35 +1640,35 @@ var _ = Describe("ConmonClient", func() {
 				BasePath:   basePath,
 				PodID:      uuid.New().String(),
 			}
-			response, err := sut.CreateNamespaces(context.Background(), &cfg)
+			response, err := sut.CreateNamespaces(ctx, &cfg)
 			Expect(err).To(Succeed())
 			Expect(response.Namespaces).To(HaveLen(2))
 
 			// The same request is answered with the same namespaces, in any order.
 			same := cfg
 			same.Namespaces = []client.Namespace{client.NamespaceUTS, client.NamespaceIPC}
-			again, err := sut.CreateNamespaces(context.Background(), &same)
+			again, err := sut.CreateNamespaces(ctx, &same)
 			Expect(err).To(Succeed())
 			Expect(again.Namespaces).To(Equal(response.Namespaces))
 
 			otherPod := cfg
 			otherPod.PodID = uuid.New().String()
-			_, err = sut.CreateNamespaces(context.Background(), &otherPod)
+			_, err = sut.CreateNamespaces(ctx, &otherPod)
 			Expect(err).NotTo(Succeed())
 
 			otherNamespaces := cfg
 			otherNamespaces.Namespaces = []client.Namespace{client.NamespaceNet}
-			_, err = sut.CreateNamespaces(context.Background(), &otherNamespaces)
+			_, err = sut.CreateNamespaces(ctx, &otherNamespaces)
 			Expect(err).NotTo(Succeed())
 
 			otherBasePath := cfg
 			otherBasePath.BasePath = MustTempDir("ns-test-")
 			DeferCleanup(os.RemoveAll, otherBasePath.BasePath)
-			_, err = sut.CreateNamespaces(context.Background(), &otherBasePath)
+			_, err = sut.CreateNamespaces(ctx, &otherBasePath)
 			Expect(err).NotTo(Succeed())
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should create the namespaces once for concurrent calls", func() {
+		It("should create the namespaces once for concurrent calls", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
@@ -1576,7 +1697,7 @@ var _ = Describe("ConmonClient", func() {
 				wg.Go(func() {
 					defer GinkgoRecover()
 
-					response, err := sut.CreateNamespaces(context.Background(), cfg)
+					response, err := sut.CreateNamespaces(ctx, cfg)
 					Expect(err).To(Succeed())
 
 					responses[i] = response
@@ -1594,15 +1715,15 @@ var _ = Describe("ConmonClient", func() {
 			}
 
 			Expect(pauseProcessCount(podID)).To(Equal(1))
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should fail with user namespace without mappings", func() {
+		It("should fail with user namespace without mappings", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
 
 			response, err := sut.CreateNamespaces(
-				context.Background(),
+				ctx,
 				&client.CreateNamespacesConfig{
 					Namespaces: []client.Namespace{
 						client.NamespaceUser,
@@ -1612,7 +1733,7 @@ var _ = Describe("ConmonClient", func() {
 			Expect(err).NotTo(Succeed())
 			Expect(errors.Is(err, client.ErrMissingIDMappings)).To(BeTrue())
 			Expect(response).To(BeNil())
-		})
+		}, SpecTimeout(specTimeout))
 	})
 })
 
@@ -1633,7 +1754,7 @@ var _ = Describe("JSONLogger", func() {
 
 	Describe("Logging", func() {
 		for _, terminal := range []bool{true, false} {
-			It(testName("should log in JSON format", terminal), func() {
+			It(testName("should log in JSON format", terminal), func(ctx SpecContext) {
 				tr = newTestRunner()
 				tr.createRuntimeConfigWithProcessArgs(
 					terminal,
@@ -1647,7 +1768,7 @@ var _ = Describe("JSONLogger", func() {
 					Type: client.LogDriverTypeJSONLogger,
 					Path: tr.logPath(),
 				}}
-				tr.createContainerWithConfig(sut, cfg)
+				tr.createContainerWithConfig(ctx, sut, cfg)
 				tr.startContainer()
 
 				// The schema is documented in usage.md.
@@ -1682,7 +1803,7 @@ var _ = Describe("JSONLogger", func() {
 					Expect(entries[i].Message).To(Equal(message))
 					Expect(entries[i].Partial).To(BeFalse())
 				}
-			})
+			}, SpecTimeout(specTimeout))
 		}
 	})
 })
@@ -1704,7 +1825,7 @@ var _ = Describe("JournaldLogger", func() {
 
 	Describe("Logging", func() {
 		for _, terminal := range []bool{true, false} {
-			It(testName("should log to journald", terminal), func() {
+			It(testName("should log to journald", terminal), func(ctx SpecContext) {
 				tr = newTestRunner()
 				// Unique markers, other specs may log to the journal at the same time.
 				marker := uuid.New().String()
@@ -1722,16 +1843,16 @@ var _ = Describe("JournaldLogger", func() {
 				sut = tr.configGivenEnv()
 				cfg := tr.defaultConfig(terminal)
 				cfg.LogDrivers = []client.ContainerLogDriver{{Type: client.LogDriverTypeJournald}}
-				tr.createContainerWithConfig(sut, cfg)
+				tr.createContainerWithConfig(ctx, sut, cfg)
 				tr.startContainer()
 
 				// Verify the journal logs, they arrive asynchronously. The
 				// documented short ID field finds both lines.
-				journal := func(args ...string) func(g Gomega) string {
+				journal := func(extraArgs ...string) func(g Gomega) string {
 					return func(g Gomega) string {
 						args := append(
 							[]string{"--since", "-1min", "CONTAINER_ID=" + tr.ctrID[:12]},
-							args...)
+							extraArgs...)
 						cmd := exec.Command("journalctl", args...)
 						stdout := strings.Builder{}
 						cmd.Stdout = &stdout
@@ -1753,7 +1874,7 @@ var _ = Describe("JournaldLogger", func() {
 						ContainSubstring("foo "+marker),
 					))
 				}
-			})
+			}, SpecTimeout(specTimeout))
 		}
 	})
 })
@@ -1773,8 +1894,18 @@ var _ = Describe("StreamingServer", func() {
 		cleanupSpec(tr, sut)
 	})
 
+	// runContainer starts a server with a started container which runs the
+	// process.
+	runContainer := func(ctx context.Context, terminal bool, processArgs []string) {
+		tr = newTestRunner()
+		tr.createRuntimeConfigWithProcessArgs(terminal, processArgs, nil)
+		sut = tr.configGivenEnv()
+		tr.createContainer(ctx, sut, terminal)
+		tr.startContainer()
+	}
+
 	Describe("ServePortForwardContainer", func() {
-		It("should forward concurrent connections", func() {
+		It("should forward concurrent connections", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
@@ -1785,7 +1916,7 @@ var _ = Describe("StreamingServer", func() {
 			// The server runs in the network namespace of the test, which
 			// needs no privileges to connect in.
 			result, err := sut.ServePortForwardContainer(
-				context.Background(),
+				ctx,
 				&client.ServePortForwardContainerConfig{
 					NetNsPath:   "/proc/self/ns/net",
 					IdleTimeout: time.Minute,
@@ -1794,12 +1925,16 @@ var _ = Describe("StreamingServer", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.URL).To(ContainSubstring("/portforward/"))
 
+			// The streaming server got started.
+			resources := resourcesOf(sut.PID())
+
 			dialer, err := portForwardDialer(result.URL)
 			Expect(err).NotTo(HaveOccurred())
 
-			local, stop, err := startPortForward(dialer, port)
+			local, stopForward, err := startPortForward(dialer, port)
 			Expect(err).NotTo(HaveOccurred())
 
+			stop := sync.OnceFunc(stopForward)
 			defer stop()
 
 			// All connections share the SPDY connection of the forwarder.
@@ -1814,9 +1949,14 @@ var _ = Describe("StreamingServer", func() {
 			}
 
 			wg.Wait()
-		})
 
-		It("should forward connections through a WebSocket tunnel", func() {
+			// The session ends with the forwarder, its namespace thread
+			// and connections with it.
+			stop()
+			expectNoResourceLeak(sut.PID(), resources)
+		}, SpecTimeout(specTimeout))
+
+		It("should forward connections through a WebSocket tunnel", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
@@ -1825,7 +1965,7 @@ var _ = Describe("StreamingServer", func() {
 			defer listener.Close()
 
 			result, err := sut.ServePortForwardContainer(
-				context.Background(),
+				ctx,
 				&client.ServePortForwardContainerConfig{
 					NetNsPath: "/proc/self/ns/net",
 				},
@@ -1851,7 +1991,7 @@ var _ = Describe("StreamingServer", func() {
 			}
 
 			wg.Wait()
-		})
+		}, SpecTimeout(specTimeout))
 
 		for _, base64Codec := range []bool{false, true} {
 			It(
@@ -1859,7 +1999,7 @@ var _ = Describe("StreamingServer", func() {
 					"should forward a port over the WebSocket channel protocol (base64: %v)",
 					base64Codec,
 				),
-				func() {
+				func(ctx SpecContext) {
 					tr = newTestRunner()
 					tr.createRuntimeConfig(false)
 					sut = tr.configGivenEnv()
@@ -1870,7 +2010,7 @@ var _ = Describe("StreamingServer", func() {
 					defer listener.Close()
 
 					result, err := sut.ServePortForwardContainer(
-						context.Background(),
+						ctx,
 						&client.ServePortForwardContainerConfig{
 							NetNsPath: "/proc/self/ns/net",
 						},
@@ -1881,20 +2021,19 @@ var _ = Describe("StreamingServer", func() {
 					Expect(err).NotTo(HaveOccurred())
 					Expect(errs).To(BeEmpty())
 					Expect(data).To(Equal(payload))
-				},
+				}, SpecTimeout(specTimeout),
 			)
 		}
 
-		It("should report a closed port on the WebSocket error channel", func() {
+		It("should report a closed port on the WebSocket error channel", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
 
-			listener, port := echoServer(0)
-			Expect(listener.Close()).To(Succeed())
+			port := closedPort()
 
 			result, err := sut.ServePortForwardContainer(
-				context.Background(),
+				ctx,
 				&client.ServePortForwardContainerConfig{
 					NetNsPath: "/proc/self/ns/net",
 				},
@@ -1905,32 +2044,30 @@ var _ = Describe("StreamingServer", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(data).To(BeEmpty())
 			Expect(errs).To(ContainSubstring("failed to connect to localhost:%d", port))
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should reject a missing network namespace path", func() {
+		It("should reject a missing network namespace path", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
 
 			// Also without a config.
 			for _, cfg := range []*client.ServePortForwardContainerConfig{nil, {}} {
-				result, err := sut.ServePortForwardContainer(context.Background(), cfg)
+				result, err := sut.ServePortForwardContainer(ctx, cfg)
 				Expect(err).To(MatchError(client.ErrMissingNetNsPath))
 				Expect(result).To(BeNil())
 			}
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should report a closed port on the error stream", func() {
+		It("should report a closed port on the error stream", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
 
-			// A port nothing listens on anymore.
-			listener, port := echoServer(0)
-			Expect(listener.Close()).To(Succeed())
+			port := closedPort()
 
 			result, err := sut.ServePortForwardContainer(
-				context.Background(),
+				ctx,
 				&client.ServePortForwardContainerConfig{
 					NetNsPath: "/proc/self/ns/net",
 				},
@@ -1966,74 +2103,72 @@ var _ = Describe("StreamingServer", func() {
 			Expect(string(message)).To(ContainSubstring(
 				"error forwarding port %d: failed to connect to localhost:%d", port, port,
 			))
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should forward a port into the network namespace of a container", func() {
-			if unshare.IsRootless() {
-				Skip("does not run rootless")
-			}
+		It(
+			"should forward a port into the network namespace of a container",
+			func(ctx SpecContext) {
+				if unshare.IsRootless() {
+					Skip("does not run rootless")
+				}
 
-			tr = newTestRunner()
-			tr.createRuntimeConfigWithProcessArgs(
-				false,
-				[]string{"/busybox", "nc", "-lk", "-p", "8080", "-e", "/busybox", "cat"},
-				nil,
-			)
-			sut = tr.configGivenEnv()
-			resp, err := sut.CreateContainer(context.Background(), tr.defaultConfig(false))
-			Expect(err).NotTo(HaveOccurred())
-			tr.startContainer()
-
-			netNsPath := fmt.Sprintf("/proc/%d/ns/net", resp.PID)
-			ownNetNs, err := os.Readlink("/proc/self/ns/net")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(os.Readlink(netNsPath)).NotTo(Equal(ownNetNs))
-
-			// Until nc listens. A failed request ends the forwarder, so each
-			// attempt starts a new one.
-			Eventually(func() (string, error) {
-				result, err := sut.ServePortForwardContainer(
-					context.Background(),
-					&client.ServePortForwardContainerConfig{
-						NetNsPath: netNsPath,
-					},
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(
+					false,
+					[]string{"/busybox", "nc", "-lk", "-p", "8080", "-e", "/busybox", "cat"},
+					nil,
 				)
-				if err != nil {
-					return "", fmt.Errorf("serve port forward: %w", err)
-				}
+				sut = tr.configGivenEnv()
+				resp, err := sut.CreateContainer(ctx, tr.defaultConfig(false))
+				Expect(err).NotTo(HaveOccurred())
+				tr.startContainer()
 
-				dialer, err := portForwardDialer(result.URL)
-				if err != nil {
-					return "", err
-				}
+				netNsPath := fmt.Sprintf("/proc/%d/ns/net", resp.PID)
+				ownNetNs, err := os.Readlink("/proc/self/ns/net")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(os.Readlink(netNsPath)).NotTo(Equal(ownNetNs))
 
-				local, stop, err := startPortForward(dialer, 8080)
-				if err != nil {
-					return "", err
-				}
-				defer stop()
+				// Until nc listens. A failed request ends the forwarder, so each
+				// attempt starts a new one.
+				Eventually(func() (string, error) {
+					result, err := sut.ServePortForwardContainer(
+						ctx,
+						&client.ServePortForwardContainerConfig{
+							NetNsPath: netNsPath,
+						},
+					)
+					if err != nil {
+						return "", fmt.Errorf("serve port forward: %w", err)
+					}
 
-				return portForwardRoundTrip(local, "hello")
-			}, 10*time.Second).Should(Equal("hello"))
-		})
+					dialer, err := portForwardDialer(result.URL)
+					if err != nil {
+						return "", err
+					}
+
+					local, stop, err := startPortForward(dialer, 8080)
+					if err != nil {
+						return "", err
+					}
+					defer stop()
+
+					return portForwardRoundTrip(local, "hello")
+				}, 10*time.Second).Should(Equal("hello"))
+			},
+			SpecTimeout(specTimeout),
+		)
 	})
 
 	for _, transport := range streamTransports {
 		Describe("ServeExecContainer over "+transport, func() {
 			for _, terminal := range []bool{true, false} {
-				It(testName("should succeed", terminal), func() {
-					tr = newTestRunner()
-					tr.createRuntimeConfigWithProcessArgs(
-						terminal,
-						[]string{"/busybox", "sleep", "10"},
-						nil,
-					)
-					sut = tr.configGivenEnv()
-					tr.createContainer(sut, terminal)
-					tr.startContainer()
+				It(testName("should succeed", terminal), func(ctx SpecContext) {
+					// Runs past the wait for the leak check, its exit would
+					// free resources.
+					runContainer(ctx, terminal, []string{"/busybox", "sleep", "600"})
 
 					result, err := sut.ServeExecContainer(
-						context.Background(),
+						ctx,
 						&client.ServeExecContainerConfig{
 							ID: tr.ctrID,
 							Command: []string{
@@ -2051,12 +2186,15 @@ var _ = Describe("StreamingServer", func() {
 					Expect(err).To(Succeed())
 					Expect(result.URL).NotTo(BeEmpty())
 
+					// The streaming server and the session got set up.
+					resources := resourcesOf(sut.PID())
+
 					stdout := &bytes.Buffer{}
 					stderr := &bytes.Buffer{}
 
 					Expect(
 						streamURLOver(
-							context.Background(),
+							ctx,
 							transport,
 							result.URL,
 							remotecommand.StreamOptions{
@@ -2077,21 +2215,44 @@ var _ = Describe("StreamingServer", func() {
 
 					// The PID file of the exec is removed once it got read.
 					Expect(execPIDFiles(tr.tmpDir)).To(BeEmpty())
-				})
 
-				It(testName("should report a non-zero exit code", terminal), func() {
-					tr = newTestRunner()
-					tr.createRuntimeConfigWithProcessArgs(
-						terminal,
-						[]string{"/busybox", "sleep", "10"},
-						nil,
-					)
-					sut = tr.configGivenEnv()
-					tr.createContainer(sut, terminal)
-					tr.startContainer()
+					expectNoResourceLeak(sut.PID(), resources)
+				}, SpecTimeout(specTimeout))
+
+				if terminal {
+					It("should apply resize events", func(ctx SpecContext) {
+						runContainer(ctx, terminal, []string{"/busybox", "sleep", "600"})
+
+						result, err := sut.ServeExecContainer(
+							ctx,
+							&client.ServeExecContainerConfig{
+								ID:      tr.ctrID,
+								Command: []string{"/busybox", "sh", "-c", sttyAwait},
+								Tty:     terminal,
+								Stdout:  true,
+							},
+						)
+						Expect(err).To(Succeed())
+
+						sizes := terminalSizes(remotecommand.TerminalSize{Width: 30, Height: 40})
+						stdout := &bytes.Buffer{}
+
+						Expect(
+							streamURLOver(ctx, transport, result.URL, remotecommand.StreamOptions{
+								Stdout:            stdout,
+								Tty:               terminal,
+								TerminalSizeQueue: sizes,
+							}),
+						).To(Succeed())
+						Expect(stdout.String()).To(ContainSubstring("40 30"))
+					}, SpecTimeout(specTimeout))
+				}
+
+				It(testName("should report a non-zero exit code", terminal), func(ctx SpecContext) {
+					runContainer(ctx, terminal, []string{"/busybox", "sleep", "10"})
 
 					result, err := sut.ServeExecContainer(
-						context.Background(),
+						ctx,
 						&client.ServeExecContainerConfig{
 							ID:      tr.ctrID,
 							Command: []string{"/busybox", "sh", "-c", "exit 3"},
@@ -2103,7 +2264,7 @@ var _ = Describe("StreamingServer", func() {
 					Expect(err).To(Succeed())
 
 					err = streamURLOver(
-						context.Background(),
+						ctx,
 						transport,
 						result.URL,
 						remotecommand.StreamOptions{
@@ -2116,99 +2277,91 @@ var _ = Describe("StreamingServer", func() {
 					var exitErr utilexec.CodeExitError
 					Expect(errors.As(err, &exitErr)).To(BeTrue(), "error %v", err)
 					Expect(exitErr.Code).To(Equal(3))
-				})
+				}, SpecTimeout(specTimeout))
 
-				It(testName("should fail if container does not exist", terminal), func() {
-					tr = newTestRunner()
-					tr.createRuntimeConfigWithProcessArgs(
-						terminal,
-						[]string{"/busybox", "sleep", "10"},
-						nil,
-					)
-					sut = tr.configGivenEnv()
+				It(
+					testName("should fail if container does not exist", terminal),
+					func(ctx SpecContext) {
+						tr = newTestRunner()
+						tr.createRuntimeConfigWithProcessArgs(
+							terminal,
+							[]string{"/busybox", "sleep", "10"},
+							nil,
+						)
+						sut = tr.configGivenEnv()
 
-					result, err := sut.ServeExecContainer(
-						context.Background(),
-						&client.ServeExecContainerConfig{
-							ID: "wrong",
-							Command: []string{
-								"/busybox",
-								"sh",
-								"-c",
-								"echo -n stdout && echo -n stderr >&2",
-							},
-							Tty:    terminal,
-							Stdout: true,
-							Stderr: true,
-						},
-					)
-
-					Expect(err).To(HaveOccurred())
-					Expect(result).To(BeNil())
-				})
-
-				It(testName("should not keep the PID file of a failed exec", terminal), func() {
-					tr = newTestRunner()
-					tr.createRuntimeConfigWithProcessArgs(
-						terminal,
-						[]string{"/busybox", "sleep", "10"},
-						nil,
-					)
-					sut = tr.configGivenEnv()
-					tr.createContainer(sut, terminal)
-					tr.startContainer()
-
-					result, err := sut.ServeExecContainer(
-						context.Background(),
-						&client.ServeExecContainerConfig{
-							ID:      tr.ctrID,
-							Command: []string{"/does/not/exist"},
-							Tty:     terminal,
-							Stdout:  true,
-							Stderr:  true,
-						},
-					)
-					Expect(err).To(Succeed())
-
-					// The runtime fails to start the command, the session reports it.
-					Expect(
-						streamURLOver(
-							context.Background(),
-							transport,
-							result.URL,
-							remotecommand.StreamOptions{
-								Stdout: io.Discard,
-								Stderr: io.Discard,
+						result, err := sut.ServeExecContainer(
+							ctx,
+							&client.ServeExecContainerConfig{
+								ID: "wrong",
+								Command: []string{
+									"/busybox",
+									"sh",
+									"-c",
+									"echo -n stdout && echo -n stderr >&2",
+								},
 								Tty:    terminal,
+								Stdout: true,
+								Stderr: true,
 							},
-						),
-					).NotTo(Succeed())
+						)
 
-					Eventually(func() []string { return execPIDFiles(tr.tmpDir) }).
-						WithTimeout(10 * time.Second).
-						Should(BeEmpty())
+						Expect(err).To(MatchError(client.ErrContainerNotFound))
+						Expect(result).To(BeNil())
+					},
+					SpecTimeout(specTimeout),
+				)
 
-					// The helper the runtime left in the PID namespace of the
-					// container is reaped, otherwise the container could not stop.
-					Eventually(func() []int { return zombieChildrenOf(int(sut.PID())) }).
-						WithTimeout(10 * time.Second).
-						Should(BeEmpty())
-				})
+				It(
+					testName("should not keep the PID file of a failed exec", terminal),
+					func(ctx SpecContext) {
+						runContainer(ctx, terminal, []string{"/busybox", "sleep", "10"})
+
+						result, err := sut.ServeExecContainer(
+							ctx,
+							&client.ServeExecContainerConfig{
+								ID:      tr.ctrID,
+								Command: []string{"/does/not/exist"},
+								Tty:     terminal,
+								Stdout:  true,
+								Stderr:  true,
+							},
+						)
+						Expect(err).To(Succeed())
+
+						// The runtime fails to start the command, the session reports it.
+						Expect(
+							streamURLOver(
+								ctx,
+								transport,
+								result.URL,
+								remotecommand.StreamOptions{
+									Stdout: io.Discard,
+									Stderr: io.Discard,
+									Tty:    terminal,
+								},
+							),
+						).NotTo(Succeed())
+
+						Eventually(func() []string { return execPIDFiles(tr.tmpDir) }).
+							WithTimeout(10 * time.Second).
+							Should(BeEmpty())
+
+						// The helper the runtime left in the PID namespace of the
+						// container is reaped, otherwise the container could not stop.
+						Eventually(func() []int { return zombieChildrenOf(int(sut.PID())) }).
+							WithTimeout(10 * time.Second).
+							Should(BeEmpty())
+					},
+					SpecTimeout(specTimeout),
+				)
 			}
 
-			It("should receive the output written after stdin EOF", func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					false,
-					[]string{"/busybox", "sleep", "10"},
-					nil,
-				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, false)
-				tr.startContainer()
+			It("should receive the output written after stdin EOF", func(ctx SpecContext) {
+				runContainer(ctx, false, []string{"/busybox", "sleep", "10"})
 
 				result, err := sut.ServeExecContainer(
-					context.Background(),
+					ctx,
 					&client.ServeExecContainerConfig{
 						ID: tr.ctrID,
 						Command: []string{
@@ -2227,31 +2380,23 @@ var _ = Describe("StreamingServer", func() {
 				stdout := &bytes.Buffer{}
 				stderr := &bytes.Buffer{}
 
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				streamCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				defer cancel()
 
-				Expect(streamURLOver(ctx, transport, result.URL, remotecommand.StreamOptions{
+				Expect(streamURLOver(streamCtx, transport, result.URL, remotecommand.StreamOptions{
 					Stdin:  strings.NewReader("attached"),
 					Stdout: stdout,
 					Stderr: stderr,
 				})).To(Succeed())
 				Expect(stdout.String()).To(Equal("attachedstdin closed\n"))
 				Expect(stderr.String()).To(BeEmpty())
-			})
+			}, SpecTimeout(specTimeout))
 
-			It("should keep an interactive stdin open", func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					false,
-					[]string{"/busybox", "sleep", "10"},
-					nil,
-				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, false)
-				tr.startContainer()
+			It("should keep an interactive stdin open", func(ctx SpecContext) {
+				runContainer(ctx, false, []string{"/busybox", "sleep", "10"})
 
 				result, err := sut.ServeExecContainer(
-					context.Background(),
+					ctx,
 					&client.ServeExecContainerConfig{
 						ID: tr.ctrID,
 						Command: []string{
@@ -2283,33 +2428,25 @@ var _ = Describe("StreamingServer", func() {
 
 				stdout := &bytes.Buffer{}
 
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				streamCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				defer cancel()
 
-				Expect(streamURLOver(ctx, transport, result.URL, remotecommand.StreamOptions{
+				Expect(streamURLOver(streamCtx, transport, result.URL, remotecommand.StreamOptions{
 					Stdin:  stdinReader,
 					Stdout: stdout,
 					Stderr: io.Discard,
 				})).To(Succeed())
 				Expect(stdout.String()).To(Equal("got later\n"))
-			})
+			}, SpecTimeout(specTimeout))
 
-			It("should close an idle session", func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					false,
-					[]string{"/busybox", "sleep", "600"},
-					nil,
-				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, false)
-				tr.startContainer()
+			It("should close an idle session", func(ctx SpecContext) {
+				runContainer(ctx, false, []string{"/busybox", "sleep", "600"})
 
 				// A command no other process runs, to find the exec process.
 				command := []string{"/busybox", "sleep", "317"}
 
 				result, err := sut.ServeExecContainer(
-					context.Background(),
+					ctx,
 					&client.ServeExecContainerConfig{
 						ID:          tr.ctrID,
 						Command:     command,
@@ -2320,7 +2457,7 @@ var _ = Describe("StreamingServer", func() {
 				)
 				Expect(err).To(Succeed())
 
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				streamCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				defer cancel()
 
 				// The session ends long before the command, which the client
@@ -2329,7 +2466,7 @@ var _ = Describe("StreamingServer", func() {
 				streamed := make(chan error, 1)
 
 				go func() {
-					streamed <- streamURLOver(ctx, transport, result.URL, remotecommand.StreamOptions{
+					streamed <- streamURLOver(streamCtx, transport, result.URL, remotecommand.StreamOptions{
 						Stdout: io.Discard,
 						Stderr: io.Discard,
 					})
@@ -2350,13 +2487,13 @@ var _ = Describe("StreamingServer", func() {
 				// The exec process gets killed, nothing would end it otherwise.
 				Eventually(func() []int { return pidsWithCmdline(command) }, 5*time.Second).
 					ShouldNot(ContainElement(pids[0]))
-			})
+			}, SpecTimeout(specTimeout))
 		})
 
 		Describe("ServeAttachContainer over "+transport, func() {
 			const terminal = true
 
-			It(testName("should succeed", terminal), func() {
+			It(testName("should succeed", terminal), func(ctx SpecContext) {
 				tr = newTestRunner()
 				// The container only answers once attached, then it exits, which
 				// ends the session.
@@ -2366,11 +2503,11 @@ var _ = Describe("StreamingServer", func() {
 					nil,
 				)
 				sut = tr.configGivenEnv()
-				tr.createContainer(sut, terminal)
+				tr.createContainer(ctx, sut, terminal)
 				tr.startContainer()
 
 				result, err := sut.ServeAttachContainer(
-					context.Background(),
+					ctx,
 					&client.ServeAttachContainerConfig{
 						ID:     tr.ctrID,
 						Stdin:  true,
@@ -2401,10 +2538,10 @@ var _ = Describe("StreamingServer", func() {
 					).Should(ContainSubstring("got attached"))
 				}()
 
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				streamCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				defer cancel()
 
-				Expect(streamURLOver(ctx, transport, result.URL, remotecommand.StreamOptions{
+				Expect(streamURLOver(streamCtx, transport, result.URL, remotecommand.StreamOptions{
 					Stdin:  stdinReader,
 					Stdout: stdout,
 					Stderr: stderr,
@@ -2412,57 +2549,97 @@ var _ = Describe("StreamingServer", func() {
 				})).To(Succeed())
 				Expect(stdout.String()).To(ContainSubstring("got attached"))
 				Expect(stderr.String()).To(BeEmpty())
-			})
+			}, SpecTimeout(specTimeout))
 
-			It("should receive the output written after stdin EOF with stdin once", func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					false,
-					[]string{"/busybox", "sh", "-c", "/busybox cat && echo stdin closed"},
-					nil,
-				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, false)
-				tr.startContainer()
+			It("should apply resize events and release the session", func(ctx SpecContext) {
+				runContainer(ctx, terminal, []string{"/busybox", "sh", "-c", sttyLoop})
 
 				result, err := sut.ServeAttachContainer(
-					context.Background(),
-					&client.ServeAttachContainerConfig{
-						ID:                tr.ctrID,
-						Stdin:             true,
-						Stdout:            true,
-						Stderr:            true,
-						StopAfterStdinEOF: true,
-					},
+					ctx,
+					&client.ServeAttachContainerConfig{ID: tr.ctrID, Stdout: true},
 				)
 				Expect(err).To(Succeed())
 
-				stdout := &bytes.Buffer{}
-				stderr := &bytes.Buffer{}
+				// The streaming server and the session got set up.
+				resources := resourcesOf(sut.PID())
 
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				sizes := terminalSizes(remotecommand.TerminalSize{Width: 30, Height: 40})
+				stdout := &syncBuffer{}
+				streamCtx, cancel := context.WithCancel(ctx)
+
 				defer cancel()
 
-				Expect(streamURLOver(ctx, transport, result.URL, remotecommand.StreamOptions{
-					Stdin:  strings.NewReader("attached"),
-					Stdout: stdout,
-					Stderr: stderr,
-				})).To(Succeed())
-				Expect(stdout.String()).To(Equal("attachedstdin closed\n"))
-				Expect(stderr.String()).To(BeEmpty())
-			})
+				streamed := make(chan error, 1)
 
-			It("should attach to a terminal without asking for one", func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					true, []string{"/busybox", "sh", "-c", "/busybox sleep 1; echo hello"}, nil,
+				go func() {
+					defer GinkgoRecover()
+
+					streamed <- streamURLOver(streamCtx, transport, result.URL, remotecommand.StreamOptions{
+						Stdout:            stdout,
+						Tty:               terminal,
+						TerminalSizeQueue: sizes,
+					})
+				}()
+
+				// stty prints the rows, then the columns.
+				Eventually(stdout.String, 10*time.Second).Should(ContainSubstring("40 30"))
+
+				// The client goes away, the container keeps running.
+				cancel()
+				Eventually(streamed, 10*time.Second).Should(Receive())
+
+				expectNoResourceLeak(sut.PID(), resources)
+			}, SpecTimeout(specTimeout))
+
+			It(
+				"should receive the output written after stdin EOF with stdin once",
+				func(ctx SpecContext) {
+					runContainer(
+						ctx,
+						false,
+						[]string{"/busybox", "sh", "-c", "/busybox cat && echo stdin closed"},
+					)
+
+					result, err := sut.ServeAttachContainer(
+						ctx,
+						&client.ServeAttachContainerConfig{
+							ID:                tr.ctrID,
+							Stdin:             true,
+							Stdout:            true,
+							Stderr:            true,
+							StopAfterStdinEOF: true,
+						},
+					)
+					Expect(err).To(Succeed())
+
+					stdout := &bytes.Buffer{}
+					stderr := &bytes.Buffer{}
+
+					streamCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+					defer cancel()
+
+					Expect(
+						streamURLOver(streamCtx, transport, result.URL, remotecommand.StreamOptions{
+							Stdin:  strings.NewReader("attached"),
+							Stdout: stdout,
+							Stderr: stderr,
+						}),
+					).To(Succeed())
+					Expect(stdout.String()).To(Equal("attachedstdin closed\n"))
+					Expect(stderr.String()).To(BeEmpty())
+				},
+				SpecTimeout(specTimeout),
+			)
+
+			It("should attach to a terminal without asking for one", func(ctx SpecContext) {
+				runContainer(
+					ctx,
+					true,
+					[]string{"/busybox", "sh", "-c", "/busybox sleep 1; echo hello"},
 				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, true)
-				tr.startContainer()
 
 				result, err := sut.ServeAttachContainer(
-					context.Background(),
+					ctx,
 					&client.ServeAttachContainerConfig{
 						ID:     tr.ctrID,
 						Stdout: true,
@@ -2472,48 +2649,48 @@ var _ = Describe("StreamingServer", func() {
 
 				stdout := &syncBuffer{}
 
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				streamCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				defer cancel()
 
 				// Without a terminal, the client opens no resize stream.
-				Expect(streamURLOver(ctx, transport, result.URL, remotecommand.StreamOptions{
+				Expect(streamURLOver(streamCtx, transport, result.URL, remotecommand.StreamOptions{
 					Stdout: stdout,
 				})).To(Succeed())
 				Expect(stdout.String()).To(ContainSubstring("hello"))
-			})
+			}, SpecTimeout(specTimeout))
 
-			It(testName("should fail if container does not exist", terminal), func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					terminal,
-					[]string{"/busybox", "sleep", "10"},
-					nil,
-				)
-				sut = tr.configGivenEnv()
+			It(
+				testName("should fail if container does not exist", terminal),
+				func(ctx SpecContext) {
+					tr = newTestRunner()
+					tr.createRuntimeConfigWithProcessArgs(
+						terminal,
+						[]string{"/busybox", "sleep", "10"},
+						nil,
+					)
+					sut = tr.configGivenEnv()
 
-				result, err := sut.ServeAttachContainer(
-					context.Background(),
-					&client.ServeAttachContainerConfig{
-						ID: "wrong",
-					},
-				)
+					result, err := sut.ServeAttachContainer(
+						ctx,
+						&client.ServeAttachContainerConfig{
+							ID: "wrong",
+						},
+					)
 
-				Expect(err).To(HaveOccurred())
-				Expect(result).To(BeNil())
-			})
+					Expect(err).To(MatchError(client.ErrContainerNotFound))
+					Expect(result).To(BeNil())
+				},
+				SpecTimeout(specTimeout),
+			)
 		})
 	}
 
 	Describe("through the proxy of the kubelet", func() {
-		It("should exec over SPDY", func() {
-			tr = newTestRunner()
-			tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "10"}, nil)
-			sut = tr.configGivenEnv()
-			tr.createContainer(sut, false)
-			tr.startContainer()
+		It("should exec over SPDY", func(ctx SpecContext) {
+			runContainer(ctx, false, []string{"/busybox", "sleep", "10"})
 
 			result, err := sut.ServeExecContainer(
-				context.Background(),
+				ctx,
 				&client.ServeExecContainerConfig{
 					ID: tr.ctrID,
 					Command: []string{
@@ -2535,10 +2712,10 @@ var _ = Describe("StreamingServer", func() {
 			stdout := &bytes.Buffer{}
 			stderr := &bytes.Buffer{}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			streamCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
 
-			err = streamURLOver(ctx, "SPDY", proxyURL, remotecommand.StreamOptions{
+			err = streamURLOver(streamCtx, "SPDY", proxyURL, remotecommand.StreamOptions{
 				Stdin:  strings.NewReader("stdin"),
 				Stdout: stdout,
 				Stderr: stderr,
@@ -2549,9 +2726,9 @@ var _ = Describe("StreamingServer", func() {
 			Expect(exitErr.Code).To(Equal(3))
 			Expect(stdout.String()).To(Equal("stdin"))
 			Expect(stderr.String()).To(Equal("stderr"))
-		})
+		}, SpecTimeout(specTimeout))
 
-		It("should forward a port over SPDY", func() {
+		It("should forward a port over SPDY", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
@@ -2560,7 +2737,7 @@ var _ = Describe("StreamingServer", func() {
 			defer listener.Close()
 
 			result, err := sut.ServePortForwardContainer(
-				context.Background(),
+				ctx,
 				&client.ServePortForwardContainerConfig{
 					NetNsPath: "/proc/self/ns/net",
 				},
@@ -2579,24 +2756,16 @@ var _ = Describe("StreamingServer", func() {
 			defer stop()
 
 			Expect(portForwardRoundTrip(local, "hello")).To(Equal("hello"))
-		})
+		}, SpecTimeout(specTimeout))
 	})
 
 	Describe("ServeExecContainer over older WebSocket protocols", func() {
 		for _, protocol := range []string{"v4.channel.k8s.io", "v4.base64.channel.k8s.io"} {
-			It("should report the output and the exit code over "+protocol, func() {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					false,
-					[]string{"/busybox", "sleep", "10"},
-					nil,
-				)
-				sut = tr.configGivenEnv()
-				tr.createContainer(sut, false)
-				tr.startContainer()
+			It("should report the output and the exit code over "+protocol, func(ctx SpecContext) {
+				runContainer(ctx, false, []string{"/busybox", "sleep", "10"})
 
 				result, err := sut.ServeExecContainer(
-					context.Background(),
+					ctx,
 					&client.ServeExecContainerConfig{
 						ID: tr.ctrID,
 						Command: []string{
@@ -2617,7 +2786,7 @@ var _ = Describe("StreamingServer", func() {
 				Expect(stderr).To(Equal("stderr"))
 				Expect(status).To(ContainSubstring(`"reason":"NonZeroExitCode"`))
 				Expect(status).To(ContainSubstring(`{"reason":"ExitCode","message":"3"}`))
-			})
+			}, SpecTimeout(specTimeout))
 		}
 	})
 })

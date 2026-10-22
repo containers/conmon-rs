@@ -65,7 +65,20 @@ impl Version {
     /// Forwarding ports by `servePortForwardContainer`.
     pub const FEATURE_PORT_FORWARD: &'static str = "portforward";
 
-    const FEATURES: &'static [&'static str] = &[Self::FEATURE_SDNOTIFY, Self::FEATURE_PORT_FORWARD];
+    /// The `idleTimeoutSec` of the exec and attach serve requests, which
+    /// older servers ignore. Port forwarding always applies its own.
+    pub const FEATURE_IDLE_TIMEOUT: &'static str = "idletimeout";
+
+    /// Exec and attach sessions over SPDY and the WebSocket protocols before
+    /// `v5.channel.k8s.io`.
+    pub const FEATURE_STREAMING_PROTOCOLS: &'static str = "streamingprotocols";
+
+    const FEATURES: &'static [&'static str] = &[
+        Self::FEATURE_SDNOTIFY,
+        Self::FEATURE_PORT_FORWARD,
+        Self::FEATURE_IDLE_TIMEOUT,
+        Self::FEATURE_STREAMING_PROTOCOLS,
+    ];
 
     /// The optional features this build supports.
     pub fn features(&self) -> &'static [&'static str] {
@@ -193,5 +206,24 @@ mod tests {
         assert!(!object.contains_key("verbose"));
 
         v.print_json()
+    }
+
+    /// The Go client matches the names, see the `Feature` constants in
+    /// pkg/client/client.go.
+    #[test]
+    fn version_features() -> Result<()> {
+        let v = Version::new(false);
+        assert_eq!(
+            v.features(),
+            [
+                "sdnotify",
+                "portforward",
+                "idletimeout",
+                "streamingprotocols"
+            ]
+        );
+        let json = serde_json::to_value(&v)?;
+        assert_eq!(json.get("features"), Some(&serde_json::json!(v.features())));
+        Ok(())
     }
 }

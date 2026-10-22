@@ -4,13 +4,11 @@ run:
 linters:
   default: none
   enable:
-    - arangolint
     - asasalint
     - asciicheck
     - bidichk
     - bodyclose
     - canonicalheader
-    - clickhouselint
     - containedctx
     - contextcheck
     - copyloopvar
@@ -80,15 +78,10 @@ linters:
     - perfsprint
     - prealloc
     - predeclared
-    - promlinter
-    - protogetter
     - reassign
     - recvcheck
     - revive
-    - rowserrcheck
-    - sloglint
     - spancheck
-    - sqlclosecheck
     - staticcheck
     - tagalign
     - tagliatelle
@@ -99,7 +92,6 @@ linters:
     - tparallel
     - unconvert
     - unparam
-    - unqueryvet
     - unused
     - usestdlibvars
     - usetesting
@@ -108,7 +100,6 @@ linters:
     - whitespace
     - wrapcheck
     - wsl_v5
-    - zerologlint
     # - depguard
     # - exhaustruct_v5
     # - funcorder
@@ -143,6 +134,10 @@ linters:
     gosec:
       excludes:
         - G115
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
     nestif:
       min-complexity: 15
     revive:
@@ -162,13 +157,15 @@ linters:
       - path: _test\.go
         linters:
           - goconst
+      # The examples need a server, they only get compiled.
+      - path: example_test\.go
+        linters:
+          - testableexamples
 formatters:
+  # gofumpt includes gofmt, gci sorts the imports.
   enable:
     - gci
-    - gofmt
     - gofumpt
-    - goimports
     - golines
-    - swaggo
   exclusions:
     generated: lax

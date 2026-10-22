@@ -4,6 +4,7 @@ interface Conmon {
     ###############################################
     # Version
     struct VersionRequest {
+        # Also report the `cargoTree`.
         verbose @0 :Bool;
         # Reserved, do not reuse the ordinal.
         metadataOld @1 :Void;
@@ -24,7 +25,11 @@ interface Conmon {
         metadataOld @9 :Void;
         # The optional features this server supports, which the version
         # alone does not tell. Known values: `sdnotify`, the relay of
-        # sd_notify messages requested by `sdnotifySocket`.
+        # sd_notify messages requested by `sdnotifySocket`; `portforward`,
+        # `servePortForwardContainer`; `idletimeout`, the `idleTimeoutSec` of
+        # the exec and attach serve requests, which older servers ignore;
+        # `streamingprotocols`, exec and attach sessions over SPDY and the
+        # WebSocket protocols before `v5.channel.k8s.io`.
         features @10 :List(Text);
     }
 
@@ -37,18 +42,35 @@ interface Conmon {
         bundlePath @1 :Text;
         terminal @2 :Bool;
         stdin @3 :Bool;
+        # The files the server writes the exit code of the container to once
+        # it exited, as decimal text, 128 plus the signal number if a signal
+        # killed it.
         exitPaths @4 :List(Text);
+        # The files the server creates empty if the container got OOM
+        # killed, before it writes the exit files.
         oomExitPaths @5 :List(Text);
         logDrivers @6 :List(LogDriver);
+        # The command the server starts once the container exited and the
+        # exit files got written, without waiting for it.
         cleanupCmd @7 :List(Text);
+        # Arguments of the runtime before the `create` command.
         globalArgs @8 :List(Text);
+        # Arguments of the `create` command of the runtime, before the
+        # container ID.
         commandArgs @9 :List(Text);
         # Reserved, do not reuse the ordinal.
         metadataOld @10 :Void;
         metadata @11 :Metadata;
+        # Environment variables of the runtime, on top of the ones of the
+        # server.
         envVars @12 :TextTextMap;
         cgroupManager @13 :CgroupManager;
+        # Slots of the fd socket, see `startFdSocket`, whose file descriptors
+        # the runtime gets as fd 3 and onwards in their order. With
+        # `--preserve-fds` in `commandArgs`, it passes them on.
         additionalFds @14 :List(UInt64);
+        # Slots of the fd socket whose file descriptors the server holds
+        # until the container exited, without passing them on.
         leakFds @15 :List(UInt64);
         # The host sd_notify socket to relay messages to, usually the
         # `NOTIFY_SOCKET` of systemd. If set, the server binds
@@ -98,6 +120,8 @@ interface Conmon {
     # ExecSync
     struct ExecSyncContainerRequest {
         id @0 :Text;
+        # How long the command may run before it gets killed, 0 for no limit.
+        # A call which gets dropped does not stop the command.
         timeoutSec @1 :UInt64;
         command @2 :List(Text);
         terminal @3 :Bool;
@@ -109,6 +133,11 @@ interface Conmon {
     }
 
     struct ExecSyncContainerResponse {
+        # The exit code of the command, 128 plus the signal number if a
+        # signal killed it. -1 if the server could not tell how it ended, -2
+        # if it could not be started, then `stderr` tells why, and -3 if it
+        # timed out. A server without pidfd support also reports -3 if it
+        # could not get the exit status, then without `timedOut`.
         exitCode @0 :Int32;
         stdout @1 :Data;
         stderr @2 :Data;
@@ -121,6 +150,8 @@ interface Conmon {
     # Attach
     struct AttachRequest {
         id @0 :Text;
+        # The path of the `SOCK_SEQPACKET` socket the server listens on for
+        # the attach clients of the container until it exited, see usage.md.
         socketPath @1 :Text;
         # Deprecated, only logged, attach sessions are per container.
         execSessionId @2 :Text;
@@ -178,6 +209,7 @@ interface Conmon {
         metadata @6 :Metadata; # Standard metadata to carry.
     }
 
+    # Available namespaces.
     enum Namespace {
         ipc @0; # Unshare the IPC namespace.
         net @1; # Unshare the network namespace.
@@ -190,7 +222,7 @@ interface Conmon {
         namespaces @0 :List(NamespaceResponse);  # The list of created namespaces.
     }
 
-    # Available namespaces.
+    # A created namespace.
     struct NamespaceResponse {
         type @0 :Namespace; # The type of the namespace.
         path @1 :Text; # Path to the bind mount of the namespace.
@@ -213,6 +245,8 @@ interface Conmon {
     ###############################################
     # Helper types
 
+    # The OpenTelemetry trace context of the request, which the client
+    # injects with a text map propagator, empty without tracing.
     using Metadata = TextTextMap;
     using TextTextMap = List(TextTextMapEntry);
     struct TextTextMapEntry {
@@ -222,6 +256,11 @@ interface Conmon {
 
     ###############################################
     # ServeExecContainer
+    #
+    # serveExecContainer, serveAttachContainer and servePortForwardContainer
+    # return the URL of a session on the streaming server of the process,
+    # which gets started with the first such request. Each URL is good for a
+    # single connection within 60 seconds, see usage.md.
     struct ServeExecContainerRequest {
         metadata @0 :Metadata; # Standard metadata to carry.
         id @1 :Text;
@@ -242,6 +281,7 @@ interface Conmon {
     }
 
     struct ServeExecContainerResponse {
+        # The URL of the session, see ServeExecContainer.
         url @0 :Text;
     }
 
@@ -266,6 +306,7 @@ interface Conmon {
     }
 
     struct ServeAttachContainerResponse {
+        # The URL of the session, see ServeExecContainer.
         url @0 :Text;
     }
 
@@ -285,6 +326,7 @@ interface Conmon {
     }
 
     struct ServePortForwardContainerResponse {
+        # The URL of the session, see ServeExecContainer.
         url @0 :Text;
     }
 

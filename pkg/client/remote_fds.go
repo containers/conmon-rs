@@ -59,7 +59,7 @@ type RemoteFDs struct {
 
 // NewRemoteFDs connects to the fd socket at `path`.
 func NewRemoteFDs(path string) (*RemoteFDs, error) {
-	conn, err := DialLongSocket("unixpacket", path)
+	conn, err := dialLongSocket("unixpacket", path)
 	if err != nil {
 		return nil, fmt.Errorf("dial long socket: %w", err)
 	}
@@ -218,35 +218,36 @@ func (r *RemoteFDs) Close() error {
 	return nil
 }
 
-// RemoteFDs can be used start and connect to the remote fd socket.
-func (c *ConmonClient) RemoteFDs(ctx context.Context) (*RemoteFDs, error) {
+// RemoteFDs can be used to start and connect to the remote fd socket.
+func (c *ConmonClient) RemoteFDs(ctx context.Context) (_ *RemoteFDs, retErr error) {
 	ctx, span := c.startSpan(ctx, "RemoteFDs")
-	if span != nil {
-		defer span.End()
-	}
+	defer endSpan(span, &retErr)
 
 	rpcClient, err := c.client(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("create RPC client: %w", err)
 	}
 
-	future, free := rpcClient.StartFdSocket(ctx, func(p proto.Conmon_startFdSocket_Params) error {
-		req, err := p.NewRequest()
-		if err != nil {
-			return fmt.Errorf("create request: %w", err)
-		}
+	future, free := rpcClient.StartFdSocket(
+		ctx,
+		func(p proto.Conmon_startFdSocket_Params) (err error) {
+			req, err := p.NewRequest()
+			if err != nil {
+				return fmt.Errorf("create request: %w", err)
+			}
 
-		if err := c.setMetadata(ctx, req); err != nil {
-			return fmt.Errorf("set metadata: %w", err)
-		}
+			if err := c.setMetadata(ctx, req); err != nil {
+				return fmt.Errorf("set metadata: %w", err)
+			}
 
-		return nil
-	})
+			return nil
+		},
+	)
 	defer free()
 
-	result, err := future.Struct()
+	result, err := rpcResult(future)
 	if err != nil {
-		return nil, fmt.Errorf("get result: %w", err)
+		return nil, err
 	}
 
 	res, err := result.Response()

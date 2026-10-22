@@ -25,7 +25,7 @@ func peerPID(*net.UnixConn) (int32, error) {
 }
 
 // openPidfd returns no pidfd, they are only supported on Linux.
-func openPidfd(*logrus.Logger, uint32) (pidfd *os.File, gone bool) {
+func openPidfd(logrus.FieldLogger, uint32) (pidfd *os.File, gone bool) {
 	return nil, false
 }
 

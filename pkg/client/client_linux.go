@@ -41,7 +41,7 @@ func peerPID(conn *net.UnixConn) (int32, error) {
 // the process exited already. Otherwise pidfds are not usable, for example
 // because the kernel does not support them, and the process has to be
 // handled through its PID.
-func openPidfd(logger *logrus.Logger, pid uint32) (pidfd *os.File, gone bool) {
+func openPidfd(logger logrus.FieldLogger, pid uint32) (pidfd *os.File, gone bool) {
 	fd, err := unix.PidfdOpen(int(pid), 0)
 	if errors.Is(err, unix.ESRCH) {
 		return nil, true
