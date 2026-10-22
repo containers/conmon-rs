@@ -8,7 +8,7 @@ Name: conmon-rs
 %if %{defined copr_username}
 Epoch: 101
 %endif
-Version: 1.1.1
+Version: 1.2.0
 Release: %autorelease
 Summary: OCI container runtime monitor written in Rust
 License: Apache-2.0 AND BSD-2-Clause AND MIT AND Zlib

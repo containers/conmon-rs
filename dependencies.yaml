@@ -1,5 +1,14 @@
 ---
 dependencies:
+  # The version of conmon-rs itself, bumped for a release.
+  - name: conmon-rs
+    version: 1.2.0
+    refPaths:
+      - path: Cargo.toml
+        match: ^version =
+      - path: rpm/conmon-rs.spec
+        match: "^Version:"
+
   - name: go
     version: 1.27.1
     refPaths:
