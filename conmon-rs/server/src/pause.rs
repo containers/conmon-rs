@@ -526,6 +526,8 @@ impl Pause {
             // for them: they stay pending until then.
             let signals = Self::init_signals();
             signals.thread_block().context("block init signals")?;
+            // SAFETY: the child of the pause process is single threaded, the
+            // init only waits for signals and reaps after the fork.
             match unsafe { fork().context("forking PID namespace init")? } {
                 ForkResult::Parent { child } => {
                     signals.thread_unblock().context("unblock init signals")?;
@@ -1419,7 +1421,7 @@ mod tests {
 
     #[test]
     fn mappings_buffer() -> Result<()> {
-        let mappings = |m: &[&str]| m.iter().map(|m| m.to_string()).collect::<Vec<_>>();
+        let mappings = |m: &[&str]| m.iter().map(ToString::to_string).collect::<Vec<_>>();
 
         // All ranges end up in one buffer, normalized to one line each.
         assert_eq!(

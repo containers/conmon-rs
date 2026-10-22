@@ -9,7 +9,9 @@
 
 use crate::{
     channel,
+    idle::Activity,
     spdy::{Connection, ConnectionHandle, Headers, Stream, StreamReceiver, StreamSender},
+    stream_protocol::{STREAM_CREATION_TIMEOUT, STREAM_TYPE_HEADER},
 };
 use anyhow::{Context, Result, anyhow, bail};
 use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
@@ -45,10 +47,6 @@ pub const CLOSE_BYTE: u8 = 255;
 /// some clients take an empty error stream for a failure.
 const SUCCESS_STATUS: &[u8] = b"{\"metadata\":{},\"status\":\"Success\"}";
 
-/// How long the client may take to open the streams of a SPDY session, the
-/// default of the kubelet and CRI-O.
-const STREAM_CREATION_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// How long the client gets to take the end of a session, its status and the
 /// close, before the server gives up on it.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -56,7 +54,6 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// The most resize events a SPDY client may send without completing one.
 const MAX_RESIZE_BUFFER: usize = 4 * 1024;
 
-const STREAM_TYPE_HEADER: &str = "streamType";
 const STREAM_TYPE_RESIZE: &str = "resize";
 
 /// A version of the protocols, which decides how a session reports its
@@ -286,6 +283,11 @@ pub trait ClientInput: Send + 'static {
 pub struct WebSocketInput {
     pub messages: SplitStream<WebSocket>,
     pub framing: Framing,
+
+    /// Touched by every message of the client except for pings and pongs,
+    /// which a client like the WebSocket executor of client-go sends as a
+    /// heartbeat. CRI-O does not count them either.
+    pub activity: Activity,
 }
 
 impl ClientInput for WebSocketInput {
@@ -293,6 +295,9 @@ impl ClientInput for WebSocketInput {
         loop {
             match self.messages.next().await {
                 Some(Ok(message)) => {
+                    if !matches!(message, Message::Ping(_) | Message::Pong(_)) {
+                        self.activity.touch();
+                    }
                     if let Some(event) = self.framing.event(message) {
                         return Some(event);
                     }
@@ -310,8 +315,7 @@ impl ClientInput for WebSocketInput {
 pub struct SpdyInput {
     stdin: Option<StreamReceiver>,
     resize: Option<StreamReceiver>,
-    resize_buf: BytesMut,
-    resize_events: VecDeque<Bytes>,
+    resize_events: ResizeEvents,
 
     /// The connection, for the streams which come after the start, see
     /// [`SpdyInput::late_stream`].
@@ -370,49 +374,62 @@ impl SpdyInput {
             }
         });
     }
+}
 
-    /// Split the resize stream into its JSON objects. A broken one drops what
-    /// the client sent so far.
-    fn split_resize(&mut self, data: &[u8]) {
-        self.resize_buf.extend_from_slice(data);
-        let mut stream =
-            serde_json::Deserializer::from_slice(&self.resize_buf).into_iter::<IgnoredAny>();
+/// The events of the resize stream of a SPDY client, which carries JSON
+/// objects back to back.
+#[derive(Debug, Default)]
+pub struct ResizeEvents {
+    buf: BytesMut,
+    events: VecDeque<Bytes>,
+}
+
+impl ResizeEvents {
+    /// Split what the client sent into its JSON objects. A broken one drops
+    /// what the client sent so far.
+    pub fn push(&mut self, data: &[u8]) {
+        self.buf.extend_from_slice(data);
+        let mut stream = serde_json::Deserializer::from_slice(&self.buf).into_iter::<IgnoredAny>();
         let mut start = 0;
         loop {
             match stream.next() {
                 Some(Ok(_)) => {
                     let end = stream.byte_offset();
-                    let object = self.resize_buf[start..end].trim_ascii();
-                    self.resize_events.push_back(Bytes::copy_from_slice(object));
+                    let object = self.buf[start..end].trim_ascii();
+                    self.events.push_back(Bytes::copy_from_slice(object));
                     start = end;
                 }
                 Some(Err(e)) if e.is_eof() => break,
                 Some(Err(e)) => {
                     debug!("Dropping invalid resize events: {e}");
-                    start = self.resize_buf.len();
+                    start = self.buf.len();
                     break;
                 }
                 None => break,
             }
         }
-        let _ = self.resize_buf.split_to(start);
+        let _ = self.buf.split_to(start);
         let whitespace = self
-            .resize_buf
+            .buf
             .iter()
             .take_while(|b| b.is_ascii_whitespace())
             .count();
-        let _ = self.resize_buf.split_to(whitespace);
-        if self.resize_buf.len() > MAX_RESIZE_BUFFER {
+        let _ = self.buf.split_to(whitespace);
+        if self.buf.len() > MAX_RESIZE_BUFFER {
             debug!("Dropping incomplete resize event");
-            self.resize_buf.clear();
+            self.buf.clear();
         }
+    }
+
+    pub fn pop(&mut self) -> Option<Bytes> {
+        self.events.pop_front()
     }
 }
 
 impl ClientInput for SpdyInput {
     async fn next(&mut self) -> Option<ClientEvent> {
         loop {
-            if let Some(event) = self.resize_events.pop_front() {
+            if let Some(event) = self.resize_events.pop() {
                 return Some(ClientEvent::Resize(event));
             }
             let event = select! {
@@ -430,7 +447,7 @@ impl ClientInput for SpdyInput {
                         return Some(ClientEvent::Stdin(Stdin::Close));
                     }
                 }
-                SpdyEvent::Resize(Some(data)) => self.split_resize(&data),
+                SpdyEvent::Resize(Some(data)) => self.resize_events.push(&data),
                 SpdyEvent::Resize(None) => self.resize = None,
                 SpdyEvent::Stream(Some(stream)) => self.late_stream(stream),
                 SpdyEvent::Stream(None) => self.connection = None,
@@ -553,8 +570,7 @@ impl SpdyStreams {
         let input = SpdyInput {
             stdin,
             resize: receiver(self.resize).await,
-            resize_buf: BytesMut::new(),
-            resize_events: VecDeque::new(),
+            resize_events: ResizeEvents::default(),
             done: connection.done(),
             connection: Some(connection),
         };
@@ -693,13 +709,24 @@ enum Transport {
     WebSocket {
         sender: SplitSink<WebSocket, Message>,
         framing: Framing,
+
+        /// Touched by every message which got sent, except for pings.
+        activity: Activity,
     },
     Spdy(SpdyOutput),
 }
 
 impl Output {
-    pub fn websocket(sender: SplitSink<WebSocket, Message>, framing: Framing) -> Self {
-        Self::new(Transport::WebSocket { sender, framing })
+    pub fn websocket(
+        sender: SplitSink<WebSocket, Message>,
+        framing: Framing,
+        activity: Activity,
+    ) -> Self {
+        Self::new(Transport::WebSocket {
+            sender,
+            framing,
+            activity,
+        })
     }
 
     pub fn spdy(output: SpdyOutput) -> Self {
@@ -852,10 +879,17 @@ impl Output {
         if self.failed {
             return Ok(());
         }
-        let Transport::WebSocket { sender, .. } = &mut self.transport else {
+        let Transport::WebSocket {
+            sender, activity, ..
+        } = &mut self.transport
+        else {
             return Ok(());
         };
+        let ping = matches!(message, Message::Ping(_));
         let result = sender.send(message).await.map_err(anyhow::Error::from);
+        if result.is_ok() && !ping {
+            activity.touch();
+        }
         self.sent(result)
     }
 
@@ -1059,38 +1093,31 @@ mod tests {
 
     #[test]
     fn resize_streams_get_split_into_events() {
-        let mut input = SpdyInput {
-            stdin: None,
-            resize: None,
-            resize_buf: BytesMut::new(),
-            resize_events: VecDeque::new(),
-            connection: None,
-            done: CancellationToken::new(),
-        };
+        let mut input = ResizeEvents::default();
         // Go encodes one object per line, which may arrive in parts.
-        input.split_resize(b"{\"Width\":80,\"Height\":24}\n{\"Width\":");
-        input.split_resize(b"100,\"Height\":40}\n");
+        input.push(b"{\"Width\":80,\"Height\":24}\n{\"Width\":");
+        input.push(b"100,\"Height\":40}\n");
         assert_eq!(
-            input.resize_events,
+            input.events,
             [
                 Bytes::from_static(b"{\"Width\":80,\"Height\":24}"),
                 Bytes::from_static(b"{\"Width\":100,\"Height\":40}"),
             ]
         );
-        assert!(input.resize_buf.is_empty());
+        assert!(input.buf.is_empty());
 
         // Garbage gets dropped, later events still work.
-        input.resize_events.clear();
-        input.split_resize(b"}{\"Width\":1,\"Height\":2}");
-        input.split_resize(b"{\"Width\":1,\"Height\":2}");
+        input.events.clear();
+        input.push(b"}{\"Width\":1,\"Height\":2}");
+        input.push(b"{\"Width\":1,\"Height\":2}");
         assert_eq!(
-            input.resize_events,
+            input.events,
             [Bytes::from_static(b"{\"Width\":1,\"Height\":2}")]
         );
 
         // An object which never ends is bounded.
-        input.split_resize(&vec![b'['; MAX_RESIZE_BUFFER + 1]);
-        assert!(input.resize_buf.is_empty());
+        input.push(&vec![b'['; MAX_RESIZE_BUFFER + 1]);
+        assert!(input.buf.is_empty());
     }
 
     #[tokio::test]

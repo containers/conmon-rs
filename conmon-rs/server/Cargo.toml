@@ -14,7 +14,7 @@ anyhow = { version = "1.0.104", default-features = false }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws"] }
 async-channel = { version = "2.5.0", default-features = false, features = ["std"] }
 base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
-bytes = { version = "1.12.1", default-features = false }
+bytes = { workspace = true }
 capnp = { workspace = true }
 capnp-rpc = { version = "0.27.1", default-features = false }
 clap = { version = "4.6.7", default-features = false, features = ["derive", "env", "error-context", "help", "std", "usage"] }
@@ -54,6 +54,8 @@ tracing = [
     "dep:tracing-opentelemetry",
     "nix/hostname",
 ]
+# The entry points of the fuzz targets in fuzz/.
+fuzzing = []
 
 [dev-dependencies]
 mockall = { version = "0.15.0", default-features = false }

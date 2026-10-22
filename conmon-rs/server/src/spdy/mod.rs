@@ -6,15 +6,24 @@
 //! supported: the client opens all streams, the server answers pings. There
 //! is no flow control, spdystream ignores window updates, so the server
 //! bounds what it buffers itself and stops reading the connection when a
-//! stream does not take its data. Streams have to take their data while they
-//! wait for something else, otherwise they hold up all others.
+//! stream does not take its data, or when the streams together hold
+//! [`DATA_BUFFER`] bytes. Streams have to take their data while they wait for
+//! something else, otherwise they hold up all others. A single stream can
+//! hold only a part of the budget, so that a slow stream alone does not stop
+//! the connection earlier than without it, but a few slow streams together
+//! do.
 
 mod frame;
 
-use crate::idle::Activity;
+use crate::{
+    budget::{Budget, Held},
+    idle::Activity,
+};
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::{Bytes, BytesMut};
 pub use frame::Headers;
+#[cfg(feature = "fuzzing")]
+pub use frame::fuzzing;
 use frame::{
     Decoder, Encoder, Frame, GOAWAY_OK, GOAWAY_PROTOCOL_ERROR, STATUS_CANCEL,
     STATUS_PROTOCOL_ERROR, STATUS_REFUSED_STREAM,
@@ -23,7 +32,7 @@ use std::{
     collections::HashMap,
     mem,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicU32, AtomicUsize, Ordering},
     },
 };
@@ -43,8 +52,18 @@ const CONTROL_QUEUE: usize = 64;
 const DATA_QUEUE: usize = 16;
 
 /// How many data frames of a stream wait for the stream to take them, before
-/// the connection is not read anymore.
+/// the connection is not read anymore. The decoder hands on the data frames
+/// of the client in parts of at most 64 KiB, also larger ones, so a stream
+/// holds at most 1 MiB.
 const STREAM_QUEUE: usize = 16;
+
+/// How many bytes of the client all streams of a connection hold together,
+/// before the connection is not read anymore. Without it, a client could
+/// make the server hold [`STREAM_QUEUE`] frames for each of [`MAX_STREAMS`]
+/// streams which do not take their data, like the data streams of port
+/// forward requests waiting for their error streams. The part which the
+/// reader waits to place comes on top.
+const DATA_BUFFER: u32 = 4 * 1024 * 1024;
 
 /// How many accepted streams wait for [`Connection::accept`].
 const ACCEPT_QUEUE: usize = 16;
@@ -97,6 +116,7 @@ impl Connection {
             control: control_tx,
             data: data_tx,
             streams: Mutex::default(),
+            budget: Budget::new(DATA_BUFFER),
             resets: Mutex::default(),
             resets_ready: Notify::new(),
             closing: CancellationToken::new(),
@@ -146,6 +166,12 @@ impl Connection {
     /// Cancelled once the connection ended.
     pub fn done(&self) -> CancellationToken {
         self.handle().done()
+    }
+
+    /// When the connection was active the last time, for an idle timeout
+    /// which its user applies instead of [`Connection::serve`], see there.
+    pub fn activity(&self) -> Activity {
+        self.shared.activity.clone()
     }
 
     /// A handle to close the connection, while the connection itself still
@@ -395,6 +421,9 @@ struct Shared {
     data: mpsc::Sender<QueuedData>,
     streams: Mutex<HashMap<u32, StreamState>>,
 
+    /// The bytes of the client all streams hold, see [`DATA_BUFFER`].
+    budget: Budget,
+
     /// The streams the server reset without queued data, which the writer
     /// sends next. Unlike the control queue it cannot be full, a stream gets
     /// reset only once.
@@ -418,7 +447,7 @@ struct Shared {
 /// An open stream as the reader sees it.
 struct StreamState {
     /// The data of the client, `None` once the client closed its side.
-    data: Option<mpsc::Sender<Bytes>>,
+    data: Option<mpsc::Sender<Held>>,
 
     /// Cancelled when the stream got reset or the connection ended.
     reset: CancellationToken,
@@ -428,21 +457,21 @@ struct StreamState {
 }
 
 impl Shared {
-    fn lock_streams(&self) -> std::sync::MutexGuard<'_, HashMap<u32, StreamState>> {
-        self.streams.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock_streams(&self) -> MutexGuard<'_, HashMap<u32, StreamState>> {
+        self.streams.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Queue the reset of a stream for the writer.
     fn queue_reset(&self, id: u32) {
         self.resets
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .push(id);
         self.resets_ready.notify_one();
     }
 
     fn take_resets(&self) -> Vec<u32> {
-        mem::take(&mut *self.resets.lock().unwrap_or_else(|e| e.into_inner()))
+        mem::take(&mut *self.resets.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// The client closed its side of the stream.
@@ -468,7 +497,8 @@ impl Shared {
     }
 
     /// Hand the data of the client to its stream. Waits while the stream
-    /// does not take it, which stops reading the connection.
+    /// does not take it or the streams hold all of the budget, which stops
+    /// reading the connection.
     async fn deliver(&self, stream_id: u32, data: Bytes) {
         let Some((tx, reset)) = self
             .lock_streams()
@@ -482,8 +512,18 @@ impl Shared {
             return;
         }
         select! {
-            // A stream which went away drops its data.
-            _ = tx.send(data) => {}
+            // A stream which went away drops its data, which gives its share
+            // of the budget back.
+            result = async { tx.send(self.budget.hold(data).await).await } => {
+                // A stream which takes its data slowly keeps the connection
+                // active, only one which does not take it at all lets it
+                // go idle.
+                if result.is_ok() {
+                    self.activity.touch();
+                }
+            }
+            // A stream which went away while waiting for the budget.
+            _ = tx.closed() => {}
             _ = reset.cancelled() => {}
         }
     }
@@ -733,7 +773,7 @@ impl Stream {
 
 /// The data the client sends on a stream.
 pub struct StreamReceiver {
-    data: mpsc::Receiver<Bytes>,
+    data: mpsc::Receiver<Held>,
     reset: CancellationToken,
 }
 
@@ -741,6 +781,12 @@ impl StreamReceiver {
     /// The next data, `None` once the client closed its side, the stream got
     /// reset or the connection ended.
     pub async fn recv(&mut self) -> Option<Bytes> {
+        self.data.recv().await.map(Held::into_bytes)
+    }
+
+    /// The next data like [`Self::recv`], which still counts against the
+    /// budget of the connection while it is held.
+    pub async fn recv_held(&mut self) -> Option<Held> {
         self.data.recv().await
     }
 
@@ -1132,6 +1178,45 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn streams_which_take_data_slowly_keep_connections_active() -> Result<()> {
+        let (mut client, mut connection) = connect(accept_data, Some(Duration::from_secs(30)))?;
+        client.open(1, [("streamtype", "data")].into()).await?;
+        let (mut receiver, _sender) = connection.accept().await.context("stream")?.split();
+        client.frame().await?;
+        let frames = STREAM_QUEUE + 2;
+        for _ in 0..frames {
+            client
+                .send(Frame::Data {
+                    stream_id: 1,
+                    fin: false,
+                    data: Bytes::from_static(b"data"),
+                })
+                .await?;
+        }
+
+        // The client keeps waiting for the stream far longer than the idle
+        // timeout, but the stream takes some of its data within each timeout.
+        for _ in 0..10 {
+            time::sleep(Duration::from_secs(20)).await;
+            assert!(receiver.recv().await.is_some());
+            client
+                .send(Frame::Data {
+                    stream_id: 1,
+                    fin: false,
+                    data: Bytes::from_static(b"data"),
+                })
+                .await?;
+        }
+        // Still open, the connection answers once the stream took the rest.
+        for _ in 0..frames {
+            assert!(receiver.recv().await.is_some());
+        }
+        client.send(Frame::Ping { id: 1 }).await?;
+        assert_eq!(client.frame().await?, Some(Frame::Ping { id: 1 }));
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn idle_timeouts_end_connections_with_stuck_streams() -> Result<()> {
         let (mut client, mut connection) = connect(accept_data, Some(Duration::from_secs(30)))?;
         client.open(1, [("streamtype", "data")].into()).await?;
@@ -1485,6 +1570,151 @@ mod tests {
             received += 1;
         }
         assert_eq!(received, frames);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn too_many_streams_get_refused() -> Result<()> {
+        let (mut client, mut connection) = connect(accept_data, None)?;
+        let mut streams = Vec::with_capacity(MAX_STREAMS);
+        for i in 0..MAX_STREAMS as u32 {
+            client
+                .open(2 * i + 1, [("streamtype", "data")].into())
+                .await?;
+            streams.push(connection.accept().await.context("stream")?);
+        }
+        let last = 2 * MAX_STREAMS as u32 + 1;
+        client.open(last, [("streamtype", "data")].into()).await?;
+        loop {
+            match client.frame().await?.context("frame")? {
+                Frame::SynReply { stream_id, .. } if stream_id < last => {}
+                frame => {
+                    assert_eq!(
+                        frame,
+                        Frame::RstStream {
+                            stream_id: last,
+                            status: STATUS_REFUSED_STREAM
+                        }
+                    );
+                    break;
+                }
+            }
+        }
+
+        // A stream which ended makes room for the next one.
+        drop(streams.pop());
+        assert!(matches!(
+            client.frame().await?,
+            Some(Frame::RstStream { .. })
+        ));
+        client
+            .open(last + 2, [("streamtype", "data")].into())
+            .await?;
+        let stream = connection.accept().await.context("stream")?;
+        assert_eq!(stream.id(), last + 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streams_share_a_byte_budget() -> Result<()> {
+        const FRAME_LEN: usize = 64 * 1024;
+        // As many streams as the budget holds with full queues, and one more.
+        let full = DATA_BUFFER as usize / (STREAM_QUEUE * FRAME_LEN);
+        assert!(full > 1, "a single stream must not take all of the budget");
+
+        let (mut client, mut connection) = connect(accept_data, None)?;
+        let mut receivers = vec![];
+        for i in 0..=full as u32 {
+            client
+                .open(2 * i + 1, [("streamtype", "data")].into())
+                .await?;
+            let (receiver, sender) = connection.accept().await.context("stream")?.split();
+            receivers.push((receiver, sender));
+            client.frame().await?;
+        }
+        let data = Bytes::from(vec![0; FRAME_LEN]);
+        for i in 0..full as u32 {
+            for _ in 0..STREAM_QUEUE {
+                client
+                    .send(Frame::Data {
+                        stream_id: 2 * i + 1,
+                        fin: false,
+                        data: data.clone(),
+                    })
+                    .await?;
+            }
+        }
+        // The queue of the last stream has room, the budget does not.
+        client
+            .send(Frame::Data {
+                stream_id: 2 * full as u32 + 1,
+                fin: false,
+                data: data.clone(),
+            })
+            .await?;
+        client.send(Frame::Ping { id: 1 }).await?;
+        assert!(
+            time::timeout(Duration::from_millis(200), client.frame())
+                .await
+                .is_err(),
+            "the connection got read on"
+        );
+        assert_eq!(receivers[0].1.shared.budget.available(), 0);
+
+        // A stream which went away while its data waited for the budget does
+        // not hold up the connection.
+        let (last, _last_sender) = receivers.pop().context("last stream")?;
+        drop(last);
+        assert_eq!(client.frame().await?, Some(Frame::Ping { id: 1 }));
+        assert_eq!(receivers[0].1.shared.budget.available(), 0);
+
+        // Data which got taken gives its share back.
+        client
+            .send(Frame::Data {
+                stream_id: 1,
+                fin: false,
+                data: data.clone(),
+            })
+            .await?;
+        client.send(Frame::Ping { id: 3 }).await?;
+        assert_eq!(
+            receivers[0].0.recv().await.map(|d| d.len()),
+            Some(FRAME_LEN)
+        );
+        assert_eq!(client.frame().await?, Some(Frame::Ping { id: 3 }));
+
+        // Dropped data does as well.
+        drop(receivers);
+        time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(connection.shared.budget.available(), DATA_BUFFER as usize);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streams_transfer_more_than_the_budget() -> Result<()> {
+        let (mut client, mut connection) = connect(accept_data, None)?;
+        client.open(1, [("streamtype", "data")].into()).await?;
+        let (mut receiver, _sender) = connection.accept().await.context("stream")?.split();
+        let received = tokio::spawn(async move {
+            let mut len = 0;
+            while let Some(data) = receiver.recv().await {
+                len += data.len();
+            }
+            len
+        });
+
+        let data = Bytes::from(vec![0; 32 * 1024]);
+        let frames = 4 * DATA_BUFFER as usize / data.len();
+        for i in 0..frames {
+            client
+                .send(Frame::Data {
+                    stream_id: 1,
+                    fin: i + 1 == frames,
+                    data: data.clone(),
+                })
+                .await?;
+        }
+        assert_eq!(received.await?, 4 * DATA_BUFFER as usize);
         Ok(())
     }
 

@@ -9,6 +9,7 @@ use crate::{
         ContainerIO, ContainerIOType, Drain, EarlyStdio, Message as IOMessage, Pipe,
         SharedContainerIO,
     },
+    idle::Activity,
     port_forward::{self, PortForward, WebSocketProtocol},
     process::Process,
     remotecommand::{
@@ -18,7 +19,7 @@ use crate::{
     server::GenerateRuntimeArgs,
     spdy::{self, Connection},
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use async_channel::Receiver as IOReceiver;
 use axum::{
     Router,
@@ -42,7 +43,7 @@ use serde::Deserialize;
 use std::{
     collections::VecDeque,
     fmt::Debug,
-    future,
+    future::{self, Future},
     ops::ControlFlow,
     path::PathBuf,
     sync::{
@@ -156,6 +157,7 @@ struct ExecSession {
     stdin: bool,
     stdout: bool,
     stderr: bool,
+    idle_timeout: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -167,6 +169,7 @@ struct AttachSession {
     stdout: bool,
     stderr: bool,
     stop_after_stdin_eof: bool,
+    idle_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,6 +262,7 @@ impl StreamingServer {
         stdin: bool,
         stdout: bool,
         stderr: bool,
+        idle_timeout: Option<Duration>,
     ) -> String {
         let mut state_lock = self.state.write().await;
         let uuid = Uuid::new_v4();
@@ -275,6 +279,7 @@ impl StreamingServer {
                     stdin,
                     stdout,
                     stderr,
+                    idle_timeout,
                 }
                 .into(),
             ),
@@ -282,6 +287,7 @@ impl StreamingServer {
         self.url_for(EXEC_PATH, &uuid)
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Returns the URL used for the provided attach parameters.
     pub async fn attach_url(
         &self,
@@ -291,6 +297,7 @@ impl StreamingServer {
         stdout: bool,
         stderr: bool,
         stop_after_stdin_eof: bool,
+        idle_timeout: Option<Duration>,
     ) -> String {
         let mut state_lock = self.state.write().await;
         let uuid = Uuid::new_v4();
@@ -303,6 +310,7 @@ impl StreamingServer {
                 stdout,
                 stderr,
                 stop_after_stdin_eof,
+                idle_timeout,
             }),
         );
         self.url_for(ATTACH_PATH, &uuid)
@@ -628,14 +636,19 @@ impl StreamingServer {
     /// Handle a single websocket connection.
     async fn handle_websocket(socket: WebSocket, session: Session, framing: Framing) {
         let (sender, messages) = socket.split();
-        let mut output = Output::websocket(sender, framing);
+        let activity = Activity::new();
+        let mut output = Output::websocket(sender, framing, activity.clone());
         // A client which went away already ends the session in its loop,
         // which tears it down.
         if let Err(e) = output.announce(session.stdout(), session.stderr()).await {
             debug!("Unable to announce the session: {e:#}");
         }
-        let input = WebSocketInput { messages, framing };
-        Self::run_session(output, input, session).await;
+        let input = WebSocketInput {
+            messages,
+            framing,
+            activity: activity.clone(),
+        };
+        Self::run_session(output, input, session, activity).await;
         info!("Closing websocket connection");
     }
 
@@ -653,10 +666,13 @@ impl StreamingServer {
             stdout: session.stdout(),
             stderr: session.stderr() && !terminal,
         };
+        // The session ends the connection once it was idle, which reports
+        // the timeout to the client first.
         let mut connection =
             Connection::serve(io, None, Some(SPDY_PING_INTERVAL), move |headers| {
                 SpdyStreams::accept(headers, version)
             });
+        let activity = connection.activity();
         let streams = match SpdyStreams::wait(&mut connection, expected).await {
             Ok(streams) => streams,
             Err(e) => {
@@ -666,12 +682,19 @@ impl StreamingServer {
             }
         };
         let (input, output) = streams.into_parts(connection, version).await;
-        Self::run_session(Output::spdy(output), input, session).await;
+        Self::run_session(Output::spdy(output), input, session, activity).await;
         info!("Closing SPDY connection");
     }
 
-    /// Run a session until it ended or the client went away.
-    async fn run_session(output: Output, input: impl ClientInput, session: Session) {
+    /// Run a session until it ended or the client went away. `activity`
+    /// tells when the connection was active the last time, for the idle
+    /// timeout of the session.
+    async fn run_session(
+        output: Output,
+        input: impl ClientInput,
+        session: Session,
+        activity: Activity,
+    ) {
         let peer_closed = output.peer_closed();
         let (stdin_tx, stdin_rx) = mpsc::channel(16);
         // Resize events go through their own channel, so that they do not
@@ -679,7 +702,7 @@ impl StreamingServer {
         // size matters.
         let (resize_tx, resize_rx) = watch::channel(None);
 
-        let mut send_task = Self::write_task(output, stdin_rx, resize_rx, session);
+        let mut send_task = Self::write_task(output, stdin_rx, resize_rx, session, activity);
         let mut recv_task = Self::read_task(input, stdin_tx, resize_tx, peer_closed);
 
         tokio::select! {
@@ -708,22 +731,47 @@ impl StreamingServer {
         }
     }
 
-    /// Build a common write task based on the session type.
+    /// Build a common write task based on the session type. A session whose
+    /// connection was idle for its timeout fails, like any other session
+    /// which did not end, so that the client does not take it for a
+    /// success.
     fn write_task(
         sender: Output,
         stdin_rx: MpscReceiver<Stdin>,
         resize_rx: ResizeRx,
         session: Session,
+        activity: Activity,
     ) -> JoinHandle<()> {
+        let idle_timeout = session.idle_timeout();
         tokio::spawn(async move {
             let mut sender = sender;
             if let (Err(e), typ) = match session {
                 Session::Exec(s) => (
-                    Self::exec_loop(*s, &mut sender, stdin_rx, resize_rx).await,
+                    async {
+                        // The runtime runs in a task of its own. A client
+                        // which goes away meanwhile must not kill it halfway,
+                        // the process it started still gets registered, and
+                        // torn down once the task finished.
+                        let started = task::spawn(Self::start_exec(*s))
+                            .await
+                            .context("join exec start")??;
+                        // The client waited for the runtime, which is no
+                        // idleness of its own.
+                        activity.touch();
+                        let exec =
+                            Self::exec_loop(started, &mut sender, stdin_rx, resize_rx, &activity);
+                        Self::until_idle(exec, &activity, idle_timeout).await
+                    }
+                    .await,
                     "exec",
                 ),
                 Session::Attach(s) => (
-                    Self::attach_loop(s, &mut sender, stdin_rx, resize_rx).await,
+                    Self::until_idle(
+                        Self::attach_loop(s, &mut sender, stdin_rx, resize_rx, &activity),
+                        &activity,
+                        idle_timeout,
+                    )
+                    .await,
                     "attach",
                 ),
             } {
@@ -740,6 +788,25 @@ impl StreamingServer {
 
             sender.close().await;
         })
+    }
+
+    /// Run the loop of a session until the connection was idle for the
+    /// timeout, which fails it.
+    async fn until_idle(
+        run: impl Future<Output = Result<()>>,
+        activity: &Activity,
+        timeout: Option<Duration>,
+    ) -> Result<()> {
+        select! {
+            result = run => result,
+            () = activity.idle(timeout) => {
+                info!("Closing idle connection");
+                bail!(
+                    "no activity on the connection for the idle timeout of {:?}",
+                    timeout.unwrap_or_default()
+                )
+            }
+        }
     }
 
     /// Build a common read task.
@@ -906,14 +973,12 @@ impl StreamingServer {
 
     /// The exec specific read/write loop.
     async fn exec_loop(
-        session: ExecSession,
+        started: StartedExec,
         sender: &mut Output,
         mut stdin_rx: MpscReceiver<Stdin>,
         mut resize_rx: ResizeRx,
+        activity: &Activity,
     ) -> Result<()> {
-        // The runtime runs in a task of its own. A client which goes away
-        // meanwhile must not kill it halfway, the process it started still
-        // gets registered, and torn down once the task finished.
         let StartedExec {
             io,
             early_stdio,
@@ -922,9 +987,7 @@ impl StreamingServer {
             stdout_enabled,
             stderr_enabled,
             teardown,
-        } = task::spawn(Self::start_exec(session))
-            .await
-            .context("join exec start")??;
+        } = started;
         let (stdout_rx, stderr_rx) = teardown.stdio.clone().context("no stdio channels")?;
         let attach = teardown.attach.clone();
         let mut pending_stdin = None;
@@ -1008,9 +1071,11 @@ impl StreamingServer {
                 },
 
                 // Wait for the container to take the stdin without blocking the
-                // output meanwhile.
+                // output meanwhile. A client waiting for that keeps the
+                // connection active.
                 () = attach.send_stdin(pending_stdin.clone().unwrap_or_default()), if pending_stdin.is_some() => {
-                    pending_stdin = None
+                    pending_stdin = None;
+                    activity.touch();
                 },
 
                 // The stdin of the client is not read while it waits for the
@@ -1097,6 +1162,7 @@ impl StreamingServer {
         sender: &mut Output,
         mut stdin_rx: MpscReceiver<Stdin>,
         mut resize_rx: ResizeRx,
+        activity: &Activity,
     ) -> Result<()> {
         // Extract values we need for the I/O loop
         let stdin_enabled = session.stdin;
@@ -1165,9 +1231,11 @@ impl StreamingServer {
                 },
 
                 // Wait for the container to take the stdin without blocking the
-                // output meanwhile.
+                // output meanwhile. A client waiting for that keeps the
+                // connection active.
                 () = attach.send_stdin(pending_stdin.clone().unwrap_or_default()), if pending_stdin.is_some() => {
-                    pending_stdin = None
+                    pending_stdin = None;
+                    activity.touch();
                 },
 
                 // The stdin of the client is not read while it waits for the
@@ -1320,6 +1388,13 @@ impl Session {
         match self {
             Session::Exec(s) => s.stderr,
             Session::Attach(s) => s.stderr,
+        }
+    }
+
+    fn idle_timeout(&self) -> Option<Duration> {
+        match self {
+            Session::Exec(s) => s.idle_timeout,
+            Session::Attach(s) => s.idle_timeout,
         }
     }
 
@@ -1495,7 +1570,7 @@ mod tests {
         stdin: bool,
         stop_after_stdin_eof: bool,
     ) -> Result<(SharedContainerIO, StreamingServer, TcpStream)> {
-        attach_session_with(false, stdin, stop_after_stdin_eof).await
+        attach_session_with(false, stdin, stop_after_stdin_eof, None).await
     }
 
     /// A container and an attach session for it.
@@ -1503,6 +1578,7 @@ mod tests {
         terminal: bool,
         stdin: bool,
         stop_after_stdin_eof: bool,
+        idle_timeout: Option<Duration>,
     ) -> Result<(SharedContainerIO, StreamingServer, TcpStream)> {
         let io = SharedContainerIO::new(ContainerIO::new(terminal, ContainerLog::new())?);
         let (_, child) = ReapableChild::from_child(Child {
@@ -1519,7 +1595,15 @@ mod tests {
         let mut server = StreamingServer::default();
         server.start_if_required().await?;
         let url = server
-            .attach_url("id".into(), child, stdin, true, false, stop_after_stdin_eof)
+            .attach_url(
+                "id".into(),
+                child,
+                stdin,
+                true,
+                false,
+                stop_after_stdin_eof,
+                idle_timeout,
+            )
             .await;
         let path = url
             .strip_prefix(&format!("http://{ADDR}:{}", server.port))
@@ -1664,10 +1748,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idle_websocket_sessions_end() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let timeout = Duration::from_secs(2);
+                let (io, _server, mut stream) =
+                    attach_session_with(false, true, true, Some(timeout)).await?;
+                let attach = io.attach().await;
+
+                // Stdin keeps the session going.
+                for _ in 0..12 {
+                    time::sleep(Duration::from_millis(250)).await;
+                    stream
+                        .write_all(&client_frame(0x2, &[STDIN_BYTE, b'x']))
+                        .await?;
+                }
+                assert!(!attach.stdin_closed().is_cancelled());
+
+                // A heartbeat of pings and pongs does not, the session ends
+                // like for a client which went away, which closes the stdin
+                // once and the connection.
+                let pongs = async {
+                    for opcode in [0x9, 0xa].into_iter().cycle() {
+                        time::sleep(Duration::from_millis(250)).await;
+                        if stream.write_all(&client_frame(opcode, &[])).await.is_err() {
+                            return;
+                        }
+                    }
+                };
+                tokio::select! {
+                    result = time::timeout(4 * timeout, attach.stdin_closed().cancelled()) => result?,
+                    () = pongs => bail!("connection ended before the stdin got closed"),
+                }
+                // The client learns about the timeout before the close.
+                let mut rest = vec![];
+                time::timeout(Duration::from_secs(5), stream.read_to_end(&mut rest)).await??;
+                let rest = String::from_utf8_lossy(&rest);
+                assert!(rest.contains("idle timeout"), "{rest}");
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn slow_exec_starts_are_no_idleness() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A runtime which takes longer than the idle timeout to start the
+        // process, which then writes its output.
+        let dir = tempfile::tempdir()?;
+        let runtime = dir.path().join("runtime");
+        std::fs::write(
+            &runtime,
+            "#!/bin/sh\n\
+             sleep 1\n\
+             for arg; do case $arg in --pid-file=*) pidfile=${arg#--pid-file=};; esac; done\n\
+             sh -c 'echo started' &\n\
+             echo $! >\"$pidfile\"\n",
+        )?;
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755))?;
+        let Some(config) = Config::parse_for_test([
+            "--runtime",
+            runtime.to_str().context("runtime path")?,
+            "--runtime-dir",
+            dir.path().to_str().context("runtime dir")?,
+        ]) else {
+            return Ok(());
+        };
+
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                let url = server
+                    .exec_url(
+                        Arc::new(ChildReaper::default()),
+                        ContainerIO::new(false, ContainerLog::new())?,
+                        Arc::new(config),
+                        CgroupManager::Cgroupfs,
+                        "id".into(),
+                        vec!["true".into()],
+                        false,
+                        true,
+                        false,
+                        Some(Duration::from_millis(500)),
+                    )
+                    .await;
+                let path = url
+                    .strip_prefix(&format!("http://{ADDR}:{}", server.port))
+                    .context("url")?;
+                let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+                stream
+                    .write_all(
+                        format!(
+                            "GET {path} HTTP/1.1\r\nHost: {ADDR}\r\nUpgrade: websocket\r\n\
+                             Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+                             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                             Sec-WebSocket-Protocol: {PROTOCOL_V5}\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await?;
+                let response = response_head(&mut stream).await?;
+                assert!(response.starts_with("http/1.1 101"), "{response}");
+
+                // The output arrives, the wait for the runtime did not end
+                // the session.
+                let mut rest = vec![];
+                time::timeout(Duration::from_secs(10), stream.read_to_end(&mut rest)).await??;
+                let rest = String::from_utf8_lossy(&rest);
+                assert!(rest.contains("started"), "{rest}");
+                assert!(!rest.contains("idle timeout"), "{rest}");
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
     async fn terminal_attach_gets_eof_on_stdin_close() -> Result<()> {
         LocalSet::new()
             .run_until(async {
-                let (io, _server, mut stream) = attach_session_with(true, true, true).await?;
+                let (io, _server, mut stream) = attach_session_with(true, true, true, None).await?;
                 let mut frames = client_frame(0x2, &[STDIN_BYTE, b'a']);
                 frames.extend(client_frame(0x2, &[CLOSE_BYTE, STDIN_BYTE]));
                 stream.write_all(&frames).await?;
@@ -1875,7 +2076,7 @@ mod tests {
                     token: CancellationToken::new(),
                 });
                 let url = server
-                    .attach_url("id".into(), child, false, true, false, false)
+                    .attach_url("id".into(), child, false, true, false, false, None)
                     .await
                     .replace(ATTACH_PATH, PORT_FORWARD_PATH);
                 let (response, _) = port_forward_request(&server, &url, SPDY_PORT_FORWARD).await?;
@@ -2027,6 +2228,56 @@ mod tests {
                     .context("no close of the idle session")??;
                 assert_eq!(opcode, 8);
                 flood.abort();
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn port_forward_over_websocket_pings_do_not_keep_sessions_active() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
+                let port = listener.local_addr()?.port();
+                let accepted = tokio::spawn(async move { listener.accept().await });
+
+                let (response, stream) = port_forward_websocket_with(
+                    &server,
+                    &format!("?port={port}"),
+                    "",
+                    Some(Duration::from_millis(500)),
+                )
+                .await?;
+                assert!(response.starts_with("http/1.1 101"), "{response}");
+                let (mut reader, mut writer) = stream.into_split();
+                server_frame(&mut reader).await?;
+                server_frame(&mut reader).await?;
+                let _connection = accepted.await??;
+
+                // A heartbeat like the one of client-go.
+                let heartbeat = tokio::spawn(async move {
+                    for opcode in [0x9, 0xa].into_iter().cycle() {
+                        time::sleep(Duration::from_millis(100)).await;
+                        if writer.write_all(&client_frame(opcode, &[])).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+                time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        // The pongs which answer the pings come first.
+                        let (opcode, _) = server_frame(&mut reader).await?;
+                        if opcode == 8 {
+                            return anyhow::Ok(());
+                        }
+                        assert_eq!(opcode, 0xa);
+                    }
+                })
+                .await
+                .context("no close of the idle session")??;
+                heartbeat.abort();
                 Ok(())
             })
             .await
@@ -2192,7 +2443,7 @@ mod tests {
     async fn spdy_attach(
         stop_after_stdin_eof: bool,
     ) -> Result<(SharedContainerIO, StreamingServer, Client<TcpStream>)> {
-        spdy_attach_with(false, stop_after_stdin_eof).await
+        spdy_attach_with(false, stop_after_stdin_eof, None).await
     }
 
     /// Like [`spdy_attach`], the container may have a terminal, which the
@@ -2200,12 +2451,21 @@ mod tests {
     async fn spdy_attach_with(
         terminal: bool,
         stop_after_stdin_eof: bool,
+        idle_timeout: Option<Duration>,
     ) -> Result<(SharedContainerIO, StreamingServer, Client<TcpStream>)> {
         let (io, child, _token) = attach_child(terminal)?;
         let mut server = StreamingServer::default();
         server.start_if_required().await?;
         let url = server
-            .attach_url("id".into(), child, true, true, false, stop_after_stdin_eof)
+            .attach_url(
+                "id".into(),
+                child,
+                true,
+                true,
+                false,
+                stop_after_stdin_eof,
+                idle_timeout,
+            )
             .await;
         let (response, stream) = upgrade(&server, &url, "POST", SPDY_EXEC_UPGRADE).await?;
         assert!(response.starts_with("http/1.1 101"), "{response}");
@@ -2351,7 +2611,7 @@ mod tests {
             .run_until(async {
                 // The client does not ask for a terminal, it opens no resize
                 // stream, the session starts nevertheless.
-                let (io, _server, mut client) = spdy_attach_with(true, false).await?;
+                let (io, _server, mut client) = spdy_attach_with(true, false, None).await?;
                 client
                     .send(Frame::Data {
                         stream_id: 3,
@@ -2389,7 +2649,7 @@ mod tests {
                     let mut server = StreamingServer::default();
                     server.start_if_required().await?;
                     let url = server
-                        .attach_url("id".into(), child, true, true, true, false)
+                        .attach_url("id".into(), child, true, true, true, false, None)
                         .await;
                     let (response, stream) = upgrade(
                         &server,
@@ -2509,6 +2769,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idle_spdy_sessions_end() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let timeout = Duration::from_secs(2);
+                let (io, _server, mut client) =
+                    spdy_attach_with(false, true, Some(timeout)).await?;
+                let attach = io.attach().await;
+
+                // Stdin keeps the session going.
+                for _ in 0..12 {
+                    time::sleep(Duration::from_millis(250)).await;
+                    client
+                        .send(Frame::Data {
+                            stream_id: 3,
+                            fin: false,
+                            data: Bytes::from_static(b"x"),
+                        })
+                        .await?;
+                }
+                assert!(!attach.stdin_closed().is_cancelled());
+
+                // The pings of the server and their echoes do not. The client
+                // learns about the timeout on the error stream, it must not
+                // take the end for a success.
+                let end = time::timeout(4 * timeout, async {
+                    let mut status = vec![];
+                    loop {
+                        match client.frame().await? {
+                            Some(Frame::Ping { id }) => client.send(Frame::Ping { id }).await?,
+                            Some(Frame::Data {
+                                stream_id: 1, data, ..
+                            }) => status.extend_from_slice(&data),
+                            Some(_) => {}
+                            None => return anyhow::Ok(status),
+                        }
+                    }
+                });
+                let status = String::from_utf8(end.await??)?;
+                assert!(status.contains("\"status\":\"Failure\""), "{status}");
+                assert!(status.contains("idle timeout"), "{status}");
+                assert!(attach.stdin_closed().is_cancelled());
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
     async fn spdy_streams_after_the_start_get_refused() -> Result<()> {
         LocalSet::new()
             .run_until(async {
@@ -2562,7 +2869,7 @@ mod tests {
                 ] {
                     let (_, child, _token) = attach_child(false)?;
                     let url = server
-                        .attach_url("id".into(), child, false, true, false, false)
+                        .attach_url("id".into(), child, false, true, false, false, None)
                         .await;
                     let (response, _) = upgrade(&server, &url, "POST", headers).await?;
                     assert!(
@@ -2600,7 +2907,7 @@ mod tests {
                 // An unknown token comes before the protocol.
                 let (_, child, _token) = attach_child(false)?;
                 let url = server
-                    .attach_url("id".into(), child, false, true, false, false)
+                    .attach_url("id".into(), child, false, true, false, false, None)
                     .await;
                 let unknown = url.replace(
                     url.rsplit('/').next().context("token")?,
@@ -2626,7 +2933,7 @@ mod tests {
                 ] {
                     let (_, child, _token) = attach_child(false)?;
                     let url = server
-                        .attach_url("id".into(), child, false, true, false, false)
+                        .attach_url("id".into(), child, false, true, false, false, None)
                         .await;
                     let (response, _) = upgrade(&server, &url, "POST", &rejected).await?;
                     assert!(response.starts_with(&format!("http/1.1 {status}")), "{response}");
@@ -2673,7 +2980,15 @@ mod tests {
         let mut server = StreamingServer::default();
         server.start_if_required().await?;
         let url = server
-            .attach_url("id".into(), child, true, true, false, stop_after_stdin_eof)
+            .attach_url(
+                "id".into(),
+                child,
+                true,
+                true,
+                false,
+                stop_after_stdin_eof,
+                None,
+            )
             .await;
         let (response, stream) = upgrade(
             &server,

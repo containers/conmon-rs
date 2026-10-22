@@ -293,14 +293,19 @@ impl Decoder {
 
     /// Decompress and parse a header block.
     fn header_block(&mut self, mut input: &[u8]) -> Result<Headers> {
-        let mut block = Vec::with_capacity((input.len() * 4).min(MAX_HEADER_BLOCK_LEN));
+        // One byte more than the limit, so that a block of exactly the limit
+        // still leaves room, which tells that it is complete.
+        let max_capacity = MAX_HEADER_BLOCK_LEN + 1;
+        let mut block = Vec::with_capacity((input.len() * 4).min(max_capacity));
         loop {
             if block.len() == block.capacity() {
                 ensure!(
-                    block.len() < MAX_HEADER_BLOCK_LEN,
+                    block.len() <= MAX_HEADER_BLOCK_LEN,
                     "header block exceeds {MAX_HEADER_BLOCK_LEN} bytes"
                 );
-                block.reserve((MAX_HEADER_BLOCK_LEN - block.len()).min(4096));
+                // Exactly, a larger capacity would let the block grow past
+                // the limit.
+                block.reserve_exact((max_capacity - block.len()).min(4096));
             }
 
             let (total_in, total_out) = (self.decompress.total_in(), self.decompress.total_out());
@@ -319,6 +324,11 @@ impl Decoder {
                     Err(e) => return Err(e).context("decompress header block"),
                 };
             input = &input[(self.decompress.total_in() - total_in) as usize..];
+            // The allocator may still have given more room than asked for.
+            ensure!(
+                block.len() <= MAX_HEADER_BLOCK_LEN,
+                "header block exceeds {MAX_HEADER_BLOCK_LEN} bytes"
+            );
 
             // The sender flushes after each block, so all of it is there once
             // the input is consumed and the output has room left.
@@ -452,7 +462,12 @@ impl Encoder {
             raw.put_u32(value.len() as u32);
             raw.put_slice(value.as_bytes());
         }
+        self.deflate(&raw)
+    }
 
+    /// Wrap a serialized header block into stored deflate blocks, the first
+    /// one of the connection with the zlib header.
+    fn deflate(&mut self, raw: &[u8]) -> Vec<u8> {
         let mut block = Vec::with_capacity(raw.len() + 16);
         if !self.started {
             // Deflate with a 32 KiB window and the preset dictionary.
@@ -477,6 +492,31 @@ impl Encoder {
         block.put_u16_le(len);
         block.put_u16_le(!len);
         block.put_slice(data);
+    }
+}
+
+/// The entry points of the fuzz targets.
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing {
+    use super::{Decoder, Encoder};
+    use futures::FutureExt;
+
+    /// Decode frames until the input ends or is invalid. Reading a slice is
+    /// never pending, so no runtime is needed.
+    pub fn frames(mut input: &[u8]) {
+        let mut decoder = Decoder::default();
+        while let Some(Ok(Some(_))) = decoder.read(&mut input).now_or_never() {}
+    }
+
+    /// Decode the input as a compressed header block, which is what a
+    /// client controls, parse it as a decompressed one, and decode it once
+    /// deflated like the server does, which always gets past the
+    /// decompression to the parsing.
+    pub fn header_block(raw: &[u8]) {
+        let _ = Decoder::default().header_block(raw);
+        let _ = Decoder::parse_header_block(raw);
+        let block = Encoder::default().deflate(raw);
+        let _ = Decoder::default().header_block(&block);
     }
 }
 
@@ -770,24 +810,57 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn header_bombs_are_rejected() -> Result<()> {
-        // A few hundred compressed bytes which expand to a megabyte.
+    /// A HEADERS frame whose block decompresses to `len` zeros, which is a
+    /// block without headers followed by padding.
+    fn headers_frame(len: usize) -> Result<BytesMut> {
         let mut compress = Compress::new(Compression::best(), true);
         compress.set_dictionary(DICTIONARY)?;
         let mut block = Vec::with_capacity(16 * 1024);
-        compress.compress_vec(&vec![0; 1024 * 1024], &mut block, FlushCompress::Sync)?;
+        compress.compress_vec(&vec![0; len], &mut block, FlushCompress::Sync)?;
         assert!(block.len() < MAX_CONTROL_FRAME_LEN);
 
         let mut frame = BytesMut::new();
         Encoder::control(&mut frame, TYPE_HEADERS, false, 4 + block.len());
         frame.put_u32(1);
         frame.put_slice(&block);
+        Ok(frame)
+    }
+
+    #[tokio::test]
+    async fn header_bombs_are_rejected() -> Result<()> {
+        // A few hundred compressed bytes which expand to a megabyte.
+        let frame = headers_frame(1024 * 1024)?;
         let err = Decoder::default()
             .read(&mut &frame[..])
             .await
             .expect_err("bomb");
         assert!(err.to_string().contains("exceeds"), "{err:#}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn header_blocks_are_limited_exactly() -> Result<()> {
+        for len in [MAX_HEADER_BLOCK_LEN - 1, MAX_HEADER_BLOCK_LEN] {
+            let frame = headers_frame(len)?;
+            assert_eq!(
+                Decoder::default().read(&mut &frame[..]).await?,
+                Some(Frame::Headers {
+                    stream_id: 1,
+                    fin: false
+                }),
+                "{len}"
+            );
+        }
+        // Past the limit, but within what growing the block by doubling its
+        // capacity would allow.
+        for len in [MAX_HEADER_BLOCK_LEN + 1, 70 * 1024, 100 * 1024] {
+            let frame = headers_frame(len)?;
+            let err = Decoder::default()
+                .read(&mut &frame[..])
+                .await
+                .expect_err("too large");
+            assert!(err.to_string().contains("exceeds"), "{len}: {err:#}");
+        }
         Ok(())
     }
 

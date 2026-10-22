@@ -3,6 +3,7 @@ use crate::{
     child::sleep_until,
     container_log::SharedContainerLog,
     streams::Streams,
+    tail::Tail,
     terminal::Terminal,
 };
 use anyhow::{Context, Result, bail};
@@ -310,7 +311,7 @@ pub struct EarlyStream {
 
     /// The end of the output which got dropped, where the error of a runtime
     /// which failed is, up to [`EarlyStream::TAIL_SIZE`].
-    tail: Vec<u8>,
+    tail: Tail<{ EarlyStream::TAIL_SIZE }>,
 }
 
 impl EarlyStream {
@@ -320,11 +321,7 @@ impl EarlyStream {
         let len = self.data.len() + data.len();
         if self.truncated || len >= ContainerIO::MAX_STDIO_STREAM_SIZE {
             self.truncated = true;
-            self.tail.extend_from_slice(data);
-            // Dropping the front only once it doubled keeps it amortized.
-            if self.tail.len() > 2 * Self::TAIL_SIZE {
-                self.tail.drain(..self.tail.len() - Self::TAIL_SIZE);
-            }
+            self.tail.push(data);
             return;
         }
         // Grow like a vector would, but not beyond the limit.
@@ -337,14 +334,14 @@ impl EarlyStream {
         self.data.extend_from_slice(data);
     }
 
-    /// The end of the output, also of the part which got dropped.
-    fn end(&self) -> &[u8] {
-        let end = if self.truncated {
-            &self.tail
-        } else {
-            &self.data
-        };
-        &end[end.len().saturating_sub(Self::TAIL_SIZE)..]
+    /// The last [`EarlyStream::TAIL_SIZE`] bytes of the output, also of the
+    /// part which got dropped. The dropped part continues the kept data, a
+    /// short one gets completed by the end of the data.
+    fn end(&self) -> Vec<u8> {
+        let tail = if self.truncated { self.tail.end() } else { &[] };
+        let from_data = Self::TAIL_SIZE.saturating_sub(tail.len());
+        let data = &self.data[self.data.len().saturating_sub(from_data)..];
+        [data, tail].concat()
     }
 }
 
@@ -454,7 +451,7 @@ impl ContainerIO {
     }
 
     /// Generate a unique temp file path without creating the file.
-    pub fn temp_file_name(directory: Option<&Path>, prefix: &str, suffix: &str) -> PathBuf {
+    fn temp_file_name(directory: Option<&Path>, prefix: &str, suffix: &str) -> PathBuf {
         let dir = directory
             .map(Path::to_path_buf)
             .unwrap_or_else(std::env::temp_dir);
@@ -593,7 +590,7 @@ impl ContainerIO {
                 self.consume_stdio();
                 let early = self.take_early_stdio().await;
                 if early.stderr.truncated {
-                    early.stderr.end().to_vec()
+                    early.stderr.end()
                 } else {
                     let exited = CancellationToken::new();
                     exited.cancel();
@@ -1040,7 +1037,19 @@ mod tests {
         let end = stream.end();
         assert_eq!(end.len(), EarlyStream::TAIL_SIZE);
         assert_eq!(end.last(), Some(&99));
-        assert!(stream.tail.len() <= 2 * EarlyStream::TAIL_SIZE);
+    }
+
+    #[test]
+    fn early_stream_end_spans_kept_and_dropped_output() {
+        let mut stream = EarlyStream::default();
+        stream.push(&vec![b'a'; ContainerIO::MAX_STDIO_STREAM_SIZE - 10]);
+        // Does not fit anymore, only a short part got dropped.
+        stream.push(b"0123456789abcdefghij");
+        assert!(stream.truncated);
+
+        let end = stream.end();
+        assert_eq!(end.len(), EarlyStream::TAIL_SIZE);
+        assert!(end.ends_with(b"a0123456789abcdefghij"));
     }
 
     #[tokio::test]
@@ -1067,7 +1076,7 @@ mod tests {
             data: b"early".to_vec(),
             done: false,
             truncated: true,
-            tail: vec![],
+            tail: Tail::default(),
         };
         let (stdio, timed_out) =
             ContainerIO::read_stream(None, &CancellationToken::new(), &rx, early).await;

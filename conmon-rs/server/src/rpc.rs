@@ -4,6 +4,7 @@ use crate::telemetry::Telemetry;
 use crate::{
     capnp_util,
     child::{Child, ChildKind, sleep_until},
+    child_reaper::{EXIT_CODE_NOT_STARTED, EXIT_CODE_TIMED_OUT},
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     notify::NotifySocket,
@@ -111,6 +112,11 @@ impl Server {
     /// How long the runtime of an exec_sync may take beyond its timeout
     /// before it gets killed.
     const EXEC_RUNTIME_GRACE: Duration = Duration::from_secs(60);
+
+    /// The idle timeout of a streaming connection, none for 0.
+    fn idle_timeout(timeout_sec: u64) -> Option<Duration> {
+        (timeout_sec != 0).then(|| Duration::from_secs(timeout_sec))
+    }
 }
 
 #[allow(refining_impl_trait_reachable)]
@@ -369,7 +375,11 @@ impl conmon::Server for Server {
                                 return Ok(ExecSyncOutput {
                                     stdout: vec![],
                                     stderr: format!("{e:#}").into_bytes(),
-                                    exit_code: if timed_out { -3 } else { -2 },
+                                    exit_code: if timed_out {
+                                        EXIT_CODE_TIMED_OUT
+                                    } else {
+                                        EXIT_CODE_NOT_STARTED
+                                    },
                                     timed_out,
                                 });
                             }
@@ -420,7 +430,7 @@ impl conmon::Server for Server {
                     ExecSyncOutput {
                         stdout: vec![],
                         stderr: b"timed out waiting for the runtime to start the process".to_vec(),
-                        exit_code: -3,
+                        exit_code: EXIT_CODE_TIMED_OUT,
                         timed_out: true,
                     }
                 };
@@ -639,6 +649,7 @@ impl conmon::Server for Server {
             req.get_stdout(),
             req.get_stderr(),
         );
+        let idle_timeout = Server::idle_timeout(req.get_idle_timeout_sec());
 
         let streaming_server = self.streaming_server().clone();
         let child_reaper = self.reaper().clone();
@@ -670,6 +681,7 @@ impl conmon::Server for Server {
                         stdin,
                         stdout,
                         stderr,
+                        idle_timeout,
                     )
                     .await;
 
@@ -698,6 +710,7 @@ impl conmon::Server for Server {
         let id = pry_err!(pry_err!(req.get_id()).to_str());
         let (stdin, stdout, stderr) = (req.get_stdin(), req.get_stdout(), req.get_stderr());
         let stop_after_stdin_eof = req.get_stop_after_stdin_eof();
+        let idle_timeout = Server::idle_timeout(req.get_idle_timeout_sec());
 
         let streaming_server = self.streaming_server().clone();
         let child = pry_err!(self.reaper().get(id));
@@ -717,7 +730,15 @@ impl conmon::Server for Server {
                 let url = streaming_server
                     .read()
                     .await
-                    .attach_url(id, child, stdin, stdout, stderr, stop_after_stdin_eof)
+                    .attach_url(
+                        id,
+                        child,
+                        stdin,
+                        stdout,
+                        stderr,
+                        stop_after_stdin_eof,
+                        idle_timeout,
+                    )
                     .await;
 
                 results.get().init_response().set_url(&url);
@@ -747,10 +768,7 @@ impl conmon::Server for Server {
             return Promise::err(Error::failed("network namespace path is empty".into()));
         }
         let netns_path = PathBuf::from(netns_path);
-        let idle_timeout = match req.get_idle_timeout_sec() {
-            0 => None,
-            secs => Some(Duration::from_secs(secs)),
-        };
+        let idle_timeout = Server::idle_timeout(req.get_idle_timeout_sec());
         let streaming_server = self.streaming_server().clone();
 
         Promise::from_future(

@@ -9,6 +9,8 @@ targets = [
     "powerpc64le-unknown-linux-gnu",
     "s390x-unknown-linux-musl",
 ]
+# The fuzz targets are not shipped, only built by CI.
+exclude = ["conmonrs-fuzz"]
 
 [advisories]
 unmaintained = "workspace"

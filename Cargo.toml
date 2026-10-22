@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["conmon-rs/server"]
+members = ["conmon-rs/server", "fuzz"]
+# The fuzz targets need cargo-fuzz and a nightly toolchain, see fuzz/.
+default-members = ["conmon-rs/server"]
 
 [workspace.package]
 # Checked against rpm/conmon-rs.spec by `make verify-spec`.
@@ -11,6 +13,7 @@ rust-version = "1.89"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+bytes = { version = "1.12.1", default-features = false }
 capnp = { version = "0.27.2", default-features = false }
 capnpc = { version = "0.27.0", default-features = false }
 tokio = { version = "1.54.1", default-features = false }

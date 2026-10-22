@@ -2,7 +2,7 @@
 
 use std::{
     future,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, PoisonError},
 };
 use tokio::time::{self, Duration, Instant};
 
@@ -17,11 +17,11 @@ impl Activity {
 
     /// The connection is active now.
     pub fn touch(&self) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
     }
 
     fn last(&self) -> Instant {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Resolves once the connection was not active for the timeout. A timeout

@@ -2293,6 +2293,44 @@ var _ = Describe("StreamingServer", func() {
 				})).To(Succeed())
 				Expect(stdout.String()).To(Equal("got later\n"))
 			})
+
+			It("should close an idle session", func() {
+				tr = newTestRunner()
+				tr.createRuntimeConfigWithProcessArgs(
+					false,
+					[]string{"/busybox", "sleep", "10"},
+					nil,
+				)
+				sut = tr.configGivenEnv()
+				tr.createContainer(sut, false)
+				tr.startContainer()
+
+				result, err := sut.ServeExecContainer(
+					context.Background(),
+					&client.ServeExecContainerConfig{
+						ID:          tr.ctrID,
+						Command:     []string{"/busybox", "sleep", "10"},
+						Stdout:      true,
+						Stderr:      true,
+						IdleTimeout: time.Second,
+					},
+				)
+				Expect(err).To(Succeed())
+
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+
+				// The session ends long before the command, which the client
+				// must not take for a success.
+				start := time.Now()
+				err = streamURLOver(ctx, transport, result.URL, remotecommand.StreamOptions{
+					Stdout: io.Discard,
+					Stderr: io.Discard,
+				})
+
+				Expect(time.Since(start)).To(BeNumerically("<", 5*time.Second))
+				Expect(err).To(MatchError(ContainSubstring("idle timeout")))
+			})
 		})
 
 		Describe("ServeAttachContainer over "+transport, func() {
