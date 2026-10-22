@@ -1,23 +1,23 @@
-use lru::LruCache;
-use std::{fmt::Debug, hash::Hash, num::NonZeroUsize, time::Duration};
+use std::{collections::VecDeque, fmt::Debug, time::Duration};
 // The tokio clock, so that tests can pause and advance it.
 use tokio::time::Instant;
 use tracing::warn;
 
-/// A HashMap bounded by element age and maximum amount of items
-/// Uses LRU eviction for O(1) performance when at capacity
+/// A map bounded by element age and maximum amount of items. Elements only
+/// get inserted and taken, so the oldest one is also the least recently used
+/// one, which goes first when the map is full. The map stays small, a linear
+/// search is quick enough.
 pub struct BoundedHashMap<K, V> {
-    cache: LruCache<K, (Instant, V)>,
+    /// The elements with the time of their insert, the oldest first.
+    entries: VecDeque<(K, Instant, V)>,
+    capacity: usize,
     max_duration: Duration,
 }
 
-impl<K, V> Debug for BoundedHashMap<K, V>
-where
-    K: Eq + Hash,
-{
+impl<K, V> Debug for BoundedHashMap<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BoundedHashMap")
-            .field("len", &self.cache.len())
+            .field("len", &self.entries.len())
             .field("max_duration", &self.max_duration)
             .finish()
     }
@@ -25,61 +25,70 @@ where
 
 impl<K, V> BoundedHashMap<K, V>
 where
-    K: Eq + Hash + Debug,
+    K: Eq + Debug,
     V: Debug,
 {
-    /// Insert an element into the hashmap by:
-    /// - removing timed-out elements from the oldest end (O(k) where k = expired count)
-    /// - removing the least recently used element if no space left (automatic via LRU)
+    /// Insert an element into the map by:
+    /// - removing timed-out elements from the oldest end
+    /// - removing the oldest element if no space left
+    ///
+    /// Returns the element which got replaced or removed for space.
     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
-        self.remove_expired(Instant::now());
-
-        // LRU cache automatically evicts the least recently used item when at capacity
-        let evicted = self.cache.push(k, (Instant::now(), v));
-        if evicted.is_some() {
-            warn!("Evicted least recently used element due to capacity limit");
-        }
-
-        // Extract the actual value from the evicted (K, (Instant, V)) tuple
-        evicted.map(|(_, (_, val))| val)
-    }
-
-    /// Remove an element from the hashmap and return it if the element has
-    /// not expired. The expired ones get removed as well, so that they do
-    /// not linger until the next insert, they may hold sockets.
-    pub fn remove(&mut self, k: &K) -> Option<V> {
         let now = Instant::now();
         self.remove_expired(now);
 
-        if let Some((inserted, value)) = self.cache.pop(k) {
-            if now - inserted > self.max_duration {
-                warn!("Max duration expired for key: {:?}", k);
-                None
-            } else {
-                Some(value)
-            }
-        } else {
+        let evicted = match self.position(&k) {
+            Some(pos) => self.entries.remove(pos),
+            None if self.entries.len() >= self.capacity => self.entries.pop_front(),
+            None => None,
+        };
+        if evicted.is_some() {
+            warn!("Evicted least recently used element due to capacity limit");
+        }
+        self.entries.push_back((k, now, v));
+
+        evicted.map(|(_, _, val)| val)
+    }
+
+    /// Remove an element from the map and return it if the element has not
+    /// expired. The expired ones get removed as well, so that they do not
+    /// linger until the next insert, they may hold sockets.
+    pub fn remove(&mut self, k: &K) -> Option<V> {
+        let now = Instant::now();
+        // Taken before the other expired ones go, which tells about a client
+        // which came too late.
+        let entry = self.position(k).and_then(|pos| self.entries.remove(pos));
+        self.remove_expired(now);
+
+        let (_, inserted, value) = entry?;
+        if now - inserted > self.max_duration {
+            warn!("Max duration expired for key: {:?}", k);
             None
+        } else {
+            Some(value)
         }
     }
 
-    /// Whether the hashmap holds an element for the key which has not
-    /// expired, without taking it.
+    /// Whether the map holds an element for the key which has not expired,
+    /// without taking it.
     pub fn contains_key(&self, k: &K) -> bool {
-        self.cache
-            .peek(k)
-            .is_some_and(|(inserted, _)| Instant::now() - *inserted <= self.max_duration)
+        let now = Instant::now();
+        self.entries
+            .iter()
+            .any(|(key, inserted, _)| key == k && now - *inserted <= self.max_duration)
     }
 
-    /// Remove expired items from the LRU end. Since items are inserted
-    /// chronologically and never accessed otherwise, the LRU entry is always
-    /// the oldest. If it is not expired, no entries are expired, so this can
-    /// stop early.
+    fn position(&self, k: &K) -> Option<usize> {
+        self.entries.iter().position(|(key, _, _)| key == k)
+    }
+
+    /// Remove expired items from the oldest end. If the oldest one is not
+    /// expired, no entries are expired, so this can stop early.
     fn remove_expired(&mut self, now: Instant) {
         let mut expired_count = 0;
-        while let Some((_, (inserted, _))) = self.cache.peek_lru() {
+        while let Some((_, inserted, _)) = self.entries.front() {
             if now - *inserted > self.max_duration {
-                self.cache.pop_lru();
+                self.entries.pop_front();
                 expired_count += 1;
             } else {
                 break;
@@ -91,23 +100,20 @@ where
         }
     }
 
-    /// Get the current number of items in the cache
+    /// Get the current number of items in the map
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.cache.len()
+        self.entries.len()
     }
 }
 
-const DEFAULT_CAPACITY: NonZeroUsize = NonZeroUsize::new(25).unwrap();
+const DEFAULT_CAPACITY: usize = 25;
 
-impl<K, V> Default for BoundedHashMap<K, V>
-where
-    K: Eq + Hash + Debug,
-    V: Debug,
-{
+impl<K, V> Default for BoundedHashMap<K, V> {
     fn default() -> Self {
         Self {
-            cache: LruCache::new(DEFAULT_CAPACITY),
+            entries: VecDeque::with_capacity(DEFAULT_CAPACITY),
+            capacity: DEFAULT_CAPACITY,
             // A client connects right after it got the URL, the kubelet
             // keeps its streaming requests for a minute as well.
             max_duration: Duration::from_secs(60),
@@ -136,7 +142,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn bounded_hashmap_test() {
         let mut sut = BoundedHashMap {
-            cache: LruCache::new(NonZeroUsize::new(2).unwrap()),
+            entries: VecDeque::new(),
+            capacity: 2,
             max_duration: Duration::new(60 * 60, 0),
         };
 
@@ -194,5 +201,20 @@ mod tests {
         advance(Duration::from_millis(200)).await;
         assert!(sut.remove(&2).is_none());
         assert_eq!(sut.len(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_elements_are_not_handed_out() {
+        let mut sut = BoundedHashMap::default();
+        sut.insert(1, "one");
+        sut.insert(2, "two");
+        advance(sut.max_duration + Duration::from_secs(1)).await;
+        sut.insert(3, "three");
+
+        // The expired element is taken, but not handed out, the other expired
+        // one goes as well.
+        assert_eq!(sut.remove(&1), None);
+        assert_eq!(sut.len(), 1);
+        assert_eq!(sut.remove(&3), Some("three"));
     }
 }

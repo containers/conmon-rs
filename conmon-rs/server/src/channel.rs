@@ -3,9 +3,9 @@
 //! base64 protocols send text messages with the channel as an ASCII digit
 //! offset and the payload base64 encoded.
 
-use axum::extract::ws::Message;
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use crate::web::Message;
 use bytes::{BufMut, Bytes, BytesMut};
+use data_encoding::BASE64;
 use tracing::debug;
 
 /// A message of the server on a channel.
@@ -13,7 +13,7 @@ pub fn message(base64: bool, channel: u8, data: &[u8]) -> Message {
     if base64 {
         let mut text = String::with_capacity(1 + data.len().div_ceil(3) * 4);
         text.push(char::from(b'0' + channel));
-        BASE64.encode_string(data, &mut text);
+        BASE64.encode_append(data, &mut text);
         Message::Text(text.into())
     } else {
         let mut frame = BytesMut::with_capacity(1 + data.len());

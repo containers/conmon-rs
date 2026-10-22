@@ -115,6 +115,7 @@ mod pause;
 mod port_forward;
 #[allow(unsafe_code)]
 mod process;
+mod random_id;
 mod remotecommand;
 mod rpc;
 #[allow(unsafe_code)]
@@ -132,3 +133,4 @@ mod terminal;
 #[allow(unsafe_code)]
 mod unwind;
 mod version;
+mod web;

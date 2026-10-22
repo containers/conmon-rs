@@ -12,9 +12,9 @@ use crate::{
     idle::Activity,
     spdy::{Connection, ConnectionHandle, Headers, Stream, StreamReceiver, StreamSender},
     stream_protocol::{STREAM_CREATION_TIMEOUT, STREAM_TYPE_HEADER},
+    web::{CloseCode, CloseFrame, Message, WebSocket},
 };
 use anyhow::{Context, Result, anyhow, bail};
-use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
 use bytes::{Bytes, BytesMut};
 use futures::{
     sink::SinkExt,
@@ -201,6 +201,8 @@ impl Framing {
                 trace!("Got ping");
                 return None;
             }
+            // Raw frames only get sent, reads never return them.
+            Message::Frame(_) => return None,
         };
 
         if self.version == Version::V5 {
@@ -838,7 +840,7 @@ impl Output {
                 Transport::WebSocket { .. } => {
                     let close = Message::Close(
                         CloseFrame {
-                            code: close_code::NORMAL,
+                            code: CloseCode::Normal,
                             reason: "done".into(),
                         }
                         .into(),

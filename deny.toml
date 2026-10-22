@@ -20,9 +20,6 @@ yanked = "warn"
 allow = [
     "Apache-2.0",
     "BSD-2-Clause",
-    "BSD-3-Clause",
-    "CC0-1.0",
-    "ISC",
     "MIT",
     "Unicode-3.0",
     "Zlib",
@@ -33,7 +30,6 @@ allow = [
 # are listed below.
 multiple-versions = "deny"
 skip = [
-    { crate = "getrandom@0.3", reason = "rand of tungstenite and opentelemetry_sdk, uuid uses 0.4" },
     { crate = "syn@2", reason = "proc macros only, not part of the binary" },
 ]
 wildcards = "deny"

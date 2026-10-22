@@ -436,10 +436,26 @@ impl AsyncWrite for &TerminalFd {
 mod tests {
     use super::*;
     use crate::container_log::ContainerLog;
-    use nix::{fcntl::FdFlag, pty};
-    use sendfd::SendWithFd;
-    use std::io::ErrorKind;
-    use std::time::Duration;
+    use nix::{fcntl::FdFlag, pty, sys::socket::ControlMessage};
+    use std::{io::IoSlice, time::Duration};
+
+    /// Send the terminal descriptor with some data, like a runtime does.
+    async fn send_fd(stream: &UnixStream, data: &[u8], fd: BorrowedFd<'_>) -> Result<()> {
+        let fds = [fd.as_raw_fd()];
+        stream
+            .async_io(Interest::WRITABLE, || {
+                socket::sendmsg::<()>(
+                    stream.as_raw_fd(),
+                    &[IoSlice::new(data)],
+                    &[ControlMessage::ScmRights(&fds)],
+                    MsgFlags::empty(),
+                    None,
+                )
+                .map_err(io::Error::from)
+            })
+            .await?;
+        Ok(())
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn new_success() -> Result<()> {
@@ -453,16 +469,7 @@ mod tests {
         let res = pty::openpty(None, None)?;
 
         let stream = UnixStream::connect(sut.path()).await?;
-        loop {
-            let ready = stream.ready(Interest::WRITABLE).await?;
-            if ready.is_writable() {
-                match stream.send_with_fd(b"test", &[res.master.as_raw_fd()]) {
-                    Ok(_) => break,
-                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
-                    Err(e) => anyhow::bail!(e),
-                }
-            }
-        }
+        send_fd(&stream, b"test", res.master.as_fd()).await?;
 
         sut.wait_connected(true, token).await?;
         assert!(!sut.path().exists());
@@ -504,14 +511,7 @@ mod tests {
         let mut sut = Terminal::new(ContainerLog::new(), attach.clone())?;
         let res = pty::openpty(None, None)?;
         let stream = UnixStream::connect(sut.path()).await?;
-        loop {
-            stream.writable().await?;
-            match stream.send_with_fd(b"x", &[res.master.as_raw_fd()]) {
-                Ok(_) => break,
-                Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
-                Err(e) => anyhow::bail!(e),
-            }
-        }
+        send_fd(&stream, b"x", res.master.as_fd()).await?;
         sut.wait_connected(true, CancellationToken::new()).await?;
 
         let eof = sut.eof_char();
