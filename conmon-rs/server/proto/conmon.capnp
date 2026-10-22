@@ -122,6 +122,7 @@ interface Conmon {
     struct AttachRequest {
         id @0 :Text;
         socketPath @1 :Text;
+        # Deprecated, only logged, attach sessions are per container.
         execSessionId @2 :Text;
         stopAfterStdinEof @3 :Bool;
         # Reserved, do not reuse the ordinal.
@@ -230,6 +231,10 @@ interface Conmon {
         stdout @5 :Bool;
         stderr @6 :Bool;
         cgroupManager @7 :CgroupManager;
+        # How long a connection may go without a frame of the client or data
+        # either way before it gets closed, 0 disables the timeout. The pings
+        # of the server and WebSocket pings and pongs do not count.
+        idleTimeoutSec @8 :UInt64;
     }
 
     struct ServeExecContainerResponse {
@@ -247,6 +252,10 @@ interface Conmon {
         stdout @3 :Bool;
         stderr @4 :Bool;
         stopAfterStdinEof @5 :Bool;
+        # How long a connection may go without a frame of the client or data
+        # either way before it gets closed, 0 disables the timeout. The pings
+        # of the server and WebSocket pings and pongs do not count.
+        idleTimeoutSec @6 :UInt64;
     }
 
     struct ServeAttachContainerResponse {
@@ -260,8 +269,9 @@ interface Conmon {
     struct ServePortForwardContainerRequest {
         metadata @0 :Metadata; # Standard metadata to carry.
         netNsPath @1 :Text;
-        # How long a connection may go without a frame before it gets closed,
-        # 0 disables the timeout.
+        # How long a connection may go without a frame of the client or data
+        # either way before it gets closed, 0 disables the timeout. The pings
+        # of the server and WebSocket pings and pongs do not count.
         idleTimeoutSec @2 :UInt64;
     }
 

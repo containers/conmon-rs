@@ -132,7 +132,11 @@ Streams for stdout or stderr which come after the start end right away. The
 server supports `v4.channel.k8s.io`, `v3`, `v2` and `channel.k8s.io`, the order
 of the client decides. From v4 on, the final status is JSON, before only a
 failure is reported as text. A client which does not take the end of a session
-within a few seconds gets its connection closed.
+within a few seconds gets its connection closed. With `idleTimeoutSec`, a
+session whose connection got no frame of the client and no data either way for
+that long fails with an error status. The time the runtime takes to start an
+exec, the pings of the server and WebSocket pings and pongs, like the heartbeat
+of client-go, do not count.
 
 Port forwarding speaks the Kubernetes `portforward.k8s.io` protocol over
 SPDY/3.1, which the kubelet uses towards the runtime also when the client
@@ -141,9 +145,13 @@ connected with a WebSocket. Per forwarded connection the client opens an
 server connects to that port on `localhost` within the network namespace of
 the request and copies between the connection and the data stream, a failure
 is reported as text on the error stream. Only what the SPDY implementation of
-Kubernetes uses is supported, there is no flow control. Clients which connect
-directly, like crictl with the WebSocket transport, may tunnel the SPDY
-connection through binary WebSocket messages with the
+Kubernetes uses is supported, there is no flow control: the server holds about
+4 MiB of what the client sent on a connection, plus the frame it waits to
+place, and stops reading it until the streams took their data. What a
+forwarded connection sends while it gets established, up to 1 MiB, does not
+count, at most 16 connections of a client get established at once. Clients
+which connect directly, like crictl with the WebSocket transport, may tunnel
+the SPDY connection through binary WebSocket messages with the
 `SPDY/3.1+portforward.k8s.io` subprotocol.
 
 The URL also serves the older WebSocket channel protocol (`v4.channel.k8s.io`,
@@ -154,9 +162,12 @@ digit offset in base64 text messages) and the first message of each channel
 carries the port as a little endian `u16`. The session ends once all
 connections ended.
 
-`idleTimeoutSec` closes a connection on which nothing went either way, SPDY
-clients ping every few seconds. Servers which support port forwarding report
-the `portforward` feature in `version`.
+`idleTimeoutSec` closes a connection which got no frame of the client and no
+data either way for that long. A stream which slowly takes its data keeps it
+active, the pings of the server and WebSocket pings and pongs do not. SPDY
+clients like client-go ping every few seconds, which counts like for CRI-O.
+Servers which support port forwarding report the `portforward` feature in
+`version`.
 
 ### File descriptor socket
 

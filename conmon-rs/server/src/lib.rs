@@ -79,6 +79,7 @@ pub mod conmon_capnp {
 
 mod attach;
 mod bounded_hashmap;
+mod budget;
 mod capnp_util;
 mod channel;
 mod child;

@@ -2307,6 +2307,12 @@ type ServeExecContainerConfig struct {
 	// To use this option set `ConmonServerConfig.CgroupManager` to
 	// `CgroupManagerPerCommand`.
 	CgroupManager CgroupManager
+
+	// IdleTimeout closes a connection which got no frame of the client and
+	// no data either way for this long. The pings of the server and
+	// WebSocket pings and pongs do not count. Zero disables the timeout.
+	// Older servers ignore it.
+	IdleTimeout time.Duration
 }
 
 // ServeExecContainerResult is the result for calling the ServeExecContainer method.
@@ -2358,6 +2364,7 @@ func (c *ConmonClient) ServeExecContainer(
 			req.SetStdin(cfg.Stdin)
 			req.SetStdout(cfg.Stdout)
 			req.SetStderr(cfg.Stderr)
+			req.SetIdleTimeoutSec(idleTimeoutSeconds(cfg.IdleTimeout))
 
 			c.setCgroupManager(cfg.CgroupManager, req)
 
@@ -2408,6 +2415,12 @@ type ServeAttachContainerConfig struct {
 	// Deprecated: Attach does not run the runtime, so the value was never
 	// sent and has no effect.
 	CgroupManager CgroupManager
+
+	// IdleTimeout closes a connection which got no frame of the client and
+	// no data either way for this long. The pings of the server and
+	// WebSocket pings and pongs do not count. Zero disables the timeout.
+	// Older servers ignore it.
+	IdleTimeout time.Duration
 }
 
 // ServeAttachContainerResult is the result for calling the ServeAttachContainer method.
@@ -2451,6 +2464,7 @@ func (c *ConmonClient) ServeAttachContainer(
 			req.SetStdout(cfg.Stdout)
 			req.SetStderr(cfg.Stderr)
 			req.SetStopAfterStdinEof(cfg.StopAfterStdinEOF)
+			req.SetIdleTimeoutSec(idleTimeoutSeconds(cfg.IdleTimeout))
 
 			return nil
 		},
@@ -2480,8 +2494,9 @@ type ServePortForwardContainerConfig struct {
 	// NetNsPath is the path to the network namespace of the container.
 	NetNsPath string
 
-	// IdleTimeout closes a connection on which no frame went either way for
-	// this long. Zero disables the timeout.
+	// IdleTimeout closes a connection which got no frame of the client and
+	// no data either way for this long. The pings of the server and
+	// WebSocket pings and pongs do not count. Zero disables the timeout.
 	IdleTimeout time.Duration
 }
 

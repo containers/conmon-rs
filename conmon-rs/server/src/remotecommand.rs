@@ -9,6 +9,7 @@
 
 use crate::{
     channel,
+    idle::Activity,
     spdy::{Connection, ConnectionHandle, Headers, Stream, StreamReceiver, StreamSender},
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -286,6 +287,11 @@ pub trait ClientInput: Send + 'static {
 pub struct WebSocketInput {
     pub messages: SplitStream<WebSocket>,
     pub framing: Framing,
+
+    /// Touched by every message of the client except for pings and pongs,
+    /// which a client like the WebSocket executor of client-go sends as a
+    /// heartbeat. CRI-O does not count them either.
+    pub activity: Activity,
 }
 
 impl ClientInput for WebSocketInput {
@@ -293,6 +299,9 @@ impl ClientInput for WebSocketInput {
         loop {
             match self.messages.next().await {
                 Some(Ok(message)) => {
+                    if !matches!(message, Message::Ping(_) | Message::Pong(_)) {
+                        self.activity.touch();
+                    }
                     if let Some(event) = self.framing.event(message) {
                         return Some(event);
                     }
@@ -693,13 +702,24 @@ enum Transport {
     WebSocket {
         sender: SplitSink<WebSocket, Message>,
         framing: Framing,
+
+        /// Touched by every message which got sent, except for pings.
+        activity: Activity,
     },
     Spdy(SpdyOutput),
 }
 
 impl Output {
-    pub fn websocket(sender: SplitSink<WebSocket, Message>, framing: Framing) -> Self {
-        Self::new(Transport::WebSocket { sender, framing })
+    pub fn websocket(
+        sender: SplitSink<WebSocket, Message>,
+        framing: Framing,
+        activity: Activity,
+    ) -> Self {
+        Self::new(Transport::WebSocket {
+            sender,
+            framing,
+            activity,
+        })
     }
 
     pub fn spdy(output: SpdyOutput) -> Self {
@@ -852,10 +872,17 @@ impl Output {
         if self.failed {
             return Ok(());
         }
-        let Transport::WebSocket { sender, .. } = &mut self.transport else {
+        let Transport::WebSocket {
+            sender, activity, ..
+        } = &mut self.transport
+        else {
             return Ok(());
         };
+        let ping = matches!(message, Message::Ping(_));
         let result = sender.send(message).await.map_err(anyhow::Error::from);
+        if result.is_ok() && !ping {
+            activity.touch();
+        }
         self.sent(result)
     }
 
