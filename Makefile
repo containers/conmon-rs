@@ -222,7 +222,7 @@ create-release-packages: verify-spec ## Create the release tarballs.
 		echo "crate version v$$VERSION and tag $$CI_TAG mismatch" ; \
 		exit 1 ; \
 	fi && \
-	git archive --format tar --prefix="$(BINARY)-$$CI_TAG/" "$$CI_TAG" | gzip >"$(BINARY)-$$CI_TAG.tar.gz"
+	git archive --format tar.gz --prefix="$(BINARY)-$$CI_TAG/" -o "$(BINARY)-$$CI_TAG.tar.gz" "$$CI_TAG"
 
 .PHONY: install
 install: ## Install the binary.

@@ -51,32 +51,103 @@ jobs:
         run: |
           ../.github/release-files binaries
           ../.github/release-files sources
-      # Updates the assets of an existing release, like on a rerun.
+      # Creates a draft with generated notes, uploads the files to it and only
+      # then publishes it, an immutable release gets no more files. The notes
+      # of a patch release start at the previous patch of its minor. A rerun
+      # continues with the draft, which gh finds by its tag as well, and
+      # leaves a published release alone if it has all files. A release only
+      # becomes the latest one if no other release has a higher version,
+      # unlike a patch release of an older minor. build-sources rejects tags
+      # other than vX.Y.Z. A failing command only fails the step outside of a
+      # pipe or a process substitution.
       - name: Release
         working-directory: release
         run: |
-          mapfile -t FILES < <(../.github/release-files files)
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --verify-tag --title "$TAG" --notes ""
+          LIST=$(../.github/release-files files)
+          mapfile -t FILES <<<"$LIST"
+          if ! DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>"$RUNNER_TEMP/view"); then
+            if ! grep -q "release not found" "$RUNNER_TEMP/view"; then
+              echo "::error::Unable to look up release $TAG: $(<"$RUNNER_TEMP/view")"
+              exit 1
+            fi
+            MINOR=${TAG%.*}
+            REFS=$(gh api "repos/$GH_REPO/git/matching-refs/tags/$MINOR." --paginate --jq '.[].ref')
+            PREVIOUS=
+            for T in $(printf '%s\n' "$REFS" "refs/tags/$TAG" | grep -E "^refs/tags/${MINOR//./\\.}\.[0-9]+$" | sort -uV); do
+              if [[ $T == "refs/tags/$TAG" ]]; then
+                break
+              fi
+              PREVIOUS=${T#refs/tags/}
+            done
+            NOTES=(--generate-notes)
+            if [[ -n $PREVIOUS ]]; then
+              NOTES+=(--notes-start-tag "$PREVIOUS")
+            fi
+            gh release create "$TAG" --draft --verify-tag --title "$TAG" "${NOTES[@]}"
+            DRAFT=true
+          fi
+          if [[ $DRAFT != true ]]; then
+            ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+            MISSING=$(comm -23 <(printf '%s\n' "${FILES[@]}" | sort) <(sort <<<"$ASSETS"))
+            if [[ -n $MISSING ]]; then
+              echo "::error::Release $TAG got published without all of its files, missing: ${MISSING//$'\n'/ }. Delete it and rerun the workflow, or tag a new version if it is immutable."
+              exit 1
+            fi
+            echo "::notice::Release $TAG is published with all files already, leaving it as it is."
+            exit 0
           fi
           gh release upload "$TAG" --clobber "${FILES[@]}"
+          RELEASES=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1000 --json tagName --jq '.[].tagName')
+          HIGHEST=$(printf '%s\n' "$RELEASES" "$TAG" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          LATEST=false
+          if [[ $HIGHEST == "$TAG" ]]; then
+            LATEST=true
+          fi
+          gh release edit "$TAG" --draft=false --latest="$LATEST"
 
   # Points the latest-X.Y.txt marker in the bucket to this tag, once the
-  # release has its binaries.
+  # release has its binaries. The marker only moves forward, a rerun of an
+  # older patch release does not move it back.
   publish-marker:
     runs-on: ubuntu-latest
     if: github.repository == 'containers/conmon-rs'
     needs: release
+    env:
+      TAG: ${{ github.ref_name }}
     steps:
+      - name: Check the current marker
+        id: marker
+        run: |
+          MINOR=${TAG%.*}
+          URL=https://storage.googleapis.com/cri-o/conmon-rs/latest-${MINOR#v}.txt
+          STATUS=$(curl -sSL --retry 5 -o "$RUNNER_TEMP/marker" -w '%{http_code}' "$URL?ts=$(date +%s)")
+          CURRENT=
+          if [[ $STATUS == 200 ]]; then
+            CURRENT=$(<"$RUNNER_TEMP/marker")
+          elif [[ $STATUS != 404 ]]; then
+            echo "::error::Unable to read $URL: HTTP $STATUS"
+            exit 1
+          fi
+          if [[ $CURRENT =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] &&
+            [[ $(printf '%s\n' "$CURRENT" "$TAG" | sort -V | tail -1) != "$TAG" ]]; then
+            echo "The marker already points to the newer release $CURRENT"
+            echo "forward=false" >>"$GITHUB_OUTPUT"
+          else
+            echo "forward=true" >>"$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.marker.outputs.forward == 'true'
         with:
           persist-credentials: false
       - run: .github/create-marker
+        if: steps.marker.outputs.forward == 'true'
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        if: steps.marker.outputs.forward == 'true'
         with:
           credentials_json: ${{ secrets.GCS_CRIO_SA }}
       # The marker changes in place, caches must not serve an old one.
       - uses: google-github-actions/upload-cloud-storage@6397bd7208e18d13ba2619ee21b9873edc94427a # v3.0.0
+        if: steps.marker.outputs.forward == 'true'
         with:
           path: .
           glob: latest-*.txt
