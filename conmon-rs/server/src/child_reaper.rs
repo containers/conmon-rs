@@ -205,13 +205,14 @@ impl ChildReaper {
     const CONNECT_AFTER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// Retrieve the container registered under `id`. Execs share the id of
-    /// their container and are skipped.
+    /// their container and are skipped. The error starts with
+    /// [`CONTAINER_NOT_FOUND`] if there is none.
     pub fn get(&self, id: &str) -> Result<ReapableChild> {
         let lock = lock(&self.grandchildren)?;
         let r = lock
             .get(id)
             .and_then(|v| v.iter().find(|c| c.kind == ChildKind::Container))
-            .context("child not available")?
+            .with_context(|| format!("{CONTAINER_NOT_FOUND}: {id}"))?
             .clone();
         Ok(r)
     }
@@ -820,6 +821,11 @@ impl ReapableChild {
     }
 }
 
+/// The start of the error of a request for a container the server does not
+/// know, clients match it, see `ErrContainerNotFound` of the Go client. The
+/// message of older servers is "child not available".
+const CONTAINER_NOT_FOUND: &str = "container not found";
+
 /// The exit code of a process whose exit status is not known, because it did
 /// neither exit nor get killed by a signal, or waitpid failed after its pidfd
 /// got readable.
@@ -1426,6 +1432,17 @@ mod tests {
         assert_eq!(map.len(), 1);
         assert_eq!(map["a"].iter().map(|c| c.pid).collect::<Vec<_>>(), [2]);
         Ok(())
+    }
+
+    /// Clients match the start of the error, see `ErrContainerNotFound` of
+    /// the Go client.
+    #[test]
+    fn get_unknown_container_fails_with_stable_error() {
+        let err = ChildReaper::default()
+            .get("unknown")
+            .err()
+            .map(|e| format!("{e:#}"));
+        assert_eq!(err.as_deref(), Some("container not found: unknown"));
     }
 
     #[tokio::test(start_paused = true)]

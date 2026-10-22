@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"github.com/containers/conmon-rs/internal/proto"
 	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"go.podman.io/storage/pkg/idtools"
@@ -40,12 +42,10 @@ const (
 )
 
 var (
-	errConfigUnspecified  = errors.New("config must be specified")
 	errRuntimeUnspecified = errors.New("runtime must be specified")
 	errRunDirUnspecified  = errors.New("RunDir must be specified")
 	errInvalidValue       = errors.New("invalid value")
 	errRunDirNotCreated   = errors.New("could not create RunDir")
-	errTimeoutWaitForPid  = errors.New("timed out waiting for server PID to disappear")
 	errServerExited       = errors.New("server exited before accepting connections")
 	errServerNotUp        = errors.New("server did not accept connections")
 	errServerPIDUnknown   = errors.New("server PID unknown")
@@ -57,44 +57,54 @@ var (
 // which runs and orphan its containers.
 var ErrServerNotResponding = errors.New("server accepted the connection but did not respond")
 
-// ConmonClient is the main client structure of this package.
+// ConmonClient is the main client structure of this package, see the package
+// documentation.
 type ConmonClient struct {
 	serverPID uint32
 	// serverPidfd refers to the server process, nil if pidfds are not
 	// supported. Unlike the PID, it never refers to another process which
 	// got the PID once the server exited. It gets closed once the server is
-	// known to be gone, serverDone is set before.
-	serverPidfd    *os.File
-	serverDone     atomic.Bool
-	runDir         string
-	logger         *logrus.Logger
-	attachReaders  map[uint64]*attachReaderValue
-	attachReaderMu sync.Mutex
-	attachReaderID atomic.Uint64
-	tracingEnabled bool
-	tracer         trace.Tracer
-	cgroupManager  CgroupManager
-	featuresMu     sync.Mutex
-	features       map[string]bool
-	connMu         sync.Mutex
-	conn           *rpcConn
+	// known to be gone or the client got closed, and no Shutdown or
+	// KillContext uses it anymore, see usePidfd.
+	serverPidfd     *os.File
+	serverDone      atomic.Bool
+	pidfdMu         sync.Mutex
+	pidfdUsers      int
+	closed          atomic.Bool
+	runDir          string
+	logger          logrus.Ext1FieldLogger
+	attachSessions  map[uint64]*attachSession
+	attachSessionMu sync.Mutex
+	attachSessionID atomic.Uint64
+	tracingEnabled  bool
+	tracer          trace.Tracer
+	cgroupManager   CgroupManager
+	featuresMu      sync.Mutex
+	features        map[string]bool
+	connMu          sync.Mutex
+	conn            *rpcConn
 }
 
 // ConmonServerConfig is the configuration for the conmon server instance.
 type ConmonServerConfig struct {
 	// ClientLogger can be set to use a custom logger rather than the
-	// logrus.StandardLogger.
+	// logrus.StandardLogger. ClientFieldLogger takes precedence.
 	ClientLogger *logrus.Logger
+
+	// ClientFieldLogger can be set to log through an entry with fields, like
+	// a *logrus.Entry, rather than a logger. It takes precedence over
+	// ClientLogger.
+	ClientFieldLogger logrus.Ext1FieldLogger
 
 	// ConmonServerPath is the binary path to the conmon server.
 	ConmonServerPath string
 
-	// LogLevel of the server to be used.
+	// LogLevel of the server to be used, see the LogLevel constants.
 	// Can be "trace", "debug", "info", "warn", "error" or "off".
 	LogLevel LogLevel
 
-	// LogDriver is the possible server logging driver.
-	// Can be "stdout" or "systemd".
+	// LogDriver is the possible server logging driver, see the LogDriver
+	// constants. Can be "none", "stdout" or "systemd".
 	LogDriver LogDriver
 
 	// Runtime is the binary path of the OCI runtime to use to operate on the
@@ -127,7 +137,8 @@ type ConmonServerConfig struct {
 	// writer can be used for both.
 	Stderr io.Writer
 
-	// CgroupManager can be used to select the cgroup manager.
+	// CgroupManager can be used to select the cgroup manager. The zero value
+	// is CgroupManagerSystemd.
 	CgroupManager CgroupManager
 
 	// Tracing can be used to enable OpenTelemetry tracing.
@@ -260,7 +271,7 @@ func NewContext(
 	config *ConmonServerConfig,
 ) (client *ConmonClient, retErr error) {
 	if config == nil {
-		return nil, errConfigUnspecified
+		return nil, ErrMissingConfig
 	}
 
 	cl, err := config.toClient()
@@ -269,9 +280,7 @@ func NewContext(
 	}
 
 	ctx, span := cl.startSpan(ctx, "New")
-	if span != nil {
-		defer span.End()
-	}
+	defer endSpan(span, &retErr)
 
 	// Check if the process has already started, and inherit that process instead.
 	probeCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
@@ -299,7 +308,7 @@ func NewContext(
 		return cl, nil
 	}
 
-	if err := cl.startServer(ctx, config); err != nil {
+	if err = cl.startServer(ctx, config); err != nil {
 		return nil, fmt.Errorf("start server: %w", err)
 	}
 
@@ -310,8 +319,8 @@ func NewContext(
 			cl.resetConn()
 
 			cleanupCtx := context.WithoutCancel(ctx)
-			if err := cl.stopServer(cleanupCtx, serverCleanupTimeout, true); err != nil {
-				cl.logger.Errorf("Unable to shutdown server: %v", err)
+			if stopErr := cl.stopServer(cleanupCtx, serverCleanupTimeout, true); stopErr != nil {
+				cl.logger.Errorf("Unable to shutdown server: %v", stopErr)
 			}
 		}
 	}()
@@ -320,8 +329,9 @@ func NewContext(
 	// up right away. The server itself tells its PID once it is up, which is
 	// the one to use: a concurrent New on the same run directory may have
 	// replaced the file.
-	if pid, err := pidGivenFile(cl.pidFile()); err != nil {
-		cl.logger.WithError(err).Warn("Unable to get server PID from file, waiting for the server")
+	if pid, pidErr := pidGivenFile(cl.pidFile()); pidErr != nil {
+		cl.logger.WithError(pidErr).
+			Warn("Unable to get server PID from file, waiting for the server")
 	} else {
 		cl.setServerPID(pid)
 	}
@@ -387,7 +397,7 @@ func (c *ConmonClient) setServerPID(pid uint32) {
 // the run directory. It returns false without an error if there is none, so
 // that a new one has to be started.
 func (c *ConmonClient) connectRunningServer(ctx context.Context) (bool, error) {
-	socketConn, err := DialLongSocket("unix", c.socket())
+	socketConn, err := dialLongSocket("unix", c.socket())
 	if err != nil {
 		if serverMissing(err) {
 			return false, nil
@@ -479,7 +489,7 @@ func (c *ConmonClient) serverGone(ctx context.Context, pid int32, pidKnown, clos
 			return true
 		}
 
-		conn, err := DialLongSocket("unix", c.socket())
+		conn, err := dialLongSocket("unix", c.socket())
 		if err != nil {
 			if serverMissing(err) {
 				return true
@@ -537,20 +547,26 @@ type ServerVersion struct {
 const versionTimeout = 10 * time.Second
 
 // Version can be used to retrieve the server version without requiring a
-// running Server.
+// running Server. Running the binary may take up to 10 seconds.
 //
 // If binaryPath is empty, then the default binary will be used.
 // If the server doesn't support it, then an ErrUnsupported error is returned.
 func Version(binaryPath string) (res *ServerVersion, err error) {
+	// A hanging binary must not block the caller forever.
+	ctx, cancel := context.WithTimeout(context.Background(), versionTimeout)
+	defer cancel()
+
+	return VersionContext(ctx, binaryPath)
+}
+
+// VersionContext works like Version, the context bounds running the binary
+// instead of the fixed timeout.
+func VersionContext(ctx context.Context, binaryPath string) (res *ServerVersion, err error) {
 	if binaryPath == "" {
 		binaryPath = binaryName
 	}
 
 	const arg = "--version-json"
-
-	// A hanging binary must not block the caller forever.
-	ctx, cancel := context.WithTimeout(context.Background(), versionTimeout)
-	defer cancel()
 
 	cmd := exec.CommandContext(ctx, binaryPath, arg)
 	// A child holding the pipes open must not keep the wait going after the
@@ -591,9 +607,14 @@ func (c *ConmonServerConfig) toClient() (*ConmonClient, error) {
 		return nil, fmt.Errorf("%w: %w", errRunDirNotCreated, err)
 	}
 
-	logger := c.ClientLogger
-	if logger == nil {
-		logger = logrus.StandardLogger()
+	var logger logrus.Ext1FieldLogger = logrus.StandardLogger()
+
+	// A typed nil, like a nil *logrus.Entry, counts as not set.
+	switch {
+	case c.ClientFieldLogger != nil && !isNilPointer(c.ClientFieldLogger):
+		logger = c.ClientFieldLogger
+	case c.ClientLogger != nil:
+		logger = c.ClientLogger
 	}
 
 	var tracer trace.Tracer
@@ -602,15 +623,22 @@ func (c *ConmonServerConfig) toClient() (*ConmonClient, error) {
 	}
 
 	return &ConmonClient{
-		runDir:        c.ServerRunDir,
-		logger:        logger,
-		attachReaders: map[uint64]*attachReaderValue{},
+		runDir:         c.ServerRunDir,
+		logger:         logger,
+		attachSessions: map[uint64]*attachSession{},
 		// Also set if New connects to a running server, which gets started
 		// with the same configuration.
 		tracingEnabled: c.Tracing != nil && c.Tracing.Enabled,
 		tracer:         tracer,
 		cgroupManager:  c.CgroupManager,
 	}, nil
+}
+
+// isNilPointer reports whether the value is a nil pointer.
+func isNilPointer(value any) bool {
+	v := reflect.ValueOf(value)
+
+	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
 //nolint:ireturn,nolintlint // Returning the interface is intentional
@@ -625,11 +653,29 @@ func (c *ConmonClient) startSpan(ctx context.Context, name string) (context.Cont
 	return c.tracer.Start(ctx, prefix+name, trace.WithSpanKind(trace.SpanKindClient))
 }
 
-func (c *ConmonClient) startServer(ctx context.Context, config *ConmonServerConfig) error {
-	_, span := c.startSpan(ctx, "startServer")
-	if span != nil {
-		defer span.End()
+// endSpan records the error the call returned, if any, and ends the span of
+// startSpan, which is nil without a tracer.
+//
+//nolint:gocritic // the pointer gets read when the deferred call runs
+func endSpan(span trace.Span, err *error) {
+	if span == nil {
+		return
 	}
+
+	if *err != nil {
+		span.RecordError(*err)
+		span.SetStatus(codes.Error, (*err).Error())
+	}
+
+	span.End()
+}
+
+func (c *ConmonClient) startServer(
+	ctx context.Context,
+	config *ConmonServerConfig,
+) (retErr error) {
+	_, span := c.startSpan(ctx, "startServer")
+	defer endSpan(span, &retErr)
 
 	entrypoint, args, err := c.toArgs(config)
 	if err != nil {
@@ -721,7 +767,7 @@ func (c *ConmonClient) setServerOutput(
 // outlive it. The returned function closes the write end of the parent, so
 // that only those keep the copy going.
 func serverOutputFile(
-	logger *logrus.Logger,
+	logger logrus.FieldLogger,
 	w io.Writer,
 ) (file *os.File, release func(), err error) {
 	if file, ok := w.(*os.File); ok {
@@ -871,11 +917,11 @@ func pidGivenFile(file string) (uint32, error) {
 
 // waitUntilServerUp polls the server until it answers, up to 10 seconds or
 // until the context ends, and returns its answer.
-func (c *ConmonClient) waitUntilServerUp(ctx context.Context) (*VersionResponse, error) {
+func (c *ConmonClient) waitUntilServerUp(
+	ctx context.Context,
+) (_ *VersionResponse, retErr error) {
 	_, span := c.startSpan(ctx, "waitUntilServerUp")
-	if span != nil {
-		defer span.End()
-	}
+	defer endSpan(span, &retErr)
 
 	pollCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
@@ -938,6 +984,12 @@ func (c *ConmonClient) client(ctx context.Context) (proto.Conmon, error) {
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
 
+	// Checked under the lock, so that no connection gets dialed after Close
+	// reset the last one.
+	if c.closed.Load() {
+		return proto.Conmon{}, ErrClientClosed
+	}
+
 	if c.conn != nil {
 		if c.conn.usable() {
 			return c.conn.client, nil
@@ -947,7 +999,7 @@ func (c *ConmonClient) client(ctx context.Context) (proto.Conmon, error) {
 		c.closeConnLocked()
 	}
 
-	socketConn, err := DialLongSocket("unix", c.socket())
+	socketConn, err := dialLongSocket("unix", c.socket())
 	if err != nil {
 		return proto.Conmon{}, fmt.Errorf("dial long socket: %w", err)
 	}
@@ -1079,7 +1131,15 @@ func (c *ConmonClient) closeConnLocked() {
 // `/proc/self/fd` entry of that parent (which is a symlink to the actual parent)
 // to construct the path to the socket.
 // It assumes a valid path, as well as a file name that doesn't exceed the unix max socket length.
+//
+// Deprecated: It is an implementation detail of the client, which dials all
+// sockets of the server itself. It will be removed in a future release.
 func DialLongSocket(network, path string) (*net.UnixConn, error) {
+	return dialLongSocket(network, path)
+}
+
+// dialLongSocket implements DialLongSocket.
+func dialLongSocket(network, path string) (*net.UnixConn, error) {
 	parent := filepath.Dir(path)
 
 	f, err := os.Open(parent)
@@ -1153,6 +1213,18 @@ const FeatureSdNotify = "sdnotify"
 // ServePortForwardContainer.
 const FeaturePortForward = "portforward"
 
+// FeatureIdleTimeout is reported by servers which apply the IdleTimeout of
+// ServeExecContainerConfig and ServeAttachContainerConfig. Others ignore it.
+// Every server with FeaturePortForward applies the one of
+// ServePortForwardContainerConfig.
+const FeatureIdleTimeout = "idletimeout"
+
+// FeatureStreamingProtocols is reported by servers which serve exec and
+// attach sessions over SPDY and the WebSocket protocols before
+// v5.channel.k8s.io, see ServeExecContainer. Others only speak
+// v5.channel.k8s.io.
+const FeatureStreamingProtocols = "streamingprotocols"
+
 // requireServerFeature fails with ErrUnsupported if the server does not
 // report the feature. New records the features, a client without them asks
 // the server once.
@@ -1205,21 +1277,20 @@ func (c *ConmonClient) setFeatures(list []string) map[string]bool {
 	return features
 }
 
-// Version can be used to retrieve all available version information.
+// Version can be used to retrieve all available version information. A nil
+// config asks for the version without the verbose fields.
 func (c *ConmonClient) Version(
 	ctx context.Context, cfg *VersionConfig,
-) (*VersionResponse, error) {
+) (_ *VersionResponse, retErr error) {
 	ctx, span := c.startSpan(ctx, "Version")
-	if span != nil {
-		defer span.End()
-	}
+	defer endSpan(span, &retErr)
 
 	rpcClient, err := c.client(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("create RPC client: %w", err)
 	}
 
-	future, free := rpcClient.Version(ctx, func(p proto.Conmon_version_Params) error {
+	future, free := rpcClient.Version(ctx, func(p proto.Conmon_version_Params) (err error) {
 		req, err := p.NewRequest()
 		if err != nil {
 			return fmt.Errorf("create request: %w", err)
@@ -1240,9 +1311,9 @@ func (c *ConmonClient) Version(
 	})
 	defer free()
 
-	result, err := future.Struct()
+	result, err := rpcResult(future)
 	if err != nil {
-		return nil, fmt.Errorf("get result: %w", err)
+		return nil, err
 	}
 
 	response, err := result.Response()
@@ -1364,16 +1435,23 @@ type CreateContainerConfig struct {
 	// Stdin indicates if stdin should be available or not.
 	Stdin bool
 
-	// ExitPaths is a slice of paths to write the exit statuses.
+	// ExitPaths is a slice of paths to write the exit statuses. Each file
+	// gets the exit code of the container as decimal text once it exited,
+	// 128 plus the number of the signal which killed it, like a shell
+	// reports it.
 	ExitPaths []string
 
-	// OOMExitPaths is a slice of files that should be created if the given container is OOM killed.
+	// OOMExitPaths is a slice of files that should be created if the given
+	// container is OOM killed. They are created empty before the exit files
+	// get written.
 	OOMExitPaths []string
 
 	// LogDrivers is a slice of selected log drivers.
 	LogDrivers []ContainerLogDriver
 
-	// CleanupCmd is the command that will be executed once the container exits
+	// CleanupCmd is the command that will be executed once the container
+	// exited and its exit files got written. The server does not wait for
+	// it.
 	CleanupCmd []string
 
 	// GlobalArgs are the additional arguments passed to the create runtime call
@@ -1392,10 +1470,16 @@ type CreateContainerConfig struct {
 	// To use this option set `ConmonServerConfig.CgroupManager` to `CgroupManagerPerCommand`.
 	CgroupManager CgroupManager
 
-	// AdditionalFDs can be used to pass additional file descriptors to the container.
+	// AdditionalFDs can be used to pass additional file descriptors to the
+	// container. They are slots of the fd socket, see RemoteFDs, which the
+	// runtime gets as fd 3 and onwards in their order. The runtime has to be
+	// told to pass them on, for example with --preserve-fds in CommandArgs.
 	AdditionalFDs []RemoteFD
 
-	// LeakFDs can be used to keep file descriptors open as long as the container is running.
+	// LeakFDs can be used to keep file descriptors open as long as the
+	// container is running. They are slots of the fd socket, see RemoteFDs,
+	// which the server holds until the container exited without passing them
+	// on.
 	LeakFDs []RemoteFD
 
 	// SdNotifySocket is the path of the host sd_notify socket, usually the
@@ -1452,13 +1536,19 @@ type CreateContainerResponse struct {
 	NamespacesPath string
 }
 
-// CreateContainer can be used to create a new running container instance.
+// CreateContainer creates a container by running the create command of the
+// runtime and monitors it from then on. The container process waits for the
+// start command of the runtime, which the caller runs, before it runs the
+// command of the container. The server writes the exit and OOM files and runs
+// the cleanup command once the container exited.
 func (c *ConmonClient) CreateContainer(
 	ctx context.Context, cfg *CreateContainerConfig,
-) (*CreateContainerResponse, error) {
+) (_ *CreateContainerResponse, retErr error) {
 	ctx, span := c.startSpan(ctx, "CreateContainer")
-	if span != nil {
-		defer span.End()
+	defer endSpan(span, &retErr)
+
+	if cfg == nil {
+		return nil, ErrMissingConfig
 	}
 
 	if err := c.validateCgroupManager(cfg.CgroupManager); err != nil {
@@ -1484,7 +1574,7 @@ func (c *ConmonClient) CreateContainer(
 
 	future, free := rpcClient.CreateContainer(
 		ctx,
-		func(p proto.Conmon_createContainer_Params) error {
+		func(p proto.Conmon_createContainer_Params) (err error) {
 			req, err := p.NewRequest()
 			if err != nil {
 				return fmt.Errorf("create request: %w", err)
@@ -1555,9 +1645,9 @@ func (c *ConmonClient) CreateContainer(
 	)
 	defer free()
 
-	result, err := future.Struct()
+	result, err := rpcResult(future)
 	if err != nil {
-		return nil, fmt.Errorf("get result: %w", err)
+		return nil, err
 	}
 
 	response, err := result.Response()
@@ -1586,6 +1676,11 @@ type ExecSyncConfig struct {
 	// less time left the command may outlive the caller by less than a
 	// second. A context which already ended fails the call without running
 	// the command.
+	//
+	// A context which ends without a deadline, for example because it got
+	// cancelled, only ends the call: the server does not stop the command,
+	// which runs until it exits or reaches the Timeout. Set a Timeout or a
+	// deadline to bound it.
 	Timeout uint64
 
 	// Terminal specifies if a tty should be used.
@@ -1602,9 +1697,11 @@ type ExecSyncConfig struct {
 
 // ExecContainerResult is the result for calling the ExecSyncContainer method.
 type ExecContainerResult struct {
-	// ExitCode specifies the returned exit status. It is -2 if the server
-	// could not start the command at all, for example because the runtime
-	// failed.
+	// ExitCode specifies the returned exit status, 128 plus the number of
+	// the signal which killed the command, like a shell reports it. It is
+	// ExecExitCodeNotStarted if the server could not start the command,
+	// ExecExitCodeTimedOut if it timed out, and -1 if the server could not
+	// tell how the command ended.
 	ExitCode int32
 
 	// Stdout contains the stdout stream result.
@@ -1617,15 +1714,32 @@ type ExecContainerResult struct {
 	TimedOut bool
 }
 
+const (
+	// ExecExitCodeNotStarted is the exit code of an exec which the server
+	// could not start, for example because the runtime failed or does not
+	// know the container. Stderr tells why.
+	ExecExitCodeNotStarted int32 = -2
+
+	// ExecExitCodeTimedOut is the exit code of an exec which did not exit
+	// before its timeout, TimedOut is set then. A server without pidfd
+	// support reports it as well if it could not get the exit status of the
+	// command, without TimedOut.
+	ExecExitCodeTimedOut int32 = -3
+)
+
 // ExecSyncContainer can be used to execute a command within a running
-// container.
+// container. It returns once the command exited and its output got
+// collected, see ExecSyncConfig.Timeout for how long that may take. The
+// command running but failing is no error, see ExecContainerResult.ExitCode.
 func (c *ConmonClient) ExecSyncContainer(
 	ctx context.Context,
 	cfg *ExecSyncConfig,
-) (*ExecContainerResult, error) {
+) (_ *ExecContainerResult, retErr error) {
 	ctx, span := c.startSpan(ctx, "ExecSyncContainer")
-	if span != nil {
-		defer span.End()
+	defer endSpan(span, &retErr)
+
+	if cfg == nil {
+		return nil, ErrMissingConfig
 	}
 
 	if err := c.validateCgroupManager(cfg.CgroupManager); err != nil {
@@ -1644,7 +1758,7 @@ func (c *ConmonClient) ExecSyncContainer(
 
 	future, free := rpcClient.ExecSyncContainer(
 		ctx,
-		func(p proto.Conmon_execSyncContainer_Params) error {
+		func(p proto.Conmon_execSyncContainer_Params) (err error) {
 			req, err := p.NewRequest()
 			if err != nil {
 				return fmt.Errorf("create request: %w", err)
@@ -1677,9 +1791,9 @@ func (c *ConmonClient) ExecSyncContainer(
 	)
 	defer free()
 
-	result, err := future.Struct()
+	result, err := rpcResult(future)
 	if err != nil {
-		return nil, fmt.Errorf("get result: %w", err)
+		return nil, err
 	}
 
 	resp, err := result.Response()
@@ -1828,28 +1942,143 @@ func (c *ConmonClient) Shutdown() error {
 
 // ShutdownContext kills the server via SIGINT and waits for the server PID
 // to be removed from the system, up to 10 seconds or until the context ends.
+// The server kills its containers before it exits. If it is still running
+// after the 10 seconds, ShutdownContext returns ErrShutdownTimeout,
+// KillContext ends it then.
+//
 // It fails without signaling anything if the server PID is unknown. Where
 // the kernel supports pidfds, the signal cannot reach another process which
-// got the PID after the server exited.
-func (c *ConmonClient) ShutdownContext(ctx context.Context) error {
+// got the PID after the server exited. It closes the stdin of the attach
+// sessions of the client and its connection first, the attach sessions end
+// once the server exited.
+func (c *ConmonClient) ShutdownContext(ctx context.Context) (retErr error) {
 	_, span := c.startSpan(ctx, "Shutdown")
-	if span != nil {
-		defer span.End()
+	defer endSpan(span, &retErr)
+
+	release, err := c.usePidfd()
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	c.closeAttachStdins()
+	c.resetConn()
+
+	return c.stopServer(ctx, serverStopTimeout, false)
+}
+
+// KillContext kills the server via SIGKILL and waits for the server PID to
+// be removed from the system, up to 10 seconds or until the context ends.
+// Unlike with ShutdownContext, the server cannot kill its containers, which
+// keep running without a monitor. Use it if ShutdownContext returned
+// ErrShutdownTimeout. Like ShutdownContext, it closes the stdin of the
+// attach sessions and the connection of the client first, and fails without
+// signaling anything if the server PID is unknown.
+func (c *ConmonClient) KillContext(ctx context.Context) (retErr error) {
+	_, span := c.startSpan(ctx, "Kill")
+	defer endSpan(span, &retErr)
+
+	release, err := c.usePidfd()
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	c.closeAttachStdins()
+	c.resetConn()
+
+	// A zero PID would signal the process group of the caller.
+	if c.serverPID == 0 {
+		return fmt.Errorf("kill server: %w", errServerPIDUnknown)
 	}
 
-	// Taken out of the map first, so that no attach finds its reader again.
-	c.attachReaderMu.Lock()
-	readers := slices.Collect(maps.Values(c.attachReaders))
-	clear(c.attachReaders)
-	c.attachReaderMu.Unlock()
+	return c.killServer(ctx, serverStopTimeout)
+}
 
-	for _, reader := range readers {
-		c.closeAttachReader(reader)
+// Close releases the resources of the client without stopping the server:
+// it ends the attach sessions of the client, and closes its connection to
+// the server and its pidfd of the server. The server and its containers
+// keep running, a later New for the same ServerRunDir connects to the
+// server again. A client which is not needed anymore has to be closed or
+// shut down, otherwise its resources leak.
+//
+// The methods of the client fail with ErrClientClosed afterwards, calls in
+// progress fail as well, attach sessions with ErrClientClosed. A Shutdown or
+// KillContext in progress still finishes. Closing a closed client does
+// nothing.
+func (c *ConmonClient) Close() error {
+	// Set before taking pidfdMu, so that usePidfd fails once Close got the
+	// lock.
+	if c.closed.Swap(true) {
+		return nil
+	}
+
+	c.attachSessionMu.Lock()
+	sessions := slices.Collect(maps.Values(c.attachSessions))
+	clear(c.attachSessions)
+	c.attachSessionMu.Unlock()
+
+	for _, session := range sessions {
+		session.cancel(ErrClientClosed)
 	}
 
 	c.resetConn()
 
-	return c.stopServer(ctx, serverStopTimeout, false)
+	c.pidfdMu.Lock()
+	defer c.pidfdMu.Unlock()
+
+	return c.closeUnusedPidfdLocked()
+}
+
+// closeAttachStdins closes the stdin of the attach sessions of the client.
+func (c *ConmonClient) closeAttachStdins() {
+	c.attachSessionMu.Lock()
+	sessions := slices.Collect(maps.Values(c.attachSessions))
+	c.attachSessionMu.Unlock()
+
+	for _, session := range sessions {
+		session.closeStdin()
+	}
+}
+
+// usePidfd keeps the pidfd of the server open until release gets called, so
+// that Close cannot close it while the server gets signaled or waited for.
+// It fails with ErrClientClosed after Close.
+func (c *ConmonClient) usePidfd() (release func(), err error) {
+	c.pidfdMu.Lock()
+	defer c.pidfdMu.Unlock()
+
+	if c.closed.Load() {
+		return nil, ErrClientClosed
+	}
+
+	c.pidfdUsers++
+
+	return func() {
+		c.pidfdMu.Lock()
+		defer c.pidfdMu.Unlock()
+
+		c.pidfdUsers--
+
+		if err := c.closeUnusedPidfdLocked(); err != nil {
+			c.logger.WithError(err).Warn("Unable to close server pidfd")
+		}
+	}, nil
+}
+
+// closeUnusedPidfdLocked closes the pidfd once it is not needed anymore,
+// because the server is gone or the client got closed, and nothing uses it.
+// The caller has to hold pidfdMu.
+func (c *ConmonClient) closeUnusedPidfdLocked() error {
+	if c.serverPidfd == nil || c.pidfdUsers > 0 || (!c.serverDone.Load() && !c.closed.Load()) {
+		return nil
+	}
+
+	if err := c.serverPidfd.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		return fmt.Errorf("close server pidfd: %w", err)
+	}
+
+	return nil
 }
 
 const (
@@ -1883,12 +2112,18 @@ func (c *ConmonClient) stopServer(ctx context.Context, timeout time.Duration, ki
 	}
 
 	err := c.waitServerExited(ctx, timeout)
-	if err == nil || !kill || !errors.Is(err, errTimeoutWaitForPid) {
+	if err == nil || !kill || !errors.Is(err, ErrShutdownTimeout) {
 		return err
 	}
 
 	c.logger.Warnf("Server PID %d did not exit on SIGINT, sending SIGKILL", c.serverPID)
 
+	return c.killServer(ctx, timeout)
+}
+
+// killServer sends SIGKILL to the server and waits for it to exit, up to the
+// timeout or until the context ends.
+func (c *ConmonClient) killServer(ctx context.Context, timeout time.Duration) error {
 	if err := c.signalServer(syscall.SIGKILL); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			c.serverGoneForGood()
@@ -1918,7 +2153,7 @@ func (c *ConmonClient) waitServerExited(ctx context.Context, timeout time.Durati
 		}
 
 		if time.Now().After(deadline) {
-			return errTimeoutWaitForPid
+			return ErrShutdownTimeout
 		}
 
 		select {
@@ -1930,11 +2165,10 @@ func (c *ConmonClient) waitServerExited(ctx context.Context, timeout time.Durati
 }
 
 // signalServer sends the signal to the server. It fails with ESRCH if the
-// server exited.
+// server exited. The caller keeps the pidfd open, see usePidfd.
 func (c *ConmonClient) signalServer(sig syscall.Signal) error {
-	// The pidfd only gets closed once the server is gone, also by a
-	// concurrent call while using it. A server known to be gone never gets
-	// signaled through its PID either.
+	// A server known to be gone never gets signaled through its PID, which
+	// may belong to another process by now.
 	if c.serverDone.Load() {
 		return syscall.ESRCH
 	}
@@ -1943,17 +2177,12 @@ func (c *ConmonClient) signalServer(sig syscall.Signal) error {
 		return syscall.Kill(int(c.serverPID), sig) //nolint:wrapcheck // wrapped by the caller
 	}
 
-	err := pidfdSendSignal(c.serverPidfd, sig)
-	if err != nil && c.serverDone.Load() {
-		return syscall.ESRCH
-	}
-
-	return err
+	return pidfdSendSignal(c.serverPidfd, sig)
 }
 
-// serverExited reports whether the server exited or is a zombie.
+// serverExited reports whether the server exited or is a zombie. The caller
+// keeps the pidfd open, see usePidfd.
 func (c *ConmonClient) serverExited() bool {
-	// The pidfd only gets closed once the server is gone, see signalServer.
 	if c.serverDone.Load() {
 		return true
 	}
@@ -1964,10 +2193,6 @@ func (c *ConmonClient) serverExited() bool {
 			return exited
 		}
 
-		if c.serverDone.Load() {
-			return true
-		}
-
 		c.logger.WithError(err).Debug("Unable to poll server pidfd, checking its PID")
 	}
 
@@ -1975,10 +2200,15 @@ func (c *ConmonClient) serverExited() bool {
 }
 
 // serverGoneForGood marks a server which is known to be gone, so that it
-// never gets signaled again, and releases its pidfd.
+// never gets signaled again, and releases its pidfd once nothing uses it.
 func (c *ConmonClient) serverGoneForGood() {
-	if !c.serverDone.Swap(true) && c.serverPidfd != nil {
-		c.serverPidfd.Close()
+	c.serverDone.Store(true)
+
+	c.pidfdMu.Lock()
+	defer c.pidfdMu.Unlock()
+
+	if err := c.closeUnusedPidfdLocked(); err != nil {
+		c.logger.WithError(err).Warn("Unable to close server pidfd")
 	}
 }
 
@@ -2002,10 +2232,12 @@ type ReopenLogContainerConfig struct {
 func (c *ConmonClient) ReopenLogContainer(
 	ctx context.Context,
 	cfg *ReopenLogContainerConfig,
-) error {
+) (retErr error) {
 	ctx, span := c.startSpan(ctx, "ReopenLogContainer")
-	if span != nil {
-		defer span.End()
+	defer endSpan(span, &retErr)
+
+	if cfg == nil {
+		return ErrMissingConfig
 	}
 
 	rpcClient, err := c.client(ctx)
@@ -2015,7 +2247,7 @@ func (c *ConmonClient) ReopenLogContainer(
 
 	future, free := rpcClient.ReopenLogContainer(
 		ctx,
-		func(p proto.Conmon_reopenLogContainer_Params) error {
+		func(p proto.Conmon_reopenLogContainer_Params) (err error) {
 			req, err := p.NewRequest()
 			if err != nil {
 				return fmt.Errorf("create request: %w", err)
@@ -2034,9 +2266,9 @@ func (c *ConmonClient) ReopenLogContainer(
 	)
 	defer free()
 
-	result, err := future.Struct()
+	result, err := rpcResult(future)
 	if err != nil {
-		return fmt.Errorf("get result: %w", err)
+		return err
 	}
 
 	if _, err := result.Response(); err != nil {
@@ -2127,10 +2359,12 @@ type NamespacesResponse struct {
 // requested.
 func (c *ConmonClient) CreateNamespaces(
 	ctx context.Context, cfg *CreateNamespacesConfig,
-) (*CreateNamespacesResponse, error) {
+) (_ *CreateNamespacesResponse, retErr error) {
 	ctx, span := c.startSpan(ctx, "CreateNamespaces")
-	if span != nil {
-		defer span.End()
+	defer endSpan(span, &retErr)
+
+	if cfg == nil {
+		return nil, ErrMissingConfig
 	}
 
 	namespaces, err := namespacesToProto(cfg)
@@ -2150,14 +2384,14 @@ func (c *ConmonClient) CreateNamespaces(
 
 	future, free := rpcClient.CreateNamespaces(
 		ctx,
-		func(p proto.Conmon_createNamespaces_Params) error {
+		func(p proto.Conmon_createNamespaces_Params) (err error) {
 			req, err := p.NewRequest()
 			if err != nil {
 				return fmt.Errorf("create request: %w", err)
 			}
 
-			if err := c.setMetadata(ctx, req); err != nil {
-				return err
+			if metadataErr := c.setMetadata(ctx, req); metadataErr != nil {
+				return metadataErr
 			}
 
 			namespaceList, err := req.NewNamespaces(int32(len(namespaces)))
@@ -2198,9 +2432,9 @@ func (c *ConmonClient) CreateNamespaces(
 	)
 	defer free()
 
-	result, err := future.Struct()
+	result, err := rpcResult(future)
 	if err != nil {
-		return nil, fmt.Errorf("get result: %w", err)
+		return nil, err
 	}
 
 	response, err := result.Response()
@@ -2314,7 +2548,7 @@ type ServeExecContainerConfig struct {
 	// control frames of the server do not count. Stdin counts once the
 	// server reads it, stdin which backs up behind a process which does not
 	// read it stops that. The process gets killed then. Zero disables the
-	// timeout. Older servers ignore it.
+	// timeout. Servers without FeatureIdleTimeout ignore it.
 	IdleTimeout time.Duration
 }
 
@@ -2324,14 +2558,23 @@ type ServeExecContainerResult struct {
 	URL string
 }
 
-// ServeExecContainer can be used to execute a command within a running container.
+// ServeExecContainer returns a URL on which the server executes the command
+// within a running container once a client connected. Clients speak the
+// Kubernetes remote command protocols: v5.channel.k8s.io over WebSocket like
+// kubectl, and with FeatureStreamingProtocols also SPDY/3.1 like the kubelet
+// and the older WebSocket versions down to channel.k8s.io.
+//
+// See the Streaming section of the package documentation for how long the
+// URL is good for, and usage.md in the repository for the protocols.
 func (c *ConmonClient) ServeExecContainer(
 	ctx context.Context,
 	cfg *ServeExecContainerConfig,
-) (*ServeExecContainerResult, error) {
+) (_ *ServeExecContainerResult, retErr error) {
 	ctx, span := c.startSpan(ctx, "ServeExecContainer")
-	if span != nil {
-		defer span.End()
+	defer endSpan(span, &retErr)
+
+	if cfg == nil {
+		return nil, ErrMissingConfig
 	}
 
 	if err := c.validateCgroupManager(cfg.CgroupManager); err != nil {
@@ -2345,7 +2588,7 @@ func (c *ConmonClient) ServeExecContainer(
 
 	future, free := rpcClient.ServeExecContainer(
 		ctx,
-		func(p proto.Conmon_serveExecContainer_Params) error {
+		func(p proto.Conmon_serveExecContainer_Params) (err error) {
 			req, err := p.NewRequest()
 			if err != nil {
 				return fmt.Errorf("create request: %w", err)
@@ -2376,9 +2619,9 @@ func (c *ConmonClient) ServeExecContainer(
 	)
 	defer free()
 
-	result, err := future.Struct()
+	result, err := rpcResult(future)
 	if err != nil {
-		return nil, fmt.Errorf("get result: %w", err)
+		return nil, err
 	}
 
 	resp, err := result.Response()
@@ -2424,8 +2667,8 @@ type ServeAttachContainerConfig struct {
 	// pongs, the pings of the server and the answers to them and other
 	// control frames of the server do not count. Stdin counts once the
 	// server reads it, stdin which backs up behind a container which does
-	// not read it stops that. Zero disables the timeout. Older servers
-	// ignore it.
+	// not read it stops that. Zero disables the timeout. Servers without
+	// FeatureIdleTimeout ignore it.
 	IdleTimeout time.Duration
 }
 
@@ -2435,14 +2678,20 @@ type ServeAttachContainerResult struct {
 	URL string
 }
 
-// ServeAttachContainer can be used to attach to a running container.
+// ServeAttachContainer returns a URL on which the server attaches a client to
+// a running container. Clients speak the protocols of ServeExecContainer.
+//
+// See the Streaming section of the package documentation for how long the
+// URL is good for, and usage.md in the repository for the protocols.
 func (c *ConmonClient) ServeAttachContainer(
 	ctx context.Context,
 	cfg *ServeAttachContainerConfig,
-) (*ServeAttachContainerResult, error) {
+) (_ *ServeAttachContainerResult, retErr error) {
 	ctx, span := c.startSpan(ctx, "ServeAttachContainer")
-	if span != nil {
-		defer span.End()
+	defer endSpan(span, &retErr)
+
+	if cfg == nil {
+		return nil, ErrMissingConfig
 	}
 
 	rpcClient, err := c.client(ctx)
@@ -2452,7 +2701,7 @@ func (c *ConmonClient) ServeAttachContainer(
 
 	future, free := rpcClient.ServeAttachContainer(
 		ctx,
-		func(p proto.Conmon_serveAttachContainer_Params) error {
+		func(p proto.Conmon_serveAttachContainer_Params) (err error) {
 			req, err := p.NewRequest()
 			if err != nil {
 				return fmt.Errorf("create request: %w", err)
@@ -2477,9 +2726,9 @@ func (c *ConmonClient) ServeAttachContainer(
 	)
 	defer free()
 
-	result, err := future.Struct()
+	result, err := rpcResult(future)
 	if err != nil {
-		return nil, fmt.Errorf("get result: %w", err)
+		return nil, err
 	}
 
 	resp, err := result.Response()
@@ -2515,18 +2764,25 @@ type ServePortForwardContainerResult struct {
 
 // ServePortForwardContainer returns a URL on which the server forwards ports
 // into the network namespace. Clients connect with SPDY/3.1 and the Kubernetes
-// portforward.k8s.io protocol. Servers without the FeaturePortForward feature
-// return ErrUnsupported.
+// portforward.k8s.io protocol like the kubelet, the same tunneled through a
+// WebSocket like crictl, or with the older WebSocket channel protocol.
+// Servers without the FeaturePortForward feature return ErrUnsupported.
+//
+// See the Streaming section of the package documentation for how long the
+// URL is good for, and usage.md in the repository for the protocols.
 func (c *ConmonClient) ServePortForwardContainer(
 	ctx context.Context,
 	cfg *ServePortForwardContainerConfig,
-) (*ServePortForwardContainerResult, error) {
+) (_ *ServePortForwardContainerResult, retErr error) {
 	ctx, span := c.startSpan(ctx, "ServePortForwardContainer")
-	if span != nil {
-		defer span.End()
+	defer endSpan(span, &retErr)
+
+	// Both errors, a nil config always failed with the latter.
+	if cfg == nil {
+		return nil, fmt.Errorf("%w: %w", ErrMissingConfig, ErrMissingNetNsPath)
 	}
 
-	if cfg == nil || cfg.NetNsPath == "" {
+	if cfg.NetNsPath == "" {
 		return nil, ErrMissingNetNsPath
 	}
 
@@ -2541,7 +2797,7 @@ func (c *ConmonClient) ServePortForwardContainer(
 
 	future, free := rpcClient.ServePortForwardContainer(
 		ctx,
-		func(p proto.Conmon_servePortForwardContainer_Params) error {
+		func(p proto.Conmon_servePortForwardContainer_Params) (err error) {
 			req, err := p.NewRequest()
 			if err != nil {
 				return fmt.Errorf("create request: %w", err)
@@ -2562,9 +2818,9 @@ func (c *ConmonClient) ServePortForwardContainer(
 	)
 	defer free()
 
-	result, err := future.Struct()
+	result, err := rpcResult(future)
 	if err != nil {
-		return nil, fmt.Errorf("get result: %w", err)
+		return nil, err
 	}
 
 	resp, err := result.Response()

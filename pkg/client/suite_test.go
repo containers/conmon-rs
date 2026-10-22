@@ -47,6 +47,19 @@ import (
 const (
 	timeoutUnlimited = 0
 	conmonBinaryKey  = "CONMON_BINARY"
+
+	// specTimeout bounds a spec, so that a call which hangs fails it with
+	// a stack, not the whole suite.
+	specTimeout = 2 * time.Minute
+
+	// sttyLoop prints the size of the terminal, the rows and then the
+	// columns, until it gets killed.
+	sttyLoop = "while true; do /busybox stty size; /busybox sleep 0.1; done"
+
+	// sttyAwait waits until the terminal has 40 rows and 30 columns, then
+	// prints its size.
+	sttyAwait = `while [ "$(/busybox stty size)" != "40 30" ]; do /busybox sleep 0.1; done; ` +
+		"/busybox stty size"
 )
 
 var (
@@ -365,17 +378,23 @@ func (tr *testRunner) defaultConfig(terminal bool) *client.CreateContainerConfig
 	}
 }
 
-func (tr *testRunner) createContainer(sut *client.ConmonClient, terminal bool) {
-	tr.createContainerWithConfig(sut, tr.defaultConfig(terminal))
+func (tr *testRunner) createContainer(
+	ctx context.Context,
+	sut *client.ConmonClient,
+	terminal bool,
+) {
+	tr.createContainerWithConfig(ctx, sut, tr.defaultConfig(terminal))
 }
 
 func (tr *testRunner) createContainerWithConfig(
+	ctx context.Context,
 	sut *client.ConmonClient,
 	cfg *client.CreateContainerConfig,
 ) {
-	resp, err := sut.CreateContainer(context.Background(), cfg)
+	resp, err := sut.CreateContainer(ctx, cfg)
 	Expect(err).To(Succeed())
 	Expect(resp.PID).NotTo(BeEquivalentTo(0))
+	//nolint:contextcheck // the runtime commands do not hang, the polling is bounded
 	Eventually(func() error {
 		return tr.rr.RunCommandCheckOutput(tr.ctrID, "list")
 	}, time.Second*5).Should(Succeed())
@@ -595,6 +614,95 @@ func vmRSSGivenPID(pid uint32) uint32 {
 	Expect(err).To(Succeed())
 
 	return uint32(rssU64)
+}
+
+// serverResources are the open file descriptors and the threads of the
+// server.
+type serverResources struct {
+	fds, threads int
+}
+
+// resourcesOf counts the open file descriptors and the threads of a process.
+func resourcesOf(pid uint32) serverResources {
+	count := func(dir string) int {
+		entries, err := os.ReadDir(fmt.Sprintf("/proc/%d/%s", pid, dir))
+		Expect(err).To(Succeed())
+
+		return len(entries)
+	}
+
+	return serverResources{fds: count("fd"), threads: count("task")}
+}
+
+// withoutDeadline returns a context which ends with ctx but has no deadline.
+// The deadline of a SpecContext would otherwise become the timeout of an
+// ExecSync with timeoutUnlimited.
+func withoutDeadline(ctx context.Context) context.Context {
+	noDeadline, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(ctx, cancel)
+
+	DeferCleanup(func() {
+		stop()
+		cancel()
+	})
+
+	return noDeadline
+}
+
+// expectNoResourceLeak waits until the server holds no more file descriptors
+// and threads than before. The threads of the blocking pool of the server
+// linger for 10 seconds once they are idle, so that may take a while.
+func expectNoResourceLeak(pid uint32, before serverResources) {
+	Eventually(func(g Gomega) {
+		now := resourcesOf(pid)
+		GinkgoWriter.Printf("Server resources %+v, before %+v\n", now, before)
+		g.Expect(now.fds).To(BeNumerically("<=", before.fds), "open file descriptors")
+		g.Expect(now.threads).To(BeNumerically("<=", before.threads), "threads")
+	}).WithTimeout(45 * time.Second).WithPolling(500 * time.Millisecond).Should(Succeed())
+}
+
+// closedPort returns a local port which refuses connections. Unlike the
+// port of a closed listener, nothing else can take it while the spec runs: a
+// socket stays bound to it without listening until the spec ends.
+func closedPort() int {
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	Expect(err).To(Succeed())
+	DeferCleanup(unix.Close, fd)
+
+	Expect(unix.Bind(fd, &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}})).To(Succeed())
+
+	addr, err := unix.Getsockname(fd)
+	Expect(err).To(Succeed())
+
+	inet4, ok := addr.(*unix.SockaddrInet4)
+	Expect(ok).To(BeTrue())
+
+	return inet4.Port
+}
+
+// sizeQueue hands the terminal sizes sent to it to a streaming client, until
+// it gets closed.
+type sizeQueue chan remotecommand.TerminalSize
+
+// terminalSizes returns a closed queue with the sizes.
+func terminalSizes(sizes ...remotecommand.TerminalSize) sizeQueue {
+	queue := make(sizeQueue, len(sizes))
+	for _, size := range sizes {
+		queue <- size
+	}
+
+	close(queue)
+
+	return queue
+}
+
+func (q sizeQueue) Next() *remotecommand.TerminalSize {
+	size, ok := <-q
+	if !ok {
+		return nil
+	}
+
+	return &size
 }
 
 // cacheBusyBox downloads busybox once per user. A provided BUSYBOX_BINARY
@@ -835,6 +943,7 @@ func testName(testName string, terminal bool) string {
 }
 
 func testAttach(
+	ctx context.Context,
 	sut *client.ConmonClient,
 	cfg *client.AttachConfig,
 	stdinWriter io.Writer,
@@ -848,7 +957,7 @@ func testAttach(
 	attachErr := make(chan error, 1)
 
 	go func() {
-		attachErr <- sut.AttachContainer(context.Background(), cfg)
+		attachErr <- sut.AttachContainer(ctx, cfg)
 	}()
 
 	func() {
@@ -1105,15 +1214,15 @@ func startPortForward(dialer httpstream.Dialer, port int) (local uint16, stop fu
 
 	select {
 	case <-readyChan:
-	case err := <-errChan:
-		return 0, nil, fmt.Errorf("forward ports: %w", err)
+	case forwardErr := <-errChan:
+		return 0, nil, fmt.Errorf("forward ports: %w", forwardErr)
 	}
 
 	stop = func() {
 		close(stopChan)
 
-		if err := <-errChan; err != nil {
-			GinkgoWriter.Printf("Port forwarding ended: %v\n", err)
+		if forwardErr := <-errChan; forwardErr != nil {
+			GinkgoWriter.Printf("Port forwarding ended: %v\n", forwardErr)
 		}
 	}
 
@@ -1139,11 +1248,11 @@ func portForwardRoundTrip(local uint16, payload string) (string, error) {
 	}
 	defer conn.Close()
 
-	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+	if err = conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		return "", fmt.Errorf("set deadline: %w", err)
 	}
 
-	if _, err := conn.Write([]byte(payload)); err != nil {
+	if _, err = conn.Write([]byte(payload)); err != nil {
 		return "", fmt.Errorf("write payload: %w", err)
 	}
 
@@ -1152,7 +1261,7 @@ func portForwardRoundTrip(local uint16, payload string) (string, error) {
 		return "", fmt.Errorf("%w: %T", errNotTCP, conn)
 	}
 
-	if err := tcpConn.CloseWrite(); err != nil {
+	if err = tcpConn.CloseWrite(); err != nil {
 		return "", fmt.Errorf("close sending side: %w", err)
 	}
 

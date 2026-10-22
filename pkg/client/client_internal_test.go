@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -11,7 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -20,6 +21,10 @@ import (
 	"capnproto.org/go/capnp/v3/rpc"
 	"github.com/containers/conmon-rs/internal/proto"
 	"github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"go.podman.io/storage/pkg/idtools"
 )
 
@@ -59,17 +64,25 @@ func newTestConn(t *testing.T, withBootstrap bool) (*rpcConn, net.Conn) {
 	return conn, remote
 }
 
-// waitBroken waits until the connection got marked as broken.
-func waitBroken(t *testing.T, conn *rpcConn) {
+// waitFor polls the condition until it holds, the test fails with the
+// message if it does not within 10 seconds.
+func waitFor(t *testing.T, message string, condition func() bool) {
 	t.Helper()
 
-	for deadline := time.Now().Add(10 * time.Second); !conn.broken.Load(); {
+	for deadline := time.Now().Add(10 * time.Second); !condition(); {
 		if time.Now().After(deadline) {
-			t.Fatal("connection not marked as broken")
+			t.Fatal(message)
 		}
 
 		time.Sleep(time.Millisecond)
 	}
+}
+
+// waitBroken waits until the connection got marked as broken.
+func waitBroken(t *testing.T, conn *rpcConn) {
+	t.Helper()
+
+	waitFor(t, "connection not marked as broken", conn.broken.Load)
 }
 
 func TestRPCConnUsable(t *testing.T) {
@@ -310,9 +323,10 @@ func TestNewKeepsServerWhichDoesNotAnswer(t *testing.T) {
 }
 
 // serveClosingSocket listens on the socket of the run directory and closes
-// every connection right away, like a server which shuts down. It returns a
-// function which stops listening.
-func serveClosingSocket(t *testing.T, dir string) func() {
+// every connection right away, like a server which shuts down. With
+// stopAfterFirst, it stops listening once it closed the first connection,
+// like a server which exits. It returns the number of accepted connections.
+func serveClosingSocket(t *testing.T, dir string, stopAfterFirst bool) *atomic.Int32 {
 	t.Helper()
 
 	listener, err := (&net.ListenConfig{}).Listen(
@@ -323,6 +337,8 @@ func serveClosingSocket(t *testing.T, dir string) func() {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+
+	var accepted atomic.Int32
 
 	done := make(chan struct{})
 
@@ -335,17 +351,23 @@ func serveClosingSocket(t *testing.T, dir string) func() {
 				return
 			}
 
+			accepted.Add(1)
 			conn.Close()
+
+			if stopAfterFirst {
+				listener.Close()
+
+				return
+			}
 		}
 	}()
 
-	stop := sync.OnceFunc(func() {
+	t.Cleanup(func() {
 		listener.Close()
 		<-done
 	})
-	t.Cleanup(stop)
 
-	return stop
+	return &accepted
 }
 
 func TestNewReplacesServerWhichGoesAway(t *testing.T) {
@@ -362,21 +384,24 @@ func TestNewReplacesServerWhichGoesAway(t *testing.T) {
 		return err
 	}
 
-	// A server which shuts down and stops accepting a bit later. Without a
-	// server binary, the start fails, which shows that New tried.
+	// A server which closes the connection of the probe and stops accepting.
+	// Without a server binary, the start fails, which shows that New tried.
 	dir := t.TempDir()
-	stop := serveClosingSocket(t, dir)
-
-	time.AfterFunc(500*time.Millisecond, stop)
+	accepted := serveClosingSocket(t, dir, true)
 
 	if err := newClient(dir); err == nil || errors.Is(err, ErrServerNotResponding) ||
 		!strings.Contains(err.Error(), "start server") {
 		t.Fatalf("got error %v, want a failed server start", err)
 	}
 
+	// The probe reached the server, it did not just find no socket.
+	if n := accepted.Load(); n != 1 {
+		t.Fatalf("server accepted %d connections, want 1", n)
+	}
+
 	// One which keeps accepting is not replaced.
 	dir = t.TempDir()
-	serveClosingSocket(t, dir)
+	serveClosingSocket(t, dir, false)
 
 	if err := newClient(dir); !errors.Is(err, ErrServerNotResponding) {
 		t.Fatalf("got error %v, want %v", err, ErrServerNotResponding)
@@ -425,12 +450,12 @@ func TestNewStartsServerOnlyWithoutListener(t *testing.T) {
 	// The socket of a server which crashed refuses the connection.
 	stale := t.TempDir()
 
-	listener, err := net.ListenUnix(
+	listener, listenErr := net.ListenUnix(
 		"unix",
 		&net.UnixAddr{Name: filepath.Join(stale, socketName), Net: "unix"},
 	)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+	if listenErr != nil {
+		t.Fatalf("listen: %v", listenErr)
 	}
 
 	listener.SetUnlinkOnClose(false)
@@ -465,7 +490,7 @@ func TestNewStartsServerOnlyWithoutListener(t *testing.T) {
 	runDir := filepath.Join(locked, "run")
 	cl := &ConmonClient{runDir: runDir, logger: logrus.New()}
 
-	_, err = cl.connectRunningServer(t.Context())
+	_, err := cl.connectRunningServer(t.Context())
 	if !errors.Is(err, os.ErrPermission) || errors.Is(err, ErrServerNotResponding) {
 		t.Fatalf("got error %v, want a permission error", err)
 	}
@@ -765,14 +790,7 @@ func TestProcessExited(t *testing.T) {
 
 	// Not reaped until the zombie got checked, so the PID cannot get reused
 	// before. The zombie does not run anymore either.
-	deadline := time.Now().Add(10 * time.Second)
-	for !processExited(pid) {
-		if time.Now().After(deadline) {
-			t.Fatal("zombie not reported as exited")
-		}
-
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitFor(t, "zombie not reported as exited", func() bool { return processExited(pid) })
 
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("wait for command: %v", err)
@@ -818,20 +836,11 @@ func startTestServer(t *testing.T, ignoreInt bool) *exec.Cmd {
 
 	// The shell sets up the trap before it execs, wait for that.
 	if ignoreInt {
-		deadline := time.Now().Add(10 * time.Second)
-
-		for {
+		waitFor(t, "test server did not exec", func() bool {
 			comm, err := os.ReadFile("/proc/" + strconv.Itoa(cmd.Process.Pid) + "/comm")
-			if err == nil && strings.TrimSpace(string(comm)) == "sleep" {
-				break
-			}
 
-			if time.Now().After(deadline) {
-				t.Fatal("test server did not exec")
-			}
-
-			time.Sleep(10 * time.Millisecond)
-		}
+			return err == nil && strings.TrimSpace(string(comm)) == "sleep"
+		})
 	}
 
 	return cmd
@@ -881,9 +890,9 @@ func TestShutdown(t *testing.T) {
 				false,
 			); !errors.Is(
 				err,
-				errTimeoutWaitForPid,
+				ErrShutdownTimeout,
 			) {
-				t.Fatalf("got error %v, want %v", err, errTimeoutWaitForPid)
+				t.Fatalf("got error %v, want %v", err, ErrShutdownTimeout)
 			}
 
 			if err := c.stopServer(t.Context(), 200*time.Millisecond, true); err != nil {
@@ -996,21 +1005,20 @@ func TestSetServerPID(t *testing.T) {
 func pidFromFile(t *testing.T, dir string) int {
 	t.Helper()
 
-	deadline := time.Now().Add(10 * time.Second)
+	var pid int
 
-	for {
+	waitFor(t, "no PID file", func() bool {
 		data, err := os.ReadFile(filepath.Join(dir, pidFileName))
-		if pid, convErr := strconv.Atoi(strings.TrimSpace(string(data))); err == nil &&
-			convErr == nil {
-			return pid
+		if err != nil {
+			return false
 		}
 
-		if time.Now().After(deadline) {
-			t.Fatal("no PID file")
-		}
+		pid, err = strconv.Atoi(strings.TrimSpace(string(data)))
 
-		time.Sleep(10 * time.Millisecond)
-	}
+		return err == nil
+	})
+
+	return pid
 }
 
 // killOnCleanup kills a process which the test did not start itself.
@@ -1207,6 +1215,7 @@ func TestNewContextCancelled(t *testing.T) {
 			}
 
 			// The binary leaves a file behind if it gets started.
+			//nolint:contextcheck // writes the binary for the whole test
 			binary := writeTestBinary(t, `touch "$4/started"`)
 
 			_, err := NewContext(ctx, &ConmonServerConfig{
@@ -1268,8 +1277,8 @@ func TestRequireServerFeature(t *testing.T) {
 func TestNewInvalidConfig(t *testing.T) {
 	t.Parallel()
 
-	if _, err := New(nil); !errors.Is(err, errConfigUnspecified) {
-		t.Fatalf("got error %v, want %v", err, errConfigUnspecified)
+	if _, err := New(nil); !errors.Is(err, ErrMissingConfig) {
+		t.Fatalf("got error %v, want %v", err, ErrMissingConfig)
 	}
 
 	if _, err := New(&ConmonServerConfig{}); !errors.Is(err, errRunDirUnspecified) {
@@ -1294,9 +1303,15 @@ func writeTestBinary(t *testing.T, script string) string {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "conmonrs")
-	//nolint:gosec // has to be executable
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o700); err != nil {
-		t.Fatalf("write binary: %v", err)
+
+	// Written by another process: a file this process writes can still be
+	// open for writing in a child of a parallel test which did not exec
+	// yet, running it would fail with ETXTBSY then.
+	cmd := exec.CommandContext(t.Context(), "sh", "-c", `cat >"$1" && chmod 700 "$1"`, "sh", path)
+	cmd.Stdin = strings.NewReader("#!/bin/sh\n" + script + "\n")
+
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("write binary: %v: %s", err, output)
 	}
 
 	return path
@@ -1330,5 +1345,558 @@ func TestVersionBinary(t *testing.T) {
 
 	if _, err := Version(binary); err == nil || !strings.Contains(err.Error(), "broken") {
 		t.Fatalf("got error %v, want one with the error output", err)
+	}
+}
+
+// failingConmon is a server which fails ReopenLogContainer with its error.
+type failingConmon struct {
+	proto.Conmon_Server
+
+	err error
+}
+
+func (f failingConmon) ReopenLogContainer(context.Context, proto.Conmon_reopenLogContainer) error {
+	return f.err
+}
+
+func TestContainerNotFound(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		message  string
+		notFound bool
+	}{
+		{"container not found: unknown", true},
+		// The message of older servers.
+		{"child not available", true},
+		{"open log file: permission denied", false},
+		// Only the start of the message counts.
+		{"create container: runtime: container not found", false},
+	} {
+		t.Run(tc.message, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			//nolint:err113 // the message of the server matters
+			server := failingConmon{err: errors.New(tc.message)}
+
+			serveSocket(t, dir, func() *rpc.Options {
+				return &rpc.Options{
+					BootstrapClient: capnp.Client(proto.Conmon_ServerToClient(server)),
+				}
+			})
+
+			c := &ConmonClient{runDir: dir, logger: logrus.New()}
+			t.Cleanup(c.resetConn)
+
+			err := c.ReopenLogContainer(t.Context(), &ReopenLogContainerConfig{ID: "unknown"})
+			if err == nil {
+				t.Fatal("call succeeded")
+			}
+
+			if errors.Is(err, ErrContainerNotFound) != tc.notFound {
+				t.Fatalf("error %v matches %v: %v", err, ErrContainerNotFound, !tc.notFound)
+			}
+
+			// The message stays the one of the server.
+			if !strings.Contains(err.Error(), tc.message) ||
+				strings.Count(err.Error(), "not found") > 1 {
+				t.Fatalf("error %q does not carry the message %q once", err, tc.message)
+			}
+		})
+	}
+}
+
+func TestMissingConfig(t *testing.T) {
+	t.Parallel()
+
+	// Checked before the client connects, no server needed.
+	c := &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
+	ctx := t.Context()
+
+	for name, call := range map[string]func() error{
+		"CreateContainer": func() error {
+			_, err := c.CreateContainer(ctx, nil)
+
+			return err
+		},
+		"ExecSyncContainer": func() error {
+			_, err := c.ExecSyncContainer(ctx, nil)
+
+			return err
+		},
+		"ReopenLogContainer": func() error { return c.ReopenLogContainer(ctx, nil) },
+		"CreateNamespaces": func() error {
+			_, err := c.CreateNamespaces(ctx, nil)
+
+			return err
+		},
+		"ServeExecContainer": func() error {
+			_, err := c.ServeExecContainer(ctx, nil)
+
+			return err
+		},
+		"ServeAttachContainer": func() error {
+			_, err := c.ServeAttachContainer(ctx, nil)
+
+			return err
+		},
+		"ServePortForwardContainer": func() error {
+			_, err := c.ServePortForwardContainer(ctx, nil)
+
+			return err
+		},
+		"AttachContainer":        func() error { return c.AttachContainer(ctx, nil) },
+		"SetWindowSizeContainer": func() error { return c.SetWindowSizeContainer(ctx, nil) },
+	} {
+		if err := call(); !errors.Is(err, ErrMissingConfig) {
+			t.Errorf("%s: got error %v, want %v", name, err, ErrMissingConfig)
+		}
+	}
+
+	// A nil port forward config always failed with the missing path.
+	if _, err := c.ServePortForwardContainer(ctx, nil); !errors.Is(err, ErrMissingNetNsPath) {
+		t.Errorf("got error %v, want %v", err, ErrMissingNetNsPath)
+	}
+}
+
+func TestClose(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	server := startTestServer(t, false)
+
+	serveVersionSocket(t, dir, versionConmon{pid: uint32(server.Process.Pid)})
+
+	c := newTestClient(t, dir, logrus.New())
+	c.setServerPID(uint32(server.Process.Pid))
+
+	if _, err := c.Version(t.Context(), nil); err != nil {
+		t.Fatalf("version: %v", err)
+	}
+
+	// An attach session in progress ends.
+	sessionCtx, _, err := c.startAttachSession(t.Context(), &AttachConfig{})
+	if err != nil {
+		t.Fatalf("start attach session: %v", err)
+	}
+
+	pidfd := c.serverPidfd
+
+	if err = c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if err = context.Cause(sessionCtx); !errors.Is(err, ErrClientClosed) {
+		t.Fatalf("got attach session error %v, want %v", err, ErrClientClosed)
+	}
+
+	// One which gets set up after Close fails.
+	_, _, err = c.startAttachSession(t.Context(), &AttachConfig{})
+	if !errors.Is(err, ErrClientClosed) {
+		t.Fatalf("got error %v starting an attach session, want %v", err, ErrClientClosed)
+	}
+
+	if len(c.attachSessions) != 0 {
+		t.Fatalf("attach sessions stay registered: %d", len(c.attachSessions))
+	}
+
+	if c.conn != nil {
+		t.Fatal("connection still open")
+	}
+
+	if pidfd != nil && !errors.Is(pidfd.Close(), os.ErrClosed) {
+		t.Fatal("pidfd still open")
+	}
+
+	if _, err := c.Version(t.Context(), nil); !errors.Is(err, ErrClientClosed) {
+		t.Fatalf("got error %v, want %v", err, ErrClientClosed)
+	}
+
+	for name, stop := range map[string]func(context.Context) error{
+		"ShutdownContext": c.ShutdownContext,
+		"KillContext":     c.KillContext,
+	} {
+		if err := stop(t.Context()); !errors.Is(err, ErrClientClosed) {
+			t.Fatalf("%s: got error %v, want %v", name, err, ErrClientClosed)
+		}
+	}
+
+	// The server keeps running.
+	if processExited(uint32(server.Process.Pid)) {
+		t.Fatal("server got stopped")
+	}
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("close again: %v", err)
+	}
+}
+
+func TestShutdownClosesAttachStdin(t *testing.T) {
+	t.Parallel()
+
+	cmd := startTestServer(t, false)
+
+	c := newTestClient(t, t.TempDir(), logrus.New())
+	c.setServerPID(uint32(cmd.Process.Pid))
+
+	stdin, stdinWriter := io.Pipe()
+
+	sessionCtx, session, err := c.startAttachSession(
+		t.Context(),
+		&AttachConfig{Streams: AttachStreams{Stdin: &In{stdin}}},
+	)
+	if err != nil {
+		t.Fatalf("start attach session: %v", err)
+	}
+	defer c.endAttachSession(session)
+
+	if err := c.Shutdown(); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	if _, err := stdinWriter.Write([]byte("x")); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("got error %v writing to the attach stdin, want %v", err, io.ErrClosedPipe)
+	}
+
+	// Unlike Close, Shutdown does not end the session, the exit of the
+	// server does.
+	if err := sessionCtx.Err(); err != nil {
+		t.Fatalf("attach session ended with %v", err)
+	}
+}
+
+func TestKillContext(t *testing.T) {
+	t.Parallel()
+
+	// A server which ignores SIGINT outlives the shutdown, the kill ends it.
+	cmd := startTestServer(t, true)
+
+	c := &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
+	c.setServerPID(uint32(cmd.Process.Pid))
+
+	if err := c.stopServer(
+		t.Context(),
+		200*time.Millisecond,
+		false,
+	); !errors.Is(
+		err,
+		ErrShutdownTimeout,
+	) {
+		t.Fatalf("got error %v, want %v", err, ErrShutdownTimeout)
+	}
+
+	if err := c.KillContext(t.Context()); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+
+	if !processExited(uint32(cmd.Process.Pid)) {
+		t.Fatal("server still running after the kill")
+	}
+
+	// A server which is gone already is no error.
+	if err := c.KillContext(t.Context()); err != nil {
+		t.Fatalf("kill again: %v", err)
+	}
+
+	// A zero PID would signal the process group of the caller.
+	c = &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
+	if err := c.KillContext(t.Context()); !errors.Is(err, errServerPIDUnknown) {
+		t.Fatalf("got error %v, want %v", err, errServerPIDUnknown)
+	}
+}
+
+func TestClientFieldLogger(t *testing.T) {
+	t.Parallel()
+
+	logger := logrus.New()
+	entry := logrus.NewEntry(logrus.New()).WithField("component", "test")
+
+	for _, tc := range []struct {
+		name   string
+		config ConmonServerConfig
+		want   logrus.Ext1FieldLogger
+	}{
+		{"default", ConmonServerConfig{}, logrus.StandardLogger()},
+		{"logger", ConmonServerConfig{ClientLogger: logger}, logger},
+		{"entry", ConmonServerConfig{ClientFieldLogger: entry}, entry},
+		{"entry first", ConmonServerConfig{ClientLogger: logger, ClientFieldLogger: entry}, entry},
+		{"nil entry", ConmonServerConfig{ClientFieldLogger: (*logrus.Entry)(nil)}, logrus.StandardLogger()},
+		{"nil entry and logger", ConmonServerConfig{ClientLogger: logger, ClientFieldLogger: (*logrus.Entry)(nil)}, logger},
+	} {
+		tc.config.ServerRunDir = t.TempDir()
+
+		c, err := tc.config.toClient()
+		if err != nil {
+			t.Fatalf("%s: client: %v", tc.name, err)
+		}
+
+		if c.logger != tc.want {
+			t.Errorf("%s: got logger %v, want %v", tc.name, c.logger, tc.want)
+		}
+	}
+}
+
+// recordingSpan records what endSpan does with it.
+type recordingSpan struct {
+	noop.Span
+
+	err    error
+	status codes.Code
+	ended  bool
+}
+
+func (s *recordingSpan) RecordError(err error, _ ...trace.EventOption) {
+	s.err = err
+}
+
+func (s *recordingSpan) SetStatus(code codes.Code, _ string) {
+	s.status = code
+}
+
+func (s *recordingSpan) End(...trace.SpanEndOption) {
+	s.ended = true
+}
+
+func TestEndSpan(t *testing.T) {
+	t.Parallel()
+
+	var err error
+
+	// Without a tracer there is no span.
+	endSpan(nil, &err)
+
+	span := &recordingSpan{}
+	endSpan(span, &err)
+
+	if !span.ended || span.err != nil || span.status != codes.Unset {
+		t.Fatalf("successful call recorded as %+v", span)
+	}
+
+	err = ErrUnsupported
+	span = &recordingSpan{}
+	endSpan(span, &err)
+
+	if !span.ended || !errors.Is(span.err, ErrUnsupported) || span.status != codes.Error {
+		t.Fatalf("failed call recorded as %+v", span)
+	}
+}
+
+func TestVersionContext(t *testing.T) {
+	t.Parallel()
+
+	binary := writeTestBinary(t, `exec sleep 60`)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+
+	if _, err := VersionContext(ctx, binary); err == nil {
+		t.Fatal("hanging binary succeeded")
+	}
+
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("version took %s", elapsed)
+	}
+}
+
+// newTestClient returns a client for the run directory, which is not
+// connected to a server yet.
+func newTestClient(t *testing.T, dir string, logger logrus.Ext1FieldLogger) *ConmonClient {
+	t.Helper()
+
+	c, err := (&ConmonServerConfig{ServerRunDir: dir}).toClient()
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+
+	c.logger = logger
+
+	return c
+}
+
+// serveAttachSocket listens like the attach socket of a container and sends
+// output on every connection until it gets closed.
+func serveAttachSocket(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "attach")
+
+	listener, err := net.ListenUnix("unixpacket", &net.UnixAddr{Name: path, Net: "unixpacket"})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	t.Cleanup(func() { listener.Close() })
+
+	go func() {
+		for {
+			conn, err := listener.AcceptUnix()
+			if err != nil {
+				return
+			}
+
+			go func() {
+				defer conn.Close()
+
+				for {
+					if _, err := conn.Write([]byte{attachPipeStdout, 'x'}); err != nil {
+						return
+					}
+
+					time.Sleep(10 * time.Millisecond)
+				}
+			}()
+		}
+	}()
+
+	return path
+}
+
+func TestCloseEndsAttach(t *testing.T) {
+	t.Parallel()
+
+	for _, withStdin := range []bool{false, true} {
+		t.Run("stdin "+strconv.FormatBool(withStdin), func(t *testing.T) {
+			t.Parallel()
+
+			c := newTestClient(t, t.TempDir(), logrus.New())
+
+			stdout, stdoutWriter := io.Pipe()
+			cfg := &AttachConfig{
+				ID:         "id",
+				SocketPath: serveAttachSocket(t),
+				Streams:    AttachStreams{Stdout: &Out{stdoutWriter}},
+			}
+
+			if withStdin {
+				stdin, _ := io.Pipe()
+				cfg.Streams.Stdin = &In{stdin}
+			}
+
+			attachErr := make(chan error, 1)
+
+			go func() { attachErr <- c.attach(t.Context(), cfg) }()
+
+			// The attach is running once the output arrives.
+			if _, err := io.ReadFull(stdout, make([]byte, 1)); err != nil {
+				t.Fatalf("read output: %v", err)
+			}
+
+			// The output stream gets closed.
+			drained := make(chan error, 1)
+
+			go func() {
+				_, err := io.Copy(io.Discard, stdout)
+				drained <- err
+			}()
+
+			if err := c.Close(); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+
+			select {
+			case err := <-attachErr:
+				if !errors.Is(err, ErrClientClosed) {
+					t.Fatalf("got error %v, want %v", err, ErrClientClosed)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("attach still running after Close")
+			}
+
+			if err := <-drained; err != nil {
+				t.Fatalf("drain output: %v", err)
+			}
+		})
+	}
+}
+
+func TestCloseDuringShutdownKeepsPidfd(t *testing.T) {
+	t.Parallel()
+
+	cmd := startTestServer(t, false)
+
+	c := newTestClient(t, t.TempDir(), logrus.New())
+	c.setServerPID(uint32(cmd.Process.Pid))
+
+	if c.serverPidfd == nil {
+		t.Skip("pidfds not supported")
+	}
+
+	// Shutdown got past its check for Close, which runs then.
+	release, err := c.usePidfd()
+	if err != nil {
+		t.Fatalf("use pidfd: %v", err)
+	}
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if err := c.stopServer(t.Context(), serverStopTimeout, false); err != nil {
+		t.Fatalf("stop server: %v", err)
+	}
+
+	release()
+
+	if !processExited(uint32(cmd.Process.Pid)) {
+		t.Fatal("server still running after the shutdown")
+	}
+
+	if !errors.Is(c.serverPidfd.Close(), os.ErrClosed) {
+		t.Fatal("pidfd still open")
+	}
+}
+
+func TestCloseWhileWaitingForServer(t *testing.T) {
+	t.Parallel()
+
+	cmd := startTestServer(t, true)
+
+	logger, hook := logrustest.NewNullLogger()
+	logger.SetLevel(logrus.DebugLevel)
+
+	c := newTestClient(t, t.TempDir(), logger)
+	c.setServerPID(uint32(cmd.Process.Pid))
+
+	if c.serverPidfd == nil {
+		t.Skip("pidfds not supported")
+	}
+
+	// The server ignores SIGINT, the shutdown waits for it until the
+	// context ends.
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+
+	stopErr := make(chan error, 1)
+
+	go func() { stopErr <- c.ShutdownContext(ctx) }()
+
+	waitFor(t, "shutdown did not start", func() bool {
+		c.pidfdMu.Lock()
+		defer c.pidfdMu.Unlock()
+
+		return c.pidfdUsers > 0
+	})
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if err := <-stopErr; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got error %v, want %v", err, context.DeadlineExceeded)
+	}
+
+	// The wait kept using the pidfd rather than the PID.
+	for _, entry := range hook.AllEntries() {
+		if strings.Contains(entry.Message, "pidfd") {
+			t.Fatalf("pidfd not usable during the shutdown: %s: %v", entry.Message, entry.Data)
+		}
+	}
+
+	// It got closed once the shutdown was over.
+	if !errors.Is(c.serverPidfd.Close(), os.ErrClosed) {
+		t.Fatal("pidfd still open")
 	}
 }
