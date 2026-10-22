@@ -21,7 +21,7 @@ use std::{
     sync::Arc,
 };
 use tokio::{sync::RwLock, task};
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 
 pub type SharedContainerLog = Arc<RwLock<ContainerLog>>;
 
@@ -569,9 +569,15 @@ impl LogFile {
     ///
     /// The file is not synced to disk: an fsync of a large log can take long
     /// and the data sits in the page cache either way.
+    ///
+    /// A failed flush dropped the buffer already, failing the reopen would
+    /// not bring it back but stop the rotation of the kubelet, which moves
+    /// the rotated file back then.
     pub(crate) async fn reopen(&mut self) -> Result<()> {
         debug!("Reopen log file {}", self.path.display());
-        self.flush().await.context("flush log file before reopen")?;
+        if let Err(e) = self.flush().await {
+            error!("Unable to flush log file before reopen: {:#}", e);
+        }
         self.replace().await
     }
 }
@@ -721,6 +727,24 @@ mod tests {
 
         assert_eq!(fs::read_to_string(file.path())?, "abc\ndef\n");
         assert_eq!(sut.bytes_written, 8);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reopen_after_failed_flush() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("log");
+        let mut sut = LogFile::new(&path, None, None);
+        sut.open().await?;
+        // A file which cannot be written fails the flush.
+        sut.file = Some(Arc::new(std::fs::File::open(&path)?));
+        sut.buf.extend_from_slice(b"lost\n");
+
+        sut.reopen().await?;
+        assert!(sut.buf.is_empty());
+        sut.buf.extend_from_slice(b"new\n");
+        sut.flush().await?;
+        assert_eq!(fs::read_to_string(&path)?, "new\n");
         Ok(())
     }
 

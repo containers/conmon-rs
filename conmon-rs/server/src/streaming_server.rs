@@ -331,7 +331,9 @@ impl StreamingServer {
         mut request: Request,
     ) -> Response {
         async move {
-            info!("Got request for token: {token}");
+            // Only at debug level, a request which gets rejected leaves the
+            // token valid, the log must not hand it out.
+            debug!("Got request for token: {token}");
             // An unknown token comes first, the request cannot succeed.
             if !state.read().await.sessions.contains_key(&token) {
                 error!("Unable to find session for token: {token}");
@@ -452,7 +454,7 @@ impl StreamingServer {
         mut request: Request,
     ) -> Response {
         async move {
-            info!("Got port forward request for token: {token}");
+            debug!("Got port forward request for token: {token}");
             // An unknown token comes first, the request cannot succeed.
             if !state.read().await.port_forwards.contains_key(&token) {
                 error!("Unable to find port forward session for token: {token}");
@@ -1058,11 +1060,7 @@ impl StreamingServer {
                     if !stderr_done {
                         Self::drain_stdio(&stderr_rx, STDERR_BYTE, sender).await?;
                     }
-                    if exit_data.exit_code == 0 {
-                        sender.status(&Status::Success).await?;
-                    } else {
-                        sender.status(&Status::ExitCode(exit_data.exit_code)).await?;
-                    }
+                    sender.status(&Status::exited(exit_data.exit_code)).await?;
                     break
                 },
             }
@@ -1603,7 +1601,9 @@ mod tests {
         LocalSet::new()
             .run_until(async {
                 let (io, _server, mut stream) = attach_session(true, false).await?;
-                stream.write_all(&client_frame(0x2, &[CLOSE_BYTE])).await?;
+                stream
+                    .write_all(&client_frame(0x2, &[CLOSE_BYTE, STDIN_BYTE]))
+                    .await?;
 
                 assert_eq!(
                     server_frame(&mut stream).await?,
@@ -1669,7 +1669,7 @@ mod tests {
             .run_until(async {
                 let (io, _server, mut stream) = attach_session_with(true, true, true).await?;
                 let mut frames = client_frame(0x2, &[STDIN_BYTE, b'a']);
-                frames.extend(client_frame(0x2, &[CLOSE_BYTE]));
+                frames.extend(client_frame(0x2, &[CLOSE_BYTE, STDIN_BYTE]));
                 stream.write_all(&frames).await?;
 
                 // The end of file character follows the stdin, like a user
@@ -1690,7 +1690,9 @@ mod tests {
             .run_until(async {
                 let (io, _server, mut stream) = attach_session(false, true).await?;
                 let attach = io.attach().await;
-                stream.write_all(&client_frame(0x2, &[CLOSE_BYTE])).await?;
+                stream
+                    .write_all(&client_frame(0x2, &[CLOSE_BYTE, STDIN_BYTE]))
+                    .await?;
 
                 // The output still reaches the client.
                 time::timeout(Duration::from_secs(5), async {
@@ -2744,7 +2746,9 @@ mod tests {
                 assert_eq!(server_frame(&mut stream).await?, (0x2, vec![STDOUT_BYTE]));
 
                 // There is no close signal before v5, the session goes on.
-                stream.write_all(&client_frame(0x2, &[CLOSE_BYTE])).await?;
+                stream
+                    .write_all(&client_frame(0x2, &[CLOSE_BYTE, STDIN_BYTE]))
+                    .await?;
                 let attach = io.attach().await;
                 attach.write(IOMessage::Data(Bytes::from_static(b"out"), Pipe::StdOut));
                 assert_eq!(server_frame(&mut stream).await?, (0x2, b"\x01out".to_vec()));

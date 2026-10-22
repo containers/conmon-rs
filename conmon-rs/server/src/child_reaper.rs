@@ -22,14 +22,14 @@ use nix::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fmt::Debug,
     os::fd::{OwnedFd, RawFd},
     path::{Path, PathBuf},
     process::Stdio,
     str,
     sync::{
-        Arc, Mutex,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -515,13 +515,19 @@ impl ChildReaper {
     /// Reap the zombie children which have been unclaimed for `grace`.
     /// `candidates` remembers when a zombie was first seen.
     async fn sweep_orphans(&self, candidates: &mut HashMap<u32, Instant>, grace: Duration) {
-        let zombies = match task::spawn_blocking(Self::zombie_children).await {
+        let (zombies, complete) = match task::spawn_blocking(Self::zombie_children).await {
             Ok(zombies) => zombies,
             Err(e) => {
                 error!("Unable to scan for zombie children: {e}");
                 return;
             }
         };
+        // The children of a thread which exited meanwhile got another thread
+        // as parent, which may have been listed already. The next sweep finds
+        // them.
+        if !complete {
+            self.sweep.notify_one();
+        }
 
         let now = Instant::now();
         candidates.retain(|pid, _| zombies.contains(pid));
@@ -562,32 +568,47 @@ impl ChildReaper {
                 .is_ok_and(|pending| pending.contains(&pid))
     }
 
-    /// The zombie children of this process.
-    fn zombie_children() -> Vec<u32> {
-        Self::children()
-            .into_iter()
-            .filter(|pid| is_zombie(*pid))
-            .collect()
+    /// The zombie children of this process, and whether the list is
+    /// complete, see [`Self::children`].
+    fn zombie_children() -> (Vec<u32>, bool) {
+        let (children, complete) = Self::children();
+        let zombies = children.into_iter().filter(|pid| is_zombie(*pid)).collect();
+        (zombies, complete)
     }
 
     /// The children of all threads of this process. The kernel lists them in
     /// `/proc/self/task/<tid>/children`, which needs `CONFIG_PROC_CHILDREN`,
-    /// fall back to scanning all processes without it.
-    fn children() -> Vec<u32> {
+    /// fall back to scanning all processes without it. The list is not
+    /// complete if a thread exited while listing them.
+    fn children() -> (Vec<u32>, bool) {
+        static PROC_CHILDREN: LazyLock<bool> =
+            LazyLock::new(|| Path::new("/proc/thread-self/children").exists());
+        if !*PROC_CHILDREN {
+            return (Self::children_by_scan(), true);
+        }
         let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
-            return vec![];
+            return (vec![], true);
         };
         let mut children = vec![];
+        let mut complete = true;
         for task in tasks.flatten() {
-            let Ok(list) = std::fs::read_to_string(task.path().join("children")) else {
-                return Self::children_by_scan();
+            // A thread which exited meanwhile took its list along, its
+            // children got another thread as parent.
+            let list = match std::fs::read_to_string(task.path().join("children")) {
+                Ok(list) => list,
+                Err(e) => {
+                    if matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) {
+                        complete = false;
+                    }
+                    continue;
+                }
             };
             children.extend(
                 list.split_whitespace()
                     .filter_map(|pid| pid.parse::<u32>().ok()),
             );
         }
-        children
+        (children, complete)
     }
 
     fn children_by_scan() -> Vec<u32> {
@@ -691,11 +712,20 @@ impl ChildReaper {
         grandchild_pid: u32,
     ) -> Result<()> {
         let mut map = lock(locked_grandchildren)?;
-        for children in map.values_mut() {
+        let mut emptied = None;
+        for (id, children) in map.iter_mut() {
             if let Some(pos) = children.iter().position(|v| v.pid == grandchild_pid) {
                 children.swap_remove(pos);
+                // Containers get a new ID on every restart, keeping the
+                // entries of the old ones would grow the map forever.
+                if children.is_empty() {
+                    emptied = Some(id.clone());
+                }
                 break;
             }
+        }
+        if let Some(id) = emptied {
+            map.remove(&id);
         }
         Ok(())
     }
@@ -902,6 +932,7 @@ impl ReapableChild {
         let forget_rx = exit_tx.subscribe();
         let timeout = self.timeout();
         let stop_token = self.token().clone();
+        let exit_token = stop_token.clone();
         let cleanup_cmd_raw = self.cleanup_cmd.clone();
         let io = self.io.clone();
 
@@ -911,10 +942,12 @@ impl ReapableChild {
                 let mut exit_code: i32 = -1;
                 let mut oomed = false;
                 let mut timed_out = false;
+                // Nobody learns about an OOM without the files, like an exec.
+                // The sender gets dropped then, which ends the receiver.
                 let (oom_tx, mut oom_rx) = tokio::sync::mpsc::channel(1);
-                let oom_watcher = OOMWatcher::new(&stop_token, pid, &oom_exit_paths, oom_tx);
+                let oom_watcher = (!oom_exit_paths.is_empty())
+                    .then(|| OOMWatcher::new(&stop_token, pid, &oom_exit_paths, oom_tx));
 
-                let stop_token_for_timeout = stop_token.clone();
                 let wait_for_exit_code = Self::wait_for_exit_code_async(stop_token, pid)
                     .instrument(debug_span!("wait_for_exit_code"));
 
@@ -942,7 +975,7 @@ impl ReapableChild {
                         timed_out = true;
                         exit_code = -3;
                         kill_grandchild(pid, Signal::SIGKILL);
-                        stop_token_for_timeout.cancel();
+                        exit_token.cancel();
                         // Reap the zombie: the pidfd future was dropped by the
                         // timeout so waitpid never ran. The thread survives
                         // cancellation and will reap once SIGKILL takes effect.
@@ -953,7 +986,11 @@ impl ReapableChild {
                 } else {
                     closure.await;
                 }
-                oom_watcher.stop();
+                // Tells the users of the token that the process is gone.
+                match oom_watcher {
+                    Some(oom_watcher) => oom_watcher.stop(),
+                    None => exit_token.cancel(),
+                }
 
                 // The exit file tells that the log is complete, so let the read
                 // loops write what the process left in the pipes.
@@ -1159,13 +1196,36 @@ impl ReapableChild {
             let span = debug_span!("write_exit_path", path = %path_buf.display());
             async {
                 debug!(code, "Writing exit code to file");
-                if let Err(e) = fs::write(path_buf, &code_str).await {
+                if let Err(e) = Self::write_exit_file(path_buf, &code_str).await {
                     error!("Could not write exit file: {:#}", e);
                 }
             }
             .instrument(span)
             .await;
         }
+    }
+
+    /// Write the exit file at once, like conmon does. CRI-O reads it as soon
+    /// as it gets created, which must not find it empty. CRI-O ignores the
+    /// temporary file, which is not named like a container.
+    async fn write_exit_file(path: &Path, contents: &str) -> Result<()> {
+        let name = path.file_name().context("exit path has no file name")?;
+        let mut tmp_name = OsString::from(".");
+        tmp_name.push(name);
+        tmp_name.push(".tmp");
+        let tmp = path.with_file_name(tmp_name);
+        let result = match fs::write(&tmp, contents).await {
+            Ok(()) => fs::rename(&tmp, path)
+                .await
+                .with_context(|| format!("rename to {}", path.display())),
+            Err(e) => Err(e).with_context(|| format!("write {}", tmp.display())),
+        };
+        if result.is_err()
+            && let Err(e) = fs::remove_file(&tmp).await
+        {
+            debug!("Unable to remove {}: {e}", tmp.display());
+        }
+        result
     }
 }
 
@@ -1230,7 +1290,7 @@ mod tests {
         lock(&reaper.pending)?.insert(claimed);
 
         // Both ways of listing the children find them.
-        assert!(ChildReaper::zombie_children().contains(&orphan));
+        assert!(ChildReaper::zombie_children().0.contains(&orphan));
         assert!(ChildReaper::children_by_scan().contains(&orphan));
 
         // The first sweep only records the candidates.
@@ -1247,7 +1307,7 @@ mod tests {
         assert!(!candidates.contains_key(&orphan));
 
         waitpid(Pid::from_raw(claimed as pid_t), None)?;
-        assert!(!ChildReaper::zombie_children().contains(&claimed));
+        assert!(!ChildReaper::zombie_children().0.contains(&claimed));
         Ok(())
     }
 
@@ -1322,7 +1382,54 @@ mod tests {
             assert_eq!(exit.exit_code, expected, "{script}");
             assert!(!exit.timed_out);
             assert_eq!(std::fs::read_to_string(&exit_path)?, expected.to_string());
+            // The token tells about the exit also without an OOM watcher.
+            assert!(reapable.token().is_cancelled());
         }
+        // No temporary exit file is left behind.
+        assert_eq!(std::fs::read_dir(dir.path())?.count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_exit_file_replaces_at_once() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("id");
+        ReapableChild::write_exit_file(&path, "1").await?;
+        ReapableChild::write_exit_file(&path, "137").await?;
+        assert_eq!(std::fs::read_to_string(&path)?, "137");
+        assert_eq!(std::fs::read_dir(dir.path())?.count(), 1);
+
+        // A missing directory fails without leaving anything behind.
+        let missing = dir.path().join("missing").join("id");
+        assert!(ReapableChild::write_exit_file(&missing, "1").await.is_err());
+        assert!(
+            ReapableChild::write_exit_file(Path::new("/"), "1")
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn forget_grandchild_drops_empty_entries() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let exit_path = dir.path().join("exit");
+        let reapable = |pid| -> Result<ReapableChild> {
+            Ok(ReapableChild::from_child(child(pid, None, &exit_path, &[])?).1)
+        };
+        let map = Arc::new(Mutex::new(HashMap::from([
+            ("a".into(), vec![reapable(1)?, reapable(2)?]),
+            ("b".into(), vec![reapable(3)?]),
+        ])));
+
+        ChildReaper::forget_grandchild(&map, 3)?;
+        ChildReaper::forget_grandchild(&map, 1)?;
+        // Unknown PIDs are ignored.
+        ChildReaper::forget_grandchild(&map, 4)?;
+
+        let map = lock(&map)?;
+        assert_eq!(map.len(), 1);
+        assert_eq!(map["a"].iter().map(|c| c.pid).collect::<Vec<_>>(), [2]);
         Ok(())
     }
 

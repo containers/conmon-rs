@@ -9,12 +9,15 @@ use crate::{
 use anyhow::{Context as _, Result};
 use libc::{TIOCSWINSZ, winsize};
 use nix::{
-    fcntl::{self, FcntlArg, FdFlag, OFlag},
-    sys::termios::{self, OutputFlags, SetArg, SpecialCharacterIndices},
+    cmsg_space,
+    fcntl::{self, FcntlArg, OFlag},
+    sys::{
+        socket::{self, ControlMessageOwned, MsgFlags},
+        termios::{self, OutputFlags, SetArg, SpecialCharacterIndices},
+    },
 };
-use sendfd::RecvWithFd;
 use std::{
-    io::{self, ErrorKind, Write},
+    io::{self, IoSliceMut, Write},
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
         unix::{fs::PermissionsExt, io::RawFd},
@@ -36,7 +39,7 @@ use tokio::{
     task,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, debug_span, error, trace};
+use tracing::{Instrument, debug, debug_span, error};
 
 #[derive(Debug)]
 pub struct Terminal {
@@ -274,64 +277,74 @@ impl Terminal {
     }
 
     async fn handle_fd_receive(mut stream: UnixStream, config: Config) -> Result<()> {
-        loop {
-            if !stream.ready(Interest::READABLE).await?.is_readable() {
-                continue;
+        let fd = match stream
+            .async_io(Interest::READABLE, || Self::recv_fd(stream.as_fd()))
+            .await
+        {
+            Ok(fd) => fd,
+            Err(e) => {
+                error!("Unable to receive data: {}", e);
+                return Err(e.into());
             }
+        };
 
-            let mut data_buffer = [];
-            let mut fd_buffer: [RawFd; 1] = [0];
+        // Allow only one single read
+        let path = config.path();
+        debug!("Removing socket path {}", path.display());
+        fs::remove_file(path).await?;
 
-            match stream.recv_with_fd(&mut data_buffer, &mut fd_buffer) {
-                Ok((_, fd_read)) => {
-                    // SAFETY: the descriptor was just received over the socket
-                    // and nothing else owns it, taking ownership right away
-                    // prevents a leak on the error paths below.
-                    let fd = (fd_read != 0).then(|| unsafe { OwnedFd::from_raw_fd(fd_buffer[0]) });
+        debug!("Shutting down receiver stream");
+        stream.shutdown().await?;
 
-                    // The descriptor arrives without close-on-exec, the
-                    // runtimes and cleanup commands spawned later would
-                    // inherit the terminal of the container otherwise.
-                    if let Some(fd) = &fd {
-                        fcntl::fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
-                            .context("set terminal close-on-exec")?;
-                    }
+        if fd.is_none() {
+            error!("No file descriptor received");
+        }
 
-                    // Allow only one single read
-                    let path = config.path();
-                    debug!("Removing socket path {}", path.display());
-                    fs::remove_file(path).await?;
+        let fd = fd.context("got no file descriptor")?;
 
-                    debug!("Shutting down receiver stream");
-                    stream.shutdown().await?;
+        debug!("Received terminal file descriptor");
 
-                    if fd.is_none() {
-                        error!("No file descriptor received");
-                    }
+        config
+            .connected_tx
+            .send(fd)
+            .await
+            .context("send connected channel")?;
 
-                    let fd = fd.context("got no file descriptor")?;
+        debug!("Shutting down listener thread");
+        Ok(())
+    }
 
-                    debug!("Received terminal file descriptor");
-
-                    config
-                        .connected_tx
-                        .send(fd)
-                        .await
-                        .context("send connected channel")?;
-
-                    debug!("Shutting down listener thread");
-                    return Ok(());
-                }
-                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                    trace!("WouldBlock error, retrying");
-                    continue;
-                }
-                Err(e) => {
-                    error!("Unable to receive data: {}", e);
-                    return Err(e.into());
-                }
+    /// Receive the descriptor of the terminal. It gets close-on-exec right
+    /// away, the runtimes which other threads spawn meanwhile would inherit
+    /// the terminal of the container otherwise.
+    fn recv_fd(socket: BorrowedFd) -> io::Result<Option<OwnedFd>> {
+        // The kernel truncates a message with more descriptors than fit,
+        // which nix reports as an error before they could be closed. One
+        // message carries at most SCM_MAX_FD of them. A server at its limit
+        // of open files gets a truncated message as well, the descriptors
+        // received up to then leak.
+        let mut cmsg_buffer = cmsg_space!([RawFd; 253]);
+        let mut iov = [IoSliceMut::new(&mut [])];
+        let msg = socket::recvmsg::<()>(
+            socket.as_raw_fd(),
+            &mut iov,
+            Some(&mut cmsg_buffer),
+            MsgFlags::MSG_CMSG_CLOEXEC,
+        )?;
+        let mut fds = vec![];
+        for cmsg in msg.cmsgs()? {
+            if let ControlMessageOwned::ScmRights(raw_fds) = cmsg {
+                // SAFETY: the descriptors were just received over the socket
+                // and nothing else owns them, taking ownership right away
+                // closes the ones which are not used.
+                fds.extend(
+                    raw_fds
+                        .into_iter()
+                        .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) }),
+                );
             }
         }
+        Ok(fds.into_iter().next())
     }
 }
 
@@ -423,8 +436,9 @@ impl AsyncWrite for &TerminalFd {
 mod tests {
     use super::*;
     use crate::container_log::ContainerLog;
-    use nix::pty;
+    use nix::{fcntl::FdFlag, pty};
     use sendfd::SendWithFd;
+    use std::io::ErrorKind;
     use std::time::Duration;
 
     #[tokio::test(flavor = "multi_thread")]

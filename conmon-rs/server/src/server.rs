@@ -242,8 +242,9 @@ impl Server {
     }
 
     fn init() -> Result<()> {
+        // The server keeps the C locale, unlike conmon, so that the errors
+        // it returns to CRI-O do not depend on the environment.
         let init = Init::<DefaultInit>::default();
-        init.unset_locale()?;
         init.set_default_umask();
         init.unset_notify_socket();
         init::save_oom_score();
