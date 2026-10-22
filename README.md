@@ -60,16 +60,23 @@ The signature has to come from the ci workflow run of exactly that commit on
 shows that the download is complete. It fails if no checksum got published,
 like for old commits and the releases before v1.1.0, unless `-k` is given.
 
+Without `-t` and `-l`, the script checks with the GitHub API that the latest
+commit of the bucket is on `main`, and warns if it is more than a day older than
+the head of `main`, like when the bucket points back to an old commit. Without
+`jq`, or if the API fails, like because of its rate limit (`GITHUB_TOKEN` raises
+it), the script only warns.
+
 Since v1.1.0, the [GitHub
 releases](https://github.com/containers/conmon-rs/releases) carry the same
 binaries as `conmonrs.$ARCH` with their signatures. To verify a binary by hand,
 for example the one of `$COMMIT` on `main`, which the publish-static workflow
-signed, or the ci workflow for older commits like the ones of v1.1.0 and v1.1.1:
+signed (use `ci.yml` for older commits without attestations, like the ones of
+v1.1.0 and v1.1.1):
 
 ```console
 > cosign verify-blob conmonrs.amd64 \
     --bundle conmonrs.amd64.bundle \
-    --certificate-identity-regexp '^https://github\.com/containers/conmon-rs/\.github/workflows/(publish-static|ci)\.yml@refs/heads/main$' \
+    --certificate-identity https://github.com/containers/conmon-rs/.github/workflows/publish-static.yml@refs/heads/main \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
     --certificate-github-workflow-sha $COMMIT
 ```

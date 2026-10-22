@@ -10,9 +10,13 @@ ARCH=
 COMMIT=
 TAG=
 NO_EXEC=
+MARKER=
 INSECURE=
 OUTPUT=conmonrs
 GITHUB_TOKEN=${GITHUB_TOKEN:-}
+# How much older the commit of the latest-main.txt marker may be than the head
+# of main without a warning, in seconds.
+MAX_MARKER_LAG=86400
 
 usage() {
     printf "Usage: %s [-o PATH] [-t SHA] [-l TAG] [-a ARCH] [-n] [-k] [-h]\n\n" "$(basename "$0")"
@@ -89,7 +93,8 @@ parse_args() {
 
 verify_requirements() {
     CMDS=(curl)
-    # Only resolving a tag queries the GitHub API.
+    # Only resolving a tag needs the GitHub API, the check of the latest commit
+    # of main gets skipped without jq.
     if [[ $TAG != "" ]]; then
         CMDS+=(jq)
     fi
@@ -106,11 +111,87 @@ verify_requirements() {
 }
 
 curl_retry() {
-    ARGS=(-sSfL --retry 5 --retry-delay 3)
-    if [[ $GITHUB_TOKEN != "" && $1 == *".github.com/"* ]]; then
-        ARGS+=(--header "Authorization: Bearer $GITHUB_TOKEN")
+    curl -sSfL --retry 5 --retry-delay 3 "$@"
+}
+
+# Prints the response of a GitHub API request, or why it failed. Returns 2 if
+# the API does not know the object, 1 on other errors, like the rate limit.
+github_api() {
+    # --fail keeps the bodies of retried errors out of the response.
+    local args=(-fsL --retry 5 --retry-delay 3 --retry-max-time 30 -w '\n%{http_code}')
+    if [[ $GITHUB_TOKEN != "" ]]; then
+        args+=(--header "Authorization: Bearer $GITHUB_TOKEN")
     fi
-    curl "${ARGS[@]}" "$@"
+    local response
+    response=$(curl "${args[@]}" "https://api.github.com/repos/$SLUG/$1") || true
+    local status=${response##*$'\n'}
+    if [[ $status == 200 ]]; then
+        printf '%s\n' "${response%$'\n'*}"
+        return
+    fi
+    case $status in
+    404 | 422)
+        echo "HTTP $status"
+        return 2
+        ;;
+    403 | 429) echo "HTTP $status, probably its rate limit, which GITHUB_TOKEN raises" ;;
+    000) echo "no response" ;;
+    *) echo "HTTP $status" ;;
+    esac
+    return 1
+}
+
+# Anyone who can write to the bucket could point the marker to a commit which
+# is not on main anymore, or back to an older one, whose binaries still have
+# valid signatures. Fail for a commit which is not on main. Only warn if it is
+# more than MAX_MARKER_LAG older than the head of main, a new head after a quiet
+# day, whose binaries take a while, or a failing publish job cause that as
+# well. Without jq, or if the API fails, like because of its rate limit, only
+# warn too.
+check_marker() {
+    if ! command -v jq >/dev/null; then
+        echo "WARNING: jq not available, unable to check the latest commit against main" >&2
+        return
+    fi
+    echo "Checking the latest commit against main"
+    # With main as the base, the response lists no commits or files, and has
+    # the head of main and the commit as its base and merge base.
+    local compare rc=0
+    compare=$(github_api "compare/main...$COMMIT") || rc=$?
+    if ((rc == 2)); then
+        echo "The latest commit $COMMIT is not a commit of $SLUG"
+        exit 1
+    elif ((rc != 0)); then
+        echo "WARNING: unable to check the latest commit against main, the GitHub API failed: $compare" >&2
+        return
+    fi
+    case $(jq -r .status <<<"$compare") in
+    identical) return ;;
+    behind) ;;
+    *)
+        echo "The latest commit $COMMIT is not on main"
+        exit 1
+        ;;
+    esac
+    local lag
+    lag=$(jq -r '(.base_commit.commit.committer.date | fromdateiso8601) - (.merge_base_commit.commit.committer.date | fromdateiso8601)' <<<"$compare")
+    if ((lag > MAX_MARKER_LAG)); then
+        echo "WARNING: the latest commit $COMMIT is $((lag / 3600)) hours older than the head of main: the binaries of the newer commits are not published yet or failed to publish, or the bucket points to an old commit" >&2
+    fi
+}
+
+# Prints the response of a GitHub API request about TAG, exits if it fails.
+tag_api() {
+    local response rc=0
+    response=$(github_api "$1") || rc=$?
+    if ((rc == 2)); then
+        echo "Tag $TAG not found in $SLUG" >&2
+        exit 1
+    elif ((rc != 0)); then
+        echo "Unable to resolve tag $TAG, the GitHub API failed: $response" >&2
+        exit 1
+    fi
+    printf '%s\n' "$response"
 }
 
 resolve_commit() {
@@ -118,18 +199,19 @@ resolve_commit() {
         echo "Getting commit from tag"
         # The singular ref endpoint only matches the exact tag, the plural one
         # would return all tags starting with it.
-        TAG_JSON=$(curl_retry "https://api.github.com/repos/$SLUG/git/ref/tags/$TAG")
+        TAG_JSON=$(tag_api "git/ref/tags/$TAG")
         TAG_OBJ_TYPE=$(echo "$TAG_JSON" | jq -r .object.type)
         TAG_OBJ_SHA=$(echo "$TAG_JSON" | jq -r .object.sha)
         if [[ "$TAG_OBJ_TYPE" == "tag" ]]; then
             # Annotated tag: dereference to get the commit SHA
-            COMMIT=$(curl_retry "https://api.github.com/repos/$SLUG/git/tags/$TAG_OBJ_SHA" | jq -r .object.sha)
+            COMMIT=$(tag_api "git/tags/$TAG_OBJ_SHA" | jq -r .object.sha)
         else
             COMMIT=$TAG_OBJ_SHA
         fi
     elif [[ $COMMIT == "" ]]; then
         echo "Getting latest commit on main"
         COMMIT=$(curl_retry "$BASE_URL/latest-main.txt?ts=$(date +%s)")
+        MARKER=1
     fi
 
     # The signature gets checked against the commit, which has to be a full
@@ -137,6 +219,9 @@ resolve_commit() {
     if [[ ! $COMMIT =~ ^[0-9a-f]{40}$ ]]; then
         echo "Not a full length commit SHA: $COMMIT"
         exit 1
+    fi
+    if [[ $MARKER != "" ]]; then
+        check_marker
     fi
     echo "Found commit: $COMMIT"
 }
@@ -147,10 +232,23 @@ verify_signature() {
     echo "Found cosign, verifying binary signature"
     curl_retry "$BASE_URL/$COMMIT/conmonrs.$ARCH.bundle" -o "conmonrs.$ARCH.bundle"
     GIT_REF=refs/heads/main
-    # The publish-static workflow signs, the ci workflow did for older
-    # commits. The ci workflow runs both.
+    # The publish-static workflow signs the commits whose binaries have
+    # attestations, the ci workflow signed the older ones. The ci workflow
+    # runs both.
+    local status workflow
+    status=$(curl -sSL --retry 5 --retry-delay 3 -o /dev/null -w '%{http_code}' -I \
+        "$BASE_URL/$COMMIT/conmonrs.$ARCH.intoto.jsonl")
+    case $status in
+    200) workflow=publish-static.yml ;;
+    404) workflow=ci.yml ;;
+    *)
+        echo "Unable to check for the attestations of commit $COMMIT: HTTP $status"
+        exit 1
+        ;;
+    esac
+    echo "Expecting the signature of the $workflow workflow"
     cosign verify-blob "conmonrs.$ARCH" \
-        --certificate-identity-regexp "^https://github\.com/$SLUG/\.github/workflows/(publish-static|ci)\.yml@$GIT_REF\$" \
+        --certificate-identity "https://github.com/$SLUG/.github/workflows/$workflow@$GIT_REF" \
         --certificate-oidc-issuer https://token.actions.githubusercontent.com \
         --certificate-github-workflow-name ci \
         --certificate-github-workflow-repository "$SLUG" \

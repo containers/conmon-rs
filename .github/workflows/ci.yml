@@ -26,7 +26,7 @@ env:
   FUZZ_TOOLCHAIN: "nightly-2026-10-15"
 # The jobs are named by what they do: lint-* checks the sources,
 # verify-* checks that generated or pinned things are up to date, build-* and
-# test-* build and test the server, publish-* changes the bucket.
+# test-* build and test the server, publish-* changes the bucket or the cache.
 jobs:
   verify-dependencies:
     runs-on: ubuntu-latest
@@ -197,34 +197,26 @@ jobs:
   # scripts/get list them as well. Every architecture gets its own build and
   # publish job: the tests only wait for their build, and each publish only
   # for its own build. The builds have no access to the signing credentials,
-  # see publish-static.yml.
+  # see publish-static.yml, and only read the cache, see publish-cache.
   build-static-amd64:
     uses: ./.github/workflows/build-static.yml
     with:
       arch: amd64
-    secrets:
-      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
   build-static-arm64:
     uses: ./.github/workflows/build-static.yml
     with:
       arch: arm64
-    secrets:
-      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
   build-static-ppc64le:
     uses: ./.github/workflows/build-static.yml
     with:
       arch: ppc64le
-    secrets:
-      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
   build-static-s390x:
     uses: ./.github/workflows/build-static.yml
     with:
       arch: s390x
-    secrets:
-      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
   # Attests, signs and uploads the binaries of main. The tests do not wait for
   # it, an outage of the signing services only holds up the marker.
@@ -239,6 +231,7 @@ jobs:
     with:
       arch: amd64
       digest: ${{ needs.build-static-amd64.outputs.digest }}
+      sbom-digest: ${{ needs.build-static-amd64.outputs.sbom-digest }}
       artifact-id: ${{ needs.build-static-amd64.outputs.artifact-id }}
     secrets:
       GCS_CRIO_SA: ${{ secrets.GCS_CRIO_SA }}
@@ -254,6 +247,7 @@ jobs:
     with:
       arch: arm64
       digest: ${{ needs.build-static-arm64.outputs.digest }}
+      sbom-digest: ${{ needs.build-static-arm64.outputs.sbom-digest }}
       artifact-id: ${{ needs.build-static-arm64.outputs.artifact-id }}
     secrets:
       GCS_CRIO_SA: ${{ secrets.GCS_CRIO_SA }}
@@ -269,6 +263,7 @@ jobs:
     with:
       arch: ppc64le
       digest: ${{ needs.build-static-ppc64le.outputs.digest }}
+      sbom-digest: ${{ needs.build-static-ppc64le.outputs.sbom-digest }}
       artifact-id: ${{ needs.build-static-ppc64le.outputs.artifact-id }}
     secrets:
       GCS_CRIO_SA: ${{ secrets.GCS_CRIO_SA }}
@@ -284,9 +279,38 @@ jobs:
     with:
       arch: s390x
       digest: ${{ needs.build-static-s390x.outputs.digest }}
+      sbom-digest: ${{ needs.build-static-s390x.outputs.sbom-digest }}
       artifact-id: ${{ needs.build-static-s390x.outputs.artifact-id }}
     secrets:
       GCS_CRIO_SA: ${{ secrets.GCS_CRIO_SA }}
+
+  # Pushes the toolchains of main to the cache: the inputs of the static builds,
+  # not the builds which get attested and published. No job needs it, a
+  # failure or a cold cache holds up neither the tests nor the publishing, only
+  # a release of the commit, which waits for the whole run.
+  publish-cache:
+    if: github.repository == 'containers/conmon-rs' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64, ppc64le, s390x]
+    name: publish-cache-${{ matrix.arch }}
+    env:
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+        with:
+          install_url: https://releases.nixos.org/nix/nix-${{ env.NIX_VERSION }}/install
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: conmon-rs
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          pushFilter: "(conmon-rs)"
+      - run: nix build ".#$ARCH.inputDerivation"
 
   test-unit:
     runs-on: ubuntu-latest
@@ -752,7 +776,10 @@ jobs:
         if: matrix.cosign
         with:
           cosign-release: v3.1.4
+      # The token keeps the marker check clear of the rate limit.
       - run: scripts/get
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       # A tag resolves to its commit through the GitHub API.
       - name: Get the latest release
         env:

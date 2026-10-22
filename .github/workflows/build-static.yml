@@ -1,7 +1,7 @@
 name: build-static
-# Builds the static binary of an architecture, without access to any signing
-# credentials. On main, the publish-static workflow attests, signs and uploads
-# the artifact, see there.
+# Builds the static binary of an architecture and its SBOM, without access to
+# any signing or cache credentials. On main, the publish-static workflow
+# attests, signs and uploads the artifact, see there.
 on:
   workflow_call:
     inputs:
@@ -9,17 +9,16 @@ on:
         description: The architecture to build, a package of the flake.
         required: true
         type: string
-    secrets:
-      CACHIX_AUTH_TOKEN:
-        description: Pushes the build to the cachix cache.
-        required: false
     # Tie the publishing to exactly this build.
     outputs:
       digest:
         description: The sha256 of the binary.
         value: ${{ jobs.build.outputs.digest }}
+      sbom-digest:
+        description: The sha256 of the SPDX SBOM of the binary.
+        value: ${{ jobs.build.outputs.sbom-digest }}
       artifact-id:
-        description: The artifact which holds the binary.
+        description: The artifact which holds the binary and its SBOM.
         value: ${{ jobs.build.outputs.artifact-id }}
 permissions: {}
 env:
@@ -31,6 +30,7 @@ jobs:
       contents: read
     outputs:
       digest: ${{ steps.digest.outputs.digest }}
+      sbom-digest: ${{ steps.digest.outputs.sbom-digest }}
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     env:
       ARCH: ${{ inputs.arch }}
@@ -41,14 +41,11 @@ jobs:
       - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
         with:
           install_url: https://releases.nixos.org/nix/nix-${{ env.NIX_VERSION }}/install
-      # The cache holds the cross toolchains, which take an hour to build. Only
-      # main pushes, the attested builds of main substitute what earlier main
-      # builds built, other runs only read. The pushes leave out conmon-rs.
+      # The cache holds the cross toolchains, which take an hour to build. The
+      # build only reads it, the publish-cache job of the ci workflow pushes.
       - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
         with:
           name: conmon-rs
-          authToken: ${{ github.ref == 'refs/heads/main' && secrets.CACHIX_AUTH_TOKEN || '' }}
-          pushFilter: "(conmon-rs)"
       - run: nix build ".#$ARCH"
       - run: file result/bin/conmonrs | grep static | grep stripped
       # Every binary gets executed once, a build which links but does not
@@ -63,11 +60,25 @@ jobs:
             -v "$PWD/result/bin:/smoke:ro" alpine:3.24 /smoke/conmonrs --version)
           echo "$VERSION"
           printf '### conmonrs.%s\n\n~~~\n%s\n~~~\n' "$ARCH" "$VERSION" >>"$GITHUB_STEP_SUMMARY"
+      # The build embeds its dependencies with cargo-auditable, which syft
+      # reads. syft writes SPDX 2.3, SPDX 3 needs a generator which reads them
+      # and attest-sbom support. The SBOM names the file it scanned, which is
+      # the published name of the binary.
+      - name: SBOM
+        run: |
+          mkdir static "$RUNNER_TEMP/sbom"
+          cp result/bin/conmonrs static/conmonrs
+          cp result/bin/conmonrs "$RUNNER_TEMP/sbom/conmonrs.$ARCH"
+          nix shell --inputs-from . nixpkgs#syft --command \
+            syft scan "file:$RUNNER_TEMP/sbom/conmonrs.$ARCH" -q -o spdx-json=static/conmonrs.spdx.json
+          jq -e '.packages | length > 10' static/conmonrs.spdx.json >/dev/null
       - name: Digest
         id: digest
-        run: echo "digest=$(sha256sum result/bin/conmonrs | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
+        run: |
+          echo "digest=$(sha256sum static/conmonrs | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
+          echo "sbom-digest=$(sha256sum static/conmonrs.spdx.json | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
           name: build-static-${{ inputs.arch }}
-          path: result/bin/conmonrs
+          path: static
