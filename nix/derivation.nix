@@ -1,6 +1,7 @@
 { pkgs, rev, lastModified }:
 with pkgs; rustPlatform.buildRustPackage {
-  name = "conmon-rs";
+  pname = "conmon-rs";
+  inherit ((lib.importTOML ../Cargo.toml).workspace.package) version;
   # The source has no .git directory, pass the build metadata in.
   BUILD_COMMIT = rev;
   SOURCE_DATE_EPOCH = lastModified;
@@ -20,14 +21,12 @@ with pkgs; rustPlatform.buildRustPackage {
   RUSTFLAGS = [
     "-Ctarget-feature=+crt-static"
   ] ++ lib.optionals stdenv.hostPlatform.isMusl [
-    "-Cpanic=abort"
     "-Clink-args=-nostartfiles"
     "-Clink-args=-L${libunwind}/lib"
   ];
   stripAllList = [ "bin" ];
   cargoLock = {
     lockFile = lib.cleanSource ./.. + "/Cargo.lock";
-    allowBuiltinFetchGit = true;
   };
 }
 

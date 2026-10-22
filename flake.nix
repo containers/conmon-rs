@@ -31,24 +31,32 @@
           rev = self.rev or self.dirtyRev or "";
           lastModified = toString (self.lastModified or 0);
         };
+
+      # Builds natively if the target is the system itself, including its
+      # libc, cross otherwise.
+      mkTarget =
+        system: config:
+        mkConmonrs (
+          mkPkgs system (
+            nixpkgs.lib.optionalAttrs
+              ((nixpkgs.lib.systems.elaborate config).config != (nixpkgs.lib.systems.elaborate system).config)
+              {
+                crossSystem.config = config;
+              }
+          )
+        );
     in
     {
       packages = forAllSystems (system: {
         default = mkConmonrs (mkPkgs system { });
 
-        amd64 = mkConmonrs (mkPkgs system { });
+        amd64 = mkTarget system "x86_64-unknown-linux-gnu";
 
-        arm64 = mkConmonrs (mkPkgs system {
-          crossSystem.config = "aarch64-unknown-linux-gnu";
-        });
+        arm64 = mkTarget system "aarch64-unknown-linux-gnu";
 
-        ppc64le = mkConmonrs (mkPkgs system {
-          crossSystem.config = "powerpc64le-unknown-linux-gnu";
-        });
+        ppc64le = mkTarget system "powerpc64le-unknown-linux-gnu";
 
-        s390x = mkConmonrs (mkPkgs system {
-          crossSystem.config = "s390x-unknown-linux-musl";
-        });
+        s390x = mkTarget system "s390x-unknown-linux-musl";
       });
     };
 }
