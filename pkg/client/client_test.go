@@ -103,10 +103,10 @@ var _ = Describe("ConmonClient", func() {
 				cfg.Env = []string{"CONMON_TEST_ENV=set"}
 			})
 
-			environ := strings.Split(
-				fileContents(fmt.Sprintf("/proc/%d/environ", sut.PID())),
-				"\x00",
-			)
+			contents, err := fileContents(fmt.Sprintf("/proc/%d/environ", sut.PID()))
+			Expect(err).To(Succeed())
+
+			environ := strings.Split(contents, "\x00")
 			Expect(environ).To(ContainElement("CONMON_TEST_ENV=set"))
 			Expect(environ).NotTo(ContainElement(HavePrefix("PATH=")))
 		})
@@ -227,7 +227,11 @@ var _ = Describe("ConmonClient", func() {
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer()
-				Expect(fileContents(tr.exitPath())).To(Equal("0"))
+				// The container may still run, the exit file comes with its
+				// exit.
+				Eventually(fileContents, 10*time.Second).
+					WithArguments(tr.exitPath()).
+					Should(Equal("0"))
 			})
 
 			It(testName("should write a non-zero exit code to the exit file", terminal), func() {
@@ -240,10 +244,9 @@ var _ = Describe("ConmonClient", func() {
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, terminal)
 				tr.startContainer()
-				Eventually(
-					func() string { return fileContents(tr.exitPath()) },
-					10*time.Second,
-				).Should(Equal("3"))
+				Eventually(fileContents, 10*time.Second).
+					WithArguments(tr.exitPath()).
+					Should(Equal("3"))
 			})
 
 			It(testName("should execute cleanup command when container exits", terminal), func() {
@@ -316,7 +319,8 @@ var _ = Describe("ConmonClient", func() {
 				Expect(err).To(Succeed())
 
 				// stty prints the rows, then the columns.
-				Eventually(func() string { return fileContents(tr.logPath()) }, 10*time.Second).
+				Eventually(fileContents, 10*time.Second).
+					WithArguments(tr.logPath()).
 					Should(ContainSubstring(" 20 10"))
 			})
 
@@ -360,7 +364,8 @@ var _ = Describe("ConmonClient", func() {
 
 				// The second line exceeds the size and rotates the log, so
 				// only it survives.
-				Eventually(func() string { return fileContents(tr.logPath()) }, 5*time.Second).
+				Eventually(fileContents, 5*time.Second).
+					WithArguments(tr.logPath()).
 					Should(ContainSubstring("world"))
 				Expect(fileContents(tr.logPath())).NotTo(ContainSubstring("hello"))
 			})
@@ -378,8 +383,7 @@ var _ = Describe("ConmonClient", func() {
 				tr.createContainerWithConfig(sut, cfg)
 				tr.startContainer()
 
-				logs := fileContents(logFile)
-				Expect(logs).NotTo(BeEmpty())
+				Expect(fileContents(logFile)).NotTo(BeEmpty())
 			})
 		}
 
@@ -440,7 +444,8 @@ var _ = Describe("ConmonClient", func() {
 
 			// The socket existed before the runtime mounted its directory.
 			tr.startContainer()
-			Eventually(func() string { return fileContents(tr.logPath()) }, 5*time.Second).
+			Eventually(fileContents, 5*time.Second).
+				WithArguments(tr.logPath()).
 				Should(ContainSubstring("/run/notify/notify.sock"))
 
 			// The socket goes away with the container.
@@ -662,8 +667,7 @@ var _ = Describe("ConmonClient", func() {
 				})
 				Expect(err).To(Succeed())
 
-				logs := fileContents(tr.logPath())
-				Expect(logs).To(BeEmpty())
+				Expect(fileContents(tr.logPath())).To(BeEmpty())
 			})
 
 			It(testName("should succeed with timeout", terminal), func() {
@@ -1659,7 +1663,10 @@ var _ = Describe("JSONLogger", func() {
 				Eventually(func(g Gomega) []entry {
 					entries = nil
 
-					for line := range strings.Lines(fileContents(tr.logPath())) {
+					contents, err := fileContents(tr.logPath())
+					g.Expect(err).To(Succeed())
+
+					for line := range strings.Lines(contents) {
 						var e entry
 						g.Expect(json.Unmarshal([]byte(line), &e)).To(Succeed(), "line %q", line)
 						entries = append(entries, e)

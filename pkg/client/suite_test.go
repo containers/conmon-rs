@@ -308,11 +308,16 @@ func logLineNumbers(g Gomega, path string) []int {
 	return numbers
 }
 
-func fileContents(path string) string {
+// fileContents reads a file, also for polling with Eventually: a file which
+// does not exist yet gets read again, any other error stops the polling right
+// away.
+func fileContents(path string) (string, error) {
 	contents, err := os.ReadFile(path)
-	Expect(err).To(Succeed())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", StopTrying("read " + path).Wrap(err)
+	}
 
-	return string(contents)
+	return string(contents), err
 }
 
 func (tr *testRunner) defaultConfig(terminal bool) *client.CreateContainerConfig {
