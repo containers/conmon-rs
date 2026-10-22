@@ -12,38 +12,37 @@ use crate::{
     idle::Activity,
     port_forward::{self, PortForward, WebSocketProtocol},
     process::Process,
+    random_id::RandomId,
     remotecommand::{
         ClientEvent, ClientInput, ExpectedStreams, Framing, Output, SPDY_PROTOCOLS, STDERR_BYTE,
         STDOUT_BYTE, SpdyStreams, Status, Stdin, Version, WebSocketInput, spdy_version,
     },
     server::GenerateRuntimeArgs,
     spdy::{self, Connection},
+    web::{self, Response, WebSocket, WebSocketUpgrade},
 };
 use anyhow::{Context, Result, bail};
 use async_channel::Receiver as IOReceiver;
-use axum::{
-    Router,
-    body::Body,
-    extract::{
-        FromRequestParts, Path, Request, State as AxumState,
-        ws::{WebSocket, WebSocketUpgrade},
-    },
-    http::{HeaderMap, HeaderName, StatusCode, header},
-    middleware::{self, Next},
-    response::{IntoResponse, Response},
-    routing::{get, post},
-};
 use bytes::Bytes;
 use futures::stream::StreamExt;
-use hyper::upgrade::OnUpgrade;
-use hyper_util::rt::TokioIo;
+use hyper::{
+    HeaderMap, Method, Request, StatusCode,
+    body::Incoming,
+    header::{self, HeaderName, HeaderValue},
+    server::conn::http1,
+    service::service_fn,
+    upgrade::OnUpgrade,
+};
+use hyper_util::rt::{TokioIo, TokioTimer};
 use libc::pid_t;
 use nix::{sys::signal::Signal, unistd::Pid};
 use serde::Deserialize;
 use std::{
     collections::VecDeque,
+    convert::Infallible,
     fmt::Debug,
     future::{self, Future},
+    io::{self, ErrorKind},
     ops::ControlFlow,
     path::PathBuf,
     sync::{
@@ -65,9 +64,17 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error, info, trace, warn};
-use uuid::Uuid;
 
 const ADDR: &str = "127.0.0.1";
+
+/// How long a client may take to send the head of its request, the default
+/// of hyper, which only applies with a timer. A connection which never sends
+/// one would stay open otherwise.
+const HEADER_READ_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_millis(500)
+} else {
+    Duration::from_secs(30)
+};
 
 const EXEC_PATH: &str = "exec";
 const ATTACH_PATH: &str = "attach";
@@ -134,8 +141,8 @@ pub struct StreamingServer {
 /// client by token.
 #[derive(Debug, Default)]
 struct State {
-    sessions: BoundedHashMap<Uuid, Session>,
-    port_forwards: BoundedHashMap<Uuid, PortForward>,
+    sessions: BoundedHashMap<RandomId, Session>,
+    port_forwards: BoundedHashMap<RandomId, PortForward>,
 }
 
 #[derive(Debug)]
@@ -204,71 +211,123 @@ impl StreamingServer {
         Ok(())
     }
 
-    /// Serve the main streaming server.
-    async fn serve(listener: TcpListener, state: Arc<RwLock<State>>) -> Result<()> {
-        let router = Router::new()
-            .route(&Self::path_for(EXEC_PATH), get(Self::handle))
-            .route(&Self::path_for(ATTACH_PATH), get(Self::handle))
-            // SPDY clients upgrade with a POST.
-            .route(&Self::path_for(EXEC_PATH), post(Self::handle))
-            .route(&Self::path_for(ATTACH_PATH), post(Self::handle))
-            // Clients upgrade port forward requests to SPDY with a POST.
-            .route(
-                &Self::path_for(PORT_FORWARD_PATH),
-                get(Self::handle_port_forward).post(Self::handle_port_forward),
-            )
-            .fallback(Self::fallback)
-            .with_state(state)
-            .layer(middleware::from_fn(Self::trace));
-        axum::serve(listener, router)
-            .await
-            .context("start streaming server")
+    /// Serve the main streaming server, every connection in a task of its
+    /// own.
+    async fn serve(listener: TcpListener, state: Arc<RwLock<State>>) {
+        loop {
+            let stream = match listener.accept().await {
+                Ok((stream, _)) => stream,
+                Err(e) => {
+                    Self::accept_failed(e).await;
+                    continue;
+                }
+            };
+            let state = state.clone();
+            tokio::spawn(async move {
+                let service = service_fn(move |request| {
+                    let state = state.clone();
+                    async move { Ok::<_, Infallible>(Self::route(request, state).await) }
+                });
+                if let Err(e) = http1::Builder::new()
+                    .timer(TokioTimer::new())
+                    .header_read_timeout(HEADER_READ_TIMEOUT)
+                    .serve_connection(TokioIo::new(stream), service)
+                    .with_upgrades()
+                    .await
+                {
+                    trace!("Unable to serve connection: {e}");
+                }
+            });
+        }
     }
 
-    /// Token parse path for the web server.
-    fn path_for(p: &str) -> String {
-        format!("/{p}/") + "{token}"
+    /// A failed accept of a connection which went away right away is no
+    /// problem. Others, like running out of file descriptors, may be over
+    /// after a while, the listener waits a second then.
+    async fn accept_failed(e: io::Error) {
+        if matches!(
+            e.kind(),
+            ErrorKind::ConnectionRefused
+                | ErrorKind::ConnectionAborted
+                | ErrorKind::ConnectionReset
+        ) {
+            return;
+        }
+        error!("Unable to accept streaming connection: {e}");
+        time::sleep(Duration::from_secs(1)).await;
     }
 
-    /// Return the URL for a specific path and Uuid.
-    fn url_for(&self, p: &str, uuid: &Uuid) -> String {
-        format!("http://{ADDR}:{0}/{p}/{uuid}", self.port)
+    /// Return the URL for a specific path and token.
+    fn url_for(&self, p: &str, token: &RandomId) -> String {
+        format!("http://{ADDR}:{0}/{p}/{token}", self.port)
     }
 
-    /// Log every request with its response status.
-    async fn trace(request: Request, next: Next) -> Response {
+    /// Route a request and log it with the status of its response.
+    async fn route(request: Request<Incoming>, state: Arc<RwLock<State>>) -> Response {
         let method = request.method().clone();
         let path = request.uri().path().to_owned();
-        let response = next.run(request).await;
+        let response = Self::dispatch(request, state).await;
         debug!("{method} {path}: {}", response.status());
         response
     }
 
-    /// Fallback response.
-    async fn fallback() -> impl IntoResponse {
-        StatusCode::NOT_FOUND
+    /// Hand a request to the handler of its path, `/<kind>/<token>`. Like a
+    /// GET, a HEAD gets handled, the response has no body then.
+    async fn dispatch(request: Request<Incoming>, state: Arc<RwLock<State>>) -> Response {
+        let Some((kind, token)) = request
+            .uri()
+            .path()
+            .strip_prefix('/')
+            .and_then(|path| path.split_once('/'))
+        else {
+            return web::status(StatusCode::NOT_FOUND);
+        };
+        let port_forward = match kind {
+            EXEC_PATH | ATTACH_PATH => false,
+            PORT_FORWARD_PATH => true,
+            _ => return web::status(StatusCode::NOT_FOUND),
+        };
+        if token.is_empty() || token.contains('/') {
+            return web::status(StatusCode::NOT_FOUND);
+        }
+        if !matches!(*request.method(), Method::GET | Method::HEAD | Method::POST) {
+            let mut response = web::status(StatusCode::METHOD_NOT_ALLOWED);
+            response
+                .headers_mut()
+                .insert(header::ALLOW, HeaderValue::from_static("GET,HEAD,POST"));
+            return response;
+        }
+        let token = match token.parse() {
+            Ok(token) => token,
+            Err(e) => return web::text(StatusCode::BAD_REQUEST, format!("Invalid URL: {e}")),
+        };
+        if port_forward {
+            Self::handle_port_forward(token, state, request).await
+        } else {
+            Self::handle(token, state, request).await
+        }
     }
 
     /// Returns the URL used for the provided exec session.
     pub async fn exec_url(&self, session: ExecSession) -> String {
-        let uuid = Uuid::new_v4();
+        let token = RandomId::new();
         self.state
             .write()
             .await
             .sessions
-            .insert(uuid, Session::Exec(session.into()));
-        self.url_for(EXEC_PATH, &uuid)
+            .insert(token, Session::Exec(session.into()));
+        self.url_for(EXEC_PATH, &token)
     }
 
     /// Returns the URL used for the provided attach session.
     pub async fn attach_url(&self, session: AttachSession) -> String {
-        let uuid = Uuid::new_v4();
+        let token = RandomId::new();
         self.state
             .write()
             .await
             .sessions
-            .insert(uuid, Session::Attach(session));
-        self.url_for(ATTACH_PATH, &uuid)
+            .insert(token, Session::Attach(session));
+        self.url_for(ATTACH_PATH, &token)
     }
 
     /// Returns the URL used for forwarding ports into the network namespace.
@@ -277,21 +336,21 @@ impl StreamingServer {
         netns_path: PathBuf,
         idle_timeout: Option<Duration>,
     ) -> String {
-        let uuid = Uuid::new_v4();
+        let token = RandomId::new();
         self.state
             .write()
             .await
             .port_forwards
-            .insert(uuid, PortForward::new(netns_path, idle_timeout));
-        self.url_for(PORT_FORWARD_PATH, &uuid)
+            .insert(token, PortForward::new(netns_path, idle_timeout));
+        self.url_for(PORT_FORWARD_PATH, &token)
     }
 
     /// Handle an exec or attach request, which the client upgrades to a
     /// WebSocket or SPDY.
     async fn handle(
-        Path(token): Path<Uuid>,
-        AxumState(state): AxumState<Arc<RwLock<State>>>,
-        mut request: Request,
+        token: RandomId,
+        state: Arc<RwLock<State>>,
+        mut request: Request<Incoming>,
     ) -> Response {
         async move {
             // Only at debug level, a request which gets rejected leaves the
@@ -300,36 +359,30 @@ impl StreamingServer {
             // An unknown token comes first, the request cannot succeed.
             if !state.read().await.sessions.contains_key(&token) {
                 error!("Unable to find session for token: {token}");
-                return StatusCode::NOT_FOUND.into_response();
+                return web::status(StatusCode::NOT_FOUND);
             }
             if Self::is_websocket_request(request.headers()) {
                 let requested = Self::websocket_protocols(request.headers());
                 let Some((framing, subprotocol)) =
                     Framing::negotiate(requested.iter().map(String::as_str))
                 else {
-                    return (
+                    return web::text(
                         StatusCode::FORBIDDEN,
                         format!(
                             "unable to upgrade: requested protocol(s) are not supported: {requested:?}"
                         ),
-                    )
-                        .into_response();
+                    );
                 };
-                let (mut parts, _) = request.into_parts();
-                let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+                let ws = match WebSocketUpgrade::from_request(&mut request) {
                     Ok(ws) => ws,
-                    Err(rejection) => return rejection.into_response(),
-                };
-                let ws = match subprotocol {
-                    Some(subprotocol) => ws.protocols([subprotocol]),
-                    None => ws,
+                    Err(rejection) => return *rejection,
                 };
                 let Some(session) = Self::take_session(&state, token).await else {
-                    return StatusCode::NOT_FOUND.into_response();
+                    return web::status(StatusCode::NOT_FOUND);
                 };
                 return ws
+                    .protocol(subprotocol)
                     .max_message_size(MAX_MESSAGE_SIZE)
-                    .max_frame_size(MAX_MESSAGE_SIZE)
                     .on_upgrade(move |socket| {
                         Self::handle_websocket(socket, session, framing)
                             .instrument(debug_span!("websocket", %token))
@@ -343,14 +396,13 @@ impl StreamingServer {
             };
             let version = spdy_version(protocol).unwrap_or(Version::V1);
             let Some(on_upgrade) = request.extensions_mut().remove::<OnUpgrade>() else {
-                return (
+                return web::text(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "unable to upgrade: connection does not support upgrades",
-                )
-                    .into_response();
+                );
             };
             let Some(session) = Self::take_session(&state, token).await else {
-                return StatusCode::NOT_FOUND.into_response();
+                return web::status(StatusCode::NOT_FOUND);
             };
             task::spawn(
                 async move {
@@ -371,7 +423,7 @@ impl StreamingServer {
 
     /// Take the exec or attach session of a valid request. Requests which get
     /// rejected before leave the token, so that the client can retry.
-    async fn take_session(state: &RwLock<State>, token: Uuid) -> Option<Session> {
+    async fn take_session(state: &RwLock<State>, token: RandomId) -> Option<Session> {
         let Some(session) = state.write().await.sessions.remove(&token) else {
             error!("Unable to find session for token: {token}");
             return None;
@@ -388,13 +440,12 @@ impl StreamingServer {
 
     /// The response of a successful SPDY upgrade.
     fn switching_protocols(protocol: &'static str) -> Response {
-        Response::builder()
-            .status(StatusCode::SWITCHING_PROTOCOLS)
-            .header(header::CONNECTION, "Upgrade")
-            .header(header::UPGRADE, SPDY_31)
-            .header(PROTOCOL_VERSION_HEADER, protocol)
-            .body(Body::empty())
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        let mut response = web::status(StatusCode::SWITCHING_PROTOCOLS);
+        let headers = response.headers_mut();
+        headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+        headers.insert(header::UPGRADE, HeaderValue::from_static(SPDY_31));
+        headers.insert(PROTOCOL_VERSION_HEADER, HeaderValue::from_static(protocol));
+        response
     }
 
     /// The WebSocket subprotocols a client requested.
@@ -412,16 +463,16 @@ impl StreamingServer {
 
     /// Handle a port forward request, which the client upgrades to SPDY.
     async fn handle_port_forward(
-        Path(token): Path<Uuid>,
-        AxumState(state): AxumState<Arc<RwLock<State>>>,
-        mut request: Request,
+        token: RandomId,
+        state: Arc<RwLock<State>>,
+        mut request: Request<Incoming>,
     ) -> Response {
         async move {
             debug!("Got port forward request for token: {token}");
             // An unknown token comes first, the request cannot succeed.
             if !state.read().await.port_forwards.contains_key(&token) {
                 error!("Unable to find port forward session for token: {token}");
-                return StatusCode::NOT_FOUND.into_response();
+                return web::status(StatusCode::NOT_FOUND);
             }
             if Self::is_websocket_request(request.headers()) {
                 return Self::upgrade_port_forward_websocket(token, &state, request).await;
@@ -432,14 +483,13 @@ impl StreamingServer {
                 Err(response) => return *response,
             };
             let Some(on_upgrade) = request.extensions_mut().remove::<OnUpgrade>() else {
-                return (
+                return web::text(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "unable to upgrade: connection does not support upgrades",
-                )
-                    .into_response();
+                );
             };
             let Some(session) = Self::take_port_forward(&state, token).await else {
-                return StatusCode::NOT_FOUND.into_response();
+                return web::status(StatusCode::NOT_FOUND);
             };
 
             task::spawn(
@@ -460,7 +510,7 @@ impl StreamingServer {
     /// Take the session of a valid request. Requests which get rejected
     /// before leave the token, so that the client can retry. Another request
     /// may have taken it meanwhile.
-    async fn take_port_forward(state: &RwLock<State>, token: Uuid) -> Option<PortForward> {
+    async fn take_port_forward(state: &RwLock<State>, token: RandomId) -> Option<PortForward> {
         let session = state.write().await.port_forwards.remove(&token);
         if session.is_none() {
             debug!(
@@ -471,55 +521,46 @@ impl StreamingServer {
     }
 
     fn is_websocket_request(headers: &HeaderMap) -> bool {
-        headers
-            .get(header::UPGRADE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+        web::header_has_token(headers, header::UPGRADE, "websocket")
     }
 
     /// Upgrade a port forward request to a WebSocket, which tunnels SPDY or
     /// speaks the channel protocol, by the subprotocols of the client.
     async fn upgrade_port_forward_websocket(
-        token: Uuid,
+        token: RandomId,
         state: &RwLock<State>,
-        request: Request,
+        mut request: Request<Incoming>,
     ) -> Response {
         let requested = Self::websocket_protocols(request.headers());
         let Some((protocol, subprotocol)) =
             WebSocketProtocol::negotiate(requested.iter().map(String::as_str))
         else {
-            return (
+            return web::text(
                 StatusCode::FORBIDDEN,
                 format!(
                     "unable to upgrade: requested protocol(s) are not supported: {requested:?}"
                 ),
-            )
-                .into_response();
+            );
         };
         let ports = match protocol {
             WebSocketProtocol::SpdyTunnel => vec![],
             WebSocketProtocol::Channels { .. } => {
                 match PortForward::query_ports(request.uri().query()) {
                     Ok(ports) => ports,
-                    Err(e) => return (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
+                    Err(e) => return web::text(StatusCode::BAD_REQUEST, format!("{e:#}")),
                 }
             }
         };
 
-        let (mut parts, _) = request.into_parts();
-        let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+        let ws = match WebSocketUpgrade::from_request(&mut request) {
             Ok(ws) => ws,
-            Err(rejection) => return rejection.into_response(),
-        };
-        let ws = match subprotocol {
-            Some(subprotocol) => ws.protocols([subprotocol]),
-            None => ws,
+            Err(rejection) => return *rejection,
         };
         let Some(session) = Self::take_port_forward(state, token).await else {
-            return StatusCode::NOT_FOUND.into_response();
+            return web::status(StatusCode::NOT_FOUND);
         };
-        ws.max_message_size(MAX_MESSAGE_SIZE)
-            .max_frame_size(MAX_MESSAGE_SIZE)
+        ws.protocol(subprotocol)
+            .max_message_size(MAX_MESSAGE_SIZE)
             .on_upgrade(move |socket| {
                 session
                     .serve_websocket(socket, protocol, ports)
@@ -540,17 +581,13 @@ impl StreamingServer {
                 .into_iter()
                 .filter_map(|v| v.to_str().ok())
         };
-        let contains = |name, value: &str| {
-            values(name).any(|v| v.to_ascii_lowercase().contains(&value.to_ascii_lowercase()))
-        };
-        if !contains(header::CONNECTION, "upgrade") || !contains(header::UPGRADE, SPDY_31) {
-            return Err(Box::new(
-                (
-                    StatusCode::BAD_REQUEST,
-                    "unable to upgrade: missing WebSocket or SPDY/3.1 upgrade headers in request",
-                )
-                    .into_response(),
-            ));
+        if !web::header_has_token(headers, header::CONNECTION, "upgrade")
+            || !web::header_has_token(headers, header::UPGRADE, SPDY_31)
+        {
+            return Err(Box::new(web::text(
+                StatusCode::BAD_REQUEST,
+                "unable to upgrade: missing WebSocket or SPDY/3.1 upgrade headers in request",
+            )));
         }
 
         let protocols: Vec<_> = values(PROTOCOL_VERSION_HEADER)
@@ -559,29 +596,25 @@ impl StreamingServer {
             .filter(|p| !p.is_empty())
             .collect();
         if protocols.is_empty() {
-            return Err(Box::new(
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("unable to upgrade: header {PROTOCOL_VERSION_HEADER} is required"),
-                )
-                    .into_response(),
-            ));
+            return Err(Box::new(web::text(
+                StatusCode::BAD_REQUEST,
+                format!("unable to upgrade: header {PROTOCOL_VERSION_HEADER} is required"),
+            )));
         }
         protocols
             .iter()
             .find_map(|protocol| supported.iter().find(|s| *s == protocol).copied())
             .ok_or_else(|| {
-                let mut response = (
+                let mut response = web::text(
                     StatusCode::FORBIDDEN,
                     format!(
                         "unable to upgrade: unable to negotiate protocol: client supports {protocols:?}, server accepts {supported:?}"
                     ),
-                )
-                    .into_response();
+                );
                 for protocol in supported {
                     response.headers_mut().append(
                         ACCEPTED_PROTOCOL_VERSIONS_HEADER,
-                        header::HeaderValue::from_static(protocol),
+                        HeaderValue::from_static(protocol),
                     );
                 }
                 Box::new(response)
@@ -1540,12 +1573,46 @@ mod tests {
         spdy::testing::{Client, Frame, Headers},
     };
     use anyhow::{anyhow, bail};
-    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+    use data_encoding::BASE64;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpStream,
         task::LocalSet,
     };
+
+    #[test]
+    fn upgrade_headers_count_in_all_values() {
+        let mut headers = HeaderMap::new();
+        headers.append(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+        headers.append(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+        headers.append(header::UPGRADE, HeaderValue::from_static("spdy/3.1"));
+        headers.append(
+            PROTOCOL_VERSION_HEADER,
+            HeaderValue::from_static("v5.channel.k8s.io"),
+        );
+        headers.append(
+            PROTOCOL_VERSION_HEADER,
+            HeaderValue::from_static("v4.channel.k8s.io"),
+        );
+        assert!(matches!(
+            StreamingServer::spdy_handshake(&headers, &["v4.channel.k8s.io"]),
+            Ok("v4.channel.k8s.io")
+        ));
+        assert!(!StreamingServer::is_websocket_request(&headers));
+
+        headers.append(header::UPGRADE, HeaderValue::from_static("h2c, WebSocket"));
+        assert!(StreamingServer::is_websocket_request(&headers));
+
+        // A token which only contains the protocol is none.
+        let mut headers = HeaderMap::new();
+        headers.append(header::CONNECTION, HeaderValue::from_static("upgrade"));
+        headers.append(header::UPGRADE, HeaderValue::from_static("SPDY/3.10"));
+        let Err(response) = StreamingServer::spdy_handshake(&headers, &["v4.channel.k8s.io"])
+        else {
+            panic!("upgraded to SPDY/3.10");
+        };
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 
     const PROTOCOL_V5: &str = "v5.channel.k8s.io";
 
@@ -2461,6 +2528,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connections_without_a_request_get_closed() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+                let mut rest = vec![];
+                time::timeout(4 * HEADER_READ_TIMEOUT, stream.read_to_end(&mut rest))
+                    .await
+                    .context("connection still open")??;
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
     async fn port_forward_over_websocket_reports_errors() -> Result<()> {
         LocalSet::new()
             .run_until(async {
@@ -3154,7 +3237,7 @@ mod tests {
                     .await;
                 let unknown = url.replace(
                     url.rsplit('/').next().context("token")?,
-                    &Uuid::new_v4().to_string(),
+                    &RandomId::new().to_string(),
                 );
                 let (response, _) = upgrade(&server, &unknown, "POST", "").await?;
                 assert!(response.starts_with("http/1.1 404"), "{response}");
@@ -3269,7 +3352,7 @@ mod tests {
                 // session started.
                 assert_eq!(server_frame(&mut stream).await?, (0x1, b"1".to_vec()));
 
-                let stdin = format!("0{}", BASE64.encode("in"));
+                let stdin = format!("0{}", BASE64.encode(b"in"));
                 stream
                     .write_all(&client_frame(0x1, stdin.as_bytes()))
                     .await?;
@@ -3280,7 +3363,7 @@ mod tests {
                 attach.write(IOMessage::Data(Bytes::from_static(b"out"), Pipe::StdOut));
                 assert_eq!(
                     server_frame(&mut stream).await?,
-                    (0x1, format!("1{}", BASE64.encode("out")).into_bytes())
+                    (0x1, format!("1{}", BASE64.encode(b"out")).into_bytes())
                 );
 
                 // The v4 status is JSON, encoded like the output.

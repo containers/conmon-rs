@@ -2,6 +2,7 @@ use crate::{
     attach::{AttachOutput, SharedContainerAttach},
     child::sleep_until,
     container_log::SharedContainerLog,
+    random_id::RandomId,
     streams::Streams,
     tail::Tail,
     terminal::Terminal,
@@ -455,7 +456,7 @@ impl ContainerIO {
         let dir = directory
             .map(Path::to_path_buf)
             .unwrap_or_else(std::env::temp_dir);
-        let unique = uuid::Uuid::new_v4();
+        let unique = RandomId::new();
         dir.join(format!("{prefix}{unique}{suffix}"))
     }
 

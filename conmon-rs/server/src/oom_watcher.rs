@@ -1,35 +1,34 @@
 use crate::mutex::lock;
 use anyhow::{Context, Result, bail};
 use nix::sys::{
+    eventfd::{EfdFlags, EventFd},
+    inotify::{AddWatchFlags, InitFlags, Inotify, InotifyEvent, WatchDescriptor},
     signal::Signal,
     statfs::{FsType, statfs},
-};
-use notify::{
-    Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
-    event::{AccessKind, AccessMode},
 };
 use std::{
     collections::HashMap,
     fs::File as StdFile,
     io::{self, BufRead, BufReader},
-    os::fd::AsRawFd,
+    os::fd::{AsFd, AsRawFd, RawFd},
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
-        Arc, LazyLock, Mutex, Weak,
-        atomic::{AtomicU64, Ordering},
+        Arc, LazyLock, Mutex, PoisonError, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    task::{Context as TaskContext, Poll, ready},
 };
 use tokio::{
     fs::{File, OpenOptions},
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ErrorKind},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ErrorKind, Interest, ReadBuf, unix::AsyncFd},
     runtime::Handle,
     sync::mpsc::{Receiver, Sender, channel},
-    task,
+    task::{self, JoinHandle},
     time::{self, Duration},
 };
-use tokio_eventfd::EventFd;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, debug_span, error, trace};
+use tracing::{Instrument, debug, debug_span, error, trace, warn};
 
 pub const CGROUP2_SUPER_MAGIC: FsType = FsType(libc::CGROUP2_SUPER_MAGIC as _);
 
@@ -222,7 +221,7 @@ impl OOMWatcher {
         let oom_cgroup_file = File::open(&memory_cgroup_file_oom_path)
             .await
             .context("opening cgroup oom file")?;
-        let oom_event_fd = EventFd::new(0, false).context("creating eventfd")?;
+        let oom_event_fd = AsyncEventFd::new().context("creating eventfd")?;
 
         let mut event_control = OpenOptions::new()
             .write(true)
@@ -462,38 +461,33 @@ impl OOMWatcher {
     /// processes exited. Then the hierarchical `oom_kill` counter of the
     /// nearest ancestor which outlives it tells whether a kill happened
     /// meanwhile, see [`OOMEvent::possible_oom`]. A removal is no OOM
-    /// on its own. cgroupfs reports it with `IN_IGNORED` only, which notify
-    /// drops, the remove event shows up for other file systems.
+    /// on its own. cgroupfs reports it with `IN_IGNORED` only, which the
+    /// watcher drops, the remove event shows up for other file systems.
     async fn watch_cgroup_v2(token: &CancellationToken, leaf: &Path) -> OOMEvent {
         let mut cgroup = CgroupV2::new(leaf);
 
         let path = cgroup.events.path.to_str();
         debug!(path, "Setup cgroup v2 handling");
 
-        // Adding the watches runs on the blocking pool. The process may exit
-        // in the meantime, which must be reported without waiting for a busy
-        // pool.
-        let mut subscriptions = tokio::select! {
-            _ = token.cancelled() => {
-                debug!("Cancelled while adding the watches");
+        let mut subscriptions = match Self::subscribe(
+            &cgroup.events,
+            cgroup.parent.as_ref(),
+            cgroup.outer.as_ref().map(|(path, _)| path.as_path()),
+        ) {
+            Ok(subscriptions) => subscriptions,
+            // The cgroup may be gone already. Still check for an OOM once the
+            // process exited.
+            Err(e) => {
+                debug!(
+                    "Unable to watch memory events, checking on exit only: {:#}",
+                    e
+                );
+                token.cancelled().await;
                 return cgroup.check_on_exit();
             }
-            res = Self::subscribe(
-                &cgroup.events,
-                cgroup.parent.as_ref(),
-                cgroup.outer.as_ref().map(|(path, _)| path.as_path()),
-            ) => match res {
-                Ok(subscriptions) => subscriptions,
-                // The cgroup may be gone already. Still check for an OOM once
-                // the process exited.
-                Err(e) => {
-                    debug!("Unable to watch memory events, checking on exit only: {:#}", e);
-                    token.cancelled().await;
-                    return cgroup.check_on_exit();
-                }
-            },
         };
 
+        let mut restarts = 0;
         loop {
             tokio::select! {
                 // Memory events may change all the time, for example while
@@ -505,25 +499,37 @@ impl OOMWatcher {
                     debug!("Loop cancelled");
                     return cgroup.check_on_exit();
                 }
-                Some(res) = subscriptions.rx.recv() => {
-                    let event = match res {
-                        Ok(event) => event,
-                        // Watcher errors without a path reach every subscriber of the
-                        // shared watcher, so they must not end the detection for this
-                        // container. The counters get re-read on the next event and on
-                        // exit anyway.
-                        Err(e) => {
-                            debug!("Watch error: {:#}", e);
-                            continue;
+                event = subscriptions.rx.recv() => {
+                    let Some(event) = event else {
+                        // All watches ended, their files got removed, or the
+                        // watcher stopped reading events.
+                        let path = cgroup.events.path.to_str();
+                        if !subscriptions.watcher_failed() || restarts >= Self::MAX_WATCHER_RESTARTS {
+                            debug!(path, "Watches ended, checking once the process exited");
+                            break;
                         }
-                    };
-
-                    // Skip access events since they're not of any interest
-                    if event.kind == EventKind::Access(AccessKind::Open(AccessMode::Any)) {
+                        restarts += 1;
+                        warn!(path, "Watcher of the memory events stopped, watching again");
+                        match Self::subscribe(
+                            &cgroup.events,
+                            cgroup.parent.as_ref(),
+                            cgroup.outer.as_ref().map(|(path, _)| path.as_path()),
+                        ) {
+                            Ok(new) => subscriptions = new,
+                            Err(e) => {
+                                warn!(path, "Unable to watch memory events again, checking on exit only: {:#}", e);
+                                break;
+                            }
+                        }
+                        // The changes while nothing got watched, like the
+                        // kills of siblings, refresh the baselines.
+                        if cgroup.check(true) {
+                            return OOMEvent::new(true);
+                        }
                         continue;
-                    }
+                    };
                     debug!("Got OOM file event: {:?}", event);
-                    if event.kind.is_remove() {
+                    if event.removed {
                         debug!("Got remove event, checking once the process exited");
                         break;
                     }
@@ -545,9 +551,13 @@ impl OOMWatcher {
         cgroup.check_on_exit()
     }
 
+    /// How often an OOM watcher watches its files again on a new shared
+    /// watcher, after the reader of the events failed.
+    const MAX_WATCHER_RESTARTS: u32 = 3;
+
     /// Watch the memory events of the container and, if present, the ones of
     /// its wrapper cgroup.
-    async fn subscribe(
+    fn subscribe(
         events: &MemoryEvents,
         parent_events: Option<&MemoryEvents>,
         pod_events: Option<&Path>,
@@ -556,7 +566,6 @@ impl OOMWatcher {
         let (events_tx, rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
         let subscription = watcher
             .subscribe(&events.path, events_tx.clone())
-            .await
             .context("watch memory events file")?;
 
         let mut parent_subscription = None;
@@ -565,7 +574,7 @@ impl OOMWatcher {
                 "Also watching parent memory events: {}",
                 parent.path.display()
             );
-            match watcher.subscribe(&parent.path, events_tx.clone()).await {
+            match watcher.subscribe(&parent.path, events_tx.clone()) {
                 Ok(subscription) => parent_subscription = Some(subscription),
                 Err(e) => debug!("Could not watch parent memory events: {:#}", e),
             }
@@ -575,7 +584,7 @@ impl OOMWatcher {
         let mut pod_subscription = None;
         if let Some(pod) = pod_events {
             debug!("Also watching outer memory events: {}", pod.display());
-            match watcher.subscribe(pod, events_tx).await {
+            match watcher.subscribe(pod, events_tx) {
                 Ok(subscription) => pod_subscription = Some(subscription),
                 Err(e) => debug!("Could not watch pod memory events: {:#}", e),
             }
@@ -583,7 +592,7 @@ impl OOMWatcher {
 
         Ok(Subscriptions {
             rx,
-            _subscription: subscription,
+            subscription,
             _parent_subscription: parent_subscription,
             _pod_subscription: pod_subscription,
         })
@@ -881,11 +890,15 @@ impl CgroupV2 {
         }
     }
 
-    /// Whether a watch event concerns the outer cgroup.
-    fn is_outer_event(&self, event: &Event) -> bool {
-        self.outer
-            .as_ref()
-            .is_some_and(|(path, _)| event.paths.contains(path))
+    /// Whether a watch event concerns the outer cgroup. Events which the
+    /// kernel dropped may have, the baseline gets read again then.
+    fn is_outer_event(&self, event: &WatchEvent) -> bool {
+        self.outer.as_ref().is_some_and(|(path, _)| {
+            event
+                .path
+                .as_deref()
+                .is_none_or(|event_path| event_path == path)
+        })
     }
 
     /// The pod cgroup above the leaf, if there is one within
@@ -1012,33 +1025,131 @@ impl MemoryEvents {
 /// The watches of a single OOM watcher and the receiver of their events. The
 /// watches get removed on drop.
 struct Subscriptions {
-    rx: Receiver<WatchResult>,
-    _subscription: Subscription,
+    rx: Receiver<WatchEvent>,
+    subscription: Subscription,
     _parent_subscription: Option<Subscription>,
     _pod_subscription: Option<Subscription>,
 }
 
-/// A watch event as delivered to subscribers. Errors are shared because
-/// `notify::Error` is not `Clone`.
-type WatchResult = Result<Event, Arc<notify::Error>>;
+impl Subscriptions {
+    /// Whether the reader of the shared watcher stopped, which ended the
+    /// watches.
+    fn watcher_failed(&self) -> bool {
+        self.subscription.watcher.failed.load(Ordering::Acquire)
+    }
+}
 
-type Subscribers = Mutex<HashMap<PathBuf, Vec<(u64, Sender<WatchResult>)>>>;
+/// A watch event as delivered to subscribers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WatchEvent {
+    /// The file which changed. None if the kernel dropped events, every
+    /// watched file may have changed then.
+    path: Option<Arc<Path>>,
+
+    /// Whether the file got removed, which ends its watch.
+    removed: bool,
+}
+
+/// What a watch reports. Opening a file is no change, the watcher reads the
+/// files itself.
+const WATCH_FLAGS: AddWatchFlags = AddWatchFlags::IN_MODIFY
+    .union(AddWatchFlags::IN_ATTRIB)
+    .union(AddWatchFlags::IN_CLOSE_WRITE)
+    .union(AddWatchFlags::IN_DELETE_SELF)
+    .union(AddWatchFlags::IN_MOVE_SELF);
+
+/// The watches by descriptor. A watch belongs to a file rather than to its
+/// path: a file which got recreated gets a watch of its own, and the events
+/// of the old one, like its removal, must not reach the subscribers of the
+/// new one.
+#[derive(Default)]
+struct Watches(HashMap<WatchDescriptor, Watch>);
+
+/// A watch of a file and its subscribers.
+struct Watch {
+    path: Arc<Path>,
+    subscribers: Vec<(u64, Sender<WatchEvent>)>,
+}
+
+impl Watches {
+    /// Hand an event of the kernel to the subscribers of its watch.
+    fn dispatch(&mut self, event: &InotifyEvent) {
+        if event.mask.contains(AddWatchFlags::IN_Q_OVERFLOW) {
+            self.lost();
+            return;
+        }
+        let Some(watch) = self.0.get(&event.wd) else {
+            trace!("Watch event with unknown descriptor: {event:?}");
+            return;
+        };
+        // A removal of a cgroup only removes the watch, which tells nothing
+        // about the file, see [`OOMWatcher::watch_cgroup_v2`].
+        if event.mask.intersects(WATCH_FLAGS) {
+            let watch_event = WatchEvent {
+                path: Some(watch.path.clone()),
+                removed: event.mask.contains(AddWatchFlags::IN_DELETE_SELF),
+            };
+            for (_, tx) in &watch.subscribers {
+                Self::deliver(tx, &watch_event);
+            }
+        }
+        // The last event of a watch, the kernel may reuse the descriptor.
+        if event.mask.contains(AddWatchFlags::IN_IGNORED) {
+            self.0.remove(&event.wd);
+        }
+    }
+
+    /// Tell every subscriber that events got lost, which may concern every
+    /// file.
+    fn lost(&self) {
+        let lost = WatchEvent {
+            path: None,
+            removed: false,
+        };
+        for (_, tx) in self.0.values().flat_map(|watch| &watch.subscribers) {
+            Self::deliver(tx, &lost);
+        }
+    }
+
+    /// Deliver an event without ever blocking the reader of the events. A
+    /// full channel drops the event, the receiver re-reads the counters on
+    /// the next one anyway.
+    fn deliver(tx: &Sender<WatchEvent>, event: &WatchEvent) {
+        if tx.try_send(event.clone()).is_err() {
+            trace!("Dropping watch event, subscriber not ready");
+        }
+    }
+}
+
+/// The inotify instance, as a raw descriptor for [`AsyncFd`].
+struct InotifyFd(Inotify);
+
+impl AsRawFd for InotifyFd {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_fd().as_raw_fd()
+    }
+}
 
 /// A single inotify instance shared by all OOM watchers.
 ///
-/// Every `notify` watcher owns an inotify file descriptor and a thread, so
-/// creating one per container does not scale with the number of containers in
-/// a pod. All memory event files are watched through this instance instead and
-/// the events get dispatched to the subscribers of their path.
+/// Creating an inotify instance per container does not scale with the number
+/// of containers in a pod. All memory event files are watched through this
+/// instance instead, a task reads its events and dispatches them to the
+/// subscribers of their path. Adding and removing a watch does not block, the
+/// subscribers do that right away.
 struct SharedWatcher {
-    /// The underlying watcher. Watches get added and removed while holding
-    /// this lock, which also serializes the decision whether a path still has
-    /// subscribers. The event callback never takes it.
-    watcher: Mutex<RecommendedWatcher>,
+    inotify: Arc<AsyncFd<InotifyFd>>,
 
-    /// Subscribers by watched path. This is the only lock taken by the event
-    /// callback, so it must never be held while calling into the watcher.
-    subscribers: Arc<Subscribers>,
+    /// The subscribers and the watches. The reader of the events takes this
+    /// lock as well, it never waits while holding it.
+    watches: Arc<Mutex<Watches>>,
+
+    /// Set once the reader of the events stopped, the next subscription gets
+    /// a new watcher then.
+    failed: Arc<AtomicBool>,
+
+    /// The task which reads the events, it ends with the watcher.
+    reader: JoinHandle<()>,
 
     /// Source of unique subscription identifiers.
     next_id: AtomicU64,
@@ -1046,142 +1157,181 @@ struct SharedWatcher {
 
 /// The shared watcher is kept alive by its subscriptions. It gets created on
 /// the first subscription and dropped with the last one, which frees the
-/// inotify instance and its thread while no container is watched. A failed
-/// creation is retried on the next subscription instead of being cached.
+/// inotify instance while no container is watched. A failed creation is
+/// retried on the next subscription instead of being cached, and so is a
+/// watcher whose reader stopped. The server has a single runtime, which reads
+/// the events.
+#[cfg(not(test))]
 static SHARED_WATCHER: Mutex<Weak<SharedWatcher>> = Mutex::new(Weak::new());
 
+/// The unit tests run a runtime per test, each one gets a watcher of its own,
+/// which its runtime reads.
+#[cfg(test)]
+static SHARED_WATCHERS: Mutex<Vec<(tokio::runtime::Id, Weak<SharedWatcher>)>> =
+    Mutex::new(Vec::new());
+
 impl SharedWatcher {
-    /// Retrieve the process wide shared watcher, creating it if necessary.
+    /// Retrieve the shared watcher, creating it if necessary.
     fn get() -> Result<Arc<Self>> {
-        let mut shared = lock(&SHARED_WATCHER)?;
-        if let Some(watcher) = shared.upgrade() {
-            return Ok(watcher);
-        }
-        let watcher = Arc::new(Self::new().context("create shared file watcher")?);
-        *shared = Arc::downgrade(&watcher);
-        Ok(watcher)
+        // The reader of the events is a task of the runtime.
+        let runtime = Handle::try_current().context("get runtime")?;
+        Self::with_slot(&runtime, |slot| {
+            if let Some(watcher) = slot
+                .upgrade()
+                .filter(|watcher| !watcher.failed.load(Ordering::Acquire))
+            {
+                return Ok(watcher);
+            }
+            let watcher = Arc::new(Self::new().context("create shared file watcher")?);
+            *slot = Arc::downgrade(&watcher);
+            Ok(watcher)
+        })
     }
 
+    #[cfg(not(test))]
+    fn with_slot<T>(_: &Handle, f: impl FnOnce(&mut Weak<Self>) -> Result<T>) -> Result<T> {
+        f(&mut *lock(&SHARED_WATCHER)?)
+    }
+
+    #[cfg(test)]
+    fn with_slot<T>(runtime: &Handle, f: impl FnOnce(&mut Weak<Self>) -> Result<T>) -> Result<T> {
+        let id = runtime.id();
+        let mut shared = lock(&SHARED_WATCHERS)?;
+        shared.retain(|(_, watcher)| watcher.strong_count() > 0);
+        let pos = match shared.iter().position(|(i, _)| *i == id) {
+            Some(pos) => pos,
+            None => {
+                shared.push((id, Weak::new()));
+                shared.len() - 1
+            }
+        };
+        f(&mut shared[pos].1)
+    }
+
+    #[allow(unsafe_code)]
     fn new() -> Result<Self> {
-        let subscribers: Arc<Subscribers> = Arc::default();
-        let callback_subscribers = subscribers.clone();
-
-        let watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-            let Ok(subscribers) = callback_subscribers.lock() else {
-                return;
-            };
-
-            let (paths, res) = match res {
-                Ok(event) => (event.paths.clone(), Ok(event)),
-                Err(e) => (e.paths.clone(), Err(Arc::new(e))),
-            };
-
-            if paths.is_empty() {
-                // Errors without a path concern the watcher as a whole.
-                for (_, tx) in subscribers.values().flatten() {
-                    Self::deliver(tx, &res);
-                }
-                return;
-            }
-
-            for path in &paths {
-                match subscribers.get(path) {
-                    Some(subs) => subs.iter().for_each(|(_, tx)| Self::deliver(tx, &res)),
-                    None => trace!("No subscriber for watch event on {}", path.display()),
-                }
-            }
-        })
-        .context("create file watcher")?;
-
+        let inotify = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC)
+            .context("create inotify instance")?;
+        // SAFETY: the `AsyncFd` takes ownership of the inotify instance, so it
+        // stays valid and unchanged for the lifetime of the `AsyncFd`.
+        let inotify =
+            unsafe { AsyncFd::register_with_interest(InotifyFd(inotify), Interest::READABLE) }
+                .context("register inotify instance")?;
+        let inotify = Arc::new(inotify);
+        let watches = Arc::<Mutex<Watches>>::default();
+        let failed = Arc::<AtomicBool>::default();
+        let reader = task::spawn(Self::read_events(
+            inotify.clone(),
+            watches.clone(),
+            failed.clone(),
+        ));
         Ok(Self {
-            watcher: Mutex::new(watcher),
-            subscribers,
+            inotify,
+            watches,
+            failed,
+            reader,
             next_id: AtomicU64::new(0),
         })
     }
 
-    /// Deliver an event without ever blocking the watcher thread. A full
-    /// channel drops the event, the receiver re-reads the counters on the
-    /// next one anyway.
-    fn deliver(tx: &Sender<WatchResult>, res: &WatchResult) {
-        if tx.try_send(res.clone()).is_err() {
-            trace!("Dropping watch event, subscriber not ready");
+    /// Read the events of the kernel and dispatch them, until the watcher
+    /// got dropped or reading failed.
+    async fn read_events(
+        inotify: Arc<AsyncFd<InotifyFd>>,
+        watches: Arc<Mutex<Watches>>,
+        failed: Arc<AtomicBool>,
+    ) {
+        loop {
+            let events = match inotify
+                .async_io(Interest::READABLE, |fd| {
+                    fd.0.read_events().map_err(io::Error::from)
+                })
+                .await
+            {
+                Ok(events) => events,
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    error!("Unable to read watch events, checking on exit only: {e}");
+                    break;
+                }
+            };
+            let Ok(mut watches) = lock(&watches) else {
+                break;
+            };
+            for event in &events {
+                watches.dispatch(event);
+            }
         }
+        Self::stopped(&watches, &failed);
+    }
+
+    /// The reader stopped. The next subscription gets a new watcher. The
+    /// watches get dropped with their senders, so that the channels of the
+    /// subscribers end once they took the events so far, they watch again
+    /// then.
+    fn stopped(watches: &Mutex<Watches>, failed: &AtomicBool) {
+        failed.store(true, Ordering::Release);
+        let watches = std::mem::take(&mut *watches.lock().unwrap_or_else(PoisonError::into_inner));
+        drop(watches);
     }
 
     /// Start watching `path` on behalf of `tx`. The watch gets removed when the
-    /// returned subscription is dropped and no other subscriber for the path
+    /// returned subscription is dropped and no other subscriber of the watch
     /// is left.
-    ///
-    /// Adding a watch waits for a reply from notify's inotify thread, so it
-    /// runs on the blocking pool rather than on the async thread.
-    async fn subscribe(
-        self: &Arc<Self>,
-        path: &Path,
-        tx: Sender<WatchResult>,
-    ) -> Result<Subscription> {
-        let watcher = self.clone();
-        let path = path.to_path_buf();
-        task::spawn_blocking(move || watcher.subscribe_blocking(&path, tx))
-            .await
-            .context("join subscribe task")?
-    }
-
-    fn subscribe_blocking(
-        self: &Arc<Self>,
-        path: &Path,
-        tx: Sender<WatchResult>,
-    ) -> Result<Subscription> {
+    fn subscribe(self: &Arc<Self>, path: &Path, tx: Sender<WatchEvent>) -> Result<Subscription> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut watcher = lock(&self.watcher)?;
+        let mut watches = lock(&self.watches)?;
 
-        lock(&self.subscribers)?
-            .entry(path.to_path_buf())
-            .or_default()
+        // inotify returns the existing descriptor for a file which is watched
+        // already, the subscriber joins its watch then.
+        let wd = self
+            .inotify
+            .get_ref()
+            .0
+            .add_watch(path, WATCH_FLAGS)
+            .with_context(|| format!("watch {}", path.display()))?;
+        watches
+            .0
+            .entry(wd)
+            .or_insert_with(|| Watch {
+                path: path.into(),
+                subscribers: vec![],
+            })
+            .subscribers
             .push((id, tx));
-
-        // Add the watch even if the path has other subscribers. inotify returns
-        // the existing descriptor for a watched path, and this re-establishes a
-        // watch the kernel dropped (for example on DELETE_SELF) while a stale
-        // subscriber with a full channel never saw the remove event.
-        if let Err(e) = watcher.watch(path, RecursiveMode::NonRecursive) {
-            drop(watcher);
-            self.unsubscribe(id, path);
-            return Err(e).with_context(|| format!("watch {}", path.display()));
-        }
 
         Ok(Subscription {
             watcher: self.clone(),
             id,
-            path: path.to_path_buf(),
+            wd,
         })
     }
 
-    fn unsubscribe(&self, id: u64, path: &Path) {
-        let Ok(mut watcher) = self.watcher.lock() else {
+    fn unsubscribe(&self, id: u64, wd: WatchDescriptor) {
+        let Ok(mut watches) = self.watches.lock() else {
             return;
         };
-
-        let last = {
-            let Ok(mut subscribers) = self.subscribers.lock() else {
-                return;
-            };
-            let Some(subs) = subscribers.get_mut(path) else {
-                return;
-            };
-            subs.retain(|(i, _)| *i != id);
-            if subs.is_empty() {
-                subscribers.remove(path);
-                true
-            } else {
-                false
-            }
+        // The kernel removed the watch already.
+        let Some(watch) = watches.0.get_mut(&wd) else {
+            return;
         };
-
-        if last && let Err(e) = watcher.unwatch(path) {
-            // The watch is gone already if the cgroup got removed.
-            trace!("Unable to unwatch {}: {:#}", path.display(), e);
+        watch.subscribers.retain(|(i, _)| *i != id);
+        if !watch.subscribers.is_empty() {
+            return;
         }
+        let Some(watch) = watches.0.remove(&wd) else {
+            return;
+        };
+        if let Err(e) = self.inotify.get_ref().0.rm_watch(wd) {
+            // The watch is gone already if the cgroup got removed.
+            trace!("Unable to unwatch {}: {:#}", watch.path.display(), e);
+        }
+    }
+}
+
+impl Drop for SharedWatcher {
+    fn drop(&mut self) {
+        self.reader.abort();
     }
 }
 
@@ -1189,21 +1339,56 @@ impl SharedWatcher {
 struct Subscription {
     watcher: Arc<SharedWatcher>,
     id: u64,
-    path: PathBuf,
+    wd: WatchDescriptor,
 }
 
 impl Drop for Subscription {
     fn drop(&mut self) {
-        let watcher = self.watcher.clone();
-        let id = self.id;
-        let path = std::mem::take(&mut self.path);
-        // Removing the watch waits for notify's inotify thread, keep that off
-        // the async thread if there is a runtime to hand it to.
-        match Handle::try_current() {
-            Ok(handle) => {
-                handle.spawn_blocking(move || watcher.unsubscribe(id, &path));
+        self.watcher.unsubscribe(self.id, self.wd);
+    }
+}
+
+/// The eventfd of a cgroup v1 OOM notification, read through the reactor of
+/// tokio.
+struct AsyncEventFd(AsyncFd<EventFd>);
+
+impl AsyncEventFd {
+    #[allow(unsafe_code)]
+    fn new() -> Result<Self> {
+        let fd = EventFd::from_flags(EfdFlags::EFD_NONBLOCK | EfdFlags::EFD_CLOEXEC)
+            .context("create eventfd")?;
+        // SAFETY: the `AsyncFd` takes ownership of the eventfd, so it stays
+        // valid and unchanged for the lifetime of the `AsyncFd`.
+        let fd = unsafe { AsyncFd::register_with_interest(fd, Interest::READABLE) }
+            .context("register eventfd")?;
+        Ok(Self(fd))
+    }
+}
+
+impl AsRawFd for AsyncEventFd {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+/// Reads the counter of the eventfd, which needs room for its 8 bytes.
+impl AsyncRead for AsyncEventFd {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if buf.remaining() < size_of::<u64>() {
+            return Poll::Ready(Err(io::Error::from(io::ErrorKind::InvalidInput)));
+        }
+        loop {
+            let mut guard = ready!(self.0.poll_read_ready(cx))?;
+            match guard.try_io(|fd| fd.get_ref().read().map_err(io::Error::from)) {
+                Ok(result) => {
+                    return Poll::Ready(result.map(|count| buf.put_slice(&count.to_ne_bytes())));
+                }
+                Err(_would_block) => {}
             }
-            Err(_) => watcher.unsubscribe(id, &path),
         }
     }
 }
@@ -1215,12 +1400,21 @@ mod tests {
     use tempfile::NamedTempFile;
     use tokio::time::{Duration, sleep, timeout};
 
-    async fn wait_for_event(rx: &mut tokio::sync::mpsc::Receiver<WatchResult>) -> Result<Event> {
+    async fn wait_for_event(rx: &mut Receiver<WatchEvent>) -> Result<WatchEvent> {
         timeout(Duration::from_secs(5), rx.recv())
             .await
             .context("no event within timeout")?
-            .context("channel closed")?
-            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("channel closed")
+    }
+
+    /// The number of subscribers of a path.
+    fn subscribers(watcher: &SharedWatcher, path: &Path) -> Result<usize> {
+        Ok(lock(&watcher.watches)?
+            .0
+            .values()
+            .filter(|watch| *watch.path == *path)
+            .map(|watch| watch.subscribers.len())
+            .sum())
     }
 
     #[tokio::test]
@@ -1231,16 +1425,156 @@ mod tests {
 
         let (tx1, mut rx1) = channel(WATCH_EVENT_CHANNEL_SIZE);
         let (tx2, mut rx2) = channel(WATCH_EVENT_CHANNEL_SIZE);
-        let _sub1 = watcher.subscribe(first.path(), tx1).await?;
-        let _sub2 = watcher.subscribe(second.path(), tx2).await?;
+        let _sub1 = watcher.subscribe(first.path(), tx1)?;
+        let _sub2 = watcher.subscribe(second.path(), tx2)?;
 
         first.write_all(b"oom 1\n")?;
         first.flush()?;
 
         let event = wait_for_event(&mut rx1).await?;
-        assert!(event.paths.iter().any(|p| p == first.path()));
+        assert_eq!(event.path.as_deref(), Some(first.path()));
+        assert!(!event.removed);
         assert!(rx2.try_recv().is_err());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shared_watcher_reports_removals() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let watcher = SharedWatcher::get()?;
+        let (tx, mut rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
+        let _sub = watcher.subscribe(file.path(), tx)?;
+
+        let path = file.path().to_path_buf();
+        file.close()?;
+        // The link count changes first.
+        loop {
+            let event = wait_for_event(&mut rx).await?;
+            assert_eq!(event.path.as_deref(), Some(path.as_path()));
+            if event.removed {
+                break;
+            }
+        }
+        // The kernel dropped the watch, the descriptor is forgotten.
+        timeout(Duration::from_secs(5), async {
+            while lock(&watcher.watches).is_ok_and(|watches| !watches.0.is_empty()) {
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .context("watch not forgotten")?;
+        Ok(())
+    }
+
+    #[test]
+    fn watches_keep_events_of_recreated_files_apart() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("memory.events");
+        let inotify = Inotify::init(InitFlags::IN_CLOEXEC)?;
+        std::fs::write(&path, "")?;
+        let old = inotify.add_watch(&path, WATCH_FLAGS)?;
+        std::fs::remove_file(&path)?;
+        std::fs::write(&path, "")?;
+        let new = inotify.add_watch(&path, WATCH_FLAGS)?;
+        assert_ne!(old, new);
+
+        let mut watches = Watches::default();
+        let (old_tx, mut old_rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
+        let (new_tx, mut new_rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
+        for (wd, tx) in [(old, old_tx), (new, new_tx)] {
+            watches.0.insert(
+                wd,
+                Watch {
+                    path: path.as_path().into(),
+                    subscribers: vec![(0, tx)],
+                },
+            );
+        }
+
+        // The removal of the old file comes after the new one got watched.
+        for mask in [AddWatchFlags::IN_DELETE_SELF, AddWatchFlags::IN_IGNORED] {
+            watches.dispatch(&InotifyEvent {
+                wd: old,
+                mask,
+                cookie: 0,
+                name: None,
+            });
+        }
+        assert!(old_rx.try_recv()?.removed);
+        assert!(new_rx.try_recv().is_err());
+        assert!(!watches.0.contains_key(&old));
+        assert!(watches.0.contains_key(&new));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stopped_watchers_get_replaced() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let watcher = SharedWatcher::get()?;
+        let (tx, mut rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
+        let _sub = watcher.subscribe(file.path(), tx)?;
+
+        SharedWatcher::stopped(&watcher.watches, &watcher.failed);
+
+        // The watches got dropped with their senders, which ends the channels
+        // of the subscribers.
+        assert!(lock(&watcher.watches)?.0.is_empty());
+        assert_eq!(timeout(Duration::from_secs(5), rx.recv()).await?, None);
+        // The next subscription gets a watcher which reads its events.
+        assert!(!Arc::ptr_eq(&SharedWatcher::get()?, &watcher));
+        Ok(())
+    }
+
+    /// Stop the reader of the shared watcher of the leaf, once the watch task
+    /// watches it, and wait until the task watches it again on a new one.
+    async fn stop_watcher(leaf: &Path) -> Result<()> {
+        baselines_taken(leaf).await?;
+        let failed = SharedWatcher::get()?;
+        SharedWatcher::stopped(&failed.watches, &failed.failed);
+        let events = leaf.join("memory.events");
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(watcher) = SharedWatcher::get()
+                    && !Arc::ptr_eq(&watcher, &failed)
+                    && subscribers(&watcher, &events).is_ok_and(|n| n > 0)
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .context("leaf not watched again")?;
+        sleep(Duration::from_millis(10)).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cgroup_v2_watches_again_after_the_watcher_stopped() -> Result<()> {
+        // An OOM of the container after the failure still gets found.
+        let root = tempfile::tempdir()?;
+        let [_, _, _, leaf] = fake_pod(root.path(), false)?;
+        let (token, task) = watch_v2(&leaf);
+        stop_watcher(&leaf).await?;
+        write_events(&leaf, 1, 4)?;
+        let event = timeout(Duration::from_secs(5), task).await??;
+        assert_eq!(event, OOMEvent::new(true));
+        token.cancel();
+
+        // The kill of a sibling after the failure is no possible OOM of the
+        // container, whose scope got removed.
+        let root = tempfile::tempdir()?;
+        let [_, pod, scope, leaf] = fake_pod(root.path(), false)?;
+        let (token, task) = watch_v2(&leaf);
+        stop_watcher(&leaf).await?;
+        write_events(&pod, 0, 4)?;
+        sleep(Duration::from_millis(100)).await;
+        std::fs::remove_dir_all(&scope)?;
+        sleep(Duration::from_millis(50)).await;
+        token.cancel();
+        let event = timeout(Duration::from_secs(5), task).await??;
+        assert_eq!(event, OOMEvent::default());
         Ok(())
     }
 
@@ -1251,32 +1585,28 @@ mod tests {
 
         let (tx1, _rx1) = channel(WATCH_EVENT_CHANNEL_SIZE);
         let (tx2, _rx2) = channel(WATCH_EVENT_CHANNEL_SIZE);
-        let sub1 = watcher.subscribe(file.path(), tx1).await?;
-        let sub2 = watcher.subscribe(file.path(), tx2).await?;
-        assert_eq!(lock(&watcher.subscribers)?[file.path()].len(), 2);
+        let sub1 = watcher.subscribe(file.path(), tx1)?;
+        let sub2 = watcher.subscribe(file.path(), tx2)?;
+        assert_eq!(subscribers(&watcher, file.path())?, 2);
 
-        // Unsubscribing happens on the blocking pool, give it a moment.
-        let subscribers = |path: &Path| -> Result<usize> {
-            Ok(lock(&watcher.subscribers)?.get(path).map_or(0, Vec::len))
-        };
         drop(sub1);
-        for _ in 0..200 {
-            if subscribers(file.path())? == 1 {
-                break;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(subscribers(file.path())?, 1);
+        assert_eq!(subscribers(&watcher, file.path())?, 1);
 
         drop(sub2);
-        for _ in 0..200 {
-            if subscribers(file.path())? == 0 {
-                break;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-        assert!(!lock(&watcher.subscribers)?.contains_key(file.path()));
+        assert!(lock(&watcher.watches)?.0.is_empty());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shared_watchers_go_with_their_last_subscription() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let (tx, _rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
+        let sub = SharedWatcher::get()?.subscribe(file.path(), tx)?;
+        let watcher = Arc::downgrade(&sub.watcher);
+        assert!(Arc::ptr_eq(&SharedWatcher::get()?, &sub.watcher));
+        drop(sub);
+        assert_eq!(watcher.strong_count(), 0);
         Ok(())
     }
 
@@ -1286,11 +1616,11 @@ mod tests {
         let watcher = SharedWatcher::get()?;
 
         let (tx1, _rx1) = channel(WATCH_EVENT_CHANNEL_SIZE);
-        let _sub1 = watcher.subscribe(file.path(), tx1).await?;
+        let _sub1 = watcher.subscribe(file.path(), tx1)?;
 
         // A second subscription re-adds the watch and still gets events.
         let (tx2, mut rx2) = channel(WATCH_EVENT_CHANNEL_SIZE);
-        let _sub2 = watcher.subscribe(file.path(), tx2).await?;
+        let _sub2 = watcher.subscribe(file.path(), tx2)?;
 
         file.write_all(b"oom 1\n")?;
         file.flush()?;
@@ -1306,29 +1636,38 @@ mod tests {
         let watcher = SharedWatcher::get()?;
 
         let (tx1, mut rx1) = channel(WATCH_EVENT_CHANNEL_SIZE);
-        let _sub1 = watcher.subscribe(file.path(), tx1).await?;
+        let _sub1 = watcher.subscribe(file.path(), tx1)?;
 
         // A second subscriber comes and goes, like an exec in the container.
         let (tx2, _rx2) = channel(WATCH_EVENT_CHANNEL_SIZE);
-        let sub2 = watcher.subscribe(file.path(), tx2).await?;
+        let sub2 = watcher.subscribe(file.path(), tx2)?;
         drop(sub2);
-        // Unsubscribing happens on the blocking pool, wait until it is done.
-        for _ in 0..200 {
-            if lock(&watcher.subscribers)?
-                .get(file.path())
-                .is_some_and(|subs| subs.len() == 1)
-            {
-                break;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(lock(&watcher.subscribers)?[file.path()].len(), 1);
+        assert_eq!(subscribers(&watcher, file.path())?, 1);
 
         file.write_all(b"oom 1\n")?;
         file.flush()?;
 
         wait_for_event(&mut rx1).await?;
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn eventfd_counts_get_read() -> Result<()> {
+        let mut event_fd = AsyncEventFd::new()?;
+        event_fd.0.get_ref().write(2)?;
+        let mut buffer = [0; 8];
+        assert_eq!(event_fd.read(&mut buffer).await?, 8);
+        assert_eq!(u64::from_ne_bytes(buffer), 2);
+
+        // Nothing else to read until the next event.
+        assert!(
+            timeout(Duration::from_millis(50), event_fd.read(&mut buffer))
+                .await
+                .is_err()
+        );
+        let mut short = [0; 4];
+        assert!(event_fd.read(&mut short).await.is_err());
         Ok(())
     }
 
@@ -1393,9 +1732,21 @@ mod tests {
         (token, task)
     }
 
-    /// Let the watch task take its baselines.
-    async fn baselines_taken() {
+    /// Let the watch task of `leaf` take its baselines. It watches the leaf
+    /// right after, and its other files within the same poll. A task which
+    /// starts late would take changes as its baselines otherwise.
+    async fn baselines_taken(leaf: &Path) -> Result<()> {
+        let watcher = SharedWatcher::get()?;
+        let events = leaf.join("memory.events");
+        timeout(Duration::from_secs(5), async {
+            while subscribers(&watcher, &events).is_ok_and(|n| n == 0) {
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .context("leaf not watched")?;
         sleep(Duration::from_millis(10)).await;
+        Ok(())
     }
 
     fn write_events(dir: &Path, oom: u64, oom_kill: u64) -> Result<()> {
@@ -1434,7 +1785,7 @@ mod tests {
         write_events(&leaf, 0, 0)?;
         write_events(pod.path(), 0, 0)?;
         let (token, task) = watch_v2(&leaf);
-        baselines_taken().await;
+        baselines_taken(&leaf).await?;
 
         // A kill of a sibling while the leaf exists does not count.
         write_events(pod.path(), 1, 1)?;
@@ -1476,7 +1827,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         let [qos, pod, scope, leaf] = fake_pod(root.path(), crun)?;
         let (token, task) = watch_v2(&leaf);
-        baselines_taken().await;
+        baselines_taken(&leaf).await?;
 
         before_removal(&pod)?;
         std::fs::remove_dir_all(&scope)?;
@@ -1529,6 +1880,26 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn cgroup_v2_lost_events_refresh_the_outer_baseline() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let [_, pod, scope, leaf] = fake_pod(root.path(), false)?;
+        let mut cgroup = CgroupV2::new(&leaf);
+
+        // A sibling got killed while the kernel dropped the events.
+        write_events(&pod, 0, 4)?;
+        let lost = WatchEvent {
+            path: None,
+            removed: false,
+        };
+        assert!(!cgroup.check(cgroup.is_outer_event(&lost)));
+
+        // The removal of the leaf afterwards is no possible OOM then.
+        std::fs::remove_dir_all(&scope)?;
+        assert_eq!(cgroup.check_on_exit(), OOMEvent::default());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn cgroup_v2_is_not_compared_above_the_pod() -> Result<()> {
         // The QoS cgroup has other pods.
@@ -1558,7 +1929,7 @@ mod tests {
             write_events(&parent, 0, 3)?;
             write_events(&leaf, 0, 3)?;
             let (token, task) = watch_v2(&leaf);
-            baselines_taken().await;
+            baselines_taken(&leaf).await?;
 
             if sibling_kill {
                 for _ in 0..50 {

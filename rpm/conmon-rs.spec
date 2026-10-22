@@ -11,7 +11,7 @@ Epoch: 101
 Version: 1.1.1
 Release: %autorelease
 Summary: OCI container runtime monitor written in Rust
-License: Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND CC0-1.0 AND ISC AND MIT AND Zlib
+License: Apache-2.0 AND BSD-2-Clause AND MIT AND Zlib
 URL: https://github.com/containers/%{name}
 Source0: %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
 BuildRequires: capnproto

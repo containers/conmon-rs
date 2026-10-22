@@ -24,9 +24,9 @@ use crate::{
     idle::Activity,
     spdy::{Connection, Headers, PING_INTERVAL, Stream, StreamReceiver, StreamSender},
     stream_protocol::{STREAM_CREATION_TIMEOUT, STREAM_TYPE_HEADER},
+    web::{CloseCode, CloseFrame, Message, WebSocket},
 };
 use anyhow::{Context, Result, bail, ensure};
-use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use nix::{
@@ -569,7 +569,7 @@ impl PortForward {
             }
             let _ = sink
                 .send(Message::Close(Some(CloseFrame {
-                    code: close_code::NORMAL,
+                    code: CloseCode::Normal,
                     reason: "".into(),
                 })))
                 .await;
@@ -587,7 +587,7 @@ impl PortForward {
                         debug!("Ending port forward tunnel, the client sent a text message");
                         break;
                     }
-                    Ok(Message::Ping(_) | Message::Pong(_)) => {}
+                    Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => {}
                     Ok(Message::Close(_)) | Err(_) => break,
                 }
             }
@@ -643,7 +643,7 @@ impl PortForward {
             }
             let _ = sink
                 .send(Message::Close(Some(CloseFrame {
-                    code: close_code::NORMAL,
+                    code: CloseCode::Normal,
                     reason: "".into(),
                 })))
                 .await;
@@ -695,7 +695,7 @@ impl PortForward {
                     let data = match message {
                         Some(Ok(Message::Binary(data))) => data,
                         Some(Ok(Message::Text(text))) => Bytes::from(text),
-                        Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                        Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
                         Some(Ok(Message::Close(_)) | Err(_)) | None => break,
                     };
                     activity.touch();
