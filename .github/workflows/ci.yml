@@ -15,7 +15,13 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   NIX_VERSION: "2.35.3"
-# The jobs are named by what they do: lint-* checks the style of the sources,
+  # The toolchain of the Rust jobs. A new stable release brings new lints,
+  # which a bump of this version picks up instead of unrelated pull requests.
+  RUST_VERSION: "1.99.1"
+  # The checksum belongs to the x86_64 Linux release of this version.
+  SHELLCHECK_VERSION: "0.11.0"
+  SHELLCHECK_SHA256: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+# The jobs are named by what they do: lint-* checks the sources,
 # verify-* checks that generated or pinned things are up to date, build-* and
 # test-* build and test the server, publish-* changes the bucket.
 jobs:
@@ -66,7 +72,9 @@ jobs:
         with:
           version: v2.15.0
 
-  lint-clippy:
+  # One build environment for all checks of the Rust sources. Every check runs
+  # even if an earlier one fails, so that a run reports all of them.
+  lint-rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -74,25 +82,55 @@ jobs:
           persist-credentials: false
       - run: .github/install-deps
       - name: Select Toolchain
-        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt && rustup default "$RUST_VERSION"
+      # The oldest toolchain the locked dependencies support.
+      - name: Install the rust-version toolchain
+        id: msrv
+        run: |
+          MSRV=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          rustup toolchain install "$MSRV" --profile minimal
+          echo "version=$MSRV" >>"$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        id: setup
+      # The checks only run on a complete setup, which they would report as
+      # their own failures otherwise.
+      - name: Rustfmt
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: cargo fmt && git diff --exit-code
       # The default features are what gets shipped, all features cover the
       # optional tracing code.
       - name: Clippy Lint
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: |
           cargo clippy --locked --all-targets -- -D warnings
           cargo clippy --locked --all-targets --all-features -- -D warnings
+      # The gh-pages workflow publishes the documentation of all features.
+      - name: Cargo doc
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: cargo doc --locked --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Cargo check with rust-version
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        env:
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: cargo "+$MSRV" check --locked --all-targets --all-features
 
-  lint-rustfmt:
+  lint-shell:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Select Toolchain
-        run: rustup toolchain install stable --profile minimal --component rustfmt && rustup default stable
-      - name: Rustfmt
-        run: cargo fmt && git diff --exit-code
+      - name: Install shellcheck
+        run: |
+          curl -sSfL -o shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          sudo tar -xJf shellcheck.tar.xz --strip-components=1 -C /usr/local/bin "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          rm shellcheck.tar.xz
+          shellcheck --version
+      - run: make lint-shell
 
   lint-typos:
     runs-on: ubuntu-latest
@@ -113,41 +151,8 @@ jobs:
       - uses: creyD/prettier_action@8c18391fdc98ed0d884c6345f03975edac71b8f0 # v4.6
         with:
           dry: true
+          prettier_version: 3.9.10
           prettier_options: --write .
-
-  verify-doc:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - run: .github/install-deps
-      - name: Select Toolchain
-        run: rustup toolchain install stable --profile minimal && rustup default stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      # The gh-pages workflow publishes the documentation of all features.
-      - name: Cargo doc
-        run: cargo doc --locked --no-deps --all-features
-        env:
-          RUSTDOCFLAGS: -D warnings
-
-  verify-msrv:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - run: .github/install-deps
-      - name: Read rust-version
-        id: msrv
-        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
-      - name: Select Toolchain
-        env:
-          TOOLCHAIN: ${{ steps.msrv.outputs.version }}
-        run: rustup toolchain install "$TOOLCHAIN" --profile minimal && rustup default "$TOOLCHAIN"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Cargo check
-        run: cargo check --locked --all-targets --all-features
 
   verify-deny:
     runs-on: ubuntu-latest
@@ -260,14 +265,20 @@ jobs:
           persist-credentials: false
       - run: .github/install-deps
       - name: Select Toolchain
-        run: rustup toolchain install stable --profile minimal --component llvm-tools-preview && rustup default stable
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal --component llvm-tools-preview && rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-llvm-cov
+      # The default features are what gets shipped, all features cover the
+      # optional tracing code. The coverage of both runs gets merged.
       - name: Generate code coverage
-        run: cargo llvm-cov --locked --all-features --lcov --output-path lcov.info
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --locked --no-report
+          cargo llvm-cov --locked --no-report --all-features
+          cargo llvm-cov report --lcov --output-path lcov.info
       - name: Upload Results
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
@@ -394,7 +405,7 @@ jobs:
           key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/files_test.go') }}
       - run: .github/install-deps
       - name: Select Toolchain
-        run: rustup toolchain install stable --profile minimal --component llvm-tools-preview && rustup default stable
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal --component llvm-tools-preview && rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
@@ -565,6 +576,13 @@ jobs:
         with:
           cosign-release: v3.1.4
       - run: scripts/get
+      # A tag resolves to its commit through the GitHub API.
+      - name: Get the latest release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(gh release view -R containers/conmon-rs --json tagName -q .tagName)
+          scripts/get -l "$TAG" -o .build/release/conmonrs
 
   # The release workflow publishes the marker of a tag.
   publish-marker:

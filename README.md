@@ -190,8 +190,8 @@ flowchart TB
 ## Development
 
 The [Makefile](./Makefile) has targets for everything CI runs: `make` builds the
-server, `make lint` runs clippy and golangci-lint, `make unit` runs the Rust
-unit tests and `make integration` runs the Go integration suite against the
-release binary (`RUNTIME_PATH` selects the OCI runtime, the suite needs root for
+server, `make lint` runs rustfmt, clippy, golangci-lint and shellcheck (which has
+to be installed), `make unit` runs the Rust unit tests and `make integration`
+runs the Go integration suite against the release binary (`RUNTIME_PATH` selects the OCI runtime, the suite needs root for
 the namespace and OOM specs). `make help` lists the rest. Contributions follow
 [CONTRIBUTING.md](./CONTRIBUTING.md).

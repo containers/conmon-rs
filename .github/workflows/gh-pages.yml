@@ -12,6 +12,7 @@ concurrency:
   cancel-in-progress: true
 env:
   CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.99.1"
 jobs:
   publish-docs:
     runs-on: ubuntu-latest
@@ -21,7 +22,7 @@ jobs:
           persist-credentials: false
       - run: .github/install-deps
       - name: Select Toolchain
-        run: rustup toolchain install stable --profile minimal && rustup default stable
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal && rustup default "$RUST_VERSION"
       # Only the docs get published, a cache entry cannot change the binaries.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build Documentation
