@@ -1,0 +1,9 @@
+# The ci profile of the unit tests, see the test-unit job.
+[profile.ci]
+# A test which only passes on a retry is reported as flaky.
+retries = 2
+fail-fast = false
+failure-output = "immediate-final"
+
+[profile.ci.junit]
+path = "junit.xml"

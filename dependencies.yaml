@@ -8,6 +8,9 @@ dependencies:
 
   - name: golangci-lint
     version: 2.15.0
+    upstream:
+      flavour: github
+      url: golangci/golangci-lint
     refPaths:
       - path: .github/workflows/ci.yml
         match: "version: v"
@@ -16,40 +19,70 @@ dependencies:
 
   - name: prettier
     version: 3.9.10
+    upstream:
+      flavour: github
+      url: prettier/prettier
     refPaths:
       - path: .github/workflows/ci.yml
-        match: "prettier_version:"
+        match: "PRETTIER_VERSION:"
       - path: Makefile
         match: "PRETTIER_VERSION :="
 
+  # The toolchain of the CI jobs. The static binaries get built with the
+  # rustc of flake.lock, which the build-static jobs print.
   - name: rust
     version: 1.99.1
+    upstream:
+      flavour: github
+      url: rust-lang/rust
     refPaths:
       - path: .github/workflows/ci.yml
         match: "RUST_VERSION:"
       - path: .github/workflows/gh-pages.yml
         match: "RUST_VERSION:"
 
+  # The fuzz targets need a nightly toolchain. zeitgeist cannot track the
+  # dated nightlies, so bump it together with the stable rust version above to
+  # a recent nightly with which the build-fuzz job passes.
+  - name: rust-nightly
+    version: 2026-10-15
+    scheme: alpha
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: "FUZZ_TOOLCHAIN:"
+
   - name: shellcheck
     version: 0.11.0
+    upstream:
+      flavour: github
+      url: koalaman/shellcheck
     refPaths:
       - path: .github/workflows/ci.yml
         match: "SHELLCHECK_VERSION:"
 
   - name: zeitgeist
     version: 0.8.0
+    upstream:
+      flavour: github
+      url: kubernetes-sigs/zeitgeist
     refPaths:
       - path: Makefile
         match: "ZEITGEIST_VERSION :="
 
   - name: jaeger
     version: 2.22.0
+    upstream:
+      flavour: github
+      url: jaegertracing/jaeger
     refPaths:
       - path: contrib/tracing/start
         match: JAEGER_IMG=
 
   - name: cri-tools
     version: 1.37.0
+    upstream:
+      flavour: github
+      url: kubernetes-sigs/cri-tools
     refPaths:
       - path: .github/setup
         match: CRI_TOOLS_VERSION=
@@ -66,6 +99,9 @@ dependencies:
 
   - name: cosign
     version: 3.1.4
+    upstream:
+      flavour: github
+      url: sigstore/cosign
     refPaths:
       - path: .github/workflows/ci.yml
         match: "cosign-release: v"
@@ -75,6 +111,56 @@ dependencies:
         match: "cosign-release: v"
       - path: .github/workflows/release.yml
         match: "cosign-release: v"
+
+  - name: crun
+    version: 1.30.1
+    upstream:
+      flavour: github
+      url: containers/crun
+    refPaths:
+      - path: .github/install-crun
+        match: CRUN_VERSION=
+
+  - name: actionlint
+    version: 1.7.12
+    upstream:
+      flavour: github
+      url: rhysd/actionlint
+    refPaths:
+      - path: Makefile
+        match: "ACTIONLINT_VERSION :="
+
+  - name: zizmor
+    version: 1.31.1
+    upstream:
+      flavour: github
+      url: zizmorcore/zizmor
+    refPaths:
+      - path: Makefile
+        match: "ZIZMOR_VERSION :="
+
+  # The LTS release which runs prettier. Up to 26, only the even majors
+  # became LTS (26 on 2026-10-28). From 27 on, every major does, in the
+  # October after its first release. The constraint shows the next LTS major:
+  # move the pin to it once it is LTS and raise the constraint by one major
+  # then.
+  - name: node
+    version: 24.22.1
+    upstream:
+      flavour: github
+      url: nodejs/node
+      constraints: < 27.0.0
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: "node-version:"
+      - path: Makefile
+        match: "NODE_VERSION :="
+
+  - name: govulncheck
+    version: 1.9.0
+    refPaths:
+      - path: .github/workflows/advisories.yml
+        match: govulncheck@v
 
   - name: alpine
     version: 3.24

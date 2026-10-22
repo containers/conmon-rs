@@ -33,12 +33,12 @@ welcome!
 
 While bug fixes can first be identified via an "issue", that is not required.
 It's ok to just open up a PR with the fix, but make sure you include the same
-information you would have included in an issue - like how to reproduce it.
+information you would have included in an issue, like how to reproduce it.
 
 PRs for new features should include some background on what use cases the
-new code is trying to address. When possible and when it makes sense, try to break-up
-larger PRs into smaller ones - it's easier to review smaller
-code changes. But only if those smaller ones make sense as stand-alone PRs.
+new code is trying to address. When possible and when it makes sense, try to
+break up larger PRs into smaller ones, smaller code changes are easier to
+review. But only if those smaller ones make sense as stand-alone PRs.
 
 Regardless of the type of PR, all PRs should include:
 
@@ -57,6 +57,17 @@ Test your changes by running:
 $ make lint
 ```
 
+Changes to Markdown, YAML or JSON files have to pass prettier, which `make
+prettier` applies and `make verify-prettier` checks, both in a container. `make
+verify` runs the other checks of CI as well.
+
+PRs which change the Cap'n Proto schema in
+[conmon-rs/server/proto/conmon.capnp](conmon-rs/server/proto/conmon.capnp) run
+`make update-proto` and commit the regenerated Go code in
+[internal/proto](internal/proto), CI checks that it matches. The target runs
+the `capnp` of the nixpkgs in flake.lock through nix, `make update-proto
+CAPNP=capnp` uses a local one instead.
+
 The unit tests run as a regular user, and so do most integration tests. The
 OOM and namespace specs need elevated permissions for the cgroups and bind
 mounts and skip or fail otherwise:
@@ -73,9 +84,9 @@ to test another one, for example the static build of `make release-static`:
 # make integration CONMON_BINARY=result/bin/conmonrs MAX_RSS_KB=5500
 ```
 
-PRs that fix issues should include a reference like `Closes #XXXX` in the
-commit message so that github will automatically close the referenced issue
-when the PR is merged.
+PRs that fix issues should include a reference like `Fixes #XXXX` in the PR
+description, as the PR template asks, so that GitHub closes the referenced
+issue when the PR is merged.
 
 Most PRs will be reviewed by the [OWNERS](OWNERS).
 

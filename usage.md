@@ -76,6 +76,12 @@ otherwise the container processes are not OOM killable.
     [--user --uid-mappings "0 1000 1" --gid-mappings "0 1000 1"]
 ```
 
+`-p, --base-path` defaults to `/var/run` and can also be set with
+`CONMON_PAUSE_BASE_PATH`, `--pod-id` with `CONMON_PAUSE_POD_ID`. With `--user`,
+`-u, --uid-mappings` and `-g, --gid-mappings` are required. Each takes one
+mapping in the format `CONTAINER_ID HOST_ID SIZE` and can be repeated for more
+of them.
+
 Each requested namespace is unshared and bind mounted to
 `$BASE_PATH/[ipc,pid,net,user,uts]ns/$POD_ID`. The bind mounts keep the
 namespaces alive, except for a PID namespace, which dies with its init process.
@@ -175,6 +181,47 @@ them and other control frames of the server do not. SPDY clients like client-go
 ping every few seconds, which counts like for CRI-O. Servers which support port
 forwarding report the `portforward` feature in `version`.
 
+### Streaming protocols by version
+
+The protocols the streaming server speaks and the first release with them,
+"unreleased" is what `main` has after v1.1.1:
+
+| Operation    | Transport                           | Subprotocols                                                                                               | Since      |
+| ------------ | ----------------------------------- | ---------------------------------------------------------------------------------------------------------- | ---------- |
+| Exec, attach | WebSocket                           | `v5.channel.k8s.io`                                                                                        | v0.7.0     |
+| Exec, attach | WebSocket                           | `v4.channel.k8s.io`, `v4.base64.channel.k8s.io`, `channel.k8s.io`, `base64.channel.k8s.io`, no subprotocol | unreleased |
+| Exec, attach | SPDY/3.1                            | `v4.channel.k8s.io`, `v3.channel.k8s.io`, `v2.channel.k8s.io`, `channel.k8s.io`                            | unreleased |
+| Port forward | SPDY/3.1                            | `portforward.k8s.io`                                                                                       | unreleased |
+| Port forward | SPDY/3.1 tunneled through WebSocket | `SPDY/3.1+portforward.k8s.io`                                                                              | unreleased |
+| Port forward | WebSocket                           | `v4.channel.k8s.io`, `v4.base64.channel.k8s.io`, no subprotocol                                            | unreleased |
+
+From v0.7.0 to v1.0.1, `servePortForwardContainer` returns a URL, but the
+server does not implement the protocol behind it. A connection to that URL
+panics, and since v0.8.0 the release builds abort on a panic, so the server
+exits and its containers lose their monitor. v1.1.0 and v1.1.1 reject the RPC
+with an unimplemented error. The `idleTimeoutSec` of the three RPCs is
+unreleased as well, older servers ignore it.
+
+### Streaming security
+
+The streaming server speaks plain HTTP on `127.0.0.1`, without TLS or
+authentication, so the token in the URL is the only access control. Every
+process on the host which can reach the loopback interface of the network
+namespace of the server may connect, the token keeps it from using a session
+it did not get the URL of:
+
+- A token is 128 random bits from the operating system, written as 32
+  lowercase hex digits.
+- A token is valid once, the first connection which the server accepts
+  takes its session.
+- A token which no client used expires after 60 seconds.
+- The server keeps a bounded number of unused URLs per kind (exec and attach,
+  port forward).
+
+The server logs tokens which are still valid only at debug level, such logs
+need the same care as the URLs. Errors name the tokens of rejected requests,
+which are unknown, used or expired.
+
 ### File descriptor socket
 
 `startFdSocket` makes the server listen on a `SOCK_SEQPACKET` UNIX socket for
@@ -203,9 +250,9 @@ are truncated in place when they exceed the configured maximum size and on
 - `journald`: one journal entry per line with the fields `CONTAINER_ID_FULL`,
   `CONTAINER_ID` (the first 12 characters) and `SYSLOG_IDENTIFIER=conmonrs`,
   at priority info for stdout and error for stderr, so that
-  `journalctl CONTAINER_ID=<id>` shows the output like with conmon. A line
-  which had no ending yet carries `CONTAINER_PARTIAL_MESSAGE=true`. The
-  maximum size does not apply.
+  `journalctl CONTAINER_ID_FULL=<id>` or `CONTAINER_ID=<short id>` shows the
+  output like with conmon. A line which had no ending yet carries
+  `CONTAINER_PARTIAL_MESSAGE=true`. The maximum size does not apply.
 
 The JSON and journald drivers collect whole lines across reads, so a line
 written in several pieces or a multi byte character split by a read still
@@ -216,6 +263,68 @@ half a second, or the output ended without one.
 The server's own logs go to the `--log-driver`. Running with
 `--log-level debug` prints every RPC and I/O decision and is the first thing to
 try when debugging a container that misbehaves under conmon-rs.
+
+## Troubleshooting
+
+With the `systemd` log driver, the default of `conmonrs`, the server's own
+logs go to the journal under its process name. CRI-O passes its `log_level` on
+to the servers, but since v1.34 starts them with the log driver `none`, unless
+the `monitor_env` of the runtime handler contains `LOG_DRIVER=systemd`. The
+container output only goes to the journal with the `journald` log driver of
+the container, sent by the same process:
+
+```console
+> journalctl _COMM=conmonrs
+> journalctl CONTAINER_ID_FULL=<id>
+```
+
+The first command shows the logs of the server together with the output of
+the containers which use the `journald` log driver, the second one only the
+output of one container.
+
+The server never waits for the journal with its own entries, they get lost
+while journald does not keep up, for example while it restarts. A line of
+container output waits up to a second, the rest of what the server read gets
+dropped after that, which the server logs as a warning. The log files of the
+`containerRuntimeInterface` and `json` drivers lose nothing this way.
+
+To see what the server does without an engine, run it in the foreground with
+its logs on stdout and talk to its socket with a client:
+
+```console
+> conmonrs --runtime /usr/bin/crun --runtime-dir /tmp/conmonrs --skip-fork -d stdout -l debug
+```
+
+Only one server runs per runtime directory. A server refuses to start with
+`socket ... is in use by a running server` while another one serves
+`conmon.sock` there, a socket which a server left behind when it exited gets
+replaced. The Go client connects to such a running server instead of starting
+a new one. If that server accepts the connection but does not answer within a
+few seconds, `client.New` returns an error matching
+`client.ErrServerNotResponding` which names its PID. The client does not
+start a second server then, as it would take over the sockets and orphan the
+containers. Collect the logs of that server, then kill it, the next
+`client.New` starts a new one. The containers of the pod lose their monitor
+that way and should be recreated.
+
+## Tracing
+
+The server can export OpenTelemetry traces of its RPCs over OTLP gRPC. This
+needs a build with the `tracing` feature:
+
+```console
+> cargo build --release --features tracing
+```
+
+The static release binaries and the RPMs get built without it, they accept
+`--enable-tracing` and `--tracing-endpoint` and ignore them. With the feature,
+`--enable-tracing` exports to `--tracing-endpoint`, `http://127.0.0.1:4317` by
+default. The Go client starts the server with these flags if its
+configuration has `Tracing: &client.Tracing{Enabled: true}`. It then passes the
+span of the context of a call along with the RPC, if there is one, through the
+global propagator of OpenTelemetry (`otel.SetTextMapPropagator`), which does
+nothing unless the caller registers one, like CRI-O does.
+[contrib/tracing](contrib/tracing) runs a local Jaeger to look at the traces.
 
 ## Red Hat OpenShift
 

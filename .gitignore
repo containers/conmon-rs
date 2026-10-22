@@ -6,3 +6,6 @@
 latest-*.txt
 /*.tar.gz
 .vscode
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage

@@ -15,44 +15,69 @@ single container, for a whole pod: a container engine like
 [CRI-O](https://github.com/cri-o/cri-o) starts one `conmonrs` process per pod,
 and that process creates the containers of the pod through the OCI runtime,
 holds their standard streams open, forwards their output to log files or
-journald, serves attach and exec sessions, detects out of memory kills and
-writes the exit codes once the containers terminate. The engine talks to it over
-a UNIX domain socket, so no new monitor process is needed for additional
-containers or execs. It works with cgroup v1 and v2 and any OCI runtime with
-the `create`, `exec` and console socket conventions of runc, like crun.
+journald, serves attach, exec and port forward sessions, detects out of memory
+kills and writes the exit codes once the containers terminate. The engine
+talks to it over a UNIX domain socket, so no new monitor process is needed for
+additional containers or execs. It works with cgroup v1 and v2 and any OCI
+runtime with the `create`, `exec` and console socket conventions of runc, like
+crun.
 
 ## Documentation
 
 - [usage.md](usage.md): configuring CRI-O, the command line, the `pause`
   subcommand and the protocols between the server and its clients.
 - [release.md](release.md): how to cut a release.
-- [Rust API docs](https://containers.github.io/conmon-rs/conmonrs/index.html)
-  and [Go client docs](https://pkg.go.dev/github.com/containers/conmon-rs/pkg/client).
+- [Rust docs](https://containers.github.io/conmon-rs/conmonrs/index.html) of
+  the server internals on `main` and the [Go client
+  docs](https://pkg.go.dev/github.com/containers/conmon-rs/pkg/client).
 
 ## Obtain the latest version
 
 We provide statically linked binaries for every successfully built commit on
-`main` via our [Google Cloud Storage Bucket][bucket]. Our provided [get
-script](scripts/get) can be used to download the latest version:
+`main` via our [Google Cloud Storage Bucket][bucket], for `amd64`, `arm64`,
+`ppc64le` and `s390x`. Our provided [get script](scripts/get) can be used to
+download the latest version:
 
 ```console
-> curl https://raw.githubusercontent.com/containers/conmon-rs/main/scripts/get | bash
+> curl -fsSL https://raw.githubusercontent.com/containers/conmon-rs/main/scripts/get | bash
 ```
 
-It is also possible to select a specific git SHA or the output binary path by:
+It is also possible to select a specific commit by its full 40 character SHA
+(`-t`), a release tag (`-l`), the architecture (`-a`, defaults to the local
+one) or the output binary path (`-o`), and to skip running the installed binary
+for its version (`-n`):
 
 ```console
-> curl https://raw.githubusercontent.com/containers/conmon-rs/main/scripts/get | \
-    bash -s -- -t $GIT_SHA -o $OUTPUT_PATH
+> curl -fsSL https://raw.githubusercontent.com/containers/conmon-rs/main/scripts/get | \
+    bash -s -- -l v1.1.1 -a arm64 -o $OUTPUT_PATH -n
 ```
 
-The script automatically verifies the created sigstore signatures if the local
-system has [`cosign`](https://github.com/sigstore/cosign) available in its
-`$PATH`.
+The script verifies the sigstore signature of the binary if the local system
+has [`cosign`](https://github.com/sigstore/cosign) available in its `$PATH`.
+The signature has to come from the ci workflow run of exactly that commit on
+`main`. Without cosign, the script only checks the SHA-256 checksum, the one of
+`sha256sums.txt` for a release and the one in the bucket otherwise, which only
+shows that the download is complete. It fails if no checksum got published,
+like for old commits and the releases before v1.1.0, unless `-k` is given.
 
-The binaries also come with [SLSA](https://slsa.dev) Build L3 provenance and
-an SPDX 2.3 SBOM, both as GitHub artifact attestations. A job without access
-to the signing credentials builds them, the reusable [publish-static
+Since v1.1.0, the [GitHub
+releases](https://github.com/containers/conmon-rs/releases) carry the same
+binaries as `conmonrs.$ARCH` with their signatures. To verify a binary by hand,
+for example the one of `$COMMIT` on `main`, which the publish-static workflow
+signed, or the ci workflow for older commits like the ones of v1.1.0 and v1.1.1:
+
+```console
+> cosign verify-blob conmonrs.amd64 \
+    --bundle conmonrs.amd64.bundle \
+    --certificate-identity-regexp '^https://github\.com/containers/conmon-rs/\.github/workflows/(publish-static|ci)\.yml@refs/heads/main$' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    --certificate-github-workflow-sha $COMMIT
+```
+
+The binaries of newer commits on `main`, and of the releases after v1.1.1,
+also come with [SLSA](https://slsa.dev) Build L3 provenance and an SPDX 2.3
+SBOM, both as GitHub artifact attestations. A job without access to the
+signing credentials builds them, the reusable [publish-static
 workflow](.github/workflows/publish-static.yml), which runs no build steps,
 attests and signs them. Verify them with the [GitHub
 CLI](https://cli.github.com):
@@ -73,9 +98,10 @@ the SBOM itself (`conmonrs.$ARCH.spdx.json`). The cosign signatures
 the one of commits from before the attestations is
 `https://github.com/containers/conmon-rs/.github/workflows/ci.yml@refs/heads/main`.
 
-The source tarball and the `sha256sums.txt` of a release have SLSA Build L3
-provenance and cosign signatures of the reusable [build-sources
-workflow](.github/workflows/build-sources.yml) for the tag:
+From the release after v1.1.1 on, the source tarball and the `sha256sums.txt`
+of a release have SLSA Build L3 provenance and cosign signatures of the
+reusable [build-sources workflow](.github/workflows/build-sources.yml) for the
+tag:
 
 ```console
 > gh attestation verify conmonrs-vX.Y.Z.tar.gz \
@@ -138,10 +164,13 @@ operations against it:
 
 The server is single threaded: a tokio `current_thread` runtime drives all I/O,
 the Cap'n Proto RPC runs on one additional thread, and blocking work like file
-I/O goes to a small bounded pool. All containers of a pod share one inotify
-instance for OOM detection. Per container, the server keeps two 4 KiB read
-buffers, the channels for exec output and a few tasks, which is why a pod with
-many containers still fits in a few megabytes.
+I/O goes to a small bounded pool. With cgroup v2, all containers of a pod
+share one inotify instance for OOM detection, with cgroup v1 every container
+gets an eventfd on its `memory.oom_control`. Per container, the server keeps
+an 8 KiB read buffer per output pipe, the channels for exec output and a few
+tasks. With glibc, the server limits malloc to a single arena instead of one
+per thread. That is why a pod with many containers still fits in a few
+megabytes.
 
 The following diagram shows how the pieces connect:
 
@@ -162,7 +191,7 @@ flowchart TB
             oom["OOM watcher"]
             exitpaths["Exit paths and<br/>cleanup command"]
         end
-        inotify["Shared inotify instance"]
+        inotify["Shared inotify instance<br/>cgroup v2"]
         streaming["Streaming server<br/>WebSocket and SPDY on localhost"]
         fdsock["fd socket"]
         pause["conmonrs pause<br/>pod namespaces"]
@@ -180,8 +209,8 @@ flowchart TB
     reaper --> oom
     inotify --> oom
     reaper --> exitpaths
-    rpc -- "serveExec, serveAttach" --> streaming
-    kubelet -- "v5.channel.k8s.io" --> streaming
+    rpc -- "serveExec, serveAttach,<br/>servePortForward" --> streaming
+    kubelet -- "SPDY/3.1 or WebSocket" --> streaming
     rpc -- "startFdSocket" --> fdsock
     client -- "SCM_RIGHTS" --> fdsock
     rpc -- "createNamespaces" --> pause
@@ -189,17 +218,41 @@ flowchart TB
 
 ## Development
 
-The [Makefile](./Makefile) has targets for everything CI runs: `make` builds the
-server, `make lint` runs rustfmt, clippy, golangci-lint and shellcheck (which has
-to be installed), `make unit` runs the Rust unit tests and `make integration`
-runs the Go integration suite against the release binary (`RUNTIME_PATH` selects the OCI runtime, the suite needs root for
-the namespace and OOM specs). `make help` lists the rest. Contributions follow
-[CONTRIBUTING.md](./CONTRIBUTING.md).
+Building the server needs the Cap'n Proto compiler (`capnp`, packaged as
+`capnproto`) and a Rust toolchain of at least the `rust-version` of
+[Cargo.toml](./Cargo.toml). The tests of the Go client and the integration
+suite need the Go version of [go.mod](./go.mod). To build and install a
+release binary:
+
+```console
+> make release
+> sudo make install PREFIX=/usr/local
+```
+
+The [Makefile](./Makefile) has targets for most of what CI runs: `make` builds
+the server, `make lint` runs rustfmt, clippy, golangci-lint and shellcheck
+(which has to be installed), `make unit` runs the Rust unit tests, `make
+unit-go` the ones of the Go client and `make integration` runs the Go
+integration suite against the release binary (`RUNTIME_PATH` selects the OCI
+runtime, the suite needs root for the namespace and OOM specs). `make verify`
+runs the remaining checks, like prettier, cargo-deny, typos (both have to be
+installed), actionlint and zizmor, some of them in containers. `make help`
+lists the rest. Contributions follow [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 The [fuzz](./fuzz) directory holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)
 targets for the parsers of client input, the SPDY frames and header blocks, the
 WebSocket channel messages and the resize events. They need a nightly toolchain,
-for example `cargo +nightly fuzz run spdy_frames`. The release profile of the
-server strips the symbols and builds slowly, CI overrides it with
+for example `cargo +nightly fuzz run spdy_frames`, CI pins the one of
+`FUZZ_TOOLCHAIN` in [ci.yml](.github/workflows/ci.yml).
+[fuzz/seeds](./fuzz/seeds) holds a few valid inputs per target to start from,
+pass the directory after the corpus, which libFuzzer does not create:
+
+```console
+> mkdir -p fuzz/corpus/spdy_frames
+> cargo +nightly fuzz run spdy_frames fuzz/corpus/spdy_frames fuzz/seeds/spdy_frames
+```
+
+cargo-fuzz builds with the release profile of the server, which strips the
+symbols and builds slowly. CI overrides it with
 `CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_LTO=false
 CARGO_PROFILE_RELEASE_OPT_LEVEL=3`, which helps local runs as well.

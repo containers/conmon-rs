@@ -48,6 +48,25 @@ body:
       required: true
 
   - type: textarea
+    id: crioVersion
+    attributes:
+      label: Container engine and OCI runtime
+      description: The CRI-O version or the one of another engine, and the OCI runtime with its version.
+      value: |
+        <details>
+
+        ```console
+        $ crio version
+        # paste output here
+        $ crun --version  # or runc --version
+        # paste output here
+        ```
+
+        </details>
+    validations:
+      required: true
+
+  - type: textarea
     id: osVersion
     attributes:
       label: OS version
@@ -60,11 +79,29 @@ body:
         # paste output here
         $ uname -a
         # paste output here
+        $ stat -fc %T /sys/fs/cgroup  # cgroup2fs means cgroup v2
+        # paste output here
         ```
 
         </details>
     validations:
       required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Server logs
+      description: |
+        The logs of the conmonrs process of the pod, ideally with `--log-level debug`, which CRI-O passes to the servers of pods it starts while it runs with `log_level = "debug"`. Since v1.34, CRI-O only lets them log to the journal with `LOG_DRIVER=systemd` in the `monitor_env` of the runtime handler. See the troubleshooting section of usage.md for how to find them.
+      value: |
+        <details>
+
+        ```console
+        $ journalctl _COMM=conmonrs
+        # paste output here
+        ```
+
+        </details>
 
   - type: textarea
     id: environment

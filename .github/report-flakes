@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# List the specs of a ginkgo JSON report which passed, but only after more than
-# one attempt. --flake-attempts lets them pass, which would hide them otherwise.
-# Specs which failed on every attempt fail the run anyway and are left out.
+# List the tests of a report which passed, but only after more than one
+# attempt: a ginkgo JSON report, where --flake-attempts lets them pass, or a
+# JUnit report of nextest, where retries do. Both would hide them otherwise.
+# Tests which failed on every attempt fail the run anyway and are left out.
 REPORT=${1:?usage: $0 REPORT}
 
 if [[ ! -f $REPORT ]]; then
@@ -11,33 +12,48 @@ if [[ ! -f $REPORT ]]; then
     exit 0
 fi
 
-# Print one line per flaky spec, escaped for workflow commands with "command",
-# with line breaks replaced by spaces otherwise.
+# Print one line per flaky test, with line breaks replaced by spaces.
 flakes() {
-    jq -r --arg mode "$1" '
-        .[].SpecReports // [] | .[] |
-        select(.State == "passed" and .NumAttempts > 1) |
-        "passed after \(.NumAttempts) attempts: \((.ContainerHierarchyTexts // []) + [.LeafNodeText] | join(" "))" |
-        if $mode == "command" then
-            gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A")
-        else
+    case $REPORT in
+    *.xml)
+        # nextest records every failed attempt of a test which passed in the
+        # end as a flakyFailure, or a flakyError if the test could not run or
+        # leaked handles.
+        python3 -I - "$REPORT" <<'EOF'
+import sys
+import xml.etree.ElementTree as ET
+
+for case in ET.parse(sys.argv[1]).iter("testcase"):
+    retries = len(case.findall("flakyFailure")) + len(case.findall("flakyError"))
+    if retries and case.find("failure") is None and case.find("error") is None:
+        name = f"{case.get('classname')} {case.get('name')}"
+        print(f"passed after {retries + 1} attempts: {' '.join(name.split())}")
+EOF
+        ;;
+    *)
+        jq -r '
+            .[].SpecReports // [] | .[] |
+            select(.State == "passed" and .NumAttempts > 1) |
+            "passed after \(.NumAttempts) attempts: \((.ContainerHierarchyTexts // []) + [.LeafNodeText] | join(" "))" |
             gsub("[\r\n]"; " ")
-        end
-    ' "$REPORT"
+        ' "$REPORT"
+        ;;
+    esac
 }
 
-FLAKES=$(flakes text)
+FLAKES=$(flakes)
 if [[ $FLAKES == "" ]]; then
-    echo "No spec needed a retry"
+    echo "No test needed a retry"
     exit 0
 fi
 
+# Workflow commands need the % escaped.
 while IFS= read -r FLAKE; do
-    echo "::warning title=Flaky spec::$FLAKE"
-done < <(flakes command)
+    echo "::warning title=Flaky test::${FLAKE//%/%25}"
+done <<<"$FLAKES"
 
 if [[ ${GITHUB_STEP_SUMMARY:-} != "" ]]; then
-    SUMMARY="### Specs which needed retries"$'\n'
+    SUMMARY="### Tests which needed retries"$'\n'
     while IFS= read -r FLAKE; do
         SUMMARY+=$'\n'"- $FLAKE"
     done <<<"$FLAKES"

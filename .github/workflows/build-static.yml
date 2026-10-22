@@ -52,13 +52,17 @@ jobs:
       - run: nix build ".#$ARCH"
       - run: file result/bin/conmonrs | grep static | grep stripped
       # Every binary gets executed once, a build which links but does not
-      # run would otherwise only show up on the target machines.
+      # run would otherwise only show up on the target machines. flake.lock
+      # decides the Rust toolchain of the build, not RUST_VERSION of the ci
+      # workflow, the summary shows which one it was.
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         if: inputs.arch != 'amd64'
       - name: Smoke test
         run: |
-          docker run --rm --platform "linux/$ARCH" \
-            -v "$PWD/result/bin:/smoke:ro" alpine:3.24 /smoke/conmonrs --version
+          VERSION=$(docker run --rm --platform "linux/$ARCH" \
+            -v "$PWD/result/bin:/smoke:ro" alpine:3.24 /smoke/conmonrs --version)
+          echo "$VERSION"
+          printf '### conmonrs.%s\n\n~~~\n%s\n~~~\n' "$ARCH" "$VERSION" >>"$GITHUB_STEP_SUMMARY"
       - name: Digest
         id: digest
         run: echo "digest=$(sha256sum result/bin/conmonrs | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"

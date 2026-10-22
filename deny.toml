@@ -14,7 +14,7 @@ exclude = ["conmonrs-fuzz"]
 
 [advisories]
 unmaintained = "workspace"
-yanked = "warn"
+yanked = "deny"
 
 [licenses]
 allow = [

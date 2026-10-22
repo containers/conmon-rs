@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install the latest crun from GitHub releases, the integration tests run it.
-# The release binaries are signed with the key of crun-signing-key.asc, whose
+# Install crun from GitHub releases, the integration tests run it. The
+# release binaries are signed with the key of crun-signing-key.asc, whose
 # primary key has this fingerprint.
+CRUN_VERSION=1.30.1
 FINGERPRINT=AC404C1C0BF735C63FF4D562263D6DF2E163E1EA
 
 case $(uname -m) in
@@ -14,8 +15,6 @@ aarch64) ARCH=arm64 ;;
     exit 1
     ;;
 esac
-CRUN_VERSION=$(curl -sSfL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    "https://api.github.com/repos/containers/crun/releases/latest" | grep -oP '"tag_name": "\K[^"]+')
 URL=https://github.com/containers/crun/releases/download/$CRUN_VERSION/crun-$CRUN_VERSION-linux-$ARCH
 
 TMPDIR=$(mktemp -d)
