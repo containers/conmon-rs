@@ -198,8 +198,9 @@ impl Connection {
         }
     }
 
-    /// Whether a frame keeps the connection from being idle, which the
-    /// pings of the server do not.
+    /// Whether a frame of the client keeps the connection from being idle,
+    /// which its answers to the pings of the server do not. Of the frames of
+    /// the server only data counts, see [`Self::write`].
     fn is_activity(frame: &Frame) -> bool {
         !matches!(frame, Frame::Ping { id } if id % 2 == 0)
     }
@@ -233,16 +234,15 @@ impl Connection {
         let mut closing = false;
         let result = async {
             loop {
+                // Only data keeps the connection active, not the control
+                // frames of the server, like resets of the streams of a
+                // client which keeps failing.
                 let mut active = false;
-                let mut control = |frame: &Frame, buf: &mut BytesMut| {
-                    active |= Self::is_activity(frame);
-                    encoder.encode(frame, buf)
-                };
                 let data = select! {
                     biased;
                     _ = shared.done.cancelled() => break,
                     Some(frame) = control_rx.recv() => {
-                        control(&frame, &mut buf)?;
+                        encoder.encode(&frame, &mut buf)?;
                         None
                     }
                     _ = shared.resets_ready.notified() => None,
@@ -257,10 +257,10 @@ impl Connection {
                 };
                 // Whatever else is queued already goes out with it.
                 while let Ok(frame) = control_rx.try_recv() {
-                    control(&frame, &mut buf)?;
+                    encoder.encode(&frame, &mut buf)?;
                 }
                 for stream_id in shared.take_resets() {
-                    control(&Self::reset_frame(stream_id), &mut buf)?;
+                    encoder.encode(&Self::reset_frame(stream_id), &mut buf)?;
                 }
                 if let Some(data) = data {
                     active = true;

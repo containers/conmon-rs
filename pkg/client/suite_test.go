@@ -268,6 +268,33 @@ func childrenOfWithState(pid int, state string) []int {
 	return children
 }
 
+// pidsWithCmdline returns the processes which run exactly the command.
+func pidsWithCmdline(command []string) []int {
+	const procPath = "/proc"
+
+	entries, err := os.ReadDir(procPath)
+	Expect(err).To(Succeed())
+
+	want := []byte(strings.Join(command, "\x00") + "\x00")
+
+	var pids []int
+
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+
+		// The process may be gone already.
+		cmdline, err := os.ReadFile(filepath.Join(procPath, entry.Name(), "cmdline"))
+		if err == nil && bytes.Equal(cmdline, want) {
+			pids = append(pids, pid)
+		}
+	}
+
+	return pids
+}
+
 func (tr *testRunner) logPath() string {
 	return filepath.Join(tr.tmpDir, "log")
 }

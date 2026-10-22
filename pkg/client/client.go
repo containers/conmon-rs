@@ -2308,10 +2308,13 @@ type ServeExecContainerConfig struct {
 	// `CgroupManagerPerCommand`.
 	CgroupManager CgroupManager
 
-	// IdleTimeout closes a connection which got no frame of the client and
-	// no data either way for this long. The pings of the server and
-	// WebSocket pings and pongs do not count. Zero disables the timeout.
-	// Older servers ignore it.
+	// IdleTimeout fails a session whose connection got no frame of the
+	// client and no data either way for this long. WebSocket pings and
+	// pongs, the pings of the server and the answers to them and other
+	// control frames of the server do not count. Stdin counts once the
+	// server reads it, stdin which backs up behind a process which does not
+	// read it stops that. The process gets killed then. Zero disables the
+	// timeout. Older servers ignore it.
 	IdleTimeout time.Duration
 }
 
@@ -2416,10 +2419,13 @@ type ServeAttachContainerConfig struct {
 	// sent and has no effect.
 	CgroupManager CgroupManager
 
-	// IdleTimeout closes a connection which got no frame of the client and
-	// no data either way for this long. The pings of the server and
-	// WebSocket pings and pongs do not count. Zero disables the timeout.
-	// Older servers ignore it.
+	// IdleTimeout fails a session whose connection got no frame of the
+	// client and no data either way for this long. WebSocket pings and
+	// pongs, the pings of the server and the answers to them and other
+	// control frames of the server do not count. Stdin counts once the
+	// server reads it, stdin which backs up behind a container which does
+	// not read it stops that. Zero disables the timeout. Older servers
+	// ignore it.
 	IdleTimeout time.Duration
 }
 
@@ -2495,8 +2501,9 @@ type ServePortForwardContainerConfig struct {
 	NetNsPath string
 
 	// IdleTimeout closes a connection which got no frame of the client and
-	// no data either way for this long. The pings of the server and
-	// WebSocket pings and pongs do not count. Zero disables the timeout.
+	// no data either way for this long. WebSocket pings and pongs, the
+	// pings of the server and the answers to them and other control frames
+	// of the server do not count. Zero disables the timeout.
 	IdleTimeout time.Duration
 }
 

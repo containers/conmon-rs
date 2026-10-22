@@ -589,7 +589,7 @@ pub struct SpdyOutput {
 }
 
 /// The final status of a session.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Status {
     Success,
     ExitCode(i32),
@@ -710,7 +710,8 @@ enum Transport {
         sender: SplitSink<WebSocket, Message>,
         framing: Framing,
 
-        /// Touched by every message which got sent, except for pings.
+        /// Touched by every message with data which got sent, not by pings
+        /// and the close.
         activity: Activity,
     },
     Spdy(SpdyOutput),
@@ -885,9 +886,9 @@ impl Output {
         else {
             return Ok(());
         };
-        let ping = matches!(message, Message::Ping(_));
+        let data = !matches!(message, Message::Ping(_) | Message::Close(_));
         let result = sender.send(message).await.map_err(anyhow::Error::from);
-        if result.is_ok() && !ping {
+        if result.is_ok() && data {
             activity.touch();
         }
         self.sent(result)

@@ -6,7 +6,8 @@ use std::{
 };
 use tokio::time::{self, Duration, Instant};
 
-/// When a connection was active the last time. Clones share the time.
+/// When a connection was active the last time, by what the client sent or
+/// got. Clones share the time.
 #[derive(Clone, Debug)]
 pub struct Activity(Arc<Mutex<Instant>>);
 
