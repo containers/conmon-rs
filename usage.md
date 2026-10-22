@@ -195,24 +195,24 @@ forwarding report the `portforward` feature in `version`.
 
 ### Streaming protocols by version
 
-The protocols the streaming server speaks and the first release with them,
-"unreleased" is what `main` has after v1.1.1:
+The protocols the streaming server speaks and the first release with them:
 
-| Operation    | Transport                           | Subprotocols                                                                                               | Since      |
-| ------------ | ----------------------------------- | ---------------------------------------------------------------------------------------------------------- | ---------- |
-| Exec, attach | WebSocket                           | `v5.channel.k8s.io`                                                                                        | v0.7.0     |
-| Exec, attach | WebSocket                           | `v4.channel.k8s.io`, `v4.base64.channel.k8s.io`, `channel.k8s.io`, `base64.channel.k8s.io`, no subprotocol | unreleased |
-| Exec, attach | SPDY/3.1                            | `v4.channel.k8s.io`, `v3.channel.k8s.io`, `v2.channel.k8s.io`, `channel.k8s.io`                            | unreleased |
-| Port forward | SPDY/3.1                            | `portforward.k8s.io`                                                                                       | unreleased |
-| Port forward | SPDY/3.1 tunneled through WebSocket | `SPDY/3.1+portforward.k8s.io`                                                                              | unreleased |
-| Port forward | WebSocket                           | `v4.channel.k8s.io`, `v4.base64.channel.k8s.io`, no subprotocol                                            | unreleased |
+| Operation    | Transport                           | Subprotocols                                                                                               | Since  |
+| ------------ | ----------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------ |
+| Exec, attach | WebSocket                           | `v5.channel.k8s.io`                                                                                        | v0.7.0 |
+| Exec, attach | WebSocket                           | `v4.channel.k8s.io`, `v4.base64.channel.k8s.io`, `channel.k8s.io`, `base64.channel.k8s.io`, no subprotocol | v1.2.0 |
+| Exec, attach | SPDY/3.1                            | `v4.channel.k8s.io`, `v3.channel.k8s.io`, `v2.channel.k8s.io`, `channel.k8s.io`                            | v1.2.0 |
+| Port forward | SPDY/3.1                            | `portforward.k8s.io`                                                                                       | v1.2.0 |
+| Port forward | SPDY/3.1 tunneled through WebSocket | `SPDY/3.1+portforward.k8s.io`                                                                              | v1.2.0 |
+| Port forward | WebSocket                           | `v4.channel.k8s.io`, `v4.base64.channel.k8s.io`, no subprotocol                                            | v1.2.0 |
 
 From v0.7.0 to v1.0.1, `servePortForwardContainer` returns a URL, but the
 server does not implement the protocol behind it. A connection to that URL
 panics, and since v0.8.0 the release builds abort on a panic, so the server
 exits and its containers lose their monitor. v1.1.0 and v1.1.1 reject the RPC
-with an unimplemented error. The `idleTimeoutSec` of the three RPCs is
-unreleased as well, older servers ignore it.
+with an unimplemented error. The `idleTimeoutSec` of the three RPCs is new in
+v1.2.0 as well: older servers ignore it for exec and attach, and do not serve
+port forwarding at all.
 
 ### Streaming security
 

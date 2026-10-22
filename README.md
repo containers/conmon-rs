@@ -43,13 +43,13 @@ download the latest version:
 ```
 
 It is also possible to select a specific commit by its full 40 character SHA
-(`-t`), a release tag (`-l`), the architecture (`-a`, defaults to the local
-one) or the output binary path (`-o`), and to skip running the installed binary
-for its version (`-n`):
+(`-t`), a release tag like `vX.Y.Z` (`-l`), the architecture (`-a`, defaults to
+the local one) or the output binary path (`-o`), and to skip running the
+installed binary for its version (`-n`):
 
 ```console
 > curl -fsSL https://raw.githubusercontent.com/containers/conmon-rs/main/scripts/get | \
-    bash -s -- -l v1.1.1 -a arm64 -o $OUTPUT_PATH -n
+    bash -s -- -l $TAG -a arm64 -o $OUTPUT_PATH -n
 ```
 
 The script verifies the sigstore signature of the binary if the local system
@@ -74,7 +74,7 @@ signed, or the ci workflow for older commits like the ones of v1.1.0 and v1.1.1:
     --certificate-github-workflow-sha $COMMIT
 ```
 
-The binaries of newer commits on `main`, and of the releases after v1.1.1,
+The binaries of newer commits on `main`, and of the releases since v1.2.0,
 also come with [SLSA](https://slsa.dev) Build L3 provenance and an SPDX 2.3
 SBOM, both as GitHub artifact attestations. A job without access to the
 signing credentials builds them, the reusable [publish-static
@@ -98,10 +98,9 @@ the SBOM itself (`conmonrs.$ARCH.spdx.json`). The cosign signatures
 the one of commits from before the attestations is
 `https://github.com/containers/conmon-rs/.github/workflows/ci.yml@refs/heads/main`.
 
-From the release after v1.1.1 on, the source tarball and the `sha256sums.txt`
-of a release have SLSA Build L3 provenance and cosign signatures of the
-reusable [build-sources workflow](.github/workflows/build-sources.yml) for the
-tag:
+Since v1.2.0, the source tarball and the `sha256sums.txt` of a release have
+SLSA Build L3 provenance and cosign signatures of the reusable [build-sources
+workflow](.github/workflows/build-sources.yml) for the tag:
 
 ```console
 > gh attestation verify conmonrs-vX.Y.Z.tar.gz \

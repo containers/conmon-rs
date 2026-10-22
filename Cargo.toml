@@ -5,8 +5,8 @@ members = ["conmon-rs/server", "fuzz"]
 default-members = ["conmon-rs/server"]
 
 [workspace.package]
-# Checked against rpm/conmon-rs.spec by `make verify-spec`.
-version = "1.1.1"
+# Tracked in dependencies.yaml together with rpm/conmon-rs.spec.
+version = "1.2.0"
 edition = "2024"
 # The oldest toolchain the locked dependencies support, checked by CI.
 rust-version = "1.89"
