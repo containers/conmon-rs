@@ -22,6 +22,8 @@ use crate::{
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::{Bytes, BytesMut};
 pub use frame::Headers;
+#[cfg(feature = "fuzzing")]
+pub use frame::fuzzing;
 use frame::{
     Decoder, Encoder, Frame, GOAWAY_OK, GOAWAY_PROTOCOL_ERROR, STATUS_CANCEL,
     STATUS_PROTOCOL_ERROR, STATUS_REFUSED_STREAM,
@@ -30,7 +32,7 @@ use std::{
     collections::HashMap,
     mem,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicU32, AtomicUsize, Ordering},
     },
 };
@@ -455,21 +457,21 @@ struct StreamState {
 }
 
 impl Shared {
-    fn lock_streams(&self) -> std::sync::MutexGuard<'_, HashMap<u32, StreamState>> {
-        self.streams.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock_streams(&self) -> MutexGuard<'_, HashMap<u32, StreamState>> {
+        self.streams.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Queue the reset of a stream for the writer.
     fn queue_reset(&self, id: u32) {
         self.resets
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .push(id);
         self.resets_ready.notify_one();
     }
 
     fn take_resets(&self) -> Vec<u32> {
-        mem::take(&mut *self.resets.lock().unwrap_or_else(|e| e.into_inner()))
+        mem::take(&mut *self.resets.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// The client closed its side of the stream.

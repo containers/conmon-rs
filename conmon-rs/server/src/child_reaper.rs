@@ -7,7 +7,8 @@ use crate::{
     init,
     mutex::lock,
     oom_watcher::{OOMEvent, OOMWatcher},
-    process::{Process, is_zombie, pidfd_open, reap_guard},
+    process::{Process, children_by_scan, is_zombie, pidfd_open, reap_guard},
+    tail::Tail,
 };
 use anyhow::{Context, Result, bail, format_err};
 use futures::future::join_all;
@@ -18,7 +19,7 @@ use nix::{
         signal::Signal,
         wait::{Id, WaitPidFlag, WaitStatus, waitid, waitpid},
     },
-    unistd::{Pid, getpid},
+    unistd::Pid,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -56,16 +57,18 @@ use tracing::{Instrument, debug, debug_span, error, warn};
 /// background until they end. Only the end of stderr is kept, it holds the
 /// error, stdout is not of interest.
 struct RuntimeOutput {
-    stderr: Arc<Mutex<Vec<u8>>>,
+    stderr: Arc<Mutex<StderrTail>>,
     task: JoinHandle<()>,
 }
+
+type StderrTail = Tail<{ RuntimeOutput::MAX_STDERR }>;
 
 impl RuntimeOutput {
     /// How much of the end of stderr is kept.
     const MAX_STDERR: usize = 64 * 1024;
 
     fn spawn(stdout: Option<ChildStdout>, stderr: Option<ChildStderr>) -> Self {
-        let buf = Arc::<Mutex<Vec<u8>>>::default();
+        let buf = Arc::<Mutex<StderrTail>>::default();
         let stderr_buf = buf.clone();
         let task = task::spawn(async move {
             tokio::join!(
@@ -85,7 +88,7 @@ impl RuntimeOutput {
     }
 
     /// Read until the end, keeping the end in `buf` if any.
-    async fn read(mut reader: impl AsyncRead + Unpin, buf: Option<&Mutex<Vec<u8>>>) {
+    async fn read(mut reader: impl AsyncRead + Unpin, buf: Option<&Mutex<StderrTail>>) {
         let mut chunk = [0; 8192];
         loop {
             let n = match reader.read(&mut chunk).await {
@@ -98,12 +101,7 @@ impl RuntimeOutput {
             let Ok(mut buf) = buf.lock() else {
                 return;
             };
-            buf.extend_from_slice(&chunk[..n]);
-            // Dropping the front only once it doubled keeps it amortized.
-            if buf.len() > 2 * Self::MAX_STDERR {
-                let excess = buf.len() - Self::MAX_STDERR;
-                buf.drain(..excess);
-            }
+            buf.push(&chunk[..n]);
         }
     }
 
@@ -120,13 +118,10 @@ impl RuntimeOutput {
             debug!("Runtime output still held open, giving up on it");
             output.task.abort();
         }
-        let mut stderr = match output.stderr.lock() {
-            Ok(mut stderr) => std::mem::take(&mut *stderr),
-            Err(_) => return vec![],
-        };
-        let excess = stderr.len().saturating_sub(Self::MAX_STDERR);
-        stderr.drain(..excess);
-        stderr
+        match output.stderr.lock() {
+            Ok(mut stderr) => std::mem::take(&mut *stderr).into_end(),
+            Err(_) => vec![],
+        }
     }
 }
 
@@ -209,14 +204,10 @@ impl ChildReaper {
     /// exited successfully.
     const CONNECT_AFTER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-    pub fn grandchildren(&self) -> &Arc<Mutex<HashMap<Box<str>, Vec<ReapableChild>>>> {
-        &self.grandchildren
-    }
-
     /// Retrieve the container registered under `id`. Execs share the id of
     /// their container and are skipped.
     pub fn get(&self, id: &str) -> Result<ReapableChild> {
-        let lock = lock(self.grandchildren())?;
+        let lock = lock(&self.grandchildren)?;
         let r = lock
             .get(id)
             .and_then(|v| v.iter().find(|c| c.kind == ChildKind::Container))
@@ -584,7 +575,7 @@ impl ChildReaper {
         static PROC_CHILDREN: LazyLock<bool> =
             LazyLock::new(|| Path::new("/proc/thread-self/children").exists());
         if !*PROC_CHILDREN {
-            return (Self::children_by_scan(), true);
+            return (children_by_scan(), true);
         }
         let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
             return (vec![], true);
@@ -609,21 +600,6 @@ impl ChildReaper {
             );
         }
         (children, complete)
-    }
-
-    fn children_by_scan() -> Vec<u32> {
-        let parent = format!("PPid:\t{}", getpid());
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return vec![];
-        };
-        entries
-            .flatten()
-            .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
-            .filter(|pid| {
-                std::fs::read_to_string(format!("/proc/{pid}/status"))
-                    .is_ok_and(|status| status.lines().any(|line| line == parent))
-            })
-            .collect()
     }
 
     /// Kill and reap the container process of a failed runtime call, if the
@@ -671,7 +647,7 @@ impl ChildReaper {
         let pid = child.pid;
         let (id, mut reapable_grandchild) = ReapableChild::from_child(child);
 
-        let locked_grandchildren = self.grandchildren();
+        let locked_grandchildren = &self.grandchildren;
         let mut map = lock(locked_grandchildren)?;
         let (exit_rx, mut forget_rx) = reapable_grandchild.watch();
         let shutting_down = self.shutting_down.load(Ordering::SeqCst);
@@ -730,7 +706,8 @@ impl ChildReaper {
         Ok(())
     }
 
-    pub async fn kill_grandchildren(&self, s: Signal) -> Result<()> {
+    /// Kill every grandchild and wait for their watchers, at the shutdown.
+    pub async fn kill_grandchildren(&self) -> Result<()> {
         debug!("Killing grandchildren");
         // Collect only PIDs and task handles to avoid cloning entire ReapableChild
         let children: Vec<_> = {
@@ -751,14 +728,14 @@ impl ChildReaper {
             let span = debug_span!("kill_grandchild", pid);
             let _enter = span.enter();
             debug!("Killing single grandchild");
-            kill_grandchild(pid, s);
+            kill_grandchild(pid, Signal::SIGKILL);
             tasks.extend(task);
         }
         // An init of a PID namespace only exits once every process of the
         // namespace is reaped, including zombies reparented to this process.
         // The sweep keeps running while the watchers are awaited.
         self.sweep.notify_one();
-        Self::wait_for_watchers(tasks, s).await?;
+        Self::wait_for_watchers(tasks).await?;
 
         // Runtime calls in progress get to finish, the server would kill a
         // runtime halfway otherwise. Their children got killed on registration.
@@ -770,7 +747,7 @@ impl ChildReaper {
             warn!("Runtime calls still in progress, stopping anyway");
         }
         let late = std::mem::take(&mut *lock(&self.late_watchers)?);
-        Self::wait_for_watchers(late, s).await?;
+        Self::wait_for_watchers(late).await?;
         debug!("Done killing all grandchildren");
         Ok(())
     }
@@ -779,11 +756,11 @@ impl ChildReaper {
     /// time the clients give the whole shutdown.
     const IN_FLIGHT_WAIT: Duration = Duration::from_secs(5);
 
-    async fn wait_for_watchers(tasks: Vec<TaskHandle>, s: Signal) -> Result<()> {
+    async fn wait_for_watchers(tasks: Vec<TaskHandle>) -> Result<()> {
         let mut waits = Vec::with_capacity(tasks.len());
         for task in tasks {
             if let Some(handle) = lock(&task)?.take() {
-                let close_span = debug_span!("close", signal = s.as_str());
+                let close_span = debug_span!("close");
                 waits.push(
                     async move {
                         debug!("Waiting for task to close");
@@ -840,6 +817,42 @@ impl ReapableChild {
 
     pub fn token(&self) -> &CancellationToken {
         &self.token
+    }
+}
+
+/// The exit code of a process whose exit status is not known, because it did
+/// neither exit nor get killed by a signal, or waitpid failed after its pidfd
+/// got readable.
+const EXIT_CODE_UNKNOWN: i32 = -1;
+
+/// The exit code of an exec which could not be started, for example because
+/// the runtime failed.
+pub const EXIT_CODE_NOT_STARTED: i32 = -2;
+
+/// The exit code of a process which did not exit before its timeout. Clients
+/// take -3 for a timeout, no other failure may report it, except for
+/// [`EXIT_CODE_WAIT_FAILED`], which always did.
+pub const EXIT_CODE_TIMED_OUT: i32 = -3;
+
+/// The exit code of a process whose exit status the blocking wait, used
+/// without pidfds, could not get, for example because it got reaped already.
+/// It is the same as [`EXIT_CODE_TIMED_OUT`] for compatibility, the pidfd wait
+/// reports [`EXIT_CODE_UNKNOWN`] instead.
+const EXIT_CODE_WAIT_FAILED: i32 = -3;
+
+/// The exit code of a process which exited or got killed by a signal, the
+/// latter like a shell reports it.
+fn status_exit_code(status: WaitStatus) -> Option<i32> {
+    match status {
+        WaitStatus::Exited(_, code) => {
+            debug!("Exited {code}");
+            Some(code)
+        }
+        WaitStatus::Signaled(_, sig, _) => {
+            debug!("Signaled: {sig}");
+            Some(sig as i32 + 128)
+        }
+        _ => None,
     }
 }
 
@@ -939,7 +952,7 @@ impl ReapableChild {
         let task = task::spawn(
             async move {
                 debug!("Running task");
-                let mut exit_code: i32 = -1;
+                let mut exit_code = EXIT_CODE_UNKNOWN;
                 let mut oomed = false;
                 let mut timed_out = false;
                 // Nobody learns about an OOM without the files, like an exec.
@@ -973,7 +986,7 @@ impl ReapableChild {
                         oomed = Self::late_oom(&mut oom_rx, code, &oom_exit_paths).await;
                     } else if res.is_err() {
                         timed_out = true;
-                        exit_code = -3;
+                        exit_code = EXIT_CODE_TIMED_OUT;
                         kill_grandchild(pid, Signal::SIGKILL);
                         exit_token.cancel();
                         // Reap the zombie: the pidfd future was dropped by the
@@ -1047,7 +1060,6 @@ impl ReapableChild {
     /// Wait for a process to exit using pidfd_open for async polling,
     /// with a blocking waitpid fallback for older kernels.
     pub(crate) async fn wait_for_exit_code_async(token: CancellationToken, pid: u32) -> i32 {
-        const FAILED_EXIT_CODE: i32 = -3;
         debug!("Waiting for exit code of pid {pid}");
 
         let exit_code = match Self::try_pidfd_wait(pid).await {
@@ -1060,7 +1072,7 @@ impl ReapableChild {
                 });
                 rx.await.unwrap_or_else(|_| {
                     error!("waitpid thread exited without a result");
-                    FAILED_EXIT_CODE
+                    EXIT_CODE_WAIT_FAILED
                 })
             }
         };
@@ -1123,22 +1135,15 @@ impl ReapableChild {
         let reaping = reap_guard();
         let status = waitpid(Pid::from_raw(pid as pid_t), WaitPidFlag::WNOHANG.into());
         drop(reaping);
-        match status {
-            Ok(WaitStatus::Exited(_, code)) => {
-                debug!("Exited {code}");
-                Some(code)
-            }
-            Ok(WaitStatus::Signaled(_, sig, _)) => {
-                debug!("Signaled: {sig}");
-                Some((sig as i32) + 128)
-            }
-            Ok(_) => {
+        match status.map(status_exit_code) {
+            Ok(Some(code)) => Some(code),
+            Ok(None) => {
                 debug!("Unexpected wait status after pidfd readable");
-                Some(-1)
+                Some(EXIT_CODE_UNKNOWN)
             }
             Err(e) => {
                 error!("waitpid after pidfd readable failed: {:#}", e);
-                Some(-1)
+                Some(EXIT_CODE_UNKNOWN)
             }
         }
     }
@@ -1146,7 +1151,6 @@ impl ReapableChild {
     /// Wait for the exit without reaping, which then happens under the
     /// [`reap_guard`].
     fn wait_for_exit_code_blocking(pid: u32) -> i32 {
-        const FAILED_EXIT_CODE: i32 = -3;
         let pid = Pid::from_raw(pid as pid_t);
         loop {
             match waitid(Id::Pid(pid), WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT) {
@@ -1154,35 +1158,26 @@ impl ReapableChild {
                 Err(Errno::EINTR) => continue,
                 Err(Errno::ECHILD) => {
                     debug!("PID {pid} got reaped already");
-                    return FAILED_EXIT_CODE;
+                    return EXIT_CODE_WAIT_FAILED;
                 }
                 Err(err) => {
                     error!("Unable to wait for pid {pid}: {:#}", err);
-                    return FAILED_EXIT_CODE;
+                    return EXIT_CODE_WAIT_FAILED;
                 }
             }
             let reaping = reap_guard();
             let status = waitpid(pid, Some(WaitPidFlag::WNOHANG));
             drop(reaping);
-            match status {
-                Ok(WaitStatus::Exited(_, exit_code)) => {
-                    debug!("Exited {}", exit_code);
-                    return exit_code;
-                }
-                Ok(WaitStatus::Signaled(_, sig, _)) => {
-                    debug!("Signaled: {sig}");
-                    return (sig as i32) + 128;
-                }
-                Ok(_) => {
-                    continue;
-                }
+            match status.map(status_exit_code) {
+                Ok(Some(code)) => return code,
+                Ok(None) => continue,
                 Err(Errno::EINTR) => {
                     debug!("Failed to wait for pid on EINTR, retrying");
                     continue;
                 }
                 Err(err) => {
                     error!("Unable to waitpid on {:#}", err);
-                    return FAILED_EXIT_CODE;
+                    return EXIT_CODE_WAIT_FAILED;
                 }
             };
         }
@@ -1291,7 +1286,7 @@ mod tests {
 
         // Both ways of listing the children find them.
         assert!(ChildReaper::zombie_children().0.contains(&orphan));
-        assert!(ChildReaper::children_by_scan().contains(&orphan));
+        assert!(children_by_scan().contains(&orphan));
 
         // The first sweep only records the candidates.
         let mut candidates = HashMap::new();
@@ -1363,7 +1358,7 @@ mod tests {
             oom_exit_paths: vec![],
             timeout,
             io: SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?),
-            cleanup_cmd: cleanup.iter().map(|s| s.to_string()).collect(),
+            cleanup_cmd: cleanup.iter().map(ToString::to_string).collect(),
             token: CancellationToken::new(),
         })
     }
@@ -1448,7 +1443,7 @@ mod tests {
         let (mut exit_rx, _) = reapable.watch();
 
         let exit = exit_rx.recv().await?;
-        assert_eq!(exit.exit_code, -3);
+        assert_eq!(exit.exit_code, EXIT_CODE_TIMED_OUT);
         assert!(exit.timed_out);
         assert_eq!(std::fs::read_to_string(&exit_path)?, "-3");
         wait_until(|| is_gone(pid)).await;
@@ -1495,7 +1490,7 @@ mod tests {
     #[tokio::test]
     async fn registration_after_shutdown_kills_child() -> Result<()> {
         let reaper = ChildReaper::default();
-        reaper.kill_grandchildren(Signal::SIGKILL).await?;
+        reaper.kill_grandchildren().await?;
 
         // A call which was in progress while the shutdown killed the others.
         let dir = tempfile::tempdir()?;
@@ -1598,7 +1593,7 @@ mod tests {
         let call = reaper.begin_call()?;
         let shutdown = task::spawn({
             let reaper = reaper.clone();
-            async move { reaper.kill_grandchildren(Signal::SIGKILL).await }
+            async move { reaper.kill_grandchildren().await }
         });
         time::sleep(Duration::from_secs(1)).await;
         assert!(!shutdown.is_finished());
@@ -1612,7 +1607,7 @@ mod tests {
         let _call = InFlight(Some(reaper.in_flight.clone()));
         reaper.in_flight.send_modify(|n| *n += 1);
         let start = Instant::now();
-        reaper.kill_grandchildren(Signal::SIGKILL).await?;
+        reaper.kill_grandchildren().await?;
         assert_eq!(start.elapsed(), ChildReaper::IN_FLIGHT_WAIT);
         Ok(())
     }

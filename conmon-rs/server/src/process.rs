@@ -28,39 +28,62 @@ pub fn reap_guard() -> RwLockWriteGuard<'static, ()> {
     REAP_LOCK.write().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Whether the process is a zombie. The state follows the parenthesized
-/// command name in `/proc/<pid>/stat`.
-pub fn is_zombie(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(") ")
-            .is_some_and(|(_, rest)| rest.starts_with('Z'))
-    })
+/// The fields of `/proc/<pid>/stat` which follow the parenthesized command
+/// name, which may contain spaces and parentheses itself.
+#[derive(Debug, PartialEq)]
+struct Stat {
+    state: char,
+    ppid: i32,
+    pgrp: i32,
 }
 
-/// Whether a child of this process belongs to the process group. The parent
-/// and the group follow the parenthesized command name in `/proc/<pid>/stat`.
-fn group_has_child(pgid: Pid) -> bool {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return false;
-    };
-    let own = getpid().as_raw().to_string();
-    let pgid = pgid.as_raw().to_string();
-    entries
+impl Stat {
+    fn read(pid: u32) -> Option<Self> {
+        Self::parse(&std::fs::read(format!("/proc/{pid}/stat")).ok()?)
+    }
+
+    /// The command name is not UTF-8 necessarily, any process can set its
+    /// own, only the fields after it are.
+    fn parse(stat: &[u8]) -> Option<Self> {
+        let end = stat.windows(2).rposition(|w| w == b") ")?;
+        let rest = std::str::from_utf8(&stat[end + 2..]).ok()?;
+        let mut fields = rest.split_whitespace();
+        Some(Self {
+            state: fields.next()?.chars().next()?,
+            ppid: fields.next()?.parse().ok()?,
+            pgrp: fields.next()?.parse().ok()?,
+        })
+    }
+}
+
+/// The PIDs of all processes, without the ones of their threads.
+fn pids() -> impl Iterator<Item = u32> {
+    std::fs::read_dir("/proc")
+        .into_iter()
         .flatten()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.parse::<u32>().is_ok())
-        })
-        .any(|entry| {
-            std::fs::read_to_string(entry.path().join("stat")).is_ok_and(|stat| {
-                stat.rsplit_once(") ").is_some_and(|(_, rest)| {
-                    let mut fields = rest.split_whitespace().skip(1);
-                    fields.next() == Some(own.as_str()) && fields.next() == Some(pgid.as_str())
-                })
-            })
-        })
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+}
+
+/// Whether the process is a zombie.
+pub fn is_zombie(pid: u32) -> bool {
+    Stat::read(pid).is_some_and(|stat| stat.state == 'Z')
+}
+
+/// The children of this process, found by scanning all processes.
+pub fn children_by_scan() -> Vec<u32> {
+    let own = getpid().as_raw();
+    pids()
+        .filter(|pid| Stat::read(*pid).is_some_and(|stat| stat.ppid == own))
+        .collect()
+}
+
+/// Whether a child of this process belongs to the process group.
+fn group_has_child(pgid: Pid) -> bool {
+    let own = getpid().as_raw();
+    pids()
+        .filter_map(Stat::read)
+        .any(|stat| stat.ppid == own && stat.pgrp == pgid.as_raw())
 }
 
 /// Whether the process group of a child gets signalled. Group 1 would end up
@@ -208,6 +231,40 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+    #[test]
+    fn stat_follows_the_command_name() {
+        assert_eq!(
+            Stat::parse(b"42 (a) b) (c) Z 1 42 42 0 -1"),
+            Some(Stat {
+                state: 'Z',
+                ppid: 1,
+                pgrp: 42
+            })
+        );
+        assert_eq!(Stat::parse(b"42 (a) R"), None);
+        // Any process can give itself a name which is not UTF-8.
+        assert_eq!(
+            Stat::parse(b"42 (\xff\xfe) Z 1 7 7 0 -1"),
+            Some(Stat {
+                state: 'Z',
+                ppid: 1,
+                pgrp: 7
+            })
+        );
+    }
+
+    #[test]
+    fn children_are_found_by_scan() -> Result<()> {
+        let mut child = std::process::Command::new("sleep").arg("60").spawn()?;
+        let found = children_by_scan().contains(&child.id());
+        let zombie = is_zombie(child.id());
+        child.kill()?;
+        child.wait()?;
+        assert!(found);
+        assert!(!zombie);
+        Ok(())
+    }
 
     #[test]
     fn own_process_group_is_not_signalled() -> Result<()> {

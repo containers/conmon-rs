@@ -4,6 +4,7 @@ use crate::telemetry::Telemetry;
 use crate::{
     capnp_util,
     child::{Child, ChildKind, sleep_until},
+    child_reaper::{EXIT_CODE_NOT_STARTED, EXIT_CODE_TIMED_OUT},
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     notify::NotifySocket,
@@ -374,7 +375,11 @@ impl conmon::Server for Server {
                                 return Ok(ExecSyncOutput {
                                     stdout: vec![],
                                     stderr: format!("{e:#}").into_bytes(),
-                                    exit_code: if timed_out { -3 } else { -2 },
+                                    exit_code: if timed_out {
+                                        EXIT_CODE_TIMED_OUT
+                                    } else {
+                                        EXIT_CODE_NOT_STARTED
+                                    },
                                     timed_out,
                                 });
                             }
@@ -425,7 +430,7 @@ impl conmon::Server for Server {
                     ExecSyncOutput {
                         stdout: vec![],
                         stderr: b"timed out waiting for the runtime to start the process".to_vec(),
-                        exit_code: -3,
+                        exit_code: EXIT_CODE_TIMED_OUT,
                         timed_out: true,
                     }
                 };

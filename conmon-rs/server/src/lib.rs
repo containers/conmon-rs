@@ -77,6 +77,17 @@ pub mod conmon_capnp {
     include!(concat!(env!("OUT_DIR"), "/proto/conmon_capnp.rs"));
 }
 
+/// The entry points of the fuzz targets in `fuzz/`, not an API.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing {
+    pub use crate::{
+        channel::decode as channel_decode,
+        remotecommand::ResizeEvents,
+        spdy::fuzzing::{frames as spdy_frames, header_block as spdy_header_block},
+    };
+}
+
 mod attach;
 mod bounded_hashmap;
 mod budget;
@@ -109,8 +120,10 @@ mod rpc;
 #[allow(unsafe_code)]
 mod server;
 mod spdy;
+mod stream_protocol;
 mod streaming_server;
 mod streams;
+mod tail;
 #[cfg(feature = "tracing")]
 mod telemetry;
 #[allow(unsafe_code)]

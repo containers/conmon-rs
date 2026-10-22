@@ -23,6 +23,7 @@ use crate::{
     channel,
     idle::Activity,
     spdy::{Connection, Headers, PING_INTERVAL, Stream, StreamReceiver, StreamSender},
+    stream_protocol::{STREAM_CREATION_TIMEOUT, STREAM_TYPE_HEADER},
 };
 use anyhow::{Context, Result, bail, ensure};
 use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
@@ -42,7 +43,7 @@ use std::{
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     pin::pin,
-    sync::{Arc, Mutex, MutexGuard, mpsc as std_mpsc},
+    sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc as std_mpsc},
     thread,
 };
 use tokio::{
@@ -64,13 +65,8 @@ pub const PROTOCOL: &str = "portforward.k8s.io";
 
 const PORT_HEADER: &str = "port";
 const REQUEST_ID_HEADER: &str = "requestID";
-const STREAM_TYPE_HEADER: &str = "streamType";
 const STREAM_TYPE_DATA: &str = "data";
 const STREAM_TYPE_ERROR: &str = "error";
-
-/// How long the second stream of a request may take, the default of the
-/// kubelet and CRI-O.
-const STREAM_CREATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long connecting to a port in the pod may take. Within the pod it gets
 /// accepted or refused right away, unless a firewall drops it.
@@ -130,15 +126,15 @@ const CHANNEL_QUEUE: usize = 16;
 /// size for each of [`MAX_CHANNEL_PORTS`] ports which do not take them.
 const CHANNEL_BUFFER: u32 = 4 * 1024 * 1024;
 
+/// How long the client gets to answer the close of the server.
+const WEBSOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// How many messages for the client wait for the WebSocket.
 const OUTPUT_QUEUE: usize = 16;
 
 /// The size of the buffers between the WebSocket and the tunneled SPDY
 /// connection.
 const TUNNEL_BUFFER: usize = 64 * 1024;
-
-/// How long the client gets to answer the close of the server.
-const WEBSOCKET_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A protocol a client may forward ports with over a WebSocket.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -362,7 +358,7 @@ impl Namespace {
     }
 
     fn lock(&self) -> MutexGuard<'_, Option<SocketRequests>> {
-        self.requests.lock().unwrap_or_else(|e| e.into_inner())
+        self.requests.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn start(&self) -> Result<SocketRequests> {

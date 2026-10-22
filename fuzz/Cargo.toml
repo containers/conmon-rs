@@ -1,0 +1,42 @@
+[package]
+name = "conmonrs-fuzz"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+bytes = { workspace = true }
+conmonrs = { path = "../conmon-rs/server", features = ["fuzzing"] }
+libfuzzer-sys = "0.4.10"
+
+[[bin]]
+name = "spdy_frames"
+path = "fuzz_targets/spdy_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "spdy_header_block"
+path = "fuzz_targets/spdy_header_block.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "channel_decode"
+path = "fuzz_targets/channel_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resize_events"
+path = "fuzz_targets/resize_events.rs"
+test = false
+doc = false
+bench = false

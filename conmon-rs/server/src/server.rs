@@ -199,8 +199,11 @@ impl Server {
                         // leave it running behind a failure.
                         eprintln!("Unable to write PID file {}: {e}", pidfile.display());
                         let _ = kill(child, Signal::SIGKILL);
+                        // SAFETY: _exit(2) ends the process right away, the
+                        // parent has nothing to flush or clean up.
                         unsafe { _exit(1) };
                     }
+                    // SAFETY: as above.
                     unsafe { _exit(0) };
                 }
                 ForkResult::Child => (),
@@ -212,6 +215,8 @@ impl Server {
         Self::close_inherited_fds();
 
         // now that we've forked, set self to childreaper
+        // SAFETY: PR_SET_CHILD_SUBREAPER only takes integer arguments and
+        // touches no memory of ours.
         let ret = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
         if ret != 0 {
             return Err(Errno::last()).context("set child subreaper");
@@ -402,9 +407,8 @@ impl Server {
         fd_socket: T,
     ) -> Result<()> {
         debug!("Starting grandchildren cleanup task");
-        // Always use SIGKILL to ensure immediate termination of container processes
         let killed = reaper
-            .kill_grandchildren(Signal::SIGKILL)
+            .kill_grandchildren()
             .await
             .context("unable to kill grandchildren");
 

@@ -45,7 +45,7 @@ impl CommandFdExt for Command {
     ) -> Result<&mut Self, FdMappingCollision> {
         let child_fds = validate_child_fds(&mappings)?;
 
-        // Safety: map_fds will not allocate, so it is safe to call from this hook.
+        // SAFETY: map_fds will not allocate, so it is safe to call from this hook.
         unsafe {
             self.pre_exec(move || map_fds(&mut mappings, &child_fds));
         }

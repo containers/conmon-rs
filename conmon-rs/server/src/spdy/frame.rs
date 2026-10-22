@@ -462,7 +462,12 @@ impl Encoder {
             raw.put_u32(value.len() as u32);
             raw.put_slice(value.as_bytes());
         }
+        self.deflate(&raw)
+    }
 
+    /// Wrap a serialized header block into stored deflate blocks, the first
+    /// one of the connection with the zlib header.
+    fn deflate(&mut self, raw: &[u8]) -> Vec<u8> {
         let mut block = Vec::with_capacity(raw.len() + 16);
         if !self.started {
             // Deflate with a 32 KiB window and the preset dictionary.
@@ -487,6 +492,31 @@ impl Encoder {
         block.put_u16_le(len);
         block.put_u16_le(!len);
         block.put_slice(data);
+    }
+}
+
+/// The entry points of the fuzz targets.
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing {
+    use super::{Decoder, Encoder};
+    use futures::FutureExt;
+
+    /// Decode frames until the input ends or is invalid. Reading a slice is
+    /// never pending, so no runtime is needed.
+    pub fn frames(mut input: &[u8]) {
+        let mut decoder = Decoder::default();
+        while let Some(Ok(Some(_))) = decoder.read(&mut input).now_or_never() {}
+    }
+
+    /// Decode the input as a compressed header block, which is what a
+    /// client controls, parse it as a decompressed one, and decode it once
+    /// deflated like the server does, which always gets past the
+    /// decompression to the parsing.
+    pub fn header_block(raw: &[u8]) {
+        let _ = Decoder::default().header_block(raw);
+        let _ = Decoder::parse_header_block(raw);
+        let block = Encoder::default().deflate(raw);
+        let _ = Decoder::default().header_block(&block);
     }
 }
 

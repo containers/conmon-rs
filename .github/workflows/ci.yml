@@ -104,6 +104,7 @@ jobs:
         run: |
           cargo clippy --locked --all-targets -- -D warnings
           cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo clippy --locked -p conmonrs-fuzz --all-targets -- -D warnings
       # The gh-pages workflow publishes the documentation of all features.
       - name: Cargo doc
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
@@ -287,6 +288,87 @@ jobs:
           # Required for uploads from the protected main branch, pull requests
           # from forks fall back to tokenless uploads.
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  # Builds all fuzz targets once, so that they keep compiling, for test-fuzz
+  # to run one per job. A new target gets fuzzed without a change here.
+  # cargo-fuzz needs a nightly toolchain. The shipped release profile would
+  # strip the symbols and take long to build, the fuzz build overrides it.
+  build-fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
+    env:
+      CARGO_PROFILE_RELEASE_STRIP: "false"
+      CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: "3"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: .github/install-deps
+      - name: Select Toolchain
+        run: rustup toolchain install nightly --profile minimal && rustup default nightly
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: fuzz
+      # cargo-fuzz resolves the dependencies itself, a lock file which does
+      # not fit fails here instead.
+      - name: Check the lock file
+        run: cargo fetch --locked
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-fuzz
+      # The prebuilt cargo-fuzz defaults to the musl target it got built for,
+      # which the sanitizers do not support.
+      - name: Build fuzz targets
+        run: |
+          cargo fuzz build --target x86_64-unknown-linux-gnu --target-dir target/fuzz
+          mkdir fuzz-targets
+          for target in $(cargo fuzz list); do
+            cp "target/fuzz/x86_64-unknown-linux-gnu/release/$target" fuzz-targets/
+          done
+      - name: List fuzz targets
+        id: list
+        run: echo "targets=$(cargo fuzz list | jq -Rnc '[inputs]')" >>"$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-targets
+          path: fuzz-targets
+
+  # Runs a fuzz target for two minutes. A crash leaves its input in the
+  # artifacts, `cargo fuzz run <target> <input>` reproduces it.
+  test-fuzz:
+    needs: build-fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.build-fuzz.outputs.targets) }}
+    name: test-fuzz-${{ matrix.target }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fuzz-targets
+          path: fuzz-targets
+      - name: Fuzz
+        env:
+          TARGET: ${{ matrix.target }}
+          # Like cargo-fuzz runs the targets.
+          ASAN_OPTIONS: detect_odr_violation=0
+        run: |
+          chmod +x "fuzz-targets/$TARGET"
+          mkdir -p corpus artifacts
+          "fuzz-targets/$TARGET" -max_total_time=120 -artifact_prefix=artifacts/ corpus
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: fuzz-${{ matrix.target }}-artifacts
+          path: artifacts
 
   test-integration-amd64:
     needs: build-static-amd64

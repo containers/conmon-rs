@@ -195,3 +195,11 @@ to be installed), `make unit` runs the Rust unit tests and `make integration`
 runs the Go integration suite against the release binary (`RUNTIME_PATH` selects the OCI runtime, the suite needs root for
 the namespace and OOM specs). `make help` lists the rest. Contributions follow
 [CONTRIBUTING.md](./CONTRIBUTING.md).
+
+The [fuzz](./fuzz) directory holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)
+targets for the parsers of client input, the SPDY frames and header blocks, the
+WebSocket channel messages and the resize events. They need a nightly toolchain,
+for example `cargo +nightly fuzz run spdy_frames`. The release profile of the
+server strips the symbols and builds slowly, CI overrides it with
+`CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_LTO=false
+CARGO_PROFILE_RELEASE_OPT_LEVEL=3`, which helps local runs as well.

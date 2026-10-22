@@ -1257,9 +1257,7 @@ mod tests {
 
         // Unsubscribing happens on the blocking pool, give it a moment.
         let subscribers = |path: &Path| -> Result<usize> {
-            Ok(lock(&watcher.subscribers)?
-                .get(path)
-                .map_or(0, |subs| subs.len()))
+            Ok(lock(&watcher.subscribers)?.get(path).map_or(0, Vec::len))
         };
         drop(sub1);
         for _ in 0..200 {
