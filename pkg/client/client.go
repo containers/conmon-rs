@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"net"
 	"os"
@@ -39,6 +40,7 @@ const (
 )
 
 var (
+	errConfigUnspecified  = errors.New("config must be specified")
 	errRuntimeUnspecified = errors.New("runtime must be specified")
 	errRunDirUnspecified  = errors.New("RunDir must be specified")
 	errInvalidValue       = errors.New("invalid value")
@@ -46,6 +48,7 @@ var (
 	errTimeoutWaitForPid  = errors.New("timed out waiting for server PID to disappear")
 	errServerExited       = errors.New("server exited before accepting connections")
 	errServerNotUp        = errors.New("server did not accept connections")
+	errServerPIDUnknown   = errors.New("server PID unknown")
 )
 
 // ErrServerNotResponding is returned by New if a server accepts connections
@@ -56,7 +59,13 @@ var ErrServerNotResponding = errors.New("server accepted the connection but did 
 
 // ConmonClient is the main client structure of this package.
 type ConmonClient struct {
-	serverPID      uint32
+	serverPID uint32
+	// serverPidfd refers to the server process, nil if pidfds are not
+	// supported. Unlike the PID, it never refers to another process which
+	// got the PID once the server exited. It gets closed once the server is
+	// known to be gone, serverDone is set before.
+	serverPidfd    *os.File
+	serverDone     atomic.Bool
 	runDir         string
 	logger         *logrus.Logger
 	attachReaders  map[uint64]*attachReaderValue
@@ -230,21 +239,59 @@ const serverProbeTimeout = 3 * time.Second
 // dialing the socket fails otherwise, for example because of missing
 // permissions, New returns that error. In neither case it starts a second
 // server.
-func New(config *ConmonServerConfig) (client *ConmonClient, retErr error) {
+//
+// If New started a server but fails afterwards, it stops the server again,
+// with SIGKILL if SIGINT does not end it within a few seconds.
+func New(config *ConmonServerConfig) (*ConmonClient, error) {
+	return NewContext(context.Background(), config)
+}
+
+// NewContext works like New. The context bounds the check of a running
+// server and the wait for a started one to accept connections, which
+// otherwise take up to 10 seconds each. A server which NewContext started
+// keeps running once it returned, but if the context ends before the server
+// answers, NewContext stops it again like on any other failure.
+//
+// Concurrent calls for the same ServerRunDir are not supported: each one
+// may start a server, and the PID file of one may name the server of the
+// other, which the cleanup of a failing call then stops.
+func NewContext(
+	ctx context.Context,
+	config *ConmonServerConfig,
+) (client *ConmonClient, retErr error) {
+	if config == nil {
+		return nil, errConfigUnspecified
+	}
+
 	cl, err := config.toClient()
 	if err != nil {
 		return nil, fmt.Errorf("convert config to client: %w", err)
 	}
-	// Check if the process has already started, and inherit that process instead.
-	ctx, cancel := defaultContext()
-	defer cancel()
 
 	ctx, span := cl.startSpan(ctx, "New")
 	if span != nil {
 		defer span.End()
 	}
 
-	if connected, err := cl.connectRunningServer(ctx); connected || err != nil {
+	// Check if the process has already started, and inherit that process instead.
+	probeCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	connected, err := cl.connectRunningServer(probeCtx)
+
+	cancel()
+
+	// A probe which ran out of time tells about the server, one which got
+	// cancelled with the caller does not, nor may a server get started then.
+	if !connected {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if err != nil {
+				return nil, fmt.Errorf("connect to server: %w: %w", ctxErr, err)
+			}
+
+			return nil, fmt.Errorf("connect to server: %w", ctxErr)
+		}
+	}
+
+	if connected || err != nil {
 		if err != nil {
 			return nil, err
 		}
@@ -256,36 +303,84 @@ func New(config *ConmonServerConfig) (client *ConmonClient, retErr error) {
 		return nil, fmt.Errorf("start server: %w", err)
 	}
 
-	pid, err := pidGivenFile(cl.pidFile())
-	if err != nil {
-		return nil, fmt.Errorf("get pid from env: %w", err)
-	}
-
-	cl.serverPID = pid
-
-	if config.Heaptrack != nil && config.Heaptrack.Enabled {
-		go cl.attachHeaptrack(config, pid)
-	}
-
 	// Cleanup the background server process
 	// if we fail any of the next steps
 	defer func() {
 		if retErr != nil {
-			if err := cl.Shutdown(); err != nil {
+			cl.resetConn()
+
+			cleanupCtx := context.WithoutCancel(ctx)
+			if err := cl.stopServer(cleanupCtx, serverCleanupTimeout, true); err != nil {
 				cl.logger.Errorf("Unable to shutdown server: %v", err)
 			}
 		}
 	}()
 
-	if err := cl.waitUntilServerUp(ctx); err != nil {
+	// The PID file names the server before it answers, so that a crash shows
+	// up right away. The server itself tells its PID once it is up, which is
+	// the one to use: a concurrent New on the same run directory may have
+	// replaced the file.
+	if pid, err := pidGivenFile(cl.pidFile()); err != nil {
+		cl.logger.WithError(err).Warn("Unable to get server PID from file, waiting for the server")
+	} else {
+		cl.setServerPID(pid)
+	}
+
+	// Heaptrack follows the server, also if it reports another PID than the
+	// file named.
+	heaptrack := config.Heaptrack != nil && config.Heaptrack.Enabled
+
+	var heaptrackPID uint32
+
+	if heaptrack && cl.serverPID != 0 {
+		heaptrackPID = cl.serverPID
+		go cl.attachHeaptrack(context.WithoutCancel(ctx), config, heaptrackPID)
+	}
+
+	resp, err := cl.waitUntilServerUp(ctx)
+	if err != nil {
 		return nil, fmt.Errorf("wait until server is up: %w", err)
 	}
 
-	if err := os.Remove(cl.pidFile()); err != nil {
-		return nil, fmt.Errorf("remove pid file: %w", err)
+	if resp.ProcessID != cl.serverPID {
+		if cl.serverPID != 0 {
+			cl.logger.Warnf(
+				"Server reports PID %d, the PID file named %d",
+				resp.ProcessID,
+				cl.serverPID,
+			)
+		}
+
+		cl.setServerPID(resp.ProcessID)
+	}
+
+	cl.setFeatures(resp.Features)
+
+	if heaptrack && heaptrackPID != cl.serverPID {
+		go cl.attachHeaptrack(context.WithoutCancel(ctx), config, cl.serverPID)
+	}
+
+	// A file left behind gets overwritten by the next start.
+	if err := os.Remove(cl.pidFile()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		cl.logger.WithError(err).Warn("Unable to remove server PID file")
 	}
 
 	return cl, nil
+}
+
+// setServerPID records the PID of the server and opens a pidfd for it.
+func (c *ConmonClient) setServerPID(pid uint32) {
+	if c.serverPidfd != nil {
+		c.serverPidfd.Close()
+	}
+
+	var gone bool
+
+	c.serverPID = pid
+	c.serverPidfd, gone = openPidfd(c.logger, pid)
+	// A server which exited already must not get signaled through its PID,
+	// which may belong to another process by now.
+	c.serverDone.Store(gone)
 }
 
 // connectRunningServer connects to the server which listens on the socket of
@@ -320,7 +415,8 @@ func (c *ConmonClient) connectRunningServer(ctx context.Context) (bool, error) {
 
 	resp, err := c.Version(probeCtx, &VersionConfig{})
 	if err == nil {
-		c.serverPID = resp.ProcessID
+		c.setServerPID(resp.ProcessID)
+		c.setFeatures(resp.Features)
 
 		return true, nil
 	}
@@ -461,13 +557,21 @@ func Version(binaryPath string) (res *ServerVersion, err error) {
 	// kill.
 	cmd.WaitDelay = time.Second
 
-	data, err := cmd.CombinedOutput()
+	// Only stdout carries the JSON, the error output of a failed run is kept
+	// by the error.
+	data, err := cmd.Output()
 	if err != nil {
-		if bytes.Contains(data, []byte("error: unexpected argument")) {
+		var stderr []byte
+
+		if exitErr := (&exec.ExitError{}); errors.As(err, &exitErr) {
+			stderr = exitErr.Stderr
+		}
+
+		if bytes.Contains(stderr, []byte("error: unexpected argument")) {
 			return nil, ErrUnsupported
 		}
 
-		return nil, fmt.Errorf("run `%s %s`: %s: %w", binaryPath, arg, string(data), err)
+		return nil, fmt.Errorf("run `%s %s`: %s: %w", binaryPath, arg, string(stderr), err)
 	}
 
 	if err := json.Unmarshal(data, &res); err != nil {
@@ -478,13 +582,18 @@ func Version(binaryPath string) (res *ServerVersion, err error) {
 }
 
 func (c *ConmonServerConfig) toClient() (*ConmonClient, error) {
-	const perm = 0o755
-	if err := os.MkdirAll(c.ServerRunDir, perm); err != nil {
-		return nil, fmt.Errorf("%s: %w", c.ServerRunDir, errRunDirNotCreated)
+	if c.ServerRunDir == "" {
+		return nil, errRunDirUnspecified
 	}
 
-	if c.ClientLogger == nil {
-		c.ClientLogger = logrus.StandardLogger()
+	const perm = 0o755
+	if err := os.MkdirAll(c.ServerRunDir, perm); err != nil {
+		return nil, fmt.Errorf("%w: %w", errRunDirNotCreated, err)
+	}
+
+	logger := c.ClientLogger
+	if logger == nil {
+		logger = logrus.StandardLogger()
 	}
 
 	var tracer trace.Tracer
@@ -494,7 +603,7 @@ func (c *ConmonServerConfig) toClient() (*ConmonClient, error) {
 
 	return &ConmonClient{
 		runDir:        c.ServerRunDir,
-		logger:        c.ClientLogger,
+		logger:        logger,
 		attachReaders: map[uint64]*attachReaderValue{},
 		// Also set if New connects to a running server, which gets started
 		// with the same configuration.
@@ -760,14 +869,15 @@ func pidGivenFile(file string) (uint32, error) {
 	return uint32(pidU64), nil
 }
 
-func (c *ConmonClient) waitUntilServerUp(ctx context.Context) (err error) {
+// waitUntilServerUp polls the server until it answers, up to 10 seconds or
+// until the context ends, and returns its answer.
+func (c *ConmonClient) waitUntilServerUp(ctx context.Context) (*VersionResponse, error) {
 	_, span := c.startSpan(ctx, "waitUntilServerUp")
 	if span != nil {
 		defer span.End()
 	}
 
-	// The polls share their own deadline, the context only carries the span.
-	pollCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultTimeout)
+	pollCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 
 	const (
@@ -777,20 +887,24 @@ func (c *ConmonClient) waitUntilServerUp(ctx context.Context) (err error) {
 	)
 
 	for interval := minInterval; ; interval = min(backoff*interval, maxInterval) {
-		_, err = c.Version(pollCtx, &VersionConfig{})
+		resp, err := c.Version(pollCtx, &VersionConfig{})
 		if err == nil {
-			return nil
+			return resp, nil
 		}
 
 		// A dial fails right away, a crashed server would otherwise only
 		// show up as a timeout with the last dial error.
-		if processExited(c.serverPID) {
-			return fmt.Errorf("%w: PID %d: %w", errServerExited, c.serverPID, err)
+		if c.serverPID != 0 && c.serverExited() {
+			return nil, fmt.Errorf("%w: PID %d: %w", errServerExited, c.serverPID, err)
 		}
 
 		select {
 		case <-pollCtx.Done():
-			return fmt.Errorf("%w after %s: %w", errServerNotUp, defaultTimeout, err)
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("%w: %w: %w", errServerNotUp, ctx.Err(), err)
+			}
+
+			return nil, fmt.Errorf("%w after %s: %w", errServerNotUp, defaultTimeout, err)
 		case <-time.After(interval):
 		}
 	}
@@ -816,10 +930,6 @@ func processExited(pid uint32) bool {
 	state := bytes.TrimSpace(stat[bytes.LastIndexByte(stat, ')')+1:])
 
 	return len(state) > 0 && (state[0] == 'Z' || state[0] == 'X')
-}
-
-func defaultContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), defaultTimeout)
 }
 
 // client returns the RPC client. A connection which got unusable gets
@@ -956,6 +1066,9 @@ func (c *ConmonClient) closeConnLocked() {
 			c.logger.WithError(err).Debug("Unable to close RPC connection")
 		}
 
+		// Calls which still hold it fail like on the closed connection.
+		c.conn.client.Release()
+
 		c.conn = nil
 	}
 }
@@ -1041,24 +1154,22 @@ const FeatureSdNotify = "sdnotify"
 const FeaturePortForward = "portforward"
 
 // requireServerFeature fails with ErrUnsupported if the server does not
-// report the feature. The features are asked once.
+// report the feature. New records the features, a client without them asks
+// the server once.
 func (c *ConmonClient) requireServerFeature(ctx context.Context, feature, usage string) error {
-	c.featuresMu.Lock()
-	defer c.featuresMu.Unlock()
-
-	if c.features == nil {
+	features := c.serverFeatures()
+	if features == nil {
+		// Asked without holding the lock, a server which does not answer
+		// must not block other callers beyond their own context.
 		resp, err := c.Version(ctx, &VersionConfig{})
 		if err != nil {
 			return fmt.Errorf("get server version: %w", err)
 		}
 
-		c.features = make(map[string]bool, len(resp.Features))
-		for _, feature := range resp.Features {
-			c.features[feature] = true
-		}
+		features = c.setFeatures(resp.Features)
 	}
 
-	if !c.features[feature] {
+	if !features[feature] {
 		return fmt.Errorf(
 			"%s needs the %q feature of the server: %w",
 			usage,
@@ -1068,6 +1179,30 @@ func (c *ConmonClient) requireServerFeature(ctx context.Context, feature, usage 
 	}
 
 	return nil
+}
+
+// serverFeatures returns the recorded features of the server, nil if they
+// are unknown.
+func (c *ConmonClient) serverFeatures() map[string]bool {
+	c.featuresMu.Lock()
+	defer c.featuresMu.Unlock()
+
+	return c.features
+}
+
+// setFeatures records the features the server reported and returns them.
+func (c *ConmonClient) setFeatures(list []string) map[string]bool {
+	features := make(map[string]bool, len(list))
+	for _, feature := range list {
+		features[feature] = true
+	}
+
+	c.featuresMu.Lock()
+	defer c.featuresMu.Unlock()
+
+	c.features = features
+
+	return features
 }
 
 // Version can be used to retrieve all available version information.
@@ -1295,8 +1430,14 @@ const (
 	// LogDriverTypeContainerRuntimeInterface is the Kubernetes CRI logger
 	// type.
 	LogDriverTypeContainerRuntimeInterface LogDriverType = iota
-	LogDriverTypeJSONLogger                LogDriverType = iota
-	LogDriverTypeJournald                  LogDriverType = iota
+
+	// LogDriverTypeJSONLogger writes one JSON object per line to the path
+	// of the driver.
+	LogDriverTypeJSONLogger
+
+	// LogDriverTypeJournald writes to the systemd journal, the path of the
+	// driver is not used.
+	LogDriverTypeJournald
 )
 
 // CreateContainerResponse is the response of the CreateContainer method.
@@ -1687,6 +1828,9 @@ func (c *ConmonClient) Shutdown() error {
 
 // ShutdownContext kills the server via SIGINT and waits for the server PID
 // to be removed from the system, up to 10 seconds or until the context ends.
+// It fails without signaling anything if the server PID is unknown. Where
+// the kernel supports pidfds, the signal cannot reach another process which
+// got the PID after the server exited.
 func (c *ConmonClient) ShutdownContext(ctx context.Context) error {
 	_, span := c.startSpan(ctx, "Shutdown")
 	if span != nil {
@@ -1705,25 +1849,76 @@ func (c *ConmonClient) ShutdownContext(ctx context.Context) error {
 
 	c.resetConn()
 
-	pid := int(c.serverPID)
-	if err := syscall.Kill(pid, syscall.SIGINT); err != nil {
+	return c.stopServer(ctx, serverStopTimeout, false)
+}
+
+const (
+	// serverStopTimeout bounds the wait for the server to exit on Shutdown.
+	serverStopTimeout = 10 * time.Second
+
+	// serverCleanupTimeout bounds each wait for a server which New started
+	// but failed to connect to, first after SIGINT and then after SIGKILL.
+	serverCleanupTimeout = 3 * time.Second
+)
+
+// stopServer sends SIGINT to the server and waits for it to exit, up to the
+// timeout or until the context ends. With kill, a server which is still
+// running then gets SIGKILL. The server is only signaled through its PID if
+// pidfds are not supported.
+func (c *ConmonClient) stopServer(ctx context.Context, timeout time.Duration, kill bool) error {
+	// A zero PID would signal the process group of the caller.
+	if c.serverPID == 0 {
+		return fmt.Errorf("stop server: %w", errServerPIDUnknown)
+	}
+
+	if err := c.signalServer(syscall.SIGINT); err != nil {
 		// Process does not exist any more, it might be manually killed.
 		if errors.Is(err, syscall.ESRCH) {
+			c.serverGoneForGood()
+
 			return nil
 		}
 
-		return fmt.Errorf("kill server PID: %w", err)
+		return fmt.Errorf("signal server PID %d: %w", c.serverPID, err)
 	}
 
-	const (
-		waitInterval = 100 * time.Millisecond
-		waitCount    = 100
-	)
+	err := c.waitServerExited(ctx, timeout)
+	if err == nil || !kill || !errors.Is(err, errTimeoutWaitForPid) {
+		return err
+	}
 
-	for range waitCount {
-		// A zombie server, which nobody reaped yet, is gone as well.
-		if processExited(c.serverPID) {
+	c.logger.Warnf("Server PID %d did not exit on SIGINT, sending SIGKILL", c.serverPID)
+
+	if err := c.signalServer(syscall.SIGKILL); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			c.serverGoneForGood()
+
 			return nil
+		}
+
+		return fmt.Errorf("kill server PID %d: %w", c.serverPID, err)
+	}
+
+	return c.waitServerExited(ctx, timeout)
+}
+
+// waitServerExited waits for the server to exit, up to the timeout or until
+// the context ends.
+func (c *ConmonClient) waitServerExited(ctx context.Context, timeout time.Duration) error {
+	const waitInterval = 100 * time.Millisecond
+
+	deadline := time.Now().Add(timeout)
+
+	for {
+		// A zombie server, which nobody reaped yet, is gone as well.
+		if c.serverExited() {
+			c.serverGoneForGood()
+
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return errTimeoutWaitForPid
 		}
 
 		select {
@@ -1732,8 +1927,59 @@ func (c *ConmonClient) ShutdownContext(ctx context.Context) error {
 		case <-time.After(waitInterval):
 		}
 	}
+}
 
-	return errTimeoutWaitForPid
+// signalServer sends the signal to the server. It fails with ESRCH if the
+// server exited.
+func (c *ConmonClient) signalServer(sig syscall.Signal) error {
+	// The pidfd only gets closed once the server is gone, also by a
+	// concurrent call while using it. A server known to be gone never gets
+	// signaled through its PID either.
+	if c.serverDone.Load() {
+		return syscall.ESRCH
+	}
+
+	if c.serverPidfd == nil {
+		return syscall.Kill(int(c.serverPID), sig) //nolint:wrapcheck // wrapped by the caller
+	}
+
+	err := pidfdSendSignal(c.serverPidfd, sig)
+	if err != nil && c.serverDone.Load() {
+		return syscall.ESRCH
+	}
+
+	return err
+}
+
+// serverExited reports whether the server exited or is a zombie.
+func (c *ConmonClient) serverExited() bool {
+	// The pidfd only gets closed once the server is gone, see signalServer.
+	if c.serverDone.Load() {
+		return true
+	}
+
+	if c.serverPidfd != nil {
+		exited, err := pidfdExited(c.serverPidfd)
+		if err == nil {
+			return exited
+		}
+
+		if c.serverDone.Load() {
+			return true
+		}
+
+		c.logger.WithError(err).Debug("Unable to poll server pidfd, checking its PID")
+	}
+
+	return processExited(c.serverPID)
+}
+
+// serverGoneForGood marks a server which is known to be gone, so that it
+// never gets signaled again, and releases its pidfd.
+func (c *ConmonClient) serverGoneForGood() {
+	if !c.serverDone.Swap(true) && c.serverPidfd != nil {
+		c.serverPidfd.Close()
+	}
 }
 
 func (c *ConmonClient) pidFile() string {
@@ -2322,7 +2568,11 @@ func idleTimeoutSeconds(timeout time.Duration) uint64 {
 	return uint64((timeout + time.Second - 1) / time.Second)
 }
 
-func (c *ConmonClient) attachHeaptrack(config *ConmonServerConfig, pid uint32) {
+func (c *ConmonClient) attachHeaptrack(
+	ctx context.Context,
+	config *ConmonServerConfig,
+	pid uint32,
+) {
 	c.logger.Infof("Attaching heaptrack to PID %d", pid)
 
 	args := []string{"--record-only"}
@@ -2347,7 +2597,7 @@ func (c *ConmonClient) attachHeaptrack(config *ConmonServerConfig, pid uint32) {
 
 	c.logger.Debugf("Running heaptrack via: %s %s", entrypoint, strings.Join(args, " "))
 
-	cmd := exec.CommandContext(context.Background(), entrypoint, args...)
+	cmd := exec.CommandContext(ctx, entrypoint, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 

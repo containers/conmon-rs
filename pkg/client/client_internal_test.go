@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -122,6 +124,14 @@ func TestRPCConnUnusableOnceServerGone(t *testing.T) {
 func serveTestSocket(t *testing.T, dir string, withBootstrap bool) {
 	t.Helper()
 
+	serveSocket(t, dir, func() *rpc.Options { return serverOptions(withBootstrap) })
+}
+
+// serveSocket serves RPC connections with the options on the socket of a
+// client in dir.
+func serveSocket(t *testing.T, dir string, options func() *rpc.Options) {
+	t.Helper()
+
 	listener, err := (&net.ListenConfig{}).Listen(
 		t.Context(),
 		"unix",
@@ -145,10 +155,7 @@ func serveTestSocket(t *testing.T, dir string, withBootstrap bool) {
 				return
 			}
 
-			conns = append(
-				conns,
-				rpc.NewConn(rpc.NewStreamTransport(socket), serverOptions(withBootstrap)),
-			)
+			conns = append(conns, rpc.NewConn(rpc.NewStreamTransport(socket), options()))
 		}
 	}()
 
@@ -159,6 +166,72 @@ func serveTestSocket(t *testing.T, dir string, withBootstrap bool) {
 		for _, conn := range conns {
 			conn.Close()
 		}
+	})
+}
+
+// versionConmon is a server which only answers Version.
+type versionConmon struct {
+	proto.Conmon_Server
+
+	pid      uint32
+	features []string
+
+	// called gets notified of every call, if set.
+	called chan<- struct{}
+
+	// release holds the answers back until it gets closed, if set.
+	release <-chan struct{}
+}
+
+func (v versionConmon) Version(ctx context.Context, call proto.Conmon_version) error {
+	if v.called != nil {
+		select {
+		case v.called <- struct{}{}:
+		default:
+		}
+	}
+
+	if v.release != nil {
+		select {
+		case <-v.release:
+		case <-ctx.Done():
+			return fmt.Errorf("wait for release: %w", ctx.Err())
+		}
+	}
+
+	results, err := call.AllocResults()
+	if err != nil {
+		return fmt.Errorf("alloc results: %w", err)
+	}
+
+	response, err := results.NewResponse()
+	if err != nil {
+		return fmt.Errorf("new response: %w", err)
+	}
+
+	response.SetProcessId(v.pid)
+
+	features, err := response.NewFeatures(int32(len(v.features)))
+	if err != nil {
+		return fmt.Errorf("new features: %w", err)
+	}
+
+	for i, feature := range v.features {
+		if err := features.Set(i, feature); err != nil {
+			return fmt.Errorf("set feature: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// serveVersionSocket serves the Version answers of the server on the
+// socket of a client in dir.
+func serveVersionSocket(t *testing.T, dir string, server versionConmon) {
+	t.Helper()
+
+	serveSocket(t, dir, func() *rpc.Options {
+		return &rpc.Options{BootstrapClient: capnp.Client(proto.Conmon_ServerToClient(server))}
 	})
 }
 
@@ -719,5 +792,543 @@ func TestProcessExited(t *testing.T) {
 
 	if !processExited(uint32(maxPID + 1)) {
 		t.Error("process which cannot exist not reported as exited")
+	}
+}
+
+// startTestServer starts a process which stands in for the server, the
+// command gets waited for with the test. With ignoreInt, SIGINT does not end
+// it.
+func startTestServer(t *testing.T, ignoreInt bool) *exec.Cmd {
+	t.Helper()
+
+	script := "exec sleep 60"
+	if ignoreInt {
+		script = "trap '' INT; " + script
+	}
+
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", script)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill() //nolint:errcheck // may have exited already
+		_ = cmd.Wait()         //nolint:errcheck // killed on purpose
+	})
+
+	// The shell sets up the trap before it execs, wait for that.
+	if ignoreInt {
+		deadline := time.Now().Add(10 * time.Second)
+
+		for {
+			comm, err := os.ReadFile("/proc/" + strconv.Itoa(cmd.Process.Pid) + "/comm")
+			if err == nil && strings.TrimSpace(string(comm)) == "sleep" {
+				break
+			}
+
+			if time.Now().After(deadline) {
+				t.Fatal("test server did not exec")
+			}
+
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	return cmd
+}
+
+func TestShutdown(t *testing.T) {
+	t.Parallel()
+
+	for _, withPidfd := range []bool{true, false} {
+		t.Run("pidfd "+strconv.FormatBool(withPidfd), func(t *testing.T) {
+			t.Parallel()
+
+			newClient := func(pid int) *ConmonClient {
+				c := &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
+
+				c.setServerPID(uint32(pid))
+
+				if !withPidfd && c.serverPidfd != nil {
+					c.serverPidfd.Close()
+					c.serverPidfd = nil
+				} else if withPidfd && c.serverPidfd == nil {
+					t.Skip("pidfds not supported")
+				}
+
+				return c
+			}
+
+			// The zombie of the server counts as gone.
+			cmd := startTestServer(t, false)
+			c := newClient(cmd.Process.Pid)
+
+			if err := c.Shutdown(); err != nil {
+				t.Fatalf("shutdown: %v", err)
+			}
+
+			if err := c.Shutdown(); err != nil {
+				t.Fatalf("shutdown again: %v", err)
+			}
+
+			// Only a server which gets killed exits.
+			cmd = startTestServer(t, true)
+			c = newClient(cmd.Process.Pid)
+
+			if err := c.stopServer(
+				t.Context(),
+				200*time.Millisecond,
+				false,
+			); !errors.Is(
+				err,
+				errTimeoutWaitForPid,
+			) {
+				t.Fatalf("got error %v, want %v", err, errTimeoutWaitForPid)
+			}
+
+			if err := c.stopServer(t.Context(), 200*time.Millisecond, true); err != nil {
+				t.Fatalf("stop with kill: %v", err)
+			}
+
+			if !processExited(uint32(cmd.Process.Pid)) {
+				t.Fatal("server still running after the kill")
+			}
+
+			// The server is gone for good, its pidfd got released.
+			if !c.serverDone.Load() {
+				t.Fatal("server not marked as gone")
+			}
+
+			if withPidfd && !errors.Is(c.serverPidfd.Close(), os.ErrClosed) {
+				t.Fatal("pidfd still open")
+			}
+		})
+	}
+}
+
+func TestShutdownServerWhichExited(t *testing.T) {
+	t.Parallel()
+
+	cmd := exec.CommandContext(context.Background(), "true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	c := &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
+	c.setServerPID(uint32(cmd.Process.Pid))
+
+	if c.serverPidfd == nil {
+		t.Skip("pidfds not supported")
+	}
+
+	// Reaped, so the PID could belong to another process by now. The pidfd
+	// still refers to the exited one.
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+
+	if err := c.Shutdown(); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+}
+
+func TestSetServerPID(t *testing.T) {
+	t.Parallel()
+
+	first := startTestServer(t, false)
+	second := startTestServer(t, false)
+
+	c := &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
+	c.setServerPID(uint32(first.Process.Pid))
+
+	old := c.serverPidfd
+	if old == nil {
+		t.Skip("pidfds not supported")
+	}
+
+	// The server reports another PID than the PID file named.
+	c.setServerPID(uint32(second.Process.Pid))
+
+	if !errors.Is(old.Close(), os.ErrClosed) {
+		t.Fatal("pidfd of the old PID still open")
+	}
+
+	if err := c.Shutdown(); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	if !processExited(uint32(second.Process.Pid)) {
+		t.Fatal("server of the new PID still running")
+	}
+
+	if processExited(uint32(first.Process.Pid)) {
+		t.Fatal("process of the old PID got signaled")
+	}
+
+	// A server which is gone already never gets signaled through its PID,
+	// which may belong to another process by now.
+	gone := exec.CommandContext(context.Background(), "true")
+	if err := gone.Run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	c = &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
+	c.setServerPID(uint32(gone.Process.Pid))
+
+	if c.serverPidfd != nil {
+		t.Skip("PID got reused")
+	}
+
+	if !c.serverDone.Load() {
+		t.Fatal("exited server not marked as gone")
+	}
+
+	if err := c.signalServer(syscall.SIGINT); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("got error %v, want %v", err, syscall.ESRCH)
+	}
+
+	if err := c.Shutdown(); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+}
+
+// pidFromFile waits for the PID file of a test server binary in dir.
+func pidFromFile(t *testing.T, dir string) int {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+
+	for {
+		data, err := os.ReadFile(filepath.Join(dir, pidFileName))
+		if pid, convErr := strconv.Atoi(strings.TrimSpace(string(data))); err == nil &&
+			convErr == nil {
+			return pid
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatal("no PID file")
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// killOnCleanup kills a process which the test did not start itself.
+func killOnCleanup(t *testing.T, pid int) {
+	t.Helper()
+
+	t.Cleanup(func() {
+		if !processExited(uint32(pid)) {
+			_ = syscall.Kill(pid, syscall.SIGKILL) //nolint:errcheck // best effort
+		}
+	})
+}
+
+func TestNewKillsServerWhichDoesNotComeUp(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	// A server which ignores SIGINT and never listens. The arguments are
+	// --runtime, the runtime, --runtime-dir and the run directory.
+	binary := writeTestBinary(
+		t,
+		`(trap '' INT; exec sleep 60) </dev/null >/dev/null 2>&1 & printf %s $! >"$4/pidfile"`,
+	)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+
+	_, err := NewContext(ctx, &ConmonServerConfig{
+		ServerRunDir:     dir,
+		ConmonServerPath: binary,
+		Runtime:          "/does/not/exist",
+		ClientLogger:     logrus.New(),
+	})
+	if !errors.Is(err, errServerNotUp) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got error %v, want %v and %v", err, errServerNotUp, context.DeadlineExceeded)
+	}
+
+	pid := pidFromFile(t, dir)
+	killOnCleanup(t, pid)
+
+	if !processExited(uint32(pid)) {
+		t.Fatal("server still running")
+	}
+
+	// SIGINT did not end it, SIGKILL did.
+	if elapsed := time.Since(start); elapsed < serverCleanupTimeout {
+		t.Fatalf("server gone after %s, before the SIGKILL", elapsed)
+	}
+}
+
+func TestNewTakesPIDFromServer(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	server := startTestServer(t, false)
+
+	// The PID file names another process than the server reports.
+	binary := writeTestBinary(
+		t,
+		`sleep 60 </dev/null >/dev/null 2>&1 & printf %s $! >"$4/pidfile"`,
+	)
+
+	type result struct {
+		client *ConmonClient
+		err    error
+	}
+
+	done := make(chan result, 1)
+
+	go func() {
+		cl, err := NewContext(t.Context(), &ConmonServerConfig{
+			ServerRunDir:     dir,
+			ConmonServerPath: binary,
+			Runtime:          "/does/not/exist",
+			ClientLogger:     logrus.New(),
+		})
+		done <- result{cl, err}
+	}()
+
+	// The server only listens once it got started.
+	other := pidFromFile(t, dir)
+	killOnCleanup(t, other)
+
+	serveVersionSocket(t, dir, versionConmon{
+		pid:      uint32(server.Process.Pid),
+		features: []string{FeatureSdNotify},
+	})
+
+	res := <-done
+	if res.err != nil {
+		t.Fatalf("new: %v", res.err)
+	}
+
+	cl := res.client
+
+	if cl.PID() != uint32(server.Process.Pid) {
+		t.Fatalf("got PID %d, want %d", cl.PID(), server.Process.Pid)
+	}
+
+	// The features of the answer got recorded.
+	if !cl.serverFeatures()[FeatureSdNotify] {
+		t.Fatal("features not recorded")
+	}
+
+	if _, err := os.Stat(cl.pidFile()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("PID file not removed: %v", err)
+	}
+
+	if err := cl.Shutdown(); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	if !processExited(uint32(server.Process.Pid)) {
+		t.Fatal("server still running")
+	}
+
+	if processExited(uint32(other)) {
+		t.Fatal("process of the PID file got signaled")
+	}
+}
+
+func TestRequireServerFeatureDoesNotBlock(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	called := make(chan struct{}, 1)
+	release := make(chan struct{})
+
+	serveVersionSocket(t, dir, versionConmon{
+		features: []string{FeaturePortForward},
+		called:   called,
+		release:  release,
+	})
+
+	c, err := (&ConmonServerConfig{ServerRunDir: dir, ClientLogger: logrus.New()}).toClient()
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+
+	t.Cleanup(c.resetConn)
+
+	slow := make(chan error, 1)
+
+	go func() {
+		slow <- c.requireServerFeature(t.Context(), FeaturePortForward, "test")
+	}()
+
+	<-called
+
+	// A second caller asks the server as well, but only waits as long as its
+	// own context allows.
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+
+	err = c.requireServerFeature(ctx, FeaturePortForward, "test")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got error %v, want %v", err, context.DeadlineExceeded)
+	}
+
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("second caller blocked for %s", elapsed)
+	}
+
+	close(release)
+
+	if err := <-slow; err != nil {
+		t.Fatalf("slow caller: %v", err)
+	}
+
+	if !c.serverFeatures()[FeaturePortForward] {
+		t.Fatal("features not recorded")
+	}
+}
+
+func TestNewContextCancelled(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	for _, running := range []bool{false, true} {
+		t.Run("running "+strconv.FormatBool(running), func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			if running {
+				//nolint:contextcheck // serves for the whole test, not only the cancelled call
+				serveSilentSocket(t, dir)
+			}
+
+			// The binary leaves a file behind if it gets started.
+			binary := writeTestBinary(t, `touch "$4/started"`)
+
+			_, err := NewContext(ctx, &ConmonServerConfig{
+				ServerRunDir:     dir,
+				ConmonServerPath: binary,
+				Runtime:          "/does/not/exist",
+				ClientLogger:     logrus.New(),
+			})
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("got error %v, want %v", err, context.Canceled)
+			}
+
+			// The error of the probe stays visible next to the context one.
+			if errors.Is(err, ErrServerNotResponding) != running {
+				t.Fatalf("got error %v, want ErrServerNotResponding: %v", err, running)
+			}
+
+			if _, err := os.Stat(filepath.Join(dir, "started")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("server got started: %v", err)
+			}
+		})
+	}
+}
+
+func TestShutdownWithoutPID(t *testing.T) {
+	t.Parallel()
+
+	c := &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
+
+	// A zero PID would signal the process group of the caller.
+	if err := c.Shutdown(); !errors.Is(err, errServerPIDUnknown) {
+		t.Fatalf("got error %v, want %v", err, errServerPIDUnknown)
+	}
+}
+
+func TestRequireServerFeature(t *testing.T) {
+	t.Parallel()
+
+	// Recorded features need no server.
+	c := &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
+	c.setFeatures([]string{FeatureSdNotify})
+
+	if err := c.requireServerFeature(t.Context(), FeatureSdNotify, "test"); err != nil {
+		t.Fatalf("recorded feature: %v", err)
+	}
+
+	if err := c.requireServerFeature(
+		t.Context(),
+		FeaturePortForward,
+		"test",
+	); !errors.Is(
+		err,
+		ErrUnsupported,
+	) {
+		t.Fatalf("got error %v, want %v", err, ErrUnsupported)
+	}
+}
+
+func TestNewInvalidConfig(t *testing.T) {
+	t.Parallel()
+
+	if _, err := New(nil); !errors.Is(err, errConfigUnspecified) {
+		t.Fatalf("got error %v, want %v", err, errConfigUnspecified)
+	}
+
+	if _, err := New(&ConmonServerConfig{}); !errors.Is(err, errRunDirUnspecified) {
+		t.Fatalf("got error %v, want %v", err, errRunDirUnspecified)
+	}
+
+	// The cause of a run directory which cannot be created is kept.
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	_, err := New(&ConmonServerConfig{ServerRunDir: filepath.Join(file, "run")})
+	if !errors.Is(err, errRunDirNotCreated) || !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("got error %v, want %v and %v", err, errRunDirNotCreated, syscall.ENOTDIR)
+	}
+}
+
+// writeTestBinary writes a shell script which stands in for the server
+// binary.
+func writeTestBinary(t *testing.T, script string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "conmonrs")
+	//nolint:gosec // has to be executable
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o700); err != nil {
+		t.Fatalf("write binary: %v", err)
+	}
+
+	return path
+}
+
+func TestVersionBinary(t *testing.T) {
+	t.Parallel()
+
+	// Output on stderr does not end up in the JSON.
+	binary := writeTestBinary(t, `echo warning >&2; echo '{"version":"1.2.3"}'`)
+
+	version, err := Version(binary)
+	if err != nil {
+		t.Fatalf("version: %v", err)
+	}
+
+	if version.Version != "1.2.3" {
+		t.Fatalf("got version %q, want %q", version.Version, "1.2.3")
+	}
+
+	binary = writeTestBinary(
+		t,
+		`echo "error: unexpected argument '--version-json' found" >&2; exit 2`,
+	)
+
+	if _, err := Version(binary); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("got error %v, want %v", err, ErrUnsupported)
+	}
+
+	binary = writeTestBinary(t, `echo broken >&2; exit 1`)
+
+	if _, err := Version(binary); err == nil || !strings.Contains(err.Error(), "broken") {
+		t.Fatalf("got error %v, want one with the error output", err)
 	}
 }
