@@ -13,7 +13,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 capnp = { version = "0.27.2", default-features = false }
 capnpc = { version = "0.27.0", default-features = false }
-tokio = { version = "1.54.0", default-features = false }
+tokio = { version = "1.54.1", default-features = false }
 
 [profile.release]
 debug = 0
