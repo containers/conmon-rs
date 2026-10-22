@@ -427,7 +427,7 @@ mod tests {
         let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
         let writer = tokio::spawn(async move {
             let _alive = alive_tx;
-            std::future::pending::<()>().await
+            std::future::pending::<()>().await;
         });
         assert_eq!(join_or_abort(writer).await, None);
         // The task got dropped with its sender.

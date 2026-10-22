@@ -67,14 +67,18 @@ impl JournaldLogger {
         }
     }
 
-    /// Send the lines to the journal. A journal which is unavailable, for
-    /// example while it restarts, must not end the output of the container,
-    /// so failures are only logged, once per chunk. Without a journal, or
-    /// with one which did not take a line in time, the rest of the chunk is
-    /// dropped right away instead of failing the same way line by line.
-    fn send(shared: &Shared, pipe: Pipe, lines: &[Line]) {
+    /// Send the lines to the journal and return how many of them it took
+    /// or got dropped. A journal which is unavailable, for example while it
+    /// restarts, must not end the output of the container, so failures are
+    /// only logged, once per chunk. Without a journal, or with one which did
+    /// not take a line in time, the rest of the chunk is dropped right away
+    /// instead of failing the same way line by line. Without waiting, the
+    /// sending stops at the first line which the journal does not take right
+    /// away.
+    fn send(shared: &Shared, pipe: Pipe, lines: &[Line], wait: Wait) -> usize {
         let priority = Self::priority(pipe);
         let mut entry = Entry::default();
+        let mut handled = lines.len();
         let mut failed = 0;
         let mut last_error = None;
         for (i, line) in lines.iter().enumerate() {
@@ -82,19 +86,25 @@ impl JournaldLogger {
             if line.partial {
                 entry.field(Self::PARTIAL_FIELD.0, Self::PARTIAL_FIELD.1);
             }
-            if let Err(e) = journal::send_at(Wait::Bounded, shared.socket(), &entry) {
-                let rest = journal::unavailable(&e) || e.kind() == ErrorKind::TimedOut;
-                last_error = Some(e);
-                if rest {
-                    failed += lines.len() - i;
-                    break;
-                }
-                failed += 1;
+            let Err(e) = journal::send_at(wait, shared.socket(), &entry) else {
+                continue;
+            };
+            if wait == Wait::Never && e.kind() == ErrorKind::WouldBlock {
+                handled = i;
+                break;
             }
+            let rest = journal::unavailable(&e) || e.kind() == ErrorKind::TimedOut;
+            last_error = Some(e);
+            if rest {
+                failed += lines.len() - i;
+                break;
+            }
+            failed += 1;
         }
         if let Some(e) = last_error {
             warn!("Unable to write {failed} lines to the journal, dropping them: {e}");
         }
+        handled
     }
 }
 
@@ -111,14 +121,20 @@ impl Logger for JournaldLogger {
         Ok(())
     }
 
-    /// Sending is blocking socket I/O, so the whole chunk is handed to a
-    /// single blocking task instead of one per line. The lines share their
-    /// buffer, moving them is free.
+    /// A journal which keeps up takes the lines right away. The ones it does
+    /// not take are sent from a single blocking task, which waits for it a
+    /// bounded time, instead of one per line. The lines share their buffer,
+    /// moving them is free.
     async fn write_lines(&mut self, pipe: Pipe, lines: &[Line]) -> Result<()> {
+        let sent = Self::send(&self.shared, pipe, lines, Wait::Never);
+        let Some(rest) = lines.get(sent..).filter(|rest| !rest.is_empty()) else {
+            return Ok(());
+        };
         let shared = self.shared.clone();
-        let lines = lines.to_vec();
-        task::spawn_blocking(move || Self::send(&shared, pipe, &lines))
+        let rest = rest.to_vec();
+        task::spawn_blocking(move || Self::send(&shared, pipe, &rest, Wait::Bounded))
             .await
+            .map(drop)
             .context("journal spawn_blocking")
     }
 }
@@ -237,6 +253,39 @@ mod tests {
         assert_eq!(
             entries[0][1],
             ("MESSAGE".into(), b"\xff\xfe\x00bin".to_vec())
+        );
+        Ok(())
+    }
+
+    /// The lines which a busy journal does not take right away wait for it.
+    #[tokio::test]
+    async fn lines_wait_for_a_busy_journal() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("socket");
+        let socket = UnixDatagram::bind(&path)?;
+        let error = journal::tests::fill(Wait::Never, &path);
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+
+        // The journal catches up a little later.
+        let reader = std::thread::spawn(move || -> Result<bool> {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+            let mut buf = vec![0; 4096];
+            loop {
+                let len = socket.recv(&mut buf)?;
+                if decode(&buf[..len]).contains(&field("MESSAGE", "late")) {
+                    return Ok(true);
+                }
+            }
+        });
+        let mut logger = JournaldLogger::with_socket("test", &path);
+        let mut buffer = LineBuffer::default();
+        let lines = buffer.push(Pipe::StdOut, b"late\n");
+        logger.write_lines(Pipe::StdOut, &lines).await?;
+        assert!(
+            reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("reader panicked"))??
         );
         Ok(())
     }

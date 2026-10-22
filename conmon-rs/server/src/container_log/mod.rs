@@ -150,7 +150,8 @@ impl ContainerLog {
     fn max_size(driver: &log_driver::Reader<'_>) -> Option<usize> {
         match driver.get_max_size() {
             0 => None,
-            max => Some(max as usize),
+            // More than the address space is no limit either.
+            max => usize::try_from(max).ok(),
         }
     }
 
@@ -373,9 +374,10 @@ impl LineBuffer {
 /// chunk, or per [`LogFile::FLUSH_SIZE`] of entries for chunks of short lines.
 /// The writes and the opens run on the blocking pool, so writeback
 /// throttling, a slow disk or truncating a huge log only stalls this log and
-/// not the thread which drives every container of the pod. The buffer moves
-/// to the blocking task and back, unlike an async file, which copies every
-/// write into a buffer of its own that keeps the size of the largest one.
+/// not the thread which drives every container of the pod and the RPCs. The
+/// buffer moves to the blocking task and back, unlike an async file, which
+/// copies every write into a buffer of its own that keeps the size of the
+/// largest one.
 #[derive(Debug)]
 pub(crate) struct LogFile {
     path: PathBuf,
@@ -389,8 +391,9 @@ pub(crate) struct LogFile {
     /// committed entries of `buf`.
     bytes_written: usize,
 
-    /// The pending output of the current chunk.
-    pub(crate) buf: Vec<u8>,
+    /// The pending output of the current chunk, allocated on first use, see
+    /// [`LogFile::buf`].
+    buf: Vec<u8>,
 }
 
 impl LogFile {
@@ -418,12 +421,21 @@ impl LogFile {
             file: None,
             max_size,
             bytes_written: 0,
-            buf: Vec::with_capacity(Self::BUF_CAPACITY),
+            buf: Vec::new(),
         }
     }
 
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The buffer to append the entries of a chunk to. A container which
+    /// never writes output does not need one.
+    pub(crate) fn buf(&mut self) -> &mut Vec<u8> {
+        if self.buf.capacity() == 0 {
+            self.buf.reserve_exact(Self::BUF_CAPACITY);
+        }
+        &mut self.buf
     }
 
     /// Open the file, truncating any existing content. A symlink in place of
@@ -507,7 +519,7 @@ impl LogFile {
                 // get dropped.
                 self.buf.truncate(start);
                 if let Err(e) = self.flush().await {
-                    debug!("Unable to flush log file after failed rotation: {:#}", e);
+                    debug!("Unable to flush log file after failed rotation: {e:#}");
                 }
                 return Err(e).context("reopen log file because of exceeded size");
             }
@@ -553,11 +565,8 @@ impl LogFile {
         .await
         {
             Ok(res) => res,
-            Err(e) => {
-                // The buffer went with the task.
-                self.buf = Vec::with_capacity(Self::BUF_CAPACITY);
-                return Err(e).context("join log write");
-            }
+            // The buffer went with the task, the next entry allocates one.
+            Err(e) => return Err(e).context("join log write"),
         };
         self.buf = buf;
         res.context("write log chunk")
@@ -576,7 +585,7 @@ impl LogFile {
     pub(crate) async fn reopen(&mut self) -> Result<()> {
         debug!("Reopen log file {}", self.path.display());
         if let Err(e) = self.flush().await {
-            error!("Unable to flush log file before reopen: {:#}", e);
+            error!("Unable to flush log file before reopen: {e:#}");
         }
         self.replace().await
     }
@@ -696,6 +705,106 @@ mod tests {
         assert_eq!(out[0].text.len(), invalid.len());
         assert!(!buffer.has_pending(Pipe::StdOut));
         assert!(buffer.stdout.capacity() <= LineBuffer::MAX_LINE);
+    }
+
+    /// A small deterministic random number generator (xorshift), so that a
+    /// failing case can be reproduced from its seed.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            let n = u64::try_from(n).expect("small bound");
+            usize::try_from(self.next() % n).expect("below the bound")
+        }
+    }
+
+    /// Output of short lines, maybe with an unfinished last one, and its
+    /// lines with whether they ended.
+    fn random_output(rng: &mut Rng) -> (Vec<u8>, Vec<(Vec<u8>, bool)>) {
+        let alphabet = ["a", "b", " ", "€", "ü", "\t"];
+        let mut output = vec![];
+        let mut lines = vec![];
+        let count = rng.below(20);
+        for i in 0..count {
+            let mut line = vec![];
+            for _ in 0..rng.below(40) {
+                line.extend_from_slice(alphabet[rng.below(alphabet.len())].as_bytes());
+            }
+            output.extend_from_slice(&line);
+            let ended = i + 1 < count || rng.below(2) == 0;
+            if ended {
+                output.push(b'\n');
+            } else if line.is_empty() {
+                break;
+            }
+            lines.push((line, ended));
+        }
+        (output, lines)
+    }
+
+    /// Split the output at random points, also inside of characters.
+    fn random_chunks<'a>(rng: &mut Rng, mut output: &'a [u8]) -> Vec<&'a [u8]> {
+        let mut chunks = vec![];
+        while !output.is_empty() {
+            let (chunk, rest) = output.split_at(1 + rng.below(output.len().min(16)));
+            chunks.push(chunk);
+            output = rest;
+        }
+        chunks
+    }
+
+    #[tokio::test]
+    async fn any_split_gives_the_same_lines() -> Result<()> {
+        for seed in 1..=500 {
+            let mut rng = Rng(seed);
+            let (output, expected) = random_output(&mut rng);
+            let chunks = random_chunks(&mut rng, &output);
+
+            // The drivers which take whole lines.
+            let mut buffer = LineBuffer::default();
+            let mut lines = vec![];
+            for chunk in &chunks {
+                lines.extend(buffer.push(Pipe::StdOut, chunk));
+            }
+            lines.extend(buffer.finish(Pipe::StdOut));
+            let lines: Vec<_> = lines
+                .into_iter()
+                .map(|line| (line.text.to_vec(), !line.partial))
+                .collect();
+            assert_eq!(lines, expected, "seed {seed}");
+
+            // The CRI log writes the chunks as they come, a reader joins the
+            // partial entries with the ones after them.
+            let (file, mut cri) = test_helpers::cri_logger(None).await?;
+            for chunk in &chunks {
+                cri.write_chunk(Pipe::StdOut, chunk).await?;
+            }
+            let log = fs::read(file.path())?;
+            let mut joined = vec![];
+            let mut line = vec![];
+            for entry in log.split_inclusive(|b| *b == b'\n') {
+                let entry = entry
+                    .strip_prefix(format!("{} stdout ", test_helpers::TIMESTAMP).as_bytes())
+                    .context("entry prefix")?;
+                let (tag, text) = entry.split_at(2);
+                line.extend_from_slice(text.strip_suffix(b"\n").context("entry end")?);
+                if tag == b"F " {
+                    joined.push((std::mem::take(&mut line), true));
+                }
+            }
+            if !line.is_empty() {
+                joined.push((line, false));
+            }
+            assert_eq!(joined, expected, "seed {seed}");
+        }
+        Ok(())
     }
 
     #[test]
@@ -926,6 +1035,20 @@ mod tests {
         let mut sut = LogFile::new(&link, Some(0o600), None);
         assert!(sut.open().await.is_err());
         assert_eq!(fs::read_to_string(&target)?, "keep");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn buffer_is_allocated_on_first_use() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let mut sut = LogFile::new(file.path(), None, None);
+        sut.open().await?;
+        assert_eq!(sut.buf.capacity(), 0);
+
+        sut.buf().extend_from_slice(b"line\n");
+        sut.flush().await?;
+        assert_eq!(fs::read_to_string(file.path())?, "line\n");
+        assert!(sut.buf.capacity() >= LogFile::BUF_CAPACITY);
         Ok(())
     }
 

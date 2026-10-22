@@ -7,8 +7,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use tokio::{net::UnixListener, time};
-use tokio_seqpacket::UnixSeqpacketListener;
+use tokio::time;
 use tracing::{debug, error};
 
 /// How long an accept loop pauses after a failed accept.
@@ -36,41 +35,20 @@ fn connection_failed(e: &io::Error) -> bool {
     )
 }
 
-#[cfg(test)]
-use mockall::{automock, predicate::*};
-
-#[derive(Debug, Default)]
-/// The main structure for this module.
-pub struct Listener<T> {
-    imp: T,
+/// Bind a listener with `bind` at a socket path whatever its length, see
+/// [`shorten_path`]. The parent directory gets created if it does not exist.
+pub fn bind_long_path<L>(path: &Path, bind: impl FnOnce(PathBuf) -> io::Result<L>) -> Result<L> {
+    // keep parent_fd in scope until the bind, or else the socket will not work
+    let (path, _parent_dir) = shorten_socket_path(path)?;
+    bind(path).context("bind server socket")
 }
 
-impl<T> Listener<T>
-where
-    T: ListenerImpl,
-{
-    pub fn bind_long_path<P>(&self, path: P) -> Result<T::Listener>
-    where
-        P: AsRef<Path>,
-    {
-        // keep parent_fd in scope until the bind, or else the socket will not work
-        let (path, _parent_dir) = self.shorten_socket_path(path)?;
-        self.imp.bind(path.as_ref()).context("bind server socket")
-    }
-
-    pub fn shorten_socket_path<P>(&self, path: P) -> Result<(PathBuf, File)>
-    where
-        P: AsRef<Path>,
-    {
-        let path = path.as_ref();
-        let (parent, _) = split_socket_path(path)?;
-
-        self.imp
-            .create_dir_all(parent)
-            .context("create parent directory")?;
-
-        shorten_path_with(path, |parent| self.imp.open(parent))
-    }
+/// Like [`shorten_path`], creating the parent directory if it does not
+/// exist.
+pub fn shorten_socket_path(path: &Path) -> Result<(PathBuf, File)> {
+    let (parent, _) = split_socket_path(path)?;
+    fs::create_dir_all(parent).context("create parent directory")?;
+    shorten_path(path)
 }
 
 /// Refer to a socket path through its parent directory, so that it fits into
@@ -78,15 +56,8 @@ where
 /// stays open as long as the returned file, the path is only valid until
 /// then.
 pub fn shorten_path(path: &Path) -> Result<(PathBuf, File)> {
-    shorten_path_with(path, |parent| File::open(parent))
-}
-
-fn shorten_path_with<F>(path: &Path, open: F) -> Result<(PathBuf, File)>
-where
-    F: FnOnce(&Path) -> io::Result<File>,
-{
     let (parent, name) = split_socket_path(path)?;
-    let parent = open(parent).context("open parent directory")?;
+    let parent = File::open(parent).context("open parent directory")?;
     let fd = parent.as_raw_fd();
 
     Ok((
@@ -120,53 +91,10 @@ fn split_socket_path(path: &Path) -> Result<(&Path, &OsStr)> {
     Ok((parent, name))
 }
 
-#[cfg_attr(test, automock(type Listener = UnixListener;))]
-pub trait ListenerImpl {
-    type Listener;
-    fn bind(&self, path: &Path) -> io::Result<Self::Listener>;
-    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
-        fs::create_dir_all(path)
-    }
-    fn open(&self, path: &Path) -> io::Result<File> {
-        File::open(path)
-    }
-}
-
-#[derive(Debug, Default)]
-/// The default implementation for the Listener.
-pub struct DefaultListener;
-
-impl ListenerImpl for DefaultListener {
-    type Listener = UnixListener;
-    fn bind(&self, path: &Path) -> io::Result<Self::Listener> {
-        UnixListener::bind(path)
-    }
-}
-
-#[derive(Debug, Default)]
-/// The implementation for SOCK_SEQPACKET listeners.
-pub struct SeqpacketListener;
-
-impl ListenerImpl for SeqpacketListener {
-    type Listener = UnixSeqpacketListener;
-    fn bind(&self, path: &Path) -> io::Result<Self::Listener> {
-        UnixSeqpacketListener::bind(path)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::ErrorKind;
-    use tempfile::{tempdir, tempfile};
-
-    fn new_sut(mock: MockListenerImpl) -> Listener<MockListenerImpl> {
-        Listener::<MockListenerImpl> { imp: mock }
-    }
-
-    fn permission_denied<T>() -> Result<T, io::Error> {
-        Err(io::Error::new(ErrorKind::PermissionDenied, ""))
-    }
+    use tokio::net::UnixListener;
 
     #[tokio::test(start_paused = true)]
     async fn only_failed_connections_accept_at_once() {
@@ -185,83 +113,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bind_long_path_success() -> Result<()> {
-        let mut mock = MockListenerImpl::new();
+    async fn bind_long_path_creates_the_directory() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        // Longer than a socket address holds.
+        let parent = dir.path().join("x".repeat(100)).join("y".repeat(100));
+        let path = parent.join("socket");
+        let listener = bind_long_path(&path, UnixListener::bind)?;
+        assert!(path.exists());
+        drop(listener);
 
-        mock.expect_create_dir_all().returning(|_| Ok(()));
-        mock.expect_open().returning(|_| tempfile());
-        mock.expect_bind()
-            .returning(|_| UnixListener::bind(tempdir()?.path().join("foo")));
-
-        let sut = new_sut(mock);
-        let first = "foo";
-        let listener = sut.bind_long_path(PathBuf::from(first).join("bar"))?;
-
-        let addr = listener.local_addr()?;
-        assert!(addr.as_pathname().context("no path name")?.ends_with(first));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn bind_long_path_failure_on_bind() {
-        let mut mock = MockListenerImpl::new();
-
-        mock.expect_create_dir_all().returning(|_| Ok(()));
-        mock.expect_open().returning(|_| tempfile());
-        mock.expect_bind().returning(|_| permission_denied());
-
-        let sut = new_sut(mock);
-        assert!(
-            sut.bind_long_path(PathBuf::from("foo").join("bar"))
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn shorten_socket_path_success() -> Result<()> {
-        let mut mock = MockListenerImpl::new();
-
-        mock.expect_create_dir_all().returning(|_| Ok(()));
-        mock.expect_open().returning(|_| tempfile());
-
-        let sut = new_sut(mock);
-        let last = "bar";
-        let (res_file_path, res_parent) =
-            sut.shorten_socket_path(PathBuf::from("/foo").join(last))?;
-
-        assert!(res_file_path.ends_with(last));
-        assert!(
-            res_file_path
-                .display()
-                .to_string()
-                .contains(&res_parent.as_raw_fd().to_string())
-        );
-
+        // A path in use fails.
+        assert!(bind_long_path(&path, UnixListener::bind).is_err());
         Ok(())
     }
 
     #[test]
-    fn shorten_socket_path_failure_on_open() {
-        let mut mock = MockListenerImpl::new();
+    fn shorten_socket_path_refers_to_the_parent() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (path, parent) = shorten_socket_path(&dir.path().join("new").join("socket"))?;
+        assert!(path.ends_with(format!("{}/socket", parent.as_raw_fd())));
+        assert!(dir.path().join("new").is_dir());
 
-        mock.expect_create_dir_all().returning(|_| Ok(()));
-        mock.expect_open().returning(|_| permission_denied());
-
-        let sut = new_sut(mock);
-
-        assert!(sut.shorten_socket_path("/foo/bar").is_err());
+        // Relative names live in the current directory.
+        assert!(split_socket_path(Path::new("socket"))?.0 == Path::new("."));
+        assert!(shorten_socket_path(Path::new("/")).is_err());
+        Ok(())
     }
 
     #[test]
-    fn shorten_socket_path_failure_on_create_dir_all() {
-        let mut mock = MockListenerImpl::new();
-
-        mock.expect_create_dir_all()
-            .returning(|_| permission_denied());
-
-        let sut = new_sut(mock);
-
-        assert!(sut.shorten_socket_path("/foo/bar").is_err());
+    fn shorten_socket_path_failures() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("file");
+        fs::write(&file, "")?;
+        // The parent cannot be created.
+        assert!(shorten_socket_path(&file.join("socket")).is_err());
+        // Without creating it, a missing parent cannot be opened.
+        assert!(shorten_path(&dir.path().join("missing").join("socket")).is_err());
+        Ok(())
     }
 }

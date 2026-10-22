@@ -38,7 +38,7 @@ impl Telemetry {
                 Resource::builder()
                     .with_service_name(env!("CARGO_PKG_NAME"))
                     .with_attributes([
-                        KeyValue::new(PROCESS_PID, process::id() as i64),
+                        KeyValue::new(PROCESS_PID, i64::from(process::id())),
                         KeyValue::new(HOST_NAME, hostname),
                     ])
                     .build(),

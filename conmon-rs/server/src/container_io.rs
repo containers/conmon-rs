@@ -115,10 +115,10 @@ impl Drain {
                 Ok(Message::Done) | Err(broadcast::error::RecvError::Closed) => return None,
                 Ok(message) => return Some(message),
                 Err(broadcast::error::RecvError::Lagged(n)) if client => {
-                    warn!("Attach client too slow, skipped {n} messages")
+                    warn!("Attach client too slow, skipped {n} messages");
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    debug!("Skipped {n} attach output messages")
+                    debug!("Skipped {n} attach output messages");
                 }
             }
         }
@@ -490,14 +490,22 @@ impl ContainerIO {
     /// `exec_sync`, which may start reading after the process already produced
     /// output, and for reporting the runtime's stderr if a create fails. Once
     /// a container is created nothing consumes them anymore, attach sessions
-    /// use the attach broadcast, so they get dropped. The read loops drop their
-    /// senders on the next send, which frees the channel buffers.
+    /// use the attach broadcast, so they get dropped, see
+    /// [`ContainerIO::close_stdio`].
     pub fn drop_stdio(&mut self) {
         match self.typ_mut() {
-            ContainerIOType::Terminal(t) => {
-                t.message_rx_mut().take();
-            }
+            ContainerIOType::Terminal(t) => Self::close_stdio(t.message_rx_mut().take()),
             ContainerIOType::Streams(s) => s.drop_stdio(),
+        }
+    }
+
+    /// Close a stdio channel and drop what it buffers right away. The read
+    /// loop drops its sender on the next send, a quiet container would keep
+    /// the buffered chunks until then otherwise.
+    pub fn close_stdio(rx: Option<Receiver<Message>>) {
+        if let Some(rx) = rx {
+            rx.close();
+            while rx.try_recv().is_ok() {}
         }
     }
 
@@ -598,7 +606,7 @@ impl ContainerIO {
                     match self.read_all_with_early(None, &exited, early).await {
                         Ok((_, stderr, _)) => stderr,
                         Err(read_err) => {
-                            debug!("Unable to read runtime output: {:#}", read_err);
+                            debug!("Unable to read runtime output: {read_err:#}");
                             vec![]
                         }
                     }
@@ -697,7 +705,7 @@ impl ContainerIO {
             match res {
                 Some(Ok(Message::Data(data, _))) => match stdio.len().checked_add(data.len()) {
                     Some(len) if len < Self::MAX_STDIO_STREAM_SIZE => {
-                        stdio.extend_from_slice(&data)
+                        stdio.extend_from_slice(&data);
                     }
                     _ => break,
                 },
@@ -739,7 +747,7 @@ impl ContainerIO {
         let log_has_drivers = logger.read().await.has_drivers();
         let res = Self::read_pipe(reader, pipe, &logger, message_tx, attach).await;
         if log_has_drivers && let Err(e) = logger.write().await.finish(pipe).await {
-            error!("Unable to finish the log of {pipe}: {:#}", e);
+            error!("Unable to finish the log of {pipe}: {e:#}");
         }
         // The output ends for the attach endpoints and the exit files only
         // once the last line is in the log.
@@ -779,7 +787,7 @@ impl ContainerIO {
             let read = if pending {
                 select! {
                     read = reader.read_buf(&mut buf) => read,
-                    _ = time::sleep(Self::IDLE_FLUSH) => {
+                    () = time::sleep(Self::IDLE_FLUSH) => {
                         let res = logger.write().await.flush(pipe).await;
                         log_errors.check(pipe, res.context("flush paused log line"));
                         pending = false;
@@ -802,6 +810,26 @@ impl ContainerIO {
                 Ok(n) => {
                     trace!("Read {} bytes", n);
 
+                    // Write to logger if drivers are configured
+                    // (exec_sync uses an empty logger, so skip the overhead).
+                    // A failing driver drops the chunk, the output must keep
+                    // flowing to the other drivers and the attach clients.
+                    if log_has_drivers {
+                        let mut locked_logger = logger.write().await;
+                        let res = locked_logger.write(pipe, &buf).await;
+                        pending = locked_logger.has_pending(pipe);
+                        drop(locked_logger);
+                        log_errors.check(pipe, res.context("write to log file"));
+                    }
+
+                    // Only the attach clients and the stdio channel take the
+                    // chunk along, the buffer gets reused otherwise.
+                    let attached = attach.has_readers();
+                    if !attached && message_tx.is_none() {
+                        buf.clear();
+                        continue;
+                    }
+
                     // A small chunk gets copied, so that it does not keep the
                     // whole buffer alive while it is queued and the buffer can
                     // be reused. A large one is split off without a copy.
@@ -813,21 +841,8 @@ impl ContainerIO {
                         buf.split().freeze()
                     };
 
-                    // Write to logger if drivers are configured
-                    // (exec_sync uses an empty logger, so skip the overhead).
-                    // A failing driver drops the chunk, the output must keep
-                    // flowing to the other drivers and the attach clients.
-                    if log_has_drivers {
-                        let mut locked_logger = logger.write().await;
-                        let res = locked_logger.write(pipe, &data).await;
-                        pending = locked_logger.has_pending(pipe);
-                        drop(locked_logger);
-                        log_errors.check(pipe, res.context("write to log file"));
-                    }
-
-                    // Only send to attach if there are active attach clients
                     // Bytes::clone() is just a refcount increment, no data copy
-                    if attach.has_readers() {
+                    if attached {
                         attach.write(Message::Data(data.clone(), pipe));
                     }
 
@@ -864,7 +879,7 @@ impl ContainerIO {
 
     pub async fn read_loop_stdin(
         mut writer: impl AsyncWrite + Unpin,
-        mut attach: SharedContainerAttach,
+        attach: SharedContainerAttach,
         token: CancellationToken,
     ) -> Result<()> {
         // While we're not processing input from a caller, and logically should be able to
@@ -876,8 +891,8 @@ impl ContainerIO {
         // after the container exited, which could block on descendants holding
         // the pipe open.
         let res = select! {
-            res = Self::forward_stdin(&mut writer, &mut attach) => res,
-            _ = token.cancelled() => Ok(()),
+            res = Self::forward_stdin(&mut writer, &attach) => res,
+            () = token.cancelled() => Ok(()),
         };
 
         // Nothing reads the stdin anymore, so let the senders drop their data
@@ -888,7 +903,7 @@ impl ContainerIO {
 
     async fn forward_stdin(
         mut writer: impl AsyncWrite + Unpin,
-        attach: &mut SharedContainerAttach,
+        attach: &SharedContainerAttach,
     ) -> Result<()> {
         let stdin_closed = attach.stdin_closed().clone();
         loop {
@@ -897,7 +912,7 @@ impl ContainerIO {
                     let data = res.context("read from stdin attach endpoints")?;
                     Self::handle_stdin_data(&data, &mut writer).await?;
                 }
-                _ = stdin_closed.cancelled() => break,
+                () = stdin_closed.cancelled() => break,
             }
         }
 
@@ -964,7 +979,7 @@ mod tests {
 
     /// Distinct output, so that a lost or reordered chunk is noticed.
     fn pattern(len: usize) -> Vec<u8> {
-        (0..len).map(|i| (i % 251) as u8).collect()
+        (0..251).cycle().take(len).collect()
     }
 
     #[tokio::test]

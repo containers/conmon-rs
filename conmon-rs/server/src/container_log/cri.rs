@@ -89,7 +89,7 @@ impl Logger for CriLogger {
 
         for (line, partial) in lines(bytes) {
             // Assemble the whole line into the chunk buffer
-            let buf = &mut self.file.buf;
+            let buf = self.file.buf();
             let start = buf.len();
             buf.extend_from_slice(self.cached_timestamp.as_bytes());
             buf.extend_from_slice(pipe_tag);

@@ -9,6 +9,7 @@ use crate::{
     streaming_server::{ADDR, AttachSession, StreamingServer},
 };
 use anyhow::{Context, Result};
+use nix::unistd::Pid;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -23,7 +24,7 @@ pub(super) fn client_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
     let mask = [1, 2, 3, 4];
     let mut frame = vec![0x80 | opcode];
     match u16::try_from(payload.len()) {
-        Ok(len) if len < 126 => frame.push(0x80 | len as u8),
+        Ok(len) if len < 126 => frame.push(0x80 | u8::try_from(len).expect("below 126")),
         Ok(len) => {
             frame.push(0x80 | 126);
             frame.extend_from_slice(&len.to_be_bytes());
@@ -54,7 +55,7 @@ pub(super) async fn attach_session_with(
     let (_, child) = ReapableChild::from_child(Child {
         id: "id".into(),
         kind: ChildKind::Container,
-        pid: 0,
+        pid: Pid::from_raw(0),
         exit_paths: vec![],
         oom_exit_paths: vec![],
         timeout: None,
@@ -145,7 +146,7 @@ pub(super) fn attach_child(
     let (_, child) = ReapableChild::from_child(Child {
         id: "id".into(),
         kind: ChildKind::Container,
-        pid: 0,
+        pid: Pid::from_raw(0),
         exit_paths: vec![],
         oom_exit_paths: vec![],
         timeout: None,

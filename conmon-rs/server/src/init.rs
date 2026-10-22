@@ -1,79 +1,96 @@
 use anyhow::{Result, bail};
-use nix::sys::stat::{Mode, umask};
+use nix::{
+    fcntl::{OFlag, open},
+    sys::stat::{Mode, umask},
+    unistd::write,
+};
 use std::{
     env,
-    fs::File,
-    io::{self, ErrorKind, Write},
+    fs::OpenOptions,
+    io::{ErrorKind, Write},
     path::Path,
     sync::OnceLock,
 };
 use tokio::process::Command;
 
-#[cfg(test)]
-use mockall::{automock, predicate::*};
+/// The OOM score adjustment of the server.
+const OOM_SCORE_ADJ: &str = "/proc/self/oom_score_adj";
 
-#[derive(Debug, Default)]
-pub struct Init<T> {
-    imp: T,
+/// Adjust the OOM score of the server, best effort without the privileges
+/// to lower it.
+pub fn set_oom_score(score: &str) -> Result<()> {
+    set_oom_score_at(Path::new(OOM_SCORE_ADJ), score)
 }
 
-impl<T> Init<T>
-where
-    T: InitImpl,
-{
-    /// Helper to adjust the OOM score of the currently running process.
-    pub fn set_oom_score<S: AsRef<str>>(&self, score: S) -> Result<()> {
-        // Attempt adjustment with best-effort.
-        let mut file = self.imp.create_file("/proc/self/oom_score_adj")?;
-        if let Err(err) = self
-            .imp
-            .write_all_file(&mut file, score.as_ref().as_bytes())
-        {
-            match err.kind() {
-                ErrorKind::PermissionDenied => {
-                    eprintln!("Missing sufficient privileges to adjust OOM score")
-                }
-                _ => bail!("adjusting OOM score {}", err),
-            }
+fn set_oom_score_at(path: &Path, score: &str) -> Result<()> {
+    match OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(score.as_bytes()))
+    {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+            eprintln!("Missing sufficient privileges to adjust OOM score");
+            Ok(())
         }
-        Ok(())
+        Err(e) => bail!("adjusting OOM score {e}"),
     }
+}
 
-    /// Set the default umask
-    pub fn set_default_umask(&self) {
-        self.imp.umask(Mode::from_bits_truncate(0o022))
-    }
+/// Set the default umask.
+pub fn set_default_umask() {
+    umask(Mode::from_bits_truncate(0o022));
+}
 
-    /// Drop the sd_notify socket of whoever started the server. The server
-    /// does not talk to systemd itself, but every process it runs would
-    /// inherit the socket: the runtime then adds its own notify socket mount
-    /// and `NOTIFY_SOCKET` to the container, the cleanup commands and the
-    /// pause process get it as well. Callers set those up themselves and let
-    /// the server relay the messages, see the `notify` module.
-    pub fn unset_notify_socket(&self) {
-        self.imp.remove_var("NOTIFY_SOCKET")
-    }
+/// Drop the sd_notify socket of whoever started the server. The server
+/// does not talk to systemd itself, but every process it runs would
+/// inherit the socket: the runtime then adds its own notify socket mount
+/// and `NOTIFY_SOCKET` to the container, the cleanup commands and the
+/// pause process get it as well. Callers set those up themselves and let
+/// the server relay the messages, see the `notify` module.
+#[expect(unsafe_code, reason = "changing the environment")]
+pub fn unset_notify_socket() {
+    // SAFETY: the server is still single threaded, the runtime and its
+    // threads start later.
+    unsafe { env::remove_var("NOTIFY_SOCKET") }
 }
 
 /// The most malloc arenas of the server. glibc gives every thread an arena
 /// of its own, up to eight per CPU, and on AArch64 it backs them with 2 MiB
 /// transparent huge pages by default, so each costs up to 2 MiB resident. The
-/// runtime and the RPC `LocalSet` each run on one thread, the others only
-/// serve short blocking work, so one arena is enough, the per thread caches
-/// of the allocator absorb most of the contention.
+/// runtime, which also runs the RPC `LocalSet`, runs on one thread, the others
+/// only serve short blocking work, so one arena is enough, the per thread
+/// caches of the allocator absorb most of the contention.
 #[cfg(target_env = "gnu")]
 const MALLOC_ARENAS: libc::c_int = 1;
 
-/// Limit the malloc arenas of the server, see [`MALLOC_ARENAS`]. Runs before
-/// the fork, while the process has a single thread. The runtimes and
-/// containers keep the defaults, an exec starts their allocator anew.
-pub fn limit_malloc_arenas() {
+/// The size from which on glibc maps every allocation on its own, which goes
+/// back to the kernel once freed, and the free memory at the top of the heap
+/// from which on glibc returns it. Both are the defaults of glibc, which
+/// raises them to the size of every mapped allocation that gets freed, up to
+/// 32 and 64 MiB. After an exec_sync with a large output, up to 16 MiB per
+/// pipe which get copied into the response, the allocations of that size
+/// would stay in the heap then and keep it resident. Setting them turns that
+/// off.
+#[cfg(target_env = "gnu")]
+const MALLOC_THRESHOLD: libc::c_int = 128 * 1024;
+
+/// Limit the malloc arenas of the server, see [`MALLOC_ARENAS`], and fix the
+/// thresholds of glibc, see [`MALLOC_THRESHOLD`]. Runs before the fork, while
+/// the process has a single thread. The runtimes and containers keep the
+/// defaults, an exec starts their allocator anew.
+#[cfg_attr(target_env = "gnu", expect(unsafe_code, reason = "mallopt"))]
+pub fn configure_malloc() {
     #[cfg(target_env = "gnu")]
-    {
+    for (param, value, name) in [
+        (libc::M_ARENA_MAX, MALLOC_ARENAS, "arenas"),
+        (libc::M_MMAP_THRESHOLD, MALLOC_THRESHOLD, "mmap threshold"),
+        (libc::M_TRIM_THRESHOLD, MALLOC_THRESHOLD, "trim threshold"),
+    ] {
         // SAFETY: mallopt only changes a parameter of the allocator.
-        if unsafe { libc::mallopt(libc::M_ARENA_MAX, MALLOC_ARENAS) } != 1 {
+        if unsafe { libc::mallopt(param, value) } != 1 {
             // Before the logging gets set up.
-            eprintln!("Unable to limit the malloc arenas");
+            eprintln!("Unable to set the malloc {name}");
         }
     }
 }
@@ -82,9 +99,9 @@ pub fn limit_malloc_arenas() {
 static INHERITED_OOM_SCORE: OnceLock<Box<[u8]>> = OnceLock::new();
 
 /// Remember the OOM score adjustment the server started with, before it
-/// protects itself with [`Init::set_oom_score`].
+/// protects itself with [`set_oom_score`].
 pub fn save_oom_score() {
-    match std::fs::read("/proc/self/oom_score_adj") {
+    match std::fs::read(OOM_SCORE_ADJ) {
         Ok(score) => {
             let _ = INHERITED_OOM_SCORE.set(score.trim_ascii().into());
         }
@@ -97,6 +114,7 @@ pub fn save_oom_score() {
 /// container processes, an exec would be the last process the kernel picks
 /// otherwise. conmon resets its runtime the same way. Only for the runtimes
 /// and cleanup commands, the pause process keeps the one of the server.
+#[expect(unsafe_code, reason = "a pre_exec hook")]
 pub fn reset_oom_score(cmd: &mut Command) {
     let Some(score) = INHERITED_OOM_SCORE.get() else {
         return;
@@ -107,130 +125,38 @@ pub fn reset_oom_score(cmd: &mut Command) {
     // privileges, a failure keeps the inherited one, as before.
     unsafe {
         cmd.pre_exec(move || {
-            let fd = libc::open(
-                c"/proc/self/oom_score_adj".as_ptr(),
-                libc::O_WRONLY | libc::O_CLOEXEC,
-            );
-            if fd >= 0 {
-                libc::write(fd, score.as_ptr().cast(), score.len());
-                libc::close(fd);
+            if let Ok(fd) = open(
+                c"/proc/self/oom_score_adj",
+                OFlag::O_WRONLY | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            ) {
+                let _ = write(fd, score);
             }
             Ok(())
         });
     }
 }
 
-#[cfg_attr(test, automock)]
-pub trait InitImpl {
-    fn create_file<P: 'static + AsRef<Path>>(&self, path: P) -> io::Result<File>;
-    fn write_all_file(&self, file: &mut File, buf: &[u8]) -> io::Result<()>;
-    fn umask(&self, mode: Mode);
-    fn remove_var(&self, key: &str);
-}
-
-#[derive(Debug, Default)]
-pub struct DefaultInit;
-
-impl InitImpl for DefaultInit {
-    fn create_file<P: AsRef<Path>>(&self, path: P) -> io::Result<File> {
-        File::create(path)
-    }
-
-    fn write_all_file(&self, file: &mut File, buf: &[u8]) -> io::Result<()> {
-        file.write_all(buf)
-    }
-
-    fn umask(&self, mode: Mode) {
-        umask(mode);
-    }
-
-    fn remove_var(&self, key: &str) {
-        // SAFETY: the server is still single threaded, the runtime and its
-        // threads start later.
-        unsafe { env::remove_var(key) }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str;
-    use tempfile::tempfile;
-
-    fn new_sut(mock: MockInitImpl) -> Init<MockInitImpl> {
-        Init::<MockInitImpl> { imp: mock }
-    }
+    use std::{fs, os::unix::fs::PermissionsExt};
 
     #[test]
-    fn set_oom_success() -> Result<()> {
-        let mut mock = MockInitImpl::new();
+    fn oom_score_gets_written() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("oom_score_adj");
+        fs::write(&path, "0")?;
+        set_oom_score_at(&path, "-1000")?;
+        assert_eq!(fs::read_to_string(&path)?, "-1000");
 
-        mock.expect_create_file()
-            .with(eq("/proc/self/oom_score_adj"))
-            .returning(|_: &str| tempfile());
+        // Without the privileges it stays as it is.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444))?;
+        set_oom_score_at(&path, "-999")?;
 
-        mock.expect_write_all_file()
-            .withf(|_, x| x == "-1000".as_bytes())
-            .returning(|_, _| Ok(()));
-
-        let sut = new_sut(mock);
-        sut.set_oom_score("-1000")
-    }
-
-    #[test]
-    fn set_oom_success_write_all_fails_permission_denied() -> Result<()> {
-        let mut mock = MockInitImpl::new();
-
-        mock.expect_create_file()
-            .with(eq("/proc/self/oom_score_adj"))
-            .returning(|_: &str| tempfile());
-
-        mock.expect_write_all_file()
-            .withf(|_, x| x == "-1000".as_bytes())
-            .returning(|_, _| Err(io::Error::new(ErrorKind::PermissionDenied, "")));
-
-        let sut = new_sut(mock);
-        sut.set_oom_score("-1000")
-    }
-
-    #[test]
-    fn set_oom_failed_create_file() {
-        let mut mock = MockInitImpl::new();
-
-        mock.expect_create_file()
-            .with(eq("/proc/self/oom_score_adj"))
-            .returning(|_: &str| Err(io::Error::other("")));
-
-        let sut = new_sut(mock);
-        let res = sut.set_oom_score("-1000");
-
-        assert!(res.is_err());
-    }
-
-    #[test]
-    fn set_oom_failed_write_all_file() {
-        let mut mock = MockInitImpl::new();
-
-        mock.expect_create_file()
-            .with(eq("/proc/self/oom_score_adj"))
-            .returning(|_: &str| tempfile());
-
-        mock.expect_write_all_file()
-            .withf(|_, x| x == "-1000".as_bytes())
-            .returning(|_, _| Err(io::Error::other("")));
-
-        let sut = new_sut(mock);
-        let res = sut.set_oom_score("-1000");
-
-        assert!(res.is_err());
-    }
-
-    #[test]
-    fn umask() {
-        let mut mock = MockInitImpl::new();
-        mock.expect_umask().returning(|_| ());
-
-        let sut = new_sut(mock);
-        sut.set_default_umask();
+        // Anything else fails.
+        assert!(set_oom_score_at(&dir.path().join("missing").join("file"), "0").is_err());
+        assert!(set_oom_score_at(dir.path(), "0").is_err());
+        Ok(())
     }
 }

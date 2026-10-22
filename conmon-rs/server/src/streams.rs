@@ -85,11 +85,13 @@ impl Streams {
         }
     }
 
-    /// Drop the stdio receivers. The read loops notice the closed channels on
-    /// their next send and drop their senders too, which frees the buffers.
+    /// Drop the stdio channels, see [`ContainerIO::drop_stdio`].
     pub fn drop_stdio(&mut self) {
-        self.message_rx_stdout = None;
-        self.message_rx_stderr = None;
+        for rx in [self.message_rx_stdout.take(), self.message_rx_stderr.take()] {
+            ContainerIO::close_stdio(rx);
+        }
+        self.message_tx_stdout = None;
+        self.message_tx_stderr = None;
     }
 
     pub fn handle_stdio_receive(
@@ -109,7 +111,7 @@ impl Streams {
             task::spawn(
                 async move {
                     if let Err(e) = ContainerIO::read_loop_stdin(stdin, attach, token).await {
-                        error!("Stdin read loop failure: {:#}", e);
+                        error!("Stdin read loop failure: {e:#}");
                     }
                 }
                 .instrument(debug_span!("stdin")),
@@ -136,7 +138,7 @@ impl Streams {
                     )
                     .await
                     {
-                        error!("Stdout read loop failure: {:#}", e);
+                        error!("Stdout read loop failure: {e:#}");
                     }
                 }
                 .instrument(debug_span!("stdout")),
@@ -147,7 +149,6 @@ impl Streams {
             let logger = self.logger().clone();
             let attach = self.attach().clone();
             let message_tx = self.message_tx_stderr.take();
-            let output = output.clone();
             task::spawn(
                 async move {
                     if let Err(e) = ContainerIO::read_loop(
@@ -160,7 +161,7 @@ impl Streams {
                     )
                     .await
                     {
-                        error!("Stderr read loop failure: {:#}", e);
+                        error!("Stderr read loop failure: {e:#}");
                     }
                 }
                 .instrument(debug_span!("stderr")),

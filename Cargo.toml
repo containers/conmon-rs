@@ -11,6 +11,7 @@ edition = "2024"
 # The oldest toolchain the locked dependencies support, checked by CI.
 rust-version = "1.89"
 license = "Apache-2.0"
+repository = "https://github.com/containers/conmon-rs"
 
 [workspace.dependencies]
 bytes = { version = "1.12.1", default-features = false }
@@ -18,8 +19,25 @@ capnp = { version = "0.27.2", default-features = false }
 capnpc = { version = "0.27.0", default-features = false }
 tokio = { version = "1.54.1", default-features = false }
 
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+cast_lossless = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+ignored_unit_patterns = "warn"
+manual_let_else = "warn"
+needless_pass_by_ref_mut = "warn"
+redundant_clone = "warn"
+semicolon_if_nothing_returned = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_async = "warn"
+
 [profile.release]
-debug = 0
 lto = true
 opt-level = "z"
 codegen-units = 1

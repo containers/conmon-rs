@@ -247,7 +247,12 @@ impl Decoder {
         let version = (first >> 16) as u16 & 0x7fff;
         ensure!(version == VERSION, "unsupported SPDY version {version}");
 
-        let frame = match first as u16 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the type is the lower half of the first word"
+        )]
+        let typ = first as u16;
+        let frame = match typ {
             TYPE_SYN_STREAM => {
                 // The stream ID, the associated stream ID, the priority and
                 // the slot precede the header block.
@@ -330,7 +335,12 @@ impl Decoder {
                     }
                     Err(e) => return Err(e).context("decompress header block"),
                 };
-            input = &input[(self.decompress.total_in() - total_in) as usize..];
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "at most the length of the input"
+            )]
+            let read = (self.decompress.total_in() - total_in) as usize;
+            input = &input[read..];
             // The allocator may still have given more room than asked for.
             ensure!(
                 block.len() <= MAX_HEADER_BLOCK_LEN,
@@ -457,6 +467,10 @@ impl Encoder {
         Self::put_len(buf, len);
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "data frames are checked, control frames carry the few headers of the server"
+    )]
     fn put_len(buf: &mut BytesMut, len: usize) {
         buf.put_slice(&(len as u32).to_be_bytes()[1..]);
     }
@@ -469,6 +483,10 @@ impl Encoder {
     }
 
     /// The uncompressed header block.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the few short headers of the server"
+    )]
     fn serialize(headers: &Headers) -> Vec<u8> {
         let mut raw = Vec::new();
         raw.put_u32(headers.0.len() as u32);
@@ -502,6 +520,10 @@ impl Encoder {
     }
 
     /// A stored deflate block which is not the last one.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the callers pass at most u16::MAX bytes"
+    )]
     fn stored_block(block: &mut Vec<u8>, data: &[u8]) {
         let len = data.len() as u16;
         block.put_u8(0);
@@ -803,17 +825,18 @@ mod tests {
     #[tokio::test]
     async fn oversized_control_frames_are_rejected() -> Result<()> {
         let mut control = vec![0x80, 0x03, 0, 1, 0];
-        control.extend_from_slice(&((MAX_CONTROL_FRAME_LEN + 1) as u32).to_be_bytes()[1..]);
+        control.extend_from_slice(&u32::try_from(MAX_CONTROL_FRAME_LEN + 1)?.to_be_bytes()[1..]);
         assert!(Decoder::default().read(&mut &control[..]).await.is_err());
         Ok(())
     }
 
     #[tokio::test]
+    #[expect(clippy::cast_possible_truncation, reason = "a wrapping byte pattern")]
     async fn large_data_frames_come_in_parts() -> Result<()> {
         // The largest frame the protocol allows, with FIN, then a ping.
         let len = MAX_DATA_FRAME_LEN;
         let mut bytes = vec![0, 0, 0, 1, FLAG_FIN];
-        bytes.extend_from_slice(&(len as u32).to_be_bytes()[1..]);
+        bytes.extend_from_slice(&u32::try_from(len)?.to_be_bytes()[1..]);
         bytes.extend((0..len).map(|i| i as u8));
         bytes.extend(hex(GO_PING));
 

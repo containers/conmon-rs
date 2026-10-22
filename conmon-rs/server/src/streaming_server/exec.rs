@@ -8,7 +8,7 @@ use crate::conmon_capnp::conmon::CgroupManager;
 use crate::{
     attach::SharedContainerAttach,
     child::{Child, ChildKind},
-    child_reaper::{ChildReaper, ExitChannelData},
+    child_reaper::{ChildReaper, ExitChannelData, RuntimeCall},
     config::Config,
     container_io::{ContainerIO, Drain, EarlyStdio, Message as IOMessage, SharedContainerIO},
     container_log::ContainerLog,
@@ -19,8 +19,7 @@ use crate::{
 use anyhow::{Context, Result};
 use async_channel::Receiver as IOReceiver;
 use bytes::Bytes;
-use libc::pid_t;
-use nix::{sys::signal::Signal, unistd::Pid};
+use nix::sys::signal::Signal;
 use std::{
     collections::VecDeque,
     future,
@@ -90,15 +89,11 @@ impl StreamingServer {
         let res = session
             .child_reaper
             .create_child(
-                session.server_config.runtime(),
-                &args,
-                session.stdin,
+                RuntimeCall {
+                    stdin: session.stdin,
+                    ..RuntimeCall::new(session.server_config.runtime(), &args, pidfile.path())
+                },
                 &mut container_io,
-                pidfile.path(),
-                None,
-                vec![],
-                false,
-                vec![],
             )
             .await;
         let (grandchild_pid, token, call) = match res {
@@ -112,7 +107,7 @@ impl StreamingServer {
         drop(pidfile);
         // Not reaped before the registration below, so the PID is still its
         // own.
-        let process = Process::open(Pid::from_raw(grandchild_pid as pid_t));
+        let process = Process::open(grandchild_pid);
         let early_stdio = container_io.take_early_stdio().await;
 
         let io = SharedContainerIO::new(container_io);
@@ -490,6 +485,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::cast_possible_truncation, reason = "a wrapping byte pattern")]
     fn early_output_gets_split_into_frames() {
         let data: Vec<u8> = (0..2 * EARLY_FRAME_SIZE + 10).map(|i| i as u8).collect();
         let frames = StreamingServer::early_frames(data.clone());

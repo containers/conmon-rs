@@ -11,6 +11,8 @@ targets = [
 ]
 # The fuzz targets are not shipped, only built by CI.
 exclude = ["conmonrs-fuzz"]
+# Neither are the dependencies of the tests.
+exclude-dev = true
 
 [advisories]
 unmaintained = "workspace"
@@ -36,6 +38,12 @@ skip = [
     { crate = "rand_core@0.9", reason = "only with the tracing feature, through opentelemetry_sdk" },
 ]
 wildcards = "deny"
+
+# The server runs on a current_thread runtime, the worker threads of the
+# multi_thread one would only cost memory. The tests may use it.
+[[bans.features]]
+crate = "tokio"
+deny = ["rt-multi-thread"]
 
 [sources]
 unknown-registry = "deny"

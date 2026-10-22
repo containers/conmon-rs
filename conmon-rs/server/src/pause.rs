@@ -1,4 +1,10 @@
-use crate::{child_reaper::ReapableChild, conmon_capnp::conmon, mutex::lock, process::Process};
+use crate::{
+    child_reaper::ReapableChild,
+    config::PauseArgs,
+    conmon_capnp::conmon,
+    mutex::lock,
+    process::{Process, read_pid_file},
+};
 use anyhow::{Context, Result, bail};
 use capnp::enum_list::Reader;
 use libc::pid_t;
@@ -158,16 +164,21 @@ impl Pause {
     }
 
     /// How long the shutdown waits for a running initialization before it
-    /// kills the pause subcommand, and how long for the cleanup after that.
-    const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
+    /// kills the pause subcommand, how long for the cleanup after that, and
+    /// how long for the unmounts of the pause instance. All together stay
+    /// below the 10 seconds the clients give the whole shutdown.
+    const SHUTDOWN_WAIT: Duration = Duration::from_secs(6);
     const KILL_WAIT: Duration = Duration::from_secs(1);
+    const STOP_WAIT: Duration = Duration::from_secs(1);
 
     /// Stop the pause instance for the shutdown. An initialization still
     /// running finishes in its own task, wait a bounded time for it rather
     /// than leaving its pause process behind, and kill its subcommand if it
     /// does not finish. No request initializes one after this.
     pub async fn shutdown() {
-        PAUSE.shutdown(Self::SHUTDOWN_WAIT, Self::KILL_WAIT).await
+        PAUSE
+            .shutdown(Self::SHUTDOWN_WAIT, Self::KILL_WAIT, Self::STOP_WAIT)
+            .await;
     }
 
     /// Fail if the pause instance was created for another pod or configuration.
@@ -236,11 +247,8 @@ impl Pause {
     fn spawn_reaper(pid: Pid, exited: Arc<AtomicBool>) {
         task::spawn(
             async move {
-                let code = ReapableChild::wait_for_exit_code_async(
-                    CancellationToken::new(),
-                    pid.as_raw() as u32,
-                )
-                .await;
+                let code =
+                    ReapableChild::wait_for_exit_code_async(CancellationToken::new(), pid).await;
                 exited.store(true, Ordering::SeqCst);
                 if PAUSE.shutting_down() {
                     info!("Pause PID {pid} exited with code {code}");
@@ -254,12 +262,13 @@ impl Pause {
         );
     }
 
-    /// Stop the global pause instance.
-    pub fn stop(&self) {
+    /// Stop the pause instance. Unmounting waits for the kernel, so it runs
+    /// on the blocking pool, see [`stop_blocking`].
+    fn stop(&self) {
         info!("Stopping pause");
         for namespace in self.namespaces() {
             if let Err(e) = namespace.umount(self.base_path(), self.pod_id()) {
-                debug!("Unable to umount namespace {namespace}: {:#}", e);
+                debug!("Unable to umount namespace {namespace}: {e:#}");
             }
         }
 
@@ -269,7 +278,7 @@ impl Pause {
             match process.signal(Signal::SIGTERM) {
                 Ok(()) => {}
                 Err(Errno::ESRCH | Errno::ECHILD) => debug!("Pause PID {pid} already exited"),
-                Err(e) => warn!("Unable to kill pause PID {pid}: {:#}", e),
+                Err(e) => warn!("Unable to kill pause PID {pid}: {e:#}"),
             }
         }
 
@@ -339,7 +348,8 @@ impl Pause {
         // the wait below, so the PID is still its own here.
         let process = child
             .id()
-            .map(|pid| Process::open(Pid::from_raw(pid as pid_t)));
+            .and_then(|pid| i32::try_from(pid).ok())
+            .map(|pid| Process::open(Pid::from_raw(pid)));
         PAUSE.set_child(process)?;
         let status = child.wait().await;
         PAUSE.set_child(None)?;
@@ -360,7 +370,7 @@ impl Pause {
             // got killed by the shutdown. Its child stops the init of a PID
             // namespace then, the bind mounts and PID file stay.
             if status.signal().is_some() {
-                pause.stop();
+                stop_blocking(move || pause.stop()).await;
             }
             bail!("exit status not ok: {status}")
         }
@@ -370,10 +380,14 @@ impl Pause {
         if namespaces.contains(&Namespace::Pid) {
             // The namespaces are bound, do not leave them behind. The init
             // cannot be stopped without its PID though.
-            let pid = Self::read_pause_pid(base_path, pod_id).inspect_err(|_| {
-                warn!("Unable to read the pause PID, its init process stays behind");
-                pause.stop()
-            })?;
+            let pid = match Self::read_pause_pid(base_path, pod_id) {
+                Ok(pid) => pid,
+                Err(e) => {
+                    warn!("Unable to read the pause PID, its init process stays behind");
+                    stop_blocking(move || pause.stop()).await;
+                    return Err(e);
+                }
+            };
             info!("Pause PID is: {pid}");
             // Before the reaper may take the exit status, the PID is only
             // reliable until then.
@@ -388,12 +402,7 @@ impl Pause {
 
     /// Read the PID of the init which the pause process left behind.
     fn read_pause_pid(base_path: &Path, pod_id: &str) -> Result<Pid> {
-        let pid = fs::read_to_string(Self::pause_pid_path(base_path, pod_id))
-            .context("read pause PID path")?
-            .trim()
-            .parse::<u32>()
-            .context("parse pause PID")?;
-        Ok(Pid::from_raw(pid as pid_t))
+        read_pid_file(&Self::pause_pid_path(base_path, pod_id)).context("read pause PID")
     }
 
     /// Retrieve the pause PID path for a base and pod ID.
@@ -404,7 +413,6 @@ impl Pause {
         path
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// Run a new pause instance.
     ///
     /// The process forks. The child unshares the requested namespaces and the
@@ -418,17 +426,19 @@ impl Pause {
     /// dies with its init process. Unsharing a PID namespace does not move the
     /// caller into it, so the child forks that init, which is the only process
     /// that stays around.
-    pub fn run<T: AsRef<Path> + Copy>(
-        base_path: T,
-        pod_id: &str,
-        ipc: bool,
-        pid: bool,
-        net: bool,
-        user: bool,
-        uts: bool,
-        uid_mappings: &[String],
-        gid_mappings: &[String],
-    ) -> Result<()> {
+    #[expect(unsafe_code, reason = "forking")]
+    pub fn run(args: &PauseArgs) -> Result<()> {
+        let PauseArgs {
+            base_path,
+            pod_id,
+            ipc,
+            pid,
+            net,
+            user,
+            uts,
+            uid_mappings,
+            gid_mappings,
+        } = args.clone();
         let requested = [
             (ipc, Namespace::Ipc),
             (pid, Namespace::Pid),
@@ -471,13 +481,13 @@ impl Pause {
                 drop(sock_child);
 
                 let mut parent = PauseParent {
-                    base_path: base_path.as_ref(),
-                    pod_id,
+                    base_path: &base_path,
+                    pod_id: &pod_id,
                     child,
                     namespaces: &namespaces,
                     holder: None,
                 };
-                let result = parent.run(uid_mappings, gid_mappings, sock_parent);
+                let result = parent.run(&uid_mappings, &gid_mappings, sock_parent);
                 if result.is_err() {
                     parent.cleanup();
                 }
@@ -496,6 +506,7 @@ impl Pause {
     /// The child side of the pause process: unshares the namespaces, forks the
     /// init of a PID namespace if requested, reports the process holding the
     /// namespaces and waits for the parent to bind them.
+    #[expect(unsafe_code, reason = "forking the init of a PID namespace")]
     fn run_child(flags: CloneFlags, user: bool, pid: bool, mut sock: UnixStream) -> Result<()> {
         let mut res = [0];
 
@@ -555,7 +566,7 @@ impl Pause {
             && pid
             && let Err(e) = kill(holder, Signal::SIGKILL)
         {
-            debug!("Unable to kill pause init {holder}: {:#}", e);
+            debug!("Unable to kill pause init {holder}: {e:#}");
         }
         result?;
 
@@ -609,7 +620,7 @@ impl Pause {
                 Ok(status) => trace!("Reaped child: {status:?}"),
                 Err(Errno::EINTR) => continue,
                 Err(e) => {
-                    warn!("Unable to reap children: {:#}", e);
+                    warn!("Unable to reap children: {e:#}");
                     return;
                 }
             }
@@ -689,12 +700,22 @@ impl Pause {
 
 /// A value which has to be undone when it is no longer used.
 trait Stop {
+    /// Undo the value, which may block, see [`stop_blocking`].
     fn stop(&self);
+}
+
+/// Run the stop of a value on the blocking pool. Unmounting waits for the
+/// kernel, which can take long, the runtime thread runs every RPC and the
+/// I/O of all containers.
+async fn stop_blocking(stop: impl FnOnce() + Send + 'static) {
+    if let Err(e) = task::spawn_blocking(stop).await {
+        warn!("Unable to stop: {e}");
+    }
 }
 
 impl Stop for Pause {
     fn stop(&self) {
-        Pause::stop(self)
+        Pause::stop(self);
     }
 }
 
@@ -811,7 +832,7 @@ impl<T: Stop + Send + Sync + 'static> SingleFlight<T> {
         }
         let value = init().await?;
         if self.shutting_down() {
-            value.stop();
+            stop_blocking(move || value.stop()).await;
             bail!("server is shutting down")
         }
         Ok(value)
@@ -825,8 +846,9 @@ impl<T: Stop + Send + Sync + 'static> SingleFlight<T> {
 
     /// Stop the value for the shutdown. Wait up to `wait` for a running
     /// initialization, kill its process if it does not finish and wait up to
-    /// `kill_wait` for it to clean up. No request initializes one after this.
-    async fn shutdown(&self, wait: Duration, kill_wait: Duration) {
+    /// `kill_wait` for it to clean up, then up to `stop_wait` for the stop of
+    /// the value. No request initializes one after this.
+    async fn shutdown(&'static self, wait: Duration, kill_wait: Duration, stop_wait: Duration) {
         self.shutting_down.store(true, Ordering::SeqCst);
 
         if time::timeout(wait, self.wait_for_init()).await.is_err() {
@@ -843,7 +865,7 @@ impl<T: Stop + Send + Sync + 'static> SingleFlight<T> {
                         );
                     }
                 }
-                Err(e) => warn!("Unable to lock initialization process PID: {:#}", e),
+                Err(e) => warn!("Unable to lock initialization process PID: {e:#}"),
             }
             if time::timeout(kill_wait, self.wait_for_init())
                 .await
@@ -853,8 +875,14 @@ impl<T: Stop + Send + Sync + 'static> SingleFlight<T> {
             }
         }
 
-        if let Some(value) = self.cell.get() {
-            value.stop();
+        // A stop which hangs, like an unmount on a hung file system, must
+        // not keep the server from stopping.
+        if let Some(value) = self.cell.get()
+            && time::timeout(stop_wait, stop_blocking(move || value.stop()))
+                .await
+                .is_err()
+        {
+            warn!("Stopping did not finish in time, leaving it behind");
         }
     }
 }
@@ -940,7 +968,7 @@ impl PauseParent<'_> {
         // it does not linger as a zombie. The namespaces are already in place,
         // so a failure is no reason to fail the whole setup.
         if let Err(e) = waitpid(child, None) {
-            warn!("Unable to wait for pause child {child}: {:#}", e);
+            warn!("Unable to wait for pause child {child}: {e:#}");
         }
 
         Ok(())
@@ -955,15 +983,15 @@ impl PauseParent<'_> {
         if let Some(init) = init
             && let Err(e) = kill(init, Signal::SIGKILL)
         {
-            debug!("Unable to kill pause init {init}: {:#}", e);
+            debug!("Unable to kill pause init {init}: {e:#}");
         }
 
         // Do not leave the child blocked on the socket or as a zombie.
         if let Err(e) = kill(child, Signal::SIGKILL) {
-            debug!("Unable to kill pause child {child}: {:#}", e);
+            debug!("Unable to kill pause child {child}: {e:#}");
         }
         if let Err(e) = waitpid(child, None) {
-            debug!("Unable to wait for pause child {child}: {:#}", e);
+            debug!("Unable to wait for pause child {child}: {e:#}");
         }
 
         // With the child gone, the killed init got reparented to this process,
@@ -971,12 +999,12 @@ impl PauseParent<'_> {
         if let Some(init) = init
             && let Err(e) = waitpid(init, None)
         {
-            debug!("Unable to wait for pause init {init}: {:#}", e);
+            debug!("Unable to wait for pause init {init}: {e:#}");
         }
 
         for namespace in self.namespaces {
             if let Err(e) = namespace.umount(self.base_path, self.pod_id) {
-                debug!("Unable to umount namespace {namespace}: {:#}", e);
+                debug!("Unable to umount namespace {namespace}: {e:#}");
             }
         }
 
@@ -1062,7 +1090,7 @@ impl Namespace {
     pub fn umount<T: AsRef<Path>>(&self, path: T, pod_id: &str) -> Result<()> {
         let bind_path = self.path(path, pod_id);
         if let Err(e) = umount(&bind_path) {
-            trace!("Unable to umount namespace {self}: {:#}", e);
+            trace!("Unable to umount namespace {self}: {e:#}");
         }
         fs::remove_file(&bind_path).context("remove namespace bind path")
     }
@@ -1212,7 +1240,11 @@ mod tests {
 
         let start = time::Instant::now();
         flight
-            .shutdown(Duration::from_secs(10), Duration::from_secs(1))
+            .shutdown(
+                Duration::from_secs(10),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
             .await;
         assert_eq!(start.elapsed(), Duration::from_secs(1));
 
@@ -1247,7 +1279,11 @@ mod tests {
 
         let start = time::Instant::now();
         flight
-            .shutdown(Duration::from_secs(10), Duration::from_secs(1))
+            .shutdown(
+                Duration::from_secs(10),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
             .await;
         assert_eq!(start.elapsed(), Duration::from_secs(11));
         assert_eq!(stops.load(Ordering::SeqCst), 0);
@@ -1282,7 +1318,11 @@ mod tests {
         }
 
         flight
-            .shutdown(Duration::from_millis(100), Duration::from_secs(10))
+            .shutdown(
+                Duration::from_millis(100),
+                Duration::from_secs(10),
+                Duration::from_secs(1),
+            )
             .await;
         assert!(caller.await?.is_err());
         assert_eq!(stops.load(Ordering::SeqCst), 1);
@@ -1296,9 +1336,70 @@ mod tests {
         flight.get_or_init(slow_init(&inits, &stops)).await?;
 
         flight
-            .shutdown(Duration::from_secs(10), Duration::from_secs(1))
+            .shutdown(
+                Duration::from_secs(10),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
             .await;
         assert_eq!(stops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    /// A value whose stop hangs until released, like an unmount on a hung
+    /// file system, and which tells the thread it stopped on.
+    struct Hung {
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        stopped_on: Mutex<Option<std::thread::ThreadId>>,
+    }
+
+    impl Stop for Hung {
+        fn stop(&self) {
+            if let Ok(mut stopped_on) = self.stopped_on.lock() {
+                *stopped_on = Some(std::thread::current().id());
+            }
+            if let Ok(release) = self.release.lock() {
+                let _ = release.recv();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_does_not_wait_for_a_hung_stop() -> Result<()> {
+        let flight: &'static SingleFlight<Hung> = Box::leak(Box::new(SingleFlight::new()));
+        let (release, rx) = std::sync::mpsc::channel();
+        let value = flight
+            .get_or_init(move || async move {
+                Ok(Hung {
+                    release: Mutex::new(rx),
+                    stopped_on: Mutex::default(),
+                })
+            })
+            .await?;
+
+        // The runtime thread keeps running while the stop hangs.
+        let ticker = task::spawn(async {
+            for _ in 0..5 {
+                time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        let start = time::Instant::now();
+        flight
+            .shutdown(
+                Duration::from_secs(10),
+                Duration::from_secs(1),
+                Duration::from_millis(200),
+            )
+            .await;
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_millis(200), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+        assert!(ticker.is_finished());
+        let stopped_on = *lock(&value.stopped_on)?;
+        assert!(stopped_on.is_some_and(|id| id != std::thread::current().id()));
+
+        // Let the blocking pool end with the test.
+        release.send(())?;
         Ok(())
     }
 

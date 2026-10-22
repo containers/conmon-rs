@@ -348,7 +348,7 @@ mod tests {
         HeaderMap, StatusCode,
         header::{self, HeaderValue},
     };
-
+    use nix::unistd::Pid;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpStream,
@@ -533,7 +533,7 @@ mod tests {
                 let (_, child) = ReapableChild::from_child(Child {
                     id: "id".into(),
                     kind: ChildKind::Container,
-                    pid: 0,
+                    pid: Pid::from_raw(0),
                     exit_paths: vec![],
                     oom_exit_paths: vec![],
                     timeout: None,

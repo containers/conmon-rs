@@ -191,7 +191,7 @@ impl Connection {
         loop {
             select! {
                 _ = interval.tick() => {}
-                _ = shared.done.cancelled() => return,
+                () = shared.done.cancelled() => return,
             }
             id = id.wrapping_add(2) & 0x7fff_ffff;
             // A full queue goes out anyway, which tells as much.
@@ -244,16 +244,16 @@ impl Connection {
                 let mut active = false;
                 let data = select! {
                     biased;
-                    _ = shared.done.cancelled() => break,
+                    () = shared.done.cancelled() => break,
                     Some(frame) = control_rx.recv() => {
                         encoder.encode(&frame, &mut buf)?;
                         None
                     }
-                    _ = shared.resets_ready.notified() => None,
+                    () = shared.resets_ready.notified() => None,
                     Some(data) = data_rx.recv() => Some(data),
                     // The server closes the connection, the frames queued
                     // until now go out first.
-                    _ = shared.closing.cancelled(), if !closing => {
+                    () = shared.closing.cancelled(), if !closing => {
                         closing = true;
                         None
                     }
@@ -283,7 +283,7 @@ impl Connection {
                         result = writer.write_all(&buf) => result.context("write frames")?,
                         // A client which does not read anymore must not keep
                         // the connection open.
-                        _ = shared.done.cancelled() => return Ok(()),
+                        () = shared.done.cancelled() => return Ok(()),
                     }
                     buf.clear();
                     if active {
@@ -530,15 +530,15 @@ impl Shared {
                 }
             }
             // A stream which went away while waiting for the budget.
-            _ = tx.closed() => {}
-            _ = reset.cancelled() => {}
+            () = tx.closed() => {}
+            () = reset.cancelled() => {}
         }
     }
 
     async fn send_control(&self, frame: Frame) -> Result<()> {
         select! {
             result = self.control.send(frame) => result.map_err(|_| anyhow!("connection closed")),
-            _ = self.done.cancelled() => bail!("connection closed"),
+            () = self.done.cancelled() => bail!("connection closed"),
         }
     }
 
@@ -648,7 +648,7 @@ where
         loop {
             let frame = select! {
                 frame = decoder.read(&mut self.reader) => frame,
-                _ = self.shared.done.cancelled() => return End::Closed,
+                () = self.shared.done.cancelled() => return End::Closed,
             };
             let frame = match frame {
                 Ok(Some(frame)) => frame,
@@ -723,6 +723,10 @@ where
     }
 
     /// Accept or refuse a stream the client opened.
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "a shared reference would need the reader to be Sync for a Send future"
+    )]
     async fn open(
         &mut self,
         stream_id: u32,
@@ -786,7 +790,7 @@ where
         select! {
             // Dropping a stream nobody accepts anymore resets it.
             _ = self.streams.send(stream) => Ok(()),
-            _ = self.shared.done.cancelled() => bail!("connection closed"),
+            () = self.shared.done.cancelled() => bail!("connection closed"),
         }
     }
 }
@@ -881,6 +885,10 @@ pub struct StreamSender {
 impl StreamSender {
     /// Send data in a single frame, at most [`frame::MAX_DATA_FRAME_LEN`]
     /// bytes. Fails once the stream got reset or the connection ended.
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "one send at a time keeps the frames in order"
+    )]
     pub async fn send(&mut self, data: Bytes) -> Result<()> {
         if self.closed {
             bail!("SPDY stream {} is closed", self.id);
@@ -905,7 +913,7 @@ impl StreamSender {
         };
         select! {
             biased;
-            _ = self.reset.cancelled() => bail!("SPDY stream {} got reset", self.id),
+            () = self.reset.cancelled() => bail!("SPDY stream {} got reset", self.id),
             result = self.shared.data.send(frame) => {
                 result.map_err(|_| anyhow!("SPDY connection closed"))?;
                 unqueued.queued = true;
@@ -941,7 +949,7 @@ impl StreamSender {
 
     /// Resolves once the client reset the stream or the connection ended.
     pub async fn reset_by_peer(&self) {
-        self.reset.cancelled().await
+        self.reset.cancelled().await;
     }
 
     /// Whether the stream got reset or the connection ended.
@@ -1466,6 +1474,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::cast_possible_truncation, reason = "small constants")]
     async fn resets_get_through_a_busy_connection() -> Result<()> {
         // A client which does not read: the writer waits for the connection
         // and the pings fill the control queue.
@@ -1782,6 +1791,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::cast_possible_truncation, reason = "a wrapping byte pattern")]
     async fn slow_streams_do_not_lose_data() -> Result<()> {
         let (mut client, mut connection) = connect(accept_data, None)?;
         client.open(1, [("streamtype", "data")].into()).await?;
@@ -1811,6 +1821,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::cast_possible_truncation, reason = "small constants")]
     async fn too_many_streams_get_refused() -> Result<()> {
         let (mut client, mut connection) = connect(accept_data, None)?;
         let mut streams = Vec::with_capacity(MAX_STREAMS);
@@ -1853,6 +1864,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::cast_possible_truncation, reason = "small constants")]
     async fn streams_reset_by_the_client_count_until_dropped() -> Result<()> {
         let (mut client, mut connection) = connect(accept_data, None)?;
         let mut streams = Vec::with_capacity(MAX_STREAMS);
@@ -1898,6 +1910,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::cast_possible_truncation, reason = "small constants")]
     async fn streams_share_a_byte_budget() -> Result<()> {
         const FRAME_LEN: usize = 64 * 1024;
         // As many streams as the budget holds with full queues, and one more.

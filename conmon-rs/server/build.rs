@@ -83,14 +83,27 @@ fn main() {
 
     // The dependency tree is only informational (`--version full`) and the
     // slowest step of this script, let packagers skip it. It covers the
-    // enabled features, a plain `cargo tree` only shows the default ones.
+    // enabled features, a plain `cargo tree` only shows the default ones, and
+    // only what ends up in the binary for the target. It must not resolve the
+    // dependencies anew or go to the network.
     let cargo_tree = if std::env::var_os("CONMONRS_SKIP_CARGO_TREE").is_some() {
         String::new()
     } else {
         let features = enabled_features();
         run(
             &cargo,
-            &["tree", "--no-default-features", "--features", &features],
+            &[
+                "tree",
+                "--locked",
+                "--offline",
+                "--edges",
+                "normal",
+                "--target",
+                &target,
+                "--no-default-features",
+                "--features",
+                &features,
+            ],
         )
     };
 

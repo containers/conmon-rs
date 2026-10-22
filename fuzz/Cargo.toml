@@ -60,3 +60,6 @@ path = "fuzz_targets/upgrade_headers.rs"
 test = false
 doc = false
 bench = false
+
+[lints]
+workspace = true

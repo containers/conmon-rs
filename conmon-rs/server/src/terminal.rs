@@ -1,10 +1,11 @@
 //! Terminal console functionalities.
 
 use crate::{
+    async_fd::{self, Fd},
     attach::SharedContainerAttach,
     container_io::{ContainerIO, Message, Pipe, STDIO_CHANNEL_SIZE, StdioSender, TempFile},
     container_log::SharedContainerLog,
-    listener::{DefaultListener, Listener},
+    listener,
 };
 use anyhow::{Context as _, Result};
 use libc::{TIOCSWINSZ, winsize};
@@ -101,9 +102,8 @@ impl Terminal {
         // Bind synchronously so that the socket exists once this returns,
         // without blocking on the listener task to get scheduled.
         debug!("Listening terminal socket on {}", path.display());
-        let listener = Listener::<DefaultListener>::default()
-            .bind_long_path(path)
-            .context("bind terminal socket")?;
+        let listener =
+            listener::bind_long_path(path, UnixListener::bind).context("bind terminal socket")?;
         Self::restrict_permissions(path)?;
 
         let (connected_tx, connected_rx) = mpsc::channel(10);
@@ -115,7 +115,7 @@ impl Terminal {
         task::spawn(
             async move {
                 if let Err(e) = Self::listen(listener, config).await {
-                    error!("Unable to listen on terminal: {:#}", e);
+                    error!("Unable to listen on terminal: {e:#}");
                 };
             }
             .instrument(debug_span!("listen")),
@@ -193,7 +193,7 @@ impl Terminal {
                 )
                 .await
                 {
-                    error!("Stdout read loop failure: {:#}", e)
+                    error!("Stdout read loop failure: {e:#}");
                 }
                 Ok::<_, anyhow::Error>(())
             }
@@ -205,7 +205,7 @@ impl Terminal {
             task::spawn(
                 async move {
                     if let Err(e) = ContainerIO::read_loop_stdin(&*fd, attach_clone, token).await {
-                        error!("Stdin read loop failure: {:#}", e);
+                        error!("Stdin read loop failure: {e:#}");
                     }
                 }
                 .instrument(debug_span!("read_loop_stdin")),
@@ -235,6 +235,7 @@ impl Terminal {
     }
 
     /// Resize the terminal width and height.
+    #[expect(unsafe_code, reason = "the TIOCSWINSZ ioctl")]
     pub fn resize(&self, width: u16, height: u16) -> Result<()> {
         debug!("Resizing terminal to width {} and height {}", width, height);
         let ws = winsize {
@@ -262,7 +263,7 @@ impl Terminal {
         let dropped = config.connected_tx.clone();
         select! {
             res = Self::accept(listener, config) => res,
-            _ = dropped.closed() => {
+            () = dropped.closed() => {
                 debug!("Terminal dropped before receiving a descriptor, stopping listener");
                 Ok(())
             }
@@ -317,6 +318,7 @@ impl Terminal {
     /// Receive the descriptor of the terminal. It gets close-on-exec right
     /// away, the runtimes which other threads spawn meanwhile would inherit
     /// the terminal of the container otherwise.
+    #[expect(unsafe_code, reason = "taking received descriptors")]
     fn recv_fd(socket: BorrowedFd) -> io::Result<Option<OwnedFd>> {
         // The kernel truncates a message with more descriptors than fit,
         // which nix reports as an error before they could be closed. One
@@ -349,16 +351,18 @@ impl Terminal {
 }
 
 #[derive(Debug)]
-struct TerminalFd(AsyncFd<std::fs::File>);
+struct TerminalFd(AsyncFd<Fd<std::fs::File>>);
 
 impl TerminalFd {
     fn new(fd: OwnedFd) -> io::Result<Self> {
         let flags = fcntl::fcntl(&fd, FcntlArg::F_GETFL)?;
         let flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
         fcntl::fcntl(&fd, FcntlArg::F_SETFL(flags))?;
-        // SAFETY: `fd` is an open descriptor that the `File` takes ownership
-        // of, so it stays valid and unchanged for the lifetime of the `AsyncFd`.
-        Ok(Self(unsafe { AsyncFd::register(std::fs::File::from(fd)) }?))
+        let file = std::fs::File::from(fd);
+        Ok(Self(async_fd::register(
+            file,
+            Interest::READABLE | Interest::WRITABLE,
+        )?))
     }
 }
 
@@ -375,6 +379,7 @@ impl AsFd for TerminalFd {
 }
 
 impl AsyncRead for &TerminalFd {
+    #[expect(unsafe_code, reason = "reading into uninitialized memory")]
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context,
@@ -416,7 +421,7 @@ impl AsyncWrite for &TerminalFd {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context, buf: &[u8]) -> Poll<io::Result<usize>> {
         loop {
             let mut guard = ready!(self.0.poll_write_ready(cx))?;
-            match guard.try_io(|inner| inner.get_ref().write(buf)) {
+            match guard.try_io(|inner| (&**inner.get_ref()).write(buf)) {
                 Ok(result) => break Poll::Ready(result),
                 Err(_would_block) => continue,
             }
@@ -458,6 +463,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[expect(unsafe_code, reason = "the TIOCGWINSZ ioctl")]
     async fn new_success() -> Result<()> {
         let logger = ContainerLog::new();
         let attach = SharedContainerAttach::default();
@@ -492,10 +498,8 @@ mod tests {
         };
         // SAFETY: TIOCGWINSZ writes a `winsize` to the pointer, which points
         // to a live local of exactly that type.
-        assert_eq!(
-            unsafe { libc::ioctl(res.slave.as_raw_fd(), libc::TIOCGWINSZ, &mut size) },
-            0
-        );
+        let ret = unsafe { libc::ioctl(res.slave.as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
+        assert_eq!(ret, 0);
         assert_eq!((size.ws_col, size.ws_row), (120, 40));
 
         // Write to the slave
