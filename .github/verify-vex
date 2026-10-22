@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Check the OpenVEX document of the binaries, which the publish-static
+# workflow attests for every binary: the fields OpenVEX v0.2.0 requires, and
+# the conventions of release.md, which the scan of .github/scan-sboms relies
+# on. Every statement names conmon-rs as its product and the affected
+# crates as its subcomponents, and lists the GHSA ID of the vulnerability,
+# which is the one grype reports for crates. The product has no version: the
+# document belongs to the binaries of its commit, and the scan, which drops
+# the product, would apply a statement for one version to all of them.
+VEX=${1:-vex/conmonrs.openvex.json}
+
+ERRORS=$(jq -r '
+    def str: type == "string" and length > 0;
+    def check(cond; msg): if cond then empty else msg end;
+    def statement($i):
+        "statement \($i)" as $s |
+        check(.vulnerability.name | str; "\($s): vulnerability.name is missing"),
+        check([.vulnerability.name, (.vulnerability.aliases // [])[]] | any(strings | test("^GHSA-"));
+            "\($s): neither vulnerability.name nor vulnerability.aliases list the GHSA ID"),
+        check(.products | type == "array" and length > 0; "\($s): products is empty"),
+        ((.products // [])[] |
+            check(.["@id"] == "pkg:github/containers/conmon-rs";
+                "\($s): product \(.["@id"]) is not pkg:github/containers/conmon-rs, without a version"),
+            check(.subcomponents | type == "array" and length > 0;
+                "\($s): product \(.["@id"]) lists no subcomponents"),
+            ((.subcomponents // [])[] |
+                check(.["@id"] | str and test("^pkg:cargo/");
+                    "\($s): subcomponent \(.["@id"]) is not a pkg:cargo purl"))),
+        check(.status | IN("not_affected", "affected", "fixed", "under_investigation");
+            "\($s): status \(.status) is not one of not_affected, affected, fixed, under_investigation"),
+        if .status == "not_affected" then
+            check((.justification | IN("component_not_present", "vulnerable_code_not_present",
+                "vulnerable_code_not_in_execute_path", "vulnerable_code_cannot_be_controlled_by_adversary",
+                "inline_mitigations_already_exist")) or (.impact_statement | str);
+                "\($s): not_affected needs a justification of OpenVEX or an impact_statement")
+        elif .status == "affected" then
+            check(.action_statement | str; "\($s): affected needs an action_statement")
+        else empty end;
+    check(.["@context"] == "https://openvex.dev/ns/v0.2.0"; "@context is not https://openvex.dev/ns/v0.2.0"),
+    check(.["@id"] | str; "@id is missing"),
+    check(.author | str; "author is missing"),
+    check(.timestamp | str; "timestamp is missing"),
+    check(.version | type == "number" and . >= 1 and . == floor; "version is not a positive integer"),
+    check(.statements | type == "array"; "statements is not an array"),
+    (.statements // [] | to_entries[] | .key as $i | .value | statement($i))
+' "$VEX")
+
+if [[ -n $ERRORS ]]; then
+    echo "$VEX is not a valid OpenVEX document of conmon-rs:" >&2
+    echo "$ERRORS" >&2
+    exit 1
+fi
+echo "$VEX is valid, $(jq '.statements | length' "$VEX") statements"

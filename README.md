@@ -97,13 +97,48 @@ CLI](https://cli.github.com):
 ```
 
 Add `--predicate-type https://spdx.dev/Document/v2.3` for the SBOM. The
-bucket and the releases carry the attestation bundles as well
-(`conmonrs.$ARCH.intoto.jsonl` and `conmonrs.$ARCH.spdx.intoto.jsonl`), and
-the SBOM itself (`conmonrs.$ARCH.spdx.json`). The cosign signatures
-(`conmonrs.$ARCH.bundle`) have the identity
+binaries of newer commits, and of the releases after v1.2.0, also come with an
+[OpenVEX](https://openvex.dev) document as an attestation, which states how
+known vulnerabilities of the crates of the SBOM affect conmon-rs. It is the
+document [vex/conmonrs.openvex.json](vex/conmonrs.openvex.json) of the commit,
+release.md describes its statements. Verify it and print the attested
+document with:
+
+```console
+> gh attestation verify conmonrs.amd64 \
+    --repo containers/conmon-rs \
+    --signer-workflow containers/conmon-rs/.github/workflows/publish-static.yml \
+    --source-ref refs/heads/main \
+    --predicate-type https://openvex.dev/ns/v0.2.0 \
+    --format json --jq '.[0].verificationResult.statement.predicate'
+```
+
+The bucket and the releases carry the attestation bundles as well
+(`conmonrs.$ARCH.intoto.jsonl`, `conmonrs.$ARCH.spdx.intoto.jsonl` and
+`conmonrs.$ARCH.vex.intoto.jsonl`), the SBOM and the VEX document themselves
+(`conmonrs.$ARCH.spdx.json` and `conmonrs.$ARCH.vex.json`). The cosign
+signatures (`conmonrs.$ARCH.bundle`) have the identity
 `https://github.com/containers/conmon-rs/.github/workflows/publish-static.yml@refs/heads/main`,
 the one of commits from before the attestations is
 `https://github.com/containers/conmon-rs/.github/workflows/ci.yml@refs/heads/main`.
+
+The statements of the VEX document name conmon-rs
+(`pkg:github/containers/conmon-rs`) as their product and the affected crates
+as its subcomponents. Neither [grype](https://github.com/anchore/grype) nor
+[trivy](https://trivy.dev) applies such a statement to the SBOM of the binary:
+grype only matches a statement whose product is the vulnerable crate itself,
+trivy does not know the `pkg:github` type, and both ignore the statements
+silently. Make the subcomponents the products first, which both apply:
+
+```console
+> jq '.statements |= map(.products = [.products[].subcomponents[]])' \
+    conmonrs.amd64.vex.json >crates.vex.json
+> grype sbom:conmonrs.amd64.spdx.json --vex crates.vex.json
+> trivy sbom conmonrs.amd64.spdx.json --vex crates.vex.json
+```
+
+`make scan SBOMS=conmonrs.amd64.spdx.json` does the same with grype and the
+VEX document of the repository.
 
 Since v1.2.0, the source tarball and the `sha256sums.txt` of a release have
 SLSA Build L3 provenance and cosign signatures of the reusable [build-sources

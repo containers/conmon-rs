@@ -168,6 +168,26 @@ dependencies:
     refPaths:
       - path: .github/workflows/advisories.yml
         match: govulncheck@v
+      - path: .github/workflows/ci.yml
+        match: govulncheck@v
+
+  - name: grype
+    version: 0.121.0
+    upstream:
+      flavour: github
+      url: anchore/grype
+    refPaths:
+      - path: Makefile
+        match: "GRYPE_VERSION :="
+
+  - name: vexctl
+    version: 0.4.4
+    upstream:
+      flavour: github
+      url: openvex/vexctl
+    refPaths:
+      - path: release.md
+        match: vexctl@v
 
   - name: alpine
     version: 3.24

@@ -28,7 +28,7 @@ release before the workflow did. The [release
 workflow](https://github.com/containers/conmon-rs/actions/workflows/release.yml)
 runs for the tag, creates a draft release with the notes GitHub generates,
 attaches the sources, the static binaries, their checksums, signatures, SLSA
-provenance and SBOMs to it, for example
+provenance, SBOMs and VEX documents to it, for example
 `https://github.com/containers/conmon-rs/releases/download/vX.Y.Z/conmonrs-vX.Y.Z.tar.gz`,
 and publishes it only then, so a published release always has all files and
 can be immutable. Edit the release notes afterwards. A release only becomes
@@ -84,3 +84,58 @@ update the package, run in an environment with access to it:
 > git push
 > rhpkg build
 ```
+
+## Vulnerabilities and VEX statements
+
+The ci workflow checks every change for known vulnerabilities: `verify-deny`
+checks the crates of [Cargo.lock](Cargo.lock) against the RustSec advisories
+with cargo-deny, `verify-vulnerabilities` scans the SBOMs of the static
+binaries with grype (`make scan`) and fails for High and Critical
+vulnerabilities which have a fix, and `verify-go-vulnerabilities` reports the
+findings of govulncheck for the Go client as warnings, since its dependencies
+follow CRI-O. The [advisories
+workflow](https://github.com/containers/conmon-rs/actions/workflows/advisories.yml)
+runs these checks every day against main and the attested SBOMs of the
+binaries of `latest-main.txt`, and fails for their findings, the ones of
+govulncheck included.
+
+If a vulnerability does not affect conmon-rs, like because it does not call
+the vulnerable code, add a statement to the OpenVEX document
+[vex/conmonrs.openvex.json](vex/conmonrs.openvex.json). The publish-static
+workflow attests it for every binary, and the scans ignore the vulnerability
+for the crates the statement lists. A statement names
+`pkg:github/containers/conmon-rs` as its product, without a version since the
+document belongs to the binaries of its commit, and the affected crates as its
+subcomponents (`pkg:cargo/<crate>`, with `@<version>` to limit it to a
+version), and lists the GHSA ID of the vulnerability, which grype reports, as
+its name or as an alias. Its status is `not_affected` with a justification
+(`vulnerable_code_not_present`, `vulnerable_code_not_in_execute_path`,
+`vulnerable_code_cannot_be_controlled_by_adversary`,
+`inline_mitigations_already_exist` or `component_not_present`) or an
+`impact_statement` which explains why, `affected` with an `action_statement`,
+`fixed` or `under_investigation`. Only `not_affected` and `fixed` hide a
+finding. An `affected` statement informs the users of the binaries, the scans
+keep failing for a finding with a fix until the crate gets updated or the
+statement becomes `not_affected` or `fixed`. vexctl adds a statement, raises the `version` of the document and
+sets its `last_updated`, which a statement added by hand has to do as well.
+vexctl dates the statement with `SOURCE_DATE_EPOCH` if set, like in a nix
+shell, unset it first:
+
+```shell
+> go run github.com/openvex/vexctl@v0.4.4 add --in-place vex/conmonrs.openvex.json \
+    --product pkg:github/containers/conmon-rs \
+    --subcomponents pkg:cargo/<crate> \
+    --vuln GHSA-xxxx-xxxx-xxxx \
+    --aliases CVE-YYYY-NNNNN,RUSTSEC-YYYY-NNNN \
+    --status not_affected \
+    --justification vulnerable_code_not_in_execute_path \
+    --impact-statement "Why conmon-rs is not affected."
+> make prettier verify-vex
+> make scan SBOMS=conmonrs.amd64.spdx.json
+```
+
+For an SBOM of a file, grype only applies a statement whose product is the
+vulnerable crate itself, so `make scan` makes the subcomponents of the
+statements their products. A released binary keeps the document it got
+attested with, a new statement only reaches the binaries built after it. The
+daily scan uses the document of main.

@@ -37,6 +37,10 @@ ACTIONLINT_VERSION := v1.7.12
 ZIZMOR_VERSION := 1.31.1
 # Extra zizmor flags, CI passes --format=github for annotations.
 ZIZMOR_FLAGS ?=
+GRYPE_VERSION := v0.121.0
+# The SPDX SBOMs make scan checks, like the conmonrs.$ARCH.spdx.json files of
+# the bucket.
+SBOMS ?=
 
 COLOR:=\\033[36m
 NOCOLOR:=\\033[0m
@@ -132,7 +136,7 @@ lint-typos: ## Check the spelling, typos has to be installed.
 	typos --config .github/typos.toml
 
 .PHONY: verify
-verify: verify-dependencies verify-spec verify-proto verify-prettier verify-deny lint-typos lint-workflows ## Run the checks of CI besides make lint and the tests.
+verify: verify-dependencies verify-spec verify-vex verify-proto verify-prettier verify-deny lint-typos lint-workflows ## Run the checks of CI besides make lint and the tests.
 
 .PHONY: verify-dependencies
 verify-dependencies: $(GOTOOLS_BINDIR)/zeitgeist ## Verify the local dependencies.
@@ -167,6 +171,19 @@ verify-spec: ## Verify that the RPM spec version matches the crate version.
 		echo "$(SPEC_FILE) version $$SPEC_VERSION does not match crate version $$VERSION" ; \
 		exit 1 ; \
 	fi
+
+.PHONY: verify-vex
+verify-vex: ## Verify the OpenVEX document of the binaries.
+	.github/verify-vex
+
+# grype runs in a container, its vulnerability database stays in the build
+# directory.
+.PHONY: scan
+scan: ## Scan $SBOMS for vulnerabilities with grype, applying the OpenVEX document.
+	CONTAINER_RUNTIME="$(CONTAINER_RUNTIME)" \
+	GRYPE_IMAGE=docker.io/anchore/grype:$(GRYPE_VERSION) \
+	GRYPE_DB_DIR="$(abspath $(BUILD_DIR))/grype-db" \
+		.github/scan-sboms $(SBOMS)
 
 .PHONY: verify-prettier
 verify-prettier: ## Check the formatting of the supported files with prettier.
