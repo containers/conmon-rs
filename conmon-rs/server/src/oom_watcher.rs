@@ -218,9 +218,8 @@ impl OOMWatcher {
             }
         };
 
-        let oom_cgroup_file = OpenOptions::new()
-            .write(true)
-            .open(&memory_cgroup_file_oom_path)
+        // Registering an event only needs the file open, like for conmon.
+        let oom_cgroup_file = File::open(&memory_cgroup_file_oom_path)
             .await
             .context("opening cgroup oom file")?;
         let oom_event_fd = EventFd::new(0, false).context("creating eventfd")?;
@@ -788,13 +787,14 @@ impl OOMWatcher {
 
     /// The cgroupfs path of `subsystem` if the `/proc/<pid>/cgroup` line
     /// `hierarchy-ID:controller-list:cgroup-path` is the one of its hierarchy.
-    /// The path may contain colons itself.
+    /// The path may contain colons itself. The unified hierarchy of a hybrid
+    /// setup lists no controllers, it is not the one of any subsystem.
     fn cgroup_v1_path(line: &str, subsystem: &str) -> Result<Option<PathBuf>> {
         let mut iter = line.splitn(3, ':').skip(1);
         let controllers = iter.next().context("no system found in cgroup")?;
         let path = Self::strip_cgroup_root(iter.next())?;
 
-        if controllers.is_empty() || controllers.split(',').any(|c| c == subsystem) {
+        if controllers.split(',').any(|c| c == subsystem) {
             return Ok(Some(Path::new(CGROUP_ROOT).join(subsystem).join(path)));
         }
         Ok(None)
@@ -1676,6 +1676,8 @@ mod tests {
             OOMWatcher::cgroup_v1_path("5:cpu,cpuacct:/x", "memory")?,
             None
         );
+        // Neither the unified hierarchy of a hybrid setup.
+        assert_eq!(OOMWatcher::cgroup_v1_path("0::/x", "memory")?, None);
         assert!(OOMWatcher::cgroup_v1_path("5:memory", "memory").is_err());
         assert!(OOMWatcher::cgroup_v1_path("5:memory:relative", "memory").is_err());
 

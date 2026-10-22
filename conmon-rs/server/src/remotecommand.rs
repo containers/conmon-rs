@@ -214,9 +214,15 @@ impl Framing {
             debug!("Got {} binary bytes", data.len());
             return match channel {
                 STDIN_BYTE => Some(ClientEvent::Stdin(Stdin::Data(data.slice(1..)))),
-                CLOSE_BYTE => {
+                // Only stdin can be closed, the message names it, like
+                // `[CLOSE_BYTE, STDIN_BYTE]`.
+                CLOSE_BYTE if data[..] == [CLOSE_BYTE, STDIN_BYTE] => {
                     info!("Got close message");
                     Some(ClientEvent::Stdin(Stdin::Close))
+                }
+                CLOSE_BYTE => {
+                    warn!("Ignoring close message {:?}", &data[1..]);
+                    None
                 }
                 RESIZE_BYTE => Some(ClientEvent::Resize(data.slice(1..))),
                 x => {
@@ -578,6 +584,19 @@ pub enum Status {
 }
 
 impl Status {
+    /// The status of a command which exited with `code`. A negative one
+    /// tells that it could not be waited for, clients only take exit codes
+    /// from 1 to 255.
+    pub fn exited(code: i32) -> Self {
+        match code {
+            0 => Self::Success,
+            1.. => Self::ExitCode(code),
+            _ => Self::Error(format!(
+                "unable to get the exit code of the command ({code})"
+            )),
+        }
+    }
+
     /// The status on the error stream, none for a success before v4.
     fn encode(&self, version: Version) -> Result<Option<Vec<u8>>> {
         if version.json_status() {
@@ -916,11 +935,14 @@ mod tests {
             event(&[STDIN_BYTE]),
             Some(ClientEvent::Stdin(Stdin::Data(Bytes::new())))
         );
-        assert_eq!(event(&[CLOSE_BYTE]), Some(ClientEvent::Stdin(Stdin::Close)));
         assert_eq!(
             event(&[CLOSE_BYTE, STDIN_BYTE]),
             Some(ClientEvent::Stdin(Stdin::Close))
         );
+        // A close needs the stdin channel, others cannot be closed.
+        assert_eq!(event(&[CLOSE_BYTE]), None);
+        assert_eq!(event(&[CLOSE_BYTE, RESIZE_BYTE]), None);
+        assert_eq!(event(&[CLOSE_BYTE, STDIN_BYTE, STDIN_BYTE]), None);
         assert_eq!(
             event(&[RESIZE_BYTE, b'{', b'}']),
             Some(ClientEvent::Resize(Bytes::from_static(b"{}")))
@@ -989,6 +1011,28 @@ mod tests {
                 .encode(Version::V1)?
                 .as_deref(),
             Some(&b"failed"[..])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exit_statuses() -> Result<()> {
+        assert_eq!(
+            Status::exited(0).encode(Version::V5)?.as_deref(),
+            Some(SUCCESS_STATUS)
+        );
+        assert_eq!(
+            Status::exited(137).encode(Version::V5)?,
+            Some(serde_json::to_vec(&ErrorMessage::new(137))?)
+        );
+        // Clients cannot parse a negative exit code, it is an error instead.
+        let internal = serde_json::to_vec(&ErrorMessage::internal(
+            "unable to get the exit code of the command (-3)".into(),
+        ))?;
+        assert_eq!(Status::exited(-3).encode(Version::V4)?, Some(internal));
+        assert_eq!(
+            Status::exited(-1).encode(Version::V2)?.as_deref(),
+            Some(&b"unable to get the exit code of the command (-1)"[..])
         );
         Ok(())
     }

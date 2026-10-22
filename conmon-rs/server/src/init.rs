@@ -1,9 +1,7 @@
 use anyhow::{Result, bail};
-use libc::{LC_ALL, c_char, c_int, setlocale};
 use nix::sys::stat::{Mode, umask};
 use std::{
     env,
-    ffi::CString,
     fs::File,
     io::{self, ErrorKind, Write},
     path::Path,
@@ -23,12 +21,6 @@ impl<T> Init<T>
 where
     T: InitImpl,
 {
-    /// Unset the locale for the current process.
-    pub fn unset_locale(&self) -> Result<()> {
-        self.imp.setlocale(LC_ALL, CString::new("")?.as_ptr());
-        Ok(())
-    }
-
     /// Helper to adjust the OOM score of the currently running process.
     pub fn set_oom_score<S: AsRef<str>>(&self, score: S) -> Result<()> {
         // Attempt adjustment with best-effort.
@@ -70,7 +62,7 @@ where
 /// serve short blocking work, so one arena is enough, the per thread caches
 /// of the allocator absorb most of the contention.
 #[cfg(target_env = "gnu")]
-const MALLOC_ARENAS: c_int = 1;
+const MALLOC_ARENAS: libc::c_int = 1;
 
 /// Limit the malloc arenas of the server, see [`MALLOC_ARENAS`]. Runs before
 /// the fork, while the process has a single thread. The runtimes and
@@ -130,7 +122,6 @@ pub fn reset_oom_score(cmd: &mut Command) {
 
 #[cfg_attr(test, automock)]
 pub trait InitImpl {
-    fn setlocale(&self, category: c_int, locale: *const c_char) -> *mut c_char;
     fn create_file<P: 'static + AsRef<Path>>(&self, path: P) -> io::Result<File>;
     fn write_all_file(&self, file: &mut File, buf: &[u8]) -> io::Result<()>;
     fn umask(&self, mode: Mode);
@@ -141,10 +132,6 @@ pub trait InitImpl {
 pub struct DefaultInit;
 
 impl InitImpl for DefaultInit {
-    fn setlocale(&self, category: c_int, locale: *const c_char) -> *mut c_char {
-        unsafe { setlocale(category, locale) }
-    }
-
     fn create_file<P: AsRef<Path>>(&self, path: P) -> io::Result<File> {
         File::create(path)
     }
@@ -167,23 +154,11 @@ impl InitImpl for DefaultInit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{ptr, str};
+    use std::str;
     use tempfile::tempfile;
 
     fn new_sut(mock: MockInitImpl) -> Init<MockInitImpl> {
         Init::<MockInitImpl> { imp: mock }
-    }
-
-    #[test]
-    fn unset_locale() -> Result<()> {
-        let mut mock = MockInitImpl::new();
-        mock.expect_setlocale()
-            .withf(|x, _| *x == LC_ALL)
-            .returning(|_, _| ptr::null_mut());
-
-        let sut = new_sut(mock);
-
-        sut.unset_locale()
     }
 
     #[test]
