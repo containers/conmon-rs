@@ -5,6 +5,7 @@
 //! It shouldn't even be possible to reach these functions, thanks to
 //! panic=abort, but libcore is compiled with unwinding enabled and that ends up
 //! making unreachable references to them.
+#![expect(unsafe_code, reason = "every item is an exported stub")]
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn _Unwind_Backtrace() {

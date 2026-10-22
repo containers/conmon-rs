@@ -1,6 +1,7 @@
 //! Signalling child processes without hitting another process which reused
 //! their PID.
 
+use anyhow::{Context, Result, bail};
 use nix::{
     errno::Errno,
     sys::{
@@ -10,10 +11,28 @@ use nix::{
     unistd::{Pid, getpgid, getpid},
 };
 use std::{
-    os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
+    path::Path,
     sync::{PoisonError, RwLock, RwLockWriteGuard},
 };
 use tracing::debug;
+
+/// Read a PID file like the runtimes write it, the number may be followed by
+/// a line ending.
+pub fn read_pid_file(path: &Path) -> Result<Pid> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("read PID file {}", path.display()))?;
+    parse_pid(&content).with_context(|| format!("parse PID file {}", path.display()))
+}
+
+/// Parse a PID, which is positive.
+fn parse_pid(pid: &str) -> Result<Pid> {
+    let pid = pid.trim().parse()?;
+    if pid <= 0 {
+        bail!("invalid PID {pid}")
+    }
+    Ok(Pid::from_raw(pid))
+}
 
 /// Taken for writing while the server reaps one of its children, and for
 /// reading while it checks that one was not reaped yet and signals it. A
@@ -38,7 +57,7 @@ struct Stat {
 }
 
 impl Stat {
-    fn read(pid: u32) -> Option<Self> {
+    fn read(pid: Pid) -> Option<Self> {
         Self::parse(&std::fs::read(format!("/proc/{pid}/stat")).ok()?)
     }
 
@@ -57,21 +76,21 @@ impl Stat {
 }
 
 /// The PIDs of all processes, without the ones of their threads.
-fn pids() -> impl Iterator<Item = u32> {
+fn pids() -> impl Iterator<Item = Pid> {
     std::fs::read_dir("/proc")
         .into_iter()
         .flatten()
         .flatten()
-        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+        .filter_map(|entry| parse_pid(entry.file_name().to_str()?).ok())
 }
 
 /// Whether the process is a zombie.
-pub fn is_zombie(pid: u32) -> bool {
+pub fn is_zombie(pid: Pid) -> bool {
     Stat::read(pid).is_some_and(|stat| stat.state == 'Z')
 }
 
 /// The children of this process, found by scanning all processes.
-pub fn children_by_scan() -> Vec<u32> {
+pub fn children_by_scan() -> Vec<Pid> {
     let own = getpid().as_raw();
     pids()
         .filter(|pid| Stat::read(*pid).is_some_and(|stat| stat.ppid == own))
@@ -96,18 +115,20 @@ pub fn signals_group(pgid: Pid, own_pgid: Option<Pid>) -> bool {
 
 /// Open a pidfd for the process, which also works for one that already
 /// exited but was not reaped yet. The descriptor is close-on-exec.
+#[expect(unsafe_code, reason = "a system call nix does not wrap")]
 pub fn pidfd_open(pid: Pid) -> nix::Result<OwnedFd> {
     // SAFETY: pidfd_open takes a PID and flags and returns a new descriptor
     // or a negative error, it does not touch any memory of ours.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid.as_raw(), 0) };
-    Errno::result(fd)?;
+    let fd = RawFd::try_from(Errno::result(fd)?).map_err(|_| Errno::EBADF)?;
     // SAFETY: the descriptor was just returned by the kernel and is not
     // owned by anything else.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 /// Send a signal through a pidfd, none only checks that the process still
 /// exists.
+#[expect(unsafe_code, reason = "a system call nix does not wrap")]
 pub fn pidfd_send_signal(pidfd: impl AsFd, signal: Option<Signal>) -> nix::Result<()> {
     let signal = signal.map_or(0, |signal| signal as libc::c_int);
     // SAFETY: the descriptor is open for the duration of the call, the null
@@ -229,7 +250,6 @@ impl Process {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Result;
     use std::os::unix::process::{CommandExt, ExitStatusExt};
 
     #[test]
@@ -255,10 +275,34 @@ mod tests {
     }
 
     #[test]
+    fn pid_files_hold_positive_pids() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("pid");
+        for (content, pid) in [
+            ("42", Some(42)),
+            ("42\n", Some(42)),
+            ("0", None),
+            ("-1", None),
+            ("x", None),
+            ("", None),
+        ] {
+            std::fs::write(&path, content)?;
+            assert_eq!(
+                read_pid_file(&path).ok(),
+                pid.map(Pid::from_raw),
+                "{content:?}"
+            );
+        }
+        assert!(read_pid_file(&dir.path().join("missing")).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn children_are_found_by_scan() -> Result<()> {
         let mut child = std::process::Command::new("sleep").arg("60").spawn()?;
-        let found = children_by_scan().contains(&child.id());
-        let zombie = is_zombie(child.id());
+        let pid = Pid::from_raw(i32::try_from(child.id())?);
+        let found = children_by_scan().contains(&pid);
+        let zombie = is_zombie(pid);
         child.kill()?;
         child.wait()?;
         assert!(found);
@@ -284,7 +328,7 @@ mod tests {
                 .args(["-c", "sleep 60 & wait"])
                 .process_group(0)
                 .spawn()?;
-            let pid = Pid::from_raw(child.id() as i32);
+            let pid = Pid::from_raw(i32::try_from(child.id())?);
             let process = if use_pidfd {
                 Process::open(pid)
             } else {
@@ -306,7 +350,7 @@ mod tests {
             .arg("60")
             .process_group(0)
             .spawn()?;
-        let pgid = Pid::from_raw(leader.id() as i32);
+        let pgid = Pid::from_raw(i32::try_from(leader.id())?);
         let mut member = std::process::Command::new("sleep")
             .arg("60")
             .process_group(pgid.as_raw())

@@ -1,4 +1,5 @@
 use crate::container_io::SharedContainerIO;
+use nix::unistd::Pid;
 use std::path::PathBuf;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -16,7 +17,7 @@ pub enum ChildKind {
 pub struct Child {
     pub(crate) id: Box<str>,
     pub(crate) kind: ChildKind,
-    pub(crate) pid: u32,
+    pub(crate) pid: Pid,
     pub(crate) exit_paths: Vec<PathBuf>,
     pub(crate) oom_exit_paths: Vec<PathBuf>,
     pub(crate) timeout: Option<Instant>,

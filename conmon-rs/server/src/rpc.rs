@@ -4,7 +4,7 @@ use crate::telemetry::Telemetry;
 use crate::{
     capnp_util,
     child::{Child, ChildKind, sleep_until},
-    child_reaper::{EXIT_CODE_NOT_STARTED, EXIT_CODE_TIMED_OUT},
+    child_reaper::{EXIT_CODE_NOT_STARTED, EXIT_CODE_TIMED_OUT, RuntimeCall},
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     notify::NotifySocket,
@@ -18,6 +18,7 @@ use anyhow::Context;
 use capnp::{Error, capability::Promise};
 use capnp_rpc::pry;
 use futures::FutureExt;
+use nix::unistd::Pid;
 use std::{
     path::{Path, PathBuf},
     process,
@@ -35,7 +36,7 @@ macro_rules! pry_err {
 
 macro_rules! capnp_err {
     ($x:expr_2021) => {
-        $x.map_err(|e| Error::failed(format!("{:#}", e)))
+        $x.map_err(|e| Error::failed(format!("{e:#}")))
     };
 }
 
@@ -43,7 +44,7 @@ macro_rules! capnp_err {
 fn set_parent_context(
     reader: capnp::struct_list::Reader<'_, conmon::text_text_map_entry::Owned>,
 ) -> Result<(), Error> {
-    Telemetry::set_parent_context(reader).map_err(|e| Error::failed(format!("{:#}", e)))
+    Telemetry::set_parent_context(reader).map_err(|e| Error::failed(format!("{e:#}")))
 }
 
 #[cfg(not(feature = "tracing"))]
@@ -120,7 +121,10 @@ impl Server {
     }
 }
 
-#[allow(refining_impl_trait_reachable)]
+#[expect(
+    refining_impl_trait_reachable,
+    reason = "the methods return the concrete capnp promises, the trait any future"
+)]
 impl conmon::Server for Server {
     /// Retrieve version information from the server.
     fn version(
@@ -146,9 +150,10 @@ impl conmon::Server for Server {
         response.set_rust_version(version.rust_version());
         response.set_cargo_version(version.cargo_version());
         response.set_cargo_tree(version.cargo_tree());
-        let mut features = response.init_features(version.features().len() as u32);
-        for (i, feature) in version.features().iter().enumerate() {
-            features.set(i as u32, feature);
+        let mut features =
+            response.init_features(pry_err!(u32::try_from(version.features().len())));
+        for (i, feature) in (0..).zip(version.features()) {
+            features.set(i, feature);
         }
 
         Promise::ok(())
@@ -229,15 +234,14 @@ impl conmon::Server for Server {
 
                         let (grandchild_pid, token, call) = match child_reaper
                             .create_child(
-                                runtime,
-                                args,
-                                stdin,
+                                RuntimeCall {
+                                    stdin,
+                                    env_vars,
+                                    relays_notify: notify_socket.is_some(),
+                                    additional_fds,
+                                    ..RuntimeCall::new(&runtime, &args, &pidfile)
+                                },
                                 &mut container_io,
-                                &pidfile,
-                                None,
-                                env_vars,
-                                notify_socket.is_some(),
-                                additional_fds,
                             )
                             .await
                         {
@@ -276,7 +280,7 @@ impl conmon::Server for Server {
                         Ok(grandchild_pid)
                     }
                     // Logged here as well, the client may be gone.
-                    .map(|res: anyhow::Result<u32>| {
+                    .map(|res: anyhow::Result<Pid>| {
                         res.inspect_err(|e| error!("Unable to create container: {e:#}"))
                     })
                     .instrument(Span::current()),
@@ -286,7 +290,7 @@ impl conmon::Server for Server {
                 results
                     .get()
                     .init_response()
-                    .set_container_pid(grandchild_pid);
+                    .set_container_pid(capnp_err!(u32::try_from(grandchild_pid.as_raw()))?);
                 Ok(())
             }
             .instrument(debug_span!("promise")),
@@ -353,15 +357,12 @@ impl conmon::Server for Server {
                         container_io.collect_stdio(true, true)?;
                         let res = child_reaper
                             .create_child(
-                                &runtime,
-                                &args,
-                                false,
+                                RuntimeCall {
+                                    deadline: runtime_deadline,
+                                    env_vars,
+                                    ..RuntimeCall::new(&runtime, &args, pidfile.path())
+                                },
                                 &mut container_io,
-                                pidfile.path(),
-                                runtime_deadline,
-                                env_vars,
-                                false,
-                                vec![],
                             )
                             .await;
                         let _ = started_tx.send(());
@@ -371,7 +372,7 @@ impl conmon::Server for Server {
                                 let timed_out =
                                     time_to_timeout.is_some_and(|t| Instant::now() >= t);
                                 let e = container_io.runtime_error(e).await;
-                                error!("Unable to create child: {:#}", e);
+                                error!("Unable to create child: {e:#}");
                                 // The client only sees the response, tell it why.
                                 return Ok(ExecSyncOutput {
                                     stdout: vec![],

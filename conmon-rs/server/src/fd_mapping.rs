@@ -39,6 +39,7 @@ impl fmt::Display for FdMappingCollision {
 impl std::error::Error for FdMappingCollision {}
 
 impl CommandFdExt for Command {
+    #[expect(unsafe_code, reason = "a pre_exec hook")]
     fn fd_mappings(
         &mut self,
         mut mappings: Vec<FdMapping>,
@@ -65,6 +66,7 @@ fn validate_child_fds(mappings: &[FdMapping]) -> Result<Vec<RawFd>, FdMappingCol
 }
 
 // This function must not allocate, as it is called from the pre_exec hook.
+#[expect(unsafe_code, reason = "taking and leaking descriptors in the child")]
 fn map_fds(mappings: &mut [FdMapping], child_fds: &[RawFd]) -> io::Result<()> {
     if mappings.is_empty() {
         return Ok(());
@@ -131,6 +133,7 @@ mod tests {
     /// A descriptor which is the target of another mapping must be moved out
     /// of the way before it gets overwritten.
     #[tokio::test]
+    #[expect(unsafe_code, reason = "taking duplicated descriptors")]
     async fn swapped_fds_are_mapped() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let (a_path, b_path) = (dir.path().join("a"), dir.path().join("b"));

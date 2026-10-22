@@ -36,10 +36,7 @@
 //!
 //! An empty request does **not** receive a response.
 
-use crate::{
-    listener::{self, Listener, SeqpacketListener},
-    mutex::lock,
-};
+use crate::{listener, mutex::lock};
 use anyhow::{Result, bail};
 use std::{
     collections::{HashMap, HashSet, hash_map},
@@ -51,7 +48,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::{runtime::Handle, sync::Mutex as AsyncMutex, task};
-use tokio_seqpacket::{UnixSeqpacket, ancillary::OwnedAncillaryMessage};
+use tokio_seqpacket::{UnixSeqpacket, UnixSeqpacketListener, ancillary::OwnedAncillaryMessage};
 use tracing::{Instrument, debug, debug_span};
 
 /// The most descriptors the kernel passes with one message (`SCM_MAX_FD`),
@@ -60,7 +57,11 @@ const MAX_FDS: usize = 253;
 
 /// Room for a control message carrying `MAX_FDS` descriptors, more would
 /// get cut off (`MSG_CTRUNC`).
-#[allow(unsafe_code)]
+#[expect(
+    unsafe_code,
+    clippy::cast_possible_truncation,
+    reason = "CMSG_SPACE of a small constant length"
+)]
 // SAFETY: CMSG_SPACE only computes a size, it does not access any memory.
 const ANCILLARY_BUF_SIZE: usize =
     unsafe { libc::CMSG_SPACE((MAX_FDS * size_of::<RawFd>()) as libc::c_uint) } as usize;
@@ -77,7 +78,7 @@ impl FdSocket {
         if let Some(server) = server.as_ref() {
             Ok(server.path.clone())
         } else {
-            *server = Server::start(path.clone(), self.clone()).await?.into();
+            *server = Server::start(path.clone(), self.clone())?.into();
             Ok(path)
         }
     }
@@ -187,10 +188,10 @@ impl ConnectionGuard {
 }
 
 impl Server {
-    async fn start(path: PathBuf, fd_socket: Arc<FdSocket>) -> Result<Self> {
+    fn start(path: PathBuf, fd_socket: Arc<FdSocket>) -> Result<Self> {
         let server = Self { path };
 
-        let mut listener = Listener::<SeqpacketListener>::default().bind_long_path(&server.path)?;
+        let mut listener = listener::bind_long_path(&server.path, UnixSeqpacketListener::bind)?;
         let guard = ListenerGuard(fd_socket);
 
         task::spawn(
@@ -308,15 +309,88 @@ mod tests {
         num_fds: u64,
         fds: &[OwnedFd],
     ) -> Result<Vec<u8>> {
-        let header = ((id << 32) | num_fds).to_le_bytes();
-        let mut ancillary_buf = [0; ANCILLARY_BUF_SIZE];
-        let mut ancillary = AncillaryMessageWriter::new(&mut ancillary_buf);
-        ancillary.add_fds(fds.iter().map(AsFd::as_fd))?;
-        conn.send_vectored_with_ancillary(&[IoSlice::new(&header)], &mut ancillary)
-            .await?;
+        send(conn, &((id << 32) | num_fds).to_le_bytes(), fds).await?;
         let mut buf = [0; 8 + MAX_FDS * 8 + 1];
         let n = conn.recv(&mut buf).await?.bytes_read();
         Ok(buf[..n].to_vec())
+    }
+
+    /// Send a message with the given descriptors attached.
+    async fn send(conn: &UnixSeqpacket, message: &[u8], fds: &[OwnedFd]) -> Result<()> {
+        let mut ancillary_buf = [0; ANCILLARY_BUF_SIZE];
+        let mut ancillary = AncillaryMessageWriter::new(&mut ancillary_buf);
+        ancillary.add_fds(fds.iter().map(AsFd::as_fd))?;
+        conn.send_vectored_with_ancillary(&[IoSlice::new(message)], &mut ancillary)
+            .await?;
+        Ok(())
+    }
+
+    /// Start an fd socket and connect to it.
+    async fn connect() -> Result<(tempfile::TempDir, Arc<FdSocket>, UnixSeqpacket)> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("fd.sock");
+        let fd_socket = Arc::new(FdSocket::default());
+        fd_socket.clone().start(path.clone()).await?;
+        let conn = UnixSeqpacket::connect(&path).await?;
+        Ok((dir, fd_socket, conn))
+    }
+
+    fn null_fds(n: usize) -> Result<Vec<OwnedFd>> {
+        (0..n)
+            .map(|_| Ok(File::open("/dev/null")?.into()))
+            .collect()
+    }
+
+    /// Whether the slot still holds a descriptor, without taking it.
+    fn has_slot(fd_socket: &FdSocket, slot: u64) -> bool {
+        lock(&fd_socket.state).is_ok_and(|state| state.fds.contains_key(&slot))
+    }
+
+    #[tokio::test]
+    async fn empty_request_releases_the_slots() -> Result<()> {
+        let (_dir, fd_socket, conn) = connect().await?;
+        let resp = request(&conn, 1, 2, &null_fds(2)?).await?;
+        let slots = [word(&resp, 1), word(&resp, 2)];
+
+        // An empty request gets no response, the next one tells that it got
+        // handled.
+        send(&conn, &0u64.to_le_bytes(), &[]).await?;
+        let resp = request(&conn, 2, 1, &null_fds(1)?).await?;
+        assert_eq!(word(&resp, 0), (2 << 32) | 1);
+        assert!(slots.iter().all(|slot| !has_slot(&fd_socket, *slot)));
+        assert!(has_slot(&fd_socket, word(&resp, 1)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disconnect_releases_the_slots() -> Result<()> {
+        let (_dir, fd_socket, conn) = connect().await?;
+        let resp = request(&conn, 1, 1, &null_fds(1)?).await?;
+        let slot = word(&resp, 1);
+        assert!(has_slot(&fd_socket, slot));
+
+        drop(conn);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while has_slot(&fd_socket, slot) {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn messages_of_other_sizes_are_ignored() -> Result<()> {
+        let (_dir, fd_socket, conn) = connect().await?;
+        // Too short and too long, with a descriptor which must not end up in
+        // a slot.
+        send(&conn, &[1; 4], &null_fds(1)?).await?;
+        send(&conn, &[1; 16], &null_fds(1)?).await?;
+
+        let resp = request(&conn, 3, 1, &null_fds(1)?).await?;
+        assert_eq!(word(&resp, 0), (3 << 32) | 1);
+        assert_eq!(lock(&fd_socket.state)?.fds.len(), 1);
+        Ok(())
     }
 
     fn word(buf: &[u8], i: usize) -> u64 {

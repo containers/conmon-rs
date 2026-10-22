@@ -668,7 +668,7 @@ mod tests {
 
                 // The container writes output meanwhile, which cannot be sent
                 // after the close anymore. The stdin which waits gets merged.
-                let mut attach = io.attach().await;
+                let attach = io.attach().await;
                 let mut stdin = vec![];
                 while stdin.len() < 50 {
                     attach.write(IOMessage::Data(Bytes::from_static(b"out"), Pipe::StdOut));
@@ -899,7 +899,7 @@ mod tests {
                         data: Bytes::from_static(b"in"),
                     })
                     .await?;
-                let mut attach = io.attach().await;
+                let attach = io.attach().await;
                 let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
                 assert_eq!(data, b"in".as_slice());
                 Ok(())
@@ -951,7 +951,7 @@ mod tests {
                             data: Bytes::from_static(b"in"),
                         })
                         .await?;
-                    let mut attach = io.attach().await;
+                    let attach = io.attach().await;
                     let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
                     assert_eq!(data, b"in".as_slice());
 
@@ -1093,7 +1093,7 @@ mod tests {
                         data: Bytes::from_static(b"in"),
                     })
                     .await?;
-                let mut attach = io.attach().await;
+                let attach = io.attach().await;
                 let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
                 assert_eq!(data, b"in".as_slice());
                 Ok(())
@@ -1179,6 +1179,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::cast_possible_truncation, reason = "a wrapping byte pattern")]
     fn small_stdin_gets_merged() {
         let mut pending = PendingStdin::default();
         for i in 0..2 * STDIN_CHUNK_SIZE {

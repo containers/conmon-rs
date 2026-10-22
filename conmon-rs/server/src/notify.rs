@@ -12,7 +12,7 @@
 //! conmon passes. `MAINPID=` would for example make systemd manage an
 //! arbitrary host process.
 
-use crate::listener::{self, DefaultListener, Listener};
+use crate::listener;
 use anyhow::{Context, Result, bail};
 use nix::sys::socket::{MsgFlags, UnixAddr, connect, recv, send};
 use std::{
@@ -87,9 +87,8 @@ impl NotifySocket {
         // The bundle path may exceed what a socket address can hold, so bind
         // through the parent directory, which also creates it. Keep the
         // directory open until the socket file is set up.
-        let (short_path, _dir) = Listener::<DefaultListener>::default()
-            .shorten_socket_path(&path)
-            .context("shorten notify socket path")?;
+        let (short_path, _dir) =
+            listener::shorten_socket_path(&path).context("shorten notify socket path")?;
 
         // A leftover of a previous run makes the bind fail, but another
         // container of this bundle may still use the socket.
@@ -204,7 +203,7 @@ impl NotifySocket {
             return;
         };
         if let Err(e) = self.connect_host_again() {
-            warn!("Unable to relay notify message: {:#}", e);
+            warn!("Unable to relay notify message: {e:#}");
             return;
         }
         if let Err(e) = self.host.send(&message).await {
@@ -222,7 +221,7 @@ impl NotifySocket {
             .connect_host_again()
             .and_then(|()| send(self.host.as_raw_fd(), &message, flags).context("send"))
         {
-            warn!("Unable to relay notify message: {:#}", e);
+            warn!("Unable to relay notify message: {e:#}");
         }
     }
 

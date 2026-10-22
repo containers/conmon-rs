@@ -107,7 +107,7 @@ mod tests {
         let check = Check(idle.clone());
         let run = async move {
             let _check = check;
-            future::pending::<()>().await
+            future::pending::<()>().await;
         };
         let start = Instant::now();
         let result = activity

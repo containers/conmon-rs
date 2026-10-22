@@ -1,5 +1,3 @@
-#![deny(missing_docs)]
-
 use crate::conmon_capnp::conmon::{self, CgroupManager};
 #[cfg(feature = "tracing")]
 use crate::telemetry::Telemetry;
@@ -8,19 +6,24 @@ use crate::{
     config::{Config, LogDriver, LogLevel},
     container_io::{ContainerIO, ContainerIOType},
     fd_socket::FdSocket,
-    init::{self, DefaultInit, Init},
+    init,
     journal::Journal,
-    listener::{self, DefaultListener, Listener},
+    listener,
     pause::Pause,
     streaming_server::StreamingServer,
 };
 use anyhow::{Context, Result, format_err};
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp::Side, twoparty};
-use futures::{AsyncReadExt, FutureExt};
+use futures::{
+    AsyncReadExt, FutureExt,
+    io::{BufReader, BufWriter},
+};
 use libc::_exit;
 use nix::{
-    errno::Errno,
-    sys::signal::{Signal, kill},
+    sys::{
+        prctl,
+        signal::{Signal, kill},
+    },
     unistd::{ForkResult, fork},
 };
 #[cfg(feature = "tracing")]
@@ -30,12 +33,16 @@ use opentelemetry_sdk::trace::SdkTracerProvider;
 use std::{fs::File, io::Write, os::fd::RawFd, path::Path, sync::Arc};
 use tokio::{
     fs,
-    runtime::{Builder, Handle},
+    net::UnixListener,
+    runtime::Builder,
     signal::unix::{SignalKind, signal},
     sync::{RwLock, oneshot},
     task::{self, LocalSet},
+    time::{self, Duration},
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
+#[cfg(feature = "tracing")]
+use tracing::warn;
 use tracing::{Instrument, Span, debug, debug_span, info};
 #[cfg(feature = "tracing")]
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -114,6 +121,7 @@ impl Server {
     /// descriptor conmon-rs actually needs is either created after this point
     /// or received later over the fd socket, so nothing above stderr is worth
     /// keeping.
+    #[expect(unsafe_code, reason = "closing descriptors which may be gone")]
     fn close_inherited_fds() {
         for fd in Self::inherited_fds() {
             // The descriptor used to enumerate them is already closed by now,
@@ -131,6 +139,7 @@ impl Server {
             // invalid descriptor number fails with `EBADF` rather than
             // affecting anything else.
             if unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1 {
+                // SAFETY: as above.
                 unsafe { libc::close(fd) };
             }
         }
@@ -150,7 +159,7 @@ impl Server {
             assert!(
                 cfg!(target_os = "linux"),
                 "inherited fds are enumerated through /proc/self/fd, which is Linux only"
-            )
+            );
         };
 
         let mut fds = Vec::new();
@@ -171,16 +180,21 @@ impl Server {
         fds
     }
 
-    /// Upper bound for the threads of the blocking pool. One of them runs
-    /// the RPC `LocalSet` permanently, the rest serve file I/O like log
-    /// writes, exit files and journald. Without a bound a burst of container
-    /// exits or log reopens spawns a thread per operation (tokio's default
-    /// allows 512), each with its own stack. Work which
+    /// Upper bound for the threads of the blocking pool, which serve file
+    /// I/O like log writes, exit files and journald. Without a bound a burst
+    /// of container exits or log reopens spawns a thread per operation
+    /// (tokio's default allows 512), each with its own stack. Work which
     /// blocks for an unbounded time, like waiting for a process, must run on
     /// a dedicated thread instead, otherwise it can starve the pool.
     const MAX_BLOCKING_THREADS: usize = 16;
 
+    /// Stack size of the threads of the blocking pool, which only run short
+    /// file and socket operations. The shutdown of the tracer, which exports
+    /// the remaining spans, runs on one as well.
+    const BLOCKING_THREAD_STACK_SIZE: usize = 512 * 1024;
+
     /// Start the `Server` instance and consume it.
+    #[expect(unsafe_code, reason = "forking")]
     pub fn start(self) -> Result<()> {
         // We need to fork as early as possible, especially before setting up tokio.
         // If we don't, the child will have a strange thread space and we're at risk of deadlocking.
@@ -214,19 +228,16 @@ impl Server {
         // its parent either way, so the descriptors have to go either way.
         Self::close_inherited_fds();
 
-        // now that we've forked, set self to childreaper
-        // SAFETY: PR_SET_CHILD_SUBREAPER only takes integer arguments and
-        // touches no memory of ours.
-        let ret = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
-        if ret != 0 {
-            return Err(Errno::last()).context("set child subreaper");
-        }
+        // The container processes get reparented to the server once their
+        // runtime exits.
+        prctl::set_child_subreaper(true).context("set child subreaper")?;
 
         debug!("Configuring Tokio runtime with current_thread");
         let rt = Builder::new_current_thread()
             .enable_io()
             .enable_time()
             .max_blocking_threads(Self::MAX_BLOCKING_THREADS)
+            .thread_stack_size(Self::BLOCKING_THREAD_STACK_SIZE)
             .build()?;
         #[cfg(feature = "tracing")]
         let tracer = rt.block_on(self.spawn_tasks())?;
@@ -236,29 +247,67 @@ impl Server {
         // Exporting the remaining spans needs the runtime the exporter was
         // created on, so shut down from a blocking task while it is driven.
         #[cfg(feature = "tracing")]
-        if let Some(tracer) = tracer {
-            rt.block_on(task::spawn_blocking(move || tracer.shutdown()))
-                .context("join tracer shutdown")?
-                .context("shutdown tracer")?;
-        }
+        let result = tracer.map_or(Ok(()), |tracer| {
+            let shutdown = rt.block_on(async {
+                time::timeout(
+                    Self::TRACER_SHUTDOWN_TIMEOUT,
+                    task::spawn_blocking(move || tracer.shutdown()),
+                )
+                .await
+            });
+            match shutdown {
+                Ok(res) => res
+                    .context("join tracer shutdown")?
+                    .context("shutdown tracer"),
+                Err(_) => {
+                    warn!("Tracer did not shut down in time");
+                    Ok(())
+                }
+            }
+        });
+        #[cfg(not(feature = "tracing"))]
+        let result = Ok(());
 
-        rt.shutdown_timeout(std::time::Duration::from_secs(15));
-        Ok(())
+        // A thread of the blocking pool which is stuck, like on a hung file
+        // system, ends with the process. Dropping the runtime would wait for
+        // it instead, so this comes before returning a failure.
+        rt.shutdown_timeout(Self::RUNTIME_SHUTDOWN_TIMEOUT);
+        result
     }
+
+    /// How long the cleanup of the shutdown may take: the grandchildren and
+    /// the pause instance get less, this bounds the rest, like removing the
+    /// sockets through a blocking pool which stuck threads may fill up.
+    /// Together with the timeouts below it stays below the 10 seconds the
+    /// clients give the whole shutdown.
+    const CLEANUP_TIMEOUT: Duration = Duration::from_millis(8500);
+
+    /// How long the tracer may take to export the remaining spans.
+    #[cfg(feature = "tracing")]
+    const TRACER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
+
+    /// How long the runtime waits for the threads of the blocking pool.
+    const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 
     fn init() -> Result<()> {
         // The server keeps the C locale, unlike conmon, so that the errors
         // it returns to CRI-O do not depend on the environment.
-        let init = Init::<DefaultInit>::default();
-        init.set_default_umask();
-        init.unset_notify_socket();
+        init::set_default_umask();
+        init::unset_notify_socket();
         init::save_oom_score();
-        init::limit_malloc_arenas();
+        init::configure_malloc();
         // While we could configure this, standard practice has it as -1000,
         // so it may be YAGNI to add configuration.
-        init.set_oom_score("-1000")
+        init::set_oom_score("-1000")
     }
 
+    #[cfg_attr(
+        not(feature = "tracing"),
+        expect(
+            clippy::needless_pass_by_ref_mut,
+            reason = "keeps the tracer with the tracing feature"
+        )
+    )]
     fn init_logging(&mut self) -> Result<()> {
         let level = LevelFilter::from(*self.config().log_level());
 
@@ -326,30 +375,21 @@ impl Server {
         let reaper = self.reaper.clone();
         self.reaper.clone().start_orphan_sweep();
 
-        // Run both signal handler and backend inside spawn_blocking with LocalSet
-        // This allows concurrent execution within the LocalSet while preventing
-        // blocking of the main current_thread runtime
-        let result = task::spawn_blocking(move || {
-            Handle::current().block_on(async move {
-                let local = LocalSet::new();
-
-                // Spawn signal handler as a local task
-                local.spawn_local(Self::traced(
-                    Self::start_signal_handler(reaper, socket, fd_socket, shutdown_tx),
-                    debug_span!("signal_handler"),
-                ));
-
-                // Run backend on the LocalSet
-                local
-                    .run_until(Self::traced(
-                        self.start_backend(shutdown_rx),
-                        debug_span!("backend"),
-                    ))
-                    .await
-            })
-        })
-        .await?;
-        result?;
+        // The RPC system is not `Send`, so the backend and the tasks of the
+        // calls run on a local set. It runs on the thread of the runtime
+        // itself, which drives the I/O and the timers of both, and the
+        // signal handler next to it.
+        let local = LocalSet::new();
+        local.spawn_local(Self::traced(
+            Self::start_signal_handler(reaper, socket, fd_socket, shutdown_tx),
+            debug_span!("signal_handler"),
+        ));
+        local
+            .run_until(Self::traced(
+                self.start_backend(shutdown_rx),
+                debug_span!("backend"),
+            ))
+            .await?;
         Ok(tracer)
     }
 
@@ -389,13 +429,16 @@ impl Server {
         // task. Failures are collected rather than returned early, the server
         // must stop in any case. The pause shutdown may wait for a running
         // initialization, the containers must not wait for that.
-        let (result, ()) =
-            tokio::join!(Self::cleanup(reaper, socket, fd_socket), Pause::shutdown());
+        let cleanup =
+            async { tokio::join!(Self::cleanup(reaper, socket, fd_socket), Pause::shutdown()).0 };
+        let result = time::timeout(Self::CLEANUP_TIMEOUT, cleanup)
+            .await
+            .unwrap_or_else(|_| Err(format_err!("cleanup did not finish in time")));
 
         debug!("Sending shutdown message");
         shutdown_tx
             .send(())
-            .map_err(|_| format_err!("unable to send shutdown message"))?;
+            .map_err(|()| format_err!("unable to send shutdown message"))?;
 
         result
     }
@@ -432,9 +475,12 @@ impl Server {
         killed.and(socket_removed).and(fd_socket_removed)
     }
 
+    /// The read and write buffers of an RPC connection, which most messages
+    /// fit into. Larger segments bypass them.
+    const RPC_BUFFER_SIZE: usize = 4096;
+
     async fn start_backend(self, mut shutdown_rx: oneshot::Receiver<()>) -> Result<()> {
-        let listener =
-            Listener::<DefaultListener>::default().bind_long_path(self.config().socket())?;
+        let listener = listener::bind_long_path(&self.config().socket(), UnixListener::bind)?;
         let client: conmon::Client = capnp_rpc::new_client(self);
 
         loop {
@@ -452,10 +498,12 @@ impl Server {
                     }
                 },
             };
+            // A message gets read and written in several pieces, the segment
+            // table and every segment on its own.
             let (reader, writer) = TokioAsyncReadCompatExt::compat(stream).split();
             let network = Box::new(VatNetwork::new(
-                reader,
-                writer,
+                BufReader::with_capacity(Self::RPC_BUFFER_SIZE, reader),
+                BufWriter::with_capacity(Self::RPC_BUFFER_SIZE, writer),
                 Side::Server,
                 Default::default(),
             ));

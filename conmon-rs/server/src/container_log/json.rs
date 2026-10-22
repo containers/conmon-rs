@@ -70,7 +70,7 @@ impl Logger for JsonLogger {
                 partial: line.partial,
             };
 
-            let buf = &mut self.file.buf;
+            let buf = self.file.buf();
             let start = buf.len();
             if let Err(e) = serde_json::to_writer(&mut *buf, &log_entry) {
                 buf.truncate(start);

@@ -436,7 +436,7 @@ impl ClientInput for SpdyInput {
                 data = Self::recv(self.stdin.as_mut()) => SpdyEvent::Stdin(data),
                 data = Self::recv(self.resize.as_mut()) => SpdyEvent::Resize(data),
                 stream = Self::accept(self.connection.as_mut()) => SpdyEvent::Stream(stream),
-                _ = self.done.cancelled() => SpdyEvent::Done,
+                () = self.done.cancelled() => SpdyEvent::Done,
             };
             match event {
                 SpdyEvent::Stdin(Some(data)) => {
@@ -525,7 +525,7 @@ impl SpdyStreams {
                 stream = connection.accept() => {
                     stream.context("connection ended before the client created all streams")?
                 }
-                _ = &mut timeout => bail!("timed out waiting for client to create streams"),
+                () = &mut timeout => bail!("timed out waiting for client to create streams"),
             };
             let slot = match stream.headers().get(STREAM_TYPE_HEADER) {
                 Some("error") => &mut error,

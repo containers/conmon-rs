@@ -1,6 +1,7 @@
 use crate::{
-    container_io::{Drain, Message, Pipe},
-    listener::{self, DefaultListener, Listener},
+    async_fd,
+    container_io::{DRAIN_MAX_WAIT, Drain, Message, Pipe},
+    listener,
     mutex::lock,
 };
 use anyhow::{Context, Result, bail};
@@ -16,20 +17,21 @@ use std::{
     fs, future,
     io::{self, IoSlice},
     os::{
-        fd::{AsFd, AsRawFd, RawFd},
+        fd::{AsFd, AsRawFd},
         unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     },
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use tokio::{
-    io::{ErrorKind, Interest, unix::AsyncFd},
+    io::{ErrorKind, Interest},
     select,
     sync::broadcast::{self, Receiver, Sender, error::RecvError},
-    task,
+    task, time,
 };
 use tokio_seqpacket::{UnixSeqpacket, UnixSeqpacketListener};
 use tokio_util::sync::CancellationToken;
@@ -54,7 +56,10 @@ pub struct SharedContainerAttach {
     // applies backpressure to the attach clients instead of dropping input.
     read_half_rx: async_channel::Receiver<Bytes>,
     read_half_tx: async_channel::Sender<Bytes>,
-    write_half_tx: Sender<Message>,
+
+    /// The output towards the attach clients, created for the first one, a
+    /// container without any does not need its buffer.
+    write_half_tx: OutputSender,
     output_ended: CancellationToken,
 
     /// Cancelled once a client with `stop_after_stdin_eof` closed its stdin,
@@ -98,6 +103,11 @@ impl AttachListener {
     }
 }
 
+/// The sender of the output broadcast, none until the first attach client
+/// subscribed. The lock orders the creation against the done message, see
+/// [`SharedContainerAttach::subscribe`].
+type OutputSender = Arc<Mutex<Option<Sender<Message>>>>;
+
 impl Default for SharedContainerAttach {
     fn default() -> Self {
         Self::new(false)
@@ -109,11 +119,10 @@ impl SharedContainerAttach {
     /// without a terminal.
     pub fn new(terminal: bool) -> Self {
         let (read_half_tx, read_half_rx) = async_channel::bounded(STDIN_CHANNEL_SIZE);
-        let (write_half_tx, _) = broadcast::channel(OUTPUT_CHANNEL_SIZE);
         Self {
             read_half_rx,
             read_half_tx,
-            write_half_tx,
+            write_half_tx: OutputSender::default(),
             output_ended: CancellationToken::new(),
             stdin_closed: CancellationToken::new(),
             stop_after_stdin_eof: Arc::default(),
@@ -143,7 +152,7 @@ impl SharedContainerAttach {
     }
 
     /// Read from all attach endpoints standard input and return the first result.
-    pub async fn read(&mut self) -> Result<Bytes> {
+    pub async fn read(&self) -> Result<Bytes> {
         self.read_half_rx
             .recv()
             .await
@@ -151,7 +160,7 @@ impl SharedContainerAttach {
     }
 
     /// Try to read from all attach endpoints standard input and return the first result.
-    pub fn try_read(&mut self) -> Result<Bytes> {
+    pub fn try_read(&self) -> Result<Bytes> {
         self.read_half_rx
             .try_recv()
             .context("try to receive attach message")
@@ -174,7 +183,11 @@ impl SharedContainerAttach {
     /// Write a buffer to all attach endpoints. Sending fails only if the last
     /// client went away meanwhile, which is no reason to stop the output.
     pub fn write(&self, m: Message) {
-        if self.write_half_tx.send(m).is_err() {
+        let sent = match self.write_half_tx.lock() {
+            Ok(tx) => tx.as_ref().is_some_and(|tx| tx.send(m).is_ok()),
+            Err(_) => false,
+        };
+        if !sent {
             trace!("No attach clients left for the output");
         }
     }
@@ -219,7 +232,7 @@ impl SharedContainerAttach {
         let mut listeners = match lock(&self.listeners) {
             Ok(listeners) => listeners,
             Err(e) => {
-                warn!("Unable to lock attach listeners: {:#}", e);
+                warn!("Unable to lock attach listeners: {e:#}");
                 return;
             }
         };
@@ -239,7 +252,15 @@ impl SharedContainerAttach {
 
     /// Check if there are any active attach readers.
     pub fn has_readers(&self) -> bool {
-        self.write_half_tx.receiver_count() > 0
+        self.receiver_count() > 0
+    }
+
+    fn receiver_count(&self) -> usize {
+        self.write_half_tx
+            .lock()
+            .ok()
+            .and_then(|tx| Some(tx.as_ref()?.receiver_count()))
+            .unwrap_or_default()
     }
 
     /// Subscribe to the container output sent to the attach endpoints. The
@@ -247,7 +268,14 @@ impl SharedContainerAttach {
     /// message may have been sent before subscribing and the receiver only
     /// gets what is still queued.
     pub fn subscribe(&self) -> (Receiver<Message>, bool) {
-        let rx = self.write_half_tx.subscribe();
+        let rx = {
+            let mut tx = self
+                .write_half_tx
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            tx.get_or_insert_with(|| broadcast::channel(OUTPUT_CHANNEL_SIZE).0)
+                .subscribe()
+        };
         // Check only after subscribing, otherwise the done message could be
         // sent in between.
         (rx, self.output_ended.is_cancelled())
@@ -257,7 +285,7 @@ impl SharedContainerAttach {
 #[derive(Debug)]
 /// The container output registered by `SharedContainerAttach::output`.
 pub struct AttachOutput {
-    write_half_tx: Sender<Message>,
+    write_half_tx: OutputSender,
     output_ended: CancellationToken,
 }
 
@@ -268,7 +296,11 @@ impl Drop for AttachOutput {
         self.output_ended.cancel();
         // Sending fails only without attach clients, which then need no done
         // message.
-        let _ = self.write_half_tx.send(Message::Done);
+        if let Ok(tx) = self.write_half_tx.lock()
+            && let Some(tx) = tx.as_ref()
+        {
+            let _ = tx.send(Message::Done);
+        }
     }
 }
 
@@ -359,8 +391,7 @@ impl Attach {
         .context("bind socket")?;
 
         // keep parent_fd in scope until the bind, or else the socket will not work
-        let (shortened_path, _parent_dir) =
-            Listener::<DefaultListener>::default().shorten_socket_path(path)?;
+        let (shortened_path, _parent_dir) = listener::shorten_socket_path(path)?;
         let addr = UnixAddr::new(&shortened_path).context("create socket addr")?;
         bind(fd.as_raw_fd(), &addr).context("bind socket fd")?;
 
@@ -433,11 +464,11 @@ impl Attach {
         loop {
             let accepted = select! {
                 accepted = listener.accept() => accepted,
-                _ = token.cancelled() => {
+                () = token.cancelled() => {
                     debug!("Stopping attach listener because token cancelled");
                     return;
                 }
-                _ = stop.cancelled() => {
+                () = stop.cancelled() => {
                     debug!("Stopping attach listener because it got replaced");
                     return;
                 }
@@ -453,7 +484,7 @@ impl Attach {
                     task::spawn(
                         async move {
                             if let Err(e) = Self::read_loop(read, attach_clone, token_clone).await {
-                                error!("Attach read loop failure: {:#}", e);
+                                error!("Attach read loop failure: {e:#}");
                             }
                         }
                         .instrument(debug_span!("read_loop")),
@@ -467,7 +498,7 @@ impl Attach {
                                 Self::write_loop(write, write_half_rx, output_ended, token_clone)
                                     .await
                             {
-                                error!("Attach write loop failure: {:#}", e);
+                                error!("Attach write loop failure: {e:#}");
                             }
                         }
                         .instrument(debug_span!("write_loop")),
@@ -488,8 +519,8 @@ impl Attach {
         let stop_after_stdin_eof = attach.stop_after_stdin_eof.load(Ordering::Acquire);
         let stopped = async || {
             select! {
-                _ = token.cancelled() => debug!("Exiting because token cancelled"),
-                _ = attach.stdin_closed.cancelled() => debug!("Exiting because stdin got closed"),
+                () = token.cancelled() => debug!("Exiting because token cancelled"),
+                () = attach.stdin_closed.cancelled() => debug!("Exiting because stdin got closed"),
             }
         };
 
@@ -505,7 +536,7 @@ impl Attach {
             // we won't interleve these two futures, as one ends execution.
             let read = select! {
                 read = socket.recv(&mut buf) => read,
-                _ = stopped() => return Ok(()),
+                () = stopped() => return Ok(()),
             };
 
             match read {
@@ -521,7 +552,7 @@ impl Attach {
                     // outlive the container or its stdin.
                     select! {
                         () = attach.send_stdin(data) => {}
-                        _ = stopped() => return Ok(()),
+                        () = stopped() => return Ok(()),
                     }
                 }
                 Ok(_) => {
@@ -564,7 +595,7 @@ impl Attach {
     /// case once the peer closed its write side, which a SOCK_SEQPACKET socket
     /// reports as POLLRDHUP, and no data is queued anymore. Checking the flag
     /// first makes sure that no data arrives in between.
-    #[allow(unsafe_code)]
+    #[expect(unsafe_code, reason = "the FIONREAD ioctl")]
     fn input_ended(socket: &UnixSeqpacket) -> io::Result<bool> {
         // Besides POLLRDHUP, poll can only report a hangup or an error, which
         // end the reading as well. The number of ready fds tells that, nix
@@ -644,15 +675,15 @@ impl Attach {
                     }
                 }
             };
+            let draining = drain.is_some();
             match message {
                 Message::Done => {
                     debug!("Exiting because the container output ended");
-                    match socket.send(Self::DONE_PACKET).await {
-                        Ok(_) => {
-                            debug!("Wrote done packet to client")
-                        }
-                        Err(ref e) if Self::client_gone(e) => {}
-                        Err(e) => bail!("unable to write done packet: {:#}", e),
+                    let packet = [IoSlice::new(Self::DONE_PACKET)];
+                    match Self::send(&socket, &packet, hangup.as_mut(), &token, draining).await {
+                        Ok(true) => debug!("Wrote done packet to client"),
+                        Ok(false) => {}
+                        Err(e) => bail!("unable to write done packet: {e:#}"),
                     }
                     return Ok(());
                 }
@@ -667,20 +698,56 @@ impl Attach {
                         // Send the pipe header and the chunk as one packet
                         // without copying the chunk into a separate buffer.
                         let packet = [IoSlice::new(&header), IoSlice::new(chunk)];
-                        match socket.send_vectored(&packet).await {
-                            Ok(_) => {
-                                debug!("Wrote {} packet {}/{} to client", pipe, idx + 1, len)
+                        match Self::send(&socket, &packet, hangup.as_mut(), &token, draining).await
+                        {
+                            Ok(true) => {
+                                debug!("Wrote {} packet {}/{} to client", pipe, idx + 1, len);
                             }
-                            Err(ref e) if Self::client_gone(e) => {
-                                // The client is gone, so stop receiving output
-                                // for it as well.
-                                debug!("Exiting because the client closed the connection");
-                                return Ok(());
-                            }
+                            // The client is gone, so stop receiving output for
+                            // it as well.
+                            Ok(false) => return Ok(()),
                             Err(e) => bail!("unable to write packet {}/{}: {:#}", idx + 1, len, e),
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Send a packet, false if the client went away or does not take it in
+    /// time. A client which does not read keeps a send waiting, until it
+    /// hangs up or, once the container exited, for at most
+    /// [`DRAIN_MAX_WAIT`]. Each packet gets that long, so that a slow client
+    /// still gets the output which was there already.
+    async fn send(
+        socket: &UnixSeqpacket,
+        packet: &[IoSlice<'_>],
+        hangup: Pin<&mut impl Future<Output = ()>>,
+        token: &CancellationToken,
+        draining: bool,
+    ) -> io::Result<bool> {
+        let stuck = async {
+            if !draining {
+                token.cancelled().await;
+            }
+            time::sleep(DRAIN_MAX_WAIT).await;
+        };
+        select! {
+            res = socket.send_vectored(packet) => match res {
+                Ok(_) => Ok(true),
+                Err(ref e) if Self::client_gone(e) => {
+                    debug!("Exiting because the client closed the connection");
+                    Ok(false)
+                }
+                Err(e) => Err(e),
+            },
+            () = hangup => {
+                debug!("Exiting because the client hung up");
+                Ok(false)
+            }
+            () = stuck => {
+                debug!("Exiting because the client does not take the output after the exit");
+                Ok(false)
             }
         }
     }
@@ -706,24 +773,18 @@ impl Attach {
     /// and its readiness is separate from the one of the socket, which the
     /// read and write loops use. If that fails, only a failing send ends
     /// the loop.
-    #[allow(unsafe_code)]
     async fn hangup(socket: &UnixSeqpacket) {
         let wait = async || -> Result<()> {
             let epoll = Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC).context("create epoll")?;
             epoll
                 .add(socket.as_fd(), EpollEvent::new(EpollFlags::EPOLLET, 0))
                 .context("watch attach socket")?;
-            // SAFETY: the `AsyncFd` takes ownership of the epoll instance, so
-            // it stays valid and unchanged for the lifetime of the `AsyncFd`.
-            let epoll =
-                unsafe { AsyncFd::register_with_interest(EpollFd(epoll), Interest::READABLE) }
-                    .context("register epoll")?;
+            let ready = async_fd::register(epoll.0.as_fd(), Interest::READABLE)
+                .context("register epoll")?;
             let mut events = [EpollEvent::empty()];
             loop {
-                let mut guard = epoll.readable().await.context("wait for epoll")?;
-                let n = guard
-                    .get_inner()
-                    .0
+                let mut guard = ready.readable().await.context("wait for epoll")?;
+                let n = epoll
                     .wait(&mut events, PollTimeout::ZERO)
                     .context("read epoll events")?;
                 if n > 0 {
@@ -733,18 +794,9 @@ impl Attach {
             }
         };
         if let Err(e) = wait().await {
-            warn!("Unable to watch for the attach client to hang up: {:#}", e);
+            warn!("Unable to watch for the attach client to hang up: {e:#}");
             future::pending::<()>().await;
         }
-    }
-}
-
-/// An epoll instance which tokio can wait for.
-struct EpollFd(Epoll);
-
-impl AsRawFd for EpollFd {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0.0.as_raw_fd()
     }
 }
 
@@ -802,7 +854,7 @@ mod tests {
     #[tokio::test]
     async fn done_after_all_pipes() -> Result<()> {
         let attach = SharedContainerAttach::default();
-        let mut rx = attach.write_half_tx.subscribe();
+        let (mut rx, _) = attach.subscribe();
 
         let stdout = attach.output();
         let stderr = stdout.clone();
@@ -820,7 +872,7 @@ mod tests {
     #[tokio::test]
     async fn done_after_failed_read_loop() -> Result<()> {
         let attach = SharedContainerAttach::default();
-        let mut rx = attach.write_half_tx.subscribe();
+        let (mut rx, _) = attach.subscribe();
         let (message_tx, _message_rx) = async_channel::unbounded();
 
         let stdout = attach.output();
@@ -929,7 +981,7 @@ mod tests {
         // it execs, which delays the hangup.
         drop(client);
         timeout(Duration::from_secs(5), write_loop).await???;
-        assert_eq!(attach.write_half_tx.receiver_count(), 0);
+        assert_eq!(attach.receiver_count(), 0);
         Ok(())
     }
 
@@ -951,6 +1003,30 @@ mod tests {
         assert_eq!(recv_packet(&client).await?, b"\x02out");
         assert_eq!(recv_packet(&client).await?, b"\x03err");
         assert_eq!(recv_packet(&client).await?, Attach::DONE_PACKET);
+        timeout(Duration::from_secs(5), write_loop).await???;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_loop_gives_up_on_stuck_client_after_exit() -> Result<()> {
+        let attach = SharedContainerAttach::default();
+        let _output = attach.output();
+        let (server, _client) = seqpacket_pair()?;
+        let (rx, _) = attach.subscribe();
+        let token = CancellationToken::new();
+        let write_loop = task::spawn(Attach::write_loop(server, rx, false, token.clone()));
+
+        // A client which does not read, until its socket takes no more.
+        let data = Bytes::from(vec![0; Attach::PACKET_BUF_SIZE - 1]);
+        for _ in 0..OUTPUT_CHANNEL_SIZE {
+            attach.write(Message::Data(data.clone(), Pipe::StdOut));
+            task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!write_loop.is_finished());
+
+        // Neither the output nor the done packet wait for it after the exit.
+        token.cancel();
         timeout(Duration::from_secs(5), write_loop).await???;
         Ok(())
     }
@@ -1015,7 +1091,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_loop_forwards_packets_with_null_bytes() -> Result<()> {
-        let mut attach = SharedContainerAttach::default();
+        let attach = SharedContainerAttach::default();
         let token = CancellationToken::new();
         let (client, task) = spawn_read_loop(&attach, &token)?;
 
@@ -1035,7 +1111,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_loop_forwards_large_packets() -> Result<()> {
-        let mut attach = SharedContainerAttach::default();
+        let attach = SharedContainerAttach::default();
         let token = CancellationToken::new();
         let (client, task) = spawn_read_loop(&attach, &token)?;
 
@@ -1067,7 +1143,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_loop_forwards_data_after_empty_packets() -> Result<()> {
-        let mut attach = SharedContainerAttach::default();
+        let attach = SharedContainerAttach::default();
         let token = CancellationToken::new();
         let (client, task) = spawn_read_loop(&attach, &token)?;
 
@@ -1088,7 +1164,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_loop_continues_after_empty_packet() -> Result<()> {
-        let mut attach = SharedContainerAttach::default();
+        let attach = SharedContainerAttach::default();
         let token = CancellationToken::new();
         let (client, task) = spawn_read_loop(&attach, &token)?;
 
@@ -1111,7 +1187,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("attach");
         let token = CancellationToken::new();
-        let mut attach = SharedContainerAttach::default();
+        let attach = SharedContainerAttach::default();
         attach.add(&path, token.clone(), true)?;
 
         let connect_client = || -> Result<OwnedFd> {
@@ -1166,9 +1242,9 @@ mod tests {
     /// Connect to an attach socket and wait until the connection receives
     /// the output.
     async fn attach_client(attach: &SharedContainerAttach, path: &Path) -> Result<UnixSeqpacket> {
-        let readers = attach.write_half_tx.receiver_count();
+        let readers = attach.receiver_count();
         let client = UnixSeqpacket::connect(path).await?;
-        wait_for(|| attach.write_half_tx.receiver_count() > readers).await?;
+        wait_for(|| attach.receiver_count() > readers).await?;
         Ok(client)
     }
 
@@ -1316,7 +1392,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_loop_forwards_stdin_after_reset() -> Result<()> {
-        let mut attach = SharedContainerAttach::default();
+        let attach = SharedContainerAttach::default();
         attach.stop_after_stdin_eof.store(true, Ordering::Release);
         let (server, client) = seqpacket_pair()?;
 
@@ -1340,7 +1416,7 @@ mod tests {
 
     #[tokio::test]
     async fn stdin_without_dropping() -> Result<()> {
-        let mut attach = SharedContainerAttach::default();
+        let attach = SharedContainerAttach::default();
         let (client, read_loop) = spawn_read_loop(&attach, &CancellationToken::new())?;
 
         // More packets than the channel capacity, which have to wait for the

@@ -98,15 +98,18 @@ impl Entry {
 }
 
 /// How sending waits for a journal which does not keep up, for example while
-/// it restarts or its disk is slow. The modes use separate sockets.
+/// it restarts or its disk is slow. The modes use separate sockets, and the
+/// server logs one of their own, see [`SERVER_SOCKET`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Wait {
     /// Never block, the entry fails with `ErrorKind::WouldBlock`. For the
-    /// server logs, which tracing writes from the runtime threads.
+    /// server logs, which tracing writes from the runtime threads, and the
+    /// container logs as long as the journal takes them right away.
     Never,
     /// Block for at most `SEND_TIMEOUT`, then fail with
-    /// `ErrorKind::TimedOut`. For the container logs, which get sent from
-    /// the blocking pool and should not be dropped on a short stall.
+    /// `ErrorKind::TimedOut`. For the container logs which the journal did
+    /// not take right away, which get sent from the blocking pool then and
+    /// should not be dropped on a short stall.
     Bounded,
 }
 
@@ -117,9 +120,28 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(1);
 /// entries up to that size do not need a memfd.
 const SEND_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 
-/// Send an entry to the journal socket at a path.
+/// The sockets of the container output, by mode.
+static NEVER_SOCKET: OnceLock<UnixDatagram> = OnceLock::new();
+static BOUNDED_SOCKET: OnceLock<UnixDatagram> = OnceLock::new();
+
+/// The socket of the server logs. Entries take up the send buffer of the
+/// socket they got sent on until the journal received them, so container
+/// output which the journal does not take fast enough must not fill the one
+/// of the server logs, they would be dropped otherwise.
+static SERVER_SOCKET: OnceLock<UnixDatagram> = OnceLock::new();
+
+/// Send an entry of the container output to the journal socket at a path.
 pub fn send_at(wait: Wait, path: &Path, entry: &Entry) -> io::Result<()> {
-    match send_to(socket(wait)?, path, entry.as_bytes()) {
+    let cell = match wait {
+        Wait::Never => &NEVER_SOCKET,
+        Wait::Bounded => &BOUNDED_SOCKET,
+    };
+    send_on(socket(cell, wait)?, wait, path, entry)
+}
+
+/// Send an entry on a socket of the mode, see [`new_socket`].
+fn send_on(socket: &UnixDatagram, wait: Wait, path: &Path, entry: &Entry) -> io::Result<()> {
+    match send_to(socket, path, entry.as_bytes()) {
         Err(e) if wait == Wait::Bounded && e.kind() == ErrorKind::WouldBlock => {
             Err(io::Error::new(
                 ErrorKind::TimedOut,
@@ -130,18 +152,18 @@ pub fn send_at(wait: Wait, path: &Path, entry: &Entry) -> io::Result<()> {
     }
 }
 
-/// The socket of a mode, created on first use. A failed creation is not
-/// stored, the next entry tries again.
-fn socket(wait: Wait) -> io::Result<&'static UnixDatagram> {
-    static NEVER: OnceLock<UnixDatagram> = OnceLock::new();
-    static BOUNDED: OnceLock<UnixDatagram> = OnceLock::new();
-    let cell = match wait {
-        Wait::Never => &NEVER,
-        Wait::Bounded => &BOUNDED,
-    };
+/// The socket kept in `cell`, created for the mode on first use. A failed
+/// creation is not stored, the next entry tries again.
+fn socket(cell: &'static OnceLock<UnixDatagram>, wait: Wait) -> io::Result<&'static UnixDatagram> {
     if let Some(socket) = cell.get() {
         return Ok(socket);
     }
+    let socket = new_socket(wait)?;
+    Ok(cell.get_or_init(|| socket))
+}
+
+/// Create a socket which sends the way the mode tells.
+fn new_socket(wait: Wait) -> io::Result<UnixDatagram> {
     let socket = UnixDatagram::unbound()?;
     match wait {
         Wait::Never => socket.set_nonblocking(true)?,
@@ -152,7 +174,7 @@ fn socket(wait: Wait) -> io::Result<&'static UnixDatagram> {
     if setsockopt(&socket, sockopt::SndBufForce, &SEND_BUFFER_SIZE).is_err() {
         setsockopt(&socket, sockopt::SndBuf, &SEND_BUFFER_SIZE).ok();
     }
-    Ok(cell.get_or_init(|| socket))
+    Ok(socket)
 }
 
 /// Send the data as one datagram, or as a memfd if it does not fit.
@@ -250,7 +272,8 @@ impl Journal {
     /// journal which does not keep up loses the line, otherwise every event
     /// would report an error.
     fn send_at(&self, path: &Path, line: &[u8]) -> io::Result<()> {
-        match send_at(Wait::Never, path, &self.entry(line)) {
+        let socket = socket(&SERVER_SOCKET, Wait::Never)?;
+        match send_on(socket, Wait::Never, path, &self.entry(line)) {
             Err(e) if unavailable(&e) || e.kind() == ErrorKind::WouldBlock => Ok(()),
             result => result,
         }
@@ -300,7 +323,9 @@ pub mod tests {
                 data = &data[end + 1..];
             } else {
                 let rest = &data[end + 1..];
-                let len = u64::from_le_bytes(rest[..8].try_into().expect("length")) as usize;
+                let len =
+                    usize::try_from(u64::from_le_bytes(rest[..8].try_into().expect("length")))
+                        .expect("length fits");
                 assert_eq!(rest[8 + len], b'\n', "value ends with a newline");
                 fields.push((
                     String::from_utf8(line.to_vec()).expect("utf8 key"),
@@ -433,7 +458,7 @@ pub mod tests {
             buf.truncate(len);
             return Ok((buf, false));
         };
-        #[allow(unsafe_code)]
+        #[expect(unsafe_code, reason = "taking a received descriptor")]
         // SAFETY: SCM_RIGHTS installed a new descriptor which nothing else owns.
         let mut file = unsafe { File::from_raw_fd(fds[0]) };
         let seals = fcntl(&file, FcntlArg::F_GET_SEALS)?;
@@ -476,10 +501,19 @@ pub mod tests {
 
     /// Send small entries to a socket which is never read, until the queue
     /// of the receiver is full and sending fails.
-    fn fill(wait: Wait, path: &Path) -> io::Error {
+    ///
+    /// The entries take up the send buffer of the socket they get sent on
+    /// until they are received, which may fill up before the queue of the
+    /// receiver does. So they are sent on a socket of their own, the shared
+    /// ones of the other tests would fail every send meanwhile otherwise.
+    pub(crate) fn fill(wait: Wait, path: &Path) -> io::Error {
+        let socket = match new_socket(wait) {
+            Ok(socket) => socket,
+            Err(e) => return e,
+        };
         let entry = Entry::new(Priority::Info, "fill");
         for _ in 0..100_000 {
-            if let Err(e) = send_at(wait, path, &entry) {
+            if let Err(e) = send_on(&socket, wait, path, &entry) {
                 return e;
             }
         }
@@ -503,6 +537,23 @@ pub mod tests {
             journal.send_at(&path, b"dropped\n")?;
         }
         assert!(start.elapsed() < SEND_TIMEOUT);
+        Ok(())
+    }
+
+    /// The server logs do not share a send buffer with the container
+    /// output.
+    #[test]
+    fn server_logs_have_a_socket_of_their_own() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("socket");
+        let _receiver = UnixDatagram::bind(&path)?;
+
+        Journal::default().send_at(&path, b"server\n")?;
+        send_at(Wait::Never, &path, &Entry::new(Priority::Info, "container"))?;
+        let (Some(server), Some(container)) = (SERVER_SOCKET.get(), NEVER_SOCKET.get()) else {
+            panic!("sockets not created");
+        };
+        assert!(!std::ptr::eq(server, container));
         Ok(())
     }
 

@@ -10,7 +10,6 @@
 //!   conmon-rs does and how it is built.
 //! - <https://github.com/containers/conmon-rs/blob/main/usage.md> on the command
 //!   line, the RPCs and the attach, streaming and fd socket protocols.
-#![deny(unsafe_code)]
 
 use anyhow::{Context, Result};
 use config::{Commands, Config, Verbosity};
@@ -32,30 +31,8 @@ pub fn run() -> Result<()> {
         return Version::new(v == Verbosity::Full).print_json();
     }
 
-    if let Some(Commands::Pause {
-        base_path,
-        pod_id,
-        ipc,
-        pid,
-        net,
-        user,
-        uts,
-        uid_mappings,
-        gid_mappings,
-    }) = config.command()
-    {
-        return Pause::run(
-            base_path,
-            pod_id,
-            *ipc,
-            *pid,
-            *net,
-            *user,
-            *uts,
-            uid_mappings,
-            gid_mappings,
-        )
-        .context("run pause");
+    if let Some(Commands::Pause(args)) = config.command() {
+        return Pause::run(args).context("run pause");
     }
 
     config.validate().context("validate config")?;
@@ -69,7 +46,13 @@ pub fn run() -> Result<()> {
 
 /// The generated Cap'n Proto RPC interface.
 pub mod conmon_capnp {
-    #![allow(clippy::all, unused_parens)]
+    #![allow(
+        clippy::all,
+        clippy::pedantic,
+        clippy::restriction,
+        unused_parens,
+        reason = "generated code"
+    )]
     include!(concat!(env!("OUT_DIR"), "/proto/conmon_capnp.rs"));
 }
 
@@ -88,37 +71,32 @@ pub mod fuzzing {
     };
 }
 
+mod async_fd;
 mod attach;
 mod bounded_hashmap;
 mod budget;
 mod capnp_util;
 mod channel;
 mod child;
-#[allow(unsafe_code)]
 mod child_reaper;
 mod config;
 mod container_io;
 mod container_log;
-#[allow(unsafe_code)]
 mod fd_mapping;
 mod fd_socket;
 mod idle;
-#[allow(unsafe_code)]
 mod init;
 mod journal;
 mod listener;
 mod mutex;
 mod notify;
 mod oom_watcher;
-#[allow(unsafe_code)]
 mod pause;
 mod port_forward;
-#[allow(unsafe_code)]
 mod process;
 mod random_id;
 mod remotecommand;
 mod rpc;
-#[allow(unsafe_code)]
 mod server;
 mod spdy;
 mod stream_protocol;
@@ -127,10 +105,8 @@ mod streams;
 mod tail;
 #[cfg(feature = "tracing")]
 mod telemetry;
-#[allow(unsafe_code)]
 mod terminal;
 #[cfg(all(target_os = "linux", target_arch = "s390x", target_env = "musl"))]
-#[allow(unsafe_code)]
 mod unwind;
 mod version;
 mod web;

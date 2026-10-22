@@ -1,9 +1,13 @@
 [package]
 name = "conmonrs"
+description = "A pod level OCI container runtime monitor"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+# Shipped as a binary, see the releases.
+publish = false
 
 [[bin]]
 name = "conmonrs"
@@ -18,13 +22,13 @@ capnp-rpc = { version = "0.27.1", default-features = false }
 clap = { version = "4.6.7", default-features = false, features = ["derive", "env", "error-context", "help", "std", "usage"] }
 data-encoding = { version = "2.11.1", default-features = false, features = ["alloc"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
-futures = { version = "0.3.34", default-features = false }
+futures = { version = "0.3.34", default-features = false, features = ["std"] }
 getrandom = { version = "0.4.3", default-features = false }
 hyper = { version = "1.12.0", default-features = false, features = ["http1", "server"] }
 hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
 libc = { version = "0.2.191", default-features = false }
 memchr = { version = "2.8.3", default-features = false }
-nix = { version = "0.31.3", default-features = false, features = ["event", "fs", "inotify", "mount", "poll", "sched", "signal", "socket", "term", "user"] }
+nix = { version = "0.31.3", default-features = false, features = ["event", "fs", "inotify", "mount", "poll", "process", "sched", "signal", "socket", "term", "user"] }
 opentelemetry = { version = "0.33.1", default-features = false, optional = true }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "trace"], optional = true }
@@ -32,7 +36,7 @@ opentelemetry-semantic-conventions = { version = "0.33.1", default-features = fa
 percent-encoding = { version = "2.3.2", default-features = false, features = ["alloc"] }
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "signal", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 tokio-seqpacket = { version = "0.9.1", default-features = false }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 tokio-util = { version = "0.7.20", default-features = false, features = ["compat", "time"] }
@@ -55,7 +59,6 @@ tracing = [
 fuzzing = []
 
 [dev-dependencies]
-mockall = { version = "0.15.0", default-features = false }
 tempfile = { version = "3.27.0", default-features = false }
 time = { version = "0.3.55", default-features = false, features = ["parsing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
@@ -64,3 +67,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 capnp = { workspace = true }
 capnpc = { workspace = true }
 time = { version = "0.3.55", default-features = false, features = ["formatting", "macros"] }
+
+[lints]
+workspace = true

@@ -116,7 +116,7 @@ impl StreamingServer {
                     InputEvent::Ended => return Ok(()),
                 },
 
-                _ = token.cancelled() => {
+                () = token.cancelled() => {
                     debug!("Exiting streaming attach because token cancelled");
                     if !done {
                         Self::drain_attach(&mut attach_rx, stdout_enabled, stderr_enabled, sender).await?;
@@ -282,7 +282,7 @@ mod tests {
 
                 // The end of file character follows the stdin, like a user
                 // pressing Ctrl-D.
-                let mut attach = io.attach().await;
+                let attach = io.attach().await;
                 for expected in [&b"a"[..], &[0x04]] {
                     let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
                     assert_eq!(data, expected);
@@ -334,7 +334,7 @@ mod tests {
                         data: Bytes::from_static(b"in"),
                     })
                     .await?;
-                let mut attach = io.attach().await;
+                let attach = io.attach().await;
                 let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
                 assert_eq!(data, b"in".as_slice());
 
@@ -418,7 +418,7 @@ mod tests {
                         data: Bytes::from_static(b"in"),
                     })
                     .await?;
-                let mut attach = io.attach().await;
+                let attach = io.attach().await;
                 let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
                 assert_eq!(data, b"in".as_slice());
 
@@ -525,7 +525,7 @@ mod tests {
                 stream
                     .write_all(&client_frame(0x1, stdin.as_bytes()))
                     .await?;
-                let mut attach = io.attach().await;
+                let attach = io.attach().await;
                 let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
                 assert_eq!(data, b"in".as_slice());
 

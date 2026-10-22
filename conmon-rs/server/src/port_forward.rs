@@ -293,8 +293,8 @@ impl Pending {
         let watch = Box::pin(async move {
             select! {
                 biased;
-                _ = stopped.cancelled() => None,
-                _ = reset => Some(request_id),
+                () = stopped.cancelled() => None,
+                () = reset => Some(request_id),
             }
         });
         let stream = Waiting {
@@ -604,7 +604,7 @@ impl PortForward {
                 let _ = spdy.await;
             }
             WebSocketProtocol::Channels { base64 } => {
-                self.serve_channels(socket, ports, base64).await
+                self.serve_channels(socket, ports, base64).await;
             }
         }
         debug!("Port forward WebSocket ended");
@@ -666,7 +666,7 @@ impl PortForward {
 
         let mut from_client = pin!(from_client);
         let closed = select! {
-            _ = &mut from_client => None,
+            () = &mut from_client => None,
             // The SPDY connection ended, the client answers the close.
             closed = &mut to_client => Some(matches!(closed, Ok(true))),
         };
@@ -724,6 +724,10 @@ impl PortForward {
         let mut inputs = Vec::with_capacity(ports.len());
         let mut forwards = JoinSet::new();
         for (i, port) in ports.into_iter().enumerate() {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "at most MAX_CHANNEL_PORTS ports"
+            )]
             let output = ChannelOutput {
                 messages: output_tx.clone(),
                 base64,
@@ -756,7 +760,7 @@ impl PortForward {
                 // session ends with its last forward, also while the client
                 // keeps sending.
                 biased;
-                _ = idle.cancelled() => break,
+                () = idle.cancelled() => break,
                 done = forwards.join_next() => if done.is_none() {
                     break;
                 },
@@ -826,8 +830,8 @@ impl PortForward {
                 // A connection which ended does not take input anymore.
                 _ = async { input.send(budget.hold(data).await).await } => {}
                 // Also while waiting for the budget.
-                _ = input.closed() => {}
-                _ = idle.cancelled() => {}
+                () = input.closed() => {}
+                () = idle.cancelled() => {}
             }
         }
     }
@@ -1119,7 +1123,7 @@ impl PortForward {
                 let read = select! {
                     read = from_container.read_buf(&mut limited) => read.context("read from the pod")?,
                     // Nothing takes the output anymore.
-                    _ = to_client.reset_by_peer() => return Ok(()),
+                    () = to_client.reset_by_peer() => return Ok(()),
                 };
                 if read == 0 {
                     break;
@@ -1613,7 +1617,7 @@ mod tests {
             drop(input_tx);
             connected_tx
                 .send(())
-                .map_err(|_| anyhow::anyhow!("connect gone"))
+                .map_err(|()| anyhow::anyhow!("connect gone"))
         });
         let (connection, early) = PortForward::drain_until(
             async { connected.await.context("connected").map(|()| 42) },
@@ -1637,6 +1641,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a wrapping byte pattern"
+    )]
     async fn small_input_while_connecting_gets_collected() -> Result<()> {
         let connect_budget = Budget::new(CONNECT_BUDGET);
         let (input_tx, mut input) = mpsc::channel(CHANNEL_QUEUE);
@@ -1654,10 +1663,10 @@ mod tests {
                 }
                 connected_tx
                     .send(())
-                    .map_err(|_| anyhow::anyhow!("connect gone"))
+                    .map_err(|()| anyhow::anyhow!("connect gone"))
             }
         });
-        let (_, early) = PortForward::drain_until(
+        let ((), early) = PortForward::drain_until(
             async { connected.await.context("connected") },
             &connect_budget,
             &mut input,
@@ -1894,7 +1903,7 @@ mod tests {
         // A port which never answers, whose client sends more than the
         // connect budget holds.
         let budget = Budget::new(CHANNEL_BUFFER);
-        let connect_budget = Budget::new(4 * READ_BUFFER as u32);
+        let connect_budget = Budget::new(4 * u32::try_from(READ_BUFFER)?);
         let (input_tx, mut input) = mpsc::channel(CHANNEL_QUEUE);
         let connecting = tokio::spawn({
             let connect_budget = connect_budget.clone();

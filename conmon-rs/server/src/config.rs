@@ -1,7 +1,7 @@
 //! Configuration related structures
 use crate::{listener, process::is_zombie};
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use nix::{
     errno::Errno,
     sys::{
@@ -86,23 +86,29 @@ pub struct Config {
     /// The logging driver used by the conmon server.
     log_driver: LogDriver,
 
+    // The blank default lets `--version` and `pause` work without the flag,
+    // see `Config::validate`.
     #[arg(
         default_value(" "),
         env(concat!(prefix!(), "RUNTIME")),
+        hide_default_value(true),
         long("runtime"),
         short('r'),
         value_name("RUNTIME")
     )]
     /// Binary path of the OCI runtime to use to operate on the containers.
+    /// Required to run the server.
     runtime: PathBuf,
 
     #[arg(
         default_value(" "),
         env(concat!(prefix!(), "RUNTIME_DIR")),
+        hide_default_value(true),
         long("runtime-dir"),
         value_name("RUNTIME_DIR")
     )]
-    /// Path of the directory for conmonrs to hold files at runtime.
+    /// Path of the directory for conmonrs to hold files at runtime. Required
+    /// to run the server.
     runtime_dir: PathBuf,
 
     #[arg(
@@ -122,7 +128,6 @@ pub struct Config {
     /// Do not fork if true.
     skip_fork: bool,
 
-    #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
     #[arg(
         env(concat!(prefix!(), "ENABLE_TRACING")),
         long("enable-tracing"),
@@ -131,7 +136,6 @@ pub struct Config {
     /// Enable OpenTelemetry tracing.
     enable_tracing: bool,
 
-    #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
     #[arg(
         default_value("http://127.0.0.1:4317"),
         env(concat!(prefix!(), "TRACING_ENDPOINT")),
@@ -208,63 +212,67 @@ pub enum Commands {
     /// Run pause, which bind mounts selected namespaces to the local file system.
     ///
     /// Only the namespaces selected by the flags are created and bind mounted to
-    /// $BASE_PATH/[ipc,pid,net,user,uts]ns/$POD_ID, whereas the POD_ID is being passed from the
+    /// `$BASE_PATH/[ipc,pid,net,user,uts]ns/$POD_ID`, whereas the POD_ID is being passed from the
     /// client. The bind mounts keep the namespaces alive, so `conmonrs pause` exits once they
     /// are in place.
     ///
     /// Only a PID namespace (via `--pid`) dies with its init process, which therefore keeps
-    /// running. Its PID is tracked in $BASE_PATH/conmonrs/$POD_ID.pid.
+    /// running. Its PID is tracked in `$BASE_PATH/conmonrs/$POD_ID.pid`.
     ///
     /// UID and GID mappings are required if unsharing of the user namespace (via `--user`) is
     /// selected.
-    Pause {
-        #[arg(
-            default_value("/var/run"),
-            env(concat!(prefix!(), "PAUSE_BASE_PATH")),
-            long("base-path"),
-            short('p'),
-            value_name("PATH")
-        )]
-        /// The base path for pinning the namespaces.
-        base_path: PathBuf,
+    Pause(PauseArgs),
+}
 
-        #[arg(
-            env(concat!(prefix!(), "PAUSE_POD_ID")),
-            long("pod-id"),
-        )]
-        /// The unique pod identifier for referring to the namespaces.
-        pod_id: String,
+#[derive(Args, Clone, Debug, Eq, PartialEq)]
+/// The arguments of the `pause` subcommand.
+pub struct PauseArgs {
+    #[arg(
+        default_value("/var/run"),
+        env(concat!(prefix!(), "PAUSE_BASE_PATH")),
+        long("base-path"),
+        short('p'),
+        value_name("PATH")
+    )]
+    /// The base path for pinning the namespaces.
+    pub base_path: PathBuf,
 
-        #[arg(long("ipc"))]
-        /// Unshare the IPC namespace.
-        ipc: bool,
+    #[arg(
+        env(concat!(prefix!(), "PAUSE_POD_ID")),
+        long("pod-id"),
+    )]
+    /// The unique pod identifier for referring to the namespaces.
+    pub pod_id: String,
 
-        #[arg(long("pid"))]
-        /// Unshare the PID namespace.
-        pid: bool,
+    #[arg(long("ipc"))]
+    /// Unshare the IPC namespace.
+    pub ipc: bool,
 
-        #[arg(long("net"))]
-        /// Unshare the network namespace.
-        net: bool,
+    #[arg(long("pid"))]
+    /// Unshare the PID namespace.
+    pub pid: bool,
 
-        #[arg(long("user"))]
-        /// Unshare the user namespace.
-        user: bool,
+    #[arg(long("net"))]
+    /// Unshare the network namespace.
+    pub net: bool,
 
-        #[arg(long("uts"))]
-        /// Unshare the UTS namespace.
-        uts: bool,
+    #[arg(long("user"))]
+    /// Unshare the user namespace.
+    pub user: bool,
 
-        #[arg(long("uid-mappings"), required_if_eq("user", "true"), short('u'))]
-        /// User ID mappings for unsharing the user namespace.
-        /// Allows multiple mappings in the format: "CONTAINER_ID HOST_ID SIZE".
-        uid_mappings: Vec<String>,
+    #[arg(long("uts"))]
+    /// Unshare the UTS namespace.
+    pub uts: bool,
 
-        #[arg(long("gid-mappings"), required_if_eq("user", "true"), short('g'))]
-        /// Group ID mappings for unsharing the user namespace.
-        /// Allows multiple mappings in the format: "CONTAINER_ID HOST_ID SIZE".
-        gid_mappings: Vec<String>,
-    },
+    #[arg(long("uid-mappings"), required_if_eq("user", "true"), short('u'))]
+    /// User ID mappings for unsharing the user namespace.
+    /// Allows multiple mappings in the format: "CONTAINER_ID HOST_ID SIZE".
+    pub uid_mappings: Vec<String>,
+
+    #[arg(long("gid-mappings"), required_if_eq("user", "true"), short('g'))]
+    /// Group ID mappings for unsharing the user namespace.
+    /// Allows multiple mappings in the format: "CONTAINER_ID HOST_ID SIZE".
+    pub gid_mappings: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -480,7 +488,8 @@ impl Config {
             return true;
         }
         // A zombie does not accept either.
-        kill(Pid::from_raw(pid), None) != Err(Errno::ESRCH) && !is_zombie(pid as u32)
+        let pid = Pid::from_raw(pid);
+        kill(pid, None) != Err(Errno::ESRCH) && !is_zombie(pid)
     }
     pub fn socket(&self) -> PathBuf {
         self.runtime_dir().join(SOCKET)
