@@ -5,12 +5,6 @@ Creating a new conmon-rs release can be done by proposing a PR to bump the
 and the `Version` in [rpm/conmon-rs.spec](rpm/conmon-rs.spec), and running
 `cargo update --workspace` to update [Cargo.lock](Cargo.lock).
 
-If the Cap'n Proto schema in
-[conmon-rs/server/proto/conmon.capnp](conmon-rs/server/proto/conmon.capnp)
-changed since the last release, run `make update-proto` and commit the
-regenerated Go code in [internal/proto](internal/proto) as part of that PR, so
-that the Go client in the tag matches the server.
-
 After that PR being merged, an annotated tag can be pushed to the repository or
 via the GitHub UI. We usually auto-generate the changelog directly from the
 GitHub UI. The [release
@@ -39,9 +33,9 @@ github.com/containers/conmon-rs@vX.Y.Z`. The Go module has no separate
 versioning, which means the Go client must stay backwards compatible within a
 major version.
 
-Those sources have to be used to update the package in
-[brew](https://brewweb.engineering.redhat.com/brew). To update the package, run
-in an appropriate environment:
+Red Hat maintainers then update the package in the Red Hat internal
+[brew](https://brewweb.engineering.redhat.com/brew) with those sources. To
+update the package, run in an environment with access to it:
 
 ```shell
 > kinit $USER@IPA.REDHAT.COM

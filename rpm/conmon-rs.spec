@@ -22,8 +22,8 @@ ExclusiveArch: %{rust_arches}
 
 %description
 conmon-rs is a pod level OCI container runtime monitor. It keeps track of the
-containers of a pod and serves their logs, attach and exec sessions over a
-Cap'n Proto RPC interface.
+containers of a pod and serves their logs, attach, exec and port forward
+sessions over a Cap'n Proto RPC interface.
 
 %prep
 %autosetup
@@ -55,7 +55,7 @@ end
 
 %files
 %license LICENSE
-%doc README.md
+%doc README.md usage.md
 %{_bindir}/%{bin_name}
 
 %changelog

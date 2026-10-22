@@ -2,36 +2,41 @@
 set -euo pipefail
 
 BASE_URL=https://storage.googleapis.com/cri-o/conmon-rs
-ARCH_AMD64=amd64
-ARCH_ARM64=arm64
-ARCH_PPC64LE=ppc64le
-ARCH_S390X=s390x
+SLUG=containers/conmon-rs
+# The architectures are the packages of flake.nix. The build and publish jobs
+# of the ci workflow and .github/release-files list them as well.
+ARCHES=(amd64 arm64 ppc64le s390x)
 ARCH=
 COMMIT=
 TAG=
 NO_EXEC=
+INSECURE=
 OUTPUT=conmonrs
 GITHUB_TOKEN=${GITHUB_TOKEN:-}
 
 usage() {
-    printf "Usage: %s [-o PATH] [-t SHA] [-l TAG] [-a ARCH] [-n] [-h]\n\n" "$(basename "$0")"
+    printf "Usage: %s [-o PATH] [-t SHA] [-l TAG] [-a ARCH] [-n] [-k] [-h]\n\n" "$(basename "$0")"
     echo "Possible arguments:"
     printf "  -o\tOutput path for the downloaded binary (defaults to './conmonrs')\n"
     printf "  -t\tFull length SHA to be used (defaults to the latest available main)\n"
     printf "  -l\tTag to be used\n"
-    printf "  -a\tArchitecture to retrieve (defaults to the local system)\n"
+    printf "  -a\tArchitecture to retrieve: %s (defaults to the local system)\n" "${ARCHES[*]}"
     printf "  -n\tDo not print the version after install, means don't execute the binary\n"
+    printf "  -k\tInstall the binary even if no checksum got published for it (insecure, only without cosign)\n"
     printf "  -h\tShow this help message\n"
 }
 
 parse_args() {
     echo "Welcome to the conmon-rs install script!"
 
-    while getopts 'a:l:no:t:h' OPTION; do
+    while getopts 'a:hkl:no:t:' OPTION; do
         case "$OPTION" in
         a)
             ARCH="$OPTARG"
             echo "Using architecture: $ARCH"
+            ;;
+        k)
+            INSECURE=1
             ;;
         l)
             TAG="$OPTARG"
@@ -61,19 +66,24 @@ parse_args() {
 
     if [[ $ARCH == "" ]]; then
         LOCAL_ARCH=$(uname -m)
-        if [[ "$LOCAL_ARCH" == x86_64 ]]; then
-            ARCH=$ARCH_AMD64
-        elif [[ "$LOCAL_ARCH" == aarch64 ]]; then
-            ARCH=$ARCH_ARM64
-        elif [[ "$LOCAL_ARCH" == "$ARCH_PPC64LE" ]]; then
-            ARCH=$ARCH_PPC64LE
-        elif [[ "$LOCAL_ARCH" == "$ARCH_S390X" ]]; then
-            ARCH=$ARCH_S390X
-        else
+        case $LOCAL_ARCH in
+        x86_64) ARCH=amd64 ;;
+        aarch64) ARCH=arm64 ;;
+        ppc64le | s390x) ARCH=$LOCAL_ARCH ;;
+        *)
             echo "Unsupported local architecture: $LOCAL_ARCH"
             exit 1
-        fi
+            ;;
+        esac
         echo "No architecture provided, using: $ARCH"
+    elif [[ " ${ARCHES[*]} " != *" $ARCH "* ]]; then
+        echo "Unsupported architecture: $ARCH, use one of: ${ARCHES[*]}"
+        exit 1
+    fi
+
+    if [[ $TAG != "" && $COMMIT != "" ]]; then
+        echo "Use either -t or -l, not both"
+        exit 1
     fi
 }
 
@@ -103,15 +113,17 @@ curl_retry() {
     curl "${ARGS[@]}" "$@"
 }
 
-download_binary() {
+resolve_commit() {
     if [[ $TAG != "" ]]; then
         echo "Getting commit from tag"
-        TAG_JSON=$(curl_retry "https://api.github.com/repos/containers/conmon-rs/git/refs/tags/$TAG")
+        # The singular ref endpoint only matches the exact tag, the plural one
+        # would return all tags starting with it.
+        TAG_JSON=$(curl_retry "https://api.github.com/repos/$SLUG/git/ref/tags/$TAG")
         TAG_OBJ_TYPE=$(echo "$TAG_JSON" | jq -r .object.type)
         TAG_OBJ_SHA=$(echo "$TAG_JSON" | jq -r .object.sha)
         if [[ "$TAG_OBJ_TYPE" == "tag" ]]; then
             # Annotated tag: dereference to get the commit SHA
-            COMMIT=$(curl_retry "https://api.github.com/repos/containers/conmon-rs/git/tags/$TAG_OBJ_SHA" | jq -r .object.sha)
+            COMMIT=$(curl_retry "https://api.github.com/repos/$SLUG/git/tags/$TAG_OBJ_SHA" | jq -r .object.sha)
         else
             COMMIT=$TAG_OBJ_SHA
         fi
@@ -120,56 +132,87 @@ download_binary() {
         COMMIT=$(curl_retry "$BASE_URL/latest-main.txt?ts=$(date +%s)")
     fi
 
+    # The signature gets checked against the commit, which has to be a full
+    # SHA for that.
+    if [[ ! $COMMIT =~ ^[0-9a-f]{40}$ ]]; then
+        echo "Not a full length commit SHA: $COMMIT"
+        exit 1
+    fi
     echo "Found commit: $COMMIT"
+}
 
-    mkdir -p "$(dirname "$OUTPUT")"
+# The signature binds the binary to a ci run of the commit on main, so neither
+# a binary of another commit nor one built elsewhere passes.
+verify_signature() {
+    echo "Found cosign, verifying binary signature"
+    curl_retry "$BASE_URL/$COMMIT/conmonrs.$ARCH.bundle" -o "conmonrs.$ARCH.bundle"
+    GIT_REF=refs/heads/main
+    # The publish-static workflow signs, the ci workflow did for older
+    # commits. The ci workflow runs both.
+    cosign verify-blob "conmonrs.$ARCH" \
+        --certificate-identity-regexp "^https://github\.com/$SLUG/\.github/workflows/(publish-static|ci)\.yml@$GIT_REF\$" \
+        --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+        --certificate-github-workflow-name ci \
+        --certificate-github-workflow-repository "$SLUG" \
+        --certificate-github-workflow-ref "$GIT_REF" \
+        --certificate-github-workflow-sha "$COMMIT" \
+        --bundle "conmonrs.$ARCH.bundle"
+}
 
-    if command -v cosign >/dev/null; then
-        echo "Found cosign, verifying binary signature"
-        TMPDIR=$(mktemp -d)
-        trap 'rm -rf $TMPDIR' EXIT
-        pushd "$TMPDIR" >/dev/null
-
-        FILES=(
-            "conmonrs.$ARCH"
-            "conmonrs.$ARCH.bundle"
-        )
-        for FILE in "${FILES[@]}"; do
-            curl_retry "$BASE_URL/$COMMIT/$FILE" -o "$FILE"
-        done
-
-        SLUG=containers/conmon-rs
-        GIT_REF=refs/heads/main
-        # The publish-static workflow signs, the ci workflow did for older
-        # commits. The ci workflow runs both.
-        cosign verify-blob "${FILES[0]}" \
-            --certificate-identity-regexp "^https://github\.com/$SLUG/\.github/workflows/(publish-static|ci)\.yml@$GIT_REF\$" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --certificate-github-workflow-name ci \
-            --certificate-github-workflow-repository "$SLUG" \
-            --certificate-github-workflow-ref "$GIT_REF" \
-            --bundle "${FILES[1]}"
-
-        popd >/dev/null
-        mv "$TMPDIR/${FILES[0]}" "$OUTPUT"
-    else
-        echo "No cosign found, verifying the checksum only"
-        TMPDIR=$(mktemp -d)
-        trap 'rm -rf $TMPDIR' EXIT
-        pushd "$TMPDIR" >/dev/null
-
-        curl_retry "$BASE_URL/$COMMIT/conmonrs.$ARCH" -o "conmonrs.$ARCH"
-        # Older commits have no checksum file.
-        if curl_retry "$BASE_URL/$COMMIT/conmonrs.$ARCH.sha256" -o "conmonrs.$ARCH.sha256" 2>/dev/null; then
-            sha256sum -c "conmonrs.$ARCH.sha256"
-        else
-            echo "WARNING: no checksum published for this commit, the binary is not verified" >&2
+# A checksum only shows that the download is complete, not who built it.
+verify_checksum() {
+    echo "No cosign found, verifying the checksum only"
+    # The checksums of a release come from GitHub, not from the bucket.
+    if [[ $TAG != "" ]] &&
+        curl_retry "https://github.com/$SLUG/releases/download/$TAG/sha256sums.txt" -o sha256sums.txt 2>/dev/null; then
+        echo "Using the checksums of release $TAG"
+        if ! grep -E "^[0-9a-f]{64}  conmonrs\.$ARCH\$" sha256sums.txt >"conmonrs.$ARCH.sha256"; then
+            echo "Release $TAG has no checksum for conmonrs.$ARCH"
+            exit 1
         fi
+    # Older commits have no checksum file.
+    elif ! curl_retry "$BASE_URL/$COMMIT/conmonrs.$ARCH.sha256" -o "conmonrs.$ARCH.sha256" 2>/dev/null; then
+        if [[ $INSECURE == "" ]]; then
+            echo "No checksum published for commit $COMMIT, install cosign or use -k to skip the verification"
+            exit 1
+        fi
+        echo "WARNING: no checksum published for this commit, the binary is not verified" >&2
+        return
+    fi
+    sha256sum -c "conmonrs.$ARCH.sha256"
+}
 
-        popd >/dev/null
-        mv "$TMPDIR/conmonrs.$ARCH" "$OUTPUT"
+# Only the binaries of releases after v1.1.1 and of newer commits on main have
+# provenance attestations.
+print_verify_hint() {
+    if [[ $TAG == "" ]]; then
+        echo "Install cosign to verify the signature, or for commits after v1.1.1 verify the provenance with:"
+    elif [[ $TAG =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+) ]] &&
+        ((BASH_REMATCH[1] * 1000000 + BASH_REMATCH[2] * 1000 + BASH_REMATCH[3] > 1001001)); then
+        echo "Install cosign to verify the signature, or verify the provenance with:"
+    else
+        echo "Install cosign to verify the signature"
+        return
+    fi
+    echo "  gh attestation verify $OUTPUT --repo $SLUG --signer-workflow $SLUG/.github/workflows/publish-static.yml --source-ref refs/heads/main --source-digest $COMMIT"
+}
+
+download_binary() {
+    mkdir -p "$(dirname "$OUTPUT")"
+    TMPDIR=$(mktemp -d)
+    trap 'rm -rf "$TMPDIR"' EXIT
+    pushd "$TMPDIR" >/dev/null
+
+    curl_retry "$BASE_URL/$COMMIT/conmonrs.$ARCH" -o "conmonrs.$ARCH"
+    if command -v cosign >/dev/null; then
+        verify_signature
+    else
+        verify_checksum
+        print_verify_hint
     fi
 
+    popd >/dev/null
+    mv "$TMPDIR/conmonrs.$ARCH" "$OUTPUT"
     chmod +x "$OUTPUT"
     printf "Installed binary into: %s\n" "$OUTPUT"
 
@@ -180,4 +223,5 @@ download_binary() {
 
 parse_args "$@"
 verify_requirements
+resolve_commit
 download_binary

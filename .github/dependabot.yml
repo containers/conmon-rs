@@ -1,10 +1,17 @@
 version: 2
+# New releases wait a week before they get proposed, so that a compromised or
+# broken one has time to get yanked. Patch releases of crates wait less, the
+# nixpkgs of flake.lock moves to the newest revision older than a week.
+# Security updates do not wait.
 updates:
   - package-ecosystem: cargo
     directory: "/"
     schedule:
       interval: daily
       time: "11:00"
+    cooldown:
+      default-days: 7
+      semver-patch-days: 3
     open-pull-requests-limit: 10
     labels:
       - "release-note-none"
@@ -31,6 +38,8 @@ updates:
     directory: "/"
     schedule:
       interval: daily
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 10
     labels:
       - "release-note-none"
@@ -41,5 +50,15 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 0
+    labels:
+      - "release-note-none"
+  # nixpkgs decides the toolchain and the C library of the static binaries,
+  # see the build-static jobs, which print the rustc version.
+  - package-ecosystem: nix
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
     labels:
       - "release-note-none"

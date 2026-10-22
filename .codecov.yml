@@ -20,12 +20,9 @@ coverage:
       default:
         threshold: 1%
 
-# The integration coverage job may fail without failing CI, its last result
-# carries over to commits without an upload of their own.
-flag_management:
-  individual_flags:
-    - name: integration
-      carryforward: true
+# No flag carries forward: the integration coverage job uploads what got
+# covered even when its tests failed, which shows as a drop of the coverage
+# instead of an older result.
 
 comment:
   layout: "header, diff"

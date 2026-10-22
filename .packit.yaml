@@ -17,9 +17,12 @@ jobs:
     targets:
       - fedora-all-x86_64
       - fedora-all-aarch64
-      # TODO: Reenable once they ship the rust-version from Cargo.toml
-      # - epel-9-x86_64
-      # - epel-9-aarch64
+      # Their Rust has to be at least the rust-version of Cargo.toml, like
+      # the commit builds into podman-next need it for all its chroots.
+      - epel-9-x86_64
+      - epel-9-aarch64
+      - epel-10-x86_64
+      - epel-10-aarch64
     additional_repos:
       - "copr://rhcontainerbot/podman-next"
 

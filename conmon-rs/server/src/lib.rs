@@ -3,17 +3,13 @@
 //! A container engine like CRI-O starts one `conmonrs` per pod and talks to
 //! it over a Cap'n Proto RPC interface on a UNIX socket, which this crate
 //! serves. The crate is the server only, the Go client lives in the same
-//! repository under `pkg/client`. The repository holds the full documentation
-//! for this version:
-#![doc = concat!(
-    "\n- <https://github.com/containers/conmon-rs/blob/v",
-    env!("CARGO_PKG_VERSION"),
-    "/README.md> on what conmon-rs does and how it is built.\n",
-    "- <https://github.com/containers/conmon-rs/blob/v",
-    env!("CARGO_PKG_VERSION"),
-    "/usage.md> on the command line, the RPCs and the attach, streaming and fd ",
-    "socket protocols.\n"
-)]
+//! repository under `pkg/client`. The repository holds the full
+//! documentation:
+//!
+//! - <https://github.com/containers/conmon-rs/blob/main/README.md> on what
+//!   conmon-rs does and how it is built.
+//! - <https://github.com/containers/conmon-rs/blob/main/usage.md> on the command
+//!   line, the RPCs and the attach, streaming and fd socket protocols.
 #![deny(unsafe_code)]
 
 use anyhow::{Context, Result};

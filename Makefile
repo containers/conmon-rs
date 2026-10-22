@@ -25,13 +25,22 @@ CRATE_VERSION := cargo metadata --no-deps --format-version 1 | jq -er '.packages
 SPEC_FILE := rpm/conmon-rs.spec
 PREFIX ?= /usr
 CI_TAG ?=
+# The recipes read it from the environment, quoted.
+export CI_TAG
 GOLANGCI_LINT_VERSION := v2.15.0
 PRETTIER_VERSION := 3.9.10
+NODE_VERSION := 24.22.1
+PRETTIER = $(CONTAINER_RUNTIME) run --rm -v ${PWD}:/w:z -w /w --entrypoint npx docker.io/library/node:$(NODE_VERSION)-slim \
+	--yes prettier@$(PRETTIER_VERSION)
 ZEITGEIST_VERSION := v0.8.0
+ACTIONLINT_VERSION := v1.7.12
+ZIZMOR_VERSION := 1.31.1
+# Extra zizmor flags, CI passes --format=github for annotations.
+ZIZMOR_FLAGS ?=
 
 COLOR:=\\033[36m
 NOCOLOR:=\\033[0m
-WIDTH:=25
+WIDTH:=30
 
 .PHONY: all
 all: default
@@ -68,10 +77,17 @@ release-static: ## Build the static release binary for the local architecture us
 	nix build .#default
 
 ##@ Test targets:
+# The features of the CI unit tests, which use cargo-nextest. The fuzzing
+# feature only adds the entry points of the fuzz targets.
 .PHONY: unit
-unit: ## Run the unit tests with the default and with all features.
+unit: ## Run the unit tests with the default and with the tracing feature.
 	cargo test --no-fail-fast
-	cargo test --no-fail-fast --all-features
+	cargo test --no-fail-fast --features tracing
+
+# TestConmonClient is the integration suite, see the integration target.
+.PHONY: unit-go
+unit-go: ## Run the unit tests of the Go client, which need no server.
+	go test -race -skip '^TestConmonClient$$' ./pkg/client
 
 .PHONY: integration
 integration: .install.ginkgo $(if $(CONMON_BINARY),,release) ## Run the integration tests using $CONMON_BINARY or the release binary.
@@ -103,9 +119,45 @@ lint-shell: ## Lint the shell scripts, the files whose first line is a sh or bas
 	shellcheck $$(git ls-files -z | xargs -0 awk \
 		'FNR == 1 && $$0 ~ "^#!(/usr/bin/env |/bin/)(ba)?sh$$" { print FILENAME } { nextfile }')
 
+# The workflows in .github/workflows, zizmor runs in a container. zizmor only
+# runs its online audits with GH_TOKEN set.
+.PHONY: lint-workflows
+lint-workflows: ## Lint the GitHub workflows with actionlint and zizmor.
+	go run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
+	$(CONTAINER_RUNTIME) run --rm -e GH_TOKEN -v ${PWD}:/w:z,ro -w /w ghcr.io/zizmorcore/zizmor:$(ZIZMOR_VERSION) \
+		$(ZIZMOR_FLAGS) .
+
+.PHONY: lint-typos
+lint-typos: ## Check the spelling, typos has to be installed.
+	typos --config .github/typos.toml
+
+.PHONY: verify
+verify: verify-dependencies verify-spec verify-proto verify-prettier verify-deny lint-typos lint-workflows ## Run the checks of CI besides make lint and the tests.
+
 .PHONY: verify-dependencies
 verify-dependencies: $(GOTOOLS_BINDIR)/zeitgeist ## Verify the local dependencies.
 	$(GOTOOLS_BINDIR)/zeitgeist validate --local-only --base-path . --config dependencies.yaml
+
+# Reads the GitHub API, set GITHUB_TOKEN for its rate limit.
+.PHONY: verify-dependencies-upstream
+verify-dependencies-upstream: $(GOTOOLS_BINDIR)/zeitgeist ## Check the dependencies for newer upstream versions.
+	$(GOTOOLS_BINDIR)/zeitgeist validate --local-only=false --base-path . --config dependencies.yaml
+
+# Also catches new generated files. make removes the intermediate
+# internal/proto/conmon.capnp only after this recipe.
+.PHONY: verify-proto
+verify-proto: update-proto ## Verify that the generated Go code matches the Cap'n Proto schema.
+	@STATUS=$$(git status --porcelain -- internal/proto ':!internal/proto/conmon.capnp') && \
+	if [ -n "$$STATUS" ]; then \
+		echo "The generated code in internal/proto is not up to date:" ; \
+		echo "$$STATUS" ; \
+		git diff internal/proto ; \
+		exit 1 ; \
+	fi
+
+.PHONY: verify-deny
+verify-deny: ## Check the dependencies with cargo-deny, which has to be installed.
+	cargo deny check
 
 .PHONY: verify-spec
 verify-spec: ## Verify that the RPM spec version matches the crate version.
@@ -117,15 +169,14 @@ verify-spec: ## Verify that the RPM spec version matches the crate version.
 	fi
 
 .PHONY: verify-prettier
-verify-prettier: prettier ## Run prettier on the project and fail on changes.
-	git diff --exit-code
+verify-prettier: ## Check the formatting of the supported files with prettier.
+	$(PRETTIER) --check .
 
 ##@ Utility targets:
 
 .PHONY: prettier
 prettier: ## Prettify supported files.
-	$(CONTAINER_RUNTIME) run --rm -v ${PWD}:/w:z -w /w --entrypoint npx docker.io/library/node:lts-slim \
-		--yes prettier@$(PRETTIER_VERSION) -w .
+	$(PRETTIER) -w .
 
 # ginkgo publishes no binaries, an installed one of the version of go.mod is
 # kept, which CI caches.
@@ -141,21 +192,11 @@ prettier: ## Prettify supported files.
 	GOBIN=$(abspath $(GOTOOLS_BINDIR)) \
 		go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
-# The release binary, its signature gets verified if cosign is available like
-# CI has it.
+# Built from source for any architecture, the Go checksum database verifies
+# the module. The remote variant also checks the upstream versions.
 $(GOTOOLS_BINDIR)/zeitgeist:
-	mkdir -p $(GOTOOLS_BINDIR)
-	URL=https://github.com/kubernetes-sigs/zeitgeist/releases/download/$(ZEITGEIST_VERSION)/zeitgeist-amd64-linux && \
-	curl -sSfL -o $@.tmp "$$URL" && \
-	if command -v cosign >/dev/null; then \
-		curl -sSfL -o $@.sigstore.json "$$URL.sigstore.json" && \
-		cosign verify-blob $@.tmp --bundle $@.sigstore.json \
-			--certificate-identity https://github.com/kubernetes-sigs/zeitgeist/.github/workflows/release.yml@refs/tags/$(ZEITGEIST_VERSION) \
-			--certificate-oidc-issuer https://token.actions.githubusercontent.com && \
-		rm $@.sigstore.json; \
-	fi && \
-	chmod +x $@.tmp && \
-	mv $@.tmp $@
+	GOBIN=$(abspath $(GOTOOLS_BINDIR)) \
+		go install sigs.k8s.io/zeitgeist/remote/zeitgeist@$(ZEITGEIST_VERSION)
 
 .PHONY: clean
 clean: ## Cleanup the project files.
@@ -177,11 +218,11 @@ update-proto: internal/proto/conmon.capnp ## Update the Cap'n Proto protocol.
 .PHONY: create-release-packages
 create-release-packages: verify-spec ## Create the release tarballs.
 	VERSION=$$($(CRATE_VERSION)) && \
-	if [ "v$$VERSION" != "$(CI_TAG)" ]; then \
-		echo "crate version v$$VERSION and tag $(CI_TAG) mismatch" ; \
+	if [ "v$$VERSION" != "$$CI_TAG" ]; then \
+		echo "crate version v$$VERSION and tag $$CI_TAG mismatch" ; \
 		exit 1 ; \
-	fi
-	git archive --format tar --prefix=$(BINARY)-$(CI_TAG)/ $(CI_TAG) | gzip >$(BINARY)-$(CI_TAG).tar.gz
+	fi && \
+	git archive --format tar --prefix="$(BINARY)-$$CI_TAG/" "$$CI_TAG" | gzip >"$(BINARY)-$$CI_TAG.tar.gz"
 
 .PHONY: install
 install: ## Install the binary.

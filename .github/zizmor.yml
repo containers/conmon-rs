@@ -1,0 +1,7 @@
+rules:
+  # Only reusable workflows get called from this repository, which resolve
+  # from the commit of the run and not from files on the runner. The signing
+  # identity which scripts/get and the release verify comes from these calls,
+  # so they stay as they are.
+  self-repository:
+    disable: true
