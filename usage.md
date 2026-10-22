@@ -61,10 +61,18 @@ through the environment variable in parentheses:
 
 When the server forks, the parent writes the child's PID to `pidfile` in the
 runtime directory and exits. The server listens on `conmon.sock` in the runtime
-directory, lowers its own OOM score to -1000 and acts as child subreaper for
-the containers. Note that the OCI runtime inherits that OOM score, so clients
-must set `process.oomScoreAdj` in their OCI configuration, like CRI-O does,
-otherwise the container processes are not OOM killable.
+directory, lowers its own OOM score to -1000, turns transparent huge pages off
+for itself and acts as child subreaper for the containers. The OCI runtime gets
+the OOM score and the huge pages setting the server started with, so the
+container processes get the OOM score of the client unless it sets
+`process.oomScoreAdj` in the OCI configuration, like CRI-O does.
+
+On SIGTERM or SIGINT, the server kills the containers, stops the pause process
+and removes its sockets within 9.5 seconds, before `Shutdown` of the Go client
+gives up after 10 with `ErrShutdownTimeout`. If any of that fails or does not
+finish in time, the server logs it as an error and exits with status 1. A
+server which cannot listen for these signals does the same cleanup right away
+and exits with status 1.
 
 ### The `pause` subcommand
 
@@ -99,7 +107,11 @@ All operations are RPCs on the `conmon.sock` UNIX domain socket, defined in
 `reopenLogContainer`, `setWindowSizeContainer`, `createNamespaces`,
 `startFdSocket`, `serveExecContainer`, `serveAttachContainer` and
 `servePortForwardContainer`. The Go client wraps each of them in a method with
-plain Go request and response structures.
+plain Go request and response structures. An OCI runtime which hangs gets
+killed and its call fails: for `createContainer` after 10 minutes, for an exec
+60 seconds after its timeout, or after 60 seconds without one, as the runtime
+only starts the exec process. Each runtime runs in a process group of its own,
+which gets killed with it, so the helpers it started do not stay behind.
 
 ### Attach socket
 

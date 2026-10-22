@@ -8,7 +8,9 @@ use crate::{
     init,
     mutex::lock,
     oom_watcher::{OOMEvent, OOMWatcher},
-    process::{Process, children_by_scan, is_zombie, pidfd_open, read_pid_file, reap_guard},
+    process::{
+        Process, child_pid, children_by_scan, is_zombie, pidfd_open, read_pid_file, reap_guard,
+    },
     tail::Tail,
 };
 use anyhow::{Context, Result, bail, format_err};
@@ -16,13 +18,13 @@ use futures::future::join_all;
 use nix::{
     errno::Errno,
     sys::{
-        signal::Signal,
+        signal::{Signal, killpg},
         wait::{Id, WaitPidFlag, WaitStatus, waitid, waitpid},
     },
     unistd::Pid,
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     ffi::OsString,
     os::fd::{OwnedFd, RawFd},
     path::{Path, PathBuf},
@@ -143,7 +145,7 @@ pub struct ChildReaper {
 
     /// The runtime calls in progress, including the registration of their
     /// child, which the shutdown waits for.
-    in_flight: Arc<watch::Sender<usize>>,
+    in_flight: Arc<watch::Sender<Calls>>,
 
     /// The watchers of children registered after the shutdown took its
     /// snapshot, which it waits for as well.
@@ -156,7 +158,10 @@ pub struct ChildReaper {
 /// of its child, or wherever the caller gives up.
 #[derive(Debug, Default)]
 pub struct InFlight {
-    calls: Option<Arc<watch::Sender<usize>>>,
+    calls: Option<Arc<watch::Sender<Calls>>>,
+
+    /// The number of the call, see [`Calls`].
+    seq: u64,
 
     /// Keeps the process which the call started pending until the call
     /// ends, also if the call gets dropped before its registration.
@@ -166,23 +171,56 @@ pub struct InFlight {
 impl Drop for InFlight {
     fn drop(&mut self) {
         if let Some(calls) = &self.calls {
-            calls.send_modify(|n| *n = n.saturating_sub(1));
+            calls.send_modify(|calls| {
+                calls.in_progress.remove(&self.seq);
+            });
         }
     }
+}
+
+/// The runtime calls in progress, numbered in the order they started.
+#[derive(Debug, Default)]
+struct Calls {
+    /// The number of the next call.
+    next: u64,
+
+    /// Until when each call in progress may still claim a process, by its
+    /// number: the deadline of its runtime and the
+    /// [`ChildReaper::CLAIM_MARGIN`]. None for a call without a deadline.
+    in_progress: BTreeMap<u64, Option<Instant>>,
+}
+
+impl Calls {
+    /// Whether a call numbered below `before` is in progress, which may
+    /// still claim a process at `now`. The deadlines of the calls differ, an
+    /// older one may still claim one while a younger one cannot anymore.
+    fn may_claim_before(&self, before: u64, now: Instant) -> bool {
+        self.in_progress
+            .range(..before)
+            .any(|(_, claim_by)| claim_by.is_none_or(|claim_by| now < claim_by))
+    }
+}
+
+/// A zombie which nobody claimed, see [`ChildReaper::sweep_orphans`].
+#[derive(Clone, Copy, Debug)]
+struct Candidate {
+    first_seen: Instant,
+
+    /// The calls numbered below this started before it was first seen. It
+    /// may be the process of one of them, which may still claim it.
+    calls_before: u64,
 }
 
 /// Marks a PID as pending for the lifetime of the guard.
 #[derive(Debug)]
 struct PendingPid {
     pending: Arc<Mutex<HashSet<Pid>>>,
-    pid: Option<Pid>,
+    pid: Pid,
 }
 
 impl PendingPid {
-    fn new(pending: &Arc<Mutex<HashSet<Pid>>>, pid: Option<Pid>) -> Self {
-        if let Some(pid) = pid
-            && let Ok(mut set) = pending.lock()
-        {
+    fn new(pending: &Arc<Mutex<HashSet<Pid>>>, pid: Pid) -> Self {
+        if let Ok(mut set) = pending.lock() {
             set.insert(pid);
         }
         Self {
@@ -194,10 +232,8 @@ impl PendingPid {
 
 impl Drop for PendingPid {
     fn drop(&mut self) {
-        if let Some(pid) = self.pid
-            && let Ok(mut set) = self.pending.lock()
-        {
-            set.remove(&pid);
+        if let Ok(mut set) = self.pending.lock() {
+            set.remove(&self.pid);
         }
     }
 }
@@ -281,13 +317,18 @@ impl ChildReaper {
             relays_notify,
             additional_fds,
         } = call;
-        let mut in_flight = self.begin_call()?;
+        let mut in_flight = self.begin_call(runtime_deadline)?;
         debug!("Running: {:?} {:?}", runtime, args);
         let mut cmd = Command::new(runtime);
         // A runtime which gets dropped, for example on a panic, must not keep
         // running unobserved.
         cmd.kill_on_drop(true);
-        init::reset_oom_score(&mut cmd);
+        // In a process group of its own, which a runtime that hangs gets
+        // killed with, see `stop_runtime`. Signals for the group of the
+        // server, like a SIGINT from a terminal, do not reach it, the
+        // server stops it on its own.
+        cmd.process_group(0);
+        init::reset_inherited(&mut cmd);
 
         if stdin {
             cmd.stdin(Stdio::piped());
@@ -323,16 +364,12 @@ impl ChildReaper {
         // pre_exec hook, dropping the command closes them in the parent.
         drop(cmd);
 
-        let runtime_pid = child
-            .id()
-            .and_then(|pid| i32::try_from(pid).ok())
-            .map(Pid::from_raw);
+        // Not waited for yet, so it has its PID. Dropping it on a failure
+        // kills it.
+        let runtime_pid = child_pid(child.id()).context("PID of runtime")?;
         let _runtime_pending = PendingPid::new(&self.pending, runtime_pid);
 
-        debug!(
-            "Running child on PID: {}",
-            runtime_pid.map_or("unknown".into(), |pid| pid.to_string())
-        );
+        debug!("Running child on PID: {runtime_pid}");
 
         let token = CancellationToken::new();
 
@@ -416,7 +453,7 @@ impl ChildReaper {
         // the pending mark, like a caller which gives up before that does.
         let grandchild_pid = status.success().then(|| read_pid_file(pidfile));
         if let Some(Ok(pid)) = &grandchild_pid {
-            in_flight.pending = Some(PendingPid::new(&self.pending, Some(*pid)));
+            in_flight.pending = Some(PendingPid::new(&self.pending, *pid));
         }
         let stderr = RuntimeOutput::finish(output).await;
 
@@ -434,18 +471,26 @@ impl ChildReaper {
         Err(self.fail_create(pidfile, error, &stderr))
     }
 
-    /// Start a runtime call, unless the server shuts down. The shutdown
-    /// waits for the calls in progress, see [`ChildReaper::kill_grandchildren`].
-    fn begin_call(&self) -> Result<InFlight> {
+    /// Start a runtime call whose runtime gets killed at the `deadline`,
+    /// unless the server shuts down. The shutdown waits for the calls in
+    /// progress, see [`ChildReaper::kill_grandchildren`].
+    fn begin_call(&self, deadline: Option<Instant>) -> Result<InFlight> {
         // Under the lock the shutdown takes its snapshot with, so that it
         // either sees this call or this call sees the shutdown.
         let _map = lock(&self.grandchildren)?;
         if self.shutting_down.load(Ordering::SeqCst) {
             bail!("server is shutting down")
         }
-        self.in_flight.send_modify(|n| *n += 1);
+        let claim_by = deadline.and_then(|deadline| deadline.checked_add(Self::CLAIM_MARGIN));
+        let mut seq = 0;
+        self.in_flight.send_modify(|calls| {
+            seq = calls.next;
+            calls.next += 1;
+            calls.in_progress.insert(seq, claim_by);
+        });
         Ok(InFlight {
             calls: Some(self.in_flight.clone()),
+            seq,
             pending: None,
         })
     }
@@ -460,6 +505,17 @@ impl ChildReaper {
     ) -> Vec<u8> {
         if time::timeout(grace, child.wait()).await.is_err() {
             debug!("Runtime did not exit in time, killing it");
+            // Its helpers in its process group go with it, like hooks or a
+            // runc init which did not set up the container yet, which would
+            // be left running otherwise. A container init which started a
+            // session of its own syncs with its runtime over a socket, and
+            // fails once that closes. The runtime was not reaped yet, so the
+            // ID of the group is still its own.
+            if let Ok(pid) = child_pid(child.id())
+                && let Err(e) = killpg(pid, Signal::SIGKILL)
+            {
+                debug!("Unable to kill process group of runtime: {e}");
+            }
             if let Err(e) = child.start_kill() {
                 debug!("Unable to kill runtime: {e}");
             }
@@ -500,14 +556,27 @@ impl ChildReaper {
     /// it, so that an owner which is about to wait for it still can.
     const ORPHAN_GRACE: Duration = Duration::from_secs(1);
 
-    /// How long the sweep leaves a zombie nobody claimed alone while runtime
-    /// calls are in progress. The process of a call can exit before the call
-    /// claims it, like an exec which ends before its runtime exited, and its
-    /// exit status belongs to the call. A call claims its process at most
-    /// [`ChildReaper::CONNECT_AFTER_EXIT_TIMEOUT`] after the runtime exited,
-    /// the bound only matters for a call which hangs, which must not keep
-    /// the zombies an init of a PID namespace waits for forever.
+    /// How long the sweep leaves a zombie nobody claimed alone at most, for
+    /// the runtime calls which were in progress when it was first seen. The
+    /// process of a call can exit before the call claims it, like an exec
+    /// which ends before its runtime exited, and its exit status belongs to
+    /// the call. Each of these calls defers the zombie only until its own
+    /// runtime deadline and the [`ChildReaper::CLAIM_MARGIN`]. This bound
+    /// counts from when the zombie was first seen, the earlier of both ends
+    /// the deferral. That is the one of the call for a zombie first seen
+    /// late in its call, like the process of a slow exec runtime which
+    /// exited right before it, and this one for a create, whose runtime gets
+    /// 10 minutes: a runtime which hangs must not keep the zombies an init
+    /// of a PID namespace waits for that long. An exec whose process exits
+    /// more than this before its runtime does loses its exit code.
     const ORPHAN_MAX_DEFER: Duration = Duration::from_secs(30);
+
+    /// How long after the deadline of its runtime a call may still claim
+    /// its process: a runtime which exits right before it may still take
+    /// [`ChildReaper::CONNECT_AFTER_EXIT_TIMEOUT`] to connect the terminal,
+    /// the [`ChildReaper::ORPHAN_GRACE`] on top covers the scheduling.
+    const CLAIM_MARGIN: Duration =
+        Self::CONNECT_AFTER_EXIT_TIMEOUT.saturating_add(Self::ORPHAN_GRACE);
 
     /// Reap exited children which nobody waits for, in the background.
     ///
@@ -522,8 +591,9 @@ impl ChildReaper {
     /// cleanup commands and the pause init by the tasks which spawned them.
     /// They are never zombies for long, so a zombie which is neither
     /// registered nor pending for [`ChildReaper::ORPHAN_GRACE`] is an orphan,
-    /// once no runtime call which may still claim it is in progress, see
-    /// [`ChildReaper::ORPHAN_MAX_DEFER`].
+    /// once no runtime call which may still claim it is in progress, at most
+    /// for [`ChildReaper::ORPHAN_MAX_DEFER`]. Once the server shuts down,
+    /// those calls cannot register a process anymore and are not waited for.
     pub fn start_orphan_sweep(self: Arc<Self>) {
         task::spawn(
             async move {
@@ -551,11 +621,13 @@ impl ChildReaper {
     }
 
     /// Reap the zombie children which have been unclaimed for `grace`, and
-    /// for `max_defer` while runtime calls are in progress. `candidates`
-    /// remembers when a zombie was first seen.
+    /// up to `max_defer` while a call which was in progress when the zombie
+    /// was first seen still is and may still claim it, unless the server
+    /// shuts down. `candidates` remembers when a zombie was first seen and
+    /// the calls which were started then.
     async fn sweep_orphans(
         &self,
-        candidates: &mut HashMap<Pid, Instant>,
+        candidates: &mut HashMap<Pid, Candidate>,
         grace: Duration,
         max_defer: Duration,
     ) {
@@ -583,14 +655,20 @@ impl ChildReaper {
         candidates.retain(|pid, _| zombies.contains(pid));
         // The owner of a claimed zombie reaps it soon, it needs no recheck.
         let claimed = self.claimed();
+        // After the scan, a call which started later did not start the zombie.
+        let calls_before = self.in_flight.borrow().next;
         for pid in zombies {
             if claimed.contains(&pid) {
                 candidates.remove(&pid);
                 continue;
             }
-            let first_seen = *candidates.entry(pid).or_insert(now);
-            let unclaimed = now.duration_since(first_seen);
-            if unclaimed < grace || (unclaimed < max_defer && self.calls_in_progress()) {
+            let candidate = *candidates.entry(pid).or_insert(Candidate {
+                first_seen: now,
+                calls_before,
+            });
+            if now.duration_since(candidate.first_seen) < grace
+                || self.defers(candidate, now, max_defer)
+            {
                 continue;
             }
             // Checked right before reaping, the sets change while the scan
@@ -611,10 +689,22 @@ impl ChildReaper {
         }
     }
 
-    /// Whether runtime calls are in progress, which may still claim a
-    /// process that exited already.
+    /// Whether the sweep leaves the zombie `candidate` alone at `now` for a
+    /// call which may still claim it, at most for `max_defer` since it was
+    /// first seen, see [`ChildReaper::ORPHAN_MAX_DEFER`].
+    fn defers(&self, candidate: Candidate, now: Instant, max_defer: Duration) -> bool {
+        !self.shutting_down.load(Ordering::SeqCst)
+            && now.duration_since(candidate.first_seen) < max_defer
+            && self
+                .in_flight
+                .borrow()
+                .may_claim_before(candidate.calls_before, now)
+    }
+
+    /// Whether runtime calls are in progress.
+    #[cfg(test)]
     fn calls_in_progress(&self) -> bool {
-        *self.in_flight.borrow() > 0
+        !self.in_flight.borrow().in_progress.is_empty()
     }
 
     /// Whether a child of any thread of this process exited and was not
@@ -767,10 +857,27 @@ impl ChildReaper {
 
         // A call which was in progress while the shutdown killed the others.
         if shutting_down {
-            kill_grandchild(pid, Signal::SIGKILL);
+            Self::kill_late_grandchild(pid);
             bail!("server is shutting down")
         }
         Ok(exit_rx)
+    }
+
+    /// Kill a grandchild registered after the shutdown killed the others,
+    /// unless it is gone already, and return whether it was signalled. The
+    /// sweep does not defer orphans while the server shuts down, so the
+    /// process may have exited and got reaped before its call claimed it.
+    /// Opening a pidfd fails with `ESRCH` then, and neither the PID nor the
+    /// group of the process gets signalled. A PID which got reused that fast
+    /// only gets signalled if it belongs to an unreaped child of the server,
+    /// see [`kill_grandchild`].
+    fn kill_late_grandchild(pid: Pid) -> bool {
+        if matches!(pidfd_open(pid), Err(Errno::ESRCH)) {
+            debug!(%pid, "Not killing grandchild, it got reaped already");
+            return false;
+        }
+        kill_grandchild(pid, Signal::SIGKILL);
+        true
     }
 
     /// Forget the child of the registration `seq` under `id`. Not by its PID,
@@ -795,8 +902,11 @@ impl ChildReaper {
         Ok(())
     }
 
-    /// Kill every grandchild and wait for their watchers, at the shutdown.
-    pub async fn kill_grandchildren(&self) -> Result<()> {
+    /// Kill every grandchild and wait for their watchers and the runtime
+    /// calls in progress until the `deadline` of the shutdown. A process
+    /// which does not exit on SIGKILL, like one stuck in the kernel, must not
+    /// keep the server from stopping. It fails if they did not end in time.
+    pub async fn kill_grandchildren(&self, deadline: Instant) -> Result<()> {
         debug!("Killing grandchildren");
         // Collect only PIDs and task handles to avoid cloning entire ReapableChild
         let children: Vec<_> = {
@@ -824,37 +934,43 @@ impl ChildReaper {
         // namespace is reaped, including zombies reparented to this process.
         // The sweep keeps running while the watchers are awaited.
         self.sweep.notify_one();
-        let deadline = Instant::now() + Self::SHUTDOWN_WAIT;
-        Self::wait_for_watchers(tasks, deadline).await?;
+        let mut left = Self::wait_for_watchers(tasks, deadline).await?;
 
         // Runtime calls in progress get to finish, the server would kill a
         // runtime halfway otherwise. Their children got killed on registration.
+        // A call which hangs does not take the time of the late watchers.
         let mut in_flight = self.in_flight.subscribe();
         let in_flight_deadline = deadline.min(Instant::now() + Self::IN_FLIGHT_WAIT);
-        if time::timeout_at(in_flight_deadline, in_flight.wait_for(|n| *n == 0))
-            .await
-            .is_err()
-        {
-            warn!("Runtime calls still in progress, stopping anyway");
-        }
+        let calls_ended = time::timeout_at(
+            in_flight_deadline,
+            in_flight.wait_for(|calls| calls.in_progress.is_empty()),
+        )
+        .await
+        .is_ok();
         let late = std::mem::take(&mut *lock(&self.late_watchers)?);
-        Self::wait_for_watchers(late, deadline).await?;
-        debug!("Done killing all grandchildren");
-        Ok(())
+        left.extend(Self::wait_for_watchers(late, deadline).await?);
+
+        match (left.is_empty(), calls_ended) {
+            (true, true) => {
+                debug!("Done killing all grandchildren");
+                Ok(())
+            }
+            (true, false) => bail!("runtime calls still in progress"),
+            (false, true) => bail!("PIDs {left:?} did not exit"),
+            (false, false) => bail!("PIDs {left:?} did not exit, runtime calls still in progress"),
+        }
     }
 
-    /// How long the shutdown waits for runtime calls in progress, below the
-    /// time the clients give the whole shutdown.
+    /// How long the shutdown waits for runtime calls in progress at most,
+    /// within its deadline.
     const IN_FLIGHT_WAIT: Duration = Duration::from_secs(5);
 
-    /// How long the shutdown waits for the grandchildren and the calls in
-    /// progress in total, below the 10 seconds the clients give the whole
-    /// shutdown. A process which does not exit on SIGKILL, like one stuck in
-    /// the kernel, must not keep the server from stopping.
-    const SHUTDOWN_WAIT: Duration = Duration::from_secs(8);
-
-    /// Wait for the watchers of the grandchildren until the deadline.
-    async fn wait_for_watchers(tasks: Vec<(Pid, TaskHandle)>, deadline: Instant) -> Result<()> {
+    /// Wait for the watchers of the grandchildren until the deadline, and
+    /// return the PIDs of the ones which did not end.
+    async fn wait_for_watchers(
+        tasks: Vec<(Pid, TaskHandle)>,
+        deadline: Instant,
+    ) -> Result<Vec<i32>> {
         let mut handles = Vec::with_capacity(tasks.len());
         for (pid, task) in tasks {
             if let Some(handle) = lock(&task)?.take() {
@@ -871,15 +987,14 @@ impl ChildReaper {
             }
             .instrument(debug_span!("close", %pid))
         });
-        if time::timeout_at(deadline, join_all(waits)).await.is_err() {
-            let left: Vec<_> = handles
-                .iter()
-                .filter(|(_, handle)| !handle.is_finished())
-                .map(|(pid, _)| pid.as_raw())
-                .collect();
-            warn!("Grandchildren did not exit in time, stopping anyway: {left:?}");
+        if time::timeout_at(deadline, join_all(waits)).await.is_ok() {
+            return Ok(vec![]);
         }
-        Ok(())
+        Ok(handles
+            .iter()
+            .filter(|(_, handle)| !handle.is_finished())
+            .map(|(pid, _)| pid.as_raw())
+            .collect())
     }
 }
 
@@ -1177,7 +1292,7 @@ impl ReapableChild {
 
     fn spawn_cleanup_process(raw_cmd: &[String]) {
         let mut cleanup_cmd = Command::new(&raw_cmd[0]);
-        init::reset_oom_score(&mut cleanup_cmd);
+        init::reset_inherited(&mut cleanup_cmd);
 
         cleanup_cmd.args(&raw_cmd[1..]);
 
@@ -1368,18 +1483,13 @@ mod tests {
     use nix::sys::signal::kill;
     use std::process::Command;
 
-    /// The PID of a child of the tests.
-    fn child_pid(child: &std::process::Child) -> Result<Pid> {
-        Ok(Pid::from_raw(i32::try_from(child.id())?))
-    }
-
     /// Spawn a child which exits right away with `code` and is never waited
     /// for.
     fn spawn_zombie(code: i32) -> Result<Pid> {
         let child = Command::new("sh")
             .args(["-c", &format!("exit {code}")])
             .spawn()?;
-        let pid = child_pid(&child)?;
+        let pid = child_pid(child.id())?;
         std::mem::forget(child);
         let start = Instant::now();
         while !is_zombie(pid) {
@@ -1452,7 +1562,7 @@ mod tests {
         // The process of a call in progress which exited before the call
         // claimed it, like an exec which ends before its runtime exited,
         // stays for the call, which gets its exit code.
-        let call = reaper.begin_call()?;
+        let call = reaper.begin_call(None)?;
         let exec = spawn_zombie(3)?;
         reaper
             .sweep_orphans(&mut candidates, grace, max_defer)
@@ -1470,7 +1580,7 @@ mod tests {
 
         // A call which hangs keeps the sweep from reaping only up to the
         // bound.
-        let _call = reaper.begin_call()?;
+        let call = reaper.begin_call(None)?;
         let late = spawn_zombie(0)?;
         reaper
             .sweep_orphans(&mut candidates, grace, max_defer)
@@ -1480,13 +1590,76 @@ mod tests {
             .sweep_orphans(&mut candidates, grace, Duration::ZERO)
             .await;
         assert!(!is_zombie(late));
+        drop(call);
+
+        // A call which cannot claim a process anymore defers none, see
+        // `deferral_ends_with_the_call_or_the_bound`.
+        let past = Instant::now()
+            .checked_sub(ChildReaper::CLAIM_MARGIN + Duration::from_secs(1))
+            .context("past deadline")?;
+        let call = reaper.begin_call(Some(past))?;
+        let past_its_deadline = spawn_zombie(0)?;
+        reaper
+            .sweep_orphans(&mut candidates, grace, max_defer)
+            .await;
+        assert!(!is_zombie(past_its_deadline));
+        drop(call);
+
+        // Calls which started after the zombie was first seen cannot claim
+        // it, they do not defer it, neither after the calls it was seen with
+        // ended nor without any.
+        let call = reaper.begin_call(None)?;
+        let first = spawn_zombie(0)?;
+        reaper
+            .sweep_orphans(&mut candidates, grace, max_defer)
+            .await;
+        assert!(is_zombie(first));
+        drop(call);
+        let unrelated = reaper.begin_call(None)?;
+        reaper
+            .sweep_orphans(&mut candidates, grace, max_defer)
+            .await;
+        assert!(!is_zombie(first));
+        drop(unrelated);
+
+        let second = spawn_zombie(0)?;
+        reaper
+            .sweep_orphans(&mut candidates, Duration::from_secs(60), max_defer)
+            .await;
+        assert!(candidates.contains_key(&second));
+        let _in_progress = reaper.begin_call(None)?;
+        reaper
+            .sweep_orphans(&mut candidates, grace, max_defer)
+            .await;
+        assert!(!is_zombie(second));
+
+        // Once the server shuts down, the calls in progress cannot register
+        // a process anymore and do not defer any, like the one above which
+        // started before this zombie.
+        let shutting_down = spawn_zombie(0)?;
+        reaper
+            .sweep_orphans(&mut candidates, grace, max_defer)
+            .await;
+        assert!(is_zombie(shutting_down));
+        reaper.shutting_down.store(true, Ordering::SeqCst);
+        reaper
+            .sweep_orphans(&mut candidates, grace, max_defer)
+            .await;
+        assert!(!is_zombie(shutting_down));
+        reaper.shutting_down.store(false, Ordering::SeqCst);
 
         waitpid(claimed, None)?;
         assert!(!ChildReaper::zombie_children().0.contains(&claimed));
         assert!(!ChildReaper::has_zombie());
 
         // Without zombies the sweep forgets its candidates.
-        candidates.insert(claimed, Instant::now());
+        candidates.insert(
+            claimed,
+            Candidate {
+                first_seen: Instant::now(),
+                calls_before: 0,
+            },
+        );
         reaper
             .sweep_orphans(&mut candidates, grace, max_defer)
             .await;
@@ -1526,7 +1699,7 @@ mod tests {
     }
 
     fn spawn_sh(script: &str) -> Result<Spawned> {
-        let pid = child_pid(&Command::new("sh").args(["-c", script]).spawn()?)?;
+        let pid = child_pid(Command::new("sh").args(["-c", script]).spawn()?.id())?;
         // Not reaped yet, so the PID is still its own.
         let process = Process::open(pid);
         Ok(Spawned { pid, process })
@@ -1688,8 +1861,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let sh = spawn_sh("exec sleep 60")?;
         // As `create_child` leaves it.
-        let mut call = reaper.begin_call()?;
-        call.pending = Some(PendingPid::new(&reaper.pending, Some(sh.pid)));
+        let mut call = reaper.begin_call(None)?;
+        call.pending = Some(PendingPid::new(&reaper.pending, sh.pid));
         assert!(reaper.is_claimed(sh.pid));
 
         let child = child(sh.pid, None, &dir.path().join("exit"), &[])?;
@@ -1729,7 +1902,9 @@ mod tests {
     #[tokio::test]
     async fn registration_after_shutdown_kills_child() -> Result<()> {
         let reaper = ChildReaper::default();
-        reaper.kill_grandchildren().await?;
+        reaper
+            .kill_grandchildren(Instant::now() + Duration::from_secs(10))
+            .await?;
 
         // A call which was in progress while the shutdown killed the others.
         let dir = tempfile::tempdir()?;
@@ -1811,31 +1986,172 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn hanging_runtime_gets_killed_at_its_deadline() -> Result<()> {
+        let reaper = ChildReaper::default();
+        let dir = tempfile::tempdir()?;
+        let pidfile = dir.path().join("pid");
+        let args = ["-c".into(), "exec sleep 60".into()];
+        for terminal in [false, true] {
+            let mut io = ContainerIO::new(terminal, ContainerLog::new())?;
+            let call = RuntimeCall {
+                deadline: Some(Instant::now() + Duration::from_millis(200)),
+                ..RuntimeCall::new(Path::new("sh"), &args, &pidfile)
+            };
+            let start = Instant::now();
+            let res =
+                time::timeout(Duration::from_secs(20), reaper.create_child(call, &mut io)).await?;
+            let err = format!("{:#}", res.err().context("runtime failure expected")?);
+            assert!(err.contains("did not finish in time"), "{err}");
+            assert!(start.elapsed() < Duration::from_secs(10));
+            // The call ended with it.
+            assert!(!reaper.calls_in_progress());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hanging_runtime_gets_killed_with_its_group() -> Result<()> {
+        let reaper = ChildReaper::default();
+        let dir = tempfile::tempdir()?;
+        let pidfile = dir.path().join("pid");
+        let helper_pidfile = dir.path().join("helper");
+        // Like a runc init which the runtime started before it hung, which
+        // holds the pipes of the runtime as well.
+        let script = format!(
+            "sleep 60 & echo $! > {}; exec sleep 60",
+            helper_pidfile.display()
+        );
+        let args = ["-c".into(), script];
+        for terminal in [false, true] {
+            let mut io = ContainerIO::new(terminal, ContainerLog::new())?;
+            let call = RuntimeCall {
+                deadline: Some(Instant::now() + Duration::from_secs(2)),
+                ..RuntimeCall::new(Path::new("sh"), &args, &pidfile)
+            };
+            let start = Instant::now();
+            let res =
+                time::timeout(Duration::from_secs(20), reaper.create_child(call, &mut io)).await?;
+            let err = format!("{:#}", res.err().context("runtime failure expected")?);
+            assert!(err.contains("did not finish in time"), "{err}");
+            // Its output did not wait for the helper either.
+            assert!(start.elapsed() < ChildReaper::CONNECT_AFTER_EXIT_TIMEOUT);
+            // Reparented to the init or a subreaper above the tests.
+            let helper = read_pid_file(&helper_pidfile)?;
+            wait_until(|| is_gone(helper) || is_zombie(helper)).await;
+            std::fs::remove_file(&helper_pidfile)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn late_grandchildren_which_are_gone_are_not_signalled() -> Result<()> {
+        let mut reaped = Command::new("true").spawn()?;
+        let pid = child_pid(reaped.id())?;
+        reaped.wait()?;
+        assert!(!ChildReaper::kill_late_grandchild(pid));
+
+        let sh = spawn_sh("exec sleep 60")?;
+        assert!(ChildReaper::kill_late_grandchild(sh.pid));
+        assert!(matches!(
+            waitpid(sh.pid, None)?,
+            WaitStatus::Signaled(_, Signal::SIGKILL, _)
+        ));
+        Ok(())
+    }
+
+    /// The exit of an exec whose runtime is slow, but within its deadline,
+    /// stays for the call, a hung create does not defer orphans for longer
+    /// than the bound.
+    #[tokio::test(start_paused = true)]
+    async fn deferral_ends_with_the_call_or_the_bound() -> Result<()> {
+        let reaper = ChildReaper::default();
+        let max_defer = ChildReaper::ORPHAN_MAX_DEFER;
+        let first_seen = |reaper: &ChildReaper| Candidate {
+            first_seen: Instant::now(),
+            calls_before: reaper.in_flight.borrow().next,
+        };
+
+        // The runtime of an exec gets a minute, its process exits after
+        // 29.5s and the runtime after 31s.
+        let exec = reaper.begin_call(Some(Instant::now() + Duration::from_secs(60)))?;
+        time::advance(Duration::from_millis(29_500)).await;
+        let zombie = first_seen(&reaper);
+        time::advance(Duration::from_millis(1500)).await;
+        assert!(reaper.defers(zombie, Instant::now(), max_defer));
+        // Not past the bound since it was first seen.
+        time::advance(max_defer - Duration::from_secs(2)).await;
+        assert!(reaper.defers(zombie, Instant::now(), max_defer));
+        time::advance(Duration::from_secs(2)).await;
+        assert!(!reaper.defers(zombie, Instant::now(), max_defer));
+
+        // Not past the deadline of the call and its margin either.
+        let late = first_seen(&reaper);
+        time::advance(ChildReaper::CLAIM_MARGIN - Duration::from_millis(1500)).await;
+        assert!(reaper.defers(late, Instant::now(), max_defer));
+        time::advance(Duration::from_secs(1)).await;
+        assert!(!reaper.defers(late, Instant::now(), max_defer));
+        drop(exec);
+
+        // A create gets 10 minutes, the bound since the zombie was first
+        // seen ends the deferral first, also late in the call.
+        let create = reaper.begin_call(Some(Instant::now() + Duration::from_secs(600)))?;
+        for after in [Duration::from_secs(1), Duration::from_secs(500)] {
+            time::advance(after).await;
+            let zombie = first_seen(&reaper);
+            time::advance(max_defer - Duration::from_millis(1)).await;
+            assert!(reaper.defers(zombie, Instant::now(), max_defer));
+            time::advance(Duration::from_millis(1)).await;
+            assert!(!reaper.defers(zombie, Instant::now(), max_defer));
+        }
+
+        // An older call with a later deadline still claims, a call which
+        // started after the zombie was first seen does not.
+        let exec = reaper.begin_call(Some(Instant::now() + Duration::from_secs(1)))?;
+        let zombie = first_seen(&reaper);
+        let unrelated = reaper.begin_call(Some(Instant::now() + Duration::from_secs(60)))?;
+        time::advance(Duration::from_secs(20)).await;
+        assert!(reaper.defers(zombie, Instant::now(), max_defer));
+        drop(create);
+        assert!(!reaper.defers(zombie, Instant::now(), max_defer));
+        drop((exec, unrelated));
+        Ok(())
+    }
+
     #[tokio::test(start_paused = true)]
     async fn shutdown_waits_for_calls_in_progress() -> Result<()> {
         let reaper = Arc::new(ChildReaper::default());
-        let call = reaper.begin_call()?;
+        let call = reaper.begin_call(None)?;
+        let deadline = Instant::now() + Duration::from_secs(60);
         let shutdown = task::spawn({
             let reaper = reaper.clone();
-            async move { reaper.kill_grandchildren().await }
+            async move { reaper.kill_grandchildren(deadline).await }
         });
         time::sleep(Duration::from_secs(1)).await;
         assert!(!shutdown.is_finished());
         // No new call starts meanwhile.
-        assert!(reaper.begin_call().is_err());
+        assert!(reaper.begin_call(None).is_err());
 
         drop(call);
         shutdown.await??;
 
-        // A call which never ends does not keep the shutdown forever.
-        let _call = InFlight {
-            calls: Some(reaper.in_flight.clone()),
-            pending: None,
-        };
-        reaper.in_flight.send_modify(|n| *n += 1);
-        let start = Instant::now();
-        reaper.kill_grandchildren().await?;
-        assert_eq!(start.elapsed(), ChildReaper::IN_FLIGHT_WAIT);
+        // A call which never ends does not keep the shutdown forever, and
+        // the shutdown reports it.
+        for (deadline, waited) in [
+            (Duration::from_secs(60), ChildReaper::IN_FLIGHT_WAIT),
+            (Duration::from_secs(2), Duration::from_secs(2)),
+        ] {
+            let reaper = ChildReaper::default();
+            let _call = reaper.begin_call(None)?;
+            let start = Instant::now();
+            let err = reaper
+                .kill_grandchildren(start + deadline)
+                .await
+                .err()
+                .map(|e| format!("{e:#}"));
+            assert_eq!(err.as_deref(), Some("runtime calls still in progress"));
+            assert_eq!(start.elapsed(), waited);
+        }
         Ok(())
     }
 
@@ -1853,8 +2169,13 @@ mod tests {
         lock(&reaper.grandchildren)?.insert(id, vec![stuck]);
 
         let start = Instant::now();
-        reaper.kill_grandchildren().await?;
-        assert_eq!(start.elapsed(), ChildReaper::SHUTDOWN_WAIT);
+        let err = reaper
+            .kill_grandchildren(start + Duration::from_secs(8))
+            .await
+            .err()
+            .map(|e| format!("{e:#}"));
+        assert_eq!(err, Some(format!("PIDs [{}] did not exit", sh.pid)));
+        assert_eq!(start.elapsed(), Duration::from_secs(8));
         Ok(())
     }
 

@@ -111,9 +111,24 @@ impl Server {
         Instant::now().checked_add(Duration::from_secs(timeout_sec))
     }
 
-    /// How long the runtime of an exec_sync may take beyond its timeout
-    /// before it gets killed.
+    /// How long the runtime of an exec may take beyond its timeout before it
+    /// gets killed. It only starts the process, so this bounds an exec
+    /// without a timeout as well.
     const EXEC_RUNTIME_GRACE: Duration = Duration::from_secs(60);
+
+    /// When the runtime of an exec with the `timeout` gets killed. A runtime
+    /// which hangs must not keep its call in progress forever, which defers
+    /// the reaping of orphans and delays the shutdown.
+    pub(crate) fn exec_runtime_deadline(timeout: Option<Instant>) -> Option<Instant> {
+        timeout
+            .unwrap_or_else(Instant::now)
+            .checked_add(Self::EXEC_RUNTIME_GRACE)
+    }
+
+    /// How long the runtime of a create may take before it gets killed, well
+    /// above the time CRI-O gives the creation of a container, so that a
+    /// runtime which hangs does not keep its call in progress forever.
+    const CREATE_RUNTIME_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
     /// The idle timeout of a streaming connection, none for 0.
     fn idle_timeout(timeout_sec: u64) -> Option<Duration> {
@@ -222,6 +237,7 @@ impl conmon::Server for Server {
         );
         let leak_fds = additional_fds.split_off(additional_slots.len() as usize);
 
+        let runtime_deadline = Instant::now().checked_add(Self::CREATE_RUNTIME_TIMEOUT);
         Promise::from_future(
             async move {
                 // capnp-rpc drops this future once the client disconnects or
@@ -236,6 +252,7 @@ impl conmon::Server for Server {
                             .create_child(
                                 RuntimeCall {
                                     stdin,
+                                    deadline: runtime_deadline,
                                     env_vars,
                                     relays_notify: notify_socket.is_some(),
                                     additional_fds,
@@ -344,11 +361,11 @@ impl conmon::Server for Server {
             async move {
                 // See create_container, the exec has to be watched and its
                 // output drained even if the client goes away.
-                // The runtime may hang, it gets killed only with a grace on top
-                // of the timeout. The client gets its timeout right away, the
-                // task kills the process the runtime started once it finished.
-                let runtime_deadline =
-                    time_to_timeout.and_then(|t| t.checked_add(Self::EXEC_RUNTIME_GRACE));
+                // The runtime may hang, it gets killed with a grace on top of
+                // the timeout, or after the grace without one. The client gets
+                // its timeout right away, the task kills the process the
+                // runtime started once it finished.
+                let runtime_deadline = Self::exec_runtime_deadline(time_to_timeout);
                 let (started_tx, mut started_rx) = oneshot::channel();
                 let exec = task::spawn_local(
                     async move {
@@ -814,5 +831,20 @@ mod tests {
         assert!(Server::exec_deadline(u64::MAX).is_none());
         let deadline = Server::exec_deadline(10).expect("deadline");
         assert!(deadline > Instant::now() + Duration::from_secs(9));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exec_runtimes_always_get_a_deadline() {
+        let now = Instant::now();
+        let timeout = now + Duration::from_secs(10);
+        assert_eq!(
+            Server::exec_runtime_deadline(Some(timeout)),
+            Some(timeout + Server::EXEC_RUNTIME_GRACE)
+        );
+        // Without a timeout of the process, the runtime still gets one.
+        assert_eq!(
+            Server::exec_runtime_deadline(None),
+            Some(now + Server::EXEC_RUNTIME_GRACE)
+        );
     }
 }

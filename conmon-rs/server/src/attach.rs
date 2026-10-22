@@ -23,8 +23,8 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
-        Arc, Mutex, PoisonError,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering, fence},
     },
 };
 use tokio::{
@@ -57,10 +57,8 @@ pub struct SharedContainerAttach {
     read_half_rx: async_channel::Receiver<Bytes>,
     read_half_tx: async_channel::Sender<Bytes>,
 
-    /// The output towards the attach clients, created for the first one, a
-    /// container without any does not need its buffer.
-    write_half_tx: OutputSender,
-    output_ended: CancellationToken,
+    /// The output towards the attach clients.
+    output: Arc<OutputState>,
 
     /// Cancelled once a client with `stop_after_stdin_eof` closed its stdin,
     /// which closes the stdin of the container for good. It is separate from
@@ -103,10 +101,18 @@ impl AttachListener {
     }
 }
 
-/// The sender of the output broadcast, none until the first attach client
-/// subscribed. The lock orders the creation against the done message, see
-/// [`SharedContainerAttach::subscribe`].
-type OutputSender = Arc<Mutex<Option<Sender<Message>>>>;
+/// The output towards the attach clients, shared with the registered output
+/// of the container, see [`SharedContainerAttach::output`].
+#[derive(Debug, Default)]
+struct OutputState {
+    /// The sender of the broadcast, created for the first attach client, a
+    /// container without any does not need its buffer. It is never removed,
+    /// so the output reads it without a lock.
+    tx: OnceLock<Sender<Message>>,
+
+    /// Set once the output ended, before the done message gets sent.
+    ended: AtomicBool,
+}
 
 impl Default for SharedContainerAttach {
     fn default() -> Self {
@@ -122,8 +128,7 @@ impl SharedContainerAttach {
         Self {
             read_half_rx,
             read_half_tx,
-            write_half_tx: OutputSender::default(),
-            output_ended: CancellationToken::new(),
+            output: Arc::default(),
             stdin_closed: CancellationToken::new(),
             stop_after_stdin_eof: Arc::default(),
             terminal,
@@ -183,10 +188,7 @@ impl SharedContainerAttach {
     /// Write a buffer to all attach endpoints. Sending fails only if the last
     /// client went away meanwhile, which is no reason to stop the output.
     pub fn write(&self, m: Message) {
-        let sent = match self.write_half_tx.lock() {
-            Ok(tx) => tx.as_ref().is_some_and(|tx| tx.send(m).is_ok()),
-            Err(_) => false,
-        };
+        let sent = self.output.tx.get().is_some_and(|tx| tx.send(m).is_ok());
         if !sent {
             trace!("No attach clients left for the output");
         }
@@ -198,8 +200,7 @@ impl SharedContainerAttach {
     /// remaining output of another one.
     pub fn output(&self) -> Arc<AttachOutput> {
         Arc::new(AttachOutput {
-            write_half_tx: self.write_half_tx.clone(),
-            output_ended: self.output_ended.clone(),
+            output: self.output.clone(),
         })
     }
 
@@ -256,11 +257,7 @@ impl SharedContainerAttach {
     }
 
     fn receiver_count(&self) -> usize {
-        self.write_half_tx
-            .lock()
-            .ok()
-            .and_then(|tx| Some(tx.as_ref()?.receiver_count()))
-            .unwrap_or_default()
+        self.output.tx.get().map_or(0, Sender::receiver_count)
     }
 
     /// Subscribe to the container output sent to the attach endpoints. The
@@ -268,37 +265,37 @@ impl SharedContainerAttach {
     /// message may have been sent before subscribing and the receiver only
     /// gets what is still queued.
     pub fn subscribe(&self) -> (Receiver<Message>, bool) {
-        let rx = {
-            let mut tx = self
-                .write_half_tx
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            tx.get_or_insert_with(|| broadcast::channel(OUTPUT_CHANNEL_SIZE).0)
-                .subscribe()
-        };
+        let rx = self
+            .output
+            .tx
+            .get_or_init(|| broadcast::channel(OUTPUT_CHANNEL_SIZE).0)
+            .subscribe();
         // Check only after subscribing, otherwise the done message could be
-        // sent in between.
-        (rx, self.output_ended.is_cancelled())
+        // sent in between. Pairs with the fence in `AttachOutput::drop`: of
+        // the two fences, the end of the output either passes its fence
+        // first, then this sees the end, or last, then it sees the sender and
+        // sends the done message after this subscribed.
+        fence(Ordering::SeqCst);
+        (rx, self.output.ended.load(Ordering::SeqCst))
     }
 }
 
 #[derive(Debug)]
 /// The container output registered by `SharedContainerAttach::output`.
 pub struct AttachOutput {
-    write_half_tx: OutputSender,
-    output_ended: CancellationToken,
+    output: Arc<OutputState>,
 }
 
 impl Drop for AttachOutput {
     fn drop(&mut self) {
-        // Cancel before sending, so that an attach client which subscribes
-        // after the done message still sees that the output ended.
-        self.output_ended.cancel();
+        // Set before sending, so that an attach client which subscribes
+        // after the done message still sees that the output ended, see
+        // `SharedContainerAttach::subscribe`.
+        self.output.ended.store(true, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
         // Sending fails only without attach clients, which then need no done
         // message.
-        if let Ok(tx) = self.write_half_tx.lock()
-            && let Some(tx) = tx.as_ref()
-        {
+        if let Some(tx) = self.output.tx.get() {
             let _ = tx.send(Message::Done);
         }
     }
@@ -902,6 +899,31 @@ mod tests {
 
         assert_eq!(rx.recv().await?, Message::Done);
         assert!(rx.try_recv().is_err());
+        Ok(())
+    }
+
+    /// An attach client which subscribes while the output ends either gets
+    /// the done message or learns that the output ended.
+    #[test]
+    fn subscribe_racing_the_end_sees_it() -> Result<()> {
+        for _ in 0..2000 {
+            let attach = SharedContainerAttach::default();
+            let output = attach.output();
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let subscriber = std::thread::spawn({
+                let (attach, barrier) = (attach.clone(), barrier.clone());
+                move || {
+                    barrier.wait();
+                    attach.subscribe()
+                }
+            });
+            barrier.wait();
+            drop(output);
+            let (mut rx, ended) = subscriber
+                .join()
+                .map_err(|_| anyhow::format_err!("subscriber panicked"))?;
+            assert!(ended || rx.try_recv() == Ok(Message::Done));
+        }
         Ok(())
     }
 

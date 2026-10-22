@@ -27,7 +27,19 @@ pub fn read_pid_file(path: &Path) -> Result<Pid> {
 
 /// Parse a PID, which is positive.
 fn parse_pid(pid: &str) -> Result<Pid> {
-    let pid = pid.trim().parse()?;
+    positive_pid(pid.trim().parse()?)
+}
+
+/// The PID of a spawned child by the ID which the standard library reports,
+/// or tokio, which has none anymore once the child got reaped.
+pub fn child_pid(id: impl Into<Option<u32>>) -> Result<Pid> {
+    let id = id.into().context("child got reaped already")?;
+    positive_pid(i32::try_from(id).with_context(|| format!("invalid PID {id}"))?)
+}
+
+/// A PID, which is positive. Zero and negative numbers refer to process
+/// groups when signalling.
+fn positive_pid(pid: i32) -> Result<Pid> {
     if pid <= 0 {
         bail!("invalid PID {pid}")
     }
@@ -106,9 +118,10 @@ fn group_has_child(pgid: Pid) -> bool {
 }
 
 /// Whether the process group of a child gets signalled. Group 1 would end up
-/// as kill(-1), which kills everything conmon-rs is allowed to, and a child
-/// which did not get its own group shares the one of this server, which
-/// would kill it as well.
+/// as kill(-1), which kills everything conmon-rs is allowed to, and the group
+/// of this server would kill it as well. A container process which did not
+/// get a group of its own shares the one of its runtime, which runs in a
+/// group of its own.
 pub fn signals_group(pgid: Pid, own_pgid: Option<Pid>) -> bool {
     pgid.as_raw() > 1 && Some(pgid) != own_pgid
 }
@@ -298,9 +311,27 @@ mod tests {
     }
 
     #[test]
+    fn child_ids_are_positive_pids() {
+        let pid = |id: Option<u32>| child_pid(id).ok().map(Pid::as_raw);
+        assert_eq!(pid(Some(42)), Some(42));
+        assert_eq!(child_pid(42).ok(), Some(Pid::from_raw(42)));
+        assert_eq!(pid(Some(i32::MAX as u32)), Some(i32::MAX));
+        // A reaped child has none, zero and what does not fit would refer
+        // to process groups.
+        assert_eq!(pid(None), None);
+        assert_eq!(pid(Some(0)), None);
+        assert_eq!(pid(Some(i32::MAX as u32 + 1)), None);
+        assert_eq!(pid(Some(u32::MAX)), None);
+        for id in [None, Some(0), Some(u32::MAX)] {
+            let err = child_pid(id).err().map(|e| format!("{e:#}"));
+            assert!(err.is_some_and(|e| !e.is_empty()));
+        }
+    }
+
+    #[test]
     fn children_are_found_by_scan() -> Result<()> {
         let mut child = std::process::Command::new("sleep").arg("60").spawn()?;
-        let pid = Pid::from_raw(i32::try_from(child.id())?);
+        let pid = child_pid(child.id())?;
         let found = children_by_scan().contains(&pid);
         let zombie = is_zombie(pid);
         child.kill()?;
@@ -328,7 +359,7 @@ mod tests {
                 .args(["-c", "sleep 60 & wait"])
                 .process_group(0)
                 .spawn()?;
-            let pid = Pid::from_raw(i32::try_from(child.id())?);
+            let pid = child_pid(child.id())?;
             let process = if use_pidfd {
                 Process::open(pid)
             } else {
@@ -350,7 +381,7 @@ mod tests {
             .arg("60")
             .process_group(0)
             .spawn()?;
-        let pgid = Pid::from_raw(i32::try_from(leader.id())?);
+        let pgid = child_pid(leader.id())?;
         let mut member = std::process::Command::new("sleep")
             .arg("60")
             .process_group(pgid.as_raw())

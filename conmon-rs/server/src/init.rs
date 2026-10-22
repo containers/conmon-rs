@@ -1,7 +1,11 @@
 use anyhow::{Result, bail};
 use nix::{
+    errno::Errno,
     fcntl::{OFlag, open},
-    sys::stat::{Mode, umask},
+    sys::{
+        prctl,
+        stat::{Mode, umask},
+    },
     unistd::write,
 };
 use std::{
@@ -9,7 +13,10 @@ use std::{
     fs::OpenOptions,
     io::{ErrorKind, Write},
     path::Path,
-    sync::OnceLock,
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio::process::Command;
 
@@ -95,7 +102,38 @@ pub fn configure_malloc() {
     }
 }
 
-/// The OOM score adjustment the server started with, see [`reset_oom_score`].
+/// Whether the server turned transparent huge pages off for itself, which
+/// the processes it runs must not inherit, see [`disable_thp`].
+static THP_DISABLED: AtomicBool = AtomicBool::new(false);
+
+/// Turn transparent huge pages off for the process, as early as possible.
+/// On AArch64 glibc asks for them for its heap by default, so the first
+/// growth of the heap beyond a 2 MiB boundary costs 2 MiB resident, which a
+/// server per pod does not need. mallopt cannot turn that off, and the
+/// tunable which can takes effect only from the start of the process. Huge
+/// pages which were already allocated stay.
+///
+/// The setting gets inherited and kept across exec, so the runtimes and the
+/// cleanup commands get the one the server started with, see
+/// [`reset_inherited`]. A setting of whoever started the server stays.
+pub fn disable_thp() {
+    match prctl::get_thp_disable() {
+        Ok(false) => {}
+        // Already disabled, or not supported, like under qemu-user.
+        Ok(true) | Err(Errno::EINVAL) => return,
+        Err(e) => {
+            // Before the logging gets set up.
+            eprintln!("Unable to get the transparent huge pages setting: {e}");
+            return;
+        }
+    }
+    match prctl::set_thp_disable(true) {
+        Ok(()) => THP_DISABLED.store(true, Ordering::Relaxed),
+        Err(e) => eprintln!("Unable to disable transparent huge pages: {e}"),
+    }
+}
+
+/// The OOM score adjustment the server started with, see [`reset_inherited`].
 static INHERITED_OOM_SCORE: OnceLock<Box<[u8]>> = OnceLock::new();
 
 /// Remember the OOM score adjustment the server started with, before it
@@ -109,28 +147,37 @@ pub fn save_oom_score() {
     }
 }
 
-/// Give a child the OOM score adjustment the server started with instead of
-/// the one it protects itself with. The runtimes pass theirs on to the
+/// Give a child the OOM score adjustment and the transparent huge pages
+/// setting the server started with instead of its own, see
+/// [`save_oom_score`] and [`disable_thp`]. The runtimes pass them on to the
 /// container processes, an exec would be the last process the kernel picks
-/// otherwise. conmon resets its runtime the same way. Only for the runtimes
-/// and cleanup commands, the pause process keeps the one of the server.
+/// otherwise. conmon resets the OOM score of its runtime the same way. Only
+/// for the runtimes and cleanup commands, the pause process keeps the ones
+/// of the server.
 #[expect(unsafe_code, reason = "a pre_exec hook")]
-pub fn reset_oom_score(cmd: &mut Command) {
-    let Some(score) = INHERITED_OOM_SCORE.get() else {
+pub fn reset_inherited(cmd: &mut Command) {
+    let score: Option<&'static [u8]> = INHERITED_OOM_SCORE.get().map(|score| &**score);
+    let thp_disabled = THP_DISABLED.load(Ordering::Relaxed);
+    if score.is_none() && !thp_disabled {
         return;
-    };
-    let score: &'static [u8] = score;
-    // SAFETY: the hook allocates nothing and only calls open, write and
-    // close, which are async signal safe. Raising the score needs no
-    // privileges, a failure keeps the inherited one, as before.
+    }
+    // SAFETY: the hook allocates nothing and only calls open, write, close
+    // and prctl, which are async signal safe. Raising the score and enabling
+    // huge pages need no privileges, a failure keeps the setting of the
+    // server, as before.
     unsafe {
         cmd.pre_exec(move || {
-            if let Ok(fd) = open(
-                c"/proc/self/oom_score_adj",
-                OFlag::O_WRONLY | OFlag::O_CLOEXEC,
-                Mode::empty(),
-            ) {
+            if let Some(score) = score
+                && let Ok(fd) = open(
+                    c"/proc/self/oom_score_adj",
+                    OFlag::O_WRONLY | OFlag::O_CLOEXEC,
+                    Mode::empty(),
+                )
+            {
                 let _ = write(fd, score);
+            }
+            if thp_disabled {
+                let _ = prctl::set_thp_disable(false);
             }
             Ok(())
         });
@@ -157,6 +204,47 @@ mod tests {
         // Anything else fails.
         assert!(set_oom_score_at(&dir.path().join("missing").join("file"), "0").is_err());
         assert!(set_oom_score_at(dir.path(), "0").is_err());
+        Ok(())
+    }
+
+    /// The transparent huge pages setting of a process, true if enabled.
+    fn thp_enabled(status: &str) -> Option<bool> {
+        let line = status.lines().find(|l| l.starts_with("THP_enabled:"))?;
+        Some(line.split_whitespace().nth(1)? == "1")
+    }
+
+    async fn child_thp_enabled(reset: bool) -> Result<Option<bool>> {
+        let mut cmd = Command::new("cat");
+        cmd.arg("/proc/self/status");
+        if reset {
+            reset_inherited(&mut cmd);
+        }
+        let output = cmd.output().await?;
+        Ok(thp_enabled(&String::from_utf8(output.stdout)?))
+    }
+
+    /// Changes the setting of the test process, which only its children
+    /// inherit, and restores it afterwards. The runtimes which other tests
+    /// spawn meanwhile get it reset, which does not matter to them.
+    #[tokio::test]
+    async fn runtimes_do_not_inherit_disabled_thp() -> Result<()> {
+        if thp_enabled(&fs::read_to_string("/proc/self/status")?) != Some(true)
+            || prctl::get_thp_disable() != Ok(false)
+        {
+            // Disabled by whoever started the tests, which stays, or not
+            // supported by the kernel.
+            return Ok(());
+        }
+        disable_thp();
+        let disabled = thp_enabled(&fs::read_to_string("/proc/self/status")?);
+        let inherited = child_thp_enabled(false).await;
+        let reset = child_thp_enabled(true).await;
+        prctl::set_thp_disable(false)?;
+        THP_DISABLED.store(false, Ordering::Relaxed);
+
+        assert_eq!(disabled, Some(false));
+        assert_eq!(inherited?, Some(false));
+        assert_eq!(reset?, Some(true));
         Ok(())
     }
 }
