@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	errConnectionBroken        = errors.New("fd socket connection broken by an interrupted request")
+	errConnectionBroken        = errors.New("fd socket connection broken by an earlier request")
 	errTooManyFileDescriptors  = errors.New("too many file descriptors")
 	errResponseTooShort        = errors.New("response too short")
 	errResponseIDDoesNotMatch  = errors.New("response id does not match")
@@ -51,8 +51,9 @@ type RemoteFDs struct {
 	mu    sync.Mutex
 	reqID uint32
 
-	// A request which got cancelled midway leaves its response in the
-	// connection, every later request would read the wrong one.
+	// A request which got cancelled or failed after it was sent may leave
+	// its response in the connection, every later request would read the
+	// wrong one.
 	broken bool
 }
 
@@ -75,9 +76,9 @@ func (r *RemoteFDs) Send(fds ...int) ([]RemoteFD, error) {
 
 // SendContext sends file descriptors to the server. The context bounds the
 // wait for the response, not the wait for a concurrent request. A request
-// interrupted by the context breaks the connection, which also drops the
-// slots of earlier requests the server still holds, every later request
-// fails with an error.
+// interrupted by the context, or one which got no valid response, breaks
+// the connection, which also drops the slots of earlier requests the server
+// still holds, every later request fails with an error.
 func (r *RemoteFDs) SendContext(ctx context.Context, fds ...int) ([]RemoteFD, error) {
 	if len(fds) == 0 {
 		return nil, nil
@@ -110,13 +111,21 @@ func (r *RemoteFDs) SendContext(ctx context.Context, fds ...int) ([]RemoteFD, er
 	// The interrupt may have fired after the response arrived, either way
 	// the pairing of requests and responses is gone.
 	if !stop() {
-		r.broken = true
-		r.conn.Close()
+		r.breakConn()
 
 		return nil, fmt.Errorf("request interrupted: %w", ctx.Err())
 	}
 
 	return remote, err
+}
+
+// breakConn closes the connection, whose requests and responses may not
+// pair up anymore.
+func (r *RemoteFDs) breakConn() {
+	if !r.broken {
+		r.broken = true
+		r.conn.Close()
+	}
 }
 
 func (r *RemoteFDs) send(fds []int) ([]RemoteFD, error) {
@@ -126,11 +135,26 @@ func (r *RemoteFDs) send(fds []int) ([]RemoteFD, error) {
 	b := binary.LittleEndian.AppendUint64(nil, uint64(reqID)<<numFDsBits|uint64(len(fds)))
 	oob := syscall.UnixRights(fds...)
 
+	// A packet is sent as a whole or not at all, a failed one leaves no
+	// response behind.
 	_, _, err := r.conn.WriteMsgUnix(b, oob, nil)
 	if err != nil {
 		return nil, fmt.Errorf("send request: %w", err)
 	}
 
+	slots, err := r.receive(reqID, len(fds))
+
+	// A server error is a complete response, anything else leaves the
+	// pairing in doubt.
+	if err != nil && !errors.As(err, new(serverError)) {
+		r.breakConn()
+	}
+
+	return slots, err
+}
+
+// receive reads the response of the request.
+func (r *RemoteFDs) receive(reqID uint32, numRequested int) ([]RemoteFD, error) {
 	buf := make([]byte, msgBufferSize)
 
 	n, err := r.conn.Read(buf)
@@ -156,8 +180,13 @@ func (r *RemoteFDs) send(fds []int) ([]RemoteFD, error) {
 		return nil, serverError(buf)
 	}
 
-	if numFDs != len(fds) {
-		return nil, fmt.Errorf("%w: %d (expected %d)", errNumberOfFDsDoesNotMatch, numFDs, len(fds))
+	if numFDs != numRequested {
+		return nil, fmt.Errorf(
+			"%w: %d (expected %d)",
+			errNumberOfFDsDoesNotMatch,
+			numFDs,
+			numRequested,
+		)
 	}
 
 	if len(buf) != numFDs*uint64Bytes {
@@ -177,7 +206,7 @@ func (r *RemoteFDs) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// An interrupted request closed the connection already.
+	// A broken connection got closed already.
 	if r.broken {
 		return nil
 	}

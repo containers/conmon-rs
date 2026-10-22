@@ -28,15 +28,21 @@ const (
 
 var errTerminalSizeNil = errors.New("terminal size cannot be nil")
 
-// AttachStreams are the stdio streams for the AttachConfig.
+// AttachStreams are the stdio streams for the AttachConfig. The attach
+// closes them once it is connected to the container and PreAttachFunc
+// succeeded. The caller closes them if AttachContainer fails before that,
+// or with Passthrough.
 type AttachStreams struct {
-	// Standard input stream, can be nil.
+	// Standard input stream, can be nil. It gets read until EOF or the
+	// detach keys, and closed once the attach ends or the client shuts
+	// down, which also ends a read blocked on it.
 	Stdin *In
 
-	// Standard output stream, can be nil.
+	// Standard output stream, can be nil. It gets closed once the output
+	// ends, see AttachContainer.
 	Stdout *Out
 
-	// Standard error stream, can be nil.
+	// Standard error stream, can be nil. It gets closed like Stdout.
 	Stderr *Out
 }
 
@@ -174,14 +180,20 @@ func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) e
 			return nil
 		},
 	)
-	defer free()
 
 	result, err := future.Struct()
 	if err != nil {
+		free()
+
 		return fmt.Errorf("get result: %w", err)
 	}
 
-	if _, err := result.Response(); err != nil {
+	_, err = result.Response()
+
+	// The answer is not needed during the attach, the server can drop it.
+	free()
+
+	if err != nil {
 		return fmt.Errorf("get response: %w", err)
 	}
 
