@@ -14,6 +14,28 @@ dependencies:
       - path: Makefile
         match: "GOLANGCI_LINT_VERSION :="
 
+  - name: prettier
+    version: 3.9.10
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: "prettier_version:"
+      - path: Makefile
+        match: "PRETTIER_VERSION :="
+
+  - name: rust
+    version: 1.99.1
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: "RUST_VERSION:"
+      - path: .github/workflows/gh-pages.yml
+        match: "RUST_VERSION:"
+
+  - name: shellcheck
+    version: 0.11.0
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: "SHELLCHECK_VERSION:"
+
   - name: zeitgeist
     version: 0.8.0
     refPaths:

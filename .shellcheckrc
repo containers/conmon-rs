@@ -1,0 +1,3 @@
+# Scripts source their neighbors relative to their own directory.
+source-path=SCRIPTDIR
+external-sources=true

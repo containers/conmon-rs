@@ -26,6 +26,7 @@ SPEC_FILE := rpm/conmon-rs.spec
 PREFIX ?= /usr
 CI_TAG ?=
 GOLANGCI_LINT_VERSION := v2.15.0
+PRETTIER_VERSION := 3.9.10
 ZEITGEIST_VERSION := v0.8.0
 
 COLOR:=\\033[36m
@@ -68,8 +69,9 @@ release-static: ## Build the static release binary for the local architecture us
 
 ##@ Test targets:
 .PHONY: unit
-unit: ## Run the unit tests.
+unit: ## Run the unit tests with the default and with all features.
 	cargo test --no-fail-fast
+	cargo test --no-fail-fast --all-features
 
 .PHONY: integration
 integration: .install.ginkgo $(if $(CONMON_BINARY),,release) ## Run the integration tests using $CONMON_BINARY or the release binary.
@@ -82,7 +84,7 @@ integration: .install.ginkgo $(if $(CONMON_BINARY),,release) ## Run the integrat
 ##@ Verify targets:
 
 .PHONY: lint
-lint: lint-rust lint-go ## Lint Rust and Go sources.
+lint: lint-rust lint-go lint-shell ## Lint Rust, Go and shell sources.
 
 .PHONY: lint-rust
 lint-rust: ## Lint the Rust sources.
@@ -95,6 +97,11 @@ lint-go: .install.golangci-lint ## Lint the Go sources.
 	$(GOTOOLS_BINDIR)/golangci-lint version
 	$(GOTOOLS_BINDIR)/golangci-lint linters
 	GL_DEBUG=gocritic $(GOTOOLS_BINDIR)/golangci-lint run
+
+.PHONY: lint-shell
+lint-shell: ## Lint the shell scripts, the files whose first line is a sh or bash shebang.
+	shellcheck $$(git ls-files -z | xargs -0 awk \
+		'FNR == 1 && $$0 ~ "^#!(/usr/bin/env |/bin/)(ba)?sh$$" { print FILENAME } { nextfile }')
 
 .PHONY: verify-dependencies
 verify-dependencies: $(GOTOOLS_BINDIR)/zeitgeist ## Verify the local dependencies.
@@ -117,8 +124,8 @@ verify-prettier: prettier ## Run prettier on the project and fail on changes.
 
 .PHONY: prettier
 prettier: ## Prettify supported files.
-	$(CONTAINER_RUNTIME) run --rm -v ${PWD}:/w:z -w /w --entrypoint bash node:latest -c \
-		'npm install -g prettier && prettier -w .'
+	$(CONTAINER_RUNTIME) run --rm -v ${PWD}:/w:z -w /w --entrypoint npx docker.io/library/node:lts-slim \
+		--yes prettier@$(PRETTIER_VERSION) -w .
 
 # ginkgo publishes no binaries, an installed one of the version of go.mod is
 # kept, which CI caches.
