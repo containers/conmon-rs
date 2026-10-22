@@ -9,7 +9,7 @@ use std::{
 };
 use tokio::{net::UnixListener, time};
 use tokio_seqpacket::UnixSeqpacketListener;
-use tracing::error;
+use tracing::{debug, error};
 
 /// How long an accept loop pauses after a failed accept.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
@@ -17,12 +17,23 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 /// Handle a failed accept of a listener which keeps going. Most errors, like
 /// running out of descriptors, fail every accept until something changes, so
 /// pause instead of spinning. Only a connection which failed on its own is
-/// no reason to wait.
+/// no reason to wait, or to tell about it beyond the debug log.
 pub async fn accept_failed(e: &io::Error) {
-    error!("Unable to accept connection: {e}");
-    if !matches!(e.raw_os_error(), Some(libc::ECONNABORTED | libc::EPROTO)) {
-        time::sleep(ACCEPT_BACKOFF).await;
+    if connection_failed(e) {
+        debug!("Unable to accept connection: {e}");
+        return;
     }
+    error!("Unable to accept connection: {e}");
+    time::sleep(ACCEPT_BACKOFF).await;
+}
+
+/// Whether an accept failed for the connection only, which the client
+/// aborted or reset before it got accepted.
+fn connection_failed(e: &io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(libc::ECONNABORTED | libc::ECONNREFUSED | libc::ECONNRESET | libc::EPROTO)
+    )
 }
 
 #[cfg(test)]
@@ -155,6 +166,22 @@ mod tests {
 
     fn permission_denied<T>() -> Result<T, io::Error> {
         Err(io::Error::new(ErrorKind::PermissionDenied, ""))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_failed_connections_accept_at_once() {
+        let start = time::Instant::now();
+        for errno in [
+            libc::ECONNABORTED,
+            libc::ECONNREFUSED,
+            libc::ECONNRESET,
+            libc::EPROTO,
+        ] {
+            accept_failed(&io::Error::from_raw_os_error(errno)).await;
+        }
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        accept_failed(&io::Error::from_raw_os_error(libc::EMFILE)).await;
+        assert_eq!(start.elapsed(), ACCEPT_BACKOFF);
     }
 
     #[tokio::test]

@@ -1,10 +1,13 @@
 //! The idle timeout of streaming connections.
 
 use std::{
-    future,
+    future::{self, Future},
     sync::{Arc, Mutex, PoisonError},
 };
-use tokio::time::{self, Duration, Instant};
+use tokio::{
+    select,
+    time::{self, Duration, Instant},
+};
 
 /// When a connection was active the last time, by what the client sent or
 /// got. Clones share the time.
@@ -41,6 +44,25 @@ impl Activity {
             time::sleep_until(deadline).await;
         }
     }
+
+    /// Run `run` until it is done, or until the connection was not active
+    /// for the timeout, which gives `None`. `on_idle` runs before `run` gets
+    /// dropped then.
+    pub async fn until_idle<T>(
+        &self,
+        timeout: Option<Duration>,
+        run: impl Future<Output = T>,
+        on_idle: impl FnOnce(),
+    ) -> Option<T> {
+        let idle = async {
+            self.idle(timeout).await;
+            on_idle();
+        };
+        select! {
+            output = run => Some(output),
+            () = idle => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -61,6 +83,38 @@ mod tests {
         time::timeout(Duration::from_secs(2), activity.idle(timeout))
             .await
             .expect("idle");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runs_end_with_the_idle_timeout() {
+        let activity = Activity::new();
+        let timeout = Some(Duration::from_secs(60));
+        let done = activity
+            .until_idle(timeout, time::sleep(Duration::from_secs(30)), || {
+                panic!("idle")
+            })
+            .await;
+        assert_eq!(done, Some(()));
+
+        // The run sees the idle callback before it gets dropped.
+        let idle = Arc::new(Mutex::new(false));
+        struct Check(Arc<Mutex<bool>>);
+        impl Drop for Check {
+            fn drop(&mut self) {
+                assert!(*self.0.lock().unwrap());
+            }
+        }
+        let check = Check(idle.clone());
+        let run = async move {
+            let _check = check;
+            future::pending::<()>().await
+        };
+        let start = Instant::now();
+        let result = activity
+            .until_idle(timeout, run, || *idle.lock().unwrap() = true)
+            .await;
+        assert_eq!(result, None);
+        assert_eq!(start.elapsed(), Duration::from_secs(30));
     }
 
     #[tokio::test(start_paused = true)]

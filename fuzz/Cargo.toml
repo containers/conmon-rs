@@ -9,7 +9,6 @@ rust-version.workspace = true
 cargo-fuzz = true
 
 [dependencies]
-bytes = { workspace = true }
 conmonrs = { path = "../conmon-rs/server", features = ["fuzzing"] }
 libfuzzer-sys = "0.4.10"
 
@@ -37,6 +36,27 @@ bench = false
 [[bin]]
 name = "resize_events"
 path = "fuzz_targets/resize_events.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "spdy_connection"
+path = "fuzz_targets/spdy_connection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "port_forward_query"
+path = "fuzz_targets/port_forward_query.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upgrade_headers"
+path = "fuzz_targets/upgrade_headers.rs"
 test = false
 doc = false
 bench = false

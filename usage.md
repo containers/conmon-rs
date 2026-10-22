@@ -117,7 +117,10 @@ work unchanged.
 `serveExecContainer`, `serveAttachContainer` and `servePortForwardContainer`
 return a URL on a server the conmonrs process starts on demand on `127.0.0.1`
 with a random port. Each URL carries a one time token which is valid for a
-bounded time. CRI-O passes these URLs to the kubelet, which connects directly.
+minute. At most 1000 URLs of each kind (exec and attach, port forward) wait for
+their client at once, a request beyond that fails, like the kubelet fails
+requests beyond its limit. CRI-O passes these URLs to the kubelet, which
+connects directly.
 
 Exec and attach speak the Kubernetes remote command protocols on the same
 URL. Over WebSocket, `v5.channel.k8s.io` is what kubectl uses: the first byte
@@ -138,15 +141,21 @@ Streams for stdout or stderr which come after the start end right away. The
 server supports `v4.channel.k8s.io`, `v3`, `v2` and `channel.k8s.io`, the order
 of the client decides. From v4 on, the final status is JSON, before only a
 failure is reported as text. A client which does not take the end of a session
-within a few seconds gets its connection closed. With `idleTimeoutSec`, a
-session whose connection got no frame of the client and no data either way for
-that long fails with an error status, an exec process gets killed then. The
-time the runtime takes to start an exec, WebSocket pings and pongs (like the
-heartbeat of client-go), the pings of the server and the answers to them and
-other control frames of the server do not count. Stdin counts once the server
-reads it. Stdin which backs up behind a process which does not read it stops
-the server from reading the client, which may then go idle, like a spdystream
-connection whose reader waits.
+within a few seconds gets its connection closed. The server then reads and
+drops what the client still sends until it answered the WebSocket close or
+closed the SPDY connection, for up to 5 seconds, as closing a connection with
+unread input resets it, which may lose the end of the session. Port forwarding
+does the same. With `idleTimeoutSec`, a session whose connection got no frame of
+the client and no data either way for that long fails with an error status, an
+exec process gets killed then. The time the runtime takes to start an exec,
+WebSocket pings and pongs (like the heartbeat of client-go), the pings of the
+server and the answers to them and other control frames of the server do not
+count. Stdin counts once the server reads it. Stdin which backs up behind a
+process which does not read it stops the server from reading the client, which
+may then go idle, like a spdystream connection whose reader waits. A session
+holds at most about 3 MiB of stdin which the process did not take yet, on top of
+what a SPDY connection holds (see port forwarding below), empty stdin messages
+count as nothing.
 
 Port forwarding speaks the Kubernetes `portforward.k8s.io` protocol over
 SPDY/3.1, which the kubelet uses towards the runtime also when the client
@@ -154,8 +163,11 @@ connected with a WebSocket. Per forwarded connection the client opens an
 `error` and a `data` stream with the `port` and `requestID` headers. The
 server connects to that port on `localhost` within the network namespace of
 the request and copies between the connection and the data stream, a failure
-is reported as text on the error stream. Only what the SPDY implementation of
-Kubernetes uses is supported, there is no flow control: the server holds about
+is reported as text on the error stream, what the client sends on it gets
+dropped. Only what the SPDY implementation of
+Kubernetes uses is supported: a connection has at most 1024 streams, which
+count until the server let go of them, also after a reset, and a stream at most
+32 headers in 8 KiB. There is no flow control: the server holds about
 4 MiB of what the client sent on a connection, plus the frame it waits to
 place, and stops reading it until the streams took their data. What a
 forwarded connection sends while it gets established, up to 1 MiB, moves into a

@@ -39,6 +39,35 @@ pub fn decode(base64: bool, message: Bytes) -> Option<(u8, Bytes)> {
     }
 }
 
+/// The entry points of the fuzz targets.
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing {
+    use super::*;
+
+    /// Decode the input as a message of a client. A message of the server
+    /// with its first byte as the channel and the rest as the payload decodes
+    /// to them again, for channels which base64 messages can carry as a
+    /// single ASCII digit offset.
+    pub fn channel(base64: bool, input: &[u8]) {
+        let _ = decode(base64, Bytes::copy_from_slice(input));
+        let Some((&channel, payload)) = input.split_first() else {
+            return;
+        };
+        if base64 && channel > 0x7f - b'0' {
+            return;
+        }
+        let message = match message(base64, channel, payload) {
+            Message::Binary(data) => data,
+            Message::Text(text) => Bytes::from(text),
+            message => panic!("unexpected message {message:?}"),
+        };
+        assert_eq!(
+            decode(base64, message),
+            Some((channel, Bytes::copy_from_slice(payload)))
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

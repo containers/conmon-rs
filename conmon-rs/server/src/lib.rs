@@ -78,9 +78,13 @@ pub mod conmon_capnp {
 #[doc(hidden)]
 pub mod fuzzing {
     pub use crate::{
-        channel::decode as channel_decode,
+        channel::fuzzing::channel,
+        port_forward::fuzzing::query_ports,
         remotecommand::ResizeEvents,
-        spdy::fuzzing::{frames as spdy_frames, header_block as spdy_header_block},
+        spdy::fuzzing::{
+            connection as spdy_connection, frames as spdy_frames, header_block as spdy_header_block,
+        },
+        streaming_server::fuzzing::upgrade_headers,
     };
 }
 

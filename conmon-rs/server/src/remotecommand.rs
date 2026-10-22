@@ -11,8 +11,8 @@ use crate::{
     channel,
     idle::Activity,
     spdy::{Connection, ConnectionHandle, Headers, Stream, StreamReceiver, StreamSender},
-    stream_protocol::{STREAM_CREATION_TIMEOUT, STREAM_TYPE_HEADER},
-    web::{CloseCode, CloseFrame, Message, WebSocket},
+    stream_protocol::{ClientBytes, ClientStr, STREAM_CREATION_TIMEOUT, STREAM_TYPE_HEADER},
+    web::{self, Message, WebSocket},
 };
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::{Bytes, BytesMut};
@@ -34,7 +34,7 @@ use tokio::{
     time::{self, Duration},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace};
 
 pub const STDIN_BYTE: u8 = 0;
 pub const STDOUT_BYTE: u8 = 1;
@@ -183,13 +183,13 @@ impl Framing {
                 return None;
             }
             Message::Close(c) => {
-                if let Some(cf) = c {
-                    info!(
-                        "Got websocket close with code {} and reason `{}`",
-                        cf.code, cf.reason
-                    );
-                } else {
-                    warn!("Got close message without close frame");
+                match c {
+                    Some(cf) => info!(
+                        "Got websocket close with code {} and reason {:?}",
+                        cf.code,
+                        ClientStr(&cf.reason)
+                    ),
+                    None => info!("Got websocket close without close frame"),
                 }
                 return Some(ClientEvent::Closed);
             }
@@ -210,22 +210,22 @@ impl Framing {
                 trace!("Got unknown binary data");
                 return None;
             };
-            debug!("Got {} binary bytes", data.len());
+            trace!("Got {} binary bytes", data.len());
             return match channel {
-                STDIN_BYTE => Some(ClientEvent::Stdin(Stdin::Data(data.slice(1..)))),
+                STDIN_BYTE => Stdin::data(data.slice(1..)).map(ClientEvent::Stdin),
                 // Only stdin can be closed, the message names it, like
                 // `[CLOSE_BYTE, STDIN_BYTE]`.
                 CLOSE_BYTE if data[..] == [CLOSE_BYTE, STDIN_BYTE] => {
-                    info!("Got close message");
+                    debug!("Got close message");
                     Some(ClientEvent::Stdin(Stdin::Close))
                 }
                 CLOSE_BYTE => {
-                    warn!("Ignoring close message {:?}", &data[1..]);
+                    debug!("Ignoring close message {:?}", ClientBytes(&data[1..]));
                     None
                 }
                 RESIZE_BYTE => Some(ClientEvent::Resize(data.slice(1..))),
                 x => {
-                    warn!("Unknown start byte for stdin: {x}");
+                    debug!("Ignoring message for unknown channel {x}");
                     None
                 }
             };
@@ -234,7 +234,7 @@ impl Framing {
         // Before v5 there is no close signal, only stdin and resize events
         // come from the client.
         match channel::decode(self.base64, data)? {
-            (STDIN_BYTE, payload) => Some(ClientEvent::Stdin(Stdin::Data(payload))),
+            (STDIN_BYTE, payload) => Stdin::data(payload).map(ClientEvent::Stdin),
             (RESIZE_BYTE, payload) => Some(ClientEvent::Resize(payload)),
             (channel, _) => {
                 trace!("Ignoring message for channel {channel}");
@@ -266,11 +266,9 @@ pub enum Stdin {
 }
 
 impl Stdin {
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Data(data) => data.len(),
-            Self::Close => 0,
-        }
+    /// Stdin with data, none for an empty message, which carries nothing.
+    pub fn data(data: Bytes) -> Option<Self> {
+        (!data.is_empty()).then_some(Self::Data(data))
     }
 }
 
@@ -363,7 +361,7 @@ impl SpdyInput {
                 self.resize = Some(receiver);
             }
             Some("stdout" | "stderr") => Self::close_later(stream.split().1),
-            _ => warn!("Rejecting a stream opened after the start of the session"),
+            _ => debug!("Rejecting a stream opened after the start of the session"),
         }
     }
 
@@ -441,7 +439,11 @@ impl ClientInput for SpdyInput {
                 _ = self.done.cancelled() => SpdyEvent::Done,
             };
             match event {
-                SpdyEvent::Stdin(Some(data)) => return Some(ClientEvent::Stdin(Stdin::Data(data))),
+                SpdyEvent::Stdin(Some(data)) => {
+                    if let Some(stdin) = Stdin::data(data) {
+                        return Some(ClientEvent::Stdin(stdin));
+                    }
+                }
                 // The client closed stdin, unless the stream got reset.
                 SpdyEvent::Stdin(None) => {
                     let reset = self.stdin.take().is_some_and(|s| s.is_reset());
@@ -494,7 +496,7 @@ impl SpdyStreams {
         match headers.get(STREAM_TYPE_HEADER) {
             Some("error" | "stdin" | "stdout" | "stderr") => Ok(()),
             Some(STREAM_TYPE_RESIZE) if version.spdy_resize() => Ok(()),
-            Some(typ) => bail!("unexpected stream type {typ:?}"),
+            Some(typ) => bail!("unexpected stream type {:?}", ClientStr(typ)),
             None => bail!("{STREAM_TYPE_HEADER:?} header is required"),
         }
     }
@@ -534,7 +536,7 @@ impl SpdyStreams {
             };
             if slot.is_some() {
                 // Dropping it resets it.
-                warn!("Rejecting a second stream of the same type");
+                debug!("Rejecting a second stream of the same type");
                 continue;
             }
             *slot = Some(stream);
@@ -833,20 +835,15 @@ impl Output {
     /// End the session: a WebSocket gets closed, the SPDY streams end and the
     /// writer flushes what is queued, shuts the connection down and ends it.
     /// A client which does not read gets the connection ended after
-    /// [`SHUTDOWN_TIMEOUT`].
-    pub async fn close(&mut self) {
+    /// [`SHUTDOWN_TIMEOUT`]. Whether the close went out, which the client of
+    /// a WebSocket answers.
+    pub async fn close(&mut self) -> bool {
         let close = async {
             match &mut self.transport {
                 Transport::WebSocket { .. } => {
-                    let close = Message::Close(
-                        CloseFrame {
-                            code: CloseCode::Normal,
-                            reason: "done".into(),
-                        }
-                        .into(),
-                    );
-                    if let Err(e) = self.send(close).await {
-                        debug!("Unable to send close message: {e:#}")
+                    if let Err(e) = self.send(web::close_message("done")).await {
+                        debug!("Unable to send close message: {e:#}");
+                        return false;
                     }
                 }
                 Transport::Spdy(output) => {
@@ -867,13 +864,18 @@ impl Output {
                     output.connection.done().cancelled().await;
                 }
             }
+            true
         };
-        if time::timeout(SHUTDOWN_TIMEOUT, close).await.is_err() {
-            debug!("Session did not flush in time");
-        }
+        let closed = time::timeout(SHUTDOWN_TIMEOUT, close)
+            .await
+            .unwrap_or_else(|_| {
+                debug!("Session did not flush in time");
+                false
+            });
         if let Transport::Spdy(output) = &self.transport {
             output.connection.abort();
         }
+        closed
     }
 
     /// Send a WebSocket message. A failure ends the session, unless the
@@ -968,10 +970,8 @@ mod tests {
             event(&[STDIN_BYTE, b'l', b's']),
             Some(ClientEvent::Stdin(Stdin::Data(Bytes::from_static(b"ls"))))
         );
-        assert_eq!(
-            event(&[STDIN_BYTE]),
-            Some(ClientEvent::Stdin(Stdin::Data(Bytes::new())))
-        );
+        // Empty stdin carries nothing.
+        assert_eq!(event(&[STDIN_BYTE]), None);
         assert_eq!(
             event(&[CLOSE_BYTE, STDIN_BYTE]),
             Some(ClientEvent::Stdin(Stdin::Close))
@@ -1009,9 +1009,11 @@ mod tests {
             event(b"\x04{}"),
             Some(ClientEvent::Resize(Bytes::from_static(b"{}")))
         );
-        // The close signal of v5 and the output channels are ignored.
+        // The close signal of v5, the output channels and empty stdin are
+        // ignored.
         assert_eq!(event(&[CLOSE_BYTE, STDIN_BYTE]), None);
         assert_eq!(event(b"\x01out"), None);
+        assert_eq!(event(&[STDIN_BYTE]), None);
 
         let base64 = Framing {
             version: Version::V1,
@@ -1026,6 +1028,7 @@ mod tests {
             Some(ClientEvent::Resize(Bytes::from_static(b"{}")))
         );
         assert_eq!(base64.event(Message::Text("0!".into())), None);
+        assert_eq!(base64.event(Message::Text("0".into())), None);
     }
 
     #[test]
@@ -1145,13 +1148,7 @@ mod tests {
 
         // The client does not read, the data queue of the connection fills.
         let data = Bytes::from(vec![0; 32 * 1024]);
-        let fill = async {
-            loop {
-                output.data(STDOUT_BYTE, &data).await?;
-            }
-            #[allow(unreachable_code)]
-            anyhow::Ok(())
-        };
+        let fill = async { while output.data(STDOUT_BYTE, &data).await.is_ok() {} };
         assert!(
             time::timeout(Duration::from_millis(500), fill)
                 .await
@@ -1221,13 +1218,7 @@ mod tests {
 
         // The client does not read, the output backs up.
         let data = Bytes::from(vec![0; 32 * 1024]);
-        let backed_up = async {
-            loop {
-                output.data(STDOUT_BYTE, &data).await?;
-            }
-            #[allow(unreachable_code)]
-            anyhow::Ok(())
-        };
+        let backed_up = async { while output.data(STDOUT_BYTE, &data).await.is_ok() {} };
         assert!(
             time::timeout(Duration::from_secs(1), backed_up)
                 .await
@@ -1237,7 +1228,7 @@ mod tests {
         // The end of the session does not wait for the client forever.
         time::timeout(3 * SHUTDOWN_TIMEOUT, async {
             assert!(output.status(&Status::Success).await.is_err());
-            output.close().await;
+            assert!(!output.close().await);
         })
         .await?;
         drop(client);

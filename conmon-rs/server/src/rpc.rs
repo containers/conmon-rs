@@ -654,7 +654,6 @@ impl conmon::Server for Server {
 
         let streaming_server = self.streaming_server().clone();
         let child_reaper = self.reaper().clone();
-        let container_io = pry_err!(ContainerIO::new(tty, ContainerLog::new()));
         let config = self.config().clone();
         let cgroup_manager = pry!(req.get_cgroup_manager());
 
@@ -669,22 +668,24 @@ impl conmon::Server for Server {
                         .context("start streaming server if required")
                 )?;
 
-                let url = streaming_server
-                    .read()
-                    .await
-                    .exec_url(ExecSession {
-                        child_reaper,
-                        container_io,
-                        server_config: config,
-                        cgroup_manager,
-                        container_id: id.into_boxed_str(),
-                        command,
-                        stdin,
-                        stdout,
-                        stderr,
-                        idle_timeout,
-                    })
-                    .await;
+                let url = capnp_err!(
+                    streaming_server
+                        .read()
+                        .await
+                        .exec_url(ExecSession {
+                            child_reaper,
+                            tty,
+                            server_config: config,
+                            cgroup_manager,
+                            container_id: id.into_boxed_str(),
+                            command,
+                            stdin,
+                            stdout,
+                            stderr,
+                            idle_timeout,
+                        })
+                        .await
+                )?;
 
                 results.get().init_response().set_url(&url);
                 Ok(())
@@ -728,19 +729,21 @@ impl conmon::Server for Server {
                         .context("start streaming server")
                 )?;
 
-                let url = streaming_server
-                    .read()
-                    .await
-                    .attach_url(AttachSession {
-                        container_id: id,
-                        child,
-                        stdin,
-                        stdout,
-                        stderr,
-                        stop_after_stdin_eof,
-                        idle_timeout,
-                    })
-                    .await;
+                let url = capnp_err!(
+                    streaming_server
+                        .read()
+                        .await
+                        .attach_url(AttachSession {
+                            container_id: id,
+                            child,
+                            stdin,
+                            stdout,
+                            stderr,
+                            stop_after_stdin_eof,
+                            idle_timeout,
+                        })
+                        .await
+                )?;
 
                 results.get().init_response().set_url(&url);
                 Ok(())
@@ -783,11 +786,13 @@ impl conmon::Server for Server {
                         .context("start streaming server")
                 )?;
 
-                let url = streaming_server
-                    .read()
-                    .await
-                    .port_forward_url(netns_path, idle_timeout)
-                    .await;
+                let url = capnp_err!(
+                    streaming_server
+                        .read()
+                        .await
+                        .port_forward_url(netns_path, idle_timeout)
+                        .await
+                )?;
 
                 results.get().init_response().set_url(&url);
                 Ok(())
