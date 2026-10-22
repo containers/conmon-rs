@@ -619,15 +619,27 @@ mod tests {
                 server.start_if_required().await?;
 
                 for base64 in [false, true] {
-                    let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
-                    let port = listener.local_addr()?.port();
+                    // Two ports which listen and one between them which
+                    // does not.
+                    let first = tokio::net::TcpListener::bind((ADDR, 0)).await?;
+                    let (_closed, closed) = port_forward::testing::closed_port()?;
+                    let last = tokio::net::TcpListener::bind((ADDR, 0)).await?;
+                    let ports = [
+                        first.local_addr()?.port(),
+                        closed,
+                        last.local_addr()?.port(),
+                    ];
                     let protocol = if base64 {
                         "v4.base64.channel.k8s.io"
                     } else {
                         "v4.channel.k8s.io"
                     };
-                    let (response, mut stream) =
-                        port_forward_websocket(&server, &format!("?port={port}"), protocol).await?;
+                    let (response, mut stream) = port_forward_websocket(
+                        &server,
+                        &format!("?port={},{}&port={}", ports[0], ports[1], ports[2]),
+                        protocol,
+                    )
+                    .await?;
                     assert!(response.starts_with("http/1.1 101"), "{response}");
                     assert!(
                         response.contains(&format!("sec-websocket-protocol: {protocol}")),
@@ -644,23 +656,63 @@ mod tests {
                             (2, [&[channel], data].concat())
                         }
                     };
+                    // The channel of a message and its data.
+                    let decode = |(opcode, payload): (u8, Vec<u8>)| -> Result<(u8, Vec<u8>)> {
+                        let (channel, data) = payload.split_first().context("empty message")?;
+                        Ok(if base64 {
+                            assert_eq!(opcode, 1);
+                            (channel - b'0', BASE64.decode(data)?)
+                        } else {
+                            assert_eq!(opcode, 2);
+                            (*channel, data.to_vec())
+                        })
+                    };
 
-                    // The data and the error channel start with the port.
-                    let prefix = port.to_le_bytes();
-                    assert_eq!(server_frame(&mut stream).await?, message(0, &prefix));
-                    assert_eq!(server_frame(&mut stream).await?, message(1, &prefix));
+                    // Port i gets the data channel 2i and the error channel
+                    // 2i+1, each starts with the port. The port which does
+                    // not listen reports its failure on its error channel,
+                    // which may come before the ports after it.
+                    let mut messages = vec![];
+                    for _ in 0..7 {
+                        messages.push(decode(server_frame(&mut stream).await?)?);
+                    }
+                    let error = messages
+                        .iter()
+                        .position(|(channel, data)| *channel == 3 && data.len() > 2)
+                        .context("no error of the closed port")?;
+                    let (_, error) = messages.remove(error);
+                    let error = String::from_utf8(error)?;
+                    assert!(
+                        error.starts_with(&format!("error forwarding port {closed}:")),
+                        "{error}"
+                    );
+                    let expected: Vec<_> = (0..6)
+                        .map(|channel| {
+                            (
+                                channel,
+                                ports[usize::from(channel / 2)].to_le_bytes().to_vec(),
+                            )
+                        })
+                        .collect();
+                    assert_eq!(messages, expected);
 
-                    let (opcode, payload) = message(0, b"request");
-                    stream.write_all(&client_frame(opcode, &payload)).await?;
-                    let (mut connection, _) = listener.accept().await?;
-                    let mut request = [0; 7];
-                    connection.read_exact(&mut request).await?;
-                    assert_eq!(&request, b"request");
-                    connection.write_all(b"response").await?;
-                    drop(connection);
+                    // Each data channel goes to its own port.
+                    for (channel, listener) in [(0, &first), (4, &last)] {
+                        let (opcode, payload) = message(channel, &[b'0' + channel]);
+                        stream.write_all(&client_frame(opcode, &payload)).await?;
+                        let (mut connection, _) = listener.accept().await?;
+                        let mut request = [0];
+                        connection.read_exact(&mut request).await?;
+                        assert_eq!(request, [b'0' + channel]);
+                        connection.write_all(b"response").await?;
+                        drop(connection);
+                        assert_eq!(
+                            server_frame(&mut stream).await?,
+                            message(channel, b"response")
+                        );
+                    }
 
-                    assert_eq!(server_frame(&mut stream).await?, message(0, b"response"));
-                    // The only port is done, which ends the session.
+                    // The last port is done, which ends the session.
                     assert_eq!(server_frame(&mut stream).await?.0, 8);
                 }
                 Ok(())

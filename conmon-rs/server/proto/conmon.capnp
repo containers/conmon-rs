@@ -260,7 +260,10 @@ interface Conmon {
     # serveExecContainer, serveAttachContainer and servePortForwardContainer
     # return the URL of a session on the streaming server of the process,
     # which gets started with the first such request. Each URL is good for a
-    # single connection within 60 seconds, see usage.md.
+    # single connection within 60 seconds, see usage.md. While 1000 URLs of
+    # the kind (exec and attach, port forward) wait for their client, a
+    # request fails with an error starting with "maximum number of in-flight
+    # requests exceeded".
     struct ServeExecContainerRequest {
         metadata @0 :Metadata; # Standard metadata to carry.
         id @1 :Text;

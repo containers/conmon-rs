@@ -12,12 +12,14 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"capnproto.org/go/capnp/v3"
+	"capnproto.org/go/capnp/v3/exc"
 	"capnproto.org/go/capnp/v3/rpc"
 	"github.com/containers/conmon-rs/internal/proto"
 	"github.com/sirupsen/logrus"
@@ -141,8 +143,8 @@ func serveTestSocket(t *testing.T, dir string, withBootstrap bool) {
 }
 
 // serveSocket serves RPC connections with the options on the socket of a
-// client in dir.
-func serveSocket(t *testing.T, dir string, options func() *rpc.Options) {
+// client in dir, until the test or the returned stop ends.
+func serveSocket(t *testing.T, dir string, options func() *rpc.Options) (stop func()) {
 	t.Helper()
 
 	listener, err := (&net.ListenConfig{}).Listen(
@@ -172,14 +174,22 @@ func serveSocket(t *testing.T, dir string, options func() *rpc.Options) {
 		}
 	}()
 
-	t.Cleanup(func() {
-		listener.Close()
-		<-done
+	var once sync.Once
 
-		for _, conn := range conns {
-			conn.Close()
-		}
-	})
+	stop = func() {
+		once.Do(func() {
+			listener.Close()
+			<-done
+
+			for _, conn := range conns {
+				conn.Close()
+			}
+		})
+	}
+
+	t.Cleanup(stop)
+
+	return stop
 }
 
 // versionConmon is a server which only answers Version.
@@ -239,11 +249,11 @@ func (v versionConmon) Version(ctx context.Context, call proto.Conmon_version) e
 }
 
 // serveVersionSocket serves the Version answers of the server on the
-// socket of a client in dir.
-func serveVersionSocket(t *testing.T, dir string, server versionConmon) {
+// socket of a client in dir, see serveSocket.
+func serveVersionSocket(t *testing.T, dir string, server proto.Conmon_Server) (stop func()) {
 	t.Helper()
 
-	serveSocket(t, dir, func() *rpc.Options {
+	return serveSocket(t, dir, func() *rpc.Options {
 		return &rpc.Options{BootstrapClient: capnp.Client(proto.Conmon_ServerToClient(server))}
 	})
 }
@@ -1122,8 +1132,8 @@ func TestNewTakesPIDFromServer(t *testing.T) {
 	}
 
 	// The features of the answer got recorded.
-	if !cl.serverFeatures()[FeatureSdNotify] {
-		t.Fatal("features not recorded")
+	if !cl.SupportsFeature(FeatureSdNotify) || cl.SupportsFeature(FeaturePortForward) {
+		t.Fatalf("got features %v, want only %q", cl.serverFeatures(), FeatureSdNotify)
 	}
 
 	if _, err := os.Stat(cl.pidFile()); !errors.Is(err, os.ErrNotExist) {
@@ -1274,6 +1284,134 @@ func TestRequireServerFeature(t *testing.T) {
 	}
 }
 
+func TestSupportsFeature(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	c := newTestClient(t, dir, logrus.New())
+
+	t.Cleanup(func() { c.Close() })
+
+	if c.SupportsFeature(FeatureSdNotify) {
+		t.Fatal("feature supported before connecting")
+	}
+
+	for i, features := range [][]string{
+		{FeatureSdNotify, FeatureStreamingProtocols},
+		// Another server, which replaced the first one.
+		{FeatureSdNotify},
+	} {
+		if i > 0 {
+			if err := os.Remove(c.socket()); err != nil {
+				t.Fatalf("remove socket: %v", err)
+			}
+		}
+
+		serveVersionSocket(t, dir, versionConmon{features: features})
+
+		connected, err := c.connectRunningServer(t.Context())
+		if err != nil || !connected {
+			t.Fatalf("connect: %v, connected %v", err, connected)
+		}
+
+		for _, feature := range []string{
+			FeatureSdNotify,
+			FeaturePortForward,
+			FeatureIdleTimeout,
+			FeatureStreamingProtocols,
+		} {
+			want := slices.Contains(features, feature)
+			if got := c.SupportsFeature(feature); got != want {
+				t.Fatalf("server with %v: feature %q supported %v", features, feature, got)
+			}
+		}
+	}
+}
+
+// reopeningConmon answers Version with its features and ReopenLogContainer,
+// its Version fails with versionErr if set.
+type reopeningConmon struct {
+	proto.Conmon_Server
+
+	features   []string
+	versionErr error
+}
+
+func (r reopeningConmon) Version(ctx context.Context, call proto.Conmon_version) error {
+	if r.versionErr != nil {
+		return r.versionErr
+	}
+
+	return versionConmon{features: r.features}.Version(ctx, call)
+}
+
+func (reopeningConmon) ReopenLogContainer(
+	_ context.Context,
+	call proto.Conmon_reopenLogContainer,
+) error {
+	results, err := call.AllocResults()
+	if err != nil {
+		return fmt.Errorf("alloc results: %w", err)
+	}
+
+	if _, err := results.NewResponse(); err != nil {
+		return fmt.Errorf("new response: %w", err)
+	}
+
+	return nil
+}
+
+func TestSupportsFeatureAfterReconnect(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	stop := serveVersionSocket(t, dir, versionConmon{
+		features: []string{FeatureSdNotify, FeatureStreamingProtocols},
+	})
+
+	c := newTestClient(t, dir, logrus.New())
+	t.Cleanup(func() { c.Close() })
+
+	connected, err := c.connectRunningServer(t.Context())
+	if err != nil || !connected {
+		t.Fatalf("connect: %v, connected %v", err, connected)
+	}
+
+	for _, server := range []reopeningConmon{
+		// A server which does not tell its features keeps the recorded
+		// ones, the call which reconnected still succeeds.
+		//nolint:err113 // any failure of Version
+		{versionErr: errors.New("version failed")},
+		{features: []string{FeatureSdNotify}},
+	} {
+		// Another server replaces the one the client is connected to.
+		conn := c.conn
+
+		stop()
+		waitBroken(t, conn)
+
+		stop = serveVersionSocket(t, dir, server)
+
+		err := c.ReopenLogContainer(t.Context(), &ReopenLogContainerConfig{ID: "id"})
+		if err != nil {
+			t.Fatalf("reopen log after reconnect: %v", err)
+		}
+
+		if c.conn == conn {
+			t.Fatal("connection not replaced")
+		}
+
+		want := server.versionErr != nil
+		if got := c.SupportsFeature(FeatureStreamingProtocols); got != want {
+			t.Fatalf("server with %v: feature supported %v, want %v", server.features, got, want)
+		}
+
+		if !c.SupportsFeature(FeatureSdNotify) {
+			t.Fatalf("server with %v: feature %q not supported", server.features, FeatureSdNotify)
+		}
+	}
+}
+
 func TestNewInvalidConfig(t *testing.T) {
 	t.Parallel()
 
@@ -1348,7 +1486,8 @@ func TestVersionBinary(t *testing.T) {
 	}
 }
 
-// failingConmon is a server which fails ReopenLogContainer with its error.
+// failingConmon is a server which fails ReopenLogContainer and
+// ServeExecContainer with its error.
 type failingConmon struct {
 	proto.Conmon_Server
 
@@ -1359,19 +1498,26 @@ func (f failingConmon) ReopenLogContainer(context.Context, proto.Conmon_reopenLo
 	return f.err
 }
 
-func TestContainerNotFound(t *testing.T) {
+func (f failingConmon) ServeExecContainer(context.Context, proto.Conmon_serveExecContainer) error {
+	return f.err
+}
+
+func TestMatchedServerErrors(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		message  string
-		notFound bool
+		message string
+		// The exported error the failure matches, if any.
+		target error
 	}{
-		{"container not found: unknown", true},
+		{"container not found: unknown", ErrContainerNotFound},
 		// The message of older servers.
-		{"child not available", true},
-		{"open log file: permission denied", false},
+		{"child not available", ErrContainerNotFound},
+		{"open log file: permission denied", nil},
 		// Only the start of the message counts.
-		{"create container: runtime: container not found", false},
+		{"create container: runtime: container not found", nil},
+		{"maximum number of in-flight requests exceeded", ErrTooManyRequests},
+		{"exec: maximum number of in-flight requests exceeded", nil},
 	} {
 		t.Run(tc.message, func(t *testing.T) {
 			t.Parallel()
@@ -1389,19 +1535,34 @@ func TestContainerNotFound(t *testing.T) {
 			c := &ConmonClient{runDir: dir, logger: logrus.New()}
 			t.Cleanup(c.resetConn)
 
-			err := c.ReopenLogContainer(t.Context(), &ReopenLogContainerConfig{ID: "unknown"})
-			if err == nil {
-				t.Fatal("call succeeded")
-			}
+			for name, call := range map[string]func() error{
+				"ReopenLogContainer": func() error {
+					return c.ReopenLogContainer(t.Context(), &ReopenLogContainerConfig{ID: "unknown"})
+				},
+				"ServeExecContainer": func() error {
+					_, err := c.ServeExecContainer(t.Context(), &ServeExecContainerConfig{ID: "unknown"})
 
-			if errors.Is(err, ErrContainerNotFound) != tc.notFound {
-				t.Fatalf("error %v matches %v: %v", err, ErrContainerNotFound, !tc.notFound)
-			}
+					return err
+				},
+			} {
+				err := call()
+				if err == nil {
+					t.Fatalf("%s succeeded", name)
+				}
 
-			// The message stays the one of the server.
-			if !strings.Contains(err.Error(), tc.message) ||
-				strings.Count(err.Error(), "not found") > 1 {
-				t.Fatalf("error %q does not carry the message %q once", err, tc.message)
+				for _, target := range []error{ErrContainerNotFound, ErrTooManyRequests} {
+					if want := errors.Is(target, tc.target); errors.Is(err, target) != want {
+						t.Fatalf("%s: error %v matches %v: %v", name, err, target, !want)
+					}
+				}
+
+				// The message stays the one of the server.
+				if strings.Count(err.Error(), tc.message) != 1 {
+					t.Fatalf(
+						"%s: error %q does not carry the message %q once",
+						name, err, tc.message,
+					)
+				}
 			}
 		})
 	}
@@ -1529,6 +1690,43 @@ func TestClose(t *testing.T) {
 
 	if err := c.Close(); err != nil {
 		t.Fatalf("close again: %v", err)
+	}
+}
+
+func TestCloseFailsCallInProgress(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	called, release := make(chan struct{}, 1), make(chan struct{})
+
+	t.Cleanup(func() { close(release) })
+
+	serveVersionSocket(t, dir, versionConmon{called: called, release: release})
+
+	c := newTestClient(t, dir, logrus.New())
+	versionErr := make(chan error, 1)
+
+	go func() {
+		_, err := c.Version(t.Context(), nil)
+		versionErr <- err
+	}()
+
+	<-called
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	select {
+	case err := <-versionErr:
+		// The call fails with the connection it used.
+		var exception *exc.Exception
+		if !errors.Is(err, ErrClientClosed) &&
+			(!errors.As(err, &exception) || exception.Type != exc.Disconnected) {
+			t.Fatalf("got error %v, want %v or a connection error", err, ErrClientClosed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("call still in progress after Close")
 	}
 }
 

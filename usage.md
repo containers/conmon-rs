@@ -118,9 +118,11 @@ work unchanged.
 return a URL on a server the conmonrs process starts on demand on `127.0.0.1`
 with a random port. Each URL carries a one time token which is valid for a
 minute. At most 1000 URLs of each kind (exec and attach, port forward) wait for
-their client at once, a request beyond that fails, like the kubelet fails
-requests beyond its limit. CRI-O passes these URLs to the kubelet, which
-connects directly.
+their client at once, a request beyond that fails with an error starting with
+`maximum number of in-flight requests exceeded` (`ErrTooManyRequests` of the Go
+client), like the kubelet fails requests beyond its limit. v1.1.1 and older drop
+the oldest URL instead. CRI-O passes these URLs to the kubelet, which connects
+directly.
 
 Exec and attach speak the Kubernetes remote command protocols on the same
 URL. Over WebSocket, `v5.channel.k8s.io` is what kubectl uses: the first byte
@@ -131,12 +133,14 @@ messages the same way without the close signal, base64 ones as text messages
 with the stream as an ASCII digit offset, and start with an empty message on
 the first output stream. Like for the Kubernetes runtime streaming server, a
 client without a subprotocol gets binary `channel.k8s.io`, and one which only
-requests unsupported subprotocols gets a 403. Over SPDY/3.1, which the kubelet
-uses towards the runtime also for WebSocket clients, the client opens a stream
-per channel by the `streamType` header (`error`, `stdin`, `stdout`, `stderr`
-and with a terminal `resize`, which may also come after the start), the end of
-the stdin stream closes stdin. The server keeps its side of the stdin stream
-open until the session ends, except for `channel.k8s.io`, like the kubelet.
+requests unsupported subprotocols gets a 403. A WebSocket message or frame of
+the client may carry at most 1 MiB, also for port forwarding, a larger one ends
+the connection. Over SPDY/3.1, which the kubelet uses towards the runtime also
+for WebSocket clients, the client opens a stream per channel by the
+`streamType` header (`error`, `stdin`, `stdout`, `stderr` and with a terminal
+`resize`, which may also come after the start), the end of the stdin stream
+closes stdin. The server keeps its side of the stdin stream open until the
+session ends, except for `channel.k8s.io`, like the kubelet.
 Streams for stdout or stderr which come after the start end right away. The
 server supports `v4.channel.k8s.io`, `v3`, `v2` and `channel.k8s.io`, the order
 of the client decides. From v4 on, the final status is JSON, before only a
@@ -190,8 +194,7 @@ connections ended.
 data either way for that long. A stream which slowly takes its data keeps it
 active, WebSocket pings and pongs, the pings of the server and the answers to
 them and other control frames of the server do not. SPDY clients like client-go
-ping every few seconds, which counts like for CRI-O. Servers which support port
-forwarding report the `portforward` feature in `version`.
+ping every few seconds, which counts like for CRI-O.
 
 ### Streaming protocols by version
 
@@ -214,6 +217,18 @@ with an unimplemented error. The `idleTimeoutSec` of the three RPCs is new in
 v1.2.0 as well: older servers ignore it for exec and attach, and do not serve
 port forwarding at all.
 
+Beyond its version, `version` reports the optional features of a server, which
+clients check before they rely on them:
+
+- `sdnotify`: the server relays the `sd_notify` messages of a container to
+  the `sdnotifySocket` of `createContainer`.
+- `portforward`: `servePortForwardContainer` forwards ports with the protocols
+  above.
+- `idletimeout`: exec and attach sessions apply their `idleTimeoutSec`, every
+  server with `portforward` applies the one of port forwarding.
+- `streamingprotocols`: exec and attach sessions speak SPDY/3.1 and the
+  WebSocket protocols before `v5.channel.k8s.io`.
+
 ### Streaming security
 
 The streaming server speaks plain HTTP on `127.0.0.1`, without TLS or
@@ -230,9 +245,10 @@ it did not get the URL of:
 - The server keeps a bounded number of unused URLs per kind (exec and attach,
   port forward).
 
-The server logs tokens which are still valid only at debug level, such logs
-need the same care as the URLs. Errors name the tokens of rejected requests,
-which are unknown, used or expired.
+The logs show only the first 8 hex digits of a token, which tell the sessions
+apart but are not enough to use one. Responses never name the token: a request
+for a token which is unknown, used or expired gets a bare 404, one whose token
+is not 32 hex digits a 400 `Invalid URL`.
 
 ### File descriptor socket
 
