@@ -10,6 +10,7 @@ use crate::{
     notify::NotifySocket,
     pause::Pause,
     server::{GenerateRuntimeArgs, Server},
+    streaming_server::{AttachSession, ExecSession},
     version::Version,
 };
 use anyhow::Context;
@@ -671,18 +672,18 @@ impl conmon::Server for Server {
                 let url = streaming_server
                     .read()
                     .await
-                    .exec_url(
+                    .exec_url(ExecSession {
                         child_reaper,
                         container_io,
-                        config,
+                        server_config: config,
                         cgroup_manager,
-                        id.into_boxed_str(),
+                        container_id: id.into_boxed_str(),
                         command,
                         stdin,
                         stdout,
                         stderr,
                         idle_timeout,
-                    )
+                    })
                     .await;
 
                 results.get().init_response().set_url(&url);
@@ -730,15 +731,15 @@ impl conmon::Server for Server {
                 let url = streaming_server
                     .read()
                     .await
-                    .attach_url(
-                        id,
+                    .attach_url(AttachSession {
+                        container_id: id,
                         child,
                         stdin,
                         stdout,
                         stderr,
                         stop_after_stdin_eof,
                         idle_timeout,
-                    )
+                    })
                     .await;
 
                 results.get().init_response().set_url(&url);

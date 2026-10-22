@@ -37,7 +37,7 @@ use percent_encoding::percent_decode_str;
 use std::{
     collections::{HashMap, VecDeque},
     fs::{self, File},
-    future::Future,
+    future::{self, Future},
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpStream as StdTcpStream},
     os::unix::fs::MetadataExt,
@@ -50,7 +50,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, DuplexStream},
     net::{TcpSocket, TcpStream, tcp::OwnedWriteHalf},
     select,
-    sync::{Semaphore, mpsc, oneshot},
+    sync::{mpsc, oneshot},
     task::{JoinHandle, JoinSet},
     time::{self, Duration},
 };
@@ -81,16 +81,18 @@ const SOCKET_THREAD_STACK_SIZE: usize = 128 * 1024;
 const SOCKET_THREAD_LINGER: Duration = Duration::from_secs(1);
 
 /// How much a client may send for a connection before it got established in
-/// the pod. Its data gets taken meanwhile and leaves the byte budget of the
-/// client, so that connections to a port which does not answer do not stop
-/// the others, which the connect timeout could take long.
+/// the pod, a client which sends more fails the forwarding.
 const CONNECT_BUFFER: usize = 1024 * 1024;
 
-/// How many connections of a client get established at once, which bounds
-/// what they take outside of the byte budget to this many times
-/// [`CONNECT_BUFFER`]. The others wait without taking their data, which then
-/// counts against the budget like the one of a stream which does not take it.
-const MAX_CONNECTS: usize = 16;
+/// How much the connections of a session which get established hold for the
+/// client together. Their data moves from the byte budget of the client into
+/// this one, so that connections to a port which does not answer, which the
+/// connect timeout could take long, do not stop the others. Once it is used
+/// up, connecting streams stop taking their data, which then stays in the
+/// byte budget of the client and may stop reading the client like any
+/// stream which does not take its data. Any number of connections get
+/// established at once, like with CRI-O.
+const CONNECT_BUDGET: u32 = 16 * 1024 * 1024;
 
 /// How much of the container output goes into a single frame, as much as Go
 /// clients send per frame.
@@ -191,11 +193,11 @@ impl Input for mpsc::Receiver<Held> {
     }
 }
 
-/// What a client sent while its connection got established, outside of its
-/// byte budget.
+/// What a client sent while its connection got established, within the
+/// connect budget of the session, see [`CONNECT_BUDGET`].
 #[derive(Debug, Default)]
 struct Early {
-    data: VecDeque<Bytes>,
+    data: VecDeque<Held>,
 
     /// Whether the client was done already.
     ended: bool,
@@ -298,8 +300,9 @@ struct Namespace {
     /// The requests of the thread which got started last.
     requests: Mutex<Option<SocketRequests>>,
 
-    /// The connections which get established at once, see [`MAX_CONNECTS`].
-    connects: Semaphore,
+    /// What the connections which get established hold, see
+    /// [`CONNECT_BUDGET`].
+    connect_budget: Budget,
 
     /// How many threads got started and ended.
     #[cfg(test)]
@@ -318,7 +321,7 @@ impl Namespace {
             path,
             linger,
             requests: Mutex::default(),
-            connects: Semaphore::new(MAX_CONNECTS),
+            connect_budget: Budget::new(CONNECT_BUDGET),
             #[cfg(test)]
             threads: AtomicUsize::new(0),
             #[cfg(test)]
@@ -678,6 +681,14 @@ impl PortForward {
 
         loop {
             select! {
+                // Nothing gets dispatched after the idle timeout, and the
+                // session ends with its last forward, also while the client
+                // keeps sending.
+                biased;
+                _ = idle.cancelled() => break,
+                done = forwards.join_next() => if done.is_none() {
+                    break;
+                },
                 message = messages.next() => {
                     // Pings and pongs only keep the WebSocket alive, the
                     // heartbeat of a client does not keep it from going idle.
@@ -689,14 +700,15 @@ impl PortForward {
                     };
                     activity.touch();
                     Self::dispatch(&inputs, &budget, base64, data, &idle).await;
+                    // A dispatch which ended with the idle timeout is no
+                    // activity.
+                    if idle.is_cancelled() {
+                        break;
+                    }
                     // A port which takes its input slowly keeps the WebSocket
                     // active.
                     activity.touch();
                 }
-                done = forwards.join_next() => if done.is_none() {
-                    break;
-                },
-                _ = idle.cancelled() => break,
             }
         }
 
@@ -924,43 +936,60 @@ impl PortForward {
     }
 
     /// Connect to the port in the pod while taking what the client sends
-    /// meanwhile, up to [`MAX_CONNECTS`] connections at once.
+    /// meanwhile.
     async fn establish(
         namespace: &Namespace,
         port: u16,
         input: &mut impl Input,
     ) -> Result<(TcpStream, Early)> {
-        let _connect = namespace
-            .connects
-            .acquire()
-            .await
-            .context("wait to connect")?;
-        Self::drain_until(Self::connect(namespace, port), input).await
+        Self::drain_until(
+            Self::connect(namespace, port),
+            &namespace.connect_budget,
+            input,
+        )
+        .await
     }
 
     /// Wait for the connection to the pod while taking what the client sends
-    /// meanwhile, which may take until the connect timeout. The data leaves
-    /// the byte budget, so that the client can go on with its other
-    /// connections. A client which sends more than [`CONNECT_BUFFER`] fails
-    /// the forwarding.
+    /// meanwhile, which may take until the connect timeout. The data moves
+    /// from the byte budget of the client into the connect budget, so that
+    /// the client can go on with its other connections. Without room in the
+    /// connect budget no more data gets taken, see [`CONNECT_BUDGET`]. A
+    /// client which sends more than [`CONNECT_BUFFER`] fails the forwarding.
     async fn drain_until<T>(
         connect: impl Future<Output = Result<T>>,
+        connect_budget: &Budget,
         input: &mut impl Input,
     ) -> Result<(T, Early)> {
         let mut connect = pin!(connect);
         let mut early = Early::default();
         let mut len = 0;
+        // Data which got taken and waits for room in the connect budget.
+        let mut taken: Option<Held> = None;
         loop {
             select! {
-                result = &mut connect => return Ok((result?, early)),
-                data = input.recv(), if !early.ended => match data {
+                result = &mut connect => {
+                    early.data.extend(taken);
+                    return Ok((result?, early));
+                }
+                held = async {
+                    match &taken {
+                        Some(data) => connect_budget.hold(Bytes::clone(data)).await,
+                        None => future::pending().await,
+                    }
+                } => {
+                    // The data leaves the byte budget of the client.
+                    taken = None;
+                    early.data.push_back(held);
+                }
+                data = input.recv(), if taken.is_none() && !early.ended => match data {
                     Some(data) => {
                         len += data.len();
                         ensure!(
                             len <= CONNECT_BUFFER,
                             "the client sent more than {CONNECT_BUFFER} bytes before the connection got established"
                         );
-                        early.data.push_back(data.into_bytes());
+                        taken = Some(data);
                     }
                     None => early.ended = true,
                 },
@@ -1092,7 +1121,6 @@ impl PortForward {
 mod tests {
     use super::*;
     use crate::spdy::testing::{Client, Frame};
-    use std::future;
     use tokio::net::TcpListener;
 
     /// The network namespace of the tests, which needs no privileges to
@@ -1334,6 +1362,7 @@ mod tests {
         });
         let (connection, early) = PortForward::drain_until(
             async { connected.await.context("connected").map(|()| 42) },
+            &Budget::new(CONNECT_BUDGET),
             &mut input,
         )
         .await?;
@@ -1341,7 +1370,7 @@ mod tests {
         assert_eq!(connection, 42);
         // Most of it got taken, the rest is still queued for the copy.
         assert!(early.data.len() >= 9, "{early:?}");
-        let mut received: Vec<_> = early.data.into_iter().collect();
+        let mut received: Vec<_> = early.data.into_iter().map(Held::into_bytes).collect();
         if !early.ended {
             while let Some(data) = input.recv().await {
                 received.push(data.into_bytes());
@@ -1394,7 +1423,12 @@ mod tests {
         let budget = Budget::new(CHANNEL_BUFFER);
         let (input_tx, mut input) = mpsc::channel(CHANNEL_QUEUE);
         let connecting = tokio::spawn(async move {
-            PortForward::drain_until(future::pending::<Result<()>>(), &mut input).await
+            PortForward::drain_until(
+                future::pending::<Result<()>>(),
+                &Budget::new(CONNECT_BUDGET),
+                &mut input,
+            )
+            .await
         });
         for _ in 0..CHANNEL_QUEUE {
             input_tx
@@ -1413,30 +1447,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connects_are_limited() -> Result<()> {
-        let namespace = Namespace::new("/nonexistent".into());
-        let slots = namespace.connects.acquire_many(MAX_CONNECTS as u32).await?;
-
-        // A connection beyond the limit does not take its data meanwhile.
-        let (input_tx, mut input) = mpsc::channel(1);
-        input_tx.send(Bytes::from_static(b"data").into()).await?;
-        let connect = tokio::spawn({
-            let namespace = namespace.clone();
+    async fn connecting_streams_stop_taking_data_without_connect_budget() -> Result<()> {
+        // A port which never answers, whose client sends more than the
+        // connect budget holds.
+        let budget = Budget::new(CHANNEL_BUFFER);
+        let connect_budget = Budget::new(4 * READ_BUFFER as u32);
+        let (input_tx, mut input) = mpsc::channel(CHANNEL_QUEUE);
+        let connecting = tokio::spawn({
+            let connect_budget = connect_budget.clone();
             async move {
-                PortForward::establish(&namespace, 80, &mut input)
-                    .await
-                    .map(|_| ())
+                PortForward::drain_until(
+                    future::pending::<Result<()>>(),
+                    &connect_budget,
+                    &mut input,
+                )
+                .await
             }
         });
+        for _ in 0..8 {
+            input_tx
+                .send(budget.hold(Bytes::from(vec![0; READ_BUFFER])).await)
+                .await?;
+        }
+
+        // The connect budget took what it holds, the rest stays in the byte
+        // budget of the client, one message of it taken already.
+        time::timeout(Duration::from_secs(5), async {
+            while connect_budget.available() != 0
+                || budget.available() != CHANNEL_BUFFER as usize - 4 * READ_BUFFER
+            {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("budgets not taken")?;
         time::sleep(Duration::from_millis(100)).await;
-        assert!(
-            input_tx.try_send(Bytes::new().into()).is_err(),
-            "the data got taken"
+        assert_eq!(
+            budget.available(),
+            CHANNEL_BUFFER as usize - 4 * READ_BUFFER
         );
 
-        // It connects once another one is done.
-        drop(slots);
-        assert!(connect.await?.is_err(), "connected to /nonexistent");
+        // A connection which ends gives its share back.
+        connecting.abort();
+        let _ = connecting.await;
+        assert_eq!(connect_budget.available(), 4 * READ_BUFFER);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parallel_connections_all_get_established() -> Result<()> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let port = listener.local_addr()?.port();
+        let namespace = Namespace::with_linger(NETNS.into(), Duration::from_secs(60));
+        let accept = tokio::spawn(async move {
+            let mut connections = vec![];
+            for _ in 0..64 {
+                connections.push(listener.accept().await?);
+            }
+            anyhow::Ok(connections)
+        });
+        let mut connects = JoinSet::new();
+        for i in 0..64u8 {
+            let namespace = namespace.clone();
+            connects.spawn(async move {
+                let (input_tx, mut input) = mpsc::channel::<Held>(1);
+                input_tx.send(Bytes::from(vec![i]).into()).await?;
+                let (_connection, early) =
+                    PortForward::establish(&namespace, port, &mut input).await?;
+                anyhow::Ok(early.data.len())
+            });
+        }
+        while let Some(result) = connects.join_next().await {
+            result??;
+        }
+        assert_eq!(
+            time::timeout(Duration::from_secs(5), accept).await???.len(),
+            64
+        );
+        assert_eq!(
+            namespace.connect_budget.available(),
+            CONNECT_BUDGET as usize
+        );
         Ok(())
     }
 
@@ -1450,9 +1541,13 @@ mod tests {
                 .is_ok()
             {}
         });
-        let err = PortForward::drain_until(future::pending::<Result<()>>(), &mut input)
-            .await
-            .expect_err("overflow");
+        let err = PortForward::drain_until(
+            future::pending::<Result<()>>(),
+            &Budget::new(CONNECT_BUDGET),
+            &mut input,
+        )
+        .await
+        .expect_err("overflow");
         assert!(
             err.to_string()
                 .contains("before the connection got established"),

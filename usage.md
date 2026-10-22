@@ -134,9 +134,13 @@ of the client decides. From v4 on, the final status is JSON, before only a
 failure is reported as text. A client which does not take the end of a session
 within a few seconds gets its connection closed. With `idleTimeoutSec`, a
 session whose connection got no frame of the client and no data either way for
-that long fails with an error status. The time the runtime takes to start an
-exec, the pings of the server and WebSocket pings and pongs, like the heartbeat
-of client-go, do not count.
+that long fails with an error status, an exec process gets killed then. The
+time the runtime takes to start an exec, WebSocket pings and pongs (like the
+heartbeat of client-go), the pings of the server and the answers to them and
+other control frames of the server do not count. Stdin counts once the server
+reads it. Stdin which backs up behind a process which does not read it stops
+the server from reading the client, which may then go idle, like a spdystream
+connection whose reader waits.
 
 Port forwarding speaks the Kubernetes `portforward.k8s.io` protocol over
 SPDY/3.1, which the kubelet uses towards the runtime also when the client
@@ -148,11 +152,13 @@ is reported as text on the error stream. Only what the SPDY implementation of
 Kubernetes uses is supported, there is no flow control: the server holds about
 4 MiB of what the client sent on a connection, plus the frame it waits to
 place, and stops reading it until the streams took their data. What a
-forwarded connection sends while it gets established, up to 1 MiB, does not
-count, at most 16 connections of a client get established at once. Clients
-which connect directly, like crictl with the WebSocket transport, may tunnel
-the SPDY connection through binary WebSocket messages with the
-`SPDY/3.1+portforward.k8s.io` subprotocol.
+forwarded connection sends while it gets established, up to 1 MiB, moves into a
+connect budget of 16 MiB per session instead, so that a port which does not
+answer does not stop the other connections. Once that is used up, connecting
+streams stop taking their data like any stream which does not take it. Any
+number of connections get established at once. Clients which connect directly,
+like crictl with the WebSocket transport, may tunnel the SPDY connection through
+binary WebSocket messages with the `SPDY/3.1+portforward.k8s.io` subprotocol.
 
 The URL also serves the older WebSocket channel protocol (`v4.channel.k8s.io`,
 `v4.base64.channel.k8s.io` or no subprotocol), which forwards one connection
@@ -164,10 +170,10 @@ connections ended.
 
 `idleTimeoutSec` closes a connection which got no frame of the client and no
 data either way for that long. A stream which slowly takes its data keeps it
-active, the pings of the server and WebSocket pings and pongs do not. SPDY
-clients like client-go ping every few seconds, which counts like for CRI-O.
-Servers which support port forwarding report the `portforward` feature in
-`version`.
+active, WebSocket pings and pongs, the pings of the server and the answers to
+them and other control frames of the server do not. SPDY clients like client-go
+ping every few seconds, which counts like for CRI-O. Servers which support port
+forwarding report the `portforward` feature in `version`.
 
 ### File descriptor socket
 

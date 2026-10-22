@@ -2298,21 +2298,24 @@ var _ = Describe("StreamingServer", func() {
 				tr = newTestRunner()
 				tr.createRuntimeConfigWithProcessArgs(
 					false,
-					[]string{"/busybox", "sleep", "10"},
+					[]string{"/busybox", "sleep", "600"},
 					nil,
 				)
 				sut = tr.configGivenEnv()
 				tr.createContainer(sut, false)
 				tr.startContainer()
 
+				// A command no other process runs, to find the exec process.
+				command := []string{"/busybox", "sleep", "317"}
+
 				result, err := sut.ServeExecContainer(
 					context.Background(),
 					&client.ServeExecContainerConfig{
 						ID:          tr.ctrID,
-						Command:     []string{"/busybox", "sleep", "10"},
+						Command:     command,
 						Stdout:      true,
 						Stderr:      true,
-						IdleTimeout: time.Second,
+						IdleTimeout: 2 * time.Second,
 					},
 				)
 				Expect(err).To(Succeed())
@@ -2323,13 +2326,30 @@ var _ = Describe("StreamingServer", func() {
 				// The session ends long before the command, which the client
 				// must not take for a success.
 				start := time.Now()
-				err = streamURLOver(ctx, transport, result.URL, remotecommand.StreamOptions{
-					Stdout: io.Discard,
-					Stderr: io.Discard,
-				})
+				streamed := make(chan error, 1)
 
-				Expect(time.Since(start)).To(BeNumerically("<", 5*time.Second))
+				go func() {
+					streamed <- streamURLOver(ctx, transport, result.URL, remotecommand.StreamOptions{
+						Stdout: io.Discard,
+						Stderr: io.Discard,
+					})
+				}()
+
+				var pids []int
+
+				Eventually(func() []int {
+					pids = pidsWithCmdline(command)
+
+					return pids
+				}, 5*time.Second).Should(HaveLen(1))
+
+				Eventually(streamed, 8*time.Second).Should(Receive(&err))
+				Expect(time.Since(start)).To(BeNumerically("<", 6*time.Second))
 				Expect(err).To(MatchError(ContainSubstring("idle timeout")))
+
+				// The exec process gets killed, nothing would end it otherwise.
+				Eventually(func() []int { return pidsWithCmdline(command) }, 5*time.Second).
+					ShouldNot(ContainElement(pids[0]))
 			})
 		})
 
