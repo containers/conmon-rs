@@ -5,12 +5,13 @@ set -euo pipefail
 # attempt: a ginkgo JSON report, where --flake-attempts lets them pass, or a
 # JUnit report of nextest, where retries do. Both would hide them otherwise.
 # Tests which failed on every attempt fail the run anyway and are left out.
-REPORT=${1:?usage: $0 REPORT}
-
-if [[ ! -f $REPORT ]]; then
-    echo "No report found at $REPORT"
-    exit 0
-fi
+#
+# The ginkgo report only covers the specs, not the plain Go tests which run
+# in the same test binary, without retries. Given LOG, the output of ginkgo,
+# the failed ones get listed as well, the output of the specs buries them
+# otherwise.
+REPORT=${1:?usage: $0 REPORT [LOG]}
+LOG=${2:-}
 
 # Print one line per flaky test, with line breaks replaced by spaces.
 flakes() {
@@ -41,21 +42,57 @@ EOF
     esac
 }
 
-FLAKES=$(flakes)
-if [[ $FLAKES == "" ]]; then
-    echo "No test needed a retry"
-    exit 0
+# The Go test which runs the specs, it fails with them, which the report
+# covers already.
+SPECS_TEST=TestConmonClient
+
+# Print one line per failed plain Go test of the log, a failed subtest
+# after its parent. Only the exact lines of the testing package count, the
+# output of the specs gets printed as it is.
+failures() {
+    if [[ $LOG == "" ]]; then
+        return
+    fi
+    if [[ ! -f $LOG ]]; then
+        echo "No log found at $LOG" >&2
+        return
+    fi
+    sed -nE \
+        -e "/^--- FAIL: $SPECS_TEST \\(/d" \
+        -e 's/^( {4})*--- FAIL: ([^[:space:]]+) \([0-9]+\.[0-9]+s\)$/\2/p' \
+        "$LOG"
+}
+
+# Report the lines with the title as warnings and in the step summary under
+# the heading.
+report() {
+    local TITLE=$1 HEADING=$2 LINES=$3
+    # Workflow commands need the % escaped.
+    while IFS= read -r LINE; do
+        echo "::warning title=$TITLE::${LINE//%/%25}"
+    done <<<"$LINES"
+
+    if [[ ${GITHUB_STEP_SUMMARY:-} != "" ]]; then
+        local SUMMARY="### $HEADING"$'\n'
+        while IFS= read -r LINE; do
+            SUMMARY+=$'\n'"- $LINE"
+        done <<<"$LINES"
+        echo "$SUMMARY" >>"$GITHUB_STEP_SUMMARY"
+    fi
+}
+
+if [[ ! -f $REPORT ]]; then
+    echo "No report found at $REPORT"
+else
+    FLAKES=$(flakes)
+    if [[ $FLAKES == "" ]]; then
+        echo "No test needed a retry"
+    else
+        report "Flaky test" "Tests which needed retries" "$FLAKES"
+    fi
 fi
 
-# Workflow commands need the % escaped.
-while IFS= read -r FLAKE; do
-    echo "::warning title=Flaky test::${FLAKE//%/%25}"
-done <<<"$FLAKES"
-
-if [[ ${GITHUB_STEP_SUMMARY:-} != "" ]]; then
-    SUMMARY="### Tests which needed retries"$'\n'
-    while IFS= read -r FLAKE; do
-        SUMMARY+=$'\n'"- $FLAKE"
-    done <<<"$FLAKES"
-    echo "$SUMMARY" >>"$GITHUB_STEP_SUMMARY"
+FAILURES=$(failures)
+if [[ $FAILURES != "" ]]; then
+    report "Failed test" "Go tests which failed" "$FAILURES"
 fi

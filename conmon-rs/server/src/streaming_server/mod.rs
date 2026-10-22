@@ -65,6 +65,11 @@ const PORT_FORWARD_PATH: &str = "portforward";
 /// message would let a client make the server buffer that much per message.
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
+/// The error of a request for a URL while too many of its kind wait for
+/// their client. Clients match it, see `ErrTooManyRequests` of the Go client,
+/// so it has to stay the start of the message.
+const TOO_MANY_REQUESTS: &str = "maximum number of in-flight requests exceeded";
+
 /// How often the sessions whose client did not come in time get dropped,
 /// while sessions wait.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
@@ -283,7 +288,7 @@ impl StreamingServer {
         let token = RandomId::new();
         let mut state = self.state.write().await;
         if sessions(&mut state).insert(token, session).is_err() {
-            bail!("maximum number of in-flight requests exceeded");
+            bail!(TOO_MANY_REQUESTS);
         }
         if !state.sweeping {
             state.sweeping = true;
@@ -380,7 +385,9 @@ mod tests {
     use crate::{
         bounded_hashmap::DEFAULT_CAPACITY,
         random_id::RandomId,
-        streaming_server::{ADDR, HEADER_READ_TIMEOUT, SWEEP_INTERVAL, StreamingServer},
+        streaming_server::{
+            ADDR, HEADER_READ_TIMEOUT, SWEEP_INTERVAL, StreamingServer, TOO_MANY_REQUESTS,
+        },
     };
     use anyhow::{Context, Result};
 
@@ -426,7 +433,8 @@ mod tests {
                     .port_forward_url(PathBuf::new(), None)
                     .await
                     .expect_err("full");
-                assert!(err.to_string().contains("in-flight"), "{err:#}");
+                // The message alone, which the RPC passes on as it is.
+                assert_eq!(format!("{err:#}"), TOO_MANY_REQUESTS);
                 assert_eq!(
                     server.state.read().await.port_forwards.len(),
                     DEFAULT_CAPACITY

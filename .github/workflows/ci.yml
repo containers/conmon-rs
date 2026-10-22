@@ -517,17 +517,22 @@ jobs:
         with:
           path: .build/gotools/bin/ginkgo
           key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod') }}
+      # The output names the failed plain Go tests, which the report of the
+      # specs does not, see .github/report-flakes.
       - name: Integration tests
+        shell: bash
         run: |
+          mkdir -p .build/report
           sudo -E make integration \
             RUNTIME_PATH=/usr/bin/crun \
             CONMON_BINARY=.build/static/conmonrs \
             MAX_RSS_KB="$MAX_RSS_KB" \
             MAX_RSS_GROWTH_KB="$MAX_RSS_GROWTH_KB" \
-            TEST_FLAGS="--flake-attempts 3 --output-dir .build/report --json-report report.json"
-      - name: Report flaky specs
+            TEST_FLAGS="--flake-attempts 3 --output-dir .build/report --json-report report.json" 2>&1 |
+            tee .build/report/output.log
+      - name: Report flaky specs and failed tests
         if: ${{ !cancelled() }}
-        run: .github/report-flakes .build/report/report.json
+        run: .github/report-flakes .build/report/report.json .build/report/output.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() }}
         with:
@@ -603,13 +608,16 @@ jobs:
       - name: Integration tests
         id: integration
         continue-on-error: true
+        shell: bash
         run: |
           source "$RUNNER_TEMP/llvm-cov.env"
+          mkdir -p .build/report
           sudo -E make integration \
             RUNTIME_PATH=/usr/bin/crun \
             CONMON_BINARY=target/debug/conmonrs \
             MAX_RSS_KB=1048576 \
-            TEST_FLAGS="--flake-attempts 3 --output-dir .build/report --json-report report.json --cover --coverprofile go-coverage.out"
+            TEST_FLAGS="--flake-attempts 3 --output-dir .build/report --json-report report.json --cover --coverprofile go-coverage.out" 2>&1 |
+            tee .build/report/output.log
       # Keep a failure visible, the job stays green.
       - name: Report failed integration tests
         if: steps.integration.outcome == 'failure'
@@ -627,9 +635,9 @@ jobs:
           files: lcov.info,.build/report/go-coverage.out
           flags: integration
           token: ${{ secrets.CODECOV_TOKEN }}
-      - name: Report flaky specs
+      - name: Report flaky specs and failed tests
         if: ${{ !cancelled() }}
-        run: .github/report-flakes .build/report/report.json
+        run: .github/report-flakes .build/report/report.json .build/report/output.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() }}
         with:

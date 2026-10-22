@@ -661,14 +661,8 @@ var _ = Describe("ConmonClient", func() {
 				runContainer(ctx, terminal, []string{"/busybox", "sleep", "600"})
 
 				pid := sut.PID()
-				rssBefore := vmRSSGivenPID(pid)
-				GinkgoWriter.Printf("VmRSS before: %d\n", rssBefore)
-				logMemoryDetails(pid, "before")
-				mappingsBefore := mappingRSS(pid)
-				resources := resourcesOf(pid)
 				execCtx := withoutDeadline(ctx)
-
-				for i := range 25 {
+				execEcho := func(i int) {
 					result, err := sut.ExecSyncContainer(
 						execCtx,
 						&client.ExecSyncConfig{
@@ -690,6 +684,24 @@ var _ = Describe("ConmonClient", func() {
 					Expect(result).NotTo(BeNil())
 					Expect(string(result.Stdout)).To(Equal(fmt.Sprintf("hello world %d", i)))
 					GinkgoWriter.Println("done with", i, string(result.Stdout))
+				}
+
+				// The first execs grow the heap of the allocator once, which
+				// on AArch64 can take a whole transparent huge page of 2 MiB.
+				// That is no leak, the measurement starts after them.
+				const warmUps = 5
+				for i := range warmUps {
+					execEcho(i)
+				}
+
+				rssBefore := vmRSSGivenPID(pid)
+				GinkgoWriter.Printf("VmRSS before: %d\n", rssBefore)
+				logMemoryDetails(pid, "before")
+				mappingsBefore := mappingRSS(pid)
+				resources := resourcesOf(pid)
+
+				for i := range 25 {
+					execEcho(warmUps + i)
 				}
 
 				rssAfter := vmRSSGivenPID(pid)

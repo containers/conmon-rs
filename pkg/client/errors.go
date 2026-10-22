@@ -42,6 +42,14 @@ var (
 	// know has the exit code ExecExitCodeNotStarted.
 	ErrContainerNotFound = errors.New("container not found")
 
+	// ErrTooManyRequests gets matched by the error of ServeExecContainer,
+	// ServeAttachContainer and ServePortForwardContainer if too many URLs of
+	// the kind wait for their client already. Use errors.Is to check for it,
+	// the message of the error stays the one of the server. A later request
+	// succeeds once a client took its URL or a URL expired. Older servers
+	// drop the oldest URL instead.
+	ErrTooManyRequests = errors.New("maximum number of in-flight requests exceeded")
+
 	// ErrClientClosed gets returned by the methods of a client after Close.
 	ErrClientClosed = errors.New("client is closed")
 
@@ -103,6 +111,10 @@ func rpcError(err error) error {
 		if strings.HasPrefix(message.Error(), notFound) {
 			return &matchedError{err: err, target: ErrContainerNotFound}
 		}
+	}
+
+	if strings.HasPrefix(message.Error(), ErrTooManyRequests.Error()) {
+		return &matchedError{err: err, target: ErrTooManyRequests}
 	}
 
 	return err

@@ -161,8 +161,8 @@ operations against it:
   `setWindowSizeContainer` resizes its terminal, `version` reports the server
   build.
 
-The server is single threaded: a tokio `current_thread` runtime drives all I/O,
-the Cap'n Proto RPC runs on one additional thread, and blocking work like file
+The server is single threaded: a tokio `current_thread` runtime drives all I/O
+and runs the Cap'n Proto RPC on the same thread, and blocking work like file
 I/O goes to a small bounded pool. With cgroup v2, all containers of a pod
 share one inotify instance for OOM detection, with cgroup v1 every container
 gets an eventfd on its `memory.oom_control`. Per container, the server keeps

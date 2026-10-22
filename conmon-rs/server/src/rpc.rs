@@ -11,7 +11,7 @@ use crate::{
     pause::Pause,
     random_id::RandomId,
     server::{GenerateRuntimeArgs, Server},
-    streaming_server::{AttachSession, ExecSession},
+    streaming_server::{AttachSession, ExecSession, StreamingServer},
     version::Version,
 };
 use anyhow::Context;
@@ -25,7 +25,12 @@ use std::{
     rc::Rc,
     time::Duration,
 };
-use tokio::{select, sync::oneshot, task, time::Instant};
+use tokio::{
+    select,
+    sync::{RwLock, oneshot},
+    task,
+    time::Instant,
+};
 use tracing::{Instrument, Span, debug, debug_span, error};
 
 macro_rules! pry_err {
@@ -119,6 +124,45 @@ impl Server {
     fn idle_timeout(timeout_sec: u64) -> Option<Duration> {
         (timeout_sec != 0).then(|| Duration::from_secs(timeout_sec))
     }
+
+    /// Start the streaming server if required and return the URL of the
+    /// session.
+    async fn streaming_url(
+        streaming_server: &RwLock<StreamingServer>,
+        request: StreamingRequest,
+    ) -> Result<String, Error> {
+        capnp_err!(
+            streaming_server
+                .write()
+                .await
+                .start_if_required()
+                .await
+                .context("start streaming server")
+        )?;
+
+        let server = streaming_server.read().await;
+        // Without a context: clients match the start of the message, like the
+        // one of too many waiting sessions, see `ErrTooManyRequests` of the Go
+        // client.
+        capnp_err!(match request {
+            StreamingRequest::Exec(session) => server.exec_url(session).await,
+            StreamingRequest::Attach(session) => server.attach_url(session).await,
+            StreamingRequest::PortForward {
+                netns_path,
+                idle_timeout,
+            } => server.port_forward_url(netns_path, idle_timeout).await,
+        })
+    }
+}
+
+/// A session for the streaming server, see [`Server::streaming_url`].
+enum StreamingRequest {
+    Exec(ExecSession),
+    Attach(AttachSession),
+    PortForward {
+        netns_path: PathBuf,
+        idle_timeout: Option<Duration>,
+    },
 }
 
 #[expect(
@@ -660,33 +704,22 @@ impl conmon::Server for Server {
 
         Promise::from_future(
             async move {
-                capnp_err!(
-                    streaming_server
-                        .write()
-                        .await
-                        .start_if_required()
-                        .await
-                        .context("start streaming server if required")
-                )?;
-
-                let url = capnp_err!(
-                    streaming_server
-                        .read()
-                        .await
-                        .exec_url(ExecSession {
-                            child_reaper,
-                            tty,
-                            server_config: config,
-                            cgroup_manager,
-                            container_id: id.into_boxed_str(),
-                            command,
-                            stdin,
-                            stdout,
-                            stderr,
-                            idle_timeout,
-                        })
-                        .await
-                )?;
+                let url = Self::streaming_url(
+                    &streaming_server,
+                    StreamingRequest::Exec(ExecSession {
+                        child_reaper,
+                        tty,
+                        server_config: config,
+                        cgroup_manager,
+                        container_id: id.into_boxed_str(),
+                        command,
+                        stdin,
+                        stdout,
+                        stderr,
+                        idle_timeout,
+                    }),
+                )
+                .await?;
 
                 results.get().init_response().set_url(&url);
                 Ok(())
@@ -721,30 +754,19 @@ impl conmon::Server for Server {
 
         Promise::from_future(
             async move {
-                capnp_err!(
-                    streaming_server
-                        .write()
-                        .await
-                        .start_if_required()
-                        .await
-                        .context("start streaming server")
-                )?;
-
-                let url = capnp_err!(
-                    streaming_server
-                        .read()
-                        .await
-                        .attach_url(AttachSession {
-                            container_id: id,
-                            child,
-                            stdin,
-                            stdout,
-                            stderr,
-                            stop_after_stdin_eof,
-                            idle_timeout,
-                        })
-                        .await
-                )?;
+                let url = Self::streaming_url(
+                    &streaming_server,
+                    StreamingRequest::Attach(AttachSession {
+                        container_id: id,
+                        child,
+                        stdin,
+                        stdout,
+                        stderr,
+                        stop_after_stdin_eof,
+                        idle_timeout,
+                    }),
+                )
+                .await?;
 
                 results.get().init_response().set_url(&url);
                 Ok(())
@@ -778,22 +800,14 @@ impl conmon::Server for Server {
 
         Promise::from_future(
             async move {
-                capnp_err!(
-                    streaming_server
-                        .write()
-                        .await
-                        .start_if_required()
-                        .await
-                        .context("start streaming server")
-                )?;
-
-                let url = capnp_err!(
-                    streaming_server
-                        .read()
-                        .await
-                        .port_forward_url(netns_path, idle_timeout)
-                        .await
-                )?;
+                let url = Self::streaming_url(
+                    &streaming_server,
+                    StreamingRequest::PortForward {
+                        netns_path,
+                        idle_timeout,
+                    },
+                )
+                .await?;
 
                 results.get().init_response().set_url(&url);
                 Ok(())
@@ -806,6 +820,90 @@ impl conmon::Server for Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        bounded_hashmap::DEFAULT_CAPACITY, child_reaper::ReapableChild, config::Config,
+        conmon_capnp::conmon::CgroupManager,
+    };
+    use std::sync::Arc;
+    use tokio::task::LocalSet;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn too_many_streaming_sessions_fail_with_the_bare_message() -> anyhow::Result<()> {
+        let Some(config) = Config::parse_for_test::<_, &str>([]) else {
+            return Ok(());
+        };
+        let config = Arc::new(config);
+        let (_, child) = ReapableChild::from_child(Child {
+            id: "id".into(),
+            kind: ChildKind::Container,
+            pid: Pid::from_raw(0),
+            exit_paths: vec![],
+            oom_exit_paths: vec![],
+            timeout: None,
+            io: SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?),
+            cleanup_cmd: vec![],
+            token: CancellationToken::new(),
+        });
+        let exec = || {
+            StreamingRequest::Exec(ExecSession {
+                child_reaper: Arc::default(),
+                tty: false,
+                server_config: config.clone(),
+                cgroup_manager: CgroupManager::Cgroupfs,
+                container_id: "id".into(),
+                command: vec!["true".into()],
+                stdin: false,
+                stdout: true,
+                stderr: false,
+                idle_timeout: None,
+            })
+        };
+        let attach = || {
+            StreamingRequest::Attach(AttachSession {
+                container_id: "id".into(),
+                child: child.clone(),
+                stdin: false,
+                stdout: true,
+                stderr: false,
+                stop_after_stdin_eof: false,
+                idle_timeout: None,
+            })
+        };
+        let port_forward = || StreamingRequest::PortForward {
+            netns_path: PathBuf::new(),
+            idle_timeout: None,
+        };
+
+        LocalSet::new()
+            .run_until(async {
+                let streaming_server = RwLock::new(StreamingServer::default());
+                // Exec and attach sessions count together.
+                for i in 0..DEFAULT_CAPACITY {
+                    let request = if i % 2 == 0 { exec() } else { attach() };
+                    Server::streaming_url(&streaming_server, request).await?;
+                    Server::streaming_url(&streaming_server, port_forward()).await?;
+                }
+                for (kind, request) in [
+                    ("exec", exec()),
+                    ("attach", attach()),
+                    ("port forward", port_forward()),
+                ] {
+                    let err = Server::streaming_url(&streaming_server, request)
+                        .await
+                        .expect_err(kind);
+                    // The message alone reaches the client, the start of it
+                    // matches `ErrTooManyRequests` of the Go client.
+                    assert_eq!(err.kind, capnp::ErrorKind::Failed, "{kind}");
+                    assert_eq!(
+                        err.extra, "maximum number of in-flight requests exceeded",
+                        "{kind}"
+                    );
+                }
+                Ok(())
+            })
+            .await
+    }
 
     #[test]
     fn exec_deadline() {

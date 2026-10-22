@@ -979,20 +979,38 @@ func processExited(pid uint32) bool {
 }
 
 // client returns the RPC client. A connection which got unusable gets
-// replaced by a new one.
+// replaced by a new one, which records the features of the server again.
 func (c *ConmonClient) client(ctx context.Context) (proto.Conmon, error) {
+	conn, dialed, err := c.usableConn(ctx)
+	if err != nil {
+		return proto.Conmon{}, err
+	}
+
+	// Without the lock, a server which does not answer must not block other
+	// callers. Features which are not recorded yet get asked for by New and
+	// requireServerFeature.
+	if dialed && c.serverFeatures() != nil {
+		c.refreshFeatures(ctx, conn)
+	}
+
+	return conn.client, nil
+}
+
+// usableConn returns the connection, and whether it got dialed for the
+// call.
+func (c *ConmonClient) usableConn(ctx context.Context) (*rpcConn, bool, error) {
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
 
 	// Checked under the lock, so that no connection gets dialed after Close
 	// reset the last one.
 	if c.closed.Load() {
-		return proto.Conmon{}, ErrClientClosed
+		return nil, false, ErrClientClosed
 	}
 
 	if c.conn != nil {
 		if c.conn.usable() {
-			return c.conn.client, nil
+			return c.conn, false, nil
 		}
 
 		c.logger.Debug("RPC connection unusable, dialing a new one")
@@ -1001,12 +1019,37 @@ func (c *ConmonClient) client(ctx context.Context) (proto.Conmon, error) {
 
 	socketConn, err := dialLongSocket("unix", c.socket())
 	if err != nil {
-		return proto.Conmon{}, fmt.Errorf("dial long socket: %w", err)
+		return nil, false, fmt.Errorf("dial long socket: %w", err)
 	}
 
 	c.conn = newRPCConn(ctx, socketConn)
 
-	return c.conn.client, nil
+	return c.conn, true, nil
+}
+
+// refreshFeatures records the features of the server on a new connection,
+// which may be another server than before, for example one which got
+// restarted. If the server does not tell them within serverProbeTimeout, the
+// recorded ones stay and the call which dialed the connection goes on.
+func (c *ConmonClient) refreshFeatures(ctx context.Context, conn *rpcConn) {
+	ctx, cancel := context.WithTimeout(ctx, serverProbeTimeout)
+	defer cancel()
+
+	resp, err := c.version(ctx, conn.client, nil)
+	if err != nil {
+		c.logger.WithError(err).
+			Debug("Unable to get the features of the server, keeping the recorded ones")
+
+		return
+	}
+
+	// Only for the connection in use, a newer one records its own.
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+
+	if c.conn == conn {
+		c.setFeatures(resp.Features)
+	}
 }
 
 // rpcConn is a connection to the server with its bootstrap capability.
@@ -1225,6 +1268,17 @@ const FeatureIdleTimeout = "idletimeout"
 // v5.channel.k8s.io.
 const FeatureStreamingProtocols = "streamingprotocols"
 
+// SupportsFeature reports whether the server reports the feature, see the
+// Feature constants. New records the features of the server it starts or
+// connects to, which can be older than the binary on disk: a server keeps
+// running across restarts of its callers and upgrades. A call which dials a
+// new connection to the server, because the last one broke, records them
+// again. SupportsFeature does not ask the server itself, so it reports the
+// features of a server which got replaced until a call reconnected.
+func (c *ConmonClient) SupportsFeature(feature string) bool {
+	return c.serverFeatures()[feature]
+}
+
 // requireServerFeature fails with ErrUnsupported if the server does not
 // report the feature. New records the features, a client without them asks
 // the server once.
@@ -1290,6 +1344,13 @@ func (c *ConmonClient) Version(
 		return nil, fmt.Errorf("create RPC client: %w", err)
 	}
 
+	return c.version(ctx, rpcClient, cfg)
+}
+
+// version asks the server for its version on the RPC client.
+func (c *ConmonClient) version(
+	ctx context.Context, rpcClient proto.Conmon, cfg *VersionConfig,
+) (*VersionResponse, error) {
 	future, free := rpcClient.Version(ctx, func(p proto.Conmon_version_Params) (err error) {
 		req, err := p.NewRequest()
 		if err != nil {
@@ -2565,7 +2626,8 @@ type ServeExecContainerResult struct {
 // and the older WebSocket versions down to channel.k8s.io.
 //
 // See the Streaming section of the package documentation for how long the
-// URL is good for, and usage.md in the repository for the protocols.
+// URL is good for and how many may wait (ErrTooManyRequests), and usage.md
+// in the repository for the protocols.
 func (c *ConmonClient) ServeExecContainer(
 	ctx context.Context,
 	cfg *ServeExecContainerConfig,
@@ -2682,7 +2744,8 @@ type ServeAttachContainerResult struct {
 // a running container. Clients speak the protocols of ServeExecContainer.
 //
 // See the Streaming section of the package documentation for how long the
-// URL is good for, and usage.md in the repository for the protocols.
+// URL is good for and how many may wait (ErrTooManyRequests), and usage.md
+// in the repository for the protocols.
 func (c *ConmonClient) ServeAttachContainer(
 	ctx context.Context,
 	cfg *ServeAttachContainerConfig,
@@ -2769,7 +2832,8 @@ type ServePortForwardContainerResult struct {
 // Servers without the FeaturePortForward feature return ErrUnsupported.
 //
 // See the Streaming section of the package documentation for how long the
-// URL is good for, and usage.md in the repository for the protocols.
+// URL is good for and how many may wait (ErrTooManyRequests), and usage.md
+// in the repository for the protocols.
 func (c *ConmonClient) ServePortForwardContainer(
 	ctx context.Context,
 	cfg *ServePortForwardContainerConfig,

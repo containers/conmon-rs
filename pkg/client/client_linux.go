@@ -92,7 +92,15 @@ func pidfdExited(pidfd *os.File) (bool, error) {
 
 		var n int
 
-		n, pollErr = unix.Poll(fds, 0)
+		// A signal, like the preemption of the Go runtime, interrupts the
+		// poll, which never gets restarted.
+		for {
+			n, pollErr = unix.Poll(fds, 0)
+			if !errors.Is(pollErr, unix.EINTR) {
+				break
+			}
+		}
+
 		exited = n > 0
 	}); err != nil {
 		return false, fmt.Errorf("control raw pidfd: %w", err)

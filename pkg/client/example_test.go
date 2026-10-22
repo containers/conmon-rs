@@ -73,6 +73,26 @@ func ExampleConmonClient_Version() {
 	}
 }
 
+// Checks a feature of the running server, which may be older than the
+// binary on disk.
+func ExampleConmonClient_SupportsFeature() {
+	conmon, err := client.New(
+		client.NewConmonServerConfig("/usr/bin/crun", "", "/run/conmonrs/pod"),
+	)
+	if err != nil {
+		fmt.Println("start server:", err)
+
+		return
+	}
+	defer conmon.Close()
+
+	if conmon.SupportsFeature(client.FeatureStreamingProtocols) {
+		fmt.Println("exec and attach speak SPDY/3.1 as well")
+	} else {
+		fmt.Println("exec and attach only speak v5.channel.k8s.io")
+	}
+}
+
 // Runs a command in a container, bounded by a timeout.
 func ExampleConmonClient_ExecSyncContainer() {
 	conmon, err := client.New(
@@ -124,6 +144,13 @@ func ExampleConmonClient_ServeExecContainer() {
 		Stdout:      true,
 		IdleTimeout: 4 * time.Hour,
 	})
+	if errors.Is(err, client.ErrTooManyRequests) {
+		// Too many URLs wait for their client, a later request may succeed.
+		fmt.Println("try again later:", err)
+
+		return
+	}
+
 	if err != nil {
 		fmt.Println("serve exec:", err)
 

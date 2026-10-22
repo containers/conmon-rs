@@ -19,8 +19,11 @@ URL=https://github.com/containers/crun/releases/download/$CRUN_VERSION/crun-$CRU
 
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
-curl -sSfL "$URL" -o "$TMPDIR/crun"
-curl -sSfL "$URL.asc" -o "$TMPDIR/crun.asc"
+# Retries transient failures, also the ones curl does not retry by default,
+# like a reset connection.
+CURL=(curl -sSfL --retry 5 --retry-delay 3 --retry-all-errors)
+"${CURL[@]}" "$URL" -o "$TMPDIR/crun"
+"${CURL[@]}" "$URL.asc" -o "$TMPDIR/crun.asc"
 
 export GNUPGHOME=$TMPDIR/gnupg
 mkdir -m 700 "$GNUPGHOME"
