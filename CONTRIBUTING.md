@@ -70,21 +70,30 @@ CAPNP=capnp` uses a local one instead.
 
 The unit tests run as a regular user, and so do most integration tests. The
 OOM and namespace specs need elevated permissions for the cgroups and bind
-mounts and skip or fail otherwise:
+mounts and skip or fail otherwise. Like CI, build the server, download the Go
+modules and install ginkgo as your user first, so that `target` and `.build`
+do not end up owned by root. Then run the suite as root with the `PATH` which
+finds `go`, your Go settings like `GOPROXY` (`GOENV`), your module cache and
+your Go toolchain. Leave out `GOCACHE`, root would leave files of its own in
+your build cache:
 
 ```console
 $ make unit unit-go
-# make integration
+$ make release .install.ginkgo
+$ go mod download && go -C pkg/client/integration mod download
+$ sudo env PATH="$PATH" GOENV="$(go env GOENV)" GOMODCACHE="$(go env GOMODCACHE)" \
+    GOTOOLCHAIN="$(go env GOTOOLCHAIN)" make integration CONMON_BINARY=target/release/conmonrs
 ```
 
 `make unit` runs the Rust unit tests with and without the `tracing` feature,
 `make unit-go` the unit tests of the Go client, which need no server.
 
-The integration tests use the release binary by default. Set `CONMON_BINARY`
-to test another one, for example the static build of `make release-static`:
+`CONMON_BINARY` selects the server to test, which the target builds
+otherwise, for example the static build of `make release-static`:
 
 ```console
-# make integration CONMON_BINARY=result/bin/conmonrs MAX_RSS_KB=5500
+$ sudo env PATH="$PATH" GOENV="$(go env GOENV)" GOMODCACHE="$(go env GOMODCACHE)" \
+    GOTOOLCHAIN="$(go env GOTOOLCHAIN)" make integration CONMON_BINARY=result/bin/conmonrs MAX_RSS_KB=5500
 ```
 
 PRs that fix issues should include a reference like `Fixes #XXXX` in the PR

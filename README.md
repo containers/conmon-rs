@@ -328,7 +328,9 @@ help` lists the rest. Contributions follow [CONTRIBUTING.md](./CONTRIBUTING.md).
 The [fuzz](./fuzz) directory holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)
 targets for the parsers of client input, the SPDY frames, header blocks and
 connections, the WebSocket channel messages, the resize events, the port forward
-query and the upgrade headers. They need a nightly toolchain, for example
+query and the upgrade headers, and for the stream pairing of SPDY port
+forwarding and the pending stdin of a session. `cargo fuzz list` lists them.
+They need a nightly toolchain, for example
 `cargo +nightly fuzz run spdy_frames`, CI pins the one of `FUZZ_TOOLCHAIN` in
 [ci.yml](.github/workflows/ci.yml). [fuzz/seeds](./fuzz/seeds) holds a few
 valid inputs per target to start from, pass the directory after the corpus,
@@ -341,5 +343,6 @@ which libFuzzer does not create:
 
 cargo-fuzz builds with the release profile of the server, which strips the
 symbols and builds slowly. CI overrides it with
-`CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_LTO=false
-CARGO_PROFILE_RELEASE_OPT_LEVEL=3`, which helps local runs as well.
+`CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
+CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_OPT_LEVEL=3
+CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16`, which helps local runs as well.

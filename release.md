@@ -52,14 +52,19 @@ The release takes the static binaries which the ci workflow built, attested
 and signed when the commit reached main, so the tag has to point to a commit
 which had its own ci run on main, like the merge commit of the version bump PR.
 The release fails right away otherwise, and for commits from before the builds
-got attested. Those binaries got built before the tag existed, the version and
-commit identify them and their tag stays empty.
+got attested or before the VEX document
+[vex/conmonrs.openvex.json](vex/conmonrs.openvex.json) existed. Those binaries
+got built before the tag existed, the version and commit identify them and
+their tag stays empty.
 
 Use only "Re-run failed jobs" for a ci run on main, never "Re-run all jobs".
 The latter builds the binaries again, and if they do not have the same bits,
 the publish-static jobs refuse to replace the signed ones in the bucket and
 fail. A release still takes the binaries of the earlier attempt, but the run
-stays failed.
+stays failed. A cancelled publish-marker job is fine: the runs of main publish
+the `latest-main.txt` marker one at a time, and a job which queues later
+replaces one which waits. The marker only moves forward, at worst it stays
+behind until the run of the next commit.
 
 The same tag also versions the Go module `github.com/containers/conmon-rs`, so
 consumers like CRI-O pick the release up with `go get

@@ -136,6 +136,8 @@ dependencies:
       - path: .github/install-crun
         match: CRUN_VERSION=
 
+  # A bump updates ACTIONLINT_CHECKSUMS_SHA256 of the Makefile as well, the
+  # sha256 of the checksums file of the release.
   - name: actionlint
     version: 1.7.12
     upstream:

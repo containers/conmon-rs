@@ -24,6 +24,10 @@ env:
   # cargo-fuzz needs a nightly toolchain, a pinned one keeps new lints and
   # compiler changes out of unrelated pull requests.
   FUZZ_TOOLCHAIN: "nightly-2026-10-15"
+  # Only main saves the build caches, which pull requests restore. One per
+  # pull request would push the caches of main out of the 10 GB of the
+  # repository.
+  SAVE_CACHE: ${{ github.ref == 'refs/heads/main' }}
 # The jobs are named by what they do: lint-* checks the sources,
 # verify-* checks that generated or pinned things are up to date, build-* and
 # test-* build and test the server, publish-* changes the bucket or the cache.
@@ -45,9 +49,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Only builds capnpc-go, which is not worth a cache entry of its own.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
       - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
         with:
           install_url: https://releases.nixos.org/nix/nix-${{ env.NIX_VERSION }}/install
@@ -59,10 +65,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: "**/go.sum"
+      - uses: ./.github/actions/setup-go
+        id: go
       # The module is what CRI-O vendors, its go.sum has to be complete and
       # match the module proxy. The integration suite is a module of its own.
       - name: Verify the Go modules
@@ -81,10 +85,17 @@ jobs:
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.15.0
+          skip-save-cache: ${{ env.SAVE_CACHE != 'true' }}
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.15.0
           working-directory: pkg/client/integration
+          skip-save-cache: ${{ env.SAVE_CACHE != 'true' }}
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: env.SAVE_CACHE == 'true' && steps.go.outputs.cache-hit != 'true'
+        with:
+          path: ${{ steps.go.outputs.paths }}
+          key: ${{ steps.go.outputs.key }}
 
   # One build environment for all checks of the Rust sources. Every check runs
   # even if an earlier one fails, so that a run reports all of them.
@@ -105,6 +116,8 @@ jobs:
           rustup toolchain install "$MSRV" --profile minimal
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         id: setup
+        with:
+          save-if: ${{ env.SAVE_CACHE }}
       # The checks are the ones of make lint-rust and make lint-msrv, see the
       # Makefile, and only run on a complete setup, which they would report as
       # their own failures otherwise.
@@ -145,9 +158,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
       - run: make lint-workflows
         env:
           CONTAINER_RUNTIME: docker
@@ -241,9 +251,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The latest Go release changes the key of a cache, which would keep
+      # adding entries.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
+          cache: false
       # go run would turn the exit code of govulncheck into 1.
       - name: govulncheck
         run: |
@@ -357,7 +370,9 @@ jobs:
   # Pushes the toolchains of main to the cache: the inputs of the static builds,
   # not the builds which get attested and published. No job needs it, a
   # failure or a cold cache holds up neither the tests nor the publishing, only
-  # a release of the commit, which waits for the whole run.
+  # a release of the commit, which waits for the whole run. The jobs keep the
+  # default names of a matrix: pull requests skip them, and a skipped job shows
+  # a name with an expression unexpanded.
   publish-cache:
     if: github.repository == 'containers/conmon-rs' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -365,7 +380,6 @@ jobs:
       fail-fast: false
       matrix:
         arch: [amd64, arm64, ppc64le, s390x]
-    name: publish-cache-${{ matrix.arch }}
     env:
       ARCH: ${{ matrix.arch }}
     steps:
@@ -392,6 +406,8 @@ jobs:
       - name: Select Toolchain
         run: rustup toolchain install "$RUST_VERSION" --profile minimal --component llvm-tools-preview && rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ env.SAVE_CACHE }}
       - name: Install cargo-llvm-cov and cargo-nextest
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
@@ -435,10 +451,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
+      # Shares the caches with lint-go, which runs on the same image. The
+      # cache entry of the key is the one of the job which saves it first,
+      # which has to hold the modules of both go.mod files.
+      - uses: ./.github/actions/setup-go
+        id: go
+      - name: Download Go modules
+        run: |
+          go mod download
+          go -C pkg/client/integration mod download
       - run: make unit-go
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: env.SAVE_CACHE == 'true' && steps.go.outputs.cache-hit != 'true'
+        with:
+          path: ${{ steps.go.outputs.paths }}
+          key: ${{ steps.go.outputs.key }}
 
   # Builds all fuzz targets once, so that they keep compiling, for test-fuzz
   # to run one per job. A new target gets fuzzed without a change here.
@@ -465,6 +492,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: fuzz
+          save-if: ${{ env.SAVE_CACHE }}
       # cargo-fuzz resolves the dependencies itself, a lock file which does
       # not fit fails here instead.
       - name: Check the lock file
@@ -572,10 +600,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: "**/go.sum"
+      # Shares the caches with test-integration-coverage on amd64, which runs
+      # on the same image.
+      - uses: ./.github/actions/setup-go
+        id: go
       # The tests run as root and keep their files per user ID.
       - name: Setup Testfiles Cache
         if: env.ARCH == 'amd64'
@@ -617,7 +645,7 @@ jobs:
           path: .build/gotools/bin/ginkgo
           key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pkg/client/integration/go.mod') }}
       # The tests run as root, the modules and ginkgo get downloaded as the
-      # runner user before, so that setup-go saves them on a cache miss.
+      # runner user before, so that the caches hold them on a miss.
       - name: Download Go modules and ginkgo
         run: |
           go mod download
@@ -629,8 +657,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p .build/report
-          # sudo sets HOME to the one of root, which would leave the caches
-          # of setup-go unused, and sudo-rs, as on ubuntu-26.04, ignores -E, so
+          # sudo sets HOME to the one of root, which would leave the Go
+          # caches unused, and sudo-rs, as on ubuntu-26.04, ignores -E, so
           # env sets what has to reach the tests on every runner, including
           # the busybox of the other architectures.
           sudo -E env \
@@ -653,15 +681,16 @@ jobs:
         with:
           name: test-integration-${{ env.ARCH }}-report
           path: .build/report/report.json
-      # The tests write into the caches as root, setup-go saves them as the
-      # runner user.
+      # The tests write into the caches as root, they get saved as the runner
+      # user.
       - name: Chown cache
-        run: |
-          for DIR in ~/go/pkg/mod ~/.cache/go-build; do
-            if [[ -d $DIR ]]; then
-              sudo chown -R "$(id -u):$(id -g)" "$DIR"
-            fi
-          done
+        if: env.SAVE_CACHE == 'true' && steps.go.outputs.cache-hit != 'true'
+        run: sudo chown -R "$(id -u):$(id -g)" "$(go env GOMODCACHE)" "$(go env GOCACHE)"
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: env.SAVE_CACHE == 'true' && steps.go.outputs.cache-hit != 'true'
+        with:
+          path: ${{ steps.go.outputs.paths }}
+          key: ${{ steps.go.outputs.key }}
 
   # The same suite on a native arm64 runner, the build-static jobs only run the
   # other architectures once under emulation.
@@ -683,14 +712,14 @@ jobs:
   test-integration-coverage:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      PROFILE_DIR: /tmp/conmon-rs-profiles
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: "**/go.sum"
+      - uses: ./.github/actions/setup-go
+        id: go
       # Saved by the test-integration-amd64 job.
       - name: Restore Testfiles Cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -702,6 +731,8 @@ jobs:
       - name: Select Toolchain
         run: rustup toolchain install "$RUST_VERSION" --profile minimal --component llvm-tools-preview && rustup default "$RUST_VERSION"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ env.SAVE_CACHE }}
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
@@ -710,19 +741,20 @@ jobs:
       - name: create symlink
         run: sudo ln -f -s "$(go env GOROOT)"/bin/* /usr/bin/
       # The environment makes the build instrumented and every server process
-      # write its profile into the target directory on exit.
+      # write its profile on exit.
       - name: Build instrumented server
         run: |
           cargo llvm-cov show-env --sh > "$RUNNER_TEMP/llvm-cov.env"
           source "$RUNNER_TEMP/llvm-cov.env"
           cargo llvm-cov clean --workspace
           cargo build --locked
+          mkdir -m 1777 "$PROFILE_DIR"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .build/gotools/bin/ginkgo
           key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pkg/client/integration/go.mod') }}
       # The tests run as root, the modules and ginkgo get downloaded as the
-      # runner user before, so that setup-go saves them on a cache miss.
+      # runner user before, so that the caches hold them on a miss.
       - name: Download Go modules and ginkgo
         run: |
           go mod download
@@ -739,15 +771,18 @@ jobs:
         run: |
           source "$RUNNER_TEMP/llvm-cov.env"
           mkdir -p .build/report
-          # sudo sets HOME to the one of root, which would leave the caches
-          # of setup-go unused, and sudo-rs, as on ubuntu-26.04, ignores -E, so
+          # sudo sets HOME to the one of root, which would leave the Go
+          # caches unused, and sudo-rs, as on ubuntu-26.04, ignores -E, so
           # env sets what has to reach the tests on every runner, including
-          # the profile path of the instrumented server.
+          # the profile path of the instrumented server. The processes of the
+          # user namespace specs have no permission on the target directory,
+          # which the runner user owns, so the profiles go to a directory
+          # which everyone can write, the report moves them.
           sudo -E env \
             GOMODCACHE="$(go env GOMODCACHE)" \
             GOTOOLCHAIN="$(go env GOTOOLCHAIN)" \
             GOCACHE="$(go env GOCACHE)" \
-            LLVM_PROFILE_FILE="$LLVM_PROFILE_FILE" \
+            LLVM_PROFILE_FILE="$PROFILE_DIR/${LLVM_PROFILE_FILE##*/}" \
             make integration \
             RUNTIME_PATH=/usr/bin/crun \
             CONMON_BINARY=target/debug/conmonrs \
@@ -762,8 +797,9 @@ jobs:
           echo ":warning: The integration tests of the coverage build failed, the coverage is partial." >>"$GITHUB_STEP_SUMMARY"
       - name: Generate code coverage
         run: |
-          sudo chown -R "$(id -u):$(id -g)" target .build
           source "$RUNNER_TEMP/llvm-cov.env"
+          sudo find "$PROFILE_DIR" -name '*.profraw' -exec mv -t "${LLVM_PROFILE_FILE%/*}" {} +
+          sudo chown -R "$(id -u):$(id -g)" target .build
           cargo llvm-cov report --lcov --output-path lcov.info
       - name: Upload Results
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
@@ -779,15 +815,16 @@ jobs:
         with:
           name: test-integration-coverage-report
           path: .build/report/report.json
-      # The tests write into the caches as root, setup-go saves them as the
-      # runner user.
+      # The tests write into the caches as root, they get saved as the runner
+      # user.
       - name: Chown cache
-        run: |
-          for DIR in ~/go/pkg/mod ~/.cache/go-build; do
-            if [[ -d $DIR ]]; then
-              sudo chown -R "$(id -u):$(id -g)" "$DIR"
-            fi
-          done
+        if: env.SAVE_CACHE == 'true' && steps.go.outputs.cache-hit != 'true'
+        run: sudo chown -R "$(id -u):$(id -g)" "$(go env GOMODCACHE)" "$(go env GOCACHE)"
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: env.SAVE_CACHE == 'true' && steps.go.outputs.cache-hit != 'true'
+        with:
+          path: ${{ steps.go.outputs.paths }}
+          key: ${{ steps.go.outputs.key }}
 
   # Runs critest against CRI-O with the static binary. With stream_websockets,
   # CRI-O hands exec and attach to the streaming server of conmon-rs, which
@@ -807,10 +844,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # ginkgo has a cache of its own, a Go cache saved here would lack the
+      # modules of the integration jobs which share its key.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache-dependency-path: "**/go.sum"
+          cache: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: build-static-amd64
@@ -960,5 +999,6 @@ jobs:
           path: .
           glob: latest-*.txt
           destination: cri-o/conmon-rs
+          process_gcloudignore: false
           headers: |-
             cache-control: no-cache

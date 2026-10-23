@@ -166,5 +166,6 @@ jobs:
           path: .
           glob: latest-*.txt
           destination: cri-o/conmon-rs
+          process_gcloudignore: false
           headers: |-
             cache-control: no-cache

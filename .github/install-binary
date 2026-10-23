@@ -6,7 +6,8 @@ set -euo pipefail
 # change gets pinned with -s, without it only an immutable release protects
 # against a replaced binary. A tar.gz asset gets the path of the binary inside
 # it with -m. The binary replaces OUTPUT in one step, a failed or interrupted
-# install leaves the previous one in place.
+# install leaves the previous one in place. Exits with 3 if the release has no
+# such asset, like for a platform it has no binaries for.
 usage() {
     echo "usage: $0 [-s CHECKSUMS_SHA256] [-m MEMBER] ASSET_URL CHECKSUMS_URL OUTPUT" >&2
     exit 1
@@ -35,7 +36,6 @@ trap 'rm -rf "$TMPDIR"' EXIT
 # Retries transient failures, also the ones curl does not retry by default,
 # like a reset connection.
 CURL=(curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors)
-"${CURL[@]}" "$URL" -o "$TMPDIR/$ASSET"
 "${CURL[@]}" "$CHECKSUMS" -o "$TMPDIR/checksums.txt"
 
 if [[ -n $CHECKSUMS_SHA256 ]] &&
@@ -44,10 +44,14 @@ if [[ -n $CHECKSUMS_SHA256 ]] &&
     exit 1
 fi
 SUM=$(awk -v asset="$ASSET" '$2 == asset || $2 == "*" asset { print $1 }' "$TMPDIR/checksums.txt")
-if [[ ! $SUM =~ ^[0-9a-f]{64}$ ]]; then
+if [[ -z $SUM ]]; then
     echo "$CHECKSUMS has no checksum of $ASSET" >&2
+    exit 3
+elif [[ ! $SUM =~ ^[0-9a-f]{64}$ ]]; then
+    echo "$CHECKSUMS has no single checksum of $ASSET" >&2
     exit 1
 fi
+"${CURL[@]}" "$URL" -o "$TMPDIR/$ASSET"
 if ! echo "$SUM  $TMPDIR/$ASSET" | sha256sum -c --status -; then
     echo "$ASSET does not match its checksum $SUM of $CHECKSUMS" >&2
     exit 1

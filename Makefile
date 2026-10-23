@@ -49,6 +49,9 @@ ZEITGEIST_VERSION := v0.8.0
 # updates it as well, see .install.zeitgeist.
 ZEITGEIST_CHECKSUMS_SHA256 := ec1a11bcdb987d7095ec8beb87c339b99671455be523af17e41b3402ae3407d4
 ACTIONLINT_VERSION := v1.7.12
+# The sha256 of the checksums file of the release, a bump of the version
+# updates it as well, see .install.actionlint.
+ACTIONLINT_CHECKSUMS_SHA256 := 433028cf0ba3c42163ea1a668dedce30fcdbe84fe912b1a5e288c006eab8a4f5
 ZIZMOR_VERSION := 1.31.1
 ZIZMOR_DIGEST := sha256:42d409dbb851d4c5d35a058cf042b828bea1e3f2884378c526eb0974780e18d9
 ZIZMOR_IMAGE := ghcr.io/zizmorcore/zizmor:$(ZIZMOR_VERSION)@$(ZIZMOR_DIGEST)
@@ -131,7 +134,7 @@ lint-rust: lint-rustfmt lint-clippy lint-rustdoc ## Lint the Rust sources.
 
 .PHONY: lint-rustfmt
 lint-rustfmt: ## Check the formatting of the Rust sources.
-	cargo fmt && git diff --exit-code
+	cargo fmt --all -- --check
 
 # The default features are what gets shipped, all features cover the optional
 # tracing code.
@@ -168,8 +171,8 @@ lint-shell: ## Lint the shell scripts, the files whose first line is a sh or bas
 # The workflows in .github/workflows, zizmor runs in a container. zizmor only
 # runs its online audits with GH_TOKEN set.
 .PHONY: lint-workflows
-lint-workflows: ## Lint the GitHub workflows with actionlint and zizmor.
-	go run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
+lint-workflows: .install.actionlint ## Lint the GitHub workflows with actionlint and zizmor.
+	"$(GOTOOLS_BINDIR)/actionlint"
 	$(CONTAINER_RUNTIME) run --rm -e GH_TOKEN -v $(CURDIR):/w:z,ro -w /w \
 		$(ZIZMOR_IMAGE) $(ZIZMOR_FLAGS) .
 
@@ -246,6 +249,13 @@ verify-prettier: ## Check the formatting of the supported files with prettier.
 prettier: ## Prettify supported files.
 	$(PRETTIER) -w .
 
+# rustfmt, and the formatters of .golangci.yml for both Go modules.
+.PHONY: fmt
+fmt: .install.golangci-lint ## Format the Rust and Go sources.
+	cargo fmt --all
+	$(GOTOOLS_BINDIR)/golangci-lint fmt
+	cd $(INTEGRATION_DIR) && $(abspath $(GOTOOLS_BINDIR))/golangci-lint fmt
+
 # ginkgo publishes no binaries, an installed one of the version of the go.mod
 # of the integration suite is kept, which CI caches.
 .PHONY: .install.ginkgo
@@ -255,39 +265,77 @@ prettier: ## Prettify supported files.
 		GOBIN=$(abspath $(GOTOOLS_BINDIR)) go install "github.com/onsi/ginkgo/v2/ginkgo@$$VERSION"; \
 	fi
 
-# The release binaries of golangci-lint and zeitgeist, checked against the
-# checksums of their release, see .github/install-binary. One of another
-# version gets replaced.
+# The release binaries of golangci-lint, actionlint and zeitgeist, checked
+# against the checksums of their release, see .github/install-binary. One of
+# another version gets replaced. A platform without release binaries builds
+# the tool from source with go install. TOOLS_ARCH uses the names of the Go
+# architectures, with armv6 and armv7 for 32-bit ARM, which the projects name
+# their assets after.
 TOOLS_OS = $(shell uname -s | tr '[:upper:]' '[:lower:]')
-TOOLS_ARCH = $(shell uname -m | sed -e 's/^x86_64$$/amd64/' -e 's/^aarch64$$/arm64/')
+TOOLS_ARCH = $(shell uname -m | sed -e 's/^x86_64$$/amd64/' -e 's/^aarch64$$/arm64/' \
+	-e 's/^i[3-6]86$$/386/' -e 's/^armv\([67]\).*/armv\1/')
+
+# Installs the tool $(1) with the variables of the prefix $(2): _VERSION is the
+# pinned version, which _VERSION_CMD prints with or without the v, _ASSET and
+# _CHECKSUMS are the URLs of the release, _INSTALL_FLAGS the options of
+# install-binary and _PACKAGE what go install builds without an asset for the
+# platform.
+define install-tool
+	VERSION=$$("$(GOTOOLS_BINDIR)/$(1)" $($(2)_VERSION_CMD)); \
+	if [ "$${VERSION#v}" != "$($(2)_VERSION:v%=%)" ]; then \
+		STATUS=0 && \
+		.github/install-binary $($(2)_INSTALL_FLAGS) "$($(2)_ASSET)" "$($(2)_CHECKSUMS)" \
+			"$(GOTOOLS_BINDIR)/$(1)" || STATUS=$$?; \
+		if [ "$$STATUS" = 3 ]; then \
+			echo "No release binary of $(1) for $(TOOLS_OS)/$(TOOLS_ARCH), building it from source" && \
+			GOBIN=$(abspath $(GOTOOLS_BINDIR)) go install "$($(2)_PACKAGE)"; \
+		elif [ "$$STATUS" != 0 ]; then \
+			exit "$$STATUS"; \
+		fi; \
+	fi
+endef
 
 # The releases of golangci-lint are immutable, the checksums file of one
 # cannot change.
 GOLANGCI_LINT_RELEASE = https://github.com/golangci/golangci-lint/releases/download/$(GOLANGCI_LINT_VERSION)
+GOLANGCI_LINT_VERSION_CMD = version --short 2>/dev/null
 GOLANGCI_LINT_NAME = golangci-lint-$(GOLANGCI_LINT_VERSION:v%=%)-$(TOOLS_OS)-$(TOOLS_ARCH)
+GOLANGCI_LINT_ASSET = $(GOLANGCI_LINT_RELEASE)/$(GOLANGCI_LINT_NAME).tar.gz
+GOLANGCI_LINT_CHECKSUMS = $(GOLANGCI_LINT_RELEASE)/golangci-lint-$(GOLANGCI_LINT_VERSION:v%=%)-checksums.txt
+GOLANGCI_LINT_INSTALL_FLAGS = -m $(GOLANGCI_LINT_NAME)/golangci-lint
+GOLANGCI_LINT_PACKAGE = github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
 .PHONY: .install.golangci-lint
 .install.golangci-lint:
-	if [ "$$("$(GOTOOLS_BINDIR)/golangci-lint" version --short 2>/dev/null)" != "$(GOLANGCI_LINT_VERSION:v%=%)" ]; then \
-		.github/install-binary -m "$(GOLANGCI_LINT_NAME)/golangci-lint" \
-			"$(GOLANGCI_LINT_RELEASE)/$(GOLANGCI_LINT_NAME).tar.gz" \
-			"$(GOLANGCI_LINT_RELEASE)/golangci-lint-$(GOLANGCI_LINT_VERSION:v%=%)-checksums.txt" \
-			"$(GOTOOLS_BINDIR)/golangci-lint"; \
-	fi
+	$(call install-tool,golangci-lint,GOLANGCI_LINT)
+
+# The releases of actionlint are not immutable, see zeitgeist below. Its
+# armv6 binary runs on armv7 as well.
+ACTIONLINT_RELEASE = https://github.com/rhysd/actionlint/releases/download/$(ACTIONLINT_VERSION)
+ACTIONLINT_VERSION_CMD = -version 2>/dev/null | head -n1
+ACTIONLINT_ASSET = $(ACTIONLINT_RELEASE)/actionlint_$(ACTIONLINT_VERSION:v%=%)_$(TOOLS_OS)_$(subst armv7,armv6,$(TOOLS_ARCH)).tar.gz
+ACTIONLINT_CHECKSUMS = $(ACTIONLINT_RELEASE)/actionlint_$(ACTIONLINT_VERSION:v%=%)_checksums.txt
+ACTIONLINT_INSTALL_FLAGS = -s $(ACTIONLINT_CHECKSUMS_SHA256) -m actionlint
+ACTIONLINT_PACKAGE = github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
+
+.PHONY: .install.actionlint
+.install.actionlint:
+	$(call install-tool,actionlint,ACTIONLINT)
 
 # The remote variant of zeitgeist, which also checks the upstream versions.
 # Its releases are not immutable, so the checksums file of the release is
 # pinned by ZEITGEIST_CHECKSUMS_SHA256, which a bump of ZEITGEIST_VERSION
-# updates as well, the install fails otherwise.
+# updates as well, the install fails otherwise. Its 32-bit ARM binary is arm.
 ZEITGEIST_RELEASE = https://github.com/kubernetes-sigs/zeitgeist/releases/download/$(ZEITGEIST_VERSION)
+ZEITGEIST_VERSION_CMD = version 2>/dev/null | awk '$$1 == "GitVersion:" { print $$2 }'
+ZEITGEIST_ASSET = $(ZEITGEIST_RELEASE)/zeitgeist-remote-$(patsubst armv%,arm,$(TOOLS_ARCH))-$(TOOLS_OS)
+ZEITGEIST_CHECKSUMS = $(ZEITGEIST_RELEASE)/checksums.txt
+ZEITGEIST_INSTALL_FLAGS = -s $(ZEITGEIST_CHECKSUMS_SHA256)
+ZEITGEIST_PACKAGE = sigs.k8s.io/zeitgeist/remote/zeitgeist@$(ZEITGEIST_VERSION)
 
 .PHONY: .install.zeitgeist
 .install.zeitgeist:
-	if [ "$$("$(GOTOOLS_BINDIR)/zeitgeist" version 2>/dev/null | awk '$$1 == "GitVersion:" { print $$2 }')" != "$(ZEITGEIST_VERSION)" ]; then \
-		.github/install-binary -s "$(ZEITGEIST_CHECKSUMS_SHA256)" \
-			"$(ZEITGEIST_RELEASE)/zeitgeist-remote-$(TOOLS_ARCH)-$(TOOLS_OS)" \
-			"$(ZEITGEIST_RELEASE)/checksums.txt" "$(GOTOOLS_BINDIR)/zeitgeist"; \
-	fi
+	$(call install-tool,zeitgeist,ZEITGEIST)
 
 .PHONY: clean
 clean: ## Cleanup the project files.

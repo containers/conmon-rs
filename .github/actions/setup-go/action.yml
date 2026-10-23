@@ -1,0 +1,47 @@
+name: setup-go
+description: >-
+  Sets up the Go of go.mod and restores the module and build caches of the
+  modules of the repository. Like for the Rust caches, only main saves them,
+  with actions/cache/save and the key and paths of the outputs at the end of a
+  job, so that a pull request which changes a go.sum adds no entries.
+outputs:
+  key:
+    description: The key of the caches.
+    value: ${{ steps.key.outputs.key }}
+  paths:
+    description: The paths of the caches.
+    value: ${{ steps.key.outputs.paths }}
+  cache-hit:
+    description: Whether the caches of the key got restored.
+    value: ${{ steps.restore.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      id: setup
+      with:
+        go-version-file: go.mod
+        cache: false
+    # The key setup-go uses, so that its entries of main get reused. It names
+    # the runner image, the jobs on the same one share the caches.
+    - name: Cache key
+      id: key
+      shell: bash
+      env:
+        GO_VERSION: ${{ steps.setup.outputs.go-version }}
+        GO_SUM_HASH: ${{ hashFiles('**/go.sum') }}
+      run: |
+        PREFIX="setup-go-$RUNNER_OS-${RUNNER_ARCH,,}-$ImageOS-go-$GO_VERSION-"
+        {
+          echo "prefix=$PREFIX"
+          echo "key=$PREFIX$GO_SUM_HASH"
+          echo "paths<<EOF"
+          go env GOMODCACHE GOCACHE
+          echo "EOF"
+        } >>"$GITHUB_OUTPUT"
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      id: restore
+      with:
+        path: ${{ steps.key.outputs.paths }}
+        key: ${{ steps.key.outputs.key }}
+        restore-keys: ${{ steps.key.outputs.prefix }}
