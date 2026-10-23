@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -649,19 +650,73 @@ func TestLogDriverTypes(t *testing.T) {
 		}
 	}
 
+	labels := map[string]string{"POD": "web"}
+
 	logDrivers, err := logDriversToProto([]ContainerLogDriver{
-		{Type: LogDriverTypeJournald}, {Type: LogDriverTypeJSONLogger, Path: "log", MaxSize: 1},
+		{Type: LogDriverTypeJournald, ContainerName: "name", Tag: "tag", Labels: labels},
+		{Type: LogDriverTypeJSONLogger, Path: "log", MaxSize: 1},
 	})
 	if err != nil {
 		t.Fatalf("convert log drivers: %v", err)
 	}
 
 	want := []protoLogDriver{
-		{typ: proto.Conmon_LogDriver_Type_journald},
+		{
+			typ:           proto.Conmon_LogDriver_Type_journald,
+			containerName: "name",
+			tag:           "tag",
+			labels:        labels,
+		},
 		{typ: proto.Conmon_LogDriver_Type_json, path: "log", maxSize: 1},
 	}
-	if !slices.Equal(logDrivers, want) {
+	if !reflect.DeepEqual(logDrivers, want) {
 		t.Errorf("got log drivers %+v, want %+v", logDrivers, want)
+	}
+
+	// The request carries the fields of the journald driver.
+	_, seg, err := capnp.NewMessage(capnp.SingleSegment(nil))
+	if err != nil {
+		t.Fatalf("new message: %v", err)
+	}
+
+	req, err := proto.NewRootConmon_CreateContainerRequest(seg)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	err = initLogDrivers(&req, logDrivers)
+	if err != nil {
+		t.Fatalf("init log drivers: %v", err)
+	}
+
+	list, err := req.LogDrivers()
+	if err != nil {
+		t.Fatalf("log drivers: %v", err)
+	}
+
+	journald := list.At(0)
+
+	entries, err := journald.Labels()
+	if err != nil || entries.Len() != 1 {
+		t.Fatalf("labels: %v, %d entries", err, entries.Len())
+	}
+
+	texts := []func() (string, error){
+		journald.ContainerName, journald.Tag, entries.At(0).Key, entries.At(0).Value,
+	}
+	got := make([]string, 0, len(texts))
+
+	for _, text := range texts {
+		value, textErr := text()
+		if textErr != nil {
+			t.Fatalf("read text: %v", textErr)
+		}
+
+		got = append(got, value)
+	}
+
+	if want := []string{"name", "tag", "POD", "web"}; !slices.Equal(got, want) {
+		t.Errorf("got name, tag and label %q, want %q", got, want)
 	}
 
 	if _, err := logDriversToProto([]ContainerLogDriver{

@@ -73,11 +73,16 @@ impl Version {
     /// `v5.channel.k8s.io`.
     pub const FEATURE_STREAMING_PROTOCOLS: &'static str = "streamingprotocols";
 
+    /// The `containerName`, `tag` and `labels` of the journald log driver,
+    /// which older servers ignore.
+    pub const FEATURE_JOURNALD_FIELDS: &'static str = "journaldfields";
+
     const FEATURES: &'static [&'static str] = &[
         Self::FEATURE_SDNOTIFY,
         Self::FEATURE_PORT_FORWARD,
         Self::FEATURE_IDLE_TIMEOUT,
         Self::FEATURE_STREAMING_PROTOCOLS,
+        Self::FEATURE_JOURNALD_FIELDS,
     ];
 
     /// The optional features this build supports.
@@ -219,7 +224,8 @@ mod tests {
                 "sdnotify",
                 "portforward",
                 "idletimeout",
-                "streamingprotocols"
+                "streamingprotocols",
+                "journaldfields"
             ]
         );
         let json = serde_json::to_value(&v)?;

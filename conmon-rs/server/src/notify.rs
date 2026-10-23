@@ -12,11 +12,11 @@
 //! conmon passes. `MAINPID=` would for example make systemd manage an
 //! arbitrary host process.
 
-use crate::listener;
+use crate::{listener, random_id::RandomId};
 use anyhow::{Context, Result, bail};
 use nix::sys::socket::{MsgFlags, UnixAddr, connect, recv, send};
 use std::{
-    fs::{self, File, Permissions},
+    fs::{self, File, Metadata, Permissions},
     io::ErrorKind,
     os::unix::{
         fs::{MetadataExt, PermissionsExt},
@@ -55,6 +55,11 @@ impl NotifySocket {
 
     /// The socket name inside of `DIR`.
     pub const FILE: &'static str = "notify.sock";
+
+    /// The start of the socket name in the bundle directory before it moves
+    /// into `DIR`, followed by a random ID, so that two creates with the same
+    /// bundle do not use the same one.
+    const TMP_PREFIX: &'static str = ".notify.sock.";
 
     /// systemd rejects larger notification messages (`NOTIFY_BUFFER_MAX`).
     const MAX_MESSAGE_SIZE: usize = 4096;
@@ -101,13 +106,8 @@ impl NotifySocket {
             return Err(e).with_context(|| format!("remove stale {}", path.display()));
         }
 
-        let socket = UnixDatagram::bind(&short_path)
+        let (socket, metadata) = Self::bind_in_place(bundle_path, &short_path)
             .with_context(|| format!("bind notify socket {}", path.display()))?;
-
-        // The container process may run as any user.
-        fs::set_permissions(&short_path, Permissions::from_mode(0o777))
-            .context("set notify socket permissions")?;
-        let metadata = fs::metadata(&short_path).context("stat notify socket")?;
 
         debug!("Relaying notify messages from {}", path.display());
         Ok(Self {
@@ -119,6 +119,35 @@ impl NotifySocket {
             dev: metadata.dev(),
             ino: metadata.ino(),
         })
+    }
+
+    /// Bind the socket in the bundle directory, open it up for the container
+    /// process, which may run as any user, and move it to `short_path`.
+    /// Unlike `DIR`, the container cannot reach the bundle directory, so it
+    /// cannot swap the socket for a symlink between the bind and the chmod,
+    /// which follows symlinks. The rename replaces whatever got placed at
+    /// the path meanwhile without following it either.
+    fn bind_in_place(bundle_path: &Path, short_path: &Path) -> Result<(UnixDatagram, Metadata)> {
+        let name = format!("{}{}", Self::TMP_PREFIX, RandomId::new());
+        let (tmp, _dir) =
+            listener::shorten_path(&bundle_path.join(name)).context("shorten temporary path")?;
+        let socket = UnixDatagram::bind(&tmp).context("bind")?;
+        let res = fs::set_permissions(&tmp, Permissions::from_mode(0o777))
+            .context("set permissions")
+            .and_then(|()| fs::symlink_metadata(&tmp).context("stat"))
+            .and_then(|metadata| {
+                fs::rename(&tmp, short_path).context("rename")?;
+                Ok(metadata)
+            });
+        match res {
+            Ok(metadata) => Ok((socket, metadata)),
+            Err(e) => {
+                if let Err(e) = fs::remove_file(&tmp) {
+                    debug!("Unable to remove temporary notify socket: {e}");
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Connect a socket to the host one, so that a wrong path fails the
@@ -280,7 +309,7 @@ impl Drop for NotifySocket {
     fn drop(&mut self) {
         // The bundle usually gets removed anyway, this just does not leave a
         // dead socket behind in case it stays, and only the own one.
-        match fs::metadata(&self.path) {
+        match fs::symlink_metadata(&self.path) {
             Ok(metadata) if metadata.dev() == self.dev && metadata.ino() == self.ino => {
                 if let Err(e) = fs::remove_file(&self.path) {
                     debug!("Unable to remove notify socket: {e}");
@@ -326,6 +355,14 @@ mod tests {
         let path = socket_path(bundle.path());
         assert_eq!(sut.path, path);
         assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o777);
+        // It got bound next to the notify directory and moved into it.
+        for entry in fs::read_dir(bundle.path())? {
+            let name = entry?.file_name();
+            assert!(
+                !name.to_string_lossy().starts_with(NotifySocket::TMP_PREFIX),
+                "{name:?}"
+            );
+        }
 
         let token = CancellationToken::new();
         sut.spawn(token.clone());

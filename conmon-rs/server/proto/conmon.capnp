@@ -39,15 +39,17 @@ interface Conmon {
     # CreateContainer
     struct CreateContainerRequest {
         id @0 :Text;
+        # The OCI bundle of the container, an absolute path like all paths
+        # of the request.
         bundlePath @1 :Text;
         terminal @2 :Bool;
         stdin @3 :Bool;
         # The files the server writes the exit code of the container to once
         # it exited, as decimal text, 128 plus the signal number if a signal
-        # killed it.
+        # killed it. Absolute paths.
         exitPaths @4 :List(Text);
         # The files the server creates empty if the container got OOM
-        # killed, before it writes the exit files.
+        # killed, before it writes the exit files. Absolute paths.
         oomExitPaths @5 :List(Text);
         logDrivers @6 :List(LogDriver);
         # The command the server starts once the container exited and the
@@ -89,11 +91,29 @@ interface Conmon {
         # The type of the log driver.
         type @0 :Type;
 
-        # The filesystem path of the log driver, if required.
+        # The filesystem path of the log driver, if required, an absolute
+        # one.
         path @1 :Text;
 
         # The maximum log size in bytes, 0 means unlimited.
         maxSize @2 :UInt64;
+
+        # The fields below only apply to the journald logger, like the
+        # options of conmon.
+
+        # The name of the container, written as CONTAINER_NAME.
+        containerName @3 :Text;
+
+        # The tag of the entries, written as CONTAINER_TAG and as
+        # SYSLOG_IDENTIFIER, which is "conmonrs" without one.
+        tag @4 :Text;
+
+        # Additional fields of every entry. A key has to be a valid journal
+        # field name: uppercase letters, digits and underscores, starting
+        # with a letter, at most 64 characters, and none of the fields which
+        # the logger sets itself, like MESSAGE or CONTAINER_ID. At most 256
+        # labels with 64 KiB of names and values together.
+        labels @5 :TextTextMap;
 
         enum Type {
             # The CRI logger, requires `path` to be set.

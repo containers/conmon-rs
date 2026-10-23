@@ -1363,6 +1363,11 @@ const FeatureIdleTimeout = "idletimeout"
 // v5.channel.k8s.io.
 const FeatureStreamingProtocols = "streamingprotocols"
 
+// FeatureJournaldFields is reported by servers which write the
+// ContainerName, Tag and Labels of a ContainerLogDriver to the journal.
+// Others ignore them.
+const FeatureJournaldFields = "journaldfields"
+
 // SupportsFeature reports whether the server reports the feature, see the
 // Feature constants. New records the features of the server it starts or
 // connects to, which can be older than the binary on disk: a server keeps
@@ -1585,7 +1590,7 @@ type CreateContainerConfig struct {
 	// ID is the container identifier.
 	ID string
 
-	// BundlePath is the path to the filesystem bundle.
+	// BundlePath is the absolute path to the filesystem bundle.
 	BundlePath string
 
 	// Terminal indicates if a tty should be used or not.
@@ -1597,12 +1602,12 @@ type CreateContainerConfig struct {
 	// ExitPaths is a slice of paths to write the exit statuses. Each file
 	// gets the exit code of the container as decimal text once it exited,
 	// 128 plus the number of the signal which killed it, like a shell
-	// reports it.
+	// reports it. The paths have to be absolute.
 	ExitPaths []string
 
 	// OOMExitPaths is a slice of files that should be created if the given
 	// container is OOM killed. They are created empty before the exit files
-	// get written.
+	// get written. The paths have to be absolute.
 	OOMExitPaths []string
 
 	// LogDrivers is a slice of selected log drivers.
@@ -1658,12 +1663,32 @@ type ContainerLogDriver struct {
 	// Type defines the log driver variant.
 	Type LogDriverType
 
-	// Path specifies the filesystem path of the log driver.
+	// Path specifies the absolute filesystem path of the log driver.
 	Path string
 
 	// MaxSize is the maximum amount of bytes to be written before rotation.
 	// 0 translates to an unlimited size.
 	MaxSize uint64
+
+	// ContainerName is written as CONTAINER_NAME by LogDriverTypeJournald,
+	// like the name of conmon. Servers without FeatureJournaldFields ignore
+	// it.
+	ContainerName string
+
+	// Tag is written as CONTAINER_TAG and SYSLOG_IDENTIFIER by
+	// LogDriverTypeJournald, like the log tag of conmon. The identifier is
+	// "conmonrs" without one. Servers without FeatureJournaldFields ignore
+	// it.
+	Tag string
+
+	// Labels are additional fields of every entry of LogDriverTypeJournald,
+	// like the log labels of conmon. A key has to be a journal field name:
+	// uppercase letters, digits and underscores, starting with a letter, at
+	// most 64 characters, and none of the fields the driver sets itself,
+	// like MESSAGE or CONTAINER_ID. At most 256 labels with 64 KiB of names
+	// and values together. Servers without FeatureJournaldFields ignore
+	// them.
+	Labels map[string]string
 }
 
 // LogDriverType specifies available log drivers.
@@ -2011,9 +2036,12 @@ var logDriverTypes = enumTable[LogDriverType, proto.Conmon_LogDriver_Type]{
 
 // protoLogDriver is a log driver with its type converted for a request.
 type protoLogDriver struct {
-	typ     proto.Conmon_LogDriver_Type
-	path    string
-	maxSize uint64
+	typ           proto.Conmon_LogDriver_Type
+	path          string
+	maxSize       uint64
+	containerName string
+	tag           string
+	labels        map[string]string
 }
 
 // logDriversToProto converts the log drivers for a request, before it gets
@@ -2027,10 +2055,14 @@ func logDriversToProto(logDrivers []ContainerLogDriver) ([]protoLogDriver, error
 			return nil, fmt.Errorf("log driver type: %w", err)
 		}
 
-		res = append(
-			res,
-			protoLogDriver{typ: typ, path: logDriver.Path, maxSize: logDriver.MaxSize},
-		)
+		res = append(res, protoLogDriver{
+			typ:           typ,
+			path:          logDriver.Path,
+			maxSize:       logDriver.MaxSize,
+			containerName: logDriver.ContainerName,
+			tag:           logDriver.Tag,
+			labels:        logDriver.Labels,
+		})
 	}
 
 	return res, nil
@@ -2051,6 +2083,18 @@ func initLogDrivers(req *proto.Conmon_CreateContainerRequest, logDrivers []proto
 		}
 
 		n.SetMaxSize(logDriver.maxSize)
+
+		if err := n.SetContainerName(logDriver.containerName); err != nil {
+			return fmt.Errorf("set log driver container name: %w", err)
+		}
+
+		if err := n.SetTag(logDriver.tag); err != nil {
+			return fmt.Errorf("set log driver tag: %w", err)
+		}
+
+		if err := stringStringMapToMapEntryList(logDriver.labels, n.NewLabels); err != nil {
+			return fmt.Errorf("set log driver labels: %w", err)
+		}
 	}
 
 	return nil

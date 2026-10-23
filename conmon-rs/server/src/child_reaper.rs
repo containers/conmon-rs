@@ -131,7 +131,7 @@ pub struct ChildReaper {
 
     /// Wakes the orphan sweep up early, for example after a failed runtime
     /// call or on shutdown.
-    sweep: Arc<Notify>,
+    sweep: Notify,
 
     /// Set by the shutdown while it holds the lock of the grandchildren, so a
     /// child registered later knows that the shutdown missed it.
@@ -249,9 +249,6 @@ pub struct RuntimeCall<'a> {
     pub deadline: Option<Instant>,
     pub env_vars: Vec<(String, String)>,
 
-    /// Whether the server relays the sd_notify messages of the container.
-    pub relays_notify: bool,
-
     /// Descriptors the runtime gets from 3 on, in this order.
     pub additional_fds: Vec<OwnedFd>,
 }
@@ -266,7 +263,6 @@ impl<'a> RuntimeCall<'a> {
             pidfile,
             deadline: None,
             env_vars: vec![],
-            relays_notify: false,
             additional_fds: vec![],
         }
     }
@@ -305,7 +301,6 @@ impl ChildReaper {
             pidfile,
             deadline: runtime_deadline,
             env_vars,
-            relays_notify,
             additional_fds,
         } = call;
         let mut in_flight = self.begin_call(runtime_deadline)?;
@@ -319,22 +314,12 @@ impl ChildReaper {
         // server, like a SIGINT from a terminal, do not reach it, the
         // server stops it on its own.
         cmd.process_group(0);
-        init::reset_inherited(&mut cmd);
 
         // Without one it must not inherit the stdin of the server, which the
         // runtime would pass on to the container.
         cmd.stdin(if stdin { Stdio::piped() } else { Stdio::null() });
 
-        // With the server relaying the sd_notify messages, the runtime must
-        // not add its own notify socket mount and `NOTIFY_SOCKET` to the
-        // container on top of what the caller set up. A value passed in the
-        // environment variables on purpose still reaches it.
-        if relays_notify {
-            cmd.env_remove("NOTIFY_SOCKET");
-        }
-
-        let mut child = cmd
-            .args(args)
+        cmd.args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .envs(env_vars)
@@ -347,9 +332,13 @@ impl ChildReaper {
                         child_fd: i as RawFd + FIRST_FD_AFTER_STDIO,
                     })
                     .collect(),
-            )?
-            .spawn()
-            .context("spawn child process")?;
+            )?;
+        // After the mappings: the pre_exec hooks run in the order they got
+        // added, and this one lowers the open files limit to the one the
+        // server started with, below which the mappings may have to move a
+        // descriptor of the server.
+        init::reset_inherited(&mut cmd);
+        let mut child = cmd.spawn().context("spawn child process")?;
 
         // The mappings own the passed descriptors and live in the command's
         // pre_exec hook, dropping the command closes them in the parent.
@@ -539,7 +528,8 @@ impl ChildReaper {
         } else {
             format_err!("{error:#}: {stderr}")
         };
-        error!("Failed: {error:#}");
+        // The caller logs the error it returns.
+        debug!("Failed: {error:#}");
         error
     }
 
@@ -1873,6 +1863,34 @@ mod tests {
         assert!(reaper.is_claimed(sh.pid));
         assert!(!lock(&reaper.pending).contains(&sh.pid));
         assert!(!reaper.calls_in_progress());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn leaked_fds_stay_open_until_the_exit() -> Result<()> {
+        use nix::{fcntl::OFlag, unistd::pipe2};
+        use std::io::{ErrorKind, Read};
+
+        let reaper = ChildReaper::default();
+        let dir = tempfile::tempdir()?;
+        let sh = spawn_sh("exec sleep 60")?;
+        let (reader, writer) = pipe2(OFlag::O_NONBLOCK)?;
+        let mut reader = std::fs::File::from(reader);
+        let call = reaper.begin_call(None)?;
+        let child = child(sh.pid, None, &dir.path().join("exit"), &[])?;
+        let mut exit_rx = reaper.watch_grandchild(child, vec![writer], call)?;
+
+        // The server keeps the descriptor while the process runs.
+        let mut buf = [0; 1];
+        assert_eq!(
+            reader.read(&mut buf).map_err(|e| e.kind()),
+            Err(ErrorKind::WouldBlock)
+        );
+
+        sh.process.signal(Signal::SIGKILL)?;
+        exit_rx.recv().await?;
+        wait_until(|| matches!((&reader).read(&mut [0; 1]), Ok(0))).await;
+        assert!(matches!(reader.read(&mut buf), Ok(0)));
         Ok(())
     }
 

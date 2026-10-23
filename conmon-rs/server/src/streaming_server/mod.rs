@@ -147,6 +147,7 @@ impl StreamingServer {
     /// own, at most [`MAX_CONNECTIONS`] at once, each for one request.
     async fn serve(listener: TcpListener, state: Arc<RwLock<State>>) {
         let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+        let mut accept_errors = listener::AcceptErrors::default();
         loop {
             let Ok(permit) = connections.clone().acquire_owned().await else {
                 return;
@@ -154,7 +155,7 @@ impl StreamingServer {
             let stream = match listener.accept().await {
                 Ok((stream, _)) => stream,
                 Err(e) => {
-                    listener::accept_failed(&e).await;
+                    accept_errors.failed(&e).await;
                     continue;
                 }
             };

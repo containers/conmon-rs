@@ -28,12 +28,23 @@ struct OomCounters {
     /// leaf cgroup, so this drifts apart from `oom` by design and the two are
     /// compared separately.
     oom_kill: u64,
+
+    /// Whether the file has the kill counter, which kernels since 4.13 do.
+    has_kill: bool,
 }
 
 impl OomCounters {
-    /// Whether any counter increased compared to `baseline`.
+    /// Whether a process got killed since `baseline`. The kernel counts an
+    /// `oom` before the OOM killer runs, which may kill nothing, if reclaim
+    /// freed enough memory meanwhile or a victim is exiting already, so only
+    /// kernels without the kill counter fall back to it. The cgroup v1
+    /// watcher waits for a kill as well.
     fn increased_since(&self, baseline: &Self) -> bool {
-        self.oom > baseline.oom || self.oom_kill > baseline.oom_kill
+        if self.has_kill {
+            self.oom_kill > baseline.oom_kill
+        } else {
+            self.oom > baseline.oom
+        }
     }
 }
 
@@ -43,8 +54,12 @@ struct CgroupV2 {
     events: MemoryEvents,
 
     /// The cgroup which merely wraps the leaf, crun places the process in
-    /// a leaf below the container cgroup and the OOMs end up recorded in
-    /// that parent. Only follow the parent in that layout. A pod cgroup
+    /// a leaf below the container cgroup and applies the memory limit to
+    /// that parent as well, whose `oom` counter goes up when its limit gets
+    /// hit. The kill itself gets counted in the leaf of the victim, its
+    /// memory.events is hierarchical and includes it, so with the kill
+    /// counter the leaf tells and the parent only matters for kernels
+    /// without it. Only follow the parent in that layout. A pod cgroup
     /// shared with sibling containers (runc) must not be watched, otherwise
     /// an OOM of a sibling would be reported for this container. Prefer
     /// memory.events.local, the counters in memory.events include events
@@ -559,7 +574,10 @@ impl OOMWatcher {
                     has_oom = true;
                     &mut counters.oom
                 }
-                "oom_kill" => &mut counters.oom_kill,
+                "oom_kill" => {
+                    counters.has_kill = true;
+                    &mut counters.oom_kill
+                }
                 _ => continue,
             };
             *target = value.trim_end().parse().context("parse u64 counter")?;
@@ -797,6 +815,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cgroup_v2_oom_without_kill_is_no_oom() -> Result<()> {
+        let pod = tempfile::tempdir()?;
+        let leaf = pod.path().join("ctr");
+        std::fs::create_dir(&leaf)?;
+        write_events(&leaf, 0, 0)?;
+        let (token, task) = watch_v2(&leaf);
+        baselines_taken(&leaf).await?;
+
+        // The limit got hit, reclaim freed memory before a kill.
+        write_events(&leaf, 1, 0)?;
+        token.cancel();
+        assert_eq!(
+            timeout(Duration::from_secs(5), task).await??,
+            OOMEvent::default()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cgroup_v2_unchanged_leaf_is_no_oom() -> Result<()> {
         let pod = tempfile::tempdir()?;
         let leaf = pod.path().join("ctr");
@@ -991,27 +1028,31 @@ mod tests {
             counters,
             OomCounters {
                 oom: 1,
-                oom_kill: 0
+                oom_kill: 0,
+                has_kill: true,
             }
         );
 
         // Unchanged counters are no OOM, even though they differ from each other.
         assert!(!counters.increased_since(&counters));
-        assert!(
-            OomCounters {
-                oom: 1,
-                oom_kill: 1
-            }
-            .increased_since(&counters)
-        );
-        assert!(
-            !OomCounters {
-                oom: 0,
-                oom_kill: 0
-            }
-            .increased_since(&counters)
-        );
+        let counters = |oom, oom_kill| OomCounters {
+            oom,
+            oom_kill,
+            has_kill: true,
+        };
+        assert!(counters(1, 1).increased_since(&counters(1, 0)));
+        assert!(!counters(0, 0).increased_since(&counters(1, 0)));
+        // An OOM which killed nothing is none.
+        assert!(!counters(2, 0).increased_since(&counters(1, 0)));
 
+        // Without the kill counter, the OOMs count.
+        let mut file = NamedTempFile::new()?;
+        file.write_all(b"low 0\nhigh 0\nmax 3\noom 1\n")?;
+        file.flush()?;
+        let old = OOMWatcher::read_oom_counters(file.path())?;
+        assert!(!old.has_kill);
+        let new = OomCounters { oom: 2, ..old };
+        assert!(new.increased_since(&old));
         Ok(())
     }
 }

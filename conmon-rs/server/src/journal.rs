@@ -27,6 +27,10 @@ use tracing_subscriber::fmt::writer::MakeWriter;
 /// The datagram socket journald receives native protocol entries on.
 pub const SOCKET_PATH: &str = "/run/systemd/journal/socket";
 
+/// The SYSLOG_IDENTIFIER of the entries of the server, and of the containers
+/// without a tag, so that `journalctl -t conmonrs` finds them.
+pub const IDENTIFIER: &str = "conmonrs";
+
 /// The syslog priorities used for the `PRIORITY` field.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Priority {
@@ -78,7 +82,9 @@ impl Entry {
         self
     }
 
-    fn valid_key(key: &str) -> bool {
+    /// Whether the key is a valid journal field name, see [`Entry::field`],
+    /// at most 64 characters.
+    pub fn valid_key(key: &str) -> bool {
         (1..=64).contains(&key.len())
             && !key.starts_with(|c: char| c == '_' || c.is_ascii_digit())
             && key
@@ -250,10 +256,12 @@ impl Journal {
     /// The entry of a formatted event. The journal separates entries itself,
     /// so the line ending of the event is dropped.
     fn entry(&self, line: &[u8]) -> Entry {
-        Entry::new(
+        let mut entry = Entry::new(
             self.priority.unwrap_or(Self::DEFAULT_PRIORITY),
             line.strip_suffix(b"\n").unwrap_or(line),
-        )
+        );
+        entry.field("SYSLOG_IDENTIFIER", IDENTIFIER);
+        entry
     }
 
     fn priority_for(level: &Level) -> Priority {
@@ -353,7 +361,7 @@ pub mod tests {
         };
         assert_eq!(
             journal.entry(b"event\n").as_bytes(),
-            b"PRIORITY=4\nMESSAGE=event\n"
+            b"PRIORITY=4\nMESSAGE=event\nSYSLOG_IDENTIFIER=conmonrs\n"
         );
         assert_eq!(
             decode(journal.entry(b"two\nlines\n").as_bytes())[1],
@@ -361,7 +369,7 @@ pub mod tests {
         );
         assert_eq!(
             Journal::default().entry(b"plain").as_bytes(),
-            b"PRIORITY=5\nMESSAGE=plain\n"
+            b"PRIORITY=5\nMESSAGE=plain\nSYSLOG_IDENTIFIER=conmonrs\n"
         );
     }
 
