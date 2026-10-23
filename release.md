@@ -116,8 +116,9 @@ its name or as an alias. Its status is `not_affected` with a justification
 `fixed` or `under_investigation`. Only `not_affected` and `fixed` hide a
 finding. An `affected` statement informs the users of the binaries, the scans
 keep failing for a finding with a fix until the crate gets updated or the
-statement becomes `not_affected` or `fixed`. vexctl adds a statement, raises the `version` of the document and
-sets its `last_updated`, which a statement added by hand has to do as well.
+statement becomes `not_affected` or `fixed`. vexctl adds a statement, raises
+the `version` of the document and sets its `last_updated`, which a statement
+added by hand has to do as well.
 vexctl dates the statement with `SOURCE_DATE_EPOCH` if set, like in a nix
 shell, unset it first:
 

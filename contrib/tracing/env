@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-cd "$(dirname "$0")"
-
 CONTAINER_RUNTIME=$(which podman 2>/dev/null) || CONTAINER_RUNTIME=$(which docker 2>/dev/null)
 if [[ -z "$CONTAINER_RUNTIME" ]]; then
     echo "Neither docker nor podman found in \$PATH"

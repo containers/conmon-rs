@@ -279,9 +279,13 @@ description lives in the module documentation of
 
 ## Logging
 
-Container output goes to the log drivers requested per container. Log files
-are truncated in place when they exceed the configured maximum size and on
-`reopenLogContainer`, which CRI-O calls for log rotation.
+Container output goes to the log drivers requested per container. When the
+next entry would exceed the configured maximum size, the server replaces the
+log file with a new empty one, like conmon: it creates `<path>.tmp` and renames
+it over the path, so that a reader which follows the log, like
+`kubectl logs -f`, reads the old file to its end first. `reopenLogContainer`,
+which CRI-O calls after the kubelet rotated the log, starts a new file at the
+path the same way.
 
 - `containerRuntimeInterface`: the CRI log format, one line per entry with an
   RFC 3339 timestamp, the stream, a `P` (partial) or `F` (full) marker and the
