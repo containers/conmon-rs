@@ -51,7 +51,7 @@ use tokio::{
     net::{TcpSocket, TcpStream, tcp::OwnedWriteHalf},
     select,
     sync::{mpsc, oneshot},
-    task::{JoinHandle, JoinSet},
+    task::JoinSet,
     time::{self, Duration},
 };
 use tokio_tungstenite::WebSocketStream;
@@ -483,6 +483,9 @@ impl Namespace {
         Ok(())
     }
 
+    /// A socket of each family, for one connection. The IPv6 one is only
+    /// needed if IPv4 fails, creating it right away costs less than another
+    /// round trip into the namespace thread.
     fn create_sockets() -> Sockets {
         [
             (AddressFamily::Inet, IpAddr::V4(Ipv4Addr::LOCALHOST)),
@@ -618,26 +621,33 @@ impl PortForward {
     {
         let (mut sink, mut messages) = socket.split();
         let (mut from_server, mut to_server) = tokio::io::split(connection);
+        // Cancelled once the client sent a message larger than the server
+        // takes, the close tells it why.
+        let too_large = CancellationToken::new();
 
-        // Whether the close went out.
-        let mut to_client: JoinHandle<bool> = tokio::spawn(async move {
-            let mut buf = BytesMut::new();
-            loop {
-                buf.reserve(TUNNEL_BUFFER);
-                match from_server.read_buf(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        if sink
-                            .send(Message::Binary(buf.split().freeze()))
-                            .await
-                            .is_err()
-                        {
-                            return false;
+        // The sink, once the close went out.
+        let mut to_client = tokio::spawn({
+            let too_large = too_large.clone();
+            async move {
+                let mut buf = BytesMut::new();
+                loop {
+                    buf.reserve(TUNNEL_BUFFER);
+                    match from_server.read_buf(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            if sink
+                                .send(Message::Binary(buf.split().freeze()))
+                                .await
+                                .is_err()
+                            {
+                                return None;
+                            }
                         }
                     }
                 }
+                let close = web::close(too_large.is_cancelled(), "");
+                sink.send(close).await.is_ok().then_some(sink)
             }
-            sink.send(web::close_message("")).await.is_ok()
         });
 
         let from_client = async {
@@ -657,6 +667,11 @@ impl PortForward {
                         break;
                     }
                     Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => {}
+                    Err(e) if web::is_too_large(&e) => {
+                        debug!("Ending port forward tunnel: {e}");
+                        too_large.cancel();
+                        break;
+                    }
                     Ok(Message::Close(_)) | Err(_) => break,
                 }
             }
@@ -664,20 +679,25 @@ impl PortForward {
             let _ = to_server.shutdown().await;
         };
 
-        let mut from_client = pin!(from_client);
-        let closed = select! {
-            () = &mut from_client => None,
-            // The SPDY connection ended, the client answers the close.
-            closed = &mut to_client => Some(matches!(closed, Ok(true))),
+        let sink = {
+            let mut from_client = pin!(from_client);
+            let closed_first = select! {
+                () = &mut from_client => None,
+                sink = &mut to_client => Some(sink.ok().flatten()),
+            };
+            match closed_first {
+                None => web::join_or_abort(to_client).await.flatten(),
+                // The SPDY connection ended, the client answers the close.
+                Some(Some(sink)) => {
+                    let _ = time::timeout(web::CLOSE_TIMEOUT, from_client).await;
+                    Some(sink)
+                }
+                Some(None) => None,
+            }
         };
-        match closed {
-            None => {
-                web::join_or_abort(to_client).await;
-            }
-            Some(true) => {
-                let _ = time::timeout(web::CLOSE_TIMEOUT, from_client).await;
-            }
-            Some(false) => {}
+        // A client which sent a message which was too large cannot answer.
+        if let Some(sink) = sink.filter(|_| too_large.is_cancelled()) {
+            web::drain(sink, messages).await;
         }
     }
 
@@ -687,6 +707,7 @@ impl PortForward {
         let (mut sink, mut messages) = socket.split();
         let (output_tx, mut output_rx) = mpsc::channel(OUTPUT_QUEUE);
         let activity = Activity::new();
+        let too_large = CancellationToken::new();
 
         // On its own, as a port which does not take its input stops reading
         // the WebSocket.
@@ -707,16 +728,17 @@ impl PortForward {
             }
         });
 
-        let writer_activity = activity.clone();
-        // Whether the close went out.
+        let (writer_activity, writer_too_large) = (activity.clone(), too_large.clone());
+        // The sink, once the close went out.
         let writer = tokio::spawn(async move {
             while let Some(message) = output_rx.recv().await {
                 if sink.send(message).await.is_err() {
-                    return false;
+                    return None;
                 }
                 writer_activity.touch();
             }
-            sink.send(web::close_message("")).await.is_ok()
+            let close = web::close(writer_too_large.is_cancelled(), "");
+            sink.send(close).await.is_ok().then_some(sink)
         });
 
         let namespace = Namespace::new(self.netns_path);
@@ -771,6 +793,16 @@ impl PortForward {
                         Some(Ok(Message::Binary(data))) => data,
                         Some(Ok(Message::Text(text))) => Bytes::from(text),
                         Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
+                        // The client cannot be read anymore, it gets the
+                        // close only. Like for Kubernetes, that ends the
+                        // session, the error channels of the ports are not
+                        // about it.
+                        Some(Err(e)) if web::is_too_large(&e) => {
+                            debug!("Ending port forward WebSocket: {e}");
+                            too_large.cancel();
+                            client_gone = true;
+                            break;
+                        }
                         Some(Ok(Message::Close(_)) | Err(_)) | None => {
                             client_gone = true;
                             break;
@@ -795,7 +827,11 @@ impl PortForward {
         while forwards.join_next().await.is_some() {}
         // Like the error of a port which failed before its input came, the
         // client has to get what the server sent before.
-        if client_gone {
+        if too_large.is_cancelled() {
+            if let Some(Some(sink)) = web::join_or_abort(writer).await {
+                web::drain(sink, messages).await;
+            }
+        } else if client_gone {
             web::join_or_abort(writer).await;
         } else {
             web::finish(writer, &mut messages).await;
@@ -1224,7 +1260,16 @@ impl PortForward {
 /// The entry points of the fuzz targets.
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing {
-    use super::{MAX_CHANNEL_PORTS, PortForward};
+    use super::{
+        MAX_CHANNEL_PORTS, PORT_HEADER, PortForward, REQUEST_ID_HEADER, STREAM_CREATION_TIMEOUT,
+        STREAM_TYPE_DATA, STREAM_TYPE_ERROR,
+    };
+    use crate::{spdy::fuzzing::client_frames, stream_protocol::STREAM_TYPE_HEADER};
+    use tokio::{
+        io::{self, AsyncWriteExt},
+        runtime, task,
+        time::{self, Duration},
+    };
 
     /// Parse the query of a channel protocol request, the ports it gives
     /// are the ones a session can forward.
@@ -1234,6 +1279,77 @@ pub mod fuzzing {
             assert!(ports.len() <= MAX_CHANNEL_PORTS);
             assert!(!ports.contains(&0));
         }
+    }
+
+    /// Serve a SPDY port forward session to a client which sends the frames
+    /// the input describes, like the SPDY connection target, then closes the
+    /// connection. The streams pair up into requests, which fail to enter
+    /// the network namespace, so that only the pairing, the resets and the
+    /// errors run. The session has to end with the client. The namespace
+    /// thread answers in real time while the clock is paused, so whether an
+    /// error reaches the client before it closes varies between runs.
+    pub fn spdy(input: &[u8]) {
+        let frames = client_frames(input, |next| {
+            // Mostly valid streams, so that requests pair up.
+            let typ = match next() % 8 {
+                0..4 => STREAM_TYPE_DATA,
+                4..7 => STREAM_TYPE_ERROR,
+                _ => "other",
+            };
+            let port = match next() % 8 {
+                0..6 => "80",
+                6 => "0",
+                _ => "http",
+            };
+            // Old clients send no request ID, their streams pair by their
+            // IDs.
+            let id = next();
+            let id = if id < 64 {
+                String::new()
+            } else {
+                (id % 4).to_string()
+            };
+            [
+                (STREAM_TYPE_HEADER, typ),
+                (PORT_HEADER, port),
+                (REQUEST_ID_HEADER, id.as_str()),
+            ]
+            .into()
+        });
+        // The paused clock gets to the deadlines of the requests at once.
+        let runtime = runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (client, server) = io::duplex(64 * 1024);
+            let (mut from_server, mut to_server) = io::split(client);
+            let client = task::spawn(async move {
+                // The connection stays open until the requests whose second
+                // stream did not come expired, the streams of a connection
+                // which ended count as reset.
+                let write = async {
+                    let _ = to_server.write_all(&frames).await;
+                    time::sleep(STREAM_CREATION_TIMEOUT + Duration::from_secs(1)).await;
+                    let _ = to_server.shutdown().await;
+                };
+                let mut sink = io::sink();
+                let _ = tokio::join!(write, io::copy(&mut from_server, &mut sink));
+            });
+            let session = PortForward {
+                netns_path: "/proc/self/ns/none".into(),
+                idle_timeout: None,
+                ping_interval: None,
+            };
+            let served = async {
+                session.serve_spdy(server).await;
+                let _ = client.await;
+            };
+            time::timeout(2 * STREAM_CREATION_TIMEOUT, served)
+                .await
+                .expect("the session ended with the client");
+        });
     }
 }
 

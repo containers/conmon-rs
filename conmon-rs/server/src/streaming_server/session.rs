@@ -7,8 +7,8 @@ use crate::{
     container_io::SharedContainerIO,
     idle::Activity,
     remotecommand::{
-        ClientEvent, ClientInput, ExpectedStreams, Framing, Output, SpdyStreams, Status, Stdin,
-        Version, WebSocketInput,
+        ClientEvent, ClientInput, ExpectedStreams, Framing, MESSAGE_TOO_LARGE, Output, SpdyStreams,
+        Status, Stdin, Version, WebSocketInput,
     },
     spdy::{self, Connection},
     web::{self, WebSocket},
@@ -35,6 +35,7 @@ use tokio::{
     task::{self, JoinHandle},
     time::{self, Duration},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace};
 
 /// How much stdin the read task holds while the container does not take it,
@@ -62,17 +63,10 @@ const STDIN_ENTRY_OVERHEAD: usize = 64;
 /// container did not take.
 const STDIN_CHANNEL_SIZE: usize = 1;
 
-/// How often a session pings the client while its stdin waits for the
-/// container, to notice a client which went away.
-const STDIN_PING_INTERVAL: Duration = if cfg!(test) {
-    Duration::from_millis(100)
-} else {
-    Duration::from_secs(5)
-};
-
-/// How often a SPDY session pings the client, to notice a client which went
-/// away also while its stdin waits for the container.
-const SPDY_PING_INTERVAL: Duration = if cfg!(test) {
+/// How often a session pings the client, to notice a client which went away
+/// also while its stdin waits for the container. A WebSocket session pings
+/// only while stdin waits, a SPDY connection all the time.
+const PING_INTERVAL: Duration = if cfg!(test) {
     Duration::from_millis(100)
 } else {
     spdy::PING_INTERVAL
@@ -83,7 +77,38 @@ const SPDY_PING_INTERVAL: Duration = if cfg!(test) {
 const STDIN_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The latest resize event of a client, older ones are replaced.
-pub(super) type ResizeRx = watch::Receiver<Option<Bytes>>;
+type ResizeRx = watch::Receiver<Option<Bytes>>;
+
+/// How the input of a client ended.
+enum InputEnd<I> {
+    /// The client closed the connection cleanly.
+    Closed,
+
+    /// The client went away.
+    Gone,
+
+    /// The client sent a message larger than the server takes, its input
+    /// still has to drain the connection, see [`ClientInput::drain`].
+    TooLarge(I),
+}
+
+/// How a single event of a client ended its input, see
+/// [`StreamingServer::read_event`].
+#[derive(Debug, PartialEq)]
+enum EventEnd {
+    Closed,
+    TooLarge,
+}
+
+/// What the input of a client hands to the loop of its session.
+pub(super) struct ClientRx {
+    stdin: MpscReceiver<Stdin>,
+    resize: ResizeRx,
+
+    /// Cancelled once the client sent a message larger than the server
+    /// takes, which fails the session.
+    too_large: CancellationToken,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -129,10 +154,9 @@ impl StreamingServer {
         };
         // The session ends the connection once it was idle, which reports
         // the timeout to the client first.
-        let mut connection =
-            Connection::serve(io, None, Some(SPDY_PING_INTERVAL), move |headers| {
-                SpdyStreams::accept(headers, version)
-            });
+        let mut connection = Connection::serve(io, None, Some(PING_INTERVAL), move |headers| {
+            SpdyStreams::accept(headers, version)
+        });
         let activity = connection.activity();
         let streams = match SpdyStreams::wait(&mut connection, expected).await {
             Ok(streams) => streams,
@@ -162,30 +186,41 @@ impl StreamingServer {
         // queue behind stdin the container does not read. Only the latest
         // size matters.
         let (resize_tx, resize_rx) = watch::channel(None);
+        let too_large = CancellationToken::new();
+        let client = ClientRx {
+            stdin: stdin_rx,
+            resize: resize_rx,
+            too_large: too_large.clone(),
+        };
 
-        let mut send_task =
-            Self::write_task(output, stdin_rx, resize_rx, session, activity.clone());
-        let mut recv_task = Self::read_task(input, stdin_tx, resize_tx, peer_closed);
+        let mut send_task = Self::write_task(output, client, session, activity.clone());
+        let mut recv_task = Self::read_task(input, stdin_tx, resize_tx, peer_closed, too_large);
 
         tokio::select! {
             rv_a = (&mut send_task) => {
-                let closed = match rv_a {
-                    Ok(closed) => {
+                let output = match rv_a {
+                    Ok(output) => {
                         info!("All messages sent");
-                        closed
+                        output
                     }
                     Err(a) => {
                         error!("Error sending messages: {a:?}");
-                        false
+                        None
                     }
                 };
                 // The client answers the close of a WebSocket, the read task
                 // drops what it sends until then, see
                 // [`web::await_close_answer`]. A close which did not go out
                 // gets no answer. A SPDY connection ended already, which ends
-                // the read task.
-                if closed && time::timeout(web::CLOSE_TIMEOUT, &mut recv_task).await.is_err() {
-                    debug!("Client did not answer the close in time");
+                // the read task. A client which sent a message which was too
+                // large, also one whose session failed for it, cannot answer
+                // anymore, the connection gets drained instead.
+                if let Some(output) = output {
+                    match time::timeout(web::CLOSE_TIMEOUT, &mut recv_task).await {
+                        Ok(Ok(InputEnd::TooLarge(input))) => input.drain(output).await,
+                        Ok(_) => {}
+                        Err(_) => debug!("Client did not answer the close in time"),
+                    }
                 }
                 recv_task.abort();
             },
@@ -193,13 +228,24 @@ impl StreamingServer {
                 match rv_b {
                     // After a clean close the session forwards the stdin which
                     // the client sent before, for a short time.
-                    Ok(true) => {
+                    Ok(InputEnd::Closed) => {
                         info!("Client closed the connection");
                         if time::timeout(STDIN_FLUSH_TIMEOUT, &mut send_task).await.is_err() {
                             debug!("Session did not end after the close, stopping it");
                         }
                     }
-                    Ok(false) => info!("Client connection ended"),
+                    // The session fails, the client still gets its status and
+                    // the close, which tells why, and what it still sends
+                    // gets drained, so that they do not get lost.
+                    Ok(InputEnd::TooLarge(input)) => {
+                        info!("Client sent a message larger than the limit");
+                        match time::timeout(web::CLOSE_TIMEOUT, &mut send_task).await {
+                            Ok(Ok(Some(output))) => input.drain(output).await,
+                            Ok(_) => {}
+                            Err(_) => debug!("Session did not end after the failure, stopping it"),
+                        }
+                    }
+                    Ok(InputEnd::Gone) => info!("Client connection ended"),
                     Err(b) => error!("Error receiving messages: {b:?}")
                 }
                 send_task.abort();
@@ -214,15 +260,16 @@ impl StreamingServer {
     /// its timeout fails, like any other session which did not end, so that
     /// the client does not take it for a success, unless the process exited
     /// already. An exec process gets killed then, nothing is left to end it.
-    /// The task tells whether the close went out, see [`Output::close`].
+    /// The task returns the output once the close went out, see
+    /// [`Output::close`].
     fn write_task(
         sender: Output,
-        stdin_rx: MpscReceiver<Stdin>,
-        resize_rx: ResizeRx,
+        client: ClientRx,
         session: Session,
         activity: Activity,
-    ) -> JoinHandle<bool> {
+    ) -> JoinHandle<Option<Output>> {
         let idle_timeout = session.idle_timeout();
+        let too_large = client.too_large.clone();
         tokio::spawn(async move {
             let mut sender = sender;
             let mut status = None;
@@ -232,16 +279,19 @@ impl StreamingServer {
                         // The runtime runs in a task of its own. A client
                         // which goes away meanwhile must not kill it halfway,
                         // the process it started still gets registered, and
-                        // torn down once the task finished.
-                        let started = task::spawn(Self::start_exec(*s))
-                            .await
-                            .context("join exec start")??;
+                        // torn down once the task finished. A client which
+                        // sent too much fails the session meanwhile, it
+                        // does not wait for its status.
+                        let start = task::spawn(Self::start_exec(*s));
+                        let started = select! {
+                            started = start => started.context("join exec start")??,
+                            () = too_large.cancelled() => bail!(MESSAGE_TOO_LARGE),
+                        };
                         // The client waited for the runtime, which is no
                         // idleness of its own.
                         activity.touch();
                         let kill = started.teardown.kill.clone();
-                        let exec =
-                            Self::exec_loop(started, &mut sender, stdin_rx, resize_rx, &mut status);
+                        let exec = Self::exec_loop(started, &mut sender, client, &mut status);
                         Self::until_idle(exec, &activity, idle_timeout, || {
                             kill.store(true, Ordering::Release);
                         })
@@ -252,7 +302,7 @@ impl StreamingServer {
                 ),
                 Session::Attach(s) => (
                     Self::until_idle(
-                        Self::attach_loop(s, &mut sender, stdin_rx, resize_rx, &mut status),
+                        Self::attach_loop(s, &mut sender, client, &mut status),
                         &activity,
                         idle_timeout,
                         || {},
@@ -268,7 +318,12 @@ impl StreamingServer {
                 debug!("Unable to send the status: {e:#}");
             }
 
-            sender.close().await
+            // The close tells clients why, also ones which do not read the
+            // status.
+            if too_large.is_cancelled() {
+                sender.close_too_large();
+            }
+            sender.close().await.then_some(sender)
         })
     }
 
@@ -315,16 +370,19 @@ impl StreamingServer {
     /// as activity, also stdin. Once stdin backs up behind a process which
     /// does not take it, the client is not read anymore and the connection
     /// may go idle, like a spdystream connection whose reader waits.
-    fn read_task(
-        mut input: impl ClientInput,
+    fn read_task<I>(
+        mut input: I,
         stdin_tx: MpscSender<Stdin>,
         resize_tx: watch::Sender<Option<Bytes>>,
         peer_closed: Arc<AtomicBool>,
-    ) -> JoinHandle<bool> {
+        too_large: CancellationToken,
+    ) -> JoinHandle<InputEnd<I>>
+    where
+        I: ClientInput,
+    {
         tokio::spawn(async move {
             let mut pending = PendingStdin::default();
-            let mut closed = false;
-            loop {
+            let end = loop {
                 select! {
                     permit = stdin_tx.reserve(), if !pending.is_empty() => match permit {
                         Ok(permit) => permit.send(pending.pop()),
@@ -333,23 +391,28 @@ impl StreamingServer {
                     },
                     event = input.next(), if !pending.is_full() => match event {
                         Some(event) => {
-                            if Self::read_event(event, &mut pending, &resize_tx).is_break() {
-                                peer_closed.store(true, Ordering::Release);
-                                closed = true;
-                                break;
+                            if let ControlFlow::Break(end) =
+                                Self::read_event(event, &mut pending, &resize_tx)
+                            {
+                                break Some(end);
                             }
                         }
-                        None => break,
+                        None => break None,
                     },
                 }
+            };
+            match end {
+                Some(EventEnd::Closed) => peer_closed.store(true, Ordering::Release),
+                Some(EventEnd::TooLarge) => too_large.cancel(),
+                None => {}
             }
 
             // Stdin sent right before a clean close, like the close of the
             // stream itself, still has to reach the container. Only for a
             // short time, a container which does not read it must not delay
-            // the end of the session. A client which went away gets nothing
-            // forwarded anymore.
-            if closed {
+            // the end of the session. A client which went away or failed the
+            // session gets nothing forwarded anymore.
+            if end == Some(EventEnd::Closed) {
                 let flush = async {
                     while !pending.is_empty() {
                         if stdin_tx.send(pending.pop()).await.is_err() {
@@ -361,23 +424,27 @@ impl StreamingServer {
                     debug!("Dropping stdin the container did not take after the close");
                 }
             }
-            closed
+            match end {
+                Some(EventEnd::Closed) => InputEnd::Closed,
+                Some(EventEnd::TooLarge) => InputEnd::TooLarge(input),
+                None => InputEnd::Gone,
+            }
         })
     }
 
-    /// Handle a single event of the client and return the control flow
-    /// decision.
+    /// Handle a single event of the client, break once its input ended.
     fn read_event(
         event: ClientEvent,
         pending: &mut PendingStdin,
         resize_tx: &watch::Sender<Option<Bytes>>,
-    ) -> ControlFlow<(), ()> {
+    ) -> ControlFlow<EventEnd> {
         match event {
             ClientEvent::Stdin(stdin) => pending.push(stdin),
             ClientEvent::Resize(data) => {
                 resize_tx.send_replace(Some(data));
             }
-            ClientEvent::Closed => return ControlFlow::Break(()),
+            ClientEvent::Closed => return ControlFlow::Break(EventEnd::Closed),
+            ClientEvent::TooLarge => return ControlFlow::Break(EventEnd::TooLarge),
         }
         ControlFlow::Continue(())
     }
@@ -389,8 +456,7 @@ impl StreamingServer {
 pub(super) struct SessionInput {
     io: SharedContainerIO,
     attach: SharedContainerAttach,
-    stdin_rx: MpscReceiver<Stdin>,
-    resize_rx: ResizeRx,
+    client: ClientRx,
 
     /// Stdin which waits for the container.
     pending: Option<Bytes>,
@@ -419,26 +485,25 @@ pub(super) enum InputEvent {
 
     /// The client closed the connection.
     Ended,
+
+    /// The client sent a message larger than the server takes, which fails
+    /// the session.
+    TooLarge,
 }
 
 impl SessionInput {
     pub(super) fn new(
         io: SharedContainerIO,
         attach: SharedContainerAttach,
-        stdin_rx: MpscReceiver<Stdin>,
-        resize_rx: ResizeRx,
+        client: ClientRx,
         stdin: bool,
     ) -> Self {
-        let mut ping = time::interval_at(
-            time::Instant::now() + STDIN_PING_INTERVAL,
-            STDIN_PING_INTERVAL,
-        );
+        let mut ping = time::interval_at(time::Instant::now() + PING_INTERVAL, PING_INTERVAL);
         ping.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
         Self {
             io,
             attach,
-            stdin_rx,
-            resize_rx,
+            client,
             pending: None,
             ping,
             stdin_open: stdin,
@@ -450,8 +515,9 @@ impl SessionInput {
     pub(super) async fn next(&mut self) -> InputEvent {
         loop {
             select! {
-                Ok(()) = self.resize_rx.changed() => {
-                    if let Some(data) = self.resize_rx.borrow_and_update().clone() {
+                () = self.client.too_large.cancelled() => return InputEvent::TooLarge,
+                Ok(()) = self.client.resize.changed() => {
+                    if let Some(data) = self.client.resize.borrow_and_update().clone() {
                         return InputEvent::Resize(data);
                     }
                 }
@@ -461,7 +527,9 @@ impl SessionInput {
                     self.pending = None;
                 }
                 _ = self.ping.tick(), if self.pending.is_some() => return InputEvent::Ping,
-                stdin = self.stdin_rx.recv(), if self.pending.is_none() => match stdin {
+                stdin = self.client.stdin.recv(), if self.pending.is_none() => match stdin {
+                    // The input fails the session before it ends.
+                    None if self.client.too_large.is_cancelled() => return InputEvent::TooLarge,
                     None => return InputEvent::Ended,
                     Some(_) if !self.stdin_open => {}
                     Some(Stdin::Data(data)) => self.pending = Some(data),
@@ -628,13 +696,84 @@ impl PendingStdin {
     }
 }
 
+/// The entry points of the fuzz targets.
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing {
+    use super::{PendingStdin, STDIN_CHUNK_SIZE, Stdin};
+    use bytes::Bytes;
+    use std::collections::VecDeque;
+
+    /// Push, pop and clear pending stdin by the input, one operation per
+    /// byte, and compare it with the stdin of a model, which is a plain
+    /// queue of its bytes. The bytes of stdin count up, so that the order
+    /// shows. Like for a session, nothing gets pushed while it is full.
+    pub fn pending_stdin(input: &[u8]) {
+        let mut pending = PendingStdin::default();
+        let (mut model, mut closed, mut close_pending) = (VecDeque::new(), false, false);
+        let mut counter = 0u8;
+        let mut input = input.iter().copied();
+        while let Some(op) = input.next() {
+            match op % 4 {
+                0 | 1 if pending.is_full() => {}
+                0 => {
+                    // Up to two chunks, also small stdin which gets merged.
+                    let mut next = || usize::from(input.next().unwrap_or_default());
+                    let len =
+                        ((next() << 16) | (next() << 8) | next()) % (2 * STDIN_CHUNK_SIZE + 1);
+                    let data: Vec<u8> = (0..len)
+                        .map(|_| {
+                            counter = counter.wrapping_add(1);
+                            counter
+                        })
+                        .collect();
+                    if !closed {
+                        model.extend(&data);
+                    }
+                    pending.push(Stdin::Data(Bytes::from(data)));
+                }
+                1 => {
+                    if !closed {
+                        closed = true;
+                        close_pending = true;
+                    }
+                    pending.push(Stdin::Close);
+                }
+                2 if !pending.is_empty() => match pending.pop() {
+                    Stdin::Data(data) => {
+                        assert!(!data.is_empty() && data.len() <= STDIN_CHUNK_SIZE);
+                        assert!(data.iter().all(|b| model.pop_front() == Some(*b)));
+                    }
+                    Stdin::Close => {
+                        assert!(model.is_empty() && close_pending);
+                        close_pending = false;
+                    }
+                },
+                2 => {}
+                _ => {
+                    pending.clear();
+                    model.clear();
+                    close_pending = false;
+                }
+            }
+            assert_eq!(pending.is_empty(), model.is_empty() && !close_pending);
+            assert!(pending.len() >= model.len());
+            // What nothing holds counts nothing.
+            if pending.is_empty() {
+                assert_eq!(pending.len(), 0);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         container_io::{ContainerIO, Message as IOMessage, Pipe, SharedContainerIO},
         container_log::ContainerLog,
-        remotecommand::{ClientEvent, STDIN_BYTE, STREAM_ERR_BYTE, Status, Stdin},
+        remotecommand::{
+            ClientEvent, MESSAGE_TOO_LARGE, STDIN_BYTE, STREAM_ERR_BYTE, Status, Stdin,
+        },
         spdy::testing::{Client, Frame},
         streaming_server::{
             AttachSession, StreamingServer, session::PENDING_STDIN_MAX_BYTES, testing::*,
@@ -677,6 +816,24 @@ mod tests {
                 }
                 assert_eq!(stdin, (0..50u8).collect::<Vec<_>>());
                 Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn messages_larger_than_the_limit_fail_the_session() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let (_io, _server, stream) = attach_session(true, false).await?;
+                let (mut reader, writer) = send_too_large(stream);
+
+                // The client learns why, from the status and the close.
+                let (opcode, status) = server_frame(&mut reader).await?;
+                assert_eq!((opcode, status.first()), (2, Some(&STREAM_ERR_BYTE)));
+                let status = String::from_utf8_lossy(&status[1..]);
+                assert!(status.contains("\"Failure\""), "{status}");
+                assert!(status.contains(MESSAGE_TOO_LARGE), "{status}");
+                too_large_close(reader, writer).await
             })
             .await
     }
@@ -1124,7 +1281,10 @@ mod tests {
         assert!(pending.is_empty());
 
         let close = StreamingServer::read_event(ClientEvent::Closed, &mut pending, &resize_tx);
-        assert_eq!(close, ControlFlow::Break(()));
+        assert_eq!(close, ControlFlow::Break(EventEnd::Closed));
+        let too_large =
+            StreamingServer::read_event(ClientEvent::TooLarge, &mut pending, &resize_tx);
+        assert_eq!(too_large, ControlFlow::Break(EventEnd::TooLarge));
     }
 
     #[test]

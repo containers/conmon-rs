@@ -61,5 +61,19 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "port_forward_spdy"
+path = "fuzz_targets/port_forward_spdy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pending_stdin"
+path = "fuzz_targets/pending_stdin.rs"
+test = false
+doc = false
+bench = false
+
 [lints]
 workspace = true

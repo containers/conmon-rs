@@ -2,20 +2,17 @@
 
 use super::{
     StreamingServer,
-    session::{InputEvent, ResizeRx, SessionInput},
+    session::{ClientRx, InputEvent, SessionInput},
 };
 use crate::{
     attach::SharedContainerAttach,
     child_reaper::ReapableChild,
     container_io::{Drain, Message as IOMessage, Pipe},
-    remotecommand::{Output, STDERR_BYTE, STDOUT_BYTE, Status, Stdin},
+    remotecommand::{MESSAGE_TOO_LARGE, Output, STDERR_BYTE, STDOUT_BYTE, Status},
 };
-use anyhow::Result;
+use anyhow::{Result, bail};
 use tokio::{
-    sync::{
-        broadcast::{self, error::RecvError},
-        mpsc::Receiver as MpscReceiver,
-    },
+    sync::broadcast::{self, error::RecvError},
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
@@ -40,8 +37,7 @@ impl StreamingServer {
     pub(super) async fn attach_loop(
         session: AttachSession,
         sender: &mut Output,
-        stdin_rx: MpscReceiver<Stdin>,
-        resize_rx: ResizeRx,
+        client: ClientRx,
         status: &mut Option<Status>,
     ) -> Result<()> {
         // Extract values we need for the I/O loop
@@ -62,7 +58,7 @@ impl StreamingServer {
         let attach = io.attach().await;
         let terminal = attach.is_terminal();
         // Without stdin, there is none to wait for.
-        let mut input = SessionInput::new(io, attach.clone(), stdin_rx, resize_rx, stdin_enabled);
+        let mut input = SessionInput::new(io, attach.clone(), client, stdin_enabled);
 
         // With stdin once, the end of the session closes the container stdin,
         // also if the client went away without closing it, like the first
@@ -114,6 +110,7 @@ impl StreamingServer {
                     // The client closed the connection, everything it sent
                     // reached the container. Nobody gets a status anymore.
                     InputEvent::Ended => return Ok(()),
+                    InputEvent::TooLarge => bail!(MESSAGE_TOO_LARGE),
                 },
 
                 () = token.cancelled() => {

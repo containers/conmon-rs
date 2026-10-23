@@ -64,12 +64,12 @@ pub mod conmon_capnp {
 pub mod fuzzing {
     pub use crate::{
         channel::fuzzing::channel,
-        port_forward::fuzzing::query_ports,
+        port_forward::fuzzing::{query_ports, spdy as port_forward_spdy},
         remotecommand::ResizeEvents,
         spdy::fuzzing::{
             connection as spdy_connection, frames as spdy_frames, header_block as spdy_header_block,
         },
-        streaming_server::fuzzing::upgrade_headers,
+        streaming_server::fuzzing::{pending_stdin, upgrade_headers},
     };
 }
 

@@ -1,7 +1,7 @@
 //! The upgrade of a request to a WebSocket or to SPDY, by the protocols the
 //! client asks for.
 
-use super::{MAX_MESSAGE_SIZE, State, StreamingServer};
+use super::{MAX_MESSAGE_SIZE, Session, State, StreamingServer};
 use crate::{
     port_forward::{self, PortForward, WebSocketProtocol},
     random_id::RandomId,
@@ -32,17 +32,21 @@ const ACCEPTED_PROTOCOL_VERSIONS_HEADER: HeaderName =
     HeaderName::from_static("x-accepted-stream-protocol-versions");
 
 impl StreamingServer {
-    /// Handle an exec or attach request, which the client upgrades to a
-    /// WebSocket or SPDY.
+    /// Handle an exec or attach request, `kind` is the path of its URL, which
+    /// the client upgrades to a WebSocket or SPDY.
     pub(super) async fn handle(
+        kind: &str,
         token: RandomId,
         state: Arc<RwLock<State>>,
         mut request: Request<Incoming>,
     ) -> Response {
         async move {
             debug!("Got request");
-            // An unknown token comes first, the request cannot succeed.
-            if !state.read().await.sessions.contains_key(&token) {
+            // An unknown token comes first, the request cannot succeed. The
+            // token of a session of the other kind is unknown on this path,
+            // the session stays for its own.
+            let typ = state.read().await.sessions.get(&token).map(Session::typ);
+            if typ != Some(kind) {
                 debug!("Unable to find session");
                 return web::status(StatusCode::NOT_FOUND);
             }
@@ -338,7 +342,8 @@ mod tests {
         remotecommand::SPDY_PROTOCOLS,
         spdy::testing::{Client, Frame, Headers},
         streaming_server::{
-            ADDR, ATTACH_PATH, AttachSession, PORT_FORWARD_PATH, StreamingServer, testing::*,
+            ADDR, ATTACH_PATH, AttachSession, EXEC_PATH, PORT_FORWARD_PATH, StreamingServer,
+            testing::*,
         },
     };
     use anyhow::{Context, Result};
@@ -437,6 +442,8 @@ mod tests {
                 .await?;
                 assert!(response.starts_with("http/1.1 101"), "{response}");
                 assert!(response.contains("upgrade: spdy/3.1"), "{response}");
+                // Only other responses end the connection.
+                assert!(!response.contains("close"), "{response}");
                 assert!(
                     response.contains("x-stream-protocol-version: portforward.k8s.io"),
                     "{response}"
@@ -560,6 +567,37 @@ mod tests {
             .await
     }
 
+    #[tokio::test]
+    async fn sessions_work_on_their_path_only() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                let (_, child, _token) = attach_child(false)?;
+                let url = server
+                    .attach_url(AttachSession {
+                        container_id: "id".into(),
+                        child,
+                        stdin: false,
+                        stdout: true,
+                        stderr: false,
+                        stop_after_stdin_eof: false,
+                        idle_timeout: None,
+                    })
+                    .await?;
+
+                // An attach token is no exec token, and it stays for its
+                // own path.
+                let exec = url.replace(ATTACH_PATH, EXEC_PATH);
+                let (response, _) = upgrade(&server, &exec, "POST", SPDY_EXEC_UPGRADE).await?;
+                assert!(response.starts_with("http/1.1 404"), "{response}");
+                let (response, _) = upgrade(&server, &url, "POST", SPDY_EXEC_UPGRADE).await?;
+                assert!(response.starts_with("http/1.1 101"), "{response}");
+                Ok(())
+            })
+            .await
+    }
+
     /// Upgrade a port forward request to a WebSocket with the subprotocols
     /// and the query, return the response head and the connection.
     async fn port_forward_websocket(
@@ -645,6 +683,7 @@ mod tests {
                         response.contains(&format!("sec-websocket-protocol: {protocol}")),
                         "{response}"
                     );
+                    assert!(!response.contains("close"), "{response}");
 
                     // A message of the channel protocol, text for base64.
                     let message = |channel: u8, data: &[u8]| {
@@ -905,6 +944,37 @@ mod tests {
                 );
                 assert_eq!(server_frame(&mut stream).await?.0, 8);
                 Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn port_forward_over_websocket_closes_on_too_large_messages() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                // A pod which accepts, but never sends.
+                let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
+                let port = listener.local_addr()?.port();
+                let accepted = tokio::spawn(async move { listener.accept().await });
+
+                // The channel protocol, after the ports of the channels.
+                let (response, mut stream) =
+                    port_forward_websocket(&server, &format!("?port={port}"), "").await?;
+                assert!(response.starts_with("http/1.1 101"), "{response}");
+                server_frame(&mut stream).await?;
+                server_frame(&mut stream).await?;
+                let _connection = accepted.await??;
+                let (reader, writer) = send_too_large(stream);
+                too_large_close(reader, writer).await?;
+
+                // The tunnel, which carries SPDY.
+                let (response, stream) =
+                    port_forward_websocket(&server, "", "SPDY/3.1+portforward.k8s.io").await?;
+                assert!(response.starts_with("http/1.1 101"), "{response}");
+                let (reader, writer) = send_too_large(stream);
+                too_large_close(reader, writer).await
             })
             .await
     }

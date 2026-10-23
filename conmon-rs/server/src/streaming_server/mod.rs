@@ -26,7 +26,7 @@ use std::{
 };
 use tokio::{
     net::TcpListener,
-    sync::RwLock,
+    sync::{RwLock, Semaphore},
     task,
     time::{self, Duration},
 };
@@ -41,8 +41,12 @@ mod testing;
 
 pub use attach::AttachSession;
 pub use exec::ExecSession;
+
+/// The entry points of the fuzz targets.
 #[cfg(feature = "fuzzing")]
-pub use handshake::fuzzing;
+pub mod fuzzing {
+    pub use super::{handshake::fuzzing::upgrade_headers, session::fuzzing::pending_stdin};
+}
 
 const ADDR: &str = "127.0.0.1";
 
@@ -50,10 +54,21 @@ const ADDR: &str = "127.0.0.1";
 /// of hyper, which only applies with a timer. A connection which never sends
 /// one would stay open otherwise.
 const HEADER_READ_TIMEOUT: Duration = if cfg!(test) {
-    Duration::from_millis(500)
+    Duration::from_secs(2)
 } else {
     Duration::from_secs(30)
 };
+
+/// How long a connection may take until it got upgraded, also one which
+/// does not read its response. Clients make one upgrade request per
+/// connection, hyper has no timeout for writing the response.
+const UPGRADE_TIMEOUT: Duration = HEADER_READ_TIMEOUT.saturating_mul(2);
+
+/// The most connections which did not get upgraded yet. More wait to be
+/// accepted, so that local processes which open connections without a
+/// request cannot use up the descriptors the whole pod needs. Upgraded
+/// connections do not count, their tokens bound them.
+const MAX_CONNECTIONS: usize = if cfg!(test) { 8 } else { 256 };
 
 const EXEC_PATH: &str = "exec";
 const ATTACH_PATH: &str = "attach";
@@ -62,7 +77,10 @@ const PORT_FORWARD_PATH: &str = "portforward";
 /// The largest WebSocket message and frame a client may send. Clients send
 /// stdin, which kubectl reads in 32 KiB chunks and the attach sockets cap at
 /// 64 KiB per packet, and small resize events. The defaults of 64 MiB per
-/// message would let a client make the server buffer that much per message.
+/// message, or the 32 MiB of Kubernetes, would let a client make the server
+/// buffer that much per message. A client which sends more, like the Python
+/// client which sends all stdin of a write in one message, fails its session
+/// with a status and a close which tell why.
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
 /// The error of a request for a URL while too many of its kind wait for
@@ -126,9 +144,13 @@ impl StreamingServer {
     }
 
     /// Serve the main streaming server, every connection in a task of its
-    /// own.
+    /// own, at most [`MAX_CONNECTIONS`] at once, each for one request.
     async fn serve(listener: TcpListener, state: Arc<RwLock<State>>) {
+        let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         loop {
+            let Ok(permit) = connections.clone().acquire_owned().await else {
+                return;
+            };
             let stream = match listener.accept().await {
                 Ok((stream, _)) => stream,
                 Err(e) => {
@@ -138,18 +160,21 @@ impl StreamingServer {
             };
             let state = state.clone();
             tokio::spawn(async move {
+                // Until the connection ended or got upgraded.
+                let _permit = permit;
                 let service = service_fn(move |request| {
                     let state = state.clone();
                     async move { Ok::<_, Infallible>(Self::route(request, state).await) }
                 });
-                if let Err(e) = http1::Builder::new()
+                let connection = http1::Builder::new()
                     .timer(TokioTimer::new())
                     .header_read_timeout(HEADER_READ_TIMEOUT)
                     .serve_connection(TokioIo::new(stream), service)
-                    .with_upgrades()
-                    .await
-                {
-                    trace!("Unable to serve connection: {e}");
+                    .with_upgrades();
+                match time::timeout(UPGRADE_TIMEOUT, connection).await {
+                    Ok(Err(e)) => trace!("Unable to serve connection: {e}"),
+                    Ok(Ok(())) => {}
+                    Err(_) => debug!("Closing connection which did not end in time"),
                 }
             });
         }
@@ -187,9 +212,19 @@ impl StreamingServer {
                 Self::logged_path(request.uri().path()),
             )
         });
-        let response = Self::dispatch(request, state).await;
+        let mut response = Self::dispatch(request, state).await;
         if let Some((method, path)) = logged {
             debug!("{method} {path}: {}", response.status());
+        }
+        // One request per connection, clients make one upgrade request each.
+        // A client which keeps sending requests without reading the
+        // responses would hold its connection otherwise, see
+        // [`MAX_CONNECTIONS`]. Turning keep-alive off for the connection
+        // would add the close to the upgrades as well.
+        if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+            response
+                .headers_mut()
+                .insert(header::CONNECTION, HeaderValue::from_static("close"));
         }
         response
     }
@@ -217,10 +252,12 @@ impl StreamingServer {
         else {
             return web::status(StatusCode::NOT_FOUND);
         };
-        let port_forward = match kind {
-            EXEC_PATH | ATTACH_PATH => false,
-            PORT_FORWARD_PATH => true,
-            _ => return web::status(StatusCode::NOT_FOUND),
+        // The path of the kind, which outlives the request.
+        let Some(kind) = [EXEC_PATH, ATTACH_PATH, PORT_FORWARD_PATH]
+            .into_iter()
+            .find(|path| *path == kind)
+        else {
+            return web::status(StatusCode::NOT_FOUND);
         };
         if token.is_empty() || token.contains('/') {
             return web::status(StatusCode::NOT_FOUND);
@@ -236,10 +273,10 @@ impl StreamingServer {
             Ok(token) => token,
             Err(e) => return web::text(StatusCode::BAD_REQUEST, format!("Invalid URL: {e}")),
         };
-        if port_forward {
+        if kind == PORT_FORWARD_PATH {
             Self::handle_port_forward(token, state, request).await
         } else {
-            Self::handle(token, state, request).await
+            Self::handle(kind, token, state, request).await
         }
     }
 
@@ -327,11 +364,11 @@ impl StreamingServer {
 }
 
 impl Session {
-    /// The kind of the session for the logs.
+    /// The kind of the session for the logs, the path of its URL.
     fn typ(&self) -> &'static str {
         match self {
-            Session::Exec(_) => "exec",
-            Session::Attach(_) => "attach",
+            Session::Exec(_) => EXEC_PATH,
+            Session::Attach(_) => ATTACH_PATH,
         }
     }
 
@@ -386,14 +423,15 @@ mod tests {
         bounded_hashmap::DEFAULT_CAPACITY,
         random_id::RandomId,
         streaming_server::{
-            ADDR, HEADER_READ_TIMEOUT, SWEEP_INTERVAL, StreamingServer, TOO_MANY_REQUESTS,
+            ADDR, HEADER_READ_TIMEOUT, MAX_CONNECTIONS, SWEEP_INTERVAL, StreamingServer,
+            TOO_MANY_REQUESTS, testing::response_head,
         },
     };
     use anyhow::{Context, Result};
 
-    use std::path::PathBuf;
+    use std::{io, path::PathBuf};
     use tokio::{
-        io::AsyncReadExt,
+        io::{AsyncReadExt, AsyncWriteExt},
         net::TcpStream,
         task::LocalSet,
         time::{self, Duration},
@@ -410,6 +448,78 @@ mod tests {
                 time::timeout(4 * HEADER_READ_TIMEOUT, stream.read_to_end(&mut rest))
                     .await
                     .context("connection still open")??;
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn connections_wait_while_too_many_are_open() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                let mut open = vec![];
+                for _ in 0..MAX_CONNECTIONS {
+                    open.push(TcpStream::connect((ADDR, server.port)).await?);
+                }
+
+                // A request on another connection waits for one of them.
+                let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+                stream
+                    .write_all(format!("GET /x HTTP/1.1\r\nHost: {ADDR}\r\n\r\n").as_bytes())
+                    .await?;
+                let mut byte = [0];
+                let early = time::timeout(HEADER_READ_TIMEOUT / 5, stream.read(&mut byte)).await;
+                assert!(early.is_err(), "request got served beyond the limit");
+                drop(open.pop());
+                let response = time::timeout(Duration::from_secs(5), response_head(&mut stream))
+                    .await
+                    .context("request not served after a connection ended")??;
+                assert!(response.starts_with("http/1.1 404"), "{response}");
+                // The others are still open, the end of one freed its permit,
+                // not the header timeout of all of them.
+                for held in &open {
+                    let read = held.try_read(&mut byte);
+                    assert!(
+                        matches!(&read, Err(e) if e.kind() == io::ErrorKind::WouldBlock),
+                        "{read:?}"
+                    );
+                }
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn clients_which_do_not_read_get_one_response() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                // Clients which send requests without end and never read the
+                // responses.
+                let request = format!("GET /x HTTP/1.1\r\nHost: {ADDR}\r\n\r\n");
+                let mut writers = vec![];
+                for _ in 0..MAX_CONNECTIONS {
+                    let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+                    let request = request.clone();
+                    writers.push(tokio::spawn(async move {
+                        while stream.write_all(request.as_bytes()).await.is_ok() {}
+                    }));
+                }
+
+                // They get closed after their response, which lets others in
+                // before any timeout.
+                let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+                stream.write_all(request.as_bytes()).await?;
+                let response = time::timeout(HEADER_READ_TIMEOUT, response_head(&mut stream))
+                    .await
+                    .context("request not served while others did not read")??;
+                assert!(response.starts_with("http/1.1 404"), "{response}");
+                for writer in writers {
+                    writer.abort();
+                }
                 Ok(())
             })
             .await
