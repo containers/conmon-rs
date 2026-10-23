@@ -1,5 +1,5 @@
 use crate::{
-    child_reaper::ReapableChild,
+    child_reaper::{ReapableChild, RuntimeOutput},
     config::PauseArgs,
     conmon_capnp::conmon,
     mutex::lock,
@@ -17,7 +17,10 @@ use nix::{
         signal::{SigSet, Signal, kill},
         wait::{WaitPidFlag, WaitStatus, waitpid},
     },
-    unistd::{ForkResult, Gid, Pid, SysconfVar, Uid, fork, getpid, setresgid, setresuid, sysconf},
+    unistd::{
+        ForkResult, Gid, Pid, SysconfVar, Uid, dup2_stderr, fork, getpid, setresgid, setresuid,
+        sysconf,
+    },
 };
 use std::{
     env, fmt,
@@ -93,6 +96,7 @@ impl Pause {
         gid_mappings: Vec<String>,
     ) -> Result<&'static Pause> {
         let base_path = PathBuf::from(base_path);
+        Self::validate_location(&base_path, pod_id)?;
         let (uid_mappings, gid_mappings) = if namespaces.contains(&Namespace::User) {
             if uid_mappings.is_empty() {
                 bail!("user ID mappings are empty")
@@ -181,6 +185,39 @@ impl Pause {
             .await
     }
 
+    /// The longest pod ID, whose PID file name still fits into `NAME_MAX`.
+    const MAX_POD_ID_LEN: usize = 255 - ".pid".len();
+
+    /// Fail unless the namespaces and the PID file of the pod end up below
+    /// the base path. The pod ID names a file there, so it must be a single
+    /// file name, and a relative base path would depend on the working
+    /// directory of the server.
+    fn validate_location(base_path: &Path, pod_id: &str) -> Result<()> {
+        if !base_path.is_absolute() {
+            bail!("base path {} is not absolute", base_path.display())
+        }
+        if pod_id.is_empty() {
+            bail!("no pod ID provided")
+        }
+        if matches!(pod_id, "." | "..")
+            || !pod_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+        {
+            bail!("pod ID {pod_id:?} has to consist of letters, digits, '_', '.' and '-' only")
+        }
+        // The PID file adds ".pid", a longer one would only fail once the
+        // namespaces got bound.
+        if pod_id.len() > Self::MAX_POD_ID_LEN {
+            bail!(
+                "pod ID is {} bytes long, the limit is {}",
+                pod_id.len(),
+                Self::MAX_POD_ID_LEN
+            )
+        }
+        Ok(())
+    }
+
     /// Fail if the pause instance was created for another pod or configuration.
     fn ensure_matches(
         &self,
@@ -266,11 +303,7 @@ impl Pause {
     /// on the blocking pool, see [`stop_blocking`].
     fn stop(&self) {
         info!("Stopping pause");
-        for namespace in self.namespaces() {
-            if let Err(e) = namespace.umount(self.base_path(), self.pod_id()) {
-                debug!("Unable to umount namespace {namespace}: {e:#}");
-            }
-        }
+        Self::unbind(self.base_path(), self.pod_id(), self.namespaces());
 
         if let Some(process) = &self.process {
             let pid = process.pid();
@@ -281,8 +314,18 @@ impl Pause {
                 Err(e) => warn!("Unable to kill pause PID {pid}: {e:#}"),
             }
         }
+    }
 
-        let pause_pid_path = Self::pause_pid_path(self.base_path(), self.pod_id());
+    /// Remove the bind mounts of the namespaces and the PID file of the init,
+    /// which a stop or a failed setup leaves behind.
+    fn unbind(base_path: &Path, pod_id: &str, namespaces: &[Namespace]) {
+        for namespace in namespaces {
+            if let Err(e) = namespace.umount(base_path, pod_id) {
+                debug!("Unable to umount namespace {namespace}: {e:#}");
+            }
+        }
+
+        let pause_pid_path = Self::pause_pid_path(base_path, pod_id);
         if let Err(e) = fs::remove_file(&pause_pid_path) {
             debug!(
                 "Unable to remove pause PID path {}: {:#}",
@@ -334,10 +377,12 @@ impl Pause {
             .arg("--base-path")
             .arg(base_path)
             .args(args)
-            // The init of a PID namespace outlives this call. It must not keep
-            // the output of the server open, only errors are of interest.
+            // The init of a PID namespace outlives this call, it does not
+            // keep stderr open, see `run_child`. Only errors are of
+            // interest, which end up in the error of a failed setup.
             .stdin(Stdio::null())
             .stdout(Stdio::null())
+            .stderr(Stdio::piped())
             // Do not leave it behind if the runtime drops this task on the
             // shutdown. Its child then stops the init of a PID namespace.
             .kill_on_drop(true)
@@ -348,9 +393,10 @@ impl Pause {
         // the wait below, so the PID is still its own here. Dropping it on a
         // failure kills it.
         let process = Process::open(child_pid(child.id()).context("PID of pause child")?);
-        PAUSE.set_child(Some(process))?;
+        PAUSE.set_child(Some(process));
+        let output = RuntimeOutput::spawn(None, child.stderr.take());
         let status = child.wait().await;
-        PAUSE.set_child(None)?;
+        PAUSE.set_child(None);
 
         let mut pause = Self {
             base_path: base_path.to_path_buf(),
@@ -369,8 +415,11 @@ impl Pause {
             // namespace then, the bind mounts and PID file stay.
             if status.signal().is_some() {
                 stop_blocking(move || pause.stop()).await;
+                bail!("exit status not ok: {status}")
             }
-            bail!("exit status not ok: {status}")
+            let stderr = RuntimeOutput::finish(Some(output)).await;
+            let stderr = String::from_utf8_lossy(&stderr);
+            bail!("exit status not ok: {status}: {}", stderr.trim())
         }
 
         // Without a PID namespace the pause process already exited after
@@ -405,10 +454,12 @@ impl Pause {
 
     /// Retrieve the pause PID path for a base and pod ID.
     fn pause_pid_path<T: AsRef<Path>>(base_path: T, pod_id: &str) -> PathBuf {
-        let mut path = base_path.as_ref().join("conmonrs");
-        path.push(pod_id);
-        path.set_extension("pid");
-        path
+        // Not with set_extension, which would replace a part of a pod ID
+        // with a dot.
+        base_path
+            .as_ref()
+            .join("conmonrs")
+            .join(format!("{pod_id}.pid"))
     }
 
     /// Run a new pause instance.
@@ -437,6 +488,7 @@ impl Pause {
             ref uid_mappings,
             ref gid_mappings,
         } = args;
+        Self::validate_location(base_path, pod_id)?;
         let requested = [
             (ipc, Namespace::Ipc),
             (pid, Namespace::Pid),
@@ -544,6 +596,12 @@ impl Pause {
                 }
                 ForkResult::Child => {
                     drop(sock);
+                    // The server reads the errors of the setup from stderr
+                    // until it ends, which the init must not hold open. If
+                    // it does, the server waits for it a bounded time.
+                    if let Ok(null) = File::open("/dev/null") {
+                        let _ = dup2_stderr(null);
+                    }
                     return Self::run_init(signals);
                 }
             }
@@ -837,9 +895,8 @@ impl<T: Stop + Send + Sync + 'static> SingleFlight<T> {
     }
 
     /// Set the process of the running initialization.
-    fn set_child(&self, child: Option<Process>) -> Result<()> {
-        *lock(&self.child)? = child;
-        Ok(())
+    fn set_child(&self, child: Option<Process>) {
+        *lock(&self.child) = child;
     }
 
     /// Stop the value for the shutdown, until the `deadline`. Wait for a
@@ -865,19 +922,14 @@ impl<T: Stop + Send + Sync + 'static> SingleFlight<T> {
             .is_err()
         {
             warn!("Initialization still running, killing its process");
-            match lock(&self.child) {
-                Ok(child) => {
-                    if let Some(child) = &*child
-                        && let Err(e) = child.signal(Signal::SIGKILL)
-                    {
-                        warn!(
-                            "Unable to kill initialization process {}: {:#}",
-                            child.pid(),
-                            e
-                        );
-                    }
-                }
-                Err(e) => warn!("Unable to lock initialization process PID: {e:#}"),
+            if let Some(child) = &*lock(&self.child)
+                && let Err(e) = child.signal(Signal::SIGKILL)
+            {
+                warn!(
+                    "Unable to kill initialization process {}: {:#}",
+                    child.pid(),
+                    e
+                );
             }
             if time::timeout_at(stop_deadline, self.wait_for_init())
                 .await
@@ -1017,20 +1069,7 @@ impl PauseParent<'_> {
             debug!("Unable to wait for pause init {init}: {e:#}");
         }
 
-        for namespace in self.namespaces {
-            if let Err(e) = namespace.umount(self.base_path, self.pod_id) {
-                debug!("Unable to umount namespace {namespace}: {e:#}");
-            }
-        }
-
-        let pause_pid_path = Pause::pause_pid_path(self.base_path, self.pod_id);
-        if let Err(e) = fs::remove_file(&pause_pid_path) {
-            debug!(
-                "Unable to remove pause PID path {}: {:#}",
-                pause_pid_path.display(),
-                e
-            );
-        }
+        Pause::unbind(self.base_path, self.pod_id, self.namespaces);
     }
 }
 
@@ -1327,14 +1366,14 @@ mod tests {
             move || async move {
                 let mut child = Command::new("sleep").arg("60").kill_on_drop(true).spawn()?;
                 let pid = child_pid(child.id())?;
-                flight.set_child(Some(Process::open(pid)))?;
+                flight.set_child(Some(Process::open(pid)));
                 let status = child.wait().await?;
-                flight.set_child(None)?;
+                flight.set_child(None);
                 assert_eq!(status.signal(), Some(Signal::SIGKILL as i32));
                 Ok(Value(stops))
             }
         }));
-        while lock(&flight.child)?.is_none() {
+        while lock(&flight.child).is_none() {
             task::yield_now().await;
         }
 
@@ -1420,7 +1459,7 @@ mod tests {
         assert!(elapsed >= Duration::from_millis(200), "{elapsed:?}");
         assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
         assert!(ticker.is_finished());
-        let stopped_on = *lock(&value.stopped_on)?;
+        let stopped_on = *lock(&value.stopped_on);
         assert!(stopped_on.is_some_and(|id| id != std::thread::current().id()));
 
         // Let the blocking pool end with the test.
@@ -1542,6 +1581,59 @@ mod tests {
             pause
                 .ensure_matches(base_path, "pod", &namespaces, &[], &mappings)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn location_stays_below_the_base_path() {
+        let base_path = Path::new("/var/run");
+        for pod_id in [
+            "pod",
+            "3f5c0d2e-6a1b-4c8e-9f7a-1b2c3d4e5f60",
+            "a.v1",
+            "-pod",
+            "..pod",
+        ] {
+            assert!(
+                Pause::validate_location(base_path, pod_id).is_ok(),
+                "{pod_id}"
+            );
+        }
+        for pod_id in [
+            "",
+            ".",
+            "..",
+            "/etc/passwd",
+            "../pod",
+            "a/b",
+            "pod\n",
+            "pöd",
+        ] {
+            assert!(
+                Pause::validate_location(base_path, pod_id).is_err(),
+                "{pod_id}"
+            );
+        }
+        assert!(Pause::validate_location(Path::new(""), "pod").is_err());
+        assert!(Pause::validate_location(Path::new("run"), "pod").is_err());
+        // The PID file name has to fit into NAME_MAX.
+        assert!(Pause::validate_location(base_path, &"a".repeat(251)).is_ok());
+        assert!(Pause::validate_location(base_path, &"a".repeat(252)).is_err());
+    }
+
+    #[test]
+    fn pause_pid_paths_of_pods_differ() {
+        assert_eq!(
+            Pause::pause_pid_path("/var/run", "a.v1"),
+            Path::new("/var/run/conmonrs/a.v1.pid")
+        );
+        assert_ne!(
+            Pause::pause_pid_path("/var/run", "a.v1"),
+            Pause::pause_pid_path("/var/run", "a.v2")
+        );
+        assert_eq!(
+            Namespace::Net.path("/var/run", "a.v1"),
+            Path::new("/var/run/netns/a.v1")
         );
     }
 

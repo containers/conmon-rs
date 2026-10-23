@@ -4,7 +4,7 @@ use crate::{
     async_fd,
     attach::SharedContainerAttach,
     child::{Child, ChildKind, sleep_until},
-    container_io::{ContainerIO, ContainerIOType, Drain, SharedContainerIO},
+    container_io::{ContainerIO, ContainerIOType, DRAIN_MAX_LOG_WAIT, Drain, SharedContainerIO},
     init,
     mutex::lock,
     oom_watcher::{OOMEvent, OOMWatcher},
@@ -57,7 +57,7 @@ use tracing::{Instrument, debug, debug_span, error, warn};
 /// The stdout and stderr of a runtime with pipes of its own, read in the
 /// background until they end. Only the end of stderr is kept, it holds the
 /// error, stdout is not of interest.
-struct RuntimeOutput {
+pub(crate) struct RuntimeOutput {
     stderr: Arc<Mutex<StderrTail>>,
     task: JoinHandle<()>,
 }
@@ -68,7 +68,7 @@ impl RuntimeOutput {
     /// How much of the end of stderr is kept.
     const MAX_STDERR: usize = 64 * 1024;
 
-    fn spawn(stdout: Option<ChildStdout>, stderr: Option<ChildStderr>) -> Self {
+    pub(crate) fn spawn(stdout: Option<ChildStdout>, stderr: Option<ChildStderr>) -> Self {
         let buf = Arc::<Mutex<StderrTail>>::default();
         let stderr_buf = buf.clone();
         let task = task::spawn(async move {
@@ -99,16 +99,13 @@ impl RuntimeOutput {
             let Some(buf) = buf else {
                 continue;
             };
-            let Ok(mut buf) = buf.lock() else {
-                return;
-            };
-            buf.push(&chunk[..n]);
+            lock(buf).push(&chunk[..n]);
         }
     }
 
     /// Wait for the end of the output for a while, a helper of the runtime
     /// may hold the pipes open, and return the end of stderr.
-    async fn finish(output: Option<Self>) -> Vec<u8> {
+    pub(crate) async fn finish(output: Option<Self>) -> Vec<u8> {
         let Some(mut output) = output else {
             return vec![];
         };
@@ -119,10 +116,7 @@ impl RuntimeOutput {
             debug!("Runtime output still held open, giving up on it");
             output.task.abort();
         }
-        match output.stderr.lock() {
-            Ok(mut stderr) => std::mem::take(&mut *stderr).into_end(),
-            Err(_) => vec![],
-        }
+        std::mem::take(&mut *lock(&output.stderr)).into_end()
     }
 }
 
@@ -156,7 +150,8 @@ pub struct ChildReaper {
 /// [`ChildReaper::create_child`] hands it to the caller, which passes it to
 /// [`ChildReaper::watch_grandchild`], so the call ends with the registration
 /// of its child, or wherever the caller gives up.
-#[derive(Debug, Default)]
+#[derive(Debug)]
+#[cfg_attr(test, derive(Default))]
 pub struct InFlight {
     calls: Option<Arc<watch::Sender<Calls>>>,
 
@@ -220,9 +215,7 @@ struct PendingPid {
 
 impl PendingPid {
     fn new(pending: &Arc<Mutex<HashSet<Pid>>>, pid: Pid) -> Self {
-        if let Ok(mut set) = pending.lock() {
-            set.insert(pid);
-        }
+        lock(pending).insert(pid);
         Self {
             pending: pending.clone(),
             pid,
@@ -232,9 +225,7 @@ impl PendingPid {
 
 impl Drop for PendingPid {
     fn drop(&mut self) {
-        if let Ok(mut set) = self.pending.lock() {
-            set.remove(&self.pid);
-        }
+        lock(&self.pending).remove(&self.pid);
     }
 }
 
@@ -290,7 +281,7 @@ impl ChildReaper {
     /// their container and are skipped. The error starts with
     /// [`CONTAINER_NOT_FOUND`] if there is none.
     pub fn get(&self, id: &str) -> Result<ReapableChild> {
-        let lock = lock(&self.grandchildren)?;
+        let lock = lock(&self.grandchildren);
         let r = lock
             .get(id)
             .and_then(|v| v.iter().find(|c| c.kind == ChildKind::Container))
@@ -330,9 +321,9 @@ impl ChildReaper {
         cmd.process_group(0);
         init::reset_inherited(&mut cmd);
 
-        if stdin {
-            cmd.stdin(Stdio::piped());
-        }
+        // Without one it must not inherit the stdin of the server, which the
+        // runtime would pass on to the container.
+        cmd.stdin(if stdin { Stdio::piped() } else { Stdio::null() });
 
         // With the server relaying the sd_notify messages, the runtime must
         // not add its own notify socket mount and `NOTIFY_SOCKET` to the
@@ -477,7 +468,7 @@ impl ChildReaper {
     fn begin_call(&self, deadline: Option<Instant>) -> Result<InFlight> {
         // Under the lock the shutdown takes its snapshot with, so that it
         // either sees this call or this call sees the shutdown.
-        let _map = lock(&self.grandchildren)?;
+        let _map = lock(&self.grandchildren);
         if self.shutting_down.load(Ordering::SeqCst) {
             bail!("server is shutting down")
         }
@@ -724,26 +715,16 @@ impl ChildReaper {
     /// Both sets get checked under the lock of the grandchildren, which
     /// `watch_grandchild` holds while it moves a child from one to the other.
     fn is_claimed(&self, pid: Pid) -> bool {
-        let Ok(map) = self.grandchildren.lock() else {
-            return false;
-        };
-        map.values().flatten().any(|child| child.pid == pid)
-            || self
-                .pending
-                .lock()
-                .is_ok_and(|pending| pending.contains(&pid))
+        let map = lock(&self.grandchildren);
+        map.values().flatten().any(|child| child.pid == pid) || lock(&self.pending).contains(&pid)
     }
 
     /// The children which a watcher or a call in progress waits for, see
     /// [`ChildReaper::is_claimed`].
     fn claimed(&self) -> HashSet<Pid> {
-        let Ok(map) = self.grandchildren.lock() else {
-            return HashSet::new();
-        };
+        let map = lock(&self.grandchildren);
         let mut claimed: HashSet<_> = map.values().flatten().map(|child| child.pid).collect();
-        if let Ok(pending) = self.pending.lock() {
-            claimed.extend(pending.iter());
-        }
+        claimed.extend(lock(&self.pending).iter());
         claimed
     }
 
@@ -833,7 +814,7 @@ impl ChildReaper {
         let (id, mut reapable_grandchild) = ReapableChild::from_child(child);
         let seq = reapable_grandchild.seq;
 
-        let mut map = lock(&self.grandchildren)?;
+        let mut map = lock(&self.grandchildren);
         // Under the lock, so that the child is registered before it can be
         // forgotten. A task which never runs, like one spawned while the
         // runtime shuts down, does not forget it, see `watch`.
@@ -841,13 +822,11 @@ impl ChildReaper {
         let key = id.clone();
         let exit_rx = reapable_grandchild.watch(move || {
             drop(leak_fds);
-            if let Err(e) = Self::forget_grandchild(&grandchildren, &key, seq) {
-                error!("Unable to forget grandchild {pid}: {e:#}");
-            }
+            Self::forget_grandchild(&grandchildren, &key, seq);
         });
         let shutting_down = self.shutting_down.load(Ordering::SeqCst);
         if shutting_down && let Some(task) = &reapable_grandchild.task {
-            lock(&self.late_watchers)?.push((pid, task.clone()));
+            lock(&self.late_watchers).push((pid, task.clone()));
         }
         map.entry(id).or_default().push(reapable_grandchild);
         // Ends the pending mark only once registered, so it is claimed all
@@ -886,10 +865,10 @@ impl ChildReaper {
         locked_grandchildren: &Arc<Mutex<HashMap<Box<str>, Vec<ReapableChild>>>>,
         id: &str,
         seq: u64,
-    ) -> Result<()> {
-        let mut map = lock(locked_grandchildren)?;
+    ) {
+        let mut map = lock(locked_grandchildren);
         let Some(children) = map.get_mut(id) else {
-            return Ok(());
+            return;
         };
         if let Some(pos) = children.iter().position(|v| v.seq == seq) {
             children.swap_remove(pos);
@@ -899,7 +878,6 @@ impl ChildReaper {
         if children.is_empty() {
             map.remove(id);
         }
-        Ok(())
     }
 
     /// Kill every grandchild and wait for their watchers and the runtime
@@ -910,7 +888,7 @@ impl ChildReaper {
         debug!("Killing grandchildren");
         // Collect only PIDs and task handles to avoid cloning entire ReapableChild
         let children: Vec<_> = {
-            let map = lock(&self.grandchildren)?;
+            let map = lock(&self.grandchildren);
             // Children registered after this snapshot get killed on their
             // registration, see `watch_grandchild`.
             self.shutting_down.store(true, Ordering::SeqCst);
@@ -947,7 +925,7 @@ impl ChildReaper {
         )
         .await
         .is_ok();
-        let late = std::mem::take(&mut *lock(&self.late_watchers)?);
+        let late = std::mem::take(&mut *lock(&self.late_watchers));
         left.extend(Self::wait_for_watchers(late, deadline).await?);
 
         match (left.is_empty(), calls_ended) {
@@ -973,7 +951,7 @@ impl ChildReaper {
     ) -> Result<Vec<i32>> {
         let mut handles = Vec::with_capacity(tasks.len());
         for (pid, task) in tasks {
-            if let Some(handle) = lock(&task)?.take() {
+            if let Some(handle) = lock(&task).take() {
                 handles.push((pid, handle));
             }
         }
@@ -1144,14 +1122,32 @@ impl ReapableChild {
 
     /// Wait until the output ended, or until the [`Drain`] gives up. A
     /// process which inherited the pipes and keeps them open must not delay
-    /// the exit file.
+    /// the exit file. Output on its way into the log is no pause, a slow log
+    /// driver must not cut off the end of the log, up to
+    /// [`DRAIN_MAX_LOG_WAIT`] in total.
     async fn wait_for_output(attach: SharedContainerAttach) {
         let (mut rx, ended) = attach.subscribe();
         if ended {
             return;
         }
+        let log_deadline = Instant::now() + DRAIN_MAX_LOG_WAIT;
         let mut drain = Drain::default();
-        while drain.recv_output(&mut rx, false).await.is_some() {}
+        loop {
+            if time::timeout_at(log_deadline, attach.wait_logged())
+                .await
+                .is_err()
+            {
+                warn!("Log drivers did not take the output in time, not waiting for them");
+                return;
+            }
+            // A read loop which got output while the drain waited gives it
+            // another chance.
+            if drain.recv_output(&mut rx, false).await.is_none()
+                && (drain.exhausted() || !attach.is_logging())
+            {
+                return;
+            }
+        }
     }
 
     pub fn from_child(child: Child) -> (Box<str>, Self) {
@@ -1247,12 +1243,13 @@ impl ReapableChild {
                         exit_code = EXIT_CODE_TIMED_OUT;
                         kill_grandchild(pid, Signal::SIGKILL);
                         exit_token.cancel();
-                        // Reap the zombie: the pidfd future was dropped by the
-                        // timeout so waitpid never ran. The thread survives
-                        // cancellation and will reap once SIGKILL takes effect.
-                        Self::spawn_waitpid_thread(move || {
-                            Self::wait_for_exit_code_blocking(pid);
-                        });
+                        // Reap it once the SIGKILL took effect, the wait got
+                        // dropped with the timeout. A process stuck in the
+                        // kernel keeps only a pidfd busy, not a thread.
+                        task::spawn(Self::wait_for_exit_code_async(
+                            CancellationToken::new(),
+                            pid,
+                        ));
                     }
                 } else {
                     closure.await;
@@ -1294,7 +1291,7 @@ impl ReapableChild {
         let mut cleanup_cmd = Command::new(&raw_cmd[0]);
         init::reset_inherited(&mut cleanup_cmd);
 
-        cleanup_cmd.args(&raw_cmd[1..]);
+        cleanup_cmd.args(&raw_cmd[1..]).stdin(Stdio::null());
 
         tokio::spawn(async move {
             match cleanup_cmd.status().await {
@@ -1347,7 +1344,7 @@ impl ReapableChild {
         // The builder drops the closure on failure, keep it for the fallback.
         let slot = Arc::new(Mutex::new(Some(f)));
         fn run<F: FnOnce()>(slot: &Mutex<Option<F>>) {
-            if let Some(f) = slot.lock().ok().and_then(|mut f| f.take()) {
+            if let Some(f) = lock(slot).take() {
                 f();
             }
         }
@@ -1388,6 +1385,11 @@ impl ReapableChild {
             Ok(Some(code)) => Some(code),
             Ok(None) => {
                 debug!("Unexpected wait status after pidfd readable");
+                Some(EXIT_CODE_UNKNOWN)
+            }
+            // The orphan sweep may have taken it meanwhile.
+            Err(Errno::ECHILD) => {
+                debug!("PID {pid} got reaped already");
                 Some(EXIT_CODE_UNKNOWN)
             }
             Err(e) => {
@@ -1482,6 +1484,7 @@ mod tests {
     };
     use nix::sys::signal::kill;
     use std::process::Command;
+    use tokio::io::AsyncWriteExt;
 
     /// Spawn a child which exits right away with `code` and is never waited
     /// for.
@@ -1535,7 +1538,7 @@ mod tests {
         assert!(!ChildReaper::has_zombie());
         let orphan = spawn_zombie(0)?;
         let claimed = spawn_zombie(0)?;
-        lock(&reaper.pending)?.insert(claimed);
+        lock(&reaper.pending).insert(claimed);
         assert!(ChildReaper::has_zombie());
 
         // Both ways of listing the children find them.
@@ -1786,13 +1789,13 @@ mod tests {
             ("b".into(), vec![third]),
         ])));
 
-        ChildReaper::forget_grandchild(&map, "b", third_seq)?;
-        ChildReaper::forget_grandchild(&map, "a", first_seq)?;
+        ChildReaper::forget_grandchild(&map, "b", third_seq);
+        ChildReaper::forget_grandchild(&map, "a", first_seq);
         // Unknown registrations are ignored.
-        ChildReaper::forget_grandchild(&map, "a", first_seq)?;
-        ChildReaper::forget_grandchild(&map, "c", first_seq)?;
+        ChildReaper::forget_grandchild(&map, "a", first_seq);
+        ChildReaper::forget_grandchild(&map, "c", first_seq);
 
-        let map = lock(&map)?;
+        let map = lock(&map);
         assert_eq!(map.len(), 1);
         assert_eq!(
             map["a"].iter().map(|c| c.seq).collect::<Vec<_>>(),
@@ -1845,11 +1848,11 @@ mod tests {
         std::fs::write(&pidfile, pid.to_string())?;
 
         // A stale PID file naming a process this server waits for.
-        lock(&reaper.pending)?.insert(pid);
+        lock(&reaper.pending).insert(pid);
         reaper.cleanup_failed_grandchild(&pidfile);
         assert!(!is_gone(pid) && !is_zombie(pid));
 
-        lock(&reaper.pending)?.remove(&pid);
+        lock(&reaper.pending).remove(&pid);
         reaper.cleanup_failed_grandchild(&pidfile);
         wait_until(|| is_gone(pid)).await;
         Ok(())
@@ -1868,7 +1871,7 @@ mod tests {
         let child = child(sh.pid, None, &dir.path().join("exit"), &[])?;
         reaper.watch_grandchild(child, vec![], call)?;
         assert!(reaper.is_claimed(sh.pid));
-        assert!(!lock(&reaper.pending)?.contains(&sh.pid));
+        assert!(!lock(&reaper.pending).contains(&sh.pid));
         assert!(!reaper.calls_in_progress());
         Ok(())
     }
@@ -1896,6 +1899,26 @@ mod tests {
         assert!(!reaper.is_claimed(pid));
         assert!(!reaper.calls_in_progress());
         process.signal(Signal::SIGKILL)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_without_stdin_gets_dev_null() -> Result<()> {
+        let reaper = ChildReaper::default();
+        let dir = tempfile::tempdir()?;
+        let (pidfile, stdin) = (dir.path().join("pid"), dir.path().join("stdin"));
+        let script = format!(
+            "readlink /proc/self/fd/0 > {}; echo $$ > {}",
+            stdin.display(),
+            pidfile.display()
+        );
+        let args = ["-c".into(), script];
+        let mut io = ContainerIO::new(false, ContainerLog::new())?;
+        let (_, token, _call) = reaper
+            .create_child(RuntimeCall::new(Path::new("sh"), &args, &pidfile), &mut io)
+            .await?;
+        token.cancel();
+        assert_eq!(std::fs::read_to_string(stdin)?.trim(), "/dev/null");
         Ok(())
     }
 
@@ -2166,7 +2189,7 @@ mod tests {
         stuck.task = Some(Arc::new(Mutex::new(Some(task::spawn(
             std::future::pending(),
         )))));
-        lock(&reaper.grandchildren)?.insert(id, vec![stuck]);
+        lock(&reaper.grandchildren).insert(id, vec![stuck]);
 
         let start = Instant::now();
         let err = reaper
@@ -2213,5 +2236,117 @@ mod tests {
         ReapableChild::wait_for_output(attach).await;
         assert_eq!(start.elapsed(), Duration::ZERO);
         Ok(())
+    }
+
+    /// A read loop over a pipe, whose log drivers hang while a guard from
+    /// [`hold`] holds the log.
+    struct LogLoop {
+        writer: tokio::io::DuplexStream,
+        attach: SharedContainerAttach,
+        logger: crate::container_log::SharedContainerLog,
+        cri: tempfile::NamedTempFile,
+        json: tempfile::NamedTempFile,
+        task: JoinHandle<Result<()>>,
+    }
+
+    async fn log_loop() -> Result<LogLoop> {
+        let (cri, json, logger) = crate::container_log::test_helpers::container_log(true).await?;
+        let attach = SharedContainerAttach::default();
+        let (writer, reader) = tokio::io::duplex(1024);
+        let task = task::spawn(ContainerIO::read_loop(
+            reader,
+            crate::container_io::Pipe::StdOut,
+            logger.clone(),
+            None,
+            attach.clone(),
+            attach.output(),
+        ));
+        Ok(LogLoop {
+            writer,
+            attach,
+            logger,
+            cri,
+            json,
+            task,
+        })
+    }
+
+    /// Make the log drivers hang until the guard gets dropped.
+    async fn hold(
+        logger: &crate::container_log::SharedContainerLog,
+    ) -> tokio::sync::OwnedRwLockReadGuard<ContainerLog> {
+        logger.clone().read_owned().await
+    }
+
+    /// Wait until a read loop has output on its way into the log, failing
+    /// if it never does.
+    async fn wait_logging(attach: &SharedContainerAttach) -> Result<()> {
+        for _ in 0..1000 {
+            if attach.is_logging() {
+                return Ok(());
+            }
+            task::yield_now().await;
+        }
+        bail!("no output on its way into the log")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exit_files_wait_for_slow_log_drivers() -> Result<()> {
+        let mut l = log_loop().await?;
+        let held = hold(&l.logger).await;
+        l.writer.write_all(b"last line\n").await?;
+        wait_logging(&l.attach).await?;
+
+        // The log takes longer than the drain waits for a pause.
+        let wait = task::spawn(ReapableChild::wait_for_output(l.attach.clone()));
+        time::sleep(2 * DRAIN_MAX_WAIT).await;
+        assert!(!wait.is_finished());
+
+        drop(held);
+        drop(l.writer);
+        wait.await?;
+        assert!(crate::container_log::test_helpers::read(&l.cri)?.contains("last line"));
+        l.task.await?
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exit_files_wait_for_the_last_line() -> Result<()> {
+        let mut l = log_loop().await?;
+        let (mut rx, _) = l.attach.subscribe();
+        l.writer.write_all(b"no newline").await?;
+        // Broadcast once the chunk got logged, the line still waits.
+        rx.recv().await?;
+
+        // The output ended, its last line is on its way into the log.
+        let held = hold(&l.logger).await;
+        drop(l.writer);
+        wait_logging(&l.attach).await?;
+        let wait = task::spawn(ReapableChild::wait_for_output(l.attach.clone()));
+        time::sleep(2 * DRAIN_MAX_WAIT).await;
+        assert!(!wait.is_finished());
+
+        drop(held);
+        wait.await?;
+        assert!(
+            crate::container_log::test_helpers::read(&l.json)?
+                .contains(r#""message":"no newline","partial":true"#)
+        );
+        l.task.await?
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exit_files_wait_for_log_drivers_bounded() -> Result<()> {
+        let mut l = log_loop().await?;
+        let held = hold(&l.logger).await;
+        l.writer.write_all(b"never logged\n").await?;
+        wait_logging(&l.attach).await?;
+
+        let start = Instant::now();
+        ReapableChild::wait_for_output(l.attach).await;
+        assert_eq!(start.elapsed(), DRAIN_MAX_LOG_WAIT);
+
+        drop(held);
+        drop(l.writer);
+        l.task.await?
     }
 }

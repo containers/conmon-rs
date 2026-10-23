@@ -10,7 +10,7 @@ use nix::{
     errno::Errno,
     poll::{PollFd, PollFlags, PollTimeout, poll},
     sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags},
-    sys::socket::{AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, listen, socket},
+    sys::socket::{Backlog, SockType, UnixAddr, bind, listen},
 };
 use std::{
     collections::HashMap,
@@ -18,19 +18,22 @@ use std::{
     io::{self, IoSlice},
     os::{
         fd::{AsFd, AsRawFd},
-        unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+        unix::fs::{FileTypeExt, MetadataExt},
     },
     path::{Path, PathBuf},
-    pin::Pin,
+    pin::{Pin, pin},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64, Ordering, fence},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence},
     },
 };
 use tokio::{
     io::{ErrorKind, Interest},
     select,
-    sync::broadcast::{self, Receiver, Sender, error::RecvError},
+    sync::{
+        Notify,
+        broadcast::{self, Receiver, Sender, error::RecvError},
+    },
     task, time,
 };
 use tokio_seqpacket::{UnixSeqpacket, UnixSeqpacketListener};
@@ -112,6 +115,13 @@ struct OutputState {
 
     /// Set once the output ended, before the done message gets sent.
     ended: AtomicBool,
+
+    /// The read loops with output on its way into the log, see
+    /// [`SharedContainerAttach::logging`].
+    logging: AtomicUsize,
+
+    /// Notified once no read loop has output on its way into the log.
+    logged: Notify,
 }
 
 impl Default for SharedContainerAttach {
@@ -230,13 +240,7 @@ impl SharedContainerAttach {
     /// replaced it meanwhile. The caller keeps the listener open, so that
     /// the inode number of its socket is not reused yet.
     fn remove_listener(&self, path: &Path, id: u64) {
-        let mut listeners = match lock(&self.listeners) {
-            Ok(listeners) => listeners,
-            Err(e) => {
-                warn!("Unable to lock attach listeners: {e:#}");
-                return;
-            }
-        };
+        let mut listeners = lock(&self.listeners);
         let Some(listener) = listeners.remove(path) else {
             return;
         };
@@ -277,6 +281,46 @@ impl SharedContainerAttach {
         // sends the done message after this subscribed.
         fence(Ordering::SeqCst);
         (rx, self.output.ended.load(Ordering::SeqCst))
+    }
+
+    /// Mark output which a read loop got as on its way into the log, until
+    /// the returned guard gets dropped once the output got broadcast. A slow
+    /// log driver delays the output, which is no pause of it, see
+    /// [`SharedContainerAttach::wait_logged`].
+    pub fn logging(&self) -> Logging<'_> {
+        self.output.logging.fetch_add(1, Ordering::SeqCst);
+        Logging(&self.output)
+    }
+
+    /// Whether a read loop has output on its way into the log.
+    pub fn is_logging(&self) -> bool {
+        self.output.logging.load(Ordering::SeqCst) > 0
+    }
+
+    /// Wait until no read loop has output on its way into the log.
+    pub async fn wait_logged(&self) {
+        loop {
+            let notified = self.output.logged.notified();
+            let mut notified = pin!(notified);
+            // Before checking, so that a notification in between is not
+            // missed.
+            notified.as_mut().enable();
+            if !self.is_logging() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// Output on its way into the log, see [`SharedContainerAttach::logging`].
+pub struct Logging<'a>(&'a OutputState);
+
+impl Drop for Logging<'_> {
+    fn drop(&mut self) {
+        if self.0.logging.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.logged.notify_waiters();
+        }
     }
 }
 
@@ -346,7 +390,7 @@ impl Attach {
 
         // Held until the new listener got registered, so that a listener
         // which stops meanwhile does not remove its socket.
-        let mut listeners = lock(&attach.listeners)?;
+        let mut listeners = lock(&attach.listeners);
         if let Some(listener) = listeners.remove(path) {
             if !listener.stop.is_cancelled() && listener.is_bound_at(path) {
                 debug!("Already listening on attach socket {}", path.display());
@@ -379,13 +423,7 @@ impl Attach {
         }
 
         debug!("Creating attach socket: {}", path.display());
-        let fd = socket(
-            AddressFamily::Unix,
-            SockType::SeqPacket,
-            SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
-            None,
-        )
-        .context("bind socket")?;
+        let fd = listener::private_socket(SockType::SeqPacket).context("create attach socket")?;
 
         // keep parent_fd in scope until the bind, or else the socket will not work
         let (shortened_path, _parent_dir) = listener::shorten_socket_path(path)?;
@@ -406,9 +444,6 @@ impl Attach {
             .map_err(remove)?;
         let setup = || -> Result<(fs::Metadata, UnixSeqpacketListener)> {
             let metadata = path.metadata().context("get attach socket metadata")?;
-            let mut permissions = metadata.permissions();
-            permissions.set_mode(0o700);
-            fs::set_permissions(path, permissions).context("set attach socket permissions")?;
             listen(&fd, Backlog::MAXCONN).context("listen on socket fd")?;
             let listener =
                 UnixSeqpacketListener::try_from(fd).context("create seqpacket listener")?;
@@ -525,12 +560,8 @@ impl Attach {
         // the queued stdin holds only the data of the packets.
         let mut buf = vec![0; Self::STDIN_PACKET_MAX_SIZE];
         loop {
-            // In situations we're processing output directly from the I/O streams
-            // we need a mechanism to figure out when to stop that doesn't involve reading the
-            // number of bytes read.
-            // Thus, we need to select on the cancellation token saved in the child.
-            // While this could result in a data race, as select statements are racy,
-            // we won't interleve these two futures, as one ends execution.
+            // A client which stays connected must not keep the loop going once
+            // the container exited or its stdin got closed.
             let read = select! {
                 read = socket.recv(&mut buf) => read,
                 () = stopped() => return Ok(()),
@@ -804,8 +835,8 @@ mod tests {
         container_io::{ContainerIO, StdioSender},
         container_log::ContainerLog,
     };
-    use nix::sys::socket::{MsgFlags, connect, send};
-    use std::os::fd::OwnedFd;
+    use nix::sys::socket::{AddressFamily, MsgFlags, SockFlag, connect, send, socket};
+    use std::os::{fd::OwnedFd, unix::fs::PermissionsExt};
     use std::{
         io,
         net::Shutdown,
@@ -1211,6 +1242,8 @@ mod tests {
         let token = CancellationToken::new();
         let attach = SharedContainerAttach::default();
         attach.add(&path, token.clone(), true)?;
+        // Only the owner may connect.
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o077, 0);
 
         let connect_client = || -> Result<OwnedFd> {
             let fd = socket(
@@ -1278,7 +1311,7 @@ mod tests {
         let attach = SharedContainerAttach::default();
         attach.add(&path, token.clone(), false)?;
         let ino = fs::metadata(&path)?.ino();
-        let first_stop = lock(&attach.listeners)?
+        let first_stop = lock(&attach.listeners)
             .get(&path)
             .context("no listener")?
             .stop
@@ -1295,7 +1328,7 @@ mod tests {
         fs::remove_file(&path)?;
         attach.add(&path, token.clone(), false)?;
         assert!(first_stop.is_cancelled());
-        assert_eq!(lock(&attach.listeners)?.len(), 1);
+        assert_eq!(lock(&attach.listeners).len(), 1);
         let second = attach_client(&attach, &path).await?;
 
         // The connections of the stopped listener stay.
@@ -1309,7 +1342,7 @@ mod tests {
         assert!(path.exists());
         token.cancel();
         wait_for(|| !path.exists()).await?;
-        wait_for(|| lock(&attach.listeners).is_ok_and(|l| l.is_empty())).await?;
+        wait_for(|| lock(&attach.listeners).is_empty()).await?;
         Ok(())
     }
 
@@ -1319,7 +1352,7 @@ mod tests {
         let path = dir.path().join("attach");
         let attach = SharedContainerAttach::default();
         attach.add(&path, CancellationToken::new(), false)?;
-        let id = lock(&attach.listeners)?
+        let id = lock(&attach.listeners)
             .get(&path)
             .context("no listener")?
             .id;
@@ -1331,13 +1364,13 @@ mod tests {
 
         // One which got replaced, so of another id, leaves them alone.
         drop(cleanup(id + 1));
-        assert!(lock(&attach.listeners)?.contains_key(&path));
+        assert!(lock(&attach.listeners).contains_key(&path));
         assert!(path.exists());
 
         // Any other end of the task removes both, so that the next attach
         // listens again instead of taking the dead socket for a live one.
         drop(cleanup(id));
-        assert!(lock(&attach.listeners)?.is_empty());
+        assert!(lock(&attach.listeners).is_empty());
         assert!(!path.exists());
         attach.add(&path, CancellationToken::new(), false)?;
         attach_client(&attach, &path).await?;

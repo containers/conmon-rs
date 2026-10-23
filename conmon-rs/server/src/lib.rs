@@ -34,7 +34,15 @@ pub fn run() -> Result<()> {
     }
 
     if let Some(Commands::Pause(args)) = config.command() {
-        return Pause::run(args).context("run pause");
+        // The server adds stderr to the error of the request, see
+        // `Pause::init`, it runs without logging. One line per process: the
+        // forked child of the pause process ends up here as well and may add
+        // its own failure.
+        if let Err(e) = Pause::run(args) {
+            eprintln!("run pause: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
     }
 
     config.validate().context("validate config")?;

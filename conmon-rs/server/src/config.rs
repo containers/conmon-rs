@@ -19,7 +19,6 @@ use std::{
     os::fd::{AsFd, AsRawFd},
     path::{Path, PathBuf},
 };
-use tracing::warn;
 use tracing_subscriber::filter::LevelFilter;
 
 macro_rules! prefix {
@@ -463,9 +462,10 @@ impl Config {
             // is gone, left behind or something else.
             Err(Errno::ECONNREFUSED | Errno::ENOENT | Errno::ENOTSOCK | Errno::EPROTOTYPE) => false,
             // Like one of another user left behind, removing it only needs
-            // the permissions of the directory.
+            // the permissions of the directory. The logging is not set up yet,
+            // so it goes to stderr.
             Err(Errno::EACCES) => {
-                warn!(
+                eprintln!(
                     "Replacing socket {} which is not accessible",
                     path.display()
                 );

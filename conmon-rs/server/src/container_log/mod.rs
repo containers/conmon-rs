@@ -344,24 +344,32 @@ impl LineBuffer {
     /// output paused, a prompt or progress output without a newline would
     /// otherwise stay invisible.
     pub(crate) fn flush(&mut self, pipe: Pipe) -> Vec<Line> {
-        self.take(pipe)
+        // Like a long line, it keeps an unfinished multi byte character and
+        // a "\r" back for the next chunk, see [`LineBuffer::cut`].
+        let tail = self.tail(pipe);
+        if tail.is_empty() {
+            return vec![];
+        }
+        let line = Self::cut(tail);
+        Self::shrink(tail);
+        if line.text.is_empty() {
+            return vec![];
+        }
+        vec![line]
     }
 
     /// The output of the pipe ended, return the line which still waits for
     /// its ending as a partial one.
     pub(crate) fn finish(&mut self, pipe: Pipe) -> Vec<Line> {
-        self.take(pipe)
-    }
-
-    fn take(&mut self, pipe: Pipe) -> Vec<Line> {
         let tail = self.tail(pipe);
         if tail.is_empty() {
             return vec![];
         }
+        // Without a newline, so there is no line ending to strip.
         let text = tail.split().freeze();
         Self::shrink(tail);
         vec![Line {
-            text: text.slice(..strip_line_ending(&text).len()),
+            text,
             partial: true,
         }]
     }
@@ -651,6 +659,40 @@ mod tests {
             collect(buffer.push(Pipe::StdOut, b"ls\n")),
             vec![("ls".into(), false)]
         );
+
+        // A pause inside a character or before a "\n" keeps them for the
+        // next chunk.
+        let euro = "€".as_bytes();
+        assert!(
+            buffer
+                .push(Pipe::StdOut, &[b"a", &euro[..1]].concat())
+                .is_empty()
+        );
+        assert_eq!(
+            collect(buffer.flush(Pipe::StdOut)),
+            vec![("a".into(), true)]
+        );
+        assert!(buffer.flush(Pipe::StdOut).is_empty());
+        assert!(buffer.has_pending(Pipe::StdOut));
+        assert!(
+            buffer
+                .push(Pipe::StdOut, &[&euro[1..], b"\r"].concat())
+                .is_empty()
+        );
+        assert_eq!(
+            collect(buffer.flush(Pipe::StdOut)),
+            vec![("€".into(), true)]
+        );
+        assert_eq!(
+            collect(buffer.push(Pipe::StdOut, b"\n")),
+            vec![("".into(), false)]
+        );
+
+        // Once the output ended, everything goes.
+        assert!(buffer.push(Pipe::StdOut, &euro[..1]).is_empty());
+        assert!(buffer.flush(Pipe::StdOut).is_empty());
+        assert_eq!(buffer.finish(Pipe::StdOut).len(), 1);
+        assert!(!buffer.has_pending(Pipe::StdOut));
     }
 
     #[test]

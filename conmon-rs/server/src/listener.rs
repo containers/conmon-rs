@@ -1,9 +1,13 @@
 use anyhow::{Context, Result};
+use nix::sys::{
+    socket::{AddressFamily, SockFlag, SockType, socket},
+    stat::{Mode, fchmod},
+};
 use std::{
     ffi::OsStr,
     fs::{self, File},
     io,
-    os::unix::io::AsRawFd,
+    os::{fd::OwnedFd, unix::io::AsRawFd},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -33,6 +37,21 @@ fn connection_failed(e: &io::Error) -> bool {
         e.raw_os_error(),
         Some(libc::ECONNABORTED | libc::ECONNREFUSED | libc::ECONNRESET | libc::EPROTO)
     )
+}
+
+/// Create a non-blocking UNIX socket which only its owner can connect to.
+/// Linux creates the file of a socket on bind with the mode of the socket
+/// minus the umask, so others cannot connect at any time, unlike with a
+/// chmod after the bind.
+pub fn private_socket(typ: SockType) -> io::Result<OwnedFd> {
+    let fd = socket(
+        AddressFamily::Unix,
+        typ,
+        SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
+        None,
+    )?;
+    fchmod(&fd, Mode::S_IRWXU)?;
+    Ok(fd)
 }
 
 /// Bind a listener with `bind` at a socket path whatever its length, see
@@ -94,6 +113,8 @@ fn split_socket_path(path: &Path) -> Result<(&Path, &OsStr)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nix::sys::socket::{UnixAddr, bind};
+    use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
 
     #[tokio::test(start_paused = true)]
@@ -149,6 +170,18 @@ mod tests {
         assert!(shorten_socket_path(&file.join("socket")).is_err());
         // Without creating it, a missing parent cannot be opened.
         assert!(shorten_path(&dir.path().join("missing").join("socket")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn private_socket_is_created_private() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("socket");
+        let fd = private_socket(SockType::Stream)?;
+        // The file gets the mode of the socket right on bind, before anything
+        // could change it. The umask may take more bits, but never adds any.
+        bind(fd.as_raw_fd(), &UnixAddr::new(&path)?)?;
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o077, 0);
         Ok(())
     }
 }
