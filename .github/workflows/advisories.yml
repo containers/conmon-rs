@@ -4,8 +4,9 @@ name: advisories
 # main and its binaries show up here, like newer versions of the tools of
 # dependencies.yaml.
 on:
+  # Off the full hour, which GitHub delays or drops under load.
   schedule:
-    - cron: "0 6 * * *"
+    - cron: "17 6 * * *"
   workflow_dispatch: {}
 permissions:
   contents: read
@@ -35,6 +36,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
+          cache: false
       - name: govulncheck
         run: |
           set -o pipefail

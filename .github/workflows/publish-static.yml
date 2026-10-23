@@ -101,7 +101,8 @@ jobs:
         if: steps.bucket.outputs.upload == 'true'
         with:
           subject-path: ${{ github.sha }}/conmonrs.${{ inputs.arch }}
-      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+      # The SPDX document gets the predicate type https://spdx.dev/Document/v2.3.
+      - uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         id: sbom
         if: steps.bucket.outputs.upload == 'true'
         with:
@@ -143,3 +144,4 @@ jobs:
         with:
           path: ${{ github.sha }}
           destination: cri-o/conmon-rs
+          process_gcloudignore: false

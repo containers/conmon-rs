@@ -61,8 +61,12 @@ jobs:
       # only cover amd64 and arm64. flake.lock decides the Rust toolchain of
       # the build, not RUST_VERSION of the ci workflow, the summary shows
       # which one it was.
+      # The binfmt image is small, a cache entry for it is not worth the
+      # space, and the jobs of the architectures would race to save it.
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         if: inputs.arch != 'amd64'
+        with:
+          cache-image: false
       - name: Smoke test
         timeout-minutes: 5
         env:
@@ -75,8 +79,8 @@ jobs:
           "${RUN[@]}" -v "$PWD/.github/smoke-test:/smoke-test:ro" "$IMAGE" /smoke-test /smoke/conmonrs
       # The build embeds its dependencies with cargo-auditable, which syft
       # reads. syft writes SPDX 2.3, SPDX 3 needs a generator which reads them
-      # and attest-sbom support. The SBOM names the file it scanned, which is
-      # the published name of the binary.
+      # and support in actions/attest. The SBOM names the file it scanned,
+      # which is the published name of the binary.
       - name: SBOM
         run: |
           mkdir static "$RUNNER_TEMP/sbom"
