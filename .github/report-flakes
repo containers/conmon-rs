@@ -6,10 +6,10 @@ set -euo pipefail
 # JUnit report of nextest, where retries do. Both would hide them otherwise.
 # Tests which failed on every attempt fail the run anyway and are left out.
 #
-# The ginkgo report only covers the specs, not the plain Go tests which run
-# in the same test binary, without retries. Given LOG, the output of ginkgo,
-# the failed ones get listed as well, the output of the specs buries them
-# otherwise.
+# The ginkgo report only covers the specs, not the plain Go tests of the
+# pkg/client package, which ginkgo runs alongside the suite without retries.
+# Given LOG, the output of ginkgo, the failed ones get listed as well, the
+# output of the specs buries them otherwise.
 REPORT=${1:?usage: $0 REPORT [LOG]}
 LOG=${2:-}
 

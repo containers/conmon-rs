@@ -65,12 +65,15 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
       # The module is what CRI-O vendors, its go.sum has to be complete and
-      # match the module proxy.
-      - name: Verify the Go module
+      # match the module proxy. The integration suite is a module of its own.
+      - name: Verify the Go modules
         run: |
-          go mod tidy -diff
-          go mod verify
+          for DIR in . pkg/client/integration; do
+            go -C "$DIR" mod tidy -diff
+            go -C "$DIR" mod verify
+          done
       # CRI-O builds the client for FreeBSD as well.
       - name: Build the Go client for other platforms
         run: |
@@ -81,6 +84,10 @@ jobs:
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.15.0
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
+          working-directory: pkg/client/integration
 
   # One build environment for all checks of the Rust sources. Every check runs
   # even if an earlier one fails, so that a run reports all of them.
@@ -434,7 +441,8 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
   # The tests of the Go client which need no server and no root. The
-  # integration suite, TestConmonClient, runs in the test-integration jobs.
+  # integration suite, the module in pkg/client/integration, runs in the
+  # test-integration jobs.
   test-unit-go:
     runs-on: ubuntu-latest
     steps:
@@ -578,6 +586,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
       # The tests run as root and keep their files per user ID.
       - name: Setup Testfiles Cache
         if: env.ARCH == 'amd64'
@@ -585,7 +594,7 @@ jobs:
         with:
           path: |
             /tmp/conmon-test-images-0
-          key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/files_test.go') }}
+          key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/integration/files_test.go') }}
       # The busybox of the tests only runs on x86, the other architectures
       # use the static one of the nixpkgs of flake.lock, which behaves the same.
       - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
@@ -617,14 +626,30 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .build/gotools/bin/ginkgo
-          key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod') }}
+          key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pkg/client/integration/go.mod') }}
+      # The tests run as root, the modules and ginkgo get downloaded as the
+      # runner user before, so that setup-go saves them on a cache miss.
+      - name: Download Go modules and ginkgo
+        run: |
+          go mod download
+          go -C pkg/client/integration mod download
+          make .install.ginkgo
       # The output names the failed plain Go tests, which the report of the
       # specs does not, see .github/report-flakes.
       - name: Integration tests
         shell: bash
         run: |
           mkdir -p .build/report
-          sudo -E make integration \
+          # sudo sets HOME to the one of root, which would leave the caches
+          # of setup-go unused, and sudo-rs, as on ubuntu-26.04, ignores -E, so
+          # env sets what has to reach the tests on every runner, including
+          # the busybox of the other architectures.
+          sudo -E env \
+            GOMODCACHE="$(go env GOMODCACHE)" \
+            GOTOOLCHAIN="$(go env GOTOOLCHAIN)" \
+            GOCACHE="$(go env GOCACHE)" \
+            BUSYBOX_BINARY="${BUSYBOX_BINARY:-}" \
+            make integration \
             RUNTIME_PATH=/usr/bin/crun \
             CONMON_BINARY=.build/static/conmonrs \
             MAX_RSS_KB="$MAX_RSS_KB" \
@@ -639,11 +664,15 @@ jobs:
         with:
           name: test-integration-${{ env.ARCH }}-report
           path: .build/report/report.json
-      # The tests run as root, setup-go saves its cache as the runner user.
+      # The tests write into the caches as root, setup-go saves them as the
+      # runner user.
       - name: Chown cache
         run: |
-          sudo chown -R "$(id -u):$(id -g)" ~/go/pkg/mod
-          sudo chown -R "$(id -u):$(id -g)" ~/.cache/go-build
+          for DIR in ~/go/pkg/mod ~/.cache/go-build; do
+            if [[ -d $DIR ]]; then
+              sudo chown -R "$(id -u):$(id -g)" "$DIR"
+            fi
+          done
 
   # The same suite on a native arm64 runner, the build-static jobs only run the
   # other architectures once under emulation.
@@ -672,13 +701,14 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
       # Saved by the test-integration-amd64 job.
       - name: Restore Testfiles Cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             /tmp/conmon-test-images-0
-          key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/files_test.go') }}
+          key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/integration/files_test.go') }}
       - run: .github/install-deps
       - name: Select Toolchain
         run: rustup toolchain install "$RUST_VERSION" --profile minimal --component llvm-tools-preview && rustup default "$RUST_VERSION"
@@ -701,7 +731,14 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .build/gotools/bin/ginkgo
-          key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod') }}
+          key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pkg/client/integration/go.mod') }}
+      # The tests run as root, the modules and ginkgo get downloaded as the
+      # runner user before, so that setup-go saves them on a cache miss.
+      - name: Download Go modules and ginkgo
+        run: |
+          go mod download
+          go -C pkg/client/integration mod download
+          make .install.ginkgo
       # The memory budget does not apply to an instrumented debug build. A
       # failure only costs the coverage, the job stays green and uploads what
       # got covered, which shows as a drop of the coverage. A failing job would
@@ -713,11 +750,20 @@ jobs:
         run: |
           source "$RUNNER_TEMP/llvm-cov.env"
           mkdir -p .build/report
-          sudo -E make integration \
+          # sudo sets HOME to the one of root, which would leave the caches
+          # of setup-go unused, and sudo-rs, as on ubuntu-26.04, ignores -E, so
+          # env sets what has to reach the tests on every runner, including
+          # the profile path of the instrumented server.
+          sudo -E env \
+            GOMODCACHE="$(go env GOMODCACHE)" \
+            GOTOOLCHAIN="$(go env GOTOOLCHAIN)" \
+            GOCACHE="$(go env GOCACHE)" \
+            LLVM_PROFILE_FILE="$LLVM_PROFILE_FILE" \
+            make integration \
             RUNTIME_PATH=/usr/bin/crun \
             CONMON_BINARY=target/debug/conmonrs \
             MAX_RSS_KB=1048576 \
-            TEST_FLAGS="--flake-attempts 3 --output-dir .build/report --json-report report.json --cover --coverprofile go-coverage.out" 2>&1 |
+            TEST_FLAGS="--flake-attempts 3 --output-dir .build/report --json-report report.json --cover --coverpkg github.com/containers/conmon-rs/pkg/client --coverprofile go-coverage.out" 2>&1 |
             tee .build/report/output.log
       # Keep a failure visible, the job stays green.
       - name: Report failed integration tests
@@ -744,10 +790,15 @@ jobs:
         with:
           name: test-integration-coverage-report
           path: .build/report/report.json
+      # The tests write into the caches as root, setup-go saves them as the
+      # runner user.
       - name: Chown cache
         run: |
-          sudo chown -R "$(id -u):$(id -g)" ~/go/pkg/mod
-          sudo chown -R "$(id -u):$(id -g)" ~/.cache/go-build
+          for DIR in ~/go/pkg/mod ~/.cache/go-build; do
+            if [[ -d $DIR ]]; then
+              sudo chown -R "$(id -u):$(id -g)" "$DIR"
+            fi
+          done
 
   # Runs critest against CRI-O with the static binary. With stream_websockets,
   # CRI-O hands exec and attach to the streaming server of conmon-rs, which
@@ -770,6 +821,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: build-static-amd64
@@ -779,7 +831,7 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .build/gotools/bin/ginkgo
-          key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod') }}
+          key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pkg/client/integration/go.mod') }}
       - name: Install ginkgo
         run: |
           make .install.ginkgo

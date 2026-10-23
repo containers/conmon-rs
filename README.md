@@ -262,8 +262,11 @@ flowchart TB
 Building the server needs the Cap'n Proto compiler (`capnp`, packaged as
 `capnproto`) and a Rust toolchain of at least the `rust-version` of
 [Cargo.toml](./Cargo.toml). The tests of the Go client and the integration
-suite need the Go version of [go.mod](./go.mod). To build and install a
-release binary:
+suite need the Go version of [go.mod](./go.mod). The integration suite is a
+module of its own in [pkg/client/integration](./pkg/client/integration), so
+that its dependencies do not become requirements of the client. The
+dependencies of the client follow CRI-O main, the modules only the suite needs
+follow the latest releases. To build and install a release binary:
 
 ```console
 > make release

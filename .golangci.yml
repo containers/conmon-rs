@@ -131,6 +131,9 @@ linters:
         - BUG
         - FIXME
         - HACK
+    gomoddirectives:
+      # The integration suite tests the client of its own checkout.
+      replace-local: true
     gosec:
       excludes:
         - G115

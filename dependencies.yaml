@@ -14,6 +14,8 @@ dependencies:
     refPaths:
       - path: go.mod
         match: ^go
+      - path: pkg/client/integration/go.mod
+        match: ^go
 
   - name: golangci-lint
     version: 2.15.0
