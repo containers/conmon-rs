@@ -615,10 +615,11 @@ impl PortForward {
 
     /// Carry the bytes of the SPDY connection in binary messages, until
     /// either side ends.
-    async fn tunnel<T>(socket: WebSocketStream<T>, connection: DuplexStream)
+    async fn tunnel<T>(socket: WebSocketStream<web::ClientIo<T>>, connection: DuplexStream)
     where
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        let discard = socket.get_ref().discarder();
         let (mut sink, mut messages) = socket.split();
         let (mut from_server, mut to_server) = tokio::io::split(connection);
         // Cancelled once the client sent a message larger than the server
@@ -670,6 +671,9 @@ impl PortForward {
                     Err(e) if web::is_too_large(&e) => {
                         debug!("Ending port forward tunnel: {e}");
                         too_large.cancel();
+                        // It may still be busy writing the rest, which holds
+                        // up the close for it.
+                        discard.discard();
                         break;
                     }
                     Ok(Message::Close(_)) | Err(_) => break,
@@ -704,6 +708,7 @@ impl PortForward {
     /// Serve the channel protocol: forward a connection per port until all
     /// of them ended, the client went away or the WebSocket was idle.
     async fn serve_channels(self, socket: WebSocket, ports: Vec<u16>, base64: bool) {
+        let discard = socket.get_ref().discarder();
         let (mut sink, mut messages) = socket.split();
         let (output_tx, mut output_rx) = mpsc::channel(OUTPUT_QUEUE);
         let activity = Activity::new();
@@ -800,6 +805,9 @@ impl PortForward {
                         Some(Err(e)) if web::is_too_large(&e) => {
                             debug!("Ending port forward WebSocket: {e}");
                             too_large.cancel();
+                            // It may still be busy writing the rest, which
+                            // holds up the close for it.
+                            discard.discard();
                             client_gone = true;
                             break;
                         }
@@ -1560,7 +1568,7 @@ mod tests {
     async fn tunnels_end_with_clients_which_do_not_read() -> Result<()> {
         let (server, client) = tokio::io::duplex(64 * 1024);
         let (socket, mut client) = tokio::join!(
-            WebSocketStream::from_raw_socket(server, Role::Server, None),
+            WebSocketStream::from_raw_socket(web::ClientIo::new(server), Role::Server, None),
             WebSocketStream::from_raw_socket(client, Role::Client, None),
         );
         let (mut spdy, connection) = tokio::io::duplex(TUNNEL_BUFFER);

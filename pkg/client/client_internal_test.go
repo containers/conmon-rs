@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -824,6 +825,54 @@ func TestProcessExited(t *testing.T) {
 	}
 }
 
+func TestProcessStartTime(t *testing.T) {
+	t.Parallel()
+
+	pid := uint32(os.Getpid())
+
+	start := processStartTime(pid)
+	if start == 0 {
+		t.Skip("/proc not readable")
+	}
+
+	if again := processStartTime(pid); again != start {
+		t.Fatalf("start time changed from %d to %d", start, again)
+	}
+
+	if got := processStartTime(math.MaxUint32); got != 0 {
+		t.Fatalf("got start time %d of a process which cannot exist", got)
+	}
+}
+
+func TestServerExitedWithoutPidfdComparesStartTimes(t *testing.T) {
+	t.Parallel()
+
+	cmd := startTestServer(t, false)
+	pid := uint32(cmd.Process.Pid)
+
+	start := processStartTime(pid)
+	if start == 0 {
+		t.Skip("/proc not readable")
+	}
+
+	c := newTestClient(t, t.TempDir(), logrus.New())
+
+	// The process which runs with the PID is the recorded server.
+	if c.serverExited(&serverProcess{pid: pid, startTime: start}) {
+		t.Fatal("running server reported as exited")
+	}
+
+	// It got the PID of a server which exited.
+	if !c.serverExited(&serverProcess{pid: pid, startTime: start - 1}) {
+		t.Fatal("process which got the PID of the server taken for it")
+	}
+
+	// Without a start time, the PID decides.
+	if c.serverExited(&serverProcess{pid: pid}) {
+		t.Fatal("running server without start time reported as exited")
+	}
+}
+
 // startTestServer starts a process which stands in for the server, the
 // command gets waited for with the test. With ignoreInt, SIGINT does not end
 // it.
@@ -1067,8 +1116,8 @@ func TestNewKillsServerWhichDoesNotComeUp(t *testing.T) {
 		Runtime:          "/does/not/exist",
 		ClientLogger:     logrus.New(),
 	})
-	if !errors.Is(err, errServerNotUp) || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("got error %v, want %v and %v", err, errServerNotUp, context.DeadlineExceeded)
+	if !errors.Is(err, ErrServerNotUp) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got error %v, want %v and %v", err, ErrServerNotUp, context.DeadlineExceeded)
 	}
 
 	pid := pidFromFile(t, dir)
@@ -1255,11 +1304,211 @@ func TestNewContextCancelled(t *testing.T) {
 func TestShutdownWithoutPID(t *testing.T) {
 	t.Parallel()
 
-	c := &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
+	c := newTestClient(t, t.TempDir(), logrus.New())
+	t.Cleanup(func() { c.Close() })
 
-	// A zero PID would signal the process group of the caller.
-	if err := c.Shutdown(); !errors.Is(err, errServerPIDUnknown) {
-		t.Fatalf("got error %v, want %v", err, errServerPIDUnknown)
+	stdin, _ := io.Pipe()
+
+	_, session, err := c.startAttachSession(t.Context(), &AttachConfig{
+		Streams: AttachStreams{Stdin: &In{stdin}},
+	})
+	if err != nil {
+		t.Fatalf("start attach session: %v", err)
+	}
+
+	// A zero PID would signal the process group of the caller. Nothing gets
+	// stopped then, the attach sessions keep their stdin.
+	for name, stop := range map[string]func() error{
+		"Shutdown":    c.Shutdown,
+		"KillContext": func() error { return c.KillContext(t.Context()) },
+	} {
+		if err := stop(); !errors.Is(err, ErrServerPIDUnknown) {
+			t.Fatalf("%s: got error %v, want %v", name, err, ErrServerPIDUnknown)
+		}
+	}
+
+	if session.stdinClosed.Load() {
+		t.Fatal("stdin of the attach session got closed")
+	}
+}
+
+// replacedBySamePID records a server, which exits, and serves a server which
+// answers with its PID on the socket of the client, like a replacement which
+// got the same PID.
+func replacedBySamePID(t *testing.T) (*ConmonClient, *serverProcess) {
+	t.Helper()
+
+	cmd := startTestServer(t, false)
+	pid := uint32(cmd.Process.Pid)
+
+	dir := t.TempDir()
+	c := newTestClient(t, dir, logrus.New())
+	t.Cleanup(func() { c.Close() })
+
+	c.setServerPID(pid)
+	recorded := c.currentServer()
+
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+
+	_ = cmd.Wait() //nolint:errcheck // killed on purpose
+
+	serveVersionSocket(t, dir, versionConmon{pid: pid})
+
+	return c, recorded
+}
+
+func TestReplacementWithTheSamePIDGetsPickedUp(t *testing.T) {
+	t.Parallel()
+
+	t.Run("pickUpReplacement", func(t *testing.T) {
+		t.Parallel()
+
+		c, recorded := replacedBySamePID(t)
+		c.pickUpReplacement(t.Context())
+
+		if c.currentServer() == recorded {
+			t.Fatal("kept the recorded server which exited")
+		}
+	})
+
+	t.Run("refreshServer", func(t *testing.T) {
+		t.Parallel()
+
+		c, recorded := replacedBySamePID(t)
+		// Only with recorded features, the first call asks for them.
+		c.setFeatures(nil)
+
+		if _, err := c.Version(t.Context(), nil); err != nil {
+			t.Fatalf("version: %v", err)
+		}
+
+		if c.currentServer() == recorded {
+			t.Fatal("kept the recorded server which exited")
+		}
+	})
+}
+
+func TestRecordedServerWhichRunsStays(t *testing.T) {
+	t.Parallel()
+
+	cmd := startTestServer(t, false)
+	pid := uint32(cmd.Process.Pid)
+
+	dir := t.TempDir()
+	serveVersionSocket(t, dir, versionConmon{pid: pid})
+
+	c := newTestClient(t, dir, logrus.New())
+	t.Cleanup(func() { c.Close() })
+
+	c.setServerPID(pid)
+	c.setFeatures(nil)
+	recorded := c.currentServer()
+
+	c.pickUpReplacement(t.Context())
+
+	if _, err := c.Version(t.Context(), nil); err != nil {
+		t.Fatalf("version: %v", err)
+	}
+
+	if c.currentServer() != recorded {
+		t.Fatal("replaced the recorded server which still runs")
+	}
+}
+
+func TestRefreshServerKeepsTheRecordedOnesWithoutAnswer(t *testing.T) {
+	t.Parallel()
+
+	cmd := startTestServer(t, false)
+
+	dir := t.TempDir()
+	// A server which never answers Version.
+	serveVersionSocket(t, dir, versionConmon{
+		pid:      uint32(os.Getpid()),
+		features: []string{"other"},
+		release:  make(chan struct{}),
+	})
+
+	c := newTestClient(t, dir, logrus.New())
+	t.Cleanup(func() { c.Close() })
+
+	c.setServerPID(uint32(cmd.Process.Pid))
+	c.setFeatures([]string{"recorded"})
+	recorded := c.currentServer()
+
+	conn, dialed, err := c.usableConn(t.Context())
+	if err != nil || !dialed {
+		t.Fatalf("dial: %v, dialed %v", err, dialed)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	c.refreshServer(ctx, conn)
+
+	if c.currentServer() != recorded {
+		t.Fatal("replaced the recorded server without an answer")
+	}
+
+	if !c.SupportsFeature("recorded") || c.SupportsFeature("other") {
+		t.Fatal("replaced the recorded features without an answer")
+	}
+}
+
+func TestPickUpReplacementWithoutReplacement(t *testing.T) {
+	t.Parallel()
+
+	for _, closed := range []bool{false, true} {
+		t.Run("closed "+strconv.FormatBool(closed), func(t *testing.T) {
+			t.Parallel()
+
+			cmd := startTestServer(t, false)
+
+			dir := t.TempDir()
+			c := newTestClient(t, dir, logrus.New())
+			c.setServerPID(uint32(cmd.Process.Pid))
+			recorded := c.currentServer()
+
+			if err := cmd.Process.Kill(); err != nil {
+				t.Fatalf("kill: %v", err)
+			}
+
+			_ = cmd.Wait() //nolint:errcheck // killed on purpose
+
+			if closed {
+				// A server answers, but a closed client does not look.
+				serveVersionSocket(t, dir, versionConmon{pid: uint32(os.Getpid())})
+
+				if err := c.Close(); err != nil {
+					t.Fatalf("close: %v", err)
+				}
+			} else {
+				// Nothing listens on the socket, the dial fails.
+				t.Cleanup(func() { c.Close() })
+			}
+
+			c.pickUpReplacement(t.Context())
+
+			if c.currentServer() != recorded {
+				t.Fatal("replaced the recorded server")
+			}
+		})
+	}
+}
+
+func TestDisconnectedCallsMatchErrServerDisconnected(t *testing.T) {
+	t.Parallel()
+
+	err := rpcError(exc.WrapError("call", exc.New(exc.Disconnected, "", "connection closed")))
+	if !errors.Is(err, ErrServerDisconnected) {
+		t.Fatalf("error %v does not match %v", err, ErrServerDisconnected)
+	}
+
+	// A failure the server reported is no disconnect.
+	err = rpcError(exc.New(exc.Failed, "", "open log file: permission denied"))
+	if errors.Is(err, ErrServerDisconnected) {
+		t.Fatalf("error %v matches %v", err, ErrServerDisconnected)
 	}
 }
 
@@ -1976,8 +2225,8 @@ func TestKillContext(t *testing.T) {
 
 	// A zero PID would signal the process group of the caller.
 	c = &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
-	if err := c.KillContext(t.Context()); !errors.Is(err, errServerPIDUnknown) {
-		t.Fatalf("got error %v, want %v", err, errServerPIDUnknown)
+	if err := c.KillContext(t.Context()); !errors.Is(err, ErrServerPIDUnknown) {
+		t.Fatalf("got error %v, want %v", err, ErrServerPIDUnknown)
 	}
 }
 

@@ -16,9 +16,13 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use bytes::{Bytes, BytesMut};
 use futures::stream::StreamExt;
-use serde::Deserialize;
+use serde::{
+    Deserialize, Deserializer,
+    de::{IgnoredAny, MapAccess, Visitor},
+};
 use std::{
     collections::VecDeque,
+    fmt,
     future::Future,
     ops::ControlFlow,
     sync::{
@@ -110,17 +114,66 @@ pub(super) struct ClientRx {
     too_large: CancellationToken,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-/// Terminal resize event for exec and attach.
+/// Terminal resize event for exec and attach. Kubernetes decodes it with
+/// Go, which matches the names of the fields regardless of their case, so
+/// clients send `{"width":80}` as well as `{"Width":80}`, and leaves a
+/// missing or null field at zero, and a null event all zero. For `Width` and
+/// `Height`, ASCII case folding accepts the same names as the Unicode case
+/// folding of Go, which only adds the Kelvin sign for `k` and the long s for
+/// `s`.
+#[derive(Debug, Default, PartialEq)]
 struct ResizeEvent {
     width: u16,
     height: u16,
 }
 
+impl ResizeEvent {
+    fn parse(data: &[u8]) -> Result<Self> {
+        let event: Option<Self> = serde_json::from_slice(data).context("unmarshal resize event")?;
+        Ok(event.unwrap_or_default())
+    }
+}
+
+impl<'de> Deserialize<'de> for ResizeEvent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// The fields in the order of the document, like Go, where the last
+        /// one of the names which match wins.
+        struct Fields;
+
+        impl<'de> Visitor<'de> for Fields {
+            type Value = ResizeEvent;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a terminal size")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<ResizeEvent, A::Error> {
+                let mut event = ResizeEvent::default();
+                while let Some(name) = map.next_key::<String>()? {
+                    let field = if name.eq_ignore_ascii_case("width") {
+                        &mut event.width
+                    } else if name.eq_ignore_ascii_case("height") {
+                        &mut event.height
+                    } else {
+                        map.next_value::<IgnoredAny>()?;
+                        continue;
+                    };
+                    if let Some(value) = map.next_value()? {
+                        *field = value;
+                    }
+                }
+                Ok(event)
+            }
+        }
+
+        deserializer.deserialize_map(Fields)
+    }
+}
+
 impl StreamingServer {
     /// Handle a single websocket connection.
     pub(super) async fn handle_websocket(socket: WebSocket, session: Session, framing: Framing) {
+        let discard = socket.get_ref().discarder();
         let (sender, messages) = socket.split();
         let activity = Activity::new();
         let mut output = Output::websocket(sender, framing, activity.clone());
@@ -133,6 +186,7 @@ impl StreamingServer {
             messages,
             framing,
             activity: activity.clone(),
+            discard,
         };
         Self::run_session(output, input, session, activity).await;
         info!("Closing websocket connection");
@@ -236,7 +290,9 @@ impl StreamingServer {
                     }
                     // The session fails, the client still gets its status and
                     // the close, which tells why, and what it still sends
-                    // gets drained, so that they do not get lost.
+                    // gets drained, so that they do not get lost. A client
+                    // still busy with the rest of its message reads them only
+                    // once it got rid of it, see [`web::Discard`].
                     Ok(InputEnd::TooLarge(input)) => {
                         info!("Client sent a message larger than the limit");
                         match time::timeout(web::CLOSE_TIMEOUT, &mut send_task).await {
@@ -292,6 +348,7 @@ impl StreamingServer {
                         activity.touch();
                         let kill = started.teardown.kill.clone();
                         let exec = Self::exec_loop(started, &mut sender, client, &mut status);
+                        let exec = Self::until_too_large(exec, &too_large);
                         Self::until_idle(exec, &activity, idle_timeout, || {
                             kill.store(true, Ordering::Release);
                         })
@@ -302,7 +359,10 @@ impl StreamingServer {
                 ),
                 Session::Attach(s) => (
                     Self::until_idle(
-                        Self::attach_loop(s, &mut sender, client, &mut status),
+                        Self::until_too_large(
+                            Self::attach_loop(s, &mut sender, client, &mut status),
+                            &too_large,
+                        ),
                         &activity,
                         idle_timeout,
                         || {},
@@ -343,6 +403,20 @@ impl StreamingServer {
                 error!("Unable to run {typ} for container: {e:#}");
                 Some(Status::Error(format!("{typ} failed: {e:#}")))
             }
+        }
+    }
+
+    /// Run the loop of a session until the client sent a message larger
+    /// than the server takes, which fails it. The loop may wait for a client
+    /// which does not read its output then, it gets dropped, so that the
+    /// status and the close go out right away.
+    async fn until_too_large(
+        run: impl Future<Output = Result<()>>,
+        too_large: &CancellationToken,
+    ) -> Result<()> {
+        select! {
+            result = run => result,
+            () = too_large.cancelled() => bail!(MESSAGE_TOO_LARGE),
         }
     }
 
@@ -565,8 +639,14 @@ impl SessionInput {
     }
 
     async fn try_resize(data: &[u8], io: &SharedContainerIO) -> Result<()> {
-        let e = serde_json::from_slice::<ResizeEvent>(data).context("unmarshal resize event")?;
+        let e = ResizeEvent::parse(data)?;
         trace!("Got resize message: {e:?}");
+        // Like CRI-O, a terminal never gets a size without rows or columns,
+        // which clients send before they know their own.
+        if e.width == 0 || e.height == 0 {
+            debug!("Ignoring resize event without a size: {e:?}");
+            return Ok(());
+        }
         if !io.try_resize(e.width, e.height).await? {
             debug!("Ignoring resize event, container has no terminal");
         }
@@ -699,9 +779,25 @@ impl PendingStdin {
 /// The entry points of the fuzz targets.
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing {
-    use super::{PendingStdin, STDIN_CHUNK_SIZE, Stdin};
+    use super::{PendingStdin, ResizeEvent, STDIN_CHUNK_SIZE, Stdin};
+    use crate::remotecommand::{ClientEvent, fuzzing::messages};
     use bytes::Bytes;
     use std::collections::VecDeque;
+
+    /// The messages of a WebSocket client for every framing, see
+    /// `remotecommand::fuzzing::messages`, with the resize events they carry
+    /// parsed like the session does. A size which got parsed reads the same
+    /// from the JSON Kubernetes sends.
+    pub fn client_messages(input: &[u8]) {
+        messages(input, |event| {
+            if let ClientEvent::Resize(data) = event
+                && let Ok(size) = ResizeEvent::parse(&data)
+            {
+                let json = format!(r#"{{"Width":{},"Height":{}}}"#, size.width, size.height);
+                assert_eq!(ResizeEvent::parse(json.as_bytes()).ok(), Some(size));
+            }
+        });
+    }
 
     /// Push, pop and clear pending stdin by the input, one operation per
     /// byte, and compare it with the stdin of a model, which is a plain
@@ -778,10 +874,12 @@ mod tests {
         streaming_server::{
             AttachSession, StreamingServer, session::PENDING_STDIN_MAX_BYTES, testing::*,
         },
+        web::CloseCode,
     };
     use anyhow::{Context, Result, anyhow, bail};
     use bytes::Bytes;
 
+    use nix::sys::socket::{setsockopt, sockopt};
     use std::ops::ControlFlow;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -834,6 +932,61 @@ mod tests {
                 assert!(status.contains("\"Failure\""), "{status}");
                 assert!(status.contains(MESSAGE_TOO_LARGE), "{status}");
                 too_large_close(reader, writer).await
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn too_large_messages_of_clients_which_do_not_read_fail_the_session() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let (io, _server, stream) = attach_session(true, false).await?;
+                let attach = io.attach().await;
+                // A small buffer, so that the message does not fit into it.
+                setsockopt(&stream, sockopt::SndBuf, &4096)?;
+
+                // The container keeps writing, until the session waits for
+                // the client to read. The client then writes all of its
+                // message before it reads, like a client with a single
+                // thread.
+                let output = {
+                    let attach = attach.clone();
+                    tokio::spawn(async move {
+                        let data = Bytes::from(vec![b'o'; 64 * 1024]);
+                        loop {
+                            attach.write(IOMessage::Data(data.clone(), Pipe::StdOut));
+                            time::sleep(Duration::from_millis(1)).await;
+                        }
+                    })
+                };
+                time::sleep(Duration::from_secs(1)).await;
+                let (mut reader, writer) = send_too_large(stream);
+                let written = time::timeout(Duration::from_secs(5), async {
+                    while !writer.is_finished() {
+                        time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await;
+                output.abort();
+                written.context("the server does not take the rest of the message")?;
+
+                // The output before, then the status and the close.
+                let mut status = None;
+                loop {
+                    match server_frame(&mut reader).await? {
+                        (8, payload) => {
+                            assert_eq!(payload[..2], u16::from(CloseCode::Size).to_be_bytes());
+                            break;
+                        }
+                        (2, payload) if payload.first() == Some(&STREAM_ERR_BYTE) => {
+                            status = Some(String::from_utf8_lossy(&payload[1..]).into_owned());
+                        }
+                        _ => {}
+                    }
+                }
+                let status = status.context("no status")?;
+                assert!(status.contains(MESSAGE_TOO_LARGE), "{status}");
+                too_large_end(reader, writer).await
             })
             .await
     }
@@ -1021,6 +1174,59 @@ mod tests {
 
         // Garbage is still an error.
         assert!(SessionInput::try_resize(b"x", &io).await.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn resize_events_match_fields_like_go() -> Result<()> {
+        let size = |width, height| ResizeEvent { width, height };
+        for (json, event) in [
+            (r#"{"Width":80,"Height":24}"#, size(80, 24)),
+            // The Kubernetes client for JavaScript.
+            (r#"{"height":24,"width":80}"#, size(80, 24)),
+            (r#"{"WIDTH":80,"hEiGhT":24,"Other":1}"#, size(80, 24)),
+            (r#"{"Width":80}"#, size(80, 0)),
+            (r#"{"Width":80,"Height":null}"#, size(80, 0)),
+            ("{}", size(0, 0)),
+            // The last of the names which match wins, a null changes
+            // nothing.
+            (r#"{"width":100,"Width":80,"height":24}"#, size(80, 24)),
+            (r#"{"Width":80,"width":100,"height":24}"#, size(100, 24)),
+            (r#"{"Width":80,"width":null,"height":24}"#, size(80, 24)),
+            // Without a size, which gets ignored.
+            ("null", size(0, 0)),
+        ] {
+            assert_eq!(ResizeEvent::parse(json.as_bytes())?, event, "{json}");
+        }
+        for json in [
+            r#"{"Width":-1}"#,
+            r#"{"Height":65536}"#,
+            r#"{"Width":"80"}"#,
+            "[]",
+        ] {
+            assert!(ResizeEvent::parse(json.as_bytes()).is_err(), "{json}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resize_events_without_a_size_are_ignored() -> Result<()> {
+        // A terminal which the runtime did not connect fails every resize
+        // which reaches it.
+        let (io, _child, _token) = attach_child(true)?;
+        assert!(
+            SessionInput::try_resize(br#"{"width":80,"height":24}"#, &io)
+                .await
+                .is_err()
+        );
+        for json in [
+            r#"{"width":0,"height":0}"#,
+            r#"{"width":100}"#,
+            "{}",
+            "null",
+        ] {
+            SessionInput::try_resize(json.as_bytes(), &io).await?;
+        }
         Ok(())
     }
 

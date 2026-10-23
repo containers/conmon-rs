@@ -71,6 +71,15 @@ pub(super) async fn too_large_close(
             break;
         }
     }
+    too_large_end(reader, writer).await
+}
+
+/// After the close of [`too_large_close`]: the client got rid of its whole
+/// message and the connection ends without a reset.
+pub(super) async fn too_large_end(
+    mut reader: OwnedReadHalf,
+    writer: JoinHandle<io::Result<()>>,
+) -> Result<()> {
     time::timeout(Duration::from_secs(10), writer).await???;
     let mut rest = vec![];
     time::timeout(Duration::from_secs(10), reader.read_to_end(&mut rest)).await??;

@@ -2,7 +2,9 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -178,5 +180,93 @@ func TestRedirectResponseToOutputStreams(t *testing.T) {
 
 	if _, closed := stdout.state(); !closed {
 		t.Error("stdout not closed at the end of the connection")
+	}
+}
+
+func TestStdinEOFEndsAttachOnlyWhenOutputCannotEnd(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		tty, stopAfterStdinEOF, containerStdin bool
+		// Whether the attach returns on the EOF of its stdin, otherwise it
+		// keeps receiving the output until it ends.
+		returns bool
+	}{
+		// The container stdin stays open, its output does not end with
+		// the stdin of the client.
+		{containerStdin: true, returns: true},
+		// The server closes the container stdin, which ends the output of
+		// a process which reads it.
+		{stopAfterStdinEOF: true, containerStdin: true},
+		{stopAfterStdinEOF: true},
+		{},
+		// A terminal never gets closed.
+		{tty: true, stopAfterStdinEOF: true, returns: true},
+		{tty: true, stopAfterStdinEOF: true, containerStdin: true, returns: true},
+		{tty: true},
+		{tty: true, containerStdin: true},
+	} {
+		name := fmt.Sprintf(
+			"tty %v stop after stdin EOF %v container stdin %v",
+			tc.tty, tc.stopAfterStdinEOF, tc.containerStdin,
+		)
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			c := newTestClient(t, t.TempDir(), logrus.New())
+			t.Cleanup(func() { c.Close() })
+
+			stdin, stdinWriter := io.Pipe()
+			stdout := &testOut{}
+			cfg := &AttachConfig{
+				ID:                "id",
+				SocketPath:        serveAttachSocket(t),
+				Tty:               tc.tty,
+				StopAfterStdinEOF: tc.stopAfterStdinEOF,
+				ContainerStdin:    tc.containerStdin,
+				Streams:           AttachStreams{Stdin: &In{stdin}, Stdout: &Out{stdout}},
+			}
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			attachErr := make(chan error, 1)
+
+			go func() { attachErr <- c.attach(ctx, cfg) }()
+
+			waitFor(t, "no output", func() bool {
+				out, _ := stdout.state()
+
+				return out != ""
+			})
+
+			stdinWriter.Close()
+
+			if tc.returns {
+				select {
+				case err := <-attachErr:
+					if err != nil {
+						t.Fatalf("attach failed: %v", err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("attach still running after the EOF of its stdin")
+				}
+
+				return
+			}
+
+			// The server keeps sending output.
+			select {
+			case err := <-attachErr:
+				t.Fatalf("attach ended with %v on the EOF of its stdin", err)
+			case <-time.After(200 * time.Millisecond):
+			}
+
+			cancel()
+
+			if err := <-attachErr; !errors.Is(err, context.Canceled) {
+				t.Fatalf("got error %v, want %v", err, context.Canceled)
+			}
+		})
 	}
 }

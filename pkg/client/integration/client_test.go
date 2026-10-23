@@ -2835,5 +2835,25 @@ var _ = Describe("StreamingServer", func() {
 				Expect(status).To(ContainSubstring(`{"reason":"ExitCode","message":"3"}`))
 			}, SpecTimeout(specTimeout))
 		}
+
+		It("should report the exit code of a process killed by a signal", func(ctx SpecContext) {
+			runContainer(ctx, false, []string{"/busybox", "sleep", "10"})
+
+			result, err := sut.ServeExecContainer(
+				ctx,
+				&client.ServeExecContainerConfig{
+					ID:      tr.ctrID,
+					Command: []string{"/busybox", "sh", "-c", "kill -KILL $$"},
+					Stdout:  true,
+				},
+			)
+			Expect(err).To(Succeed())
+
+			_, _, status, err := legacyExec(result.URL, "v4.channel.k8s.io")
+			Expect(err).NotTo(HaveOccurred())
+			// Like a shell reports it, 128 and the number of the signal.
+			Expect(status).To(ContainSubstring(`"reason":"NonZeroExitCode"`))
+			Expect(status).To(ContainSubstring(`{"reason":"ExitCode","message":"137"}`))
+		}, SpecTimeout(specTimeout))
 	})
 })

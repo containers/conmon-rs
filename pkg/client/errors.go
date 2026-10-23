@@ -57,6 +57,31 @@ var (
 	// running once the wait for it timed out, while an ended context fails
 	// with the error of the context. KillContext stops it for good.
 	ErrShutdownTimeout = errors.New("timed out waiting for server PID to disappear")
+
+	// ErrServerExited gets matched by the error of New if the server it
+	// started exited before it accepted connections, for example for an
+	// invalid configuration. Its logs tell why.
+	ErrServerExited = errors.New("server exited before accepting connections")
+
+	// ErrServerNotUp gets matched by the error of New if the server it
+	// started still runs but did not accept connections in time, or the
+	// context ended before.
+	ErrServerNotUp = errors.New("server did not accept connections")
+
+	// ErrServerPIDUnknown gets matched by the error of Shutdown and
+	// KillContext if the client does not know the PID of the server, which
+	// they do not signal then, for example because the server did not report
+	// it.
+	ErrServerPIDUnknown = errors.New("server PID unknown")
+
+	// ErrServerDisconnected gets matched by the error of a method if the
+	// connection to the server ended during the call, for example because the
+	// server exited, unlike a request which the server rejected. Calls in
+	// flight while Close, Shutdown or KillContext reset the connection match
+	// it as well, or fail with ErrClientClosed. The next call connects again,
+	// also to a server which replaced the exited one, after Close it fails
+	// with ErrClientClosed instead. Use errors.Is to check for it.
+	ErrServerDisconnected = errors.New("disconnected from the server")
 )
 
 // containerNotFoundMessages are how servers start the message for a container
@@ -92,10 +117,19 @@ func rpcResult[T any](future interface{ Struct() (T, error) }) (T, error) {
 }
 
 // rpcError makes the failure of a call match the exported error for it, if
-// any. The server reports every failure as an exception with a message.
+// any. The server reports every failure as an exception with a message, an
+// ended connection fails calls with a disconnected one.
 func rpcError(err error) error {
 	var exception *exc.Exception
-	if !errors.As(err, &exception) || exception.Type != exc.Failed {
+	if !errors.As(err, &exception) {
+		return err
+	}
+
+	if exception.Type == exc.Disconnected {
+		return &matchedError{err: err, target: ErrServerDisconnected}
+	}
+
+	if exception.Type != exc.Failed {
 		return err
 	}
 

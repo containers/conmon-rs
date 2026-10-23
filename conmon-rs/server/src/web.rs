@@ -4,7 +4,10 @@
 //! a plain text response which tells what is missing.
 
 use bytes::Bytes;
-use futures::stream::{SplitSink, SplitStream, Stream, StreamExt};
+use futures::{
+    stream::{SplitSink, SplitStream, Stream, StreamExt},
+    task::AtomicWaker,
+};
 use hyper::{
     Method, Request, StatusCode,
     body::{Body as HttpBody, Frame, SizeHint},
@@ -15,11 +18,16 @@ use hyper_util::rt::TokioIo;
 use std::{
     convert::Infallible,
     future::Future,
+    io,
     pin::Pin,
-    task::{Context, Poll},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::{Context, Poll, ready},
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     task::JoinHandle,
     time::{self, Duration},
 };
@@ -39,7 +47,7 @@ pub use tokio_tungstenite::tungstenite::{
 };
 
 /// A WebSocket of a client, after the upgrade of its request.
-pub type WebSocket = WebSocketStream<TokioIo<Upgraded>>;
+pub type WebSocket = WebSocketStream<ClientIo<TokioIo<Upgraded>>>;
 
 /// How long a client gets to take the end of a WebSocket, the close of the
 /// server and what is queued before it.
@@ -49,6 +57,11 @@ pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// too large, see [`drain`]. More than the rest of a message of the size
 /// Kubernetes takes.
 const DRAIN_LIMIT: usize = 64 * 1024 * 1024;
+
+/// The buffer a WebSocket reads into, which it allocates up front. Clients
+/// mostly send small stdin and resize events, larger messages grow it while
+/// they get read. Tungstenite allocates 128 KiB otherwise, for every session.
+const READ_BUFFER_SIZE: usize = 16 * 1024;
 
 /// The close of the server once it is done.
 pub fn close_message(reason: &str) -> Message {
@@ -83,11 +96,12 @@ pub fn is_too_large(e: &Error) -> bool {
 /// takes, once the close went out. The rest of the message cannot be read
 /// as messages. The server stops writing and drops what the client still
 /// sends until it ends the connection, for up to [`CLOSE_TIMEOUT`] and
-/// [`DRAIN_LIMIT`]. A socket closed with input it did not read resets the
+/// [`DRAIN_LIMIT`], on top of what got dropped while the close went out, see
+/// [`Discard`]. A socket closed with input it did not read resets the
 /// connection, which can drop the close and the status before it.
 pub async fn drain<T>(
-    sink: SplitSink<WebSocketStream<T>, Message>,
-    messages: SplitStream<WebSocketStream<T>>,
+    sink: SplitSink<WebSocketStream<ClientIo<T>>, Message>,
+    messages: SplitStream<WebSocketStream<ClientIo<T>>>,
 ) where
     T: AsyncRead + AsyncWrite + Unpin,
 {
@@ -95,22 +109,194 @@ pub async fn drain<T>(
         return;
     };
     let io = socket.get_mut();
+    io.drain();
     let drained = async {
         if let Err(e) = io.shutdown().await {
             debug!("Unable to shut down the WebSocket: {e}");
         }
-        let mut buf = [0; 8192];
-        let mut left = DRAIN_LIMIT;
-        while left > 0 {
-            match io.read(&mut buf).await {
-                Ok(read @ 1..) => left = left.saturating_sub(read),
-                _ => return,
-            }
+        // Dropped input never reaches the buffer, a read ends with the
+        // connection or the limit.
+        if let Err(e) = io.read(&mut [0; 1]).await {
+            debug!("Stopped draining the WebSocket: {e}");
         }
-        debug!("Client sent too much after the close");
     };
     if time::timeout(CLOSE_TIMEOUT, drained).await.is_err() {
         debug!("Client did not end the WebSocket in time");
+    }
+}
+
+/// The connection of a WebSocket client, whose input can get dropped
+/// instead of read, see [`Discard`].
+pub struct ClientIo<T> {
+    io: T,
+    discard: Arc<DiscardState>,
+
+    /// How much input may still get dropped.
+    left: usize,
+
+    /// Whether the client ended its side of the connection.
+    ended: bool,
+}
+
+#[derive(Debug, Default)]
+struct DiscardState {
+    /// Whether the input gets dropped.
+    on: AtomicBool,
+
+    /// The task whose write waits for the client, which has to drop its
+    /// input from now on.
+    writer: AtomicWaker,
+}
+
+/// Drops the input of a [`ClientIo`], also after its WebSocket got split. A
+/// client which sent a message larger than the server takes may still be
+/// busy writing the rest of it and not read meanwhile, which holds up the
+/// status and the close for it, unless its input gets read. The WebSocket
+/// cannot read it anymore, it fails on the message again. Writes drop what
+/// the client sent before they write, up to [`DRAIN_LIMIT`], and the input
+/// of the client wakes a write which waits for it. Reads see nothing but the
+/// end of the connection.
+#[derive(Clone, Debug, Default)]
+pub struct Discard(Arc<DiscardState>);
+
+impl Discard {
+    pub fn discard(&self) {
+        self.0.on.store(true, Ordering::Release);
+        // A write which waits for a client busy with the rest of its message
+        // would never get woken otherwise.
+        self.0.writer.wake();
+    }
+}
+
+impl<T> ClientIo<T> {
+    /// How many reads of dropped input one poll does at most, so that a
+    /// client which keeps sending does not hold the thread.
+    const DISCARD_READS: usize = 16;
+
+    pub fn new(io: T) -> Self {
+        Self {
+            io,
+            discard: Arc::default(),
+            left: DRAIN_LIMIT,
+            ended: false,
+        }
+    }
+
+    /// Drops the input of the connection.
+    pub fn discarder(&self) -> Discard {
+        Discard(self.discard.clone())
+    }
+
+    fn discarding(&self) -> bool {
+        self.discard.on.load(Ordering::Acquire)
+    }
+
+    /// Drop the input from now on, with a budget of its own for the end of
+    /// the WebSocket, see [`drain`].
+    fn drain(&mut self) {
+        self.discard.on.store(true, Ordering::Release);
+        self.left = DRAIN_LIMIT;
+    }
+}
+
+impl<T: AsyncRead + Unpin> ClientIo<T> {
+    /// Read and drop the input until the connection ended, which it is
+    /// ready for.
+    fn poll_discard(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.ended {
+            return Poll::Ready(Ok(()));
+        }
+        let mut scratch = [0; 8192];
+        for _ in 0..Self::DISCARD_READS {
+            if self.left == 0 {
+                return Poll::Ready(Err(io::Error::other(
+                    "client sent too much after the close",
+                )));
+            }
+            let mut dropped = ReadBuf::new(&mut scratch);
+            ready!(Pin::new(&mut self.io).poll_read(cx, &mut dropped))?;
+            match dropped.filled().len() {
+                0 => {
+                    self.ended = true;
+                    return Poll::Ready(Ok(()));
+                }
+                read => self.left = self.left.saturating_sub(read),
+            }
+        }
+        // More input may wait, which is readable already and wakes nobody.
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+
+    /// Run a write, after dropping the input if it gets dropped. The read
+    /// leaves the waker of the write with the connection, so that input
+    /// wakes a write which waits for the client, also one which started
+    /// before the input got dropped.
+    fn poll_writing<R>(
+        &mut self,
+        cx: &mut Context<'_>,
+        write: impl FnOnce(Pin<&mut T>, &mut Context<'_>) -> Poll<R>,
+    ) -> Poll<R> {
+        let discarding = self.discarding();
+        if discarding {
+            // Its failures end the dropping, the write still goes on.
+            let _ = self.poll_discard(cx);
+        }
+        let poll = write(Pin::new(&mut self.io), cx);
+        if poll.is_pending() && !discarding {
+            self.discard.writer.register(cx.waker());
+            if self.discarding() {
+                cx.waker().wake_by_ref();
+            }
+        }
+        poll
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for ClientIo<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if this.discarding() {
+            return this.poll_discard(cx);
+        }
+        Pin::new(&mut this.io).poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ClientIo<T> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut()
+            .poll_writing(cx, |io, cx| io.poll_write(cx, buf))
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut()
+            .poll_writing(cx, |io, cx| io.poll_write_vectored(cx, bufs))
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.io.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.get_mut().poll_writing(cx, |io, cx| io.poll_flush(cx))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.get_mut()
+            .poll_writing(cx, |io, cx| io.poll_shutdown(cx))
     }
 }
 
@@ -267,7 +453,7 @@ impl WebSocketUpgrade {
             key,
             on_upgrade,
             protocol: None,
-            config: WebSocketConfig::default(),
+            config: WebSocketConfig::default().read_buffer_size(READ_BUFFER_SIZE),
         })
     }
 
@@ -308,7 +494,7 @@ impl WebSocketUpgrade {
                 }
             };
             let socket = WebSocketStream::from_raw_socket(
-                TokioIo::new(upgraded),
+                ClientIo::new(TokioIo::new(upgraded)),
                 Role::Server,
                 Some(config),
             )
@@ -534,5 +720,65 @@ mod tests {
         let response = text(StatusCode::BAD_REQUEST, "bad");
         assert_eq!(response.body().size_hint().exact(), Some(3));
         assert_eq!(collect(response.into_body()).await, b"bad");
+    }
+
+    #[tokio::test]
+    async fn drains_have_a_budget_of_their_own() -> anyhow::Result<()> {
+        let (server, mut client) = tokio::io::duplex(1024);
+        let mut socket =
+            WebSocketStream::from_raw_socket(ClientIo::new(server), Role::Server, None).await;
+        // Dropping the input while the close went out used up the budget
+        // almost.
+        let discard = socket.get_ref().discarder();
+        discard.discard();
+        socket.get_mut().left = 10;
+        let (sink, messages) = socket.split();
+
+        // The client still sends after the close, more than is left of the
+        // first budget, then ends its side.
+        let client = tokio::spawn(async move {
+            client.write_all(&[0; 4096]).await?;
+            time::sleep(Duration::from_millis(50)).await;
+            client.write_all(&[0; 4096]).await?;
+            client.shutdown().await?;
+            // The server ends its side once it read everything.
+            let mut rest = vec![];
+            client.read_to_end(&mut rest).await?;
+            io::Result::Ok(())
+        });
+        drain(sink, messages).await;
+        client.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropped_input_wakes_waiting_writes() -> anyhow::Result<()> {
+        // A write which waits for the client gets woken once its input gets
+        // dropped, which lets the client go on and read.
+        let (server, mut client) = tokio::io::duplex(1024);
+        let mut io = ClientIo::new(server);
+        let discard = io.discarder();
+        let writer = tokio::spawn(async move {
+            io.write_all(&[1; 64 * 1024]).await?;
+            io.flush().await
+        });
+        time::sleep(Duration::from_millis(50)).await;
+        assert!(!writer.is_finished());
+
+        // The client writes before it reads, which the server does not read.
+        let client = tokio::spawn(async move {
+            client.write_all(&[0; 64 * 1024]).await?;
+            let mut read = vec![0; 64 * 1024];
+            client.read_exact(&mut read).await?;
+            io::Result::Ok(read)
+        });
+        time::sleep(Duration::from_millis(50)).await;
+        assert!(!client.is_finished());
+
+        discard.discard();
+        time::timeout(Duration::from_secs(5), writer).await???;
+        let read = time::timeout(Duration::from_secs(5), client).await???;
+        assert!(read.iter().all(|b| *b == 1));
+        Ok(())
     }
 }
