@@ -129,7 +129,7 @@ CLI](https://cli.github.com), which also checks that they got built from
 ```
 
 Add `--predicate-type https://spdx.dev/Document/v2.3` for the SBOM. The
-binaries of newer commits, and of the releases after v1.2.0, also come with an
+binaries of newer commits, and of the releases since v1.2.1, also come with an
 [OpenVEX](https://openvex.dev) document as an attestation, which states how
 known vulnerabilities of the crates of the SBOM affect conmon-rs. It is the
 document [vex/conmonrs.openvex.json](vex/conmonrs.openvex.json) of the commit,

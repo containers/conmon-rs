@@ -1622,7 +1622,8 @@ type CreateContainerConfig struct {
 	// ID is the container identifier.
 	ID string
 
-	// BundlePath is the absolute path to the filesystem bundle.
+	// BundlePath is the absolute path to the filesystem bundle. Servers
+	// since v1.2.1 reject other ones.
 	BundlePath string
 
 	// Terminal indicates if a tty should be used or not.
@@ -1634,12 +1635,14 @@ type CreateContainerConfig struct {
 	// ExitPaths is a slice of paths to write the exit statuses. Each file
 	// gets the exit code of the container as decimal text once it exited,
 	// 128 plus the number of the signal which killed it, like a shell
-	// reports it. The paths have to be absolute.
+	// reports it. The paths have to be absolute, servers since v1.2.1
+	// reject other ones.
 	ExitPaths []string
 
 	// OOMExitPaths is a slice of files that should be created if the given
 	// container is OOM killed. They are created empty before the exit files
-	// get written. The paths have to be absolute.
+	// get written. The paths have to be absolute, servers since v1.2.1
+	// reject other ones.
 	OOMExitPaths []string
 
 	// LogDrivers is a slice of selected log drivers.
@@ -1696,6 +1699,7 @@ type ContainerLogDriver struct {
 	Type LogDriverType
 
 	// Path specifies the absolute filesystem path of the log driver.
+	// Servers since v1.2.1 reject other ones.
 	Path string
 
 	// MaxSize is the maximum amount of bytes to be written before rotation.
@@ -2659,7 +2663,7 @@ type CreateNamespacesConfig struct {
 	// PodID is the unique identifier of the pod. It names the files of the
 	// namespaces below BasePath, so it must not be empty, may only contain
 	// the characters A-Z, a-z, 0-9, "_", "." and "-", must not be "." or
-	// ".." and takes 251 bytes at most. Servers after v1.2.0 reject other
+	// ".." and takes 251 bytes at most. Servers since v1.2.1 reject other
 	// values of BasePath and PodID.
 	PodID string
 }

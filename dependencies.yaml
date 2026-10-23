@@ -6,7 +6,7 @@
 dependencies:
   # The version of conmon-rs itself, bumped for a release.
   - name: conmon-rs
-    version: 1.2.0
+    version: 1.2.1
     refPaths:
       - path: Cargo.toml
         match: ^version =

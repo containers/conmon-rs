@@ -274,11 +274,11 @@ descriptors as `SCM_RIGHTS` ancillary data and one little endian `u64`
 `(request_id << 32) | num_fds`. The response repeats that `u64` followed by one
 `u64` slot per descriptor. On error the lower 32 bits of the first word are
 all ones and the rest of the message is the error text. Received descriptors
-are closed when the connection ends or on an empty request. A connection holds
-at most 1024 descriptors which no request took yet, and all connections
-together a quarter of the open files limit of the server, a request beyond
-that fails. The full description lives in the module documentation of
-[fd_socket.rs](conmon-rs/server/src/fd_socket.rs).
+are closed when the connection ends or on an empty request. Since v1.2.1, a
+connection holds at most 1024 descriptors which no request took yet, and all
+connections together a quarter of the open files limit of the server, a
+request beyond that fails. The full description lives in the module
+documentation of [fd_socket.rs](conmon-rs/server/src/fd_socket.rs).
 
 ## Logging
 

@@ -57,7 +57,7 @@ func (r RemoteFD) String() string {
 // for concurrent use, the requests are serialized. A request carries at most
 // 253 file descriptors. The server holds the file descriptors of a
 // connection until a request like CreateContainer takes their slots, servers
-// after v1.2.0 at most 1024 which no request took yet, a request beyond that
+// since v1.2.1 at most 1024 which no request took yet, a request beyond that
 // fails. The slots belong to the connection: closing it, or a broken
 // connection, drops the file descriptors the server still holds, so keep it
 // open until the requests which use the slots returned.
