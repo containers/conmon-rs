@@ -73,9 +73,12 @@ OOM and namespace specs need elevated permissions for the cgroups and bind
 mounts and skip or fail otherwise:
 
 ```console
-$ make unit
+$ make unit unit-go
 # make integration
 ```
+
+`make unit` runs the Rust unit tests with and without the `tracing` feature,
+`make unit-go` the unit tests of the Go client, which need no server.
 
 The integration tests use the release binary by default. Set `CONMON_BINARY`
 to test another one, for example the static build of `make release-static`:
@@ -95,7 +98,7 @@ Most PRs will be reviewed by the [OWNERS](OWNERS).
 The sign-off is a line at the end of the explanation for the patch. Your
 signature certifies that you wrote the patch or otherwise have the right to pass
 it on as an open-source patch. The rules are simple: if you can certify
-the below (from [developercertificate.org](http://developercertificate.org/)):
+the below (from [developercertificate.org](https://developercertificate.org/)):
 
 ```
 Developer Certificate of Origin

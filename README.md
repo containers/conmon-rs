@@ -20,7 +20,7 @@ kills and writes the exit codes once the containers terminate. The engine
 talks to it over a UNIX domain socket, so no new monitor process is needed for
 additional containers or execs. It works with cgroup v1 and v2 and any OCI
 runtime with the `create`, `exec` and console socket conventions of runc, like
-crun.
+crun. CI runs the integration tests on cgroup v2 only.
 
 ## Documentation
 
@@ -49,7 +49,7 @@ installed binary for its version (`-n`):
 
 ```console
 > curl -fsSL https://raw.githubusercontent.com/containers/conmon-rs/main/scripts/get | \
-    bash -s -- -l $TAG -a arm64 -o $OUTPUT_PATH -n
+    bash -s -- -l vX.Y.Z -a arm64 -o $OUTPUT_PATH -n
 ```
 
 The script verifies the sigstore signature of the binary if the local system
@@ -66,19 +66,49 @@ the head of `main`, like when the bucket points back to an old commit. Without
 `jq`, or if the API fails, like because of its rate limit (`GITHUB_TOKEN` raises
 it), the script only warns.
 
-Since v1.1.0, the [GitHub
+Every commit on `main` is also built as an RPM in the [podman-next
+copr](https://copr.fedorainfracloud.org/coprs/rhcontainerbot/podman-next/package/conmon-rs).
+
+[bucket]: https://console.cloud.google.com/storage/browser/cri-o/conmon-rs
+
+## Verify the downloads
+
+The bucket serves the files of a commit at
+`https://storage.googleapis.com/cri-o/conmon-rs/$COMMIT/`, `latest-main.txt`
+names the latest commit of `main` and `latest-X.Y.txt` the latest release tag
+of a minor version. Since v1.1.0, the [GitHub
 releases](https://github.com/containers/conmon-rs/releases) carry the same
-binaries as `conmonrs.$ARCH` with their signatures. To verify a binary by hand,
-for example the one of `$COMMIT` on `main`, which the publish-static workflow
-signed (use `ci.yml` for older commits without attestations, like the ones of
-v1.1.0 and v1.1.1):
+binaries as `conmonrs.$ARCH` with their signatures, built from the commit of
+the tag. To verify a binary by hand, download it with its files and set
+`COMMIT` to that commit (the assignments `COMMIT=$(...)` need a POSIX shell
+like bash or zsh), either for a release:
+
+```console
+> gh release download vX.Y.Z --repo containers/conmon-rs \
+    --pattern 'conmonrs.amd64*'
+> COMMIT=$(gh api repos/containers/conmon-rs/commits/vX.Y.Z --jq .sha)
+```
+
+or for the latest commit of `main` in the bucket:
+
+```console
+> COMMIT=$(curl -fsSL https://storage.googleapis.com/cri-o/conmon-rs/latest-main.txt)
+> curl -fsSL --remote-name-all \
+    "https://storage.googleapis.com/cri-o/conmon-rs/$COMMIT/conmonrs.amd64{,.bundle,.intoto.jsonl,.spdx.json,.spdx.intoto.jsonl,.vex.json,.vex.intoto.jsonl}"
+```
+
+curl expands the braces itself. For an older commit, it reports a 404 for
+each of these files the commit does not have and exits with an error, but
+still downloads the others. Then check the signature, which the publish-static
+workflow made (use `ci.yml` instead of `publish-static.yml` for older commits
+without attestations, like the ones of v1.1.0 and v1.1.1):
 
 ```console
 > cosign verify-blob conmonrs.amd64 \
     --bundle conmonrs.amd64.bundle \
     --certificate-identity https://github.com/containers/conmon-rs/.github/workflows/publish-static.yml@refs/heads/main \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-    --certificate-github-workflow-sha $COMMIT
+    --certificate-github-workflow-sha "$COMMIT"
 ```
 
 The binaries of newer commits on `main`, and of the releases since v1.2.0,
@@ -87,13 +117,15 @@ SBOM, both as GitHub artifact attestations. A job without access to the
 signing credentials builds them, the reusable [publish-static
 workflow](.github/workflows/publish-static.yml), which runs no build steps,
 attests and signs them. Verify them with the [GitHub
-CLI](https://cli.github.com):
+CLI](https://cli.github.com), which also checks that they got built from
+`$COMMIT`:
 
 ```console
 > gh attestation verify conmonrs.amd64 \
     --repo containers/conmon-rs \
     --signer-workflow containers/conmon-rs/.github/workflows/publish-static.yml \
-    --source-ref refs/heads/main
+    --source-ref refs/heads/main \
+    --source-digest "$COMMIT"
 ```
 
 Add `--predicate-type https://spdx.dev/Document/v2.3` for the SBOM. The
@@ -109,18 +141,19 @@ document with:
     --repo containers/conmon-rs \
     --signer-workflow containers/conmon-rs/.github/workflows/publish-static.yml \
     --source-ref refs/heads/main \
+    --source-digest "$COMMIT" \
     --predicate-type https://openvex.dev/ns/v0.2.0 \
     --format json --jq '.[0].verificationResult.statement.predicate'
 ```
 
 The bucket and the releases carry the attestation bundles as well
 (`conmonrs.$ARCH.intoto.jsonl`, `conmonrs.$ARCH.spdx.intoto.jsonl` and
-`conmonrs.$ARCH.vex.intoto.jsonl`), the SBOM and the VEX document themselves
-(`conmonrs.$ARCH.spdx.json` and `conmonrs.$ARCH.vex.json`). The cosign
-signatures (`conmonrs.$ARCH.bundle`) have the identity
-`https://github.com/containers/conmon-rs/.github/workflows/publish-static.yml@refs/heads/main`,
-the one of commits from before the attestations is
-`https://github.com/containers/conmon-rs/.github/workflows/ci.yml@refs/heads/main`.
+`conmonrs.$ARCH.vex.intoto.jsonl`), and the SBOM and the VEX document
+themselves (`conmonrs.$ARCH.spdx.json` and `conmonrs.$ARCH.vex.json`).
+`gh attestation verify` takes a bundle with `--bundle` and the matching
+`--predicate-type` instead of fetching the attestations from GitHub.
+
+### Scan with the VEX document
 
 The statements of the VEX document name conmon-rs
 (`pkg:github/containers/conmon-rs`) as their product and the affected crates
@@ -140,25 +173,33 @@ silently. Make the subcomponents the products first, which both apply:
 `make scan SBOMS=conmonrs.amd64.spdx.json` does the same with grype and the
 VEX document of the repository.
 
+### Verify the source tarball
+
 Since v1.2.0, the source tarball and the `sha256sums.txt` of a release have
-SLSA Build L3 provenance and cosign signatures of the reusable [build-sources
-workflow](.github/workflows/build-sources.yml) for the tag:
+SLSA Build L3 provenance (also as the bundle `sources.intoto.jsonl`) and cosign
+signatures (`conmonrs-vX.Y.Z.tar.gz.bundle` and `sha256sums.txt.bundle`) of
+the reusable [build-sources workflow](.github/workflows/build-sources.yml) for
+the tag. `sha256sums.txt` lists the checksums of the tarball and the binaries.
+`COMMIT` is the commit of the tag, like for the binaries of a release:
 
 ```console
+> gh release download vX.Y.Z --repo containers/conmon-rs \
+    --pattern conmonrs-vX.Y.Z.tar.gz --pattern 'sha256sums.txt*' \
+    --pattern sources.intoto.jsonl
+> COMMIT=$(gh api repos/containers/conmon-rs/commits/vX.Y.Z --jq .sha)
 > gh attestation verify conmonrs-vX.Y.Z.tar.gz \
+    --bundle sources.intoto.jsonl \
     --repo containers/conmon-rs \
     --signer-workflow containers/conmon-rs/.github/workflows/build-sources.yml \
-    --source-ref refs/tags/vX.Y.Z
+    --source-ref refs/tags/vX.Y.Z \
+    --source-digest "$COMMIT"
 > cosign verify-blob sha256sums.txt \
     --bundle sha256sums.txt.bundle \
     --certificate-identity https://github.com/containers/conmon-rs/.github/workflows/build-sources.yml@refs/tags/vX.Y.Z \
-    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    --certificate-github-workflow-sha "$COMMIT"
+> sha256sum --ignore-missing -c sha256sums.txt
 ```
-
-Every commit on `main` is also built as an RPM in the [podman-next
-copr](https://copr.fedorainfracloud.org/coprs/rhcontainerbot/podman-next/package/conmon-rs).
-
-[bucket]: https://console.cloud.google.com/storage/browser/cri-o/conmon-rs
 
 ## Architecture
 
