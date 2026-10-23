@@ -28,8 +28,10 @@ CURL=(curl -sSfL --retry 5 --retry-delay 3 --retry-all-errors)
 export GNUPGHOME=$TMPDIR/gnupg
 mkdir -m 700 "$GNUPGHOME"
 gpg --batch --quiet --import "$(dirname "$0")/crun-signing-key.asc"
+# grep reads all status lines, grep -q would stop at the match and fail the
+# pipe with SIGPIPE if gpg writes more after it.
 if ! gpg --batch --status-fd 1 --verify "$TMPDIR/crun.asc" "$TMPDIR/crun" 2>/dev/null |
-    grep -q "^\[GNUPG:\] VALIDSIG .* $FINGERPRINT\$"; then
+    grep "^\[GNUPG:\] VALIDSIG .* $FINGERPRINT\$" >/dev/null; then
     echo "Invalid signature of crun $CRUN_VERSION" >&2
     exit 1
 fi

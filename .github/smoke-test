@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+# Run the server once until it serves its socket, then stop it like CRI-O
+# does. The build-static workflow runs it in an Alpine container of the
+# architecture, emulated by qemu for the ones besides amd64, which only gets
+# as far as the listening socket and the signal handling, not the runtime.
+BINARY=${1:?usage: $0 BINARY}
+DIR=$(mktemp -d)
+trap 'rm -rf "$DIR"' EXIT
+
+"$BINARY" --skip-fork --runtime /bin/sh --runtime-dir "$DIR" --log-driver stdout &
+PID=$!
+
+# Emulated, the start takes a few seconds.
+TRIES=0
+until [ -S "$DIR/conmon.sock" ]; do
+    if ! kill -0 "$PID" 2>/dev/null || [ "$TRIES" -ge 120 ]; then
+        echo "The server did not create its socket in $DIR" >&2
+        kill -KILL "$PID" 2>/dev/null || true
+        wait "$PID" || true
+        exit 1
+    fi
+    TRIES=$((TRIES + 1))
+    sleep 0.5
+done
+
+# The server stops within its shutdown budget, a hanging one gets killed.
+if ! kill -TERM "$PID" 2>/dev/null; then
+    STATUS=0
+    wait "$PID" || STATUS=$?
+    echo "The server exited with $STATUS right after it created its socket" >&2
+    exit 1
+fi
+TRIES=0
+while kill -0 "$PID" 2>/dev/null; do
+    if [ "$TRIES" -ge 60 ]; then
+        echo "The server did not stop on SIGTERM" >&2
+        kill -KILL "$PID" 2>/dev/null || true
+        wait "$PID" || true
+        exit 1
+    fi
+    TRIES=$((TRIES + 1))
+    sleep 0.5
+done
+STATUS=0
+wait "$PID" || STATUS=$?
+if [ "$STATUS" -ne 0 ]; then
+    echo "The server exited with $STATUS on SIGTERM" >&2
+    exit 1
+fi
+echo "The server served its socket and stopped on SIGTERM"

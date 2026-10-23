@@ -34,7 +34,14 @@ jobs:
       GH_REPO: ${{ github.repository }}
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.ref_name }}
+    outputs:
+      minor: ${{ steps.minor.outputs.minor }}
     steps:
+      # The marker of the release, build-sources rejects tags other than
+      # vX.Y.Z.
+      - name: Minor version
+        id: minor
+        run: echo "minor=${TAG%.*}" >>"$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -107,11 +114,18 @@ jobs:
 
   # Points the latest-X.Y.txt marker in the bucket to this tag, once the
   # release has its binaries. The marker only moves forward, a rerun of an
-  # older patch release does not move it back.
+  # older patch release does not move it back. The jobs of a minor version
+  # run one at a time, the workflow only waits for the runs of the same tag,
+  # and two patch releases could both read the old marker and the older one
+  # upload last otherwise. A third job replaces a waiting one, which leaves
+  # the marker behind until a rerun, but never moves it back.
   publish-marker:
     runs-on: ubuntu-latest
     if: github.repository == 'containers/conmon-rs'
     needs: release
+    concurrency:
+      group: ${{ github.workflow }}-publish-marker-${{ needs.release.outputs.minor }}
+      cancel-in-progress: false
     env:
       TAG: ${{ github.ref_name }}
     steps:

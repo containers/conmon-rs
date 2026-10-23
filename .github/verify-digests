@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Check that the images pinned as REGISTRY/REPOSITORY:TAG@DIGEST have the
+# digest of the current index of their tag. A pull ignores the tag next to a
+# digest, so a bump of the tag without the digest would go unnoticed. The
+# registries answer HEAD requests of manifests without counting them against
+# their pull rate limits.
+ACCEPT=application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json
+# Retries timeouts and the transient errors of the server, not the errors of
+# the client like an unknown tag.
+CURL=(curl -sS --retry 5 --retry-delay 3)
+
+# The digest of the index of a tag, with an anonymous token of the realm the
+# registry names in its challenge. The caller checks the result, which turns
+# off set -e here.
+index_digest() {
+    local registry=$1 repository=$2 tag=$3 url challenge realm service token
+    url=https://$registry/v2/$repository/manifests/$tag
+    challenge=$("${CURL[@]}" -I -o /dev/null -w '%header{www-authenticate}' -H "Accept: $ACCEPT" "$url") ||
+        return 1
+    realm=$(sed -n 's/.*realm="\([^"]*\)".*/\1/p' <<<"$challenge")
+    service=$(sed -n 's/.*service="\([^"]*\)".*/\1/p' <<<"$challenge")
+    if [[ -z $realm ]]; then
+        echo "$registry asks for no bearer token: $challenge" >&2
+        return 1
+    fi
+    token=$("${CURL[@]}" -f -G "$realm" --data-urlencode "service=$service" \
+        --data-urlencode "scope=repository:$repository:pull" | jq -er '.token // .access_token') ||
+        return 1
+    "${CURL[@]}" -f -I -o /dev/null -w '%header{docker-content-digest}' \
+        -H "Accept: $ACCEPT" -H "Authorization: Bearer $token" "$url"
+}
+
+if (($# == 0)); then
+    echo "usage: $0 REGISTRY/REPOSITORY:TAG@DIGEST..." >&2
+    exit 1
+fi
+
+FAILED=0
+for REF in "$@"; do
+    NAME=${REF%@*}
+    PINNED=${REF#*@}
+    REGISTRY=${NAME%%/*}
+    PATH_TAG=${NAME#*/}
+    REPOSITORY=${PATH_TAG%:*}
+    TAG=${PATH_TAG##*:}
+    if [[ $REF != *@sha256:* || $REGISTRY != *.* || $PATH_TAG != *:* ]]; then
+        echo "$REF is not REGISTRY/REPOSITORY:TAG@sha256:DIGEST" >&2
+        FAILED=1
+        continue
+    fi
+    # Docker Hub serves the API under another name.
+    if [[ $REGISTRY == docker.io ]]; then
+        REGISTRY="registry-1.docker.io"
+    fi
+    if ! CURRENT=$(index_digest "$REGISTRY" "$REPOSITORY" "$TAG"); then
+        echo "Unable to read the digest of $NAME" >&2
+        FAILED=1
+        continue
+    fi
+    if [[ $CURRENT == "$PINNED" ]]; then
+        echo "$NAME is pinned to its current digest $PINNED"
+    else
+        echo "$NAME is pinned to $PINNED, but the tag has the digest ${CURRENT:-none}, update the digest" >&2
+        FAILED=1
+    fi
+done
+exit "$FAILED"

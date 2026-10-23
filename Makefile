@@ -1,5 +1,5 @@
 RUNTIME_PATH ?= /usr/bin/runc
-PROTO_PATH ?= "conmon-rs/server/proto"
+PROTO_PATH ?= conmon-rs/server/proto
 BINARY := conmonrs
 CONTAINER_RUNTIME ?= podman
 BUILD_DIR ?= .build
@@ -36,16 +36,27 @@ CI_TAG ?=
 # The recipes read it from the environment, quoted.
 export CI_TAG
 GOLANGCI_LINT_VERSION := v2.15.0
+# The images run pinned by the digest of their index, which a bump of the
+# version updates as well, see dependencies.yaml and verify-digests.
 PRETTIER_VERSION := 3.9.10
 NODE_VERSION := 24.22.1
-PRETTIER = $(CONTAINER_RUNTIME) run --rm -v ${PWD}:/w:z -w /w --entrypoint npx docker.io/library/node:$(NODE_VERSION)-slim \
-	--yes prettier@$(PRETTIER_VERSION)
+NODE_DIGEST := sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
+NODE_IMAGE := docker.io/library/node:$(NODE_VERSION)-slim@$(NODE_DIGEST)
+PRETTIER = $(CONTAINER_RUNTIME) run --rm -v $(CURDIR):/w:z -w /w --entrypoint npx \
+	$(NODE_IMAGE) --yes prettier@$(PRETTIER_VERSION)
 ZEITGEIST_VERSION := v0.8.0
+# The sha256 of the checksums.txt of the release, a bump of the version
+# updates it as well, see .install.zeitgeist.
+ZEITGEIST_CHECKSUMS_SHA256 := ec1a11bcdb987d7095ec8beb87c339b99671455be523af17e41b3402ae3407d4
 ACTIONLINT_VERSION := v1.7.12
 ZIZMOR_VERSION := 1.31.1
+ZIZMOR_DIGEST := sha256:42d409dbb851d4c5d35a058cf042b828bea1e3f2884378c526eb0974780e18d9
+ZIZMOR_IMAGE := ghcr.io/zizmorcore/zizmor:$(ZIZMOR_VERSION)@$(ZIZMOR_DIGEST)
 # Extra zizmor flags, CI passes --format=github for annotations.
 ZIZMOR_FLAGS ?=
 GRYPE_VERSION := v0.121.0
+GRYPE_DIGEST := sha256:621d56d1d68106b787022c81546f7e0a36202a25d1239f0c20195fab8c16f7ea
+GRYPE_IMAGE := docker.io/anchore/grype:$(GRYPE_VERSION)@$(GRYPE_DIGEST)
 # The SPDX SBOMs make scan checks, like the conmonrs.$ARCH.spdx.json files of
 # the bucket.
 SBOMS ?=
@@ -113,17 +124,40 @@ integration: .install.ginkgo $(if $(CONMON_BINARY),,release) ## Run the integrat
 .PHONY: lint
 lint: lint-rust lint-go lint-shell ## Lint Rust, Go and shell sources.
 
+# The checks of the lint-rust job of CI, which runs each target on its own.
+# lint-msrv is left out, it needs the rust-version toolchain of rustup.
 .PHONY: lint-rust
-lint-rust: ## Lint the Rust sources.
+lint-rust: lint-rustfmt lint-clippy lint-rustdoc ## Lint the Rust sources.
+
+.PHONY: lint-rustfmt
+lint-rustfmt: ## Check the formatting of the Rust sources.
 	cargo fmt && git diff --exit-code
-	cargo clippy --all-targets -- -D warnings
-	cargo clippy --all-targets --all-features -- -D warnings
+
+# The default features are what gets shipped, all features cover the optional
+# tracing code.
+.PHONY: lint-clippy
+lint-clippy: ## Lint the Rust sources and the fuzz targets with clippy.
+	cargo clippy --locked --all-targets -- -D warnings
+	cargo clippy --locked --all-targets --all-features -- -D warnings
+	cargo clippy --locked -p conmonrs-fuzz --all-targets -- -D warnings
+
+# Like the gh-pages workflow publishes it, with the private items, which
+# document the server internals.
+.PHONY: lint-rustdoc
+lint-rustdoc: ## Check the documentation of the Rust sources.
+	RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --features tracing --document-private-items
+
+# The oldest toolchain the locked dependencies support, installed through
+# rustup.
+.PHONY: lint-msrv
+lint-msrv: ## Check the Rust sources with the rust-version toolchain of Cargo.toml.
+	MSRV=$$(sed -n 's/^rust-version = "\(.*\)"$$/\1/p' Cargo.toml) && \
+	cargo "+$$MSRV" check --locked --all-targets --all-features
 
 .PHONY: lint-go
 lint-go: .install.golangci-lint ## Lint the Go sources.
 	$(GOTOOLS_BINDIR)/golangci-lint version
-	$(GOTOOLS_BINDIR)/golangci-lint linters
-	GL_DEBUG=gocritic $(GOTOOLS_BINDIR)/golangci-lint run
+	$(GOTOOLS_BINDIR)/golangci-lint run
 	cd $(INTEGRATION_DIR) && $(abspath $(GOTOOLS_BINDIR))/golangci-lint run
 
 .PHONY: lint-shell
@@ -136,8 +170,8 @@ lint-shell: ## Lint the shell scripts, the files whose first line is a sh or bas
 .PHONY: lint-workflows
 lint-workflows: ## Lint the GitHub workflows with actionlint and zizmor.
 	go run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
-	$(CONTAINER_RUNTIME) run --rm -e GH_TOKEN -v ${PWD}:/w:z,ro -w /w ghcr.io/zizmorcore/zizmor:$(ZIZMOR_VERSION) \
-		$(ZIZMOR_FLAGS) .
+	$(CONTAINER_RUNTIME) run --rm -e GH_TOKEN -v $(CURDIR):/w:z,ro -w /w \
+		$(ZIZMOR_IMAGE) $(ZIZMOR_FLAGS) .
 
 .PHONY: lint-typos
 lint-typos: ## Check the spelling, typos has to be installed.
@@ -147,13 +181,22 @@ lint-typos: ## Check the spelling, typos has to be installed.
 verify: verify-dependencies verify-spec verify-vex verify-proto verify-prettier verify-deny lint-typos lint-workflows ## Run the checks of CI besides make lint and the tests.
 
 .PHONY: verify-dependencies
-verify-dependencies: $(GOTOOLS_BINDIR)/zeitgeist ## Verify the local dependencies.
+verify-dependencies: .install.zeitgeist ## Verify the local dependencies.
 	$(GOTOOLS_BINDIR)/zeitgeist validate --local-only --base-path . --config dependencies.yaml
 
 # Reads the GitHub API, set GITHUB_TOKEN for its rate limit.
 .PHONY: verify-dependencies-upstream
-verify-dependencies-upstream: $(GOTOOLS_BINDIR)/zeitgeist ## Check the dependencies for newer upstream versions.
+verify-dependencies-upstream: .install.zeitgeist ## Check the dependencies for newer upstream versions.
 	$(GOTOOLS_BINDIR)/zeitgeist validate --local-only=false --base-path . --config dependencies.yaml
+
+# zeitgeist only checks the tags, which a pull ignores next to a digest. The
+# image of the smoke test is the one of the build-static workflow. A tag which
+# moved fails as well, so the advisories workflow runs it, not the pull
+# requests.
+.PHONY: verify-digests
+verify-digests: ## Verify that the pinned images have the current digests of their tags.
+	.github/verify-digests $(NODE_IMAGE) $(ZIZMOR_IMAGE) $(GRYPE_IMAGE) \
+		"$$(sed -n 's/^ *IMAGE: //p' .github/workflows/build-static.yml)"
 
 # Also catches new generated files. make removes the intermediate
 # internal/proto/conmon.capnp only after this recipe.
@@ -189,7 +232,7 @@ verify-vex: ## Verify the OpenVEX document of the binaries.
 .PHONY: scan
 scan: ## Scan $SBOMS for vulnerabilities with grype, applying the OpenVEX document.
 	CONTAINER_RUNTIME="$(CONTAINER_RUNTIME)" \
-	GRYPE_IMAGE=docker.io/anchore/grype:$(GRYPE_VERSION) \
+	GRYPE_IMAGE=$(GRYPE_IMAGE) \
 	GRYPE_DB_DIR="$(abspath $(BUILD_DIR))/grype-db" \
 		.github/scan-sboms $(SBOMS)
 
@@ -212,25 +255,47 @@ prettier: ## Prettify supported files.
 		GOBIN=$(abspath $(GOTOOLS_BINDIR)) go install "github.com/onsi/ginkgo/v2/ginkgo@$$VERSION"; \
 	fi
 
+# The release binaries of golangci-lint and zeitgeist, checked against the
+# checksums of their release, see .github/install-binary. One of another
+# version gets replaced.
+TOOLS_OS = $(shell uname -s | tr '[:upper:]' '[:lower:]')
+TOOLS_ARCH = $(shell uname -m | sed -e 's/^x86_64$$/amd64/' -e 's/^aarch64$$/arm64/')
+
+# The releases of golangci-lint are immutable, the checksums file of one
+# cannot change.
+GOLANGCI_LINT_RELEASE = https://github.com/golangci/golangci-lint/releases/download/$(GOLANGCI_LINT_VERSION)
+GOLANGCI_LINT_NAME = golangci-lint-$(GOLANGCI_LINT_VERSION:v%=%)-$(TOOLS_OS)-$(TOOLS_ARCH)
+
 .PHONY: .install.golangci-lint
 .install.golangci-lint:
-	GOBIN=$(abspath $(GOTOOLS_BINDIR)) \
-		go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	if [ "$$("$(GOTOOLS_BINDIR)/golangci-lint" version --short 2>/dev/null)" != "$(GOLANGCI_LINT_VERSION:v%=%)" ]; then \
+		.github/install-binary -m "$(GOLANGCI_LINT_NAME)/golangci-lint" \
+			"$(GOLANGCI_LINT_RELEASE)/$(GOLANGCI_LINT_NAME).tar.gz" \
+			"$(GOLANGCI_LINT_RELEASE)/golangci-lint-$(GOLANGCI_LINT_VERSION:v%=%)-checksums.txt" \
+			"$(GOTOOLS_BINDIR)/golangci-lint"; \
+	fi
 
-# Built from source for any architecture, the Go checksum database verifies
-# the module. The remote variant also checks the upstream versions.
-$(GOTOOLS_BINDIR)/zeitgeist:
-	GOBIN=$(abspath $(GOTOOLS_BINDIR)) \
-		go install sigs.k8s.io/zeitgeist/remote/zeitgeist@$(ZEITGEIST_VERSION)
+# The remote variant of zeitgeist, which also checks the upstream versions.
+# Its releases are not immutable, so the checksums file of the release is
+# pinned by ZEITGEIST_CHECKSUMS_SHA256, which a bump of ZEITGEIST_VERSION
+# updates as well, the install fails otherwise.
+ZEITGEIST_RELEASE = https://github.com/kubernetes-sigs/zeitgeist/releases/download/$(ZEITGEIST_VERSION)
+
+.PHONY: .install.zeitgeist
+.install.zeitgeist:
+	if [ "$$("$(GOTOOLS_BINDIR)/zeitgeist" version 2>/dev/null | awk '$$1 == "GitVersion:" { print $$2 }')" != "$(ZEITGEIST_VERSION)" ]; then \
+		.github/install-binary -s "$(ZEITGEIST_CHECKSUMS_SHA256)" \
+			"$(ZEITGEIST_RELEASE)/zeitgeist-remote-$(TOOLS_ARCH)-$(TOOLS_OS)" \
+			"$(ZEITGEIST_RELEASE)/checksums.txt" "$(GOTOOLS_BINDIR)/zeitgeist"; \
+	fi
 
 .PHONY: clean
 clean: ## Cleanup the project files.
 	rm -rf target/ result
 
 .INTERMEDIATE: internal/proto/conmon.capnp
-internal/proto/conmon.capnp:
-	cat $(PROTO_PATH)/conmon.capnp $(PROTO_PATH)/go-patch > $@
-
+internal/proto/conmon.capnp: $(PROTO_PATH)/conmon.capnp $(PROTO_PATH)/go-patch
+	cat $^ > $@
 
 .PHONY: update-proto
 update-proto: internal/proto/conmon.capnp ## Update the Cap'n Proto protocol.

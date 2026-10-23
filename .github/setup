@@ -70,9 +70,11 @@ EOT
 
     sudo systemctl enable --now crio.service
 
-    # Validate if the correct config is being loaded
-    sudo crio status config | grep -q 'default_runtime = "crun"'
-    sudo crio status config | grep -q 'runtime_type = "pod"'
+    # Validate if the correct config is being loaded. grep -q would stop
+    # reading at the first match, which fails the pipe with SIGPIPE if crio
+    # writes more.
+    sudo crio status config | grep 'default_runtime = "crun"' >/dev/null
+    sudo crio status config | grep 'runtime_type = "pod"' >/dev/null
 }
 
 install_critest() {

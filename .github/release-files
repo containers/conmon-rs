@@ -19,19 +19,21 @@ PROVENANCE=https://slsa.dev/provenance/v1
 SPDX=https://spdx.dev/Document/v2.3
 OPENVEX=https://openvex.dev/ns/v0.2.0
 
-# Fail right away for a commit from before the binaries got attested, whose
-# attestations would never show up in the bucket. Other errors of the API stay
-# errors.
+# Fail right away for a commit from before the binaries got attested with
+# their VEX document, whose files would never show up in the bucket. Other
+# errors of the API stay errors.
 check() {
-    local output
-    if ! output=$(gh api "repos/$REPO/contents/.github/workflows/publish-static.yml?ref=$SHA" --silent 2>&1); then
-        if [[ $output == *"(HTTP 404)"* ]]; then
-            echo "::error::$SHA is from before the binaries got attested, tag a newer commit." >&2
-        else
-            echo "::error::Unable to look up the workflows of $SHA: $output" >&2
+    local file output
+    for file in .github/workflows/publish-static.yml vex/conmonrs.openvex.json; do
+        if ! output=$(gh api "repos/$REPO/contents/$file?ref=$SHA" --silent 2>&1); then
+            if [[ $output == *"(HTTP 404)"* ]]; then
+                echo "::error::$SHA is from before the binaries got attested with their VEX document, it has no $file, tag a newer commit." >&2
+            else
+                echo "::error::Unable to look up $file of $SHA: $output" >&2
+            fi
+            exit 1
         fi
-        exit 1
-    fi
+    done
 }
 
 # The ci run of the commit uploads the binaries, which may take as long as its
