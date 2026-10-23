@@ -102,13 +102,13 @@ jobs:
         with:
           subject-path: ${{ github.sha }}/conmonrs.${{ inputs.arch }}
       # The SPDX document gets the predicate type https://spdx.dev/Document/v2.3.
-      - uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         id: sbom
         if: steps.bucket.outputs.upload == 'true'
         with:
           subject-path: ${{ github.sha }}/conmonrs.${{ inputs.arch }}
           sbom-path: ${{ github.sha }}/conmonrs.${{ inputs.arch }}.spdx.json
-      - uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         id: vex
         if: steps.bucket.outputs.upload == 'true'
         with:
