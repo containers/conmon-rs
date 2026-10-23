@@ -4,6 +4,7 @@ use nix::{
     fcntl::{OFlag, open},
     sys::{
         prctl,
+        resource::{Resource, getrlimit, rlim_t, setrlimit},
         stat::{Mode, umask},
     },
     unistd::write,
@@ -136,6 +137,36 @@ pub fn disable_thp() {
 /// The OOM score adjustment the server started with, see [`reset_inherited`].
 static INHERITED_OOM_SCORE: OnceLock<Box<[u8]>> = OnceLock::new();
 
+/// The soft and hard limit of open files the server started with, if it
+/// raised the soft one, see [`raise_nofile_limit`].
+static INHERITED_NOFILE: OnceLock<(rlim_t, rlim_t)> = OnceLock::new();
+
+/// Raise the soft limit of open files to the hard one. The server holds the
+/// pipes, log files, pidfds and sockets of every container of a pod and the
+/// descriptors which clients pass, while Go programs like CRI-O start it
+/// with the soft limit they started with, often 1024. The runtimes and the
+/// cleanup commands get the limits the server started with, see
+/// [`reset_inherited`].
+pub fn raise_nofile_limit() {
+    let (soft, hard) = match getrlimit(Resource::RLIMIT_NOFILE) {
+        Ok(limits) => limits,
+        Err(e) => {
+            // Before the logging gets set up.
+            eprintln!("Unable to get the open files limit: {e}");
+            return;
+        }
+    };
+    if soft >= hard {
+        return;
+    }
+    match setrlimit(Resource::RLIMIT_NOFILE, hard, hard) {
+        Ok(()) => {
+            let _ = INHERITED_NOFILE.set((soft, hard));
+        }
+        Err(e) => eprintln!("Unable to raise the open files limit to {hard}: {e}"),
+    }
+}
+
 /// Remember the OOM score adjustment the server started with, before it
 /// protects itself with [`set_oom_score`].
 pub fn save_oom_score() {
@@ -147,24 +178,26 @@ pub fn save_oom_score() {
     }
 }
 
-/// Give a child the OOM score adjustment and the transparent huge pages
-/// setting the server started with instead of its own, see
-/// [`save_oom_score`] and [`disable_thp`]. The runtimes pass them on to the
-/// container processes, an exec would be the last process the kernel picks
-/// otherwise. conmon resets the OOM score of its runtime the same way. Only
-/// for the runtimes and cleanup commands, the pause process keeps the ones
-/// of the server.
+/// Give a child the OOM score adjustment, the transparent huge pages setting
+/// and the open files limits the server started with instead of its own, see
+/// [`save_oom_score`], [`disable_thp`] and [`raise_nofile_limit`]. The
+/// runtimes pass them on to the container processes, an exec would be the
+/// last process the kernel picks otherwise. conmon resets the OOM score of
+/// its runtime the same way. Only for the runtimes and cleanup commands, the
+/// pause process keeps the ones of the server. Add it after the other
+/// pre_exec hooks, those run in order and may need the raised limit.
 #[expect(unsafe_code, reason = "a pre_exec hook")]
 pub fn reset_inherited(cmd: &mut Command) {
     let score: Option<&'static [u8]> = INHERITED_OOM_SCORE.get().map(|score| &**score);
     let thp_disabled = THP_DISABLED.load(Ordering::Relaxed);
-    if score.is_none() && !thp_disabled {
+    let nofile = INHERITED_NOFILE.get().copied();
+    if score.is_none() && !thp_disabled && nofile.is_none() {
         return;
     }
-    // SAFETY: the hook allocates nothing and only calls open, write, close
-    // and prctl, which are async signal safe. Raising the score and enabling
-    // huge pages need no privileges, a failure keeps the setting of the
-    // server, as before.
+    // SAFETY: the hook allocates nothing and only calls open, write, close,
+    // prctl and setrlimit, which are async signal safe. Raising the score,
+    // enabling huge pages and lowering a limit need no privileges, a
+    // failure keeps the setting of the server, as before.
     unsafe {
         cmd.pre_exec(move || {
             if let Some(score) = score
@@ -179,8 +212,17 @@ pub fn reset_inherited(cmd: &mut Command) {
             if thp_disabled {
                 let _ = prctl::set_thp_disable(false);
             }
+            restore_nofile(nofile);
             Ok(())
         });
+    }
+}
+
+/// Set the open files limits of the process, if any, async signal safe for a
+/// pre_exec hook. A failure keeps the ones of the server.
+fn restore_nofile(limits: Option<(rlim_t, rlim_t)>) {
+    if let Some((soft, hard)) = limits {
+        let _ = setrlimit(Resource::RLIMIT_NOFILE, soft, hard);
     }
 }
 
@@ -204,6 +246,31 @@ mod tests {
         // Anything else fails.
         assert!(set_oom_score_at(&dir.path().join("missing").join("file"), "0").is_err());
         assert!(set_oom_score_at(dir.path(), "0").is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[expect(unsafe_code, reason = "a pre_exec hook")]
+    async fn restore_nofile_sets_the_child_limit() -> Result<()> {
+        // Like a server which raised the soft limit it started with. Only the
+        // child gets the lower one, the limits of the tests stay.
+        let limits = getrlimit(Resource::RLIMIT_NOFILE)?;
+        let inherited = limits.0.min(4096) / 2;
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "ulimit -Sn"]);
+        // SAFETY: the hook only calls setrlimit, see `reset_inherited`.
+        unsafe {
+            cmd.pre_exec(move || {
+                restore_nofile(Some((inherited, limits.1)));
+                Ok(())
+            });
+        }
+        let output = cmd.output().await?;
+        assert_eq!(
+            String::from_utf8(output.stdout)?.trim(),
+            inherited.to_string()
+        );
+        assert_eq!(getrlimit(Resource::RLIMIT_NOFILE)?, limits);
         Ok(())
     }
 

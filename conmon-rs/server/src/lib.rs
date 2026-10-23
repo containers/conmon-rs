@@ -116,6 +116,8 @@ mod tail;
 #[cfg(feature = "tracing")]
 mod telemetry;
 mod terminal;
+#[cfg(test)]
+mod test_util;
 #[cfg(all(target_os = "linux", target_arch = "s390x", target_env = "musl"))]
 mod unwind;
 mod version;

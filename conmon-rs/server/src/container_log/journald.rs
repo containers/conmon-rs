@@ -3,10 +3,17 @@ use crate::{
     container_log::{Line, Logger},
     journal::{self, Entry, Priority, Wait},
 };
-use anyhow::{Context, Result};
-use std::{io::ErrorKind, path::Path, sync::Arc};
+use anyhow::{Context, Result, bail};
+use std::{
+    io::ErrorKind,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tokio::task;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Writes the container output to the journal with the container ID fields
 /// and priorities conmon uses, so that `journalctl CONTAINER_ID=<id>` finds
@@ -21,6 +28,9 @@ pub struct JournaldLogger {
 struct Shared {
     /// The fields of every entry, encoded once.
     fields: Entry,
+    /// Whether the last send failed, so that a journal which is unavailable
+    /// gets reported once and not for every chunk of output.
+    failing: AtomicBool,
     /// A temporary socket instead of the one of journald.
     #[cfg(test)]
     socket: Option<std::path::PathBuf>,
@@ -43,20 +53,87 @@ impl JournaldLogger {
     /// The field marking a line which had no ending yet.
     const PARTIAL_FIELD: (&'static str, &'static str) = ("CONTAINER_PARTIAL_MESSAGE", "true");
 
-    pub fn new(id: &str) -> Self {
+    /// The fields the logger sets itself, which a label cannot replace.
+    const OWN_FIELDS: [&'static str; 8] = [
+        "MESSAGE",
+        "PRIORITY",
+        "CONTAINER_ID",
+        "CONTAINER_ID_FULL",
+        "CONTAINER_NAME",
+        "CONTAINER_TAG",
+        "SYSLOG_IDENTIFIER",
+        Self::PARTIAL_FIELD.0,
+    ];
+
+    /// The most labels of a logger. journald drops entries with more than
+    /// 1024 fields (`ENTRY_FIELDS_MAX`), which would lose every line.
+    const MAX_LABELS: usize = 256;
+
+    /// The most bytes of the names and values of all labels together, which
+    /// every entry carries.
+    const MAX_LABEL_BYTES: usize = 64 * 1024;
+
+    /// A logger with the fields conmon writes: the container ID, the name
+    /// and the tag if given, which is the syslog identifier as well, and the
+    /// labels.
+    pub fn new<'a>(
+        id: &str,
+        name: &str,
+        tag: &str,
+        labels: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Self> {
         let short_id: String = id.chars().take(Self::SHORT_ID_LEN).collect();
         let mut fields = Entry::default();
         fields
             .field("CONTAINER_ID_FULL", id)
-            .field("CONTAINER_ID", short_id)
-            .field("SYSLOG_IDENTIFIER", "conmonrs");
-        Self {
+            .field("CONTAINER_ID", short_id);
+        if !name.is_empty() {
+            fields.field("CONTAINER_NAME", name);
+        }
+        if tag.is_empty() {
+            fields.field("SYSLOG_IDENTIFIER", journal::IDENTIFIER);
+        } else {
+            fields
+                .field("CONTAINER_TAG", tag)
+                .field("SYSLOG_IDENTIFIER", tag);
+        }
+        let (mut count, mut bytes) = (0, 0);
+        for (key, value) in labels {
+            Self::validate_label(key)?;
+            count += 1;
+            bytes += key.len() + value.len();
+            if count > Self::MAX_LABELS || bytes > Self::MAX_LABEL_BYTES {
+                bail!(
+                    "too many journald labels: at most {} with {} bytes together",
+                    Self::MAX_LABELS,
+                    Self::MAX_LABEL_BYTES
+                );
+            }
+            fields.field(key, value);
+        }
+        Ok(Self {
             shared: Arc::new(Shared {
                 fields,
+                failing: AtomicBool::new(false),
                 #[cfg(test)]
                 socket: None,
             }),
+        })
+    }
+
+    /// Check that a label is a field name which the journal takes and which
+    /// the logger does not set itself.
+    fn validate_label(key: &str) -> Result<()> {
+        if !Entry::valid_key(key) {
+            bail!(
+                "invalid journald label {key:?}: use uppercase letters, digits and \
+                 underscores, starting with a letter, at most 64 characters"
+            );
         }
+        if Self::OWN_FIELDS.contains(&key) {
+            bail!("journald label {key:?} replaces a field of the logger");
+        }
+        Ok(())
     }
 
     /// The journal priority of the output of a pipe.
@@ -70,11 +147,11 @@ impl JournaldLogger {
     /// Send the lines to the journal and return how many of them it took
     /// or got dropped. A journal which is unavailable, for example while it
     /// restarts, must not end the output of the container, so failures are
-    /// only logged, once per chunk. Without a journal, or with one which did
-    /// not take a line in time, the rest of the chunk is dropped right away
-    /// instead of failing the same way line by line. Without waiting, the
-    /// sending stops at the first line which the journal does not take right
-    /// away.
+    /// only logged, once until a send succeeds again. Without a journal, or
+    /// with one which did not take a line in time, the rest of the chunk is
+    /// dropped right away instead of failing the same way line by line.
+    /// Without waiting, the sending stops at the first line which the
+    /// journal does not take right away.
     fn send(shared: &Shared, pipe: Pipe, lines: &[Line], wait: Wait) -> usize {
         let priority = Self::priority(pipe);
         let mut entry = Entry::default();
@@ -101,8 +178,16 @@ impl JournaldLogger {
             }
             failed += 1;
         }
-        if let Some(e) = last_error {
-            warn!("Unable to write {failed} lines to the journal, dropping them: {e}");
+        match last_error {
+            Some(e) if !shared.failing.swap(true, Ordering::Relaxed) => warn!(
+                "Unable to write {failed} lines to the journal, dropping lines \
+                 until it takes them again: {e}"
+            ),
+            Some(e) => debug!("Unable to write {failed} lines to the journal: {e}"),
+            None if handled > 0 && shared.failing.swap(false, Ordering::Relaxed) => {
+                info!("The journal takes lines again");
+            }
+            None => {}
         }
         handled
     }
@@ -153,7 +238,7 @@ mod tests {
 
     impl JournaldLogger {
         fn with_socket(id: &str, socket: &Path) -> Self {
-            let mut logger = Self::new(id);
+            let mut logger = Self::new(id, "", "", []).expect("logger");
             Arc::get_mut(&mut logger.shared)
                 .expect("unshared logger")
                 .socket = Some(socket.to_owned());
@@ -183,8 +268,8 @@ mod tests {
     }
 
     #[test]
-    fn short_ids_are_kept() {
-        let logger = JournaldLogger::new("abc");
+    fn short_ids_are_kept() -> Result<()> {
+        let logger = JournaldLogger::new("abc", "", "", [])?;
         assert_eq!(
             decode(logger.shared.fields.as_bytes()),
             [
@@ -193,6 +278,52 @@ mod tests {
                 field("SYSLOG_IDENTIFIER", "conmonrs"),
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn name_tag_and_labels_like_conmon() -> Result<()> {
+        let labels = [("POD", "web"), ("A_1", "")];
+        let logger = JournaldLogger::new("abc", "k8s_ctr", "tag", labels)?;
+        assert_eq!(
+            decode(logger.shared.fields.as_bytes()),
+            [
+                field("CONTAINER_ID_FULL", "abc"),
+                field("CONTAINER_ID", "abc"),
+                field("CONTAINER_NAME", "k8s_ctr"),
+                field("CONTAINER_TAG", "tag"),
+                field("SYSLOG_IDENTIFIER", "tag"),
+                field("POD", "web"),
+                field("A_1", ""),
+            ]
+        );
+
+        // As many labels as journald takes, with names and values within
+        // the limit, but not more.
+        let names: Vec<String> = (0..=JournaldLogger::MAX_LABELS)
+            .map(|i| format!("L{i}"))
+            .collect();
+        let labels = |n: usize| names[..n].iter().map(|name| (name.as_str(), "v"));
+        assert!(JournaldLogger::new("abc", "", "", labels(JournaldLogger::MAX_LABELS)).is_ok());
+        let err = JournaldLogger::new("abc", "", "", labels(JournaldLogger::MAX_LABELS + 1))
+            .err()
+            .context("too many labels")?;
+        assert!(
+            err.to_string().contains("too many journald labels"),
+            "{err}"
+        );
+        let large = "v".repeat(JournaldLogger::MAX_LABEL_BYTES);
+        assert!(JournaldLogger::new("abc", "", "", [("LARGE", large.as_str())]).is_err());
+
+        let long = "A".repeat(65);
+        let invalid = ["", "lower", "_TRUSTED", "1A", "A-B", &long, "MESSAGE"];
+        for key in invalid {
+            assert!(
+                JournaldLogger::new("abc", "", "", [(key, "x")]).is_err(),
+                "{key}"
+            );
+        }
+        Ok(())
     }
 
     /// The entries carry the message, the priority of the pipe, the
@@ -290,13 +421,24 @@ mod tests {
         Ok(())
     }
 
-    /// Failing sends get logged and do not fail the write.
+    /// Failing sends get logged once and do not fail the write.
     #[tokio::test]
     async fn send_failures_are_not_fatal() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let mut logger = JournaldLogger::with_socket("test", &dir.path().join("missing"));
+        let path = dir.path().join("socket");
+        let mut logger = JournaldLogger::with_socket("test", &path);
         let mut buffer = LineBuffer::default();
         let lines = buffer.push(Pipe::StdOut, b"lost\n");
-        logger.write_lines(Pipe::StdOut, &lines).await
+        logger.write_lines(Pipe::StdOut, &lines).await?;
+        assert!(logger.shared.failing.load(Ordering::Relaxed));
+        logger.write_lines(Pipe::StdOut, &lines).await?;
+        assert!(logger.shared.failing.load(Ordering::Relaxed));
+
+        // The journal is back.
+        let socket = UnixDatagram::bind(&path)?;
+        logger.write_lines(Pipe::StdOut, &lines).await?;
+        assert!(!logger.shared.failing.load(Ordering::Relaxed));
+        assert_eq!(received(&socket)?.len(), 1);
+        Ok(())
     }
 }

@@ -1,8 +1,9 @@
 //! The idle timeout of streaming connections.
 
+use crate::mutex::lock;
 use std::{
     future::{self, Future},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, Mutex},
 };
 use tokio::{
     select,
@@ -21,11 +22,11 @@ impl Activity {
 
     /// The connection is active now.
     pub fn touch(&self) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
+        *lock(&self.0) = Instant::now();
     }
 
     fn last(&self) -> Instant {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        *lock(&self.0)
     }
 
     /// Resolves once the connection was not active for the timeout. A timeout

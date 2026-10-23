@@ -62,8 +62,9 @@ through the environment variable in parentheses:
 When the server forks, the parent writes the child's PID to `pidfile` in the
 runtime directory and exits. The server listens on `conmon.sock` in the runtime
 directory, lowers its own OOM score to -1000, turns transparent huge pages off
-for itself and acts as child subreaper for the containers. The OCI runtime gets
-the OOM score and the huge pages setting the server started with, so the
+for itself, raises its soft limit of open files to the hard one and acts as
+child subreaper for the containers. The OCI runtime gets the OOM score, the
+huge pages setting and the open files limits the server started with, so the
 container processes get the OOM score of the client unless it sets
 `process.oomScoreAdj` in the OCI configuration, like CRI-O does.
 
@@ -240,6 +241,8 @@ clients check before they rely on them:
   server with `portforward` applies the one of port forwarding.
 - `streamingprotocols`: exec and attach sessions speak SPDY/3.1 and the
   WebSocket protocols before `v5.channel.k8s.io`.
+- `journaldfields`: the `journald` log driver writes its `containerName`,
+  `tag` and `labels`, see [Logging](#logging).
 
 ### Streaming security
 
@@ -272,24 +275,28 @@ descriptors as `SCM_RIGHTS` ancillary data and one little endian `u64`
 `u64` slot per descriptor. On error the lower 32 bits of the first word are
 all ones and the rest of the message is the error text. Received descriptors
 are closed when the connection ends or on an empty request. A connection holds
-at most 1024 descriptors which no request took yet, a request beyond that
-fails. The full
-description lives in the module documentation of
+at most 1024 descriptors which no request took yet, and all connections
+together a quarter of the open files limit of the server, a request beyond
+that fails. The full description lives in the module documentation of
 [fd_socket.rs](conmon-rs/server/src/fd_socket.rs).
 
 ## Logging
 
 Container output goes to the log drivers requested per container. When the
 next entry would exceed the configured maximum size, the server replaces the
-log file with a new empty one, like conmon: it creates `<path>.tmp` and renames
-it over the path, so that a reader which follows the log, like
+log file with a new empty one, like conmon: it creates `.<name>.conmonrs-tmp`
+next to it, a name which the log cleanup of the kubelet does not match, and
+renames it over the path, so that a reader which follows the log, like
 `kubectl logs -f`, reads the old file to its end first. `reopenLogContainer`,
 which CRI-O calls after the kubelet rotated the log, starts a new file at the
-path the same way.
+path the same way. The server appends to the log files, so a file which gets
+truncated in place, for example to free disk space, continues at its new end.
+A write which fails in the middle of an entry, like on a full disk, drops the
+rest of it, the next entry starts on a line of its own.
 
 - `containerRuntimeInterface`: the CRI log format, one line per entry with an
-  RFC 3339 timestamp, the stream, a `P` (partial) or `F` (full) marker and the
-  line.
+  RFC 3339 timestamp in nanoseconds of when the server read the output, the
+  stream, a `P` (partial) or `F` (full) marker and the line.
 - `json`: one JSON object per line with `timestamp` (seconds since the epoch),
   `pipe` (`stdout` or `stderr`), `message` (the line without its ending) and
   `partial: true` when the line had no ending yet.
@@ -298,7 +305,13 @@ path the same way.
   at priority info for stdout and error for stderr, so that
   `journalctl CONTAINER_ID_FULL=<id>` or `CONTAINER_ID=<short id>` shows the
   output like with conmon. A line which had no ending yet carries
-  `CONTAINER_PARTIAL_MESSAGE=true`. The maximum size does not apply.
+  `CONTAINER_PARTIAL_MESSAGE=true`. The maximum size does not apply. Like the
+  options of conmon, `containerName` adds `CONTAINER_NAME`, `tag` adds
+  `CONTAINER_TAG` and replaces the `SYSLOG_IDENTIFIER`, and `labels` add
+  fields of their own, whose names follow the rules of the journal: uppercase
+  letters, digits and underscores, starting with a letter, at most 64
+  characters. A container takes at most 256 labels with 64 KiB of names and
+  values together, journald drops entries with more than 1024 fields.
 
 The JSON and journald drivers collect whole lines across reads, so a line
 written in several pieces or a multi byte character split by a read still
@@ -320,18 +333,19 @@ container output only goes to the journal with the `journald` log driver of
 the container, sent by the same process:
 
 ```console
-> journalctl _COMM=conmonrs
+> journalctl -t conmonrs
 > journalctl CONTAINER_ID_FULL=<id>
 ```
 
 The first command shows the logs of the server together with the output of
-the containers which use the `journald` log driver, the second one only the
-output of one container.
+the containers which use the `journald` log driver without a `tag`, the
+second one only the output of one container.
 
 The server never waits for the journal with its own entries, they get lost
 while journald does not keep up, for example while it restarts. A line of
 container output waits up to a second, the rest of what the server read gets
-dropped after that, which the server logs as a warning. The log files of the
+dropped after that, which the server logs as a warning, once until the journal
+takes lines again. The log files of the
 `containerRuntimeInterface` and `json` drivers lose nothing this way.
 
 To see what the server does without an engine, run it in the foreground with

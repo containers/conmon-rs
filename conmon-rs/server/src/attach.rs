@@ -493,6 +493,7 @@ impl Attach {
         stop: CancellationToken,
     ) {
         debug!("Start listening on attach socket {}", path.display());
+        let mut accept_errors = listener::AcceptErrors::default();
         loop {
             let accepted = select! {
                 accepted = listener.accept() => accepted,
@@ -536,7 +537,7 @@ impl Attach {
                         .instrument(debug_span!("write_loop")),
                     );
                 }
-                Err(e) => listener::accept_failed(&e).await,
+                Err(e) => accept_errors.failed(&e).await,
             }
         }
     }

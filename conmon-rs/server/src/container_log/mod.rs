@@ -6,7 +6,10 @@ pub(crate) mod test_helpers;
 
 use crate::conmon_capnp::conmon::log_driver::{self, Owned, Type};
 use crate::{
-    container_io::Pipe, container_log::cri::CriLogger, container_log::journald::JournaldLogger,
+    capnp_util::{check_absolute, into_map},
+    container_io::Pipe,
+    container_log::cri::CriLogger,
+    container_log::journald::JournaldLogger,
     container_log::json::JsonLogger,
 };
 use anyhow::{Context, Result};
@@ -14,7 +17,7 @@ use bytes::{Bytes, BytesMut};
 use capnp::struct_list::Reader;
 use std::{
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{self, Write},
     mem,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
@@ -129,12 +132,18 @@ impl ContainerLog {
                 let max_size = Self::max_size(&driver);
                 Ok(match driver.get_type()? {
                     Type::ContainerRuntimeInterface => {
-                        Driver::Cri(CriLogger::new(driver.get_path()?.to_str()?, max_size))
+                        Driver::Cri(CriLogger::new(Self::path(&driver)?, max_size))
                     }
-                    Type::Json => {
-                        Driver::Json(JsonLogger::new(driver.get_path()?.to_str()?, max_size))
+                    Type::Json => Driver::Json(JsonLogger::new(Self::path(&driver)?, max_size)),
+                    Type::Journald => {
+                        let labels: Vec<(&str, &str)> = into_map(driver.get_labels()?)?;
+                        Driver::Journald(JournaldLogger::new(
+                            id,
+                            driver.get_container_name()?.to_str()?,
+                            driver.get_tag()?.to_str()?,
+                            labels,
+                        )?)
                     }
-                    Type::Journald => Driver::Journald(JournaldLogger::new(id)),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -144,6 +153,13 @@ impl ContainerLog {
             lines: LineBuffer::default(),
             buffers_lines,
         })))
+    }
+
+    /// The path of a requested driver, which has to be absolute.
+    fn path<'a>(driver: &log_driver::Reader<'a>) -> Result<&'a Path> {
+        let path = Path::new(driver.get_path()?.to_str()?);
+        check_absolute("log path", path)?;
+        Ok(path)
     }
 
     /// The maximum log size of a requested driver, zero means unlimited.
@@ -402,6 +418,10 @@ pub(crate) struct LogFile {
     /// The pending output of the current chunk, allocated on first use, see
     /// [`LogFile::buf`].
     buf: Vec<u8>,
+
+    /// Whether a failed write left the file in the middle of an entry, so
+    /// that the next one has to start on a line of its own.
+    torn: bool,
 }
 
 impl LogFile {
@@ -430,6 +450,7 @@ impl LogFile {
             max_size,
             bytes_written: 0,
             buf: Vec::new(),
+            torn: false,
         }
     }
 
@@ -447,31 +468,51 @@ impl LogFile {
     }
 
     /// Open the file, truncating any existing content. A symlink in place of
-    /// the log is not followed, the truncation would hit its target.
+    /// the log is not followed, the truncation would hit its target. A
+    /// temporary file which a crashed server left behind gets removed, the
+    /// kubelet would never clean it up.
     pub(crate) async fn open(&mut self) -> Result<()> {
         let options = self.open_options();
         let path = self.path.clone();
-        let file = task::spawn_blocking(move || options.open(path))
-            .await
-            .context("join log file open")?
-            .with_context(|| format!("open log file path '{}'", self.path.display()))?;
+        let file = task::spawn_blocking(move || {
+            let tmp = Self::tmp_path(&path);
+            if let Err(e) = fs::remove_file(&tmp)
+                && e.kind() != io::ErrorKind::NotFound
+            {
+                debug!("Unable to remove {}: {e}", tmp.display());
+            }
+            options.open(path)
+        })
+        .await
+        .context("join log file open")?
+        .with_context(|| format!("open log file path '{}'", self.path.display()))?;
         self.file = Some(Arc::new(file));
         self.bytes_written = 0;
+        self.torn = false;
         Ok(())
     }
 
-    /// Replace the file with a new empty one, like conmon does: create
-    /// `<path>.tmp` and rename it over the path. Unlike a truncation in
-    /// place, a reader which follows the log, like `kubectl logs -f`, keeps
-    /// the old file with its offset and reads it to its end, before it
-    /// notices the new one. A rename does not follow a symlink at the path
-    /// either.
+    /// The new file of a replacement before it gets renamed over the path:
+    /// `.<name>.conmonrs-tmp` next to it. The kubelet removes `*.tmp` files
+    /// and treats `<name>.*` ones as rotated logs, a name which matches
+    /// neither keeps it from deleting the file while it gets renamed.
+    fn tmp_path(path: &Path) -> PathBuf {
+        let mut name = std::ffi::OsString::from(".");
+        name.push(path.file_name().unwrap_or_default());
+        name.push(".conmonrs-tmp");
+        path.with_file_name(name)
+    }
+
+    /// Replace the file with a new empty one, like conmon does: create a
+    /// temporary file, see [`LogFile::tmp_path`], and rename it over the
+    /// path. Unlike a truncation in place, a reader which follows the log,
+    /// like `kubectl logs -f`, keeps the old file with its offset and reads
+    /// it to its end, before it notices the new one. A rename does not follow
+    /// a symlink at the path either.
     async fn replace(&mut self) -> Result<()> {
         let options = self.open_options();
         let path = self.path.clone();
-        let mut tmp = path.clone().into_os_string();
-        tmp.push(".tmp");
-        let tmp = PathBuf::from(tmp);
+        let tmp = Self::tmp_path(&path);
         let file = task::spawn_blocking(move || -> Result<File> {
             let file = options
                 .open(&tmp)
@@ -488,9 +529,15 @@ impl LogFile {
         .context("join log file replace")??;
         self.file = Some(Arc::new(file));
         self.bytes_written = 0;
+        self.torn = false;
         Ok(())
     }
 
+    /// The writes append, so that they land at the end also after the file
+    /// got truncated in place, like by an admin freeing disk space, instead
+    /// of at the old offset, which leaves a hole of zeros in front of them.
+    /// The standard library refuses append together with truncate, the
+    /// kernel takes both.
     fn open_options(&self) -> OpenOptions {
         let mut options = OpenOptions::new();
         options
@@ -498,7 +545,7 @@ impl LogFile {
             .read(true)
             .truncate(true)
             .write(true)
-            .custom_flags(libc::O_NOFOLLOW);
+            .custom_flags(libc::O_NOFOLLOW | libc::O_APPEND);
         if let Some(mode) = self.mode {
             options.mode(mode);
         }
@@ -512,11 +559,26 @@ impl LogFile {
     /// right away.
     pub(crate) async fn commit_entry(&mut self, start: usize) -> Result<()> {
         let len = self.buf.len() - start;
-        let total = self.bytes_written.saturating_add(len);
+        let mut total = self.bytes_written.saturating_add(len);
         trace!(
             "Verifying log size: max_size = {:?}, bytes_written = {}, entry = {}",
             self.max_size, self.bytes_written, len,
         );
+
+        // A file which got truncated in place, like by an admin freeing disk
+        // space, holds less than counted, the writes continue at its new end.
+        // Only rotate once the file itself grew beyond the size.
+        if self.max_size.is_some_and(|max| total > max)
+            && let Some(size) = self.file_size()
+            && size.saturating_add(start) < self.bytes_written
+        {
+            debug!(
+                "Log file {} shrank, counting from its size",
+                self.path.display()
+            );
+            self.bytes_written = size.saturating_add(start);
+            total = self.bytes_written.saturating_add(len);
+        }
 
         if self.max_size.is_some_and(|max| total > max) {
             debug!("Rotate log file {}", self.path.display());
@@ -542,19 +604,25 @@ impl LogFile {
         Ok(())
     }
 
+    /// The size of the open file. A stat of an open file does not wait for
+    /// the disk, unlike its writes.
+    fn file_size(&self) -> Option<usize> {
+        let metadata = self.file.as_ref()?.metadata().ok()?;
+        usize::try_from(metadata.len()).ok()
+    }
+
     /// Write the pending buffer to the file and clear it.
     pub(crate) async fn flush(&mut self) -> Result<()> {
         if self.buf.is_empty() {
             return Ok(());
         }
         let len = self.buf.len();
-        let res = self.write_buf().await;
+        let (written, res) = self.write_buf().await;
         if res.is_err() {
-            // Drop the chunk even if the write failed. It may have been written
-            // partially, retrying it along with the next chunk would duplicate
-            // that part. Assume it did not make it, so that a later rotation
-            // does not happen early.
-            self.bytes_written = self.bytes_written.saturating_sub(len);
+            // Drop the chunk even if the write failed, retrying it along with
+            // the next chunk would duplicate the part which got written. Only
+            // that part counts for the rotation.
+            self.bytes_written = self.bytes_written.saturating_sub(len - written);
         }
         self.buf.clear();
         if self.buf.capacity() > Self::BUF_RETAIN_LIMIT {
@@ -563,21 +631,54 @@ impl LogFile {
         res
     }
 
-    async fn write_buf(&mut self) -> Result<()> {
-        let file = self.file.clone().context(Self::ERR_UNINITIALIZED)?;
+    /// Write the buffer and return how much of it got written. A write which
+    /// fails in the middle of an entry, like on a full disk, leaves the file
+    /// torn, the next write then starts with a newline of its own, so that
+    /// the next entry does not get appended to the cut one.
+    async fn write_buf(&mut self) -> (usize, Result<()>) {
+        let Some(file) = self.file.clone() else {
+            return (0, Err(anyhow::anyhow!(Self::ERR_UNINITIALIZED)));
+        };
         let buf = mem::take(&mut self.buf);
-        let (buf, res) = match task::spawn_blocking(move || {
-            let res = (&*file).write_all(&buf);
-            (buf, res)
+        let torn = self.torn;
+        let (buf, newline, written, res) = match task::spawn_blocking(move || {
+            let (newline, written, res) = Self::write_out(&file, torn, &buf);
+            (buf, newline, written, res)
         })
         .await
         {
             Ok(res) => res,
             // The buffer went with the task, the next entry allocates one.
-            Err(e) => return Err(e).context("join log write"),
+            Err(e) => return (0, Err(e).context("join log write")),
         };
         self.buf = buf;
-        res.context("write log chunk")
+        if newline {
+            self.bytes_written = self.bytes_written.saturating_add(1);
+        }
+        self.torn = if written > 0 {
+            res.is_err() && !self.buf[..written].ends_with(b"\n")
+        } else {
+            torn && !newline
+        };
+        (written, res.context("write log chunk"))
+    }
+
+    /// Write `buf` to the file, after a newline if the file is `torn`.
+    /// Return whether the newline got written and how much of the buffer.
+    fn write_out(mut file: &File, torn: bool, buf: &[u8]) -> (bool, usize, io::Result<()>) {
+        if torn && let Err(e) = file.write_all(b"\n") {
+            return (false, 0, Err(e));
+        }
+        let mut written = 0;
+        while written < buf.len() {
+            match file.write(&buf[written..]) {
+                Ok(0) => return (torn, written, Err(io::ErrorKind::WriteZero.into())),
+                Ok(n) => written += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return (torn, written, Err(e)),
+            }
+        }
+        (torn, written, Ok(()))
     }
 
     /// Write the pending buffer and start a new file at the path. The
@@ -939,7 +1040,7 @@ mod tests {
         assert!(sut.buf.is_empty());
         assert_eq!(sut.bytes_written, 6);
         assert_eq!(fs::read_to_string(&old)?, "first\n");
-        assert!(!dir.path().join("log.tmp").exists());
+        assert!(!dir.path().join(".log.conmonrs-tmp").exists());
         Ok(())
     }
 
@@ -969,7 +1070,7 @@ mod tests {
         assert_ne!(metadata.ino(), ino);
         assert_eq!(metadata.mode() & 0o777, 0o600);
         assert_eq!(fs::read_to_string(&path)?, "second\n");
-        assert!(!dir.path().join("log.tmp").exists());
+        assert!(!dir.path().join(".log.conmonrs-tmp").exists());
 
         // The old file keeps its content, the reader is at its end.
         assert_eq!(reader.metadata()?.ino(), ino);
@@ -986,6 +1087,112 @@ mod tests {
         assert_eq!(fs::read_to_string(&rotated)?, "second\n");
         assert_eq!(fs::read_to_string(&path)?, "third\n");
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn writes_append_after_truncation() -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("log");
+        let mut sut = LogFile::new(&path, None, Some(20));
+        sut.open().await?;
+        sut.buf.extend_from_slice(b"first entry 12345\n");
+        sut.commit_entry(0).await?;
+        sut.flush().await?;
+        let ino = fs::metadata(&path)?.ino();
+
+        // Like `> 0.log` of an admin, the file shrinks below the offset. The
+        // next entry continues at its end and does not rotate it, the file
+        // holds far less than the size.
+        File::options().write(true).open(&path)?.set_len(0)?;
+        sut.buf.extend_from_slice(b"second\n");
+        sut.commit_entry(0).await?;
+        sut.flush().await?;
+        assert_eq!(fs::read_to_string(&path)?, "second\n");
+        assert_eq!(fs::metadata(&path)?.ino(), ino);
+        assert_eq!(sut.bytes_written, 7);
+
+        // The size still applies to what the file holds.
+        sut.buf.extend_from_slice(b"third entry 1234\n");
+        sut.commit_entry(0).await?;
+        sut.flush().await?;
+        assert_eq!(fs::read_to_string(&path)?, "third entry 1234\n");
+        assert_ne!(fs::metadata(&path)?.ino(), ino);
+        Ok(())
+    }
+
+    #[test]
+    fn log_paths_have_to_be_absolute() -> Result<()> {
+        use crate::conmon_capnp::conmon::create_container_request;
+
+        let mut message = capnp::message::Builder::new_default();
+        let mut drivers = message
+            .init_root::<create_container_request::Builder<'_>>()
+            .init_log_drivers(2);
+        for (i, path) in ["/log", "log"].into_iter().enumerate() {
+            let mut driver = drivers.reborrow().get(u32::try_from(i)?);
+            driver.set_type(Type::Json);
+            driver.set_path(path);
+        }
+        let drivers = drivers.into_reader();
+        assert!(ContainerLog::path(&drivers.get(0)).is_ok());
+        let err = ContainerLog::path(&drivers.get(1)).unwrap_err();
+        assert!(err.to_string().contains("is not absolute"), "{err}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_removes_a_stale_tmp_file() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("log");
+        let tmp = LogFile::tmp_path(&path);
+        fs::write(&tmp, "left behind")?;
+        LogFile::new(&path, None, None).open().await?;
+        assert!(!tmp.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn torn_entries_get_ended() -> Result<()> {
+        use nix::{fcntl::OFlag, unistd::pipe2};
+        use std::io::Read;
+
+        // A pipe which is full fails a write in the middle, like a full disk.
+        let (reader, writer) = pipe2(OFlag::O_NONBLOCK)?;
+        let mut reader = File::from(reader);
+        let mut sut = LogFile::new("unused", None, None);
+        sut.file = Some(Arc::new(File::from(writer)));
+
+        let entry = [vec![b'a'; 1024 * 1024], b"\n".to_vec()].concat();
+        sut.buf.extend_from_slice(&entry);
+        // A large entry gets written right away.
+        assert!(sut.commit_entry(0).await.is_err());
+        assert!(sut.buf.is_empty());
+        assert!(sut.torn);
+        let mut written = vec![];
+        let _ = reader.read_to_end(&mut written);
+        assert!(!written.is_empty() && written.len() < entry.len());
+        assert_eq!(sut.bytes_written, written.len());
+
+        // The next entry starts on a line of its own.
+        sut.buf.extend_from_slice(b"next\n");
+        sut.commit_entry(0).await?;
+        sut.flush().await?;
+        assert!(!sut.torn);
+        let mut next = vec![];
+        let _ = reader.read_to_end(&mut next);
+        assert_eq!(next, b"\nnext\n");
+        assert_eq!(sut.bytes_written, written.len() + next.len());
+        Ok(())
+    }
+
+    #[test]
+    fn tmp_path_is_hidden_from_the_kubelet() {
+        assert_eq!(
+            LogFile::tmp_path(Path::new("/logs/0.log")),
+            Path::new("/logs/.0.log.conmonrs-tmp")
+        );
     }
 
     #[tokio::test]

@@ -5,15 +5,9 @@ use crate::{
     container_log::{LogFile, Logger, lines},
 };
 use anyhow::{Context, Result};
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use std::{fmt::Write, path::Path};
+use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 use tracing::debug;
-
-/// How long a formatted timestamp is reused before it gets refreshed.
-const TIMESTAMP_CACHE_DURATION: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 /// The main structure used for container log handling.
@@ -21,11 +15,8 @@ pub struct CriLogger {
     /// The log file on disk.
     file: LogFile,
 
-    /// Cached timestamp string to avoid repeated formatting
-    cached_timestamp: String,
-
-    /// Last time the cached timestamp was updated
-    last_timestamp_update: Instant,
+    /// The timestamp of the entries of the current chunk.
+    timestamp: Timestamp,
 }
 
 impl CriLogger {
@@ -33,32 +24,81 @@ impl CriLogger {
     pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> CriLogger {
         Self {
             file: LogFile::new(path, Some(0o600), max_log_size),
-            cached_timestamp: String::new(),
-            last_timestamp_update: Instant::now(),
+            timestamp: Timestamp::default(),
         }
-    }
-
-    /// Refresh the cached timestamp if it is empty or older than
-    /// `TIMESTAMP_CACHE_DURATION`.
-    fn update_timestamp(&mut self) -> Result<()> {
-        let now = Instant::now();
-        if self.cached_timestamp.is_empty()
-            || now.duration_since(self.last_timestamp_update) >= TIMESTAMP_CACHE_DURATION
-        {
-            let now_dt = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
-            self.cached_timestamp = now_dt.format(&Rfc3339).context("format datetime")?;
-            self.last_timestamp_update = now;
-        }
-        Ok(())
     }
 
     /// Use a fixed timestamp for every entry, so that tests can compare the
-    /// written bytes. The refresh never happens because the last update lies
-    /// in the future, which `duration_since` saturates to zero.
+    /// written bytes.
     #[cfg(test)]
     pub(crate) fn freeze_timestamp(&mut self, timestamp: &str) {
-        self.cached_timestamp = timestamp.into();
-        self.last_timestamp_update = Instant::now() + Duration::from_secs(24 * 60 * 60);
+        self.timestamp.formatted = timestamp.into();
+        self.timestamp.frozen = true;
+    }
+}
+
+/// The RFC 3339 timestamp of the time a chunk got read, with nanoseconds like
+/// the ones of conmon. The local date, time of day and UTC offset only change
+/// with the second, they get formatted once per second, the fraction for
+/// every chunk.
+#[derive(Debug, Default)]
+struct Timestamp {
+    /// The second since the epoch the cached parts belong to.
+    second: Option<i64>,
+
+    /// The local date and time of day of that second, like
+    /// `2026-10-20T12:00:00`.
+    date_time: String,
+
+    /// The UTC offset of that second, like `+02:00` or `Z`.
+    offset: String,
+
+    /// The whole timestamp of the current chunk.
+    formatted: String,
+
+    #[cfg(test)]
+    frozen: bool,
+}
+
+impl Timestamp {
+    /// The length of the date and time of day of an RFC 3339 timestamp.
+    const DATE_TIME_LEN: usize = "2026-10-20T12:00:00".len();
+
+    /// Take the current time and return its timestamp.
+    fn update(&mut self) -> Result<&str> {
+        #[cfg(test)]
+        if self.frozen {
+            return Ok(&self.formatted);
+        }
+        let now = OffsetDateTime::now_utc();
+        let second = now.unix_timestamp();
+        if self.second != Some(second) {
+            let offset = UtcOffset::local_offset_at(now).unwrap_or(UtcOffset::UTC);
+            // Without a fraction, the date and time of day are followed by
+            // the offset.
+            let whole = now
+                .to_offset(offset)
+                .replace_nanosecond(0)
+                .context("strip nanoseconds")?
+                .format(&Rfc3339)
+                .context("format datetime")?;
+            let (date_time, offset) = whole
+                .split_at_checked(Self::DATE_TIME_LEN)
+                .context("split datetime")?;
+            self.date_time = date_time.into();
+            self.offset = offset.into();
+            self.second = Some(second);
+        }
+        self.formatted.clear();
+        write!(
+            self.formatted,
+            "{}.{:09}{}",
+            self.date_time,
+            now.nanosecond(),
+            self.offset
+        )
+        .context("format timestamp")?;
+        Ok(&self.formatted)
     }
 }
 
@@ -80,7 +120,7 @@ impl Logger for CriLogger {
     }
 
     async fn write_chunk(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {
-        self.update_timestamp()?;
+        let timestamp = self.timestamp.update()?;
 
         let pipe_tag: &[u8] = match pipe {
             Pipe::StdOut => b" stdout ",
@@ -91,7 +131,7 @@ impl Logger for CriLogger {
             // Assemble the whole line into the chunk buffer
             let buf = self.file.buf();
             let start = buf.len();
-            buf.extend_from_slice(self.cached_timestamp.as_bytes());
+            buf.extend_from_slice(timestamp.as_bytes());
             buf.extend_from_slice(pipe_tag);
             buf.extend_from_slice(if partial { b"P " } else { b"F " });
             buf.extend_from_slice(line);
@@ -203,6 +243,25 @@ mod tests {
         let res = read(&file)?;
         let timestamp = res.split_whitespace().next().context("no timestamp")?;
         OffsetDateTime::parse(timestamp, &Rfc3339).context("unable to parse timestamp")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn timestamps_are_taken_per_chunk() -> Result<()> {
+        let mut sut = Timestamp::default();
+        let first = OffsetDateTime::parse(sut.update()?, &Rfc3339)?;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let second = OffsetDateTime::parse(sut.update()?, &Rfc3339)?;
+        assert!(second > first, "{first} {second}");
+        // Nine digits of the fraction like conmon.
+        let fraction = sut.update()?[Timestamp::DATE_TIME_LEN..]
+            .strip_prefix('.')
+            .context("fraction")?
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .count();
+        assert_eq!(fraction, 9);
+        assert!((OffsetDateTime::now_utc() - second).whole_seconds() < 5);
         Ok(())
     }
 

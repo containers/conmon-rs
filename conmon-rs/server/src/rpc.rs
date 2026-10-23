@@ -241,6 +241,7 @@ impl conmon::Server for Server {
             pry_err!(ContainerIO::new(req.get_terminal(), container_log.clone()));
 
         let bundle_path = Path::new(pry!(pry!(req.get_bundle_path()).to_str()));
+        pry_err!(capnp_util::check_absolute("bundle path", bundle_path));
         let pidfile = bundle_path.join("pidfile");
         debug!("PID file is {}", pidfile.display());
 
@@ -260,6 +261,9 @@ impl conmon::Server for Server {
         let runtime = self.config().runtime().to_path_buf();
         let exit_paths = capnp_vec_path!(req.get_exit_paths());
         let oom_exit_paths = capnp_vec_path!(req.get_oom_exit_paths());
+        for path in exit_paths.iter().chain(&oom_exit_paths) {
+            pry_err!(capnp_util::check_absolute("exit path", path));
+        }
         let env_vars = pry!(req.get_env_vars().and_then(capnp_util::into_map));
 
         // The runtime mounts the socket directory, so it has to exist before
@@ -298,7 +302,6 @@ impl conmon::Server for Server {
                                     stdin,
                                     deadline: runtime_deadline,
                                     env_vars,
-                                    relays_notify: notify_socket.is_some(),
                                     additional_fds,
                                     ..RuntimeCall::new(&runtime, &args, &pidfile)
                                 },
@@ -375,7 +378,8 @@ impl conmon::Server for Server {
         // even starts.
         let time_to_timeout = Self::exec_deadline(req.get_timeout_sec());
 
-        let pidfile = ContainerIO::temp_file(Some(self.config().runtime_dir()), "exec_sync", "pid");
+        let pidfile =
+            ContainerIO::temp_file(Some(self.config().runtime_dir()), "exec_sync", ".pid");
 
         debug!(
             "Got exec sync container request with timeout {}",
@@ -913,6 +917,66 @@ mod tests {
                         "{kind}"
                     );
                 }
+                Ok(())
+            })
+            .await
+    }
+
+    /// Run an exec through the RPC with a runtime which runs `script`, with
+    /// a timeout of a second.
+    async fn exec_sync_with_runtime(script: &str) -> anyhow::Result<Option<ExecSyncOutput>> {
+        let dir = tempfile::tempdir()?;
+        let runtime = dir.path().join("runtime");
+        crate::test_util::write_script(&runtime, script)?;
+        let Some(config) = Config::parse_for_test([
+            "--runtime",
+            runtime.to_str().context("runtime")?,
+            "--runtime-dir",
+            dir.path().to_str().context("runtime dir")?,
+        ]) else {
+            return Ok(None);
+        };
+
+        let client: conmon::Client = capnp_rpc::new_client(Server::with_config(config));
+        let mut request = client.exec_sync_container_request();
+        let mut req = request.get().init_request();
+        req.set_id("ctr");
+        req.set_timeout_sec(1);
+        req.init_command(1).set(0, "true");
+        let reply = request.send().promise.await?;
+        let resp = reply.get()?.get_response()?;
+        Ok(Some(ExecSyncOutput {
+            stdout: resp.get_stdout()?.to_vec(),
+            stderr: resp.get_stderr()?.to_vec(),
+            exit_code: resp.get_exit_code(),
+            timed_out: resp.get_timed_out(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn exec_sync_reports_runtimes_which_do_not_start_the_process() -> anyhow::Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                // The runtime fails, its stderr tells why.
+                let Some(failed) = exec_sync_with_runtime("echo boom >&2; exit 1").await? else {
+                    return Ok(());
+                };
+                assert_eq!(failed.exit_code, EXIT_CODE_NOT_STARTED);
+                assert!(!failed.timed_out);
+                let stderr = String::from_utf8_lossy(&failed.stderr);
+                assert!(stderr.contains("boom"), "{stderr}");
+
+                // The runtime hangs beyond the timeout of the exec.
+                let hung = exec_sync_with_runtime("exec sleep 60")
+                    .await?
+                    .context("output")?;
+                assert_eq!(hung.exit_code, EXIT_CODE_TIMED_OUT);
+                assert!(hung.timed_out);
+                let stderr = String::from_utf8_lossy(&hung.stderr);
+                assert!(
+                    stderr.contains("timed out waiting for the runtime"),
+                    "{stderr}"
+                );
                 Ok(())
             })
             .await

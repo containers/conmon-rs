@@ -9,7 +9,7 @@ use std::{
     io,
     os::{fd::OwnedFd, unix::io::AsRawFd},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::time;
 use tracing::{debug, error};
@@ -17,17 +17,48 @@ use tracing::{debug, error};
 /// How long an accept loop pauses after a failed accept.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
-/// Handle a failed accept of a listener which keeps going. Most errors, like
-/// running out of descriptors, fail every accept until something changes, so
-/// pause instead of spinning. Only a connection which failed on its own is
-/// no reason to wait, or to tell about it beyond the debug log.
-pub async fn accept_failed(e: &io::Error) {
-    if connection_failed(e) {
-        debug!("Unable to accept connection: {e}");
-        return;
+/// How often the failed accepts of a listener get logged as errors, a
+/// server out of descriptors would log one every [`ACCEPT_BACKOFF`]
+/// otherwise.
+const ACCEPT_ERROR_INTERVAL: Duration = Duration::from_secs(10);
+
+/// The failed accepts of a listener which keeps going.
+#[derive(Debug, Default)]
+pub struct AcceptErrors {
+    /// When the last one got logged as an error.
+    last_logged: Option<Instant>,
+}
+
+impl AcceptErrors {
+    /// Handle a failed accept. Most errors, like running out of descriptors,
+    /// fail every accept until something changes, so pause instead of
+    /// spinning. Only a connection which failed on its own is no reason to
+    /// wait, or to tell about it beyond the debug log.
+    pub async fn failed(&mut self, e: &io::Error) {
+        if connection_failed(e) {
+            debug!("Unable to accept connection: {e}");
+            return;
+        }
+        if self.log_error_now(Instant::now()) {
+            error!("Unable to accept connection: {e}");
+        } else {
+            debug!("Unable to accept connection: {e}");
+        }
+        time::sleep(ACCEPT_BACKOFF).await;
     }
-    error!("Unable to accept connection: {e}");
-    time::sleep(ACCEPT_BACKOFF).await;
+
+    /// Whether an error is due to be logged as one, at most once per
+    /// [`ACCEPT_ERROR_INTERVAL`].
+    fn log_error_now(&mut self, now: Instant) -> bool {
+        if self
+            .last_logged
+            .is_some_and(|last| now.saturating_duration_since(last) < ACCEPT_ERROR_INTERVAL)
+        {
+            return false;
+        }
+        self.last_logged = Some(now);
+        true
+    }
 }
 
 /// Whether an accept failed for the connection only, which the client
@@ -117,19 +148,33 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
 
+    #[test]
+    fn accept_errors_get_logged_once_per_interval() {
+        let mut errors = AcceptErrors::default();
+        let start = Instant::now();
+        assert!(errors.log_error_now(start));
+        assert!(!errors.log_error_now(start + ACCEPT_BACKOFF));
+        // Another listener logs its own.
+        assert!(AcceptErrors::default().log_error_now(start + ACCEPT_BACKOFF));
+        assert!(errors.log_error_now(start + ACCEPT_ERROR_INTERVAL));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn only_failed_connections_accept_at_once() {
         let start = time::Instant::now();
+        let mut errors = AcceptErrors::default();
         for errno in [
             libc::ECONNABORTED,
             libc::ECONNREFUSED,
             libc::ECONNRESET,
             libc::EPROTO,
         ] {
-            accept_failed(&io::Error::from_raw_os_error(errno)).await;
+            errors.failed(&io::Error::from_raw_os_error(errno)).await;
         }
         assert_eq!(start.elapsed(), Duration::ZERO);
-        accept_failed(&io::Error::from_raw_os_error(libc::EMFILE)).await;
+        errors
+            .failed(&io::Error::from_raw_os_error(libc::EMFILE))
+            .await;
         assert_eq!(start.elapsed(), ACCEPT_BACKOFF);
     }
 

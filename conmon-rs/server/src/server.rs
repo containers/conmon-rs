@@ -116,14 +116,20 @@ impl Server {
     /// Create a new server for a validated and prepared configuration.
     pub fn new(config: Config) -> Result<Self> {
         Self::init().context("init self")?;
-        Ok(Self {
+        Ok(Self::with_config(config))
+    }
+
+    /// A server for the configuration without the setup of the process,
+    /// which tests must not change.
+    pub(crate) fn with_config(config: Config) -> Self {
+        Self {
             config: Arc::new(config),
             reaper: Default::default(),
             fd_socket: Default::default(),
             #[cfg(feature = "tracing")]
             tracer: Default::default(),
             streaming_server: Default::default(),
-        })
+        }
     }
 
     /// Close file descriptors inherited from whatever started us.
@@ -323,6 +329,7 @@ impl Server {
         init::set_default_umask();
         init::unset_notify_socket();
         init::save_oom_score();
+        init::raise_nofile_limit();
         init::configure_malloc();
         // While we could configure this, standard practice has it as -1000,
         // so it may be YAGNI to add configuration.
@@ -587,6 +594,7 @@ impl Server {
     async fn start_backend(self, mut shutdown_rx: oneshot::Receiver<Result<()>>) -> Result<()> {
         let listener = listener::bind_long_path(&self.config().socket(), UnixListener::bind)?;
         let client: conmon::Client = capnp_rpc::new_client(self);
+        let mut accept_errors = listener::AcceptErrors::default();
 
         loop {
             let stream = tokio::select! {
@@ -598,7 +606,7 @@ impl Server {
                     Ok((stream, _)) => stream,
                     // One failed connection must not end the server.
                     Err(e) => {
-                        listener::accept_failed(&e).await;
+                        accept_errors.failed(&e).await;
                         continue;
                     }
                 },

@@ -37,10 +37,13 @@
 //! An empty request does **not** receive a response.
 //!
 //! A connection holds at most 1024 file descriptors which no request took
-//! yet, a request which would exceed that fails with an error response.
+//! yet, and all connections together a quarter of the open files limit of
+//! the server, a request which would exceed either fails with an error
+//! response.
 
 use crate::{listener, mutex::lock};
 use anyhow::{Result, bail};
+use nix::sys::resource::{Resource, getrlimit};
 use std::{
     collections::{HashMap, HashSet, hash_map},
     io::{IoSliceMut, Write},
@@ -50,7 +53,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
 };
-use tokio::{runtime::Handle, sync::Mutex as AsyncMutex, task};
+use tokio::{sync::Mutex as AsyncMutex, task};
 use tokio_seqpacket::{UnixSeqpacket, UnixSeqpacketListener, ancillary::OwnedAncillaryMessage};
 use tracing::{Instrument, debug, debug_span};
 
@@ -62,6 +65,35 @@ const MAX_FDS: usize = 253;
 /// request took yet. A client which never lets go of them must not use up the
 /// descriptors of the server, which every container needs.
 const MAX_HELD_FDS: usize = 1024;
+
+/// The share of the open files limit of the server which all connections
+/// together may hold, many connections must not use them up either.
+const HELD_SHARE_OF_LIMIT: u64 = 4;
+
+/// How many descriptors connections may hold, see [`MAX_HELD_FDS`] and
+/// [`HELD_SHARE_OF_LIMIT`].
+#[derive(Clone, Copy, Debug)]
+struct Limits {
+    per_connection: usize,
+    total: usize,
+}
+
+impl Limits {
+    /// The limits of the server with its current open files limit.
+    fn of_server() -> Self {
+        let total = match getrlimit(Resource::RLIMIT_NOFILE) {
+            Ok((soft, _)) => usize::try_from(soft / HELD_SHARE_OF_LIMIT).unwrap_or(usize::MAX),
+            Err(e) => {
+                debug!("Unable to get the open files limit: {e}");
+                MAX_HELD_FDS
+            }
+        };
+        Self {
+            per_connection: MAX_HELD_FDS,
+            total,
+        }
+    }
+}
 
 /// Room for a control message carrying `MAX_FDS` descriptors, more would
 /// get cut off (`MSG_CTRUNC`).
@@ -152,26 +184,6 @@ struct Server {
     path: PathBuf,
 }
 
-/// Lets the next start bind a new socket once the accept loop task is gone,
-/// for example on a panic. The loop itself does not stop on errors.
-struct ListenerGuard(Arc<FdSocket>);
-
-impl Drop for ListenerGuard {
-    fn drop(&mut self) {
-        match Handle::try_current() {
-            Ok(handle) => {
-                let fd_socket = self.0.clone();
-                handle.spawn(async move {
-                    *fd_socket.server.lock().await = None;
-                });
-            }
-            _ => {
-                *self.0.server.blocking_lock() = None;
-            }
-        }
-    }
-}
-
 struct ConnectionGuard {
     fd_socket: Arc<FdSocket>,
     slots: Vec<u64>,
@@ -199,21 +211,23 @@ impl Server {
         let server = Self { path };
 
         let mut listener = listener::bind_long_path(&server.path, UnixSeqpacketListener::bind)?;
-        let guard = ListenerGuard(fd_socket);
+        // After the server raised its open files limit at startup.
+        let limits = Limits::of_server();
 
         task::spawn(
             async move {
-                // One failed connection must not stop the socket.
+                // One failed connection must not stop the socket, the loop
+                // never ends.
+                let mut accept_errors = listener::AcceptErrors::default();
                 loop {
                     match listener.accept().await {
                         Ok(conn) => {
-                            let fd_socket = guard.0.clone();
                             task::spawn(
-                                Self::serve(conn, fd_socket)
+                                Self::serve(conn, fd_socket.clone(), limits)
                                     .instrument(debug_span!("fd_socket_serve")),
                             );
                         }
-                        Err(e) => listener::accept_failed(&e).await,
+                        Err(e) => accept_errors.failed(&e).await,
                     }
                 }
             }
@@ -224,13 +238,13 @@ impl Server {
     }
 
     /// Add the received descriptors to the state and the slots of the
-    /// connection, all of them or none, and return their slots. The
-    /// connection holds `max_held` at most.
+    /// connection, all of them or none, and return their slots, within the
+    /// `limits`.
     fn add_received_fds(
         guard: &mut ConnectionGuard,
         received_fds: Vec<OwnedFd>,
         num_fds: usize,
-        max_held: usize,
+        limits: Limits,
     ) -> Result<Vec<u64>> {
         if received_fds.len() != num_fds {
             bail!(
@@ -242,10 +256,18 @@ impl Server {
         let mut state = lock(&guard.fd_socket.state);
         // Slots which requests took meanwhile do not count.
         guard.slots.retain(|slot| state.fds.contains_key(slot));
-        if guard.slots.len() + received_fds.len() > max_held {
+        if guard.slots.len() + received_fds.len() > limits.per_connection {
             bail!(
-                "connection holds {} file descriptors already, the limit is {max_held}",
-                guard.slots.len()
+                "connection holds {} file descriptors already, the limit is {}",
+                guard.slots.len(),
+                limits.per_connection
+            )
+        }
+        if state.fds.len() + received_fds.len() > limits.total {
+            bail!(
+                "connections hold {} file descriptors already, the limit is {}",
+                state.fds.len(),
+                limits.total
             )
         }
         let slots: Vec<u64> = received_fds.into_iter().map(|fd| state.add(fd)).collect();
@@ -253,7 +275,7 @@ impl Server {
         Ok(slots)
     }
 
-    async fn serve(conn: UnixSeqpacket, fd_socket: Arc<FdSocket>) -> Result<()> {
+    async fn serve(conn: UnixSeqpacket, fd_socket: Arc<FdSocket>, limits: Limits) -> Result<()> {
         let mut guard = ConnectionGuard {
             fd_socket,
             slots: Vec::new(),
@@ -287,7 +309,7 @@ impl Server {
                 // other messages are ignored
             }
 
-            let result = Self::add_received_fds(&mut guard, received_fds, num_fds, MAX_HELD_FDS);
+            let result = Self::add_received_fds(&mut guard, received_fds, num_fds, limits);
 
             match result {
                 Ok(slots) => {
@@ -457,10 +479,14 @@ mod tests {
             fd_socket: fd_socket.clone(),
             slots: Vec::new(),
         };
-        let slots = Server::add_received_fds(&mut guard, null_fds(2)?, 2, 3)?;
+        let limits = Limits {
+            per_connection: 3,
+            total: 5,
+        };
+        let slots = Server::add_received_fds(&mut guard, null_fds(2)?, 2, limits)?;
 
         // Beyond the limit nothing gets added.
-        let err = Server::add_received_fds(&mut guard, null_fds(2)?, 2, 3).unwrap_err();
+        let err = Server::add_received_fds(&mut guard, null_fds(2)?, 2, limits).unwrap_err();
         assert!(
             err.to_string().contains("holds 2 file descriptors"),
             "{err}"
@@ -469,8 +495,22 @@ mod tests {
 
         // Descriptors which a request took do not count anymore.
         fd_socket.take_all(slots)?;
-        Server::add_received_fds(&mut guard, null_fds(3)?, 3, 3)?;
+        Server::add_received_fds(&mut guard, null_fds(3)?, 3, limits)?;
         assert_eq!(guard.slots.len(), 3);
+
+        // Another connection counts towards the total.
+        let mut other = ConnectionGuard {
+            fd_socket,
+            slots: Vec::new(),
+        };
+        Server::add_received_fds(&mut other, null_fds(2)?, 2, limits)?;
+        let err = Server::add_received_fds(&mut other, null_fds(1)?, 1, limits).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("connections hold 5 file descriptors"),
+            "{err}"
+        );
+        assert!(Limits::of_server().total > 0);
         Ok(())
     }
 }

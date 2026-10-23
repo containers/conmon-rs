@@ -28,7 +28,7 @@ hyper = { version = "1.12.0", default-features = false, features = ["http1", "se
 hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
 libc = { version = "0.2.191", default-features = false }
 memchr = { version = "2.8.3", default-features = false }
-nix = { version = "0.31.3", default-features = false, features = ["event", "fs", "inotify", "mount", "poll", "process", "sched", "signal", "socket", "term", "user"] }
+nix = { version = "0.31.3", default-features = false, features = ["event", "fs", "inotify", "mount", "poll", "process", "resource", "sched", "signal", "socket", "term", "user"] }
 opentelemetry = { version = "0.33.1", default-features = false, optional = true }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "trace"], optional = true }
