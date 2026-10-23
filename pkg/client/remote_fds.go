@@ -48,12 +48,19 @@ const (
 // RemoteFD represents a file descriptor on the server, identified by a slot number.
 type RemoteFD uint64
 
+// String returns the slot number of the file descriptor, like RemoteFD(3).
 func (r RemoteFD) String() string {
 	return fmt.Sprintf("RemoteFD(%d)", r)
 }
 
 // RemoteFDs can be used to send file descriptors to the server. It is safe
-// for concurrent use, the requests are serialized.
+// for concurrent use, the requests are serialized. A request carries at most
+// 253 file descriptors. The server holds the file descriptors of a
+// connection until a request like CreateContainer takes their slots, servers
+// after v1.2.0 at most 1024 which no request took yet, a request beyond that
+// fails. The slots belong to the connection: closing it, or a broken
+// connection, drops the file descriptors the server still holds, so keep it
+// open until the requests which use the slots returned.
 type RemoteFDs struct {
 	conn  *net.UnixConn
 	mu    sync.Mutex

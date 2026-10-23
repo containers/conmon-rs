@@ -75,5 +75,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "client_messages"
+path = "fuzz_targets/client_messages.rs"
+test = false
+doc = false
+bench = false
+
 [lints]
 workspace = true

@@ -46,9 +46,6 @@ var (
 	errRunDirUnspecified  = errors.New("RunDir must be specified")
 	errInvalidValue       = errors.New("invalid value")
 	errRunDirNotCreated   = errors.New("could not create RunDir")
-	errServerExited       = errors.New("server exited before accepting connections")
-	errServerNotUp        = errors.New("server did not accept connections")
-	errServerPIDUnknown   = errors.New("server PID unknown")
 )
 
 // ErrServerNotResponding is returned by New if a server accepts connections
@@ -394,6 +391,10 @@ type serverProcess struct {
 	// users counts the Shutdown and KillContext calls in progress, guarded
 	// by the pidfdMu of the client.
 	users int
+	// startTime is when the process started, see processStartTime, 0 if
+	// it is unknown. Without a pidfd, it tells the server apart from a
+	// process which got its PID later.
+	startTime uint64
 }
 
 // setServerPID records the PID of the server and opens a pidfd for it. The
@@ -432,7 +433,7 @@ func (c *ConmonClient) setServerPIDIf(old *serverProcess, pid uint32) bool {
 
 // newServerProcess returns the server process of the PID with a pidfd.
 func (c *ConmonClient) newServerProcess(pid uint32) *serverProcess {
-	server := &serverProcess{pid: pid}
+	server := &serverProcess{pid: pid, startTime: processStartTime(pid)}
 
 	var gone bool
 
@@ -1019,16 +1020,16 @@ func (c *ConmonClient) waitUntilServerUp(
 		// show up as a timeout with the last dial error.
 		if server := c.currentServer(); server != nil && server.pid != 0 &&
 			c.serverExited(server) {
-			return nil, fmt.Errorf("%w: PID %d: %w", errServerExited, server.pid, err)
+			return nil, fmt.Errorf("%w: PID %d: %w", ErrServerExited, server.pid, err)
 		}
 
 		select {
 		case <-pollCtx.Done():
 			if ctx.Err() != nil {
-				return nil, fmt.Errorf("%w: %w: %w", errServerNotUp, ctx.Err(), err)
+				return nil, fmt.Errorf("%w: %w: %w", ErrServerNotUp, ctx.Err(), err)
 			}
 
-			return nil, fmt.Errorf("%w after %s: %w", errServerNotUp, defaultTimeout, err)
+			return nil, fmt.Errorf("%w after %s: %w", ErrServerNotUp, defaultTimeout, err)
 		case <-time.After(interval):
 		}
 	}
@@ -1044,16 +1045,42 @@ func processExited(pid uint32) bool {
 
 	// Without a readable /proc, for example in a chroot, the process counts
 	// as running.
-	stat, err := os.ReadFile("/proc/" + strconv.FormatUint(uint64(pid), 10) + "/stat")
-	if err != nil {
-		return false
+	stat := processStat(pid)
+
+	return len(stat) > 0 && (stat[0][0] == 'Z' || stat[0][0] == 'X')
+}
+
+// processStartTime returns when the process started after the boot, in
+// clock ticks, 0 if it is unknown. A process which got the PID of another
+// one which exited started later.
+func processStartTime(pid uint32) uint64 {
+	// The start time is the 22nd field, the 20th after the command.
+	const startTimeField = 22 - 3
+
+	stat := processStat(pid)
+	if len(stat) <= startTimeField {
+		return 0
 	}
 
-	// The state follows the command in parentheses, which can contain any
-	// character.
-	state := bytes.TrimSpace(stat[bytes.LastIndexByte(stat, ')')+1:])
+	start, err := strconv.ParseUint(string(stat[startTimeField]), 10, 64)
+	if err != nil {
+		return 0
+	}
 
-	return len(state) > 0 && (state[0] == 'Z' || state[0] == 'X')
+	return start
+}
+
+// processStat returns the fields of /proc/<pid>/stat after the command,
+// starting with the state, none if it cannot be read.
+func processStat(pid uint32) [][]byte {
+	stat, err := os.ReadFile("/proc/" + strconv.FormatUint(uint64(pid), 10) + "/stat")
+	if err != nil {
+		return nil
+	}
+
+	// The fields follow the command in parentheses, which can contain any
+	// character.
+	return bytes.Fields(stat[bytes.LastIndexByte(stat, ')')+1:])
 }
 
 // client returns the RPC client. A connection which got unusable gets
@@ -1126,6 +1153,12 @@ func (c *ConmonClient) refreshServer(ctx context.Context, conn *rpcConn) {
 		return
 	}
 
+	// A server with the recorded PID is the recorded one, unless that one
+	// exited and the replacement got its PID. Checked before the lock,
+	// recording the server checks that it is still the one read here.
+	server := c.currentServer()
+	same := server != nil && resp.ProcessID == server.pid && !c.serverExited(server)
+
 	// Only for the connection in use, a newer one records its own.
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
@@ -1136,8 +1169,7 @@ func (c *ConmonClient) refreshServer(ctx context.Context, conn *rpcConn) {
 
 	c.setFeatures(resp.Features)
 
-	server := c.currentServer()
-	if resp.ProcessID == 0 || (server != nil && resp.ProcessID == server.pid) {
+	if resp.ProcessID == 0 || same {
 		return
 	}
 
@@ -2155,13 +2187,14 @@ func (c *ConmonClient) Shutdown() error {
 // after the 10 seconds, ShutdownContext returns ErrShutdownTimeout,
 // KillContext ends it then.
 //
-// It fails without signaling anything if the server PID is unknown. Where
-// the kernel supports pidfds, the signal cannot reach another process which
-// got the PID after the server exited. It closes the stdin of the attach
-// sessions of the client and its connection first, the attach sessions end
-// once the server exited. If the recorded server exited and another one,
-// for example a restarted one, answers on the socket of the run directory
-// within a few seconds, that one gets stopped.
+// It fails with ErrServerPIDUnknown if the server PID is unknown, without
+// signaling anything or touching the attach sessions and the connection.
+// Where the kernel supports pidfds, the signal cannot reach another process
+// which got the PID after the server exited. It closes the stdin of the
+// attach sessions of the client and its connection first, the attach
+// sessions end once the server exited. If the recorded server exited and
+// another one, for example a restarted one, answers on the socket of the run
+// directory within a few seconds, that one gets stopped.
 func (c *ConmonClient) ShutdownContext(ctx context.Context) (retErr error) {
 	_, span := c.startSpan(ctx, "Shutdown")
 	defer endSpan(span, &retErr)
@@ -2173,6 +2206,11 @@ func (c *ConmonClient) ShutdownContext(ctx context.Context) (retErr error) {
 		return err
 	}
 	defer release()
+
+	// Nothing ends while nothing can be stopped.
+	if server == nil || server.pid == 0 {
+		return fmt.Errorf("stop server: %w", ErrServerPIDUnknown)
+	}
 
 	c.closeAttachStdins()
 	c.resetConn()
@@ -2186,8 +2224,8 @@ func (c *ConmonClient) ShutdownContext(ctx context.Context) (retErr error) {
 // keep running without a monitor. Use it if ShutdownContext returned
 // ErrShutdownTimeout. Like ShutdownContext, it closes the stdin of the
 // attach sessions and the connection of the client first, stops a server
-// which replaced the recorded one, and fails without signaling anything if
-// the server PID is unknown.
+// which replaced the recorded one, and fails with ErrServerPIDUnknown
+// without touching anything if the server PID is unknown.
 func (c *ConmonClient) KillContext(ctx context.Context) (retErr error) {
 	_, span := c.startSpan(ctx, "Kill")
 	defer endSpan(span, &retErr)
@@ -2200,13 +2238,14 @@ func (c *ConmonClient) KillContext(ctx context.Context) (retErr error) {
 	}
 	defer release()
 
+	// A zero PID would signal the process group of the caller. Nothing ends
+	// while nothing can be stopped.
+	if server == nil || server.pid == 0 {
+		return fmt.Errorf("kill server: %w", ErrServerPIDUnknown)
+	}
+
 	c.closeAttachStdins()
 	c.resetConn()
-
-	// A zero PID would signal the process group of the caller.
-	if server == nil || server.pid == 0 {
-		return fmt.Errorf("kill server: %w", errServerPIDUnknown)
-	}
 
 	return c.killServer(ctx, server, serverStopTimeout)
 }
@@ -2274,8 +2313,10 @@ func (c *ConmonClient) pickUpReplacement(ctx context.Context) {
 		conn.client.Release()
 	}()
 
+	// The recorded server exited, an answering one replaced it, also one
+	// which got the same PID, which the new pidfd tells apart.
 	resp, err := c.version(ctx, conn.client, nil)
-	if err != nil || resp.ProcessID == 0 || resp.ProcessID == server.pid {
+	if err != nil || resp.ProcessID == 0 {
 		return
 	}
 
@@ -2370,7 +2411,7 @@ func (c *ConmonClient) stopServer(
 ) error {
 	// A zero PID would signal the process group of the caller.
 	if server == nil || server.pid == 0 {
-		return fmt.Errorf("stop server: %w", errServerPIDUnknown)
+		return fmt.Errorf("stop server: %w", ErrServerPIDUnknown)
 	}
 
 	if err := server.signal(syscall.SIGINT); err != nil {
@@ -2461,11 +2502,13 @@ func (s *serverProcess) signal(sig syscall.Signal) error {
 	return pidfdSendSignal(s.pidfd, sig)
 }
 
-// serverExited reports whether the server exited or is a zombie. Without
-// usePidfd, the pidfd may get closed concurrently and the check falls back
-// to the PID, which may belong to another process by now, so that an
-// exited server can look running. Only Shutdown and KillContext, which
-// keep the pidfd open, signal a server based on it.
+// serverExited reports whether the server exited or is a zombie. Without a
+// pidfd, or without usePidfd, which keeps it from getting closed
+// concurrently, the check falls back to the PID. A process which got the
+// PID later counts as an exited server if its start time differs, which
+// cannot be read everywhere, so that an exited server can still look
+// running. Only Shutdown and KillContext, which keep the pidfd open, signal
+// a server based on it.
 func (c *ConmonClient) serverExited(server *serverProcess) bool {
 	if server.done.Load() {
 		return true
@@ -2480,7 +2523,14 @@ func (c *ConmonClient) serverExited(server *serverProcess) bool {
 		c.logger.WithError(err).Debug("Unable to poll server pidfd, checking its PID")
 	}
 
-	return processExited(server.pid)
+	if processExited(server.pid) {
+		return true
+	}
+
+	// Another process which got the PID started later.
+	start := processStartTime(server.pid)
+
+	return server.startTime != 0 && start != 0 && start != server.startTime
 }
 
 // serverGoneForGood marks a server which is known to be gone, so that it
@@ -2625,7 +2675,7 @@ type CreateNamespacesResponse struct {
 
 // NamespacesResponse is the response data for the CreateNamespacesResponse.
 type NamespacesResponse struct {
-	// Namespace is the type of namespace.
+	// Type is the namespace which got created.
 	Type Namespace
 
 	// Path is the bind mount of the namespace, which can be joined via

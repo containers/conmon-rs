@@ -190,7 +190,9 @@ mod tests {
         container_io::{Message as IOMessage, Pipe},
         remotecommand::{CLOSE_BYTE, STDIN_BYTE, STDOUT_BYTE, STREAM_ERR_BYTE},
         spdy::testing::Frame,
-        streaming_server::{session::PENDING_STDIN_MAX_BYTES, testing::*},
+        streaming_server::{
+            AttachSession, StreamingServer, session::PENDING_STDIN_MAX_BYTES, testing::*,
+        },
     };
     use anyhow::Result;
     use bytes::Bytes;
@@ -498,6 +500,80 @@ mod tests {
                 // The pings of the session notice and end it, which closes
                 // the stdin once.
                 time::timeout(Duration::from_secs(5), attach.stdin_closed().cancelled()).await?;
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn concurrent_attaches_share_the_container() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let (io, child, token) = attach_child(false)?;
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                let mut streams = vec![];
+                for _ in 0..2 {
+                    let url = server
+                        .attach_url(AttachSession {
+                            container_id: "id".into(),
+                            child: child.clone(),
+                            stdin: true,
+                            stdout: true,
+                            stderr: false,
+                            stop_after_stdin_eof: false,
+                            idle_timeout: None,
+                        })
+                        .await?;
+                    let (response, stream) = upgrade(
+                        &server,
+                        &url,
+                        "GET",
+                        &format!(
+                            "Upgrade: websocket\r\nConnection: Upgrade\r\n\
+                             Sec-WebSocket-Version: 13\r\n\
+                             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                             Sec-WebSocket-Protocol: {PROTOCOL_V5}\r\n"
+                        ),
+                    )
+                    .await?;
+                    assert!(response.starts_with("http/1.1 101"), "{response}");
+                    streams.push(stream);
+                }
+                let attach = io.attach().await;
+
+                // The stdin of both reaches the container.
+                for (stream, data) in streams.iter_mut().zip([b"a", b"b"]) {
+                    stream
+                        .write_all(&client_frame(0x2, &[&[STDIN_BYTE], &data[..]].concat()))
+                        .await?;
+                    let read = time::timeout(Duration::from_secs(5), attach.read()).await??;
+                    assert_eq!(read, &data[..]);
+                }
+
+                // Both get the output, then the status and the close once the
+                // container exited.
+                attach.write(IOMessage::Data(Bytes::from_static(b"out"), Pipe::StdOut));
+                attach.write(IOMessage::Done);
+                token.cancel();
+                for stream in &mut streams {
+                    assert_eq!(
+                        server_frame(stream).await?,
+                        (0x2, [&[STDOUT_BYTE][..], b"out"].concat())
+                    );
+                    assert_eq!(
+                        server_frame(stream).await?,
+                        (
+                            0x2,
+                            [
+                                &[STREAM_ERR_BYTE][..],
+                                br#"{"metadata":{},"status":"Success"}"#
+                            ]
+                            .concat()
+                        )
+                    );
+                    assert_eq!(server_frame(stream).await?.0, 0x8);
+                }
                 Ok(())
             })
             .await

@@ -353,7 +353,10 @@ mod tests {
         HeaderMap, StatusCode,
         header::{self, HeaderValue},
     };
-    use nix::unistd::Pid;
+    use nix::{
+        sys::socket::{setsockopt, sockopt},
+        unistd::Pid,
+    };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpStream,
@@ -974,6 +977,52 @@ mod tests {
                     port_forward_websocket(&server, "", "SPDY/3.1+portforward.k8s.io").await?;
                 assert!(response.starts_with("http/1.1 101"), "{response}");
                 let (reader, writer) = send_too_large(stream);
+                too_large_close(reader, writer).await
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn port_forward_closes_on_too_large_messages_of_clients_which_do_not_read() -> Result<()>
+    {
+        LocalSet::new()
+            .run_until(async {
+                let mut server = StreamingServer::default();
+                server.start_if_required().await?;
+                // A pod which keeps sending.
+                let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
+                let port = listener.local_addr()?.port();
+                let pod = tokio::spawn(async move {
+                    let (mut connection, _) = listener.accept().await?;
+                    let data = vec![b'o'; 64 * 1024];
+                    loop {
+                        connection.write_all(&data).await?;
+                    }
+                    #[expect(unreachable_code, reason = "the type of the task")]
+                    anyhow::Ok(())
+                });
+
+                let (response, mut stream) =
+                    port_forward_websocket(&server, &format!("?port={port}"), "").await?;
+                assert!(response.starts_with("http/1.1 101"), "{response}");
+                // A small buffer, so that the message does not fit into it.
+                setsockopt(&stream, sockopt::SndBuf, &4096)?;
+                server_frame(&mut stream).await?;
+                server_frame(&mut stream).await?;
+
+                // The client does not read while the pod sends, until the
+                // server waits for it, then writes all of its message
+                // before it reads.
+                time::sleep(Duration::from_secs(1)).await;
+                let (reader, writer) = send_too_large(stream);
+                let written = time::timeout(Duration::from_secs(5), async {
+                    while !writer.is_finished() {
+                        time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await;
+                pod.abort();
+                written.context("the server does not take the rest of the message")?;
                 too_large_close(reader, writer).await
             })
             .await

@@ -63,7 +63,7 @@ impl StreamingServer {
         let pidfile = ContainerIO::temp_file(
             Some(session.server_config.runtime_dir()),
             "exec_streaming",
-            "pid",
+            ".pid",
         );
 
         let args = GenerateRuntimeArgs {

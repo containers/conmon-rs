@@ -45,18 +45,26 @@ pub use exec::ExecSession;
 /// The entry points of the fuzz targets.
 #[cfg(feature = "fuzzing")]
 pub mod fuzzing {
-    pub use super::{handshake::fuzzing::upgrade_headers, session::fuzzing::pending_stdin};
+    pub use super::{
+        handshake::fuzzing::upgrade_headers,
+        session::fuzzing::{client_messages, pending_stdin},
+    };
 }
 
 const ADDR: &str = "127.0.0.1";
 
-/// How long a client may take to send the head of its request, the default
-/// of hyper, which only applies with a timer. A connection which never sends
-/// one would stay open otherwise.
+/// How long a client may take to send the head of its request, which only
+/// applies with a timer. A connection which never sends one would stay open
+/// otherwise. Clients send it right after they connected, and every
+/// connection serves one request, see [`MAX_CONNECTIONS`]. Far below the 30
+/// seconds of hyper, so that connections without a request cannot hold the
+/// server off for long: a local process which keeps all of them open delays
+/// the requests of others by up to this long, the backlog of the listener
+/// serves them in order.
 const HEADER_READ_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_secs(2)
 } else {
-    Duration::from_secs(30)
+    Duration::from_secs(5)
 };
 
 /// How long a connection may take until it got upgraded, also one which
@@ -67,7 +75,9 @@ const UPGRADE_TIMEOUT: Duration = HEADER_READ_TIMEOUT.saturating_mul(2);
 /// The most connections which did not get upgraded yet. More wait to be
 /// accepted, so that local processes which open connections without a
 /// request cannot use up the descriptors the whole pod needs. Upgraded
-/// connections do not count, their tokens bound them.
+/// connections do not count, their tokens bound them. There is no limit per
+/// peer, the server listens on the loopback address only, where the kubelet
+/// and a local process which holds connections look the same.
 const MAX_CONNECTIONS: usize = if cfg!(test) { 8 } else { 256 };
 
 const EXEC_PATH: &str = "exec";
@@ -423,9 +433,11 @@ mod tests {
     use crate::{
         bounded_hashmap::DEFAULT_CAPACITY,
         random_id::RandomId,
+        remotecommand::STDIN_BYTE,
         streaming_server::{
             ADDR, HEADER_READ_TIMEOUT, MAX_CONNECTIONS, SWEEP_INTERVAL, StreamingServer,
-            TOO_MANY_REQUESTS, testing::response_head,
+            TOO_MANY_REQUESTS, UPGRADE_TIMEOUT,
+            testing::{attach_session, client_frame, response_head},
         },
     };
     use anyhow::{Context, Result};
@@ -487,6 +499,25 @@ mod tests {
                         "{read:?}"
                     );
                 }
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn upgraded_sessions_outlive_the_upgrade_timeout() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                // The deadline of a connection ends once hyper handed it over
+                // for the upgrade, a session takes as long as it takes.
+                let (io, _server, mut stream) = attach_session(true, false).await?;
+                time::sleep(UPGRADE_TIMEOUT + Duration::from_millis(500)).await;
+                stream
+                    .write_all(&client_frame(0x2, &[STDIN_BYTE, b'x']))
+                    .await?;
+                let attach = io.attach().await;
+                let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
+                assert_eq!(data, b"x".as_slice());
                 Ok(())
             })
             .await
