@@ -215,12 +215,13 @@ func TestRemoteFDsInvalidResponseBreaksConnection(t *testing.T) {
 
 			r := newTestRemoteFDs(t, tc.reply, slotsReply)
 
-			if _, err := r.Send(testFD(t)); !errors.Is(err, tc.want) {
-				t.Fatalf("got error %v, want %v", err, tc.want)
+			_, err := r.Send(testFD(t))
+			if !errors.Is(err, tc.want) || !errors.Is(err, ErrRemoteFDsBroken) {
+				t.Fatalf("got error %v, want %v and %v", err, tc.want, ErrRemoteFDsBroken)
 			}
 
-			if _, err := r.Send(testFD(t)); !errors.Is(err, errConnectionBroken) {
-				t.Fatalf("got error %v, want %v", err, errConnectionBroken)
+			if _, err := r.Send(testFD(t)); !errors.Is(err, ErrRemoteFDsBroken) {
+				t.Fatalf("got error %v, want %v", err, ErrRemoteFDsBroken)
 			}
 
 			if err := r.Close(); err != nil {
@@ -239,15 +240,80 @@ func TestRemoteFDsInterruptedRequestBreaksConnection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 
-	if _, err := r.SendContext(ctx, testFD(t)); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("got error %v, want %v", err, context.DeadlineExceeded)
+	_, err := r.SendContext(ctx, testFD(t))
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrRemoteFDsBroken) {
+		t.Fatalf("got error %v, want %v and %v", err, context.DeadlineExceeded, ErrRemoteFDsBroken)
 	}
 
-	if _, err := r.Send(testFD(t)); !errors.Is(err, errConnectionBroken) {
-		t.Fatalf("got error %v, want %v", err, errConnectionBroken)
+	if _, err := r.Send(testFD(t)); !errors.Is(err, ErrRemoteFDsBroken) {
+		t.Fatalf("got error %v, want %v", err, ErrRemoteFDsBroken)
 	}
 
 	if err := r.Close(); err != nil {
 		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestRemoteFDsCloseDuringRequest(t *testing.T) {
+	t.Parallel()
+
+	// The server gets the request but never answers.
+	received := make(chan struct{})
+	r := newTestRemoteFDs(t, func(uint32, []int) []byte {
+		close(received)
+		<-t.Context().Done()
+
+		return nil
+	})
+
+	fd := testFD(t)
+	sendErr := make(chan error, 1)
+
+	go func() {
+		_, err := r.Send(fd)
+		sendErr <- err
+	}()
+
+	// The request holds the lock while it waits for the response.
+	<-received
+
+	closed := make(chan error, 1)
+
+	go func() { closed <- r.Close() }()
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("close blocked by the request")
+	}
+
+	if err := <-sendErr; !errors.Is(err, ErrRemoteFDsBroken) {
+		t.Fatalf("got error %v, want %v", err, ErrRemoteFDsBroken)
+	}
+
+	if _, err := r.Send(testFD(t)); !errors.Is(err, ErrRemoteFDsBroken) {
+		t.Fatalf("got error %v after close, want %v", err, ErrRemoteFDsBroken)
+	}
+
+	if err := r.Close(); err != nil {
+		t.Fatalf("close again: %v", err)
+	}
+}
+
+func TestRemoteFDsCloseBeforeWrite(t *testing.T) {
+	t.Parallel()
+
+	r := newTestRemoteFDs(t)
+
+	if err := r.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Like a request which checked for Close just before it ran.
+	if _, err := r.send([]int{testFD(t)}); !errors.Is(err, ErrRemoteFDsBroken) {
+		t.Fatalf("got error %v, want %v", err, ErrRemoteFDsBroken)
 	}
 }

@@ -104,6 +104,9 @@ func TestConmonClient(t *testing.T) {
 		busyboxDest = binary
 	}
 
+	// Set once, goroutines of earlier specs may still log.
+	logrus.SetLevel(logrus.TraceLevel)
+
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "ConmonClient")
 }
@@ -504,9 +507,7 @@ func (tr *testRunner) configGivenEnvWith(
 	cfg.ConmonServerPath = conmonPath
 	cfg.LogDriver = client.LogDriverStdout
 
-	logger := logrus.StandardLogger()
-	logger.Level = logrus.TraceLevel
-	cfg.ClientLogger = logger
+	cfg.ClientLogger = logrus.StandardLogger()
 
 	if tr.enableTracing {
 		cfg.Tracing = &client.Tracing{Enabled: true}
