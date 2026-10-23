@@ -60,16 +60,11 @@ var ErrServerNotResponding = errors.New("server accepted the connection but did 
 // ConmonClient is the main client structure of this package, see the package
 // documentation.
 type ConmonClient struct {
-	serverPID uint32
-	// serverPidfd refers to the server process, nil if pidfds are not
-	// supported. Unlike the PID, it never refers to another process which
-	// got the PID once the server exited. It gets closed once the server is
-	// known to be gone or the client got closed, and no Shutdown or
-	// KillContext uses it anymore, see usePidfd.
-	serverPidfd     *os.File
-	serverDone      atomic.Bool
+	// server is the server process, nil while its PID is unknown. It gets
+	// replaced once the client connects to another server, for example one
+	// which got restarted, guarded by pidfdMu.
+	server          *serverProcess
 	pidfdMu         sync.Mutex
-	pidfdUsers      int
 	closed          atomic.Bool
 	runDir          string
 	logger          logrus.Ext1FieldLogger
@@ -79,10 +74,13 @@ type ConmonClient struct {
 	tracingEnabled  bool
 	tracer          trace.Tracer
 	cgroupManager   CgroupManager
-	featuresMu      sync.Mutex
-	features        map[string]bool
-	connMu          sync.Mutex
-	conn            *rpcConn
+	// cgroupManagerWarning warns once about per command cgroup managers
+	// which get ignored.
+	cgroupManagerWarning sync.Once
+	featuresMu           sync.Mutex
+	features             map[string]bool
+	connMu               sync.Mutex
+	conn                 *rpcConn
 }
 
 // ConmonServerConfig is the configuration for the conmon server instance.
@@ -318,8 +316,13 @@ func NewContext(
 		if retErr != nil {
 			cl.resetConn()
 
-			cleanupCtx := context.WithoutCancel(ctx)
-			if stopErr := cl.stopServer(cleanupCtx, serverCleanupTimeout, true); stopErr != nil {
+			stopErr := cl.stopServer(
+				context.WithoutCancel(ctx),
+				cl.currentServer(),
+				serverCleanupTimeout,
+				true,
+			)
+			if stopErr != nil {
 				cl.logger.Errorf("Unable to shutdown server: %v", stopErr)
 			}
 		}
@@ -340,10 +343,9 @@ func NewContext(
 	// file named.
 	heaptrack := config.Heaptrack != nil && config.Heaptrack.Enabled
 
-	var heaptrackPID uint32
+	heaptrackPID := cl.PID()
 
-	if heaptrack && cl.serverPID != 0 {
-		heaptrackPID = cl.serverPID
+	if heaptrack && heaptrackPID != 0 {
 		go cl.attachHeaptrack(context.WithoutCancel(ctx), config, heaptrackPID)
 	}
 
@@ -352,12 +354,12 @@ func NewContext(
 		return nil, fmt.Errorf("wait until server is up: %w", err)
 	}
 
-	if resp.ProcessID != cl.serverPID {
-		if cl.serverPID != 0 {
+	if filePID := cl.PID(); resp.ProcessID != filePID {
+		if filePID != 0 {
 			cl.logger.Warnf(
 				"Server reports PID %d, the PID file named %d",
 				resp.ProcessID,
-				cl.serverPID,
+				filePID,
 			)
 		}
 
@@ -366,8 +368,8 @@ func NewContext(
 
 	cl.setFeatures(resp.Features)
 
-	if heaptrack && heaptrackPID != cl.serverPID {
-		go cl.attachHeaptrack(context.WithoutCancel(ctx), config, cl.serverPID)
+	if heaptrack && heaptrackPID != resp.ProcessID {
+		go cl.attachHeaptrack(context.WithoutCancel(ctx), config, resp.ProcessID)
 	}
 
 	// A file left behind gets overwritten by the next start.
@@ -378,19 +380,90 @@ func NewContext(
 	return cl, nil
 }
 
-// setServerPID records the PID of the server and opens a pidfd for it.
+// serverProcess is a server process with a known PID.
+type serverProcess struct {
+	pid uint32
+	// pidfd refers to the process, nil if pidfds are not supported. Unlike
+	// the PID, it never refers to another process which got the PID once
+	// the server exited. It gets closed once the server is known to be
+	// gone, got replaced by another one or the client got closed, and no
+	// Shutdown or KillContext uses it anymore, see usePidfd.
+	pidfd *os.File
+	// done is set once the process is known to be gone.
+	done atomic.Bool
+	// users counts the Shutdown and KillContext calls in progress, guarded
+	// by the pidfdMu of the client.
+	users int
+}
+
+// setServerPID records the PID of the server and opens a pidfd for it. The
+// pidfd of the server recorded before gets closed once nothing uses it
+// anymore.
 func (c *ConmonClient) setServerPID(pid uint32) {
-	if c.serverPidfd != nil {
-		c.serverPidfd.Close()
+	server := c.newServerProcess(pid)
+
+	c.pidfdMu.Lock()
+	defer c.pidfdMu.Unlock()
+
+	c.replaceServerLocked(server)
+}
+
+// setServerPIDIf records the PID of the server like setServerPID, but only
+// if the recorded server is still old, so that a server which got recorded
+// in the meantime stays. It reports whether it recorded the PID.
+func (c *ConmonClient) setServerPIDIf(old *serverProcess, pid uint32) bool {
+	server := c.newServerProcess(pid)
+
+	c.pidfdMu.Lock()
+	defer c.pidfdMu.Unlock()
+
+	if c.server != old {
+		if server.pidfd != nil {
+			server.pidfd.Close()
+		}
+
+		return false
 	}
+
+	c.replaceServerLocked(server)
+
+	return true
+}
+
+// newServerProcess returns the server process of the PID with a pidfd.
+func (c *ConmonClient) newServerProcess(pid uint32) *serverProcess {
+	server := &serverProcess{pid: pid}
 
 	var gone bool
 
-	c.serverPID = pid
-	c.serverPidfd, gone = openPidfd(c.logger, pid)
+	server.pidfd, gone = openPidfd(c.logger, pid)
 	// A server which exited already must not get signaled through its PID,
 	// which may belong to another process by now.
-	c.serverDone.Store(gone)
+	server.done.Store(gone)
+
+	return server
+}
+
+// replaceServerLocked records the server process, the caller has to hold
+// pidfdMu.
+func (c *ConmonClient) replaceServerLocked(server *serverProcess) {
+	old := c.server
+	c.server = server
+
+	// A closed client releases the new one right away.
+	for _, server := range []*serverProcess{old, server} {
+		if err := c.closeUnusedPidfdLocked(server); err != nil {
+			c.logger.WithError(err).Warn("Unable to close server pidfd")
+		}
+	}
+}
+
+// currentServer returns the server process, nil while its PID is unknown.
+func (c *ConmonClient) currentServer() *serverProcess {
+	c.pidfdMu.Lock()
+	defer c.pidfdMu.Unlock()
+
+	return c.server
 }
 
 // connectRunningServer connects to the server which listens on the socket of
@@ -507,9 +580,13 @@ func (c *ConmonClient) serverGone(ctx context.Context, pid int32, pidKnown, clos
 }
 
 // serverMissing reports whether a dial error means that no server listens on
-// the socket: it does not exist, or it is left over by one which exited.
+// the socket: it does not exist, it is left over by one which exited or it
+// is no socket at all, which all refuse the connection, or it is no stream
+// socket. The server replaces such a socket on start, see socket_in_use in
+// conmon-rs/server/src/config.rs.
 func serverMissing(err error) bool {
-	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
+	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EPROTOTYPE)
 }
 
 // ServerVersion contains the version data of the server instance.
@@ -940,8 +1017,9 @@ func (c *ConmonClient) waitUntilServerUp(
 
 		// A dial fails right away, a crashed server would otherwise only
 		// show up as a timeout with the last dial error.
-		if c.serverPID != 0 && c.serverExited() {
-			return nil, fmt.Errorf("%w: PID %d: %w", errServerExited, c.serverPID, err)
+		if server := c.currentServer(); server != nil && server.pid != 0 &&
+			c.serverExited(server) {
+			return nil, fmt.Errorf("%w: PID %d: %w", errServerExited, server.pid, err)
 		}
 
 		select {
@@ -990,7 +1068,7 @@ func (c *ConmonClient) client(ctx context.Context) (proto.Conmon, error) {
 	// callers. Features which are not recorded yet get asked for by New and
 	// requireServerFeature.
 	if dialed && c.serverFeatures() != nil {
-		c.refreshFeatures(ctx, conn)
+		c.refreshServer(ctx, conn)
 	}
 
 	return conn.client, nil
@@ -1027,11 +1105,16 @@ func (c *ConmonClient) usableConn(ctx context.Context) (*rpcConn, bool, error) {
 	return c.conn, true, nil
 }
 
-// refreshFeatures records the features of the server on a new connection,
-// which may be another server than before, for example one which got
-// restarted. If the server does not tell them within serverProbeTimeout, the
-// recorded ones stay and the call which dialed the connection goes on.
-func (c *ConmonClient) refreshFeatures(ctx context.Context, conn *rpcConn) {
+// refreshServer records the PID and the features of the server on a new
+// connection, which may be another server than before, for example one
+// which got restarted. Shutdown and KillContext stop that one then. If the
+// server does not tell them within serverProbeTimeout, the recorded ones
+// stay and the call which dialed the connection goes on. The peer
+// credentials of the socket are no replacement: they name the process
+// which called listen at that time, which may have exited by the time the
+// PID gets used, and the PID may belong to another process by then. Only
+// the PID which the server reports itself is trusted.
+func (c *ConmonClient) refreshServer(ctx context.Context, conn *rpcConn) {
 	ctx, cancel := context.WithTimeout(ctx, serverProbeTimeout)
 	defer cancel()
 
@@ -1047,8 +1130,20 @@ func (c *ConmonClient) refreshFeatures(ctx context.Context, conn *rpcConn) {
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
 
-	if c.conn == conn {
-		c.setFeatures(resp.Features)
+	if c.conn != conn {
+		return
+	}
+
+	c.setFeatures(resp.Features)
+
+	server := c.currentServer()
+	if resp.ProcessID == 0 || (server != nil && resp.ProcessID == server.pid) {
+		return
+	}
+
+	if c.setServerPIDIf(server, resp.ProcessID) {
+		c.logger.Warnf("Connected to server PID %d, which replaced the recorded one",
+			resp.ProcessID)
 	}
 }
 
@@ -1473,9 +1568,12 @@ func (c *ConmonClient) setCgroupManager(
 	if cgroupManager == CgroupManagerPerCommand {
 		cgroupManager = cfg
 	} else if cfg != CgroupManager(0) {
-		c.logger.Warnf(
-			"cgroup manager specified in per command config, but global cgroup manager is not set to CgroupManagerPerCommand",
-		)
+		c.cgroupManagerWarning.Do(func() {
+			c.logger.Warn(
+				"cgroup manager specified in per command config, but global cgroup manager " +
+					"is not set to CgroupManagerPerCommand, ignoring it (logged once)",
+			)
+		})
 	}
 
 	req.SetCgroupManager(proto.Conmon_CgroupManager(cgroupManager))
@@ -1990,9 +2088,15 @@ func (t enumTable[C, P]) fromProto(value P) (C, error) {
 	return zero, fmt.Errorf("%w: %v from server", errInvalidValue, value)
 }
 
-// PID returns the server process ID.
+// PID returns the server process ID. It changes once the client connects to
+// another server, for example one which got restarted on the same
+// ServerRunDir, which Shutdown and KillContext then stop.
 func (c *ConmonClient) PID() uint32 {
-	return c.serverPID
+	if server := c.currentServer(); server != nil {
+		return server.pid
+	}
+
+	return 0
 }
 
 // Shutdown kills the server via SIGINT and waits up to 10 seconds for the
@@ -2011,12 +2115,16 @@ func (c *ConmonClient) Shutdown() error {
 // the kernel supports pidfds, the signal cannot reach another process which
 // got the PID after the server exited. It closes the stdin of the attach
 // sessions of the client and its connection first, the attach sessions end
-// once the server exited.
+// once the server exited. If the recorded server exited and another one,
+// for example a restarted one, answers on the socket of the run directory
+// within a few seconds, that one gets stopped.
 func (c *ConmonClient) ShutdownContext(ctx context.Context) (retErr error) {
 	_, span := c.startSpan(ctx, "Shutdown")
 	defer endSpan(span, &retErr)
 
-	release, err := c.usePidfd()
+	c.pickUpReplacement(ctx)
+
+	server, release, err := c.usePidfd()
 	if err != nil {
 		return err
 	}
@@ -2025,7 +2133,7 @@ func (c *ConmonClient) ShutdownContext(ctx context.Context) (retErr error) {
 	c.closeAttachStdins()
 	c.resetConn()
 
-	return c.stopServer(ctx, serverStopTimeout, false)
+	return c.stopServer(ctx, server, serverStopTimeout, false)
 }
 
 // KillContext kills the server via SIGKILL and waits for the server PID to
@@ -2033,13 +2141,16 @@ func (c *ConmonClient) ShutdownContext(ctx context.Context) (retErr error) {
 // Unlike with ShutdownContext, the server cannot kill its containers, which
 // keep running without a monitor. Use it if ShutdownContext returned
 // ErrShutdownTimeout. Like ShutdownContext, it closes the stdin of the
-// attach sessions and the connection of the client first, and fails without
-// signaling anything if the server PID is unknown.
+// attach sessions and the connection of the client first, stops a server
+// which replaced the recorded one, and fails without signaling anything if
+// the server PID is unknown.
 func (c *ConmonClient) KillContext(ctx context.Context) (retErr error) {
 	_, span := c.startSpan(ctx, "Kill")
 	defer endSpan(span, &retErr)
 
-	release, err := c.usePidfd()
+	c.pickUpReplacement(ctx)
+
+	server, release, err := c.usePidfd()
 	if err != nil {
 		return err
 	}
@@ -2049,11 +2160,11 @@ func (c *ConmonClient) KillContext(ctx context.Context) (retErr error) {
 	c.resetConn()
 
 	// A zero PID would signal the process group of the caller.
-	if c.serverPID == 0 {
+	if server == nil || server.pid == 0 {
 		return fmt.Errorf("kill server: %w", errServerPIDUnknown)
 	}
 
-	return c.killServer(ctx, serverStopTimeout)
+	return c.killServer(ctx, server, serverStopTimeout)
 }
 
 // Close releases the resources of the client without stopping the server:
@@ -2088,7 +2199,48 @@ func (c *ConmonClient) Close() error {
 	c.pidfdMu.Lock()
 	defer c.pidfdMu.Unlock()
 
-	return c.closeUnusedPidfdLocked()
+	return c.closeUnusedPidfdLocked(c.server)
+}
+
+// pickUpReplacement records the server which replaced the recorded one,
+// if that one exited and another server answers Version on the socket of
+// the run directory within serverProbeTimeout. Shutdown and KillContext
+// stop the server which runs then, also if no call connected to it yet.
+func (c *ConmonClient) pickUpReplacement(ctx context.Context) {
+	server := c.currentServer()
+	if server == nil || c.closed.Load() || !c.serverExited(server) {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, serverProbeTimeout)
+	defer cancel()
+
+	socketConn, err := dialLongSocket("unix", c.socket())
+	if err != nil {
+		return
+	}
+
+	conn := newRPCConn(ctx, socketConn)
+
+	defer func() {
+		if closeErr := conn.conn.Close(); closeErr != nil {
+			c.logger.WithError(closeErr).Debug("Unable to close RPC connection")
+		}
+
+		conn.client.Release()
+	}()
+
+	resp, err := c.version(ctx, conn.client, nil)
+	if err != nil || resp.ProcessID == 0 || resp.ProcessID == server.pid {
+		return
+	}
+
+	// Another Shutdown, KillContext or connection may have recorded a
+	// server in the meantime, which stays.
+	if c.setServerPIDIf(server, resp.ProcessID) {
+		c.logger.Warnf("Server PID %d exited, server PID %d replaced it",
+			server.pid, resp.ProcessID)
+	}
 }
 
 // closeAttachStdins closes the stdin of the attach sessions of the client.
@@ -2102,40 +2254,48 @@ func (c *ConmonClient) closeAttachStdins() {
 	}
 }
 
-// usePidfd keeps the pidfd of the server open until release gets called, so
-// that Close cannot close it while the server gets signaled or waited for.
-// It fails with ErrClientClosed after Close.
-func (c *ConmonClient) usePidfd() (release func(), err error) {
+// usePidfd returns the server process, nil if its PID is unknown, and keeps
+// its pidfd open until release gets called, so that neither Close nor a
+// connection to another server can close it while the server gets signaled
+// or waited for. It fails with ErrClientClosed after Close.
+func (c *ConmonClient) usePidfd() (server *serverProcess, release func(), err error) {
 	c.pidfdMu.Lock()
 	defer c.pidfdMu.Unlock()
 
 	if c.closed.Load() {
-		return nil, ErrClientClosed
+		return nil, nil, ErrClientClosed
 	}
 
-	c.pidfdUsers++
+	server = c.server
+	if server == nil {
+		return nil, func() {}, nil
+	}
 
-	return func() {
+	server.users++
+
+	return server, func() {
 		c.pidfdMu.Lock()
 		defer c.pidfdMu.Unlock()
 
-		c.pidfdUsers--
+		server.users--
 
-		if err := c.closeUnusedPidfdLocked(); err != nil {
+		if err := c.closeUnusedPidfdLocked(server); err != nil {
 			c.logger.WithError(err).Warn("Unable to close server pidfd")
 		}
 	}, nil
 }
 
-// closeUnusedPidfdLocked closes the pidfd once it is not needed anymore,
-// because the server is gone or the client got closed, and nothing uses it.
-// The caller has to hold pidfdMu.
-func (c *ConmonClient) closeUnusedPidfdLocked() error {
-	if c.serverPidfd == nil || c.pidfdUsers > 0 || (!c.serverDone.Load() && !c.closed.Load()) {
+// closeUnusedPidfdLocked closes the pidfd of the server process once it is
+// not needed anymore, because the server is gone, got replaced by another
+// one or the client got closed, and nothing uses it. The caller has to hold
+// pidfdMu.
+func (c *ConmonClient) closeUnusedPidfdLocked(server *serverProcess) error {
+	if server == nil || server.pidfd == nil || server.users > 0 ||
+		(!server.done.Load() && !c.closed.Load() && server == c.server) {
 		return nil
 	}
 
-	if err := c.serverPidfd.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+	if err := server.pidfd.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
 		return fmt.Errorf("close server pidfd: %w", err)
 	}
 
@@ -2157,61 +2317,74 @@ const (
 // stopServer sends SIGINT to the server and waits for it to exit, up to the
 // timeout or until the context ends. With kill, a server which is still
 // running then gets SIGKILL. The server is only signaled through its PID if
-// pidfds are not supported.
-func (c *ConmonClient) stopServer(ctx context.Context, timeout time.Duration, kill bool) error {
+// pidfds are not supported. The caller keeps the pidfd open, see usePidfd.
+func (c *ConmonClient) stopServer(
+	ctx context.Context,
+	server *serverProcess,
+	timeout time.Duration,
+	kill bool,
+) error {
 	// A zero PID would signal the process group of the caller.
-	if c.serverPID == 0 {
+	if server == nil || server.pid == 0 {
 		return fmt.Errorf("stop server: %w", errServerPIDUnknown)
 	}
 
-	if err := c.signalServer(syscall.SIGINT); err != nil {
+	if err := server.signal(syscall.SIGINT); err != nil {
 		// Process does not exist any more, it might be manually killed.
 		if errors.Is(err, syscall.ESRCH) {
-			c.serverGoneForGood()
+			c.serverGoneForGood(server)
 
 			return nil
 		}
 
-		return fmt.Errorf("signal server PID %d: %w", c.serverPID, err)
+		return fmt.Errorf("signal server PID %d: %w", server.pid, err)
 	}
 
-	err := c.waitServerExited(ctx, timeout)
+	err := c.waitServerExited(ctx, server, timeout)
 	if err == nil || !kill || !errors.Is(err, ErrShutdownTimeout) {
 		return err
 	}
 
-	c.logger.Warnf("Server PID %d did not exit on SIGINT, sending SIGKILL", c.serverPID)
+	c.logger.Warnf("Server PID %d did not exit on SIGINT, sending SIGKILL", server.pid)
 
-	return c.killServer(ctx, timeout)
+	return c.killServer(ctx, server, timeout)
 }
 
 // killServer sends SIGKILL to the server and waits for it to exit, up to the
 // timeout or until the context ends.
-func (c *ConmonClient) killServer(ctx context.Context, timeout time.Duration) error {
-	if err := c.signalServer(syscall.SIGKILL); err != nil {
+func (c *ConmonClient) killServer(
+	ctx context.Context,
+	server *serverProcess,
+	timeout time.Duration,
+) error {
+	if err := server.signal(syscall.SIGKILL); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
-			c.serverGoneForGood()
+			c.serverGoneForGood(server)
 
 			return nil
 		}
 
-		return fmt.Errorf("kill server PID %d: %w", c.serverPID, err)
+		return fmt.Errorf("kill server PID %d: %w", server.pid, err)
 	}
 
-	return c.waitServerExited(ctx, timeout)
+	return c.waitServerExited(ctx, server, timeout)
 }
 
 // waitServerExited waits for the server to exit, up to the timeout or until
 // the context ends.
-func (c *ConmonClient) waitServerExited(ctx context.Context, timeout time.Duration) error {
+func (c *ConmonClient) waitServerExited(
+	ctx context.Context,
+	server *serverProcess,
+	timeout time.Duration,
+) error {
 	const waitInterval = 100 * time.Millisecond
 
 	deadline := time.Now().Add(timeout)
 
 	for {
 		// A zombie server, which nobody reaped yet, is gone as well.
-		if c.serverExited() {
-			c.serverGoneForGood()
+		if c.serverExited(server) {
+			c.serverGoneForGood(server)
 
 			return nil
 		}
@@ -2228,31 +2401,34 @@ func (c *ConmonClient) waitServerExited(ctx context.Context, timeout time.Durati
 	}
 }
 
-// signalServer sends the signal to the server. It fails with ESRCH if the
-// server exited. The caller keeps the pidfd open, see usePidfd.
-func (c *ConmonClient) signalServer(sig syscall.Signal) error {
+// signal sends the signal to the server. It fails with ESRCH if the server
+// exited. The caller keeps the pidfd open, see usePidfd.
+func (s *serverProcess) signal(sig syscall.Signal) error {
 	// A server known to be gone never gets signaled through its PID, which
 	// may belong to another process by now.
-	if c.serverDone.Load() {
+	if s.done.Load() {
 		return syscall.ESRCH
 	}
 
-	if c.serverPidfd == nil {
-		return syscall.Kill(int(c.serverPID), sig) //nolint:wrapcheck // wrapped by the caller
+	if s.pidfd == nil {
+		return syscall.Kill(int(s.pid), sig) //nolint:wrapcheck // wrapped by the caller
 	}
 
-	return pidfdSendSignal(c.serverPidfd, sig)
+	return pidfdSendSignal(s.pidfd, sig)
 }
 
-// serverExited reports whether the server exited or is a zombie. The caller
-// keeps the pidfd open, see usePidfd.
-func (c *ConmonClient) serverExited() bool {
-	if c.serverDone.Load() {
+// serverExited reports whether the server exited or is a zombie. Without
+// usePidfd, the pidfd may get closed concurrently and the check falls back
+// to the PID, which may belong to another process by now, so that an
+// exited server can look running. Only Shutdown and KillContext, which
+// keep the pidfd open, signal a server based on it.
+func (c *ConmonClient) serverExited(server *serverProcess) bool {
+	if server.done.Load() {
 		return true
 	}
 
-	if c.serverPidfd != nil {
-		exited, err := pidfdExited(c.serverPidfd)
+	if server.pidfd != nil {
+		exited, err := pidfdExited(server.pidfd)
 		if err == nil {
 			return exited
 		}
@@ -2260,18 +2436,18 @@ func (c *ConmonClient) serverExited() bool {
 		c.logger.WithError(err).Debug("Unable to poll server pidfd, checking its PID")
 	}
 
-	return processExited(c.serverPID)
+	return processExited(server.pid)
 }
 
 // serverGoneForGood marks a server which is known to be gone, so that it
 // never gets signaled again, and releases its pidfd once nothing uses it.
-func (c *ConmonClient) serverGoneForGood() {
-	c.serverDone.Store(true)
+func (c *ConmonClient) serverGoneForGood(server *serverProcess) {
+	server.done.Store(true)
 
 	c.pidfdMu.Lock()
 	defer c.pidfdMu.Unlock()
 
-	if err := c.closeUnusedPidfdLocked(); err != nil {
+	if err := c.closeUnusedPidfdLocked(server); err != nil {
 		c.logger.WithError(err).Warn("Unable to close server pidfd")
 	}
 }
@@ -2382,11 +2558,15 @@ type CreateNamespacesConfig struct {
 	// namespace.
 	IDMappings *idtools.IDMappings
 
-	// BasePath is the root path for storing the namespaces.
-	// Defaults to "/var/run" if unset.
+	// BasePath is the root path for storing the namespaces, it has to be
+	// absolute. Defaults to "/var/run" if unset.
 	BasePath string
 
-	// PodID is the unique identifier of the pod.
+	// PodID is the unique identifier of the pod. It names the files of the
+	// namespaces below BasePath, so it must not be empty, may only contain
+	// the characters A-Z, a-z, 0-9, "_", "." and "-", must not be "." or
+	// ".." and takes 251 bytes at most. Servers after v1.2.0 reject other
+	// values of BasePath and PodID.
 	PodID string
 }
 

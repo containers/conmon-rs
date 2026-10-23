@@ -6,6 +6,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
@@ -17,9 +18,14 @@ type testOut struct {
 	buf    bytes.Buffer
 	closed bool
 	err    error
+
+	// delay slows down every write, if set.
+	delay time.Duration
 }
 
 func (o *testOut) Write(b []byte) (int, error) {
+	time.Sleep(o.delay)
+
 	o.mu.Lock()
 	defer o.mu.Unlock()
 

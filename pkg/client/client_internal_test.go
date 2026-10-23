@@ -27,6 +27,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
+	"go.podman.io/common/pkg/detach"
 	"go.podman.io/storage/pkg/idtools"
 )
 
@@ -868,10 +869,10 @@ func TestShutdown(t *testing.T) {
 
 				c.setServerPID(uint32(pid))
 
-				if !withPidfd && c.serverPidfd != nil {
-					c.serverPidfd.Close()
-					c.serverPidfd = nil
-				} else if withPidfd && c.serverPidfd == nil {
+				if !withPidfd && c.server.pidfd != nil {
+					c.server.pidfd.Close()
+					c.server.pidfd = nil
+				} else if withPidfd && c.server.pidfd == nil {
 					t.Skip("pidfds not supported")
 				}
 
@@ -896,6 +897,7 @@ func TestShutdown(t *testing.T) {
 
 			if err := c.stopServer(
 				t.Context(),
+				c.server,
 				200*time.Millisecond,
 				false,
 			); !errors.Is(
@@ -905,7 +907,7 @@ func TestShutdown(t *testing.T) {
 				t.Fatalf("got error %v, want %v", err, ErrShutdownTimeout)
 			}
 
-			if err := c.stopServer(t.Context(), 200*time.Millisecond, true); err != nil {
+			if err := c.stopServer(t.Context(), c.server, 200*time.Millisecond, true); err != nil {
 				t.Fatalf("stop with kill: %v", err)
 			}
 
@@ -914,11 +916,11 @@ func TestShutdown(t *testing.T) {
 			}
 
 			// The server is gone for good, its pidfd got released.
-			if !c.serverDone.Load() {
+			if !c.server.done.Load() {
 				t.Fatal("server not marked as gone")
 			}
 
-			if withPidfd && !errors.Is(c.serverPidfd.Close(), os.ErrClosed) {
+			if withPidfd && !errors.Is(c.server.pidfd.Close(), os.ErrClosed) {
 				t.Fatal("pidfd still open")
 			}
 		})
@@ -936,7 +938,7 @@ func TestShutdownServerWhichExited(t *testing.T) {
 	c := &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
 	c.setServerPID(uint32(cmd.Process.Pid))
 
-	if c.serverPidfd == nil {
+	if c.server.pidfd == nil {
 		t.Skip("pidfds not supported")
 	}
 
@@ -960,7 +962,7 @@ func TestSetServerPID(t *testing.T) {
 	c := &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
 	c.setServerPID(uint32(first.Process.Pid))
 
-	old := c.serverPidfd
+	old := c.server.pidfd
 	if old == nil {
 		t.Skip("pidfds not supported")
 	}
@@ -994,15 +996,15 @@ func TestSetServerPID(t *testing.T) {
 	c = &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
 	c.setServerPID(uint32(gone.Process.Pid))
 
-	if c.serverPidfd != nil {
+	if c.server.pidfd != nil {
 		t.Skip("PID got reused")
 	}
 
-	if !c.serverDone.Load() {
+	if !c.server.done.Load() {
 		t.Fatal("exited server not marked as gone")
 	}
 
-	if err := c.signalServer(syscall.SIGINT); !errors.Is(err, syscall.ESRCH) {
+	if err := c.server.signal(syscall.SIGINT); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("got error %v, want %v", err, syscall.ESRCH)
 	}
 
@@ -1412,6 +1414,180 @@ func TestSupportsFeatureAfterReconnect(t *testing.T) {
 	}
 }
 
+func TestShutdownAfterReconnectToAnotherServer(t *testing.T) {
+	t.Parallel()
+
+	first := startTestServer(t, false)
+	second := startTestServer(t, false)
+
+	dir := t.TempDir()
+	stop := serveVersionSocket(t, dir, versionConmon{pid: uint32(first.Process.Pid)})
+
+	c := newTestClient(t, dir, logrus.New())
+	t.Cleanup(func() { c.Close() })
+
+	connected, err := c.connectRunningServer(t.Context())
+	if err != nil || !connected {
+		t.Fatalf("connect: %v, connected %v", err, connected)
+	}
+
+	old := c.server
+	if old.pidfd == nil {
+		t.Skip("pidfds not supported")
+	}
+
+	// Another server replaces the one the client is connected to.
+	conn := c.conn
+
+	stop()
+	waitBroken(t, conn)
+
+	serveVersionSocket(t, dir, versionConmon{pid: uint32(second.Process.Pid)})
+
+	if _, err := c.Version(t.Context(), nil); err != nil {
+		t.Fatalf("version after reconnect: %v", err)
+	}
+
+	if got := c.PID(); got != uint32(second.Process.Pid) {
+		t.Fatalf("got PID %d, want %d", got, second.Process.Pid)
+	}
+
+	if !errors.Is(old.pidfd.Close(), os.ErrClosed) {
+		t.Fatal("pidfd of the replaced server still open")
+	}
+
+	// Shutdown stops the server the client talks to.
+	if err := c.Shutdown(); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	if !processExited(uint32(second.Process.Pid)) {
+		t.Fatal("server which replaced the first one still running")
+	}
+
+	if processExited(uint32(first.Process.Pid)) {
+		t.Fatal("replaced server got signaled")
+	}
+}
+
+func TestSetServerPIDIf(t *testing.T) {
+	t.Parallel()
+
+	first := startTestServer(t, false)
+	second := startTestServer(t, false)
+	third := startTestServer(t, false)
+
+	c := newTestClient(t, t.TempDir(), logrus.New())
+	t.Cleanup(func() { c.Close() })
+
+	c.setServerPID(uint32(first.Process.Pid))
+	read := c.currentServer()
+
+	// Another call recorded a server in the meantime, which stays.
+	c.setServerPID(uint32(second.Process.Pid))
+
+	if c.setServerPIDIf(read, uint32(third.Process.Pid)) {
+		t.Fatal("replaced a server which got recorded in the meantime")
+	}
+
+	if got := c.PID(); got != uint32(second.Process.Pid) {
+		t.Fatalf("got PID %d, want %d", got, second.Process.Pid)
+	}
+
+	if !c.setServerPIDIf(c.currentServer(), uint32(third.Process.Pid)) {
+		t.Fatal("did not replace the recorded server")
+	}
+
+	if got := c.PID(); got != uint32(third.Process.Pid) {
+		t.Fatalf("got PID %d, want %d", got, third.Process.Pid)
+	}
+}
+
+func TestShutdownPicksUpReplacement(t *testing.T) {
+	t.Parallel()
+
+	for _, kill := range []bool{false, true} {
+		t.Run("kill "+strconv.FormatBool(kill), func(t *testing.T) {
+			t.Parallel()
+
+			first := startTestServer(t, false)
+			second := startTestServer(t, false)
+
+			dir := t.TempDir()
+
+			c := newTestClient(t, dir, logrus.New())
+			c.setServerPID(uint32(first.Process.Pid))
+
+			// The recorded server exited and another one took over the
+			// socket, no call connected to it yet.
+			if err := first.Process.Kill(); err != nil {
+				t.Fatalf("kill: %v", err)
+			}
+
+			_ = first.Wait() //nolint:errcheck // killed on purpose
+
+			serveVersionSocket(t, dir, versionConmon{pid: uint32(second.Process.Pid)})
+
+			stop := c.Shutdown
+			if kill {
+				stop = func() error { return c.KillContext(t.Context()) }
+			}
+
+			if err := stop(); err != nil {
+				t.Fatalf("stop: %v", err)
+			}
+
+			if !processExited(uint32(second.Process.Pid)) {
+				t.Fatal("server which replaced the recorded one still running")
+			}
+		})
+	}
+}
+
+func TestReplacedServerKeepsPidfdDuringShutdown(t *testing.T) {
+	t.Parallel()
+
+	first := startTestServer(t, false)
+	second := startTestServer(t, false)
+
+	c := newTestClient(t, t.TempDir(), logrus.New())
+	c.setServerPID(uint32(first.Process.Pid))
+
+	if c.server.pidfd == nil {
+		t.Skip("pidfds not supported")
+	}
+
+	// A shutdown in progress keeps the server it started with.
+	server, release, err := c.usePidfd()
+	if err != nil {
+		t.Fatalf("use pidfd: %v", err)
+	}
+
+	c.setServerPID(uint32(second.Process.Pid))
+
+	if err := c.stopServer(t.Context(), server, serverStopTimeout, false); err != nil {
+		t.Fatalf("stop server: %v", err)
+	}
+
+	release()
+
+	if !processExited(uint32(first.Process.Pid)) {
+		t.Fatal("server of the shutdown still running")
+	}
+
+	if processExited(uint32(second.Process.Pid)) {
+		t.Fatal("server which replaced it got signaled")
+	}
+
+	if !errors.Is(server.pidfd.Close(), os.ErrClosed) {
+		t.Fatal("pidfd of the replaced server still open")
+	}
+
+	if c.server.pidfd == nil || errors.Is(c.server.pidfd.Close(), os.ErrClosed) {
+		t.Fatal("pidfd of the current server got closed")
+	}
+}
+
 func TestNewInvalidConfig(t *testing.T) {
 	t.Parallel()
 
@@ -1642,7 +1818,7 @@ func TestClose(t *testing.T) {
 		t.Fatalf("start attach session: %v", err)
 	}
 
-	pidfd := c.serverPidfd
+	pidfd := c.server.pidfd
 
 	if err = c.Close(); err != nil {
 		t.Fatalf("close: %v", err)
@@ -1775,6 +1951,7 @@ func TestKillContext(t *testing.T) {
 
 	if err := c.stopServer(
 		t.Context(),
+		c.server,
 		200*time.Millisecond,
 		false,
 	); !errors.Is(
@@ -2010,6 +2187,104 @@ func TestCloseEndsAttach(t *testing.T) {
 	}
 }
 
+func TestClosedFileStdinKeepsAttach(t *testing.T) {
+	t.Parallel()
+
+	c := newTestClient(t, t.TempDir(), logrus.New())
+
+	stdin, stdinWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+
+	t.Cleanup(func() { stdinWriter.Close() })
+
+	stdout, stdoutWriter := io.Pipe()
+	cfg := &AttachConfig{
+		ID:         "id",
+		SocketPath: serveAttachSocket(t),
+		Streams:    AttachStreams{Stdin: &In{stdin}, Stdout: &Out{stdoutWriter}},
+	}
+
+	attachErr := make(chan error, 1)
+
+	go func() { attachErr <- c.attach(t.Context(), cfg) }()
+
+	// The attach is running once the output arrives.
+	if _, err := io.ReadFull(stdout, make([]byte, 1)); err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+
+	go func() { _, _ = io.Copy(io.Discard, stdout) }() //nolint:errcheck // drained only
+
+	// Like on Shutdown, a read of the closed file fails with os.ErrClosed,
+	// which does not end the attach.
+	c.closeAttachStdins()
+
+	select {
+	case err := <-attachErr:
+		t.Fatalf("attach ended with %v after its stdin got closed", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if err := <-attachErr; !errors.Is(err, ErrClientClosed) {
+		t.Fatalf("got error %v, want %v", err, ErrClientClosed)
+	}
+}
+
+func TestDetachStopsOutput(t *testing.T) {
+	t.Parallel()
+
+	c := newTestClient(t, t.TempDir(), logrus.New())
+
+	stdin, stdinWriter := io.Pipe()
+	// A slow stream, which is still being written to on the detach.
+	stdout := &testOut{delay: 20 * time.Millisecond}
+	cfg := &AttachConfig{
+		ID:         "id",
+		SocketPath: serveAttachSocket(t),
+		Streams:    AttachStreams{Stdin: &In{stdin}, Stdout: &Out{stdout}},
+		DetachKeys: []byte{16, 17},
+	}
+
+	attachErr := make(chan error, 1)
+
+	go func() { attachErr <- c.attach(t.Context(), cfg) }()
+
+	waitFor(t, "no output", func() bool {
+		out, _ := stdout.state()
+
+		return out != ""
+	})
+
+	// The keys get read one at a time, like from a terminal.
+	for _, key := range cfg.DetachKeys {
+		if _, err := stdinWriter.Write([]byte{key}); err != nil {
+			t.Fatalf("write detach key: %v", err)
+		}
+	}
+
+	if err := <-attachErr; !errors.Is(err, detach.ErrDetach) {
+		t.Fatalf("got error %v, want %v", err, detach.ErrDetach)
+	}
+
+	// The output stopped before the attach returned.
+	out, closed := stdout.state()
+	if !closed {
+		t.Fatal("stdout not closed when the attach returned")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	if later, _ := stdout.state(); later != out {
+		t.Fatalf("output written after the attach returned: %q", later[len(out):])
+	}
+}
+
 func TestCloseDuringShutdownKeepsPidfd(t *testing.T) {
 	t.Parallel()
 
@@ -2018,12 +2293,12 @@ func TestCloseDuringShutdownKeepsPidfd(t *testing.T) {
 	c := newTestClient(t, t.TempDir(), logrus.New())
 	c.setServerPID(uint32(cmd.Process.Pid))
 
-	if c.serverPidfd == nil {
+	if c.server.pidfd == nil {
 		t.Skip("pidfds not supported")
 	}
 
 	// Shutdown got past its check for Close, which runs then.
-	release, err := c.usePidfd()
+	_, release, err := c.usePidfd()
 	if err != nil {
 		t.Fatalf("use pidfd: %v", err)
 	}
@@ -2032,7 +2307,7 @@ func TestCloseDuringShutdownKeepsPidfd(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	if err := c.stopServer(t.Context(), serverStopTimeout, false); err != nil {
+	if err := c.stopServer(t.Context(), c.server, serverStopTimeout, false); err != nil {
 		t.Fatalf("stop server: %v", err)
 	}
 
@@ -2042,7 +2317,7 @@ func TestCloseDuringShutdownKeepsPidfd(t *testing.T) {
 		t.Fatal("server still running after the shutdown")
 	}
 
-	if !errors.Is(c.serverPidfd.Close(), os.ErrClosed) {
+	if !errors.Is(c.server.pidfd.Close(), os.ErrClosed) {
 		t.Fatal("pidfd still open")
 	}
 }
@@ -2058,7 +2333,7 @@ func TestCloseWhileWaitingForServer(t *testing.T) {
 	c := newTestClient(t, t.TempDir(), logger)
 	c.setServerPID(uint32(cmd.Process.Pid))
 
-	if c.serverPidfd == nil {
+	if c.server.pidfd == nil {
 		t.Skip("pidfds not supported")
 	}
 
@@ -2075,7 +2350,7 @@ func TestCloseWhileWaitingForServer(t *testing.T) {
 		c.pidfdMu.Lock()
 		defer c.pidfdMu.Unlock()
 
-		return c.pidfdUsers > 0
+		return c.server.users > 0
 	})
 
 	if err := c.Close(); err != nil {
@@ -2094,7 +2369,72 @@ func TestCloseWhileWaitingForServer(t *testing.T) {
 	}
 
 	// It got closed once the shutdown was over.
-	if !errors.Is(c.serverPidfd.Close(), os.ErrClosed) {
+	if !errors.Is(c.server.pidfd.Close(), os.ErrClosed) {
 		t.Fatal("pidfd still open")
+	}
+}
+
+func TestConnectRunningServerIgnoresOtherSocketTypes(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	// A packet socket, like the attach or fd sockets, which the server
+	// replaces on start.
+	listener, err := net.ListenUnix(
+		"unixpacket",
+		&net.UnixAddr{Name: filepath.Join(dir, socketName), Net: "unixpacket"},
+	)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	t.Cleanup(func() { listener.Close() })
+
+	c := newTestClient(t, dir, logrus.New())
+
+	connected, err := c.connectRunningServer(t.Context())
+	if err != nil || connected {
+		t.Fatalf("got connected %v, error %v, want no server", connected, err)
+	}
+}
+
+// cgroupManagerRequest records the cgroup manager of a request.
+type cgroupManagerRequest struct {
+	manager proto.Conmon_CgroupManager
+}
+
+func (r *cgroupManagerRequest) SetCgroupManager(manager proto.Conmon_CgroupManager) {
+	r.manager = manager
+}
+
+func TestSetCgroupManagerWarnsOnce(t *testing.T) {
+	t.Parallel()
+
+	logger, hook := logrustest.NewNullLogger()
+
+	c := newTestClient(t, t.TempDir(), logger)
+	c.cgroupManager = CgroupManagerSystemd
+
+	for range 3 {
+		req := &cgroupManagerRequest{}
+		c.setCgroupManager(CgroupManagerCgroupfs, req)
+
+		if req.manager != proto.Conmon_CgroupManager_systemd {
+			t.Fatalf("got cgroup manager %v, want the global one", req.manager)
+		}
+	}
+
+	if got := len(hook.AllEntries()); got != 1 {
+		t.Fatalf("got %d log entries, want one warning", got)
+	}
+
+	// The per command one gets used if the global one asks for it.
+	c.cgroupManager = CgroupManagerPerCommand
+	req := &cgroupManagerRequest{}
+	c.setCgroupManager(CgroupManagerCgroupfs, req)
+
+	if req.manager != proto.Conmon_CgroupManager_cgroupfs {
+		t.Fatalf("got cgroup manager %v, want the per command one", req.manager)
 	}
 }

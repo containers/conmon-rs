@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -124,6 +125,10 @@ type attachSession struct {
 
 	// closeStdin closes the stdin of the attach, if any, on the first call.
 	closeStdin func()
+
+	// stdinClosed is set before closeStdin closes the stdin, the copy of
+	// stdin ends then with whatever error the stream returns.
+	stdinClosed atomic.Bool
 }
 
 // startAttachSession registers an attach session, which Close ends through
@@ -134,10 +139,13 @@ func (c *ConmonClient) startAttachSession(
 ) (context.Context, *attachSession, error) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	session := &attachSession{
-		id:         c.attachSessionID.Add(1),
-		cancel:     cancel,
-		closeStdin: sync.OnceFunc(func() { c.closeStdin(cfg) }),
+		id:     c.attachSessionID.Add(1),
+		cancel: cancel,
 	}
+	session.closeStdin = sync.OnceFunc(func() {
+		session.stdinClosed.Store(true)
+		c.closeStdin(cfg)
+	})
 
 	// Checked under the lock, Close takes the sessions out after it got
 	// marked closed.
@@ -285,7 +293,7 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) (err error
 		return nil
 	}
 
-	receiveStdoutError, stdinDone := c.setupStdioChannels(ctx, cfg, conn)
+	receiveStdoutError, stdinDone := c.setupStdioChannels(ctx, cfg, conn, session)
 
 	if cfg.PostAttachFunc != nil {
 		if err := cfg.PostAttachFunc(); err != nil {
@@ -347,7 +355,7 @@ func (c *ConmonClient) forwardResizeEvents(
 }
 
 func (c *ConmonClient) setupStdioChannels(
-	ctx context.Context, cfg *AttachConfig, conn *net.UnixConn,
+	ctx context.Context, cfg *AttachConfig, conn *net.UnixConn, session *attachSession,
 ) (receiveStdoutError, stdinDone chan error) {
 	ctx, span := c.startSpan(ctx, "setupStdioChannels")
 	if span != nil {
@@ -368,7 +376,11 @@ func (c *ConmonClient) setupStdioChannels(
 	if stdin != nil {
 		go func() {
 			_, err := detach.Copy(conn, stdin, cfg.DetachKeys)
-			if !errors.Is(err, io.ErrClosedPipe) {
+
+			// A closed stdin does not end the attach, the output does.
+			// One which the client closed, for example on Shutdown, can
+			// return any error then, like os.ErrClosed for an *os.File.
+			if !session.stdinClosed.Load() && !errors.Is(err, io.ErrClosedPipe) {
 				stdinDone <- err
 			}
 		}()
@@ -551,11 +563,14 @@ func (c *ConmonClient) readStdio(
 		// afterwards still has to be received below.
 		closeErr := conn.CloseWrite()
 
-		// A detach or a failed stdin copy ends the attach right away.
+		// A detach or a failed stdin copy ends the attach right away, the
+		// output stops before it returns.
 		if err != nil {
 			if !errors.Is(err, detach.ErrDetach) {
 				err = fmt.Errorf("copy stdin: %w", err)
 			}
+
+			c.stopOutput(closeRead, receiveStdoutError)
 
 			return errors.Join(closeErr, err)
 		}

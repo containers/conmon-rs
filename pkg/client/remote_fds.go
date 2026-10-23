@@ -7,14 +7,22 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/containers/conmon-rs/internal/proto"
 )
 
+// ErrRemoteFDsBroken gets matched by the error of a request of RemoteFDs
+// which got no valid response, which got interrupted by its context after
+// it was sent, or which ran into Close. Every request afterwards fails with
+// it as well, a new RemoteFDs is needed then. A request which the server
+// rejected, or which could not be sent, does not match it and keeps the
+// connection usable.
+var ErrRemoteFDsBroken = errors.New("fd socket connection broken")
+
 var (
-	errConnectionBroken        = errors.New("fd socket connection broken by an earlier request")
 	errTooManyFileDescriptors  = errors.New("too many file descriptors")
 	errResponseTooShort        = errors.New("response too short")
 	errResponseIDDoesNotMatch  = errors.New("response id does not match")
@@ -55,6 +63,10 @@ type RemoteFDs struct {
 	// its response in the connection, every later request would read the
 	// wrong one.
 	broken bool
+
+	// closed is set by Close, which does not wait for a request in
+	// progress.
+	closed atomic.Bool
 }
 
 // NewRemoteFDs connects to the fd socket at `path`.
@@ -78,7 +90,8 @@ func (r *RemoteFDs) Send(fds ...int) ([]RemoteFD, error) {
 // wait for the response, not the wait for a concurrent request. A request
 // interrupted by the context, or one which got no valid response, breaks
 // the connection, which also drops the slots of earlier requests the server
-// still holds, every later request fails with an error.
+// still holds, every later request fails with an error matching
+// ErrRemoteFDsBroken.
 func (r *RemoteFDs) SendContext(ctx context.Context, fds ...int) ([]RemoteFD, error) {
 	if len(fds) == 0 {
 		return nil, nil
@@ -91,8 +104,12 @@ func (r *RemoteFDs) SendContext(ctx context.Context, fds ...int) ([]RemoteFD, er
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if r.closed.Load() {
+		return nil, fmt.Errorf("%w: closed", ErrRemoteFDsBroken)
+	}
+
 	if r.broken {
-		return nil, errConnectionBroken
+		return nil, fmt.Errorf("%w by an earlier request", ErrRemoteFDsBroken)
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -113,7 +130,7 @@ func (r *RemoteFDs) SendContext(ctx context.Context, fds ...int) ([]RemoteFD, er
 	if !stop() {
 		r.breakConn()
 
-		return nil, fmt.Errorf("request interrupted: %w", ctx.Err())
+		return nil, fmt.Errorf("%w: request interrupted: %w", ErrRemoteFDsBroken, ctx.Err())
 	}
 
 	return remote, err
@@ -136,9 +153,14 @@ func (r *RemoteFDs) send(fds []int) ([]RemoteFD, error) {
 	oob := syscall.UnixRights(fds...)
 
 	// A packet is sent as a whole or not at all, a failed one leaves no
-	// response behind.
+	// response behind. Close may have closed the connection after the
+	// request checked for it.
 	_, _, err := r.conn.WriteMsgUnix(b, oob, nil)
 	if err != nil {
+		if r.closed.Load() {
+			return nil, fmt.Errorf("%w: closed: send request: %w", ErrRemoteFDsBroken, err)
+		}
+
 		return nil, fmt.Errorf("send request: %w", err)
 	}
 
@@ -148,6 +170,8 @@ func (r *RemoteFDs) send(fds []int) ([]RemoteFD, error) {
 	// pairing in doubt.
 	if err != nil && !errors.As(err, new(serverError)) {
 		r.breakConn()
+
+		err = fmt.Errorf("%w: %w", ErrRemoteFDsBroken, err)
 	}
 
 	return slots, err
@@ -201,17 +225,16 @@ func (r *RemoteFDs) receive(reqID uint32, numRequested int) ([]RemoteFD, error) 
 	return slots, nil
 }
 
-// Close the connection and unused remote file descriptors.
+// Close the connection and unused remote file descriptors. A request in
+// progress fails then. Closing a closed RemoteFDs does nothing.
 func (r *RemoteFDs) Close() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// A broken connection got closed already.
-	if r.broken {
+	if r.closed.Swap(true) {
 		return nil
 	}
 
-	if err := r.conn.Close(); err != nil {
+	// Without the lock, which a request holds while it waits for its
+	// response. A broken connection got closed already.
+	if err := r.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		return fmt.Errorf("close fd socket: %w", err)
 	}
 
