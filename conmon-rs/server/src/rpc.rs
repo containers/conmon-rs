@@ -611,10 +611,6 @@ impl conmon::Server for Server {
         let req = pry!(pry!(params.get()).get_request());
         let pod_id = pry_err!(pry_err!(req.get_pod_id()).to_str());
 
-        if pod_id.is_empty() {
-            return Promise::err(Error::failed("no pod ID provided".into()));
-        }
-
         let span = new_root_span!("create_namespaces", pod_id);
         let _enter = span.enter();
         pry!(set_parent_context(pry!(req.get_metadata())));

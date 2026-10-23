@@ -13,7 +13,7 @@ use nix::{
     cmsg_space,
     fcntl::{self, FcntlArg, OFlag},
     sys::{
-        socket::{self, ControlMessageOwned, MsgFlags},
+        socket::{self, Backlog, ControlMessageOwned, MsgFlags, SockType, UnixAddr},
         termios::{self, OutputFlags, SetArg, SpecialCharacterIndices},
     },
 };
@@ -21,7 +21,7 @@ use std::{
     io::{self, IoSliceMut, Write},
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
-        unix::{fs::PermissionsExt, io::RawFd},
+        unix::{io::RawFd, net::UnixListener as StdUnixListener},
     },
     path::{Path, PathBuf},
     pin::Pin,
@@ -102,9 +102,13 @@ impl Terminal {
         // Bind synchronously so that the socket exists once this returns,
         // without blocking on the listener task to get scheduled.
         debug!("Listening terminal socket on {}", path.display());
-        let listener =
-            listener::bind_long_path(path, UnixListener::bind).context("bind terminal socket")?;
-        Self::restrict_permissions(path)?;
+        let listener = listener::bind_long_path(path, |path| {
+            let fd = listener::private_socket(SockType::Stream)?;
+            socket::bind(fd.as_raw_fd(), &UnixAddr::new(&path)?)?;
+            socket::listen(&fd, Backlog::MAXCONN)?;
+            UnixListener::from_std(StdUnixListener::from(fd))
+        })
+        .context("bind terminal socket")?;
 
         let (connected_tx, connected_rx) = mpsc::channel(10);
         let config = Config {
@@ -138,15 +142,6 @@ impl Terminal {
     /// Make the read loop wait for the consumer of the message channel.
     pub fn consume_stdio(&self) {
         self.consumed.store(true, Ordering::Release);
-    }
-
-    /// Make the terminal socket accessible to its owner only.
-    fn restrict_permissions(path: &Path) -> Result<()> {
-        let mut perms = std::fs::metadata(path)
-            .context("get terminal socket metadata")?
-            .permissions();
-        perms.set_mode(0o700);
-        std::fs::set_permissions(path, perms).context("set terminal socket permissions")
     }
 
     /// Waits for the socket client to be connected.
@@ -442,7 +437,7 @@ mod tests {
     use super::*;
     use crate::container_log::ContainerLog;
     use nix::{fcntl::FdFlag, pty, sys::socket::ControlMessage};
-    use std::{io::IoSlice, time::Duration};
+    use std::{io::IoSlice, os::unix::fs::PermissionsExt, time::Duration};
 
     /// Send the terminal descriptor with some data, like a runtime does.
     async fn send_fd(stream: &UnixStream, data: &[u8], fd: BorrowedFd<'_>) -> Result<()> {
@@ -471,6 +466,11 @@ mod tests {
 
         let mut sut = Terminal::new(logger, attach)?;
         assert!(sut.path().exists());
+        // Only the owner may connect.
+        assert_eq!(
+            std::fs::metadata(sut.path())?.permissions().mode() & 0o077,
+            0
+        );
 
         let res = pty::openpty(None, None)?;
 

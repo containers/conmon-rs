@@ -12,7 +12,7 @@ use std::{
     io,
     path::Path,
     sync::{
-        Arc, Mutex, PoisonError, Weak,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
@@ -168,7 +168,7 @@ impl SharedWatcher {
 
     /// Retrieve the watcher kept in the slot, or create one there.
     fn get_in(slot: &Slot) -> Result<Arc<Self>> {
-        let mut slot = lock(slot)?;
+        let mut slot = lock(slot);
         if let Some(watcher) = slot
             .upgrade()
             .filter(|watcher| !watcher.failed.load(Ordering::Acquire))
@@ -188,7 +188,7 @@ impl SharedWatcher {
     #[cfg(test)]
     fn slot(runtime: &Handle) -> Result<&'static Slot> {
         let id = runtime.id();
-        let mut shared = lock(&SHARED_WATCHERS)?;
+        let mut shared = lock(&SHARED_WATCHERS);
         if let Some((_, slot)) = shared.iter().find(|(i, _)| *i == id) {
             return Ok(slot);
         }
@@ -241,9 +241,7 @@ impl SharedWatcher {
                     break;
                 }
             };
-            let Ok(mut watches) = lock(&watches) else {
-                break;
-            };
+            let mut watches = lock(&watches);
             for event in &events {
                 watches.dispatch(event);
             }
@@ -257,7 +255,7 @@ impl SharedWatcher {
     /// then.
     fn stopped(watches: &Mutex<Watches>, failed: &AtomicBool) {
         failed.store(true, Ordering::Release);
-        let watches = std::mem::take(&mut *watches.lock().unwrap_or_else(PoisonError::into_inner));
+        let watches = std::mem::take(&mut *lock(watches));
         drop(watches);
     }
 
@@ -270,7 +268,7 @@ impl SharedWatcher {
         tx: Sender<WatchEvent>,
     ) -> Result<Subscription> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut watches = lock(&self.watches)?;
+        let mut watches = lock(&self.watches);
 
         // inotify returns the existing descriptor for a file which is watched
         // already, the subscriber joins its watch then.
@@ -297,9 +295,7 @@ impl SharedWatcher {
     }
 
     fn unsubscribe(&self, id: u64, wd: WatchDescriptor) {
-        let Ok(mut watches) = self.watches.lock() else {
-            return;
-        };
+        let mut watches = lock(&self.watches);
         // The kernel removed the watch already.
         let Some(watch) = watches.0.get_mut(&wd) else {
             return;
@@ -349,7 +345,7 @@ impl SharedWatcher {
     /// Remove the watch of a file, which the kernel reports with IN_IGNORED
     /// only, like for the files of a cgroup which got removed.
     pub(super) fn remove_watch(&self, path: &Path) -> Result<()> {
-        let wd = lock(&self.watches)?
+        let wd = lock(&self.watches)
             .0
             .iter()
             .find(|(_, watch)| *watch.path == *path)
@@ -361,7 +357,9 @@ impl SharedWatcher {
     /// Whether the file is watched.
     pub(super) fn watches(&self, path: &Path) -> bool {
         lock(&self.watches)
-            .is_ok_and(|watches| watches.0.values().any(|watch| *watch.path == *path))
+            .0
+            .values()
+            .any(|watch| *watch.path == *path)
     }
 }
 
@@ -392,7 +390,7 @@ mod tests {
 
     /// The number of subscribers of a path.
     fn subscribers(watcher: &SharedWatcher, path: &Path) -> Result<usize> {
-        Ok(lock(&watcher.watches)?
+        Ok(lock(&watcher.watches)
             .0
             .values()
             .filter(|watch| *watch.path == *path)
@@ -464,7 +462,7 @@ mod tests {
         }
         // The kernel dropped the watch, the descriptor is forgotten.
         timeout(Duration::from_secs(5), async {
-            while lock(&watcher.watches).is_ok_and(|watches| !watches.0.is_empty()) {
+            while !lock(&watcher.watches).0.is_empty() {
                 sleep(Duration::from_millis(1)).await;
             }
         })
@@ -562,7 +560,7 @@ mod tests {
         // like removing the watch does.
         watcher.inotify.get_ref().rm_watch(sub.wd)?;
         assert_eq!(timeout(Duration::from_secs(5), rx.recv()).await?, None);
-        assert!(lock(&watcher.watches)?.0.is_empty());
+        assert!(lock(&watcher.watches).0.is_empty());
         drop(sub);
         Ok(())
     }
@@ -578,7 +576,7 @@ mod tests {
 
         // The watches got dropped with their senders, which ends the channels
         // of the subscribers.
-        assert!(lock(&watcher.watches)?.0.is_empty());
+        assert!(lock(&watcher.watches).0.is_empty());
         assert_eq!(timeout(Duration::from_secs(5), rx.recv()).await?, None);
         // The next subscription gets a watcher which reads its events.
         assert!(!Arc::ptr_eq(&SharedWatcher::get()?, &watcher));
@@ -626,7 +624,7 @@ mod tests {
         assert_eq!(subscribers(&watcher, file.path())?, 1);
 
         drop(sub2);
-        assert!(lock(&watcher.watches)?.0.is_empty());
+        assert!(lock(&watcher.watches).0.is_empty());
 
         Ok(())
     }

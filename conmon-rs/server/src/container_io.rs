@@ -63,6 +63,13 @@ pub(crate) const DRAIN_MAX_MESSAGES: usize = 1024;
 /// output which was there already.
 pub(crate) const DRAIN_MAX_WAIT: Duration = Duration::from_secs(1);
 
+/// Upper bound for the time the exit files wait for the log drivers to take
+/// the output after the process exited, which does not count as a pause of
+/// the output, see `SharedContainerAttach::logging`. A journal which stalls
+/// takes up to a second per chunk, a pipe full of them must not keep the
+/// exit from being reported for minutes.
+pub(crate) const DRAIN_MAX_LOG_WAIT: Duration = Duration::from_secs(5);
+
 /// Bounds forwarding the output after the process exited.
 pub(crate) struct Drain {
     remaining: usize,
@@ -99,6 +106,11 @@ impl Drain {
         let res = time::timeout(DRAIN_TIMEOUT.min(budget), recv).await.ok();
         self.waited += start.elapsed();
         res
+    }
+
+    /// Whether the drain forwarded or waited as much as it may.
+    pub(crate) fn exhausted(&self) -> bool {
+        self.remaining == 0 || self.waited >= DRAIN_MAX_WAIT
     }
 
     /// The next message of the attach output with [`Drain::recv`]. A
@@ -745,9 +757,15 @@ impl ContainerIO {
         T: AsyncRead + Unpin,
     {
         let log_has_drivers = logger.read().await.has_drivers();
-        let res = Self::read_pipe(reader, pipe, &logger, message_tx, attach).await;
-        if log_has_drivers && let Err(e) = logger.write().await.finish(pipe).await {
-            error!("Unable to finish the log of {pipe}: {e:#}");
+        let res =
+            Self::read_pipe(reader, pipe, &logger, log_has_drivers, message_tx, &attach).await;
+        if log_has_drivers {
+            // The line which waits for its ending is on its way into the log
+            // like a chunk, see `SharedContainerAttach::logging`.
+            let _logging = attach.logging();
+            if let Err(e) = logger.write().await.finish(pipe).await {
+                error!("Unable to finish the log of {pipe}: {e:#}");
+            }
         }
         // The output ends for the attach endpoints and the exit files only
         // once the last line is in the log.
@@ -759,21 +777,21 @@ impl ContainerIO {
         mut reader: T,
         pipe: Pipe,
         logger: &SharedContainerLog,
+        log_has_drivers: bool,
         mut message_tx: Option<StdioSender>,
-        attach: SharedContainerAttach,
+        attach: &SharedContainerAttach,
     ) -> Result<()>
     where
         T: AsyncRead + Unpin,
     {
         let mut buf = BytesMut::with_capacity(READ_BUFFER_SIZE);
-
-        // Cache has_drivers check - drivers are immutable after container creation
-        let log_has_drivers = logger.read().await.has_drivers();
         let mut log_errors = LogErrors::default();
 
-        // Whether a line waits for its ending in the log, known from the last
-        // write, so that the logger is not locked for it on every read.
-        let mut pending = false;
+        // When the line which waits for its ending in the log gets written as
+        // a partial one, known from the last write, so that the logger is not
+        // locked for it on every read. Set once the line started, a line
+        // which trickles in must not wait for a pause of the output.
+        let mut flush_at = None;
 
         loop {
             // A large chunk gets split off below and shares the allocation
@@ -782,15 +800,15 @@ impl ContainerIO {
             // process made at once.
             buf.reserve(READ_BUFFER_SIZE);
 
-            // A line which waits for its ending gets written once the output
-            // pauses, the drivers decide whether they buffer at all.
-            let read = if pending {
+            // The drivers decide whether they buffer lines at all.
+            let read = if let Some(deadline) = flush_at {
                 select! {
                     read = reader.read_buf(&mut buf) => read,
-                    () = time::sleep(Self::IDLE_FLUSH) => {
+                    () = time::sleep_until(deadline) => {
+                        let _logging = attach.logging();
                         let res = logger.write().await.flush(pipe).await;
                         log_errors.check(pipe, res.context("flush paused log line"));
-                        pending = false;
+                        flush_at = None;
                         continue;
                     }
                 }
@@ -810,6 +828,10 @@ impl ContainerIO {
                 Ok(n) => {
                     trace!("Read {} bytes", n);
 
+                    // Until it got broadcast below, the output is on its way,
+                    // see `SharedContainerAttach::logging`.
+                    let logging = log_has_drivers.then(|| attach.logging());
+
                     // Write to logger if drivers are configured
                     // (exec_sync uses an empty logger, so skip the overhead).
                     // A failing driver drops the chunk, the output must keep
@@ -817,9 +839,17 @@ impl ContainerIO {
                     if log_has_drivers {
                         let mut locked_logger = logger.write().await;
                         let res = locked_logger.write(pipe, &buf).await;
-                        pending = locked_logger.has_pending(pipe);
+                        let pending = locked_logger.has_pending(pipe);
                         drop(locked_logger);
                         log_errors.check(pipe, res.context("write to log file"));
+
+                        // A newline in the chunk ended the line which waited
+                        // before, the one waiting now started in this chunk.
+                        flush_at = match flush_at {
+                            _ if !pending => None,
+                            Some(at) if memchr::memchr(b'\n', &buf).is_none() => Some(at),
+                            _ => Some(Instant::now() + Self::IDLE_FLUSH),
+                        };
                     }
 
                     // Only the attach clients and the stdio channel take the
@@ -845,6 +875,7 @@ impl ContainerIO {
                     if attached {
                         attach.write(Message::Data(data.clone(), pipe));
                     }
+                    drop(logging);
 
                     Self::forward(&mut message_tx, Message::Data(data, pipe)).await;
                 }
@@ -882,14 +913,10 @@ impl ContainerIO {
         attach: SharedContainerAttach,
         token: CancellationToken,
     ) -> Result<()> {
-        // While we're not processing input from a caller, and logically should be able to
-        // catch a Message::Done here, it doesn't quite work that way.
-        // Every child has an io instance that starts this function, though not
-        // all children have input to process. If there is no input from the child
-        // then we leak this function, causing memory to balloon over time.
-        // Thus, we need the select statement and token. Nothing gets written
-        // after the container exited, which could block on descendants holding
-        // the pipe open.
+        // The exit of the container cancels the token. Without it the loop would
+        // wait for attach input forever, which a container may never get.
+        // Nothing gets written after the exit either, which could block on
+        // descendants holding the pipe open.
         let res = select! {
             res = Self::forward_stdin(&mut writer, &attach) => res,
             () = token.cancelled() => Ok(()),
@@ -1190,6 +1217,27 @@ mod tests {
         assert_eq!(json.lines().count(), 2, "{json}");
         assert!(json.contains(r#""message":"ls""#));
         Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_loop_flushes_trickling_line() -> Result<()> {
+        let (_cri, json, logger) = test_helpers::container_log(true).await?;
+        let (mut writer, _rx, read_loop) = spawn_loop(logger, false);
+
+        // Progress output which never pauses as long as the line waits.
+        let mut flushed = false;
+        for _ in 0..10 {
+            writer.write_all(b".").await?;
+            time::sleep(ContainerIO::IDLE_FLUSH * 4 / 5).await;
+            if test_helpers::read(&json)?.contains(r#""partial":true"#) {
+                flushed = true;
+                break;
+            }
+        }
+        assert!(flushed, "trickling line not flushed");
+
+        drop(writer);
+        read_loop.await?
     }
 
     #[tokio::test]

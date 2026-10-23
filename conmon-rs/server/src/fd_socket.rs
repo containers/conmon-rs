@@ -35,6 +35,9 @@
 //! or with an empty request (`request_id` = 0 and `num_fds` = 0).
 //!
 //! An empty request does **not** receive a response.
+//!
+//! A connection holds at most 1024 file descriptors which no request took
+//! yet, a request which would exceed that fails with an error response.
 
 use crate::{listener, mutex::lock};
 use anyhow::{Result, bail};
@@ -54,6 +57,11 @@ use tracing::{Instrument, debug, debug_span};
 /// The most descriptors the kernel passes with one message (`SCM_MAX_FD`),
 /// which is also the limit of the Go client.
 const MAX_FDS: usize = 253;
+
+/// The most descriptors a connection holds at a time, which it sent and no
+/// request took yet. A client which never lets go of them must not use up the
+/// descriptors of the server, which every container needs.
+const MAX_HELD_FDS: usize = 1024;
 
 /// Room for a control message carrying `MAX_FDS` descriptors, more would
 /// get cut off (`MSG_CTRUNC`).
@@ -93,7 +101,7 @@ impl FdSocket {
         if slots.is_empty() {
             return Ok(Vec::new());
         }
-        let mut state = lock(&self.state)?;
+        let mut state = lock(&self.state);
         let mut seen = HashSet::with_capacity(slots.len());
         for slot in &slots {
             if !seen.insert(slot) {
@@ -126,13 +134,13 @@ impl State {
                 }
             }
         }
-        debug!("add {slot}: {:?}", self.fds);
+        debug!("Added descriptor in slot {slot}");
         self.last = slot;
         slot.0
     }
 
     fn take(&mut self, slot: u64) -> Result<OwnedFd> {
-        debug!("take {slot}: {:?}", self.fds);
+        debug!("Taking descriptor of slot {slot}");
         self.fds
             .remove(&slot)
             .ok_or_else(|| anyhow::anyhow!("no file descriptor in slot {slot}"))
@@ -171,19 +179,18 @@ struct ConnectionGuard {
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
-        let _ = self.close();
+        self.close();
     }
 }
 
 impl ConnectionGuard {
-    fn close(&mut self) -> Result<()> {
-        let mut state = lock(&self.fd_socket.state)?;
-        debug!("close... {state:?}");
-        for slot in mem::take(&mut self.slots) {
+    fn close(&mut self) {
+        let mut state = lock(&self.fd_socket.state);
+        let slots = mem::take(&mut self.slots);
+        debug!("Releasing the descriptors of {} slots", slots.len());
+        for slot in slots {
             state.fds.remove(&slot);
         }
-        debug!("closed: {state:?}");
-        Ok(())
     }
 }
 
@@ -217,24 +224,33 @@ impl Server {
     }
 
     /// Add the received descriptors to the state and the slots of the
-    /// connection, all of them or none.
+    /// connection, all of them or none, and return their slots. The
+    /// connection holds `max_held` at most.
     fn add_received_fds(
         guard: &mut ConnectionGuard,
         received_fds: Vec<OwnedFd>,
         num_fds: usize,
-    ) -> Result<()> {
+        max_held: usize,
+    ) -> Result<Vec<u64>> {
         if received_fds.len() != num_fds {
-            anyhow::bail!(
+            bail!(
                 "received {} fds, but expected {num_fds} fds",
                 received_fds.len()
             )
         }
 
-        let mut state = lock(&guard.fd_socket.state)?;
-        guard
-            .slots
-            .extend(received_fds.into_iter().map(|fd| state.add(fd)));
-        Ok(())
+        let mut state = lock(&guard.fd_socket.state);
+        // Slots which requests took meanwhile do not count.
+        guard.slots.retain(|slot| state.fds.contains_key(slot));
+        if guard.slots.len() + received_fds.len() > max_held {
+            bail!(
+                "connection holds {} file descriptors already, the limit is {max_held}",
+                guard.slots.len()
+            )
+        }
+        let slots: Vec<u64> = received_fds.into_iter().map(|fd| state.add(fd)).collect();
+        guard.slots.extend(&slots);
+        Ok(slots)
     }
 
     async fn serve(conn: UnixSeqpacket, fd_socket: Arc<FdSocket>) -> Result<()> {
@@ -256,7 +272,7 @@ impl Server {
             };
 
             if id_and_num_fds == 0 {
-                guard.close()?;
+                guard.close();
                 continue;
             }
 
@@ -271,12 +287,10 @@ impl Server {
                 // other messages are ignored
             }
 
-            let start = guard.slots.len();
-            let result = Self::add_received_fds(&mut guard, received_fds, num_fds);
+            let result = Self::add_received_fds(&mut guard, received_fds, num_fds, MAX_HELD_FDS);
 
             match result {
-                Ok(()) => {
-                    let slots = &guard.slots[start..];
+                Ok(slots) => {
                     let mut buf = vec![0; 8 + slots.len() * 8];
                     let (chunks, _) = buf.as_chunks_mut::<8>();
                     chunks[0].copy_from_slice(&id_and_num_fds.to_le_bytes());
@@ -343,7 +357,7 @@ mod tests {
 
     /// Whether the slot still holds a descriptor, without taking it.
     fn has_slot(fd_socket: &FdSocket, slot: u64) -> bool {
-        lock(&fd_socket.state).is_ok_and(|state| state.fds.contains_key(&slot))
+        lock(&fd_socket.state).fds.contains_key(&slot)
     }
 
     #[tokio::test]
@@ -389,7 +403,7 @@ mod tests {
 
         let resp = request(&conn, 3, 1, &null_fds(1)?).await?;
         assert_eq!(word(&resp, 0), (3 << 32) | 1);
-        assert_eq!(lock(&fd_socket.state)?.fds.len(), 1);
+        assert_eq!(lock(&fd_socket.state).fds.len(), 1);
         Ok(())
     }
 
@@ -433,6 +447,30 @@ mod tests {
         let resp = request(&conn, 9, MAX_FDS as u64, &fds).await?;
         assert_eq!(word(&resp, 0), (9 << 32) | MAX_FDS as u64);
         assert_eq!(resp.len(), (MAX_FDS + 1) * 8);
+        Ok(())
+    }
+
+    #[test]
+    fn connection_holds_a_limited_number_of_fds() -> Result<()> {
+        let fd_socket = Arc::new(FdSocket::default());
+        let mut guard = ConnectionGuard {
+            fd_socket: fd_socket.clone(),
+            slots: Vec::new(),
+        };
+        let slots = Server::add_received_fds(&mut guard, null_fds(2)?, 2, 3)?;
+
+        // Beyond the limit nothing gets added.
+        let err = Server::add_received_fds(&mut guard, null_fds(2)?, 2, 3).unwrap_err();
+        assert!(
+            err.to_string().contains("holds 2 file descriptors"),
+            "{err}"
+        );
+        assert_eq!(lock(&fd_socket.state).fds.len(), 2);
+
+        // Descriptors which a request took do not count anymore.
+        fd_socket.take_all(slots)?;
+        Server::add_received_fds(&mut guard, null_fds(3)?, 3, 3)?;
+        assert_eq!(guard.slots.len(), 3);
         Ok(())
     }
 }

@@ -215,8 +215,8 @@ mod tests {
 
         assert_eq!(msg_string(msg)?, expected);
 
-        // There is no child_reaper instance paying attention to the child we've created,
-        // so the read_loops must be cancelled here instead.
+        // The token only stops the stdin loop, the output ends with the
+        // process, which exits after its echo.
         token.cancel();
 
         let msg = stdout_rx.recv().await.context("no message on stdout")?;

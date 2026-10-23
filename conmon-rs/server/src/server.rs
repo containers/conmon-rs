@@ -12,7 +12,7 @@ use crate::{
     pause::Pause,
     streaming_server::StreamingServer,
 };
-use anyhow::{Context, Result, format_err};
+use anyhow::{Context, Result, bail, format_err};
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp::Side, twoparty};
 use futures::{
     AsyncReadExt, FutureExt,
@@ -35,7 +35,7 @@ use tokio::{
     fs,
     net::UnixListener,
     runtime::Builder,
-    signal::unix::{SignalKind, signal},
+    signal::unix::{Signal as SignalStream, SignalKind, signal},
     sync::{RwLock, oneshot},
     task::{self, LocalSet},
     time::{self, Duration, Instant},
@@ -358,7 +358,14 @@ impl Server {
         let registry = registry.with(telemetry_layer);
 
         match self.config().log_driver() {
-            LogDriver::None => {}
+            LogDriver::None => {
+                // Without logs the spans still get exported. A subscriber
+                // without any layer would only cost.
+                #[cfg(feature = "tracing")]
+                if self.tracer.is_some() {
+                    registry.try_init().context("init telemetry layer")?;
+                }
+            }
             LogDriver::Stdout => {
                 let layer = tracing_subscriber::fmt::layer()
                     .with_target(true)
@@ -411,6 +418,9 @@ impl Server {
         let fd_socket = self.config().fd_socket();
         let reaper = self.reaper.clone();
         self.reaper.clone().start_orphan_sweep();
+        // Before the backend binds the socket, a signal which arrives once a
+        // client can connect must shut the server down, not kill it.
+        let signals = Self::listen_for_signals();
 
         // The RPC system is not `Send`, so the backend and the tasks of the
         // calls run on a local set. It runs on the thread of the runtime
@@ -418,7 +428,7 @@ impl Server {
         // signal handler next to it.
         let local = LocalSet::new();
         local.spawn_local(Self::traced(
-            Self::start_signal_handler(reaper, socket, fd_socket, shutdown_tx),
+            Self::start_signal_handler(signals, reaper, socket, fd_socket, shutdown_tx),
             debug_span!("signal_handler"),
         ));
         local
@@ -446,12 +456,13 @@ impl Server {
     /// the result, which the server exits with. A server which cannot listen
     /// for the signals ends right away, after the same cleanup.
     async fn start_signal_handler<T: AsRef<Path>>(
+        signals: Result<[SignalStream; 2]>,
         reaper: Arc<ChildReaper>,
         socket: T,
         fd_socket: T,
         shutdown_tx: oneshot::Sender<Result<()>>,
     ) {
-        let signalled = Self::wait_for_signal().await;
+        let signalled = Self::wait_for_signal(signals).await;
         let shutdown = Self::shutdown(reaper, socket, fd_socket, Pause::shutdown).await;
         let result = Self::all_ok([signalled, shutdown]);
         // The backend returns it, the server exits non-zero on a failure.
@@ -461,10 +472,17 @@ impl Server {
         }
     }
 
-    /// Wait for SIGTERM or SIGINT.
-    async fn wait_for_signal() -> Result<()> {
-        let mut sigterm = signal(SignalKind::terminate()).context("listen for SIGTERM")?;
-        let mut sigint = signal(SignalKind::interrupt()).context("listen for SIGINT")?;
+    /// Listen for SIGTERM and SIGINT, which shut the server down.
+    fn listen_for_signals() -> Result<[SignalStream; 2]> {
+        Ok([
+            signal(SignalKind::terminate()).context("listen for SIGTERM")?,
+            signal(SignalKind::interrupt()).context("listen for SIGINT")?,
+        ])
+    }
+
+    /// Wait for SIGTERM or SIGINT, see [`Server::listen_for_signals`].
+    async fn wait_for_signal(signals: Result<[SignalStream; 2]>) -> Result<()> {
+        let [mut sigterm, mut sigint] = signals?;
 
         tokio::select! {
             _ = sigterm.recv() => {
@@ -620,13 +638,11 @@ impl GenerateRuntimeArgs<'_> {
         global_args: impl IntoIterator<Item = impl AsRef<str>>,
         command_args: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<Vec<String>> {
-        // Pre-allocate capacity for typical arg count to reduce reallocations
         let mut args = Vec::with_capacity(16);
         args.extend(self.default_args().context("build default runtime args")?);
 
         args.extend(global_args.into_iter().map(|arg| arg.as_ref().into()));
 
-        // Use static strings where possible to avoid allocations
         args.push("create".into());
         args.push("--bundle".into());
         args.push(bundle_path.display().to_string());
@@ -639,7 +655,7 @@ impl GenerateRuntimeArgs<'_> {
             args.push(format!("--console-socket={}", terminal.path().display()));
         }
 
-        args.push(self.id.into());
+        args.push(self.checked_id()?.into());
 
         debug!("Runtime args {:?}", args.join(" "));
         Ok(args)
@@ -661,11 +677,9 @@ impl GenerateRuntimeArgs<'_> {
     }
 
     pub(crate) fn exec_sync_args_without_command(&self) -> Result<Vec<String>> {
-        // Pre-allocate capacity for typical arg count
         let mut args = Vec::with_capacity(12);
         args.extend(self.default_args().context("build default runtime args")?);
 
-        // Use static strings to avoid allocations
         args.push("exec".into());
         args.push("-d".into());
 
@@ -675,9 +689,18 @@ impl GenerateRuntimeArgs<'_> {
         }
 
         args.push(format!("--pid-file={}", self.pidfile.display()));
-        args.push(self.id.into());
+        args.push(self.checked_id()?.into());
 
         Ok(args)
+    }
+
+    /// The container ID, which the runtimes take as a positional argument.
+    /// One which starts with a dash would be taken for an option.
+    fn checked_id(&self) -> Result<&str> {
+        if self.id.is_empty() || self.id.starts_with('-') {
+            bail!("invalid container ID {:?}", self.id)
+        }
+        Ok(self.id)
     }
 
     /// Build the default arguments for any provided runtime.
@@ -799,6 +822,26 @@ mod tests {
                 "id"
             ]
         );
+    }
+
+    #[test]
+    fn ids_which_look_like_options_are_rejected() {
+        let Some(config) = Config::parse_for_test(["--runtime", "/usr/bin/runc"]) else {
+            return;
+        };
+        let container_io =
+            ContainerIO::new(false, ContainerLog::new()).expect("create container IO");
+        for id in ["", "-d", "--help"] {
+            let args = GenerateRuntimeArgs {
+                config: &config,
+                id,
+                container_io: &container_io,
+                pidfile: Path::new("/pidfile"),
+                cgroup_manager: CgroupManager::Cgroupfs,
+            };
+            assert!(args.exec_sync_args(["true"]).is_err(), "{id}");
+            assert!(create(args).is_err(), "{id}");
+        }
     }
 
     #[test]

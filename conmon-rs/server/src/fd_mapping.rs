@@ -174,4 +174,32 @@ mod tests {
         );
         Ok(())
     }
+
+    /// A descriptor which already has the number of its mapping only loses
+    /// its close-on-exec flag.
+    #[tokio::test]
+    async fn identical_fds_are_inherited() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("a");
+        let fd: OwnedFd = File::create(&path)?.into();
+        let raw = fd.as_raw_fd();
+        assert!(
+            FdFlag::from_bits_truncate(fcntl(&fd, FcntlArg::F_GETFD)?).contains(FdFlag::FD_CLOEXEC)
+        );
+
+        let output = Command::new("readlink")
+            .arg(format!("/proc/self/fd/{raw}"))
+            .fd_mappings(vec![FdMapping {
+                parent_fd: fd,
+                child_fd: raw,
+            }])?
+            .output()
+            .await?;
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout)?.trim(),
+            path.to_str().unwrap()
+        );
+        Ok(())
+    }
 }

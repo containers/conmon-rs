@@ -204,8 +204,13 @@ interface Conmon {
         namespaces @1 :List(Namespace);
         uidMappings @2 :List(Text); # User ID mappings when unsharing the user namespace.
         gidMappings @3 :List(Text); # Group ID mappings when unsharing the user namespace.
-        basePath @4 :Text; # The root path for storing the namespaces.
-        podId @5 :Text; # The pod identifier.
+        # The root path for storing the namespaces, which has to be absolute.
+        basePath @4 :Text;
+        # The pod identifier, which names the files of the namespaces below
+        # the base path. It must not be empty, "." or "..", consists of the
+        # letters A-Z and a-z, the digits 0-9, "_", "." and "-" only, and takes
+        # 251 bytes at most.
+        podId @5 :Text;
         metadata @6 :Metadata; # Standard metadata to carry.
     }
 
