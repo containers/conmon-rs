@@ -108,7 +108,11 @@ jobs:
               fi
             done
 
-  # Warns about newer upstream releases of the tools of dependencies.yaml.
+  # Warns about newer upstream releases of the tools of dependencies.yaml, and
+  # fails for an image whose tag has another digest than the pinned one: a
+  # bump of the tag without the digest, or a tag which moved, like alpine:3.24
+  # to a new patch release or a rebuild of node. The pull requests do not
+  # check it, a moved tag would fail them all.
   verify-dependencies-upstream:
     if: github.repository == 'containers/conmon-rs'
     runs-on: ubuntu-latest
@@ -116,9 +120,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
       - name: Check for updates
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -126,3 +127,6 @@ jobs:
           set -o pipefail
           make verify-dependencies-upstream | tee upstream.txt
           sed -n 's/^Update available/::warning::Update available/p' upstream.txt
+      - name: Check the digests of the images
+        if: ${{ !cancelled() }}
+        run: make verify-digests

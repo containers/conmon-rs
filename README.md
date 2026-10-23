@@ -274,14 +274,15 @@ follow the latest releases. To build and install a release binary:
 ```
 
 The [Makefile](./Makefile) has targets for most of what CI runs: `make` builds
-the server, `make lint` runs rustfmt, clippy, golangci-lint and shellcheck
-(which has to be installed), `make unit` runs the Rust unit tests, `make
-unit-go` the ones of the Go client and `make integration` runs the Go
-integration suite against the release binary (`RUNTIME_PATH` selects the OCI
-runtime, the suite needs root for the namespace and OOM specs). `make verify`
-runs the remaining checks, like prettier, cargo-deny, typos (both have to be
-installed), actionlint and zizmor, some of them in containers. `make help`
-lists the rest. Contributions follow [CONTRIBUTING.md](./CONTRIBUTING.md).
+the server, `make lint` runs rustfmt, clippy, rustdoc, golangci-lint and
+shellcheck (which has to be installed), `make lint-msrv` checks the sources
+with the `rust-version` toolchain of rustup, `make unit` runs the Rust unit
+tests, `make unit-go` the ones of the Go client and `make integration` runs
+the Go integration suite against the release binary (`RUNTIME_PATH` selects
+the OCI runtime, the suite needs root for the namespace and OOM specs). `make
+verify` runs the remaining checks, like prettier, cargo-deny, typos (both have
+to be installed), actionlint and zizmor, some of them in containers. `make
+help` lists the rest. Contributions follow [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 The [fuzz](./fuzz) directory holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)
 targets for the parsers of client input, the SPDY frames, header blocks and

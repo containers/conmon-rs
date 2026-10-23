@@ -28,8 +28,10 @@ permissions: {}
 env:
   NIX_VERSION: "2.35.3"
 jobs:
+  # A cold cache builds the cross toolchains, which takes about an hour.
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     permissions:
       contents: read
     outputs:
@@ -53,18 +55,24 @@ jobs:
           name: conmon-rs
       - run: nix build ".#$ARCH"
       - run: file result/bin/conmonrs | grep static | grep stripped
-      # Every binary gets executed once, a build which links but does not
-      # run would otherwise only show up on the target machines. flake.lock
-      # decides the Rust toolchain of the build, not RUST_VERSION of the ci
-      # workflow, the summary shows which one it was.
+      # Every binary runs once until it serves its socket, see
+      # .github/smoke-test, a build which links but does not run would
+      # otherwise only show up on the target machines. The integration tests
+      # only cover amd64 and arm64. flake.lock decides the Rust toolchain of
+      # the build, not RUST_VERSION of the ci workflow, the summary shows
+      # which one it was.
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         if: inputs.arch != 'amd64'
       - name: Smoke test
+        timeout-minutes: 5
+        env:
+          IMAGE: docker.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
         run: |
-          VERSION=$(docker run --rm --platform "linux/$ARCH" \
-            -v "$PWD/result/bin:/smoke:ro" alpine:3.24 /smoke/conmonrs --version)
+          RUN=(docker run --rm --platform "linux/$ARCH" -v "$PWD/result/bin:/smoke:ro")
+          VERSION=$("${RUN[@]}" "$IMAGE" /smoke/conmonrs --version)
           echo "$VERSION"
           printf '### conmonrs.%s\n\n~~~\n%s\n~~~\n' "$ARCH" "$VERSION" >>"$GITHUB_STEP_SUMMARY"
+          "${RUN[@]}" -v "$PWD/.github/smoke-test:/smoke-test:ro" "$IMAGE" /smoke-test /smoke/conmonrs
       # The build embeds its dependencies with cargo-auditable, which syft
       # reads. syft writes SPDX 2.3, SPDX 3 needs a generator which reads them
       # and attest-sbom support. The SBOM names the file it scanned, which is

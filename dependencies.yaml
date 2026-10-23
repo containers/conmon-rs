@@ -1,4 +1,8 @@
 ---
+# The container images of alpine, grype, node and zizmor are pinned by the
+# digest of their index as well, which a bump of the version updates, see
+# `skopeo inspect --format '{{.Digest}}' docker://<image>:<tag>`. make
+# verify-digests checks them, the advisories workflow every day.
 dependencies:
   # The version of conmon-rs itself, bumped for a release.
   - name: conmon-rs
@@ -71,6 +75,8 @@ dependencies:
       - path: .github/workflows/ci.yml
         match: "SHELLCHECK_VERSION:"
 
+  # A bump updates ZEITGEIST_CHECKSUMS_SHA256 of the Makefile as well, the
+  # sha256 of the checksums.txt of the release.
   - name: zeitgeist
     version: 0.8.0
     upstream:
@@ -197,8 +203,10 @@ dependencies:
       - path: .github/workflows/build-static.yml
         match: "alpine:"
 
-  - name: ubuntu-arm-runner
+  # The runners of the jobs which run the server, the other jobs use
+  # ubuntu-latest.
+  - name: ubuntu-runner
     version: 24.04
     refPaths:
       - path: .github/workflows/ci.yml
-        match: "runs-on: ubuntu-.*-arm"
+        match: "runs-on: ubuntu-[0-9]"

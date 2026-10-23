@@ -8,7 +8,9 @@ set -euo pipefail
 # crates as its subcomponents, and lists the GHSA ID of the vulnerability,
 # which is the one grype reports for crates. The product has no version: the
 # document belongs to the binaries of its commit, and the scan, which drops
-# the product, would apply a statement for one version to all of them.
+# the product, would apply a statement for one version to all of them. A
+# document with statements has a version above the first one, and a
+# last_updated, which vexctl sets and a statement added by hand has to.
 VEX=${1:-vex/conmonrs.openvex.json}
 
 ERRORS=$(jq -r '
@@ -19,13 +21,13 @@ ERRORS=$(jq -r '
         check(.vulnerability.name | str; "\($s): vulnerability.name is missing"),
         check([.vulnerability.name, (.vulnerability.aliases // [])[]] | any(strings | test("^GHSA-"));
             "\($s): neither vulnerability.name nor vulnerability.aliases list the GHSA ID"),
-        check(.products | type == "array" and length > 0; "\($s): products is empty"),
-        ((.products // [])[] |
+        check(.products | type == "array" and length > 0; "\($s): products is not a list of products"),
+        ((.products | arrays[]) |
             check(.["@id"] == "pkg:github/containers/conmon-rs";
                 "\($s): product \(.["@id"]) is not pkg:github/containers/conmon-rs, without a version"),
             check(.subcomponents | type == "array" and length > 0;
                 "\($s): product \(.["@id"]) lists no subcomponents"),
-            ((.subcomponents // [])[] |
+            ((.subcomponents | arrays[]) |
                 check(.["@id"] | str and test("^pkg:cargo/");
                     "\($s): subcomponent \(.["@id"]) is not a pkg:cargo purl"))),
         check(.status | IN("not_affected", "affected", "fixed", "under_investigation");
@@ -44,7 +46,14 @@ ERRORS=$(jq -r '
     check(.timestamp | str; "timestamp is missing"),
     check(.version | type == "number" and . >= 1 and . == floor; "version is not a positive integer"),
     check(.statements | type == "array"; "statements is not an array"),
-    (.statements // [] | to_entries[] | .key as $i | .value | statement($i))
+    check((.statements | type != "array" or length == 0) or .version > 1;
+        "version is still 1, adding a statement raises it, see release.md"),
+    check(.version == 1 or (.last_updated | str);
+        "last_updated is missing, raising the version sets it, see release.md"),
+    # A field of an unexpected type, like a product which is no object, ends
+    # the checks of its statement with an error of jq.
+    (.statements | arrays | to_entries[] | .key as $i | .value |
+        try statement($i) catch "statement \($i) is malformed: \(.)")
 ' "$VEX")
 
 if [[ -n $ERRORS ]]; then

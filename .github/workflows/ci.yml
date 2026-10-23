@@ -34,10 +34,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # zeitgeist gets built from source, see the Makefile.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
+      # zeitgeist is a release binary, see the Makefile.
       - run: make verify-dependencies
       - run: make verify-spec
       - run: make verify-vex
@@ -100,40 +97,29 @@ jobs:
       - run: .github/install-deps
       - name: Select Toolchain
         run: rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt && rustup default "$RUST_VERSION"
-      # The oldest toolchain the locked dependencies support.
+      # The oldest toolchain the locked dependencies support, which make
+      # lint-msrv uses.
       - name: Install the rust-version toolchain
-        id: msrv
         run: |
           MSRV=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
           rustup toolchain install "$MSRV" --profile minimal
-          echo "version=$MSRV" >>"$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         id: setup
-      # The checks only run on a complete setup, which they would report as
+      # The checks are the ones of make lint-rust and make lint-msrv, see the
+      # Makefile, and only run on a complete setup, which they would report as
       # their own failures otherwise.
       - name: Rustfmt
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: cargo fmt && git diff --exit-code
-      # The default features are what gets shipped, all features cover the
-      # optional tracing code.
+        run: make lint-rustfmt
       - name: Clippy Lint
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: |
-          cargo clippy --locked --all-targets -- -D warnings
-          cargo clippy --locked --all-targets --all-features -- -D warnings
-          cargo clippy --locked -p conmonrs-fuzz --all-targets -- -D warnings
-      # The gh-pages workflow publishes the documentation with the tracing
-      # feature.
+        run: make lint-clippy
       - name: Cargo doc
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: cargo doc --locked --no-deps --features tracing
-        env:
-          RUSTDOCFLAGS: -D warnings
+        run: make lint-rustdoc
       - name: Cargo check with rust-version
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        env:
-          MSRV: ${{ steps.msrv.outputs.version }}
-        run: cargo "+$MSRV" check --locked --all-targets --all-features
+        run: make lint-msrv
 
   lint-shell:
     runs-on: ubuntu-latest
@@ -569,9 +555,12 @@ jobs:
           name: fuzz-${{ matrix.target }}-artifacts
           path: artifacts
 
+  # The jobs which run the server pin the same Ubuntu release for every
+  # architecture, the kernel and the memory budget depend on it, see
+  # dependencies.yaml.
   test-integration-amd64:
     needs: build-static-amd64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       ARCH: amd64
@@ -692,7 +681,7 @@ jobs:
   # The debug build is slower, so a timing sensitive failure here only costs
   # the coverage.
   test-integration-coverage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -805,7 +794,7 @@ jobs:
   # critest reaches directly over WebSocket. Port forwarding stays with CRI-O.
   test-critest:
     needs: build-static-amd64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -851,7 +840,7 @@ jobs:
           fi
 
           set +o errexit
-          sudo -E PATH="$PATH" critest \
+          sudo -E env PATH="$PATH" critest \
             --runtime-endpoint=unix:///var/run/crio/crio.sock \
             --parallel="$(nproc)" \
             --ginkgo.flake-attempts=3 \
@@ -916,6 +905,12 @@ jobs:
         run: |
           TAG=$(gh release view -R containers/conmon-rs --json tagName -q .tagName)
           scripts/get -l "$TAG" -o .build/release/conmonrs
+      # The binaries of v1.1.1 are from before the publish-static workflow,
+      # the ci workflow signed them.
+      - name: Get a release from before the attestations
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/get -l v1.1.1 -o .build/old/conmonrs
 
   # The release workflow publishes the marker of a tag.
   publish-marker:
@@ -926,14 +921,20 @@ jobs:
       - publish-static-arm64
       - publish-static-ppc64le
       - publish-static-s390x
+    # Runs of main commits overlap and finish in any order. The marker only
+    # moves forward, so an older run finishing last cannot move it back and a
+    # failing newer run does not hold it up for the ones after it. The jobs
+    # run one at a time, two could both read the old marker and the older one
+    # upload last otherwise. A third job replaces a waiting one, which leaves
+    # the marker behind until the next commit, but never moves it back.
+    concurrency:
+      group: ${{ github.workflow }}-publish-marker
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      # Runs of main commits overlap and finish in any order. The marker only
-      # moves forward, so an older run finishing last cannot move it back and
-      # a failing newer run does not hold it up for the ones after it.
       - name: Check the current marker
         id: main
         run: |

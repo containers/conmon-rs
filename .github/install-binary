@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install a binary of a release, which has to match its checksum in the
+# checksums file of the release. The checksums file of a release which can
+# change gets pinned with -s, without it only an immutable release protects
+# against a replaced binary. A tar.gz asset gets the path of the binary inside
+# it with -m. The binary replaces OUTPUT in one step, a failed or interrupted
+# install leaves the previous one in place.
+usage() {
+    echo "usage: $0 [-s CHECKSUMS_SHA256] [-m MEMBER] ASSET_URL CHECKSUMS_URL OUTPUT" >&2
+    exit 1
+}
+
+CHECKSUMS_SHA256=
+MEMBER=
+while getopts "s:m:" OPT; do
+    case $OPT in
+    s) CHECKSUMS_SHA256=$OPTARG ;;
+    m) MEMBER=$OPTARG ;;
+    *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+if (($# != 3)); then
+    usage
+fi
+URL=$1
+CHECKSUMS=$2
+OUTPUT=$3
+ASSET=${URL##*/}
+
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+# Retries transient failures, also the ones curl does not retry by default,
+# like a reset connection.
+CURL=(curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors)
+"${CURL[@]}" "$URL" -o "$TMPDIR/$ASSET"
+"${CURL[@]}" "$CHECKSUMS" -o "$TMPDIR/checksums.txt"
+
+if [[ -n $CHECKSUMS_SHA256 ]] &&
+    ! echo "$CHECKSUMS_SHA256  $TMPDIR/checksums.txt" | sha256sum -c --status -; then
+    echo "$CHECKSUMS does not match its pinned checksum $CHECKSUMS_SHA256" >&2
+    exit 1
+fi
+SUM=$(awk -v asset="$ASSET" '$2 == asset || $2 == "*" asset { print $1 }' "$TMPDIR/checksums.txt")
+if [[ ! $SUM =~ ^[0-9a-f]{64}$ ]]; then
+    echo "$CHECKSUMS has no checksum of $ASSET" >&2
+    exit 1
+fi
+if ! echo "$SUM  $TMPDIR/$ASSET" | sha256sum -c --status -; then
+    echo "$ASSET does not match its checksum $SUM of $CHECKSUMS" >&2
+    exit 1
+fi
+
+BINARY=$TMPDIR/$ASSET
+if [[ -n $MEMBER ]]; then
+    tar -xzf "$BINARY" -C "$TMPDIR" "$MEMBER"
+    BINARY=$TMPDIR/$MEMBER
+fi
+mkdir -p "$(dirname "$OUTPUT")"
+install -m 755 "$BINARY" "$OUTPUT.tmp"
+mv -f "$OUTPUT.tmp" "$OUTPUT"
+echo "Installed $ASSET into $OUTPUT"
