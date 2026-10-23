@@ -971,13 +971,13 @@ var _ = Describe("ConmonClient", func() {
 					ContainerStdin:    true,
 					StopAfterStdinEOF: !leaveStdinOpen,
 					Streams: client.AttachStreams{
-						Stdin: &client.In{stdinReader},
+						Stdin: &client.In{ReadCloser: stdinReader},
 					},
 				}
 				if pipe == "stdout" {
-					cfg.Streams.Stdout = &client.Out{stdWriter}
+					cfg.Streams.Stdout = &client.Out{WriteCloser: stdWriter}
 				} else {
-					cfg.Streams.Stderr = &client.Out{stdWriter}
+					cfg.Streams.Stderr = &client.Out{WriteCloser: stdWriter}
 				}
 
 				testAttach(ctx, sut, cfg, stdinWriter, stdReader, pipe, pipe == "stderr", terminal)
@@ -1017,9 +1017,9 @@ var _ = Describe("ConmonClient", func() {
 				StopAfterStdinEOF: stopAfterStdinEOF,
 				ContainerStdin:    true,
 				Streams: client.AttachStreams{
-					Stdin:  &client.In{stdinReader},
-					Stdout: &client.Out{stdoutWriter},
-					Stderr: &client.Out{stderrWriter},
+					Stdin:  &client.In{ReadCloser: stdinReader},
+					Stdout: &client.Out{WriteCloser: stdoutWriter},
+					Stderr: &client.Out{WriteCloser: stderrWriter},
 				},
 			}
 
@@ -1157,8 +1157,8 @@ var _ = Describe("ConmonClient", func() {
 							SocketPath:     socketPath,
 							ContainerStdin: true,
 							Streams: client.AttachStreams{
-								Stdin:  &client.In{stdinReader},
-								Stdout: &client.Out{stdoutWriter},
+								Stdin:  &client.In{ReadCloser: stdinReader},
+								Stdout: &client.Out{WriteCloser: stdoutWriter},
 							},
 						})
 					}()
@@ -1205,7 +1205,7 @@ var _ = Describe("ConmonClient", func() {
 					SocketPath: filepath.Join(tr.tmpDir, "attach"),
 					Tty:        true,
 					Resize:     resizeEvents,
-					Streams:    client.AttachStreams{Stdout: &client.Out{stdoutWriter}},
+					Streams:    client.AttachStreams{Stdout: &client.Out{WriteCloser: stdoutWriter}},
 				})
 			}()
 
@@ -1244,8 +1244,8 @@ var _ = Describe("ConmonClient", func() {
 					ContainerStdin:    true,
 					StopAfterStdinEOF: true,
 					Streams: client.AttachStreams{
-						Stdin:  &client.In{stdinReader},
-						Stdout: &client.Out{stdoutWriter},
+						Stdin:  &client.In{ReadCloser: stdinReader},
+						Stdout: &client.Out{WriteCloser: stdoutWriter},
 					},
 				})
 			}()
@@ -1312,7 +1312,7 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	Describe("Tracing", func() {
-		const contribTracingPath = "../../contrib/tracing/"
+		const contribTracingPath = "../../../contrib/tracing/"
 
 		BeforeEach(func() {
 			// Tracing is a compile time feature of the server, only a build

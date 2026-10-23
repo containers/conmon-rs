@@ -5,7 +5,15 @@ CONTAINER_RUNTIME ?= podman
 BUILD_DIR ?= .build
 GOTOOLS_GOPATH ?= $(BUILD_DIR)/gotools
 GOTOOLS_BINDIR ?= $(GOTOOLS_GOPATH)/bin
-GINKGO_FLAGS ?= -vv --trace --race --randomize-all --show-node-events --timeout 5m -r pkg/client
+# The integration suite is a module of its own in pkg/client/integration, so
+# that its dependencies stay out of the go.mod of the client, which CRI-O
+# requires and which follows CRI-O main. The modules only the suite needs
+# follow the latest releases. Recursing into pkg/client runs the unit tests of
+# the client as well. They do not use ginkgo, which warns about the version of
+# it in the module graph of the client anyway. They form a suite of their own,
+# and without --keep-going a failing one would skip the integration suite.
+INTEGRATION_DIR := pkg/client/integration
+GINKGO_FLAGS ?= -vv --trace --race --randomize-all --show-node-events --timeout 5m --keep-going -r pkg/client
 # Extra ginkgo flags, CI passes --flake-attempts here so that a flake is
 # visible locally.
 TEST_FLAGS ?=
@@ -88,10 +96,9 @@ unit: ## Run the unit tests with the default and with the tracing feature.
 	cargo test --no-fail-fast
 	cargo test --no-fail-fast --features tracing
 
-# TestConmonClient is the integration suite, see the integration target.
 .PHONY: unit-go
 unit-go: ## Run the unit tests of the Go client, which need no server.
-	go test -race -skip '^TestConmonClient$$' ./pkg/client
+	go test -race ./pkg/client
 
 .PHONY: integration
 integration: .install.ginkgo $(if $(CONMON_BINARY),,release) ## Run the integration tests using $CONMON_BINARY or the release binary.
@@ -117,6 +124,7 @@ lint-go: .install.golangci-lint ## Lint the Go sources.
 	$(GOTOOLS_BINDIR)/golangci-lint version
 	$(GOTOOLS_BINDIR)/golangci-lint linters
 	GL_DEBUG=gocritic $(GOTOOLS_BINDIR)/golangci-lint run
+	cd $(INTEGRATION_DIR) && $(abspath $(GOTOOLS_BINDIR))/golangci-lint run
 
 .PHONY: lint-shell
 lint-shell: ## Lint the shell scripts, the files whose first line is a sh or bash shebang.
@@ -195,11 +203,11 @@ verify-prettier: ## Check the formatting of the supported files with prettier.
 prettier: ## Prettify supported files.
 	$(PRETTIER) -w .
 
-# ginkgo publishes no binaries, an installed one of the version of go.mod is
-# kept, which CI caches.
+# ginkgo publishes no binaries, an installed one of the version of the go.mod
+# of the integration suite is kept, which CI caches.
 .PHONY: .install.ginkgo
 .install.ginkgo:
-	VERSION=$$(go list -m -f {{.Version}} github.com/onsi/ginkgo/v2) && \
+	VERSION=$$(go -C $(INTEGRATION_DIR) list -m -f {{.Version}} github.com/onsi/ginkgo/v2) && \
 	if ! "$(GOTOOLS_BINDIR)/ginkgo" version 2>/dev/null | grep -qx "Ginkgo Version $${VERSION#v}"; then \
 		GOBIN=$(abspath $(GOTOOLS_BINDIR)) go install "github.com/onsi/ginkgo/v2/ginkgo@$$VERSION"; \
 	fi
