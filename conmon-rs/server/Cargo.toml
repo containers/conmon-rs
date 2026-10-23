@@ -55,8 +55,9 @@ tracing = [
     "dep:tracing-opentelemetry",
     "nix/hostname",
 ]
-# The entry points of the fuzz targets in fuzz/.
-fuzzing = []
+# The entry points of the fuzz targets in fuzz/, which pause the clock of
+# tokio.
+fuzzing = ["tokio/test-util"]
 
 [dev-dependencies]
 tempfile = { version = "3.27.0", default-features = false }

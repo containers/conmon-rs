@@ -971,8 +971,8 @@ impl Drop for StreamSender {
 pub mod fuzzing {
     pub use super::frame::fuzzing::{frames, header_block};
     use super::{
-        Connection,
-        frame::{Encoder, Frame, Headers},
+        Connection, Headers,
+        frame::{Encoder, Frame},
     };
     use anyhow::bail;
     use bytes::{Bytes, BytesMut};
@@ -984,8 +984,13 @@ pub mod fuzzing {
 
     /// The frames a client sends, by the input: each starts with a byte
     /// which picks the frame and its FIN flag, followed by the stream and
-    /// what the frame needs. Raw bytes may break the framing.
-    fn client_frames(input: &[u8]) -> BytesMut {
+    /// what the frame needs. The headers of a new stream come from
+    /// `headers`, by the next bytes of the input. Raw bytes may break the
+    /// framing.
+    pub(crate) fn client_frames(
+        input: &[u8],
+        mut headers: impl FnMut(&mut dyn FnMut() -> u8) -> Headers,
+    ) -> BytesMut {
         let mut input = input.iter().copied();
         let mut encoder = Encoder::default();
         let mut buf = BytesMut::new();
@@ -996,11 +1001,7 @@ pub mod fuzzing {
                 0 => Frame::SynStream {
                     stream_id: id,
                     fin,
-                    headers: [(
-                        "streamType",
-                        ["data", "error", "other"][usize::from(next() % 3)],
-                    )]
-                    .into(),
+                    headers: headers(&mut next),
                 },
                 1 => {
                     let (byte, len) = (next(), next());
@@ -1040,7 +1041,13 @@ pub mod fuzzing {
     /// accepts take their data, answer, close or get dropped. The connection
     /// has to end with the client, also with streams which do not.
     pub fn connection(input: &[u8]) {
-        let frames = client_frames(input);
+        let frames = client_frames(input, |next| {
+            [(
+                "streamType",
+                ["data", "error", "other"][usize::from(next() % 3)],
+            )]
+            .into()
+        });
         let runtime = runtime::Builder::new_current_thread()
             .enable_time()
             .build()

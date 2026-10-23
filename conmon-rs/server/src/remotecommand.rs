@@ -173,15 +173,12 @@ impl Framing {
     }
 
     /// What a message of the client means, none for one which needs no
-    /// handling.
+    /// handling. Like for Kubernetes, text messages carry the same as binary
+    /// ones, also for v5, its server does not look at the type.
     pub fn event(self, message: Message) -> Option<ClientEvent> {
         let data = match message {
             Message::Binary(data) => data,
-            Message::Text(text) if self.version < Version::V5 => Bytes::from(text),
-            Message::Text(t) => {
-                trace!("Got text message: {t:?}");
-                return None;
-            }
+            Message::Text(text) => Bytes::from(text),
             Message::Close(c) => {
                 match c {
                     Some(cf) => info!(
@@ -207,10 +204,10 @@ impl Framing {
 
         if self.version == Version::V5 {
             let Some(&channel) = data.first() else {
-                trace!("Got unknown binary data");
+                trace!("Got empty message");
                 return None;
             };
-            trace!("Got {} binary bytes", data.len());
+            trace!("Got {} bytes", data.len());
             return match channel {
                 STDIN_BYTE => Stdin::data(data.slice(1..)).map(ClientEvent::Stdin),
                 // Only stdin can be closed, the message names it, like
@@ -254,7 +251,15 @@ pub enum ClientEvent {
 
     /// The client closed the connection cleanly.
     Closed,
+
+    /// The client sent a message larger than the server takes, which fails
+    /// the session, see [`MESSAGE_TOO_LARGE`].
+    TooLarge,
 }
+
+/// The failure of a session whose client sent a message larger than the
+/// server takes.
+pub const MESSAGE_TOO_LARGE: &str = "message of the client exceeds the size limit of the server";
 
 /// The stdin of a client.
 #[derive(Clone, Debug, PartialEq)]
@@ -277,6 +282,16 @@ pub trait ClientInput: Send + 'static {
     /// The next event, `None` once the client went away without a clean
     /// close.
     fn next(&mut self) -> impl Future<Output = Option<ClientEvent>> + Send;
+
+    /// End the connection once `output` closed it after
+    /// [`ClientEvent::TooLarge`], see [`web::drain`].
+    fn drain(self, output: Output) -> impl Future<Output = ()> + Send
+    where
+        Self: Sized,
+    {
+        drop(output);
+        future::ready(())
+    }
 }
 
 /// The input of a WebSocket client.
@@ -302,8 +317,18 @@ impl ClientInput for WebSocketInput {
                         return Some(event);
                     }
                 }
+                Some(Err(e)) if web::is_too_large(&e) => {
+                    debug!("Unable to read the client: {e}");
+                    return Some(ClientEvent::TooLarge);
+                }
                 _ => return None,
             }
+        }
+    }
+
+    async fn drain(self, output: Output) {
+        if let Transport::WebSocket { sender, .. } = output.transport {
+            web::drain(sender, self.messages).await;
         }
     }
 }
@@ -707,6 +732,10 @@ pub struct Output {
 
     /// Set once the client closed the connection cleanly.
     peer_closed: Arc<AtomicBool>,
+
+    /// Whether a WebSocket gets closed for a message of the client which
+    /// was too large.
+    too_large: bool,
 }
 
 enum Transport {
@@ -743,7 +772,14 @@ impl Output {
             transport,
             failed: false,
             peer_closed: Arc::default(),
+            too_large: false,
         }
+    }
+
+    /// Close a WebSocket with the code for a message of the client which was
+    /// too large, which tells the client why the session failed.
+    pub fn close_too_large(&mut self) {
+        self.too_large = true;
     }
 
     /// Set by the input once the client closed the connection cleanly.
@@ -841,7 +877,7 @@ impl Output {
         let close = async {
             match &mut self.transport {
                 Transport::WebSocket { .. } => {
-                    if let Err(e) = self.send(web::close_message("done")).await {
+                    if let Err(e) = self.send(web::close(self.too_large, "done")).await {
                         debug!("Unable to send close message: {e:#}");
                         return false;
                     }
@@ -987,7 +1023,11 @@ mod tests {
         // Unknown and empty messages are ignored.
         assert_eq!(event(&[42, b'x']), None);
         assert_eq!(event(&[]), None);
-        assert_eq!(Framing::V5.event(Message::Text("0a".into())), None);
+        // Text messages carry the same, like for Kubernetes.
+        assert_eq!(
+            Framing::V5.event(Message::Text("\0ls".into())),
+            Some(ClientEvent::Stdin(Stdin::Data(Bytes::from_static(b"ls"))))
+        );
         assert_eq!(
             Framing::V5.event(Message::Close(None)),
             Some(ClientEvent::Closed)

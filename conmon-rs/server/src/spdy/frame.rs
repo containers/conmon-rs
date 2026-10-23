@@ -11,6 +11,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use flate2::{Decompress, FlushDecompress, Status};
+use std::fmt;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// The protocol version of the control frames.
@@ -70,8 +71,10 @@ pub const GOAWAY_OK: u32 = 0;
 pub const GOAWAY_PROTOCOL_ERROR: u32 = 1;
 
 /// A single SPDY frame. Only the frames and fields the server acts on are
-/// represented, see [`Frame::Ignored`].
-#[derive(Debug, PartialEq)]
+/// represented, see [`Frame::Ignored`]. Its debug output shows only the
+/// length of data, which may carry secrets, like typed passwords or
+/// forwarded traffic.
+#[derive(PartialEq)]
 pub enum Frame {
     /// The client opens a stream.
     SynStream {
@@ -106,6 +109,58 @@ pub enum Frame {
     /// control frame. spdystream does not do flow control, so window updates
     /// are not needed either.
     Ignored,
+}
+
+impl fmt::Debug for Frame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SynStream {
+                stream_id,
+                fin,
+                headers,
+            } => f
+                .debug_struct("SynStream")
+                .field("stream_id", stream_id)
+                .field("fin", fin)
+                .field("headers", headers)
+                .finish(),
+            Self::SynReply { stream_id, headers } => f
+                .debug_struct("SynReply")
+                .field("stream_id", stream_id)
+                .field("headers", headers)
+                .finish(),
+            Self::RstStream { stream_id, status } => f
+                .debug_struct("RstStream")
+                .field("stream_id", stream_id)
+                .field("status", status)
+                .finish(),
+            Self::Ping { id } => f.debug_struct("Ping").field("id", id).finish(),
+            Self::GoAway {
+                last_stream_id,
+                status,
+            } => f
+                .debug_struct("GoAway")
+                .field("last_stream_id", last_stream_id)
+                .field("status", status)
+                .finish(),
+            Self::Headers { stream_id, fin } => f
+                .debug_struct("Headers")
+                .field("stream_id", stream_id)
+                .field("fin", fin)
+                .finish(),
+            Self::Data {
+                stream_id,
+                fin,
+                data,
+            } => f
+                .debug_struct("Data")
+                .field("stream_id", stream_id)
+                .field("fin", fin)
+                .field("len", &data.len())
+                .finish(),
+            Self::Ignored => f.write_str("Ignored"),
+        }
+    }
 }
 
 /// The headers of a stream. SPDY requires lowercase names, multiple values
@@ -638,6 +693,19 @@ mod tests {
         let mut compress = Compress::new(Compression::default(), true);
         assert_eq!(compress.set_dictionary(DICTIONARY)?, DICTIONARY_ID);
         Ok(())
+    }
+
+    #[test]
+    fn debug_output_hides_data() {
+        let frame = Frame::Data {
+            stream_id: 1,
+            fin: true,
+            data: Bytes::from_static(b"secret"),
+        };
+        assert_eq!(
+            format!("{frame:?}"),
+            "Data { stream_id: 1, fin: true, len: 6 }"
+        );
     }
 
     #[test]

@@ -6,13 +6,16 @@ use crate::{
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     spdy::testing::Client,
-    streaming_server::{ADDR, AttachSession, StreamingServer},
+    streaming_server::{ADDR, AttachSession, MAX_MESSAGE_SIZE, StreamingServer},
+    web::CloseCode,
 };
 use anyhow::{Context, Result};
 use nix::unistd::Pid;
+use std::io;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpStream, tcp::OwnedReadHalf},
+    task::JoinHandle,
     time::{self, Duration},
 };
 use tokio_util::sync::CancellationToken;
@@ -34,6 +37,44 @@ pub(super) fn client_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
     frame.extend_from_slice(&mask);
     frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
     frame
+}
+
+/// Send a masked binary message which is larger than the server takes, in
+/// a task of its own, the server reads its rest only after its close went
+/// out. Returns the reading half of the connection and the task.
+pub(super) fn send_too_large(stream: TcpStream) -> (OwnedReadHalf, JoinHandle<io::Result<()>>) {
+    let (reader, mut writer) = stream.into_split();
+    let writer = tokio::spawn(async move {
+        let len = MAX_MESSAGE_SIZE + 1;
+        let mut message = vec![0x82, 0x80 | 127];
+        message.extend_from_slice(&u64::try_from(len).expect("fits").to_be_bytes());
+        // A zero mask leaves the payload as it is.
+        message.resize(message.len() + 4 + len, 0);
+        // Dropping the writer ends the connection afterwards.
+        writer.write_all(&message).await
+    });
+    (reader, writer)
+}
+
+/// Read the frames of the server until its close, which tells that the
+/// client sent a message which was too large, see [`send_too_large`]. The
+/// server reads what the client still sends, the connection ends without a
+/// reset, which could drop the close.
+pub(super) async fn too_large_close(
+    mut reader: OwnedReadHalf,
+    writer: JoinHandle<io::Result<()>>,
+) -> Result<()> {
+    loop {
+        let (opcode, payload) = server_frame(&mut reader).await?;
+        if opcode == 8 {
+            assert_eq!(payload[..2], u16::from(CloseCode::Size).to_be_bytes());
+            break;
+        }
+    }
+    time::timeout(Duration::from_secs(10), writer).await???;
+    let mut rest = vec![];
+    time::timeout(Duration::from_secs(10), reader.read_to_end(&mut rest)).await??;
+    Ok(())
 }
 
 /// A container without a terminal and an attach session for it.

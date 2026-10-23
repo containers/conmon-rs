@@ -4,7 +4,7 @@
 //! a plain text response which tells what is missing.
 
 use bytes::Bytes;
-use futures::stream::{Stream, StreamExt};
+use futures::stream::{SplitSink, SplitStream, Stream, StreamExt};
 use hyper::{
     Method, Request, StatusCode,
     body::{Body as HttpBody, Frame, SizeHint},
@@ -19,12 +19,14 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     task::JoinHandle,
     time::{self, Duration},
 };
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{
+        error::CapacityError,
         handshake::derive_accept_key,
         protocol::{Role, WebSocketConfig},
     },
@@ -32,7 +34,7 @@ use tokio_tungstenite::{
 use tracing::debug;
 
 pub use tokio_tungstenite::tungstenite::{
-    Message,
+    Error, Message,
     protocol::{CloseFrame, frame::coding::CloseCode},
 };
 
@@ -43,12 +45,73 @@ pub type WebSocket = WebSocketStream<TokioIo<Upgraded>>;
 /// server and what is queued before it.
 pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The most a client may still send after the close for a message which was
+/// too large, see [`drain`]. More than the rest of a message of the size
+/// Kubernetes takes.
+const DRAIN_LIMIT: usize = 64 * 1024 * 1024;
+
 /// The close of the server once it is done.
 pub fn close_message(reason: &str) -> Message {
     Message::Close(Some(CloseFrame {
         code: CloseCode::Normal,
         reason: reason.into(),
     }))
+}
+
+/// The close of the server once it is done, or after the client sent a
+/// message larger than the server takes, see [`is_too_large`], which tells
+/// the client why.
+pub fn close(too_large: bool, reason: &str) -> Message {
+    if !too_large {
+        return close_message(reason);
+    }
+    Message::Close(Some(CloseFrame {
+        code: CloseCode::Size,
+        reason: "message too large".into(),
+    }))
+}
+
+/// Whether a read failed for a message larger than the server takes. The
+/// WebSocket cannot be read anymore then, the rest of the message did not
+/// get read, but the server can still close it, see [`close`], and has to
+/// [`drain`] it then.
+pub fn is_too_large(e: &Error) -> bool {
+    matches!(e, Error::Capacity(CapacityError::MessageTooLong { .. }))
+}
+
+/// End a WebSocket whose client sent a message larger than the server
+/// takes, once the close went out. The rest of the message cannot be read
+/// as messages. The server stops writing and drops what the client still
+/// sends until it ends the connection, for up to [`CLOSE_TIMEOUT`] and
+/// [`DRAIN_LIMIT`]. A socket closed with input it did not read resets the
+/// connection, which can drop the close and the status before it.
+pub async fn drain<T>(
+    sink: SplitSink<WebSocketStream<T>, Message>,
+    messages: SplitStream<WebSocketStream<T>>,
+) where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    let Ok(mut socket) = messages.reunite(sink) else {
+        return;
+    };
+    let io = socket.get_mut();
+    let drained = async {
+        if let Err(e) = io.shutdown().await {
+            debug!("Unable to shut down the WebSocket: {e}");
+        }
+        let mut buf = [0; 8192];
+        let mut left = DRAIN_LIMIT;
+        while left > 0 {
+            match io.read(&mut buf).await {
+                Ok(read @ 1..) => left = left.saturating_sub(read),
+                _ => return,
+            }
+        }
+        debug!("Client sent too much after the close");
+    };
+    if time::timeout(CLOSE_TIMEOUT, drained).await.is_err() {
+        debug!("Client did not end the WebSocket in time");
+    }
 }
 
 /// Wait for the task which writes to a WebSocket and closes it, abort it
@@ -88,13 +151,13 @@ where
 
 /// End a WebSocket: wait for the writer, which sends the close of the
 /// server, see [`join_or_abort`], then for the answer of the client, see
-/// [`await_close_answer`]. The writer tells whether its close went out, a
-/// client gets no time to answer a close it did not get.
-pub async fn finish<S, E>(writer: JoinHandle<bool>, messages: &mut S)
+/// [`await_close_answer`]. The writer returns its sink once its close went
+/// out, a client gets no time to answer a close it did not get.
+pub async fn finish<S, E, T>(writer: JoinHandle<Option<T>>, messages: &mut S)
 where
     S: Stream<Item = Result<Message, E>> + Unpin,
 {
-    if join_or_abort(writer).await == Some(true) {
+    if let Some(Some(_)) = join_or_abort(writer).await {
         await_close_answer(messages).await;
     }
 }
@@ -439,17 +502,21 @@ mod tests {
         let mut messages = futures::stream::pending::<Result<Message, Infallible>>();
         // A writer which hangs, which does not send its close.
         let start = time::Instant::now();
-        finish(tokio::spawn(std::future::pending::<bool>()), &mut messages).await;
+        finish(
+            tokio::spawn(std::future::pending::<Option<()>>()),
+            &mut messages,
+        )
+        .await;
         assert_eq!(start.elapsed(), CLOSE_TIMEOUT);
         // One which did not get its close out.
         let start = time::Instant::now();
-        finish(tokio::spawn(async { false }), &mut messages).await;
+        finish(tokio::spawn(async { None::<()> }), &mut messages).await;
         assert_eq!(start.elapsed(), Duration::ZERO);
 
         // A close which went out gets its answer, what comes before it gets
         // dropped.
         let start = time::Instant::now();
-        finish(tokio::spawn(async { true }), &mut messages).await;
+        finish(tokio::spawn(async { Some(()) }), &mut messages).await;
         assert_eq!(start.elapsed(), CLOSE_TIMEOUT);
         let mut messages = futures::stream::iter([
             Ok::<_, Infallible>(Message::Binary(Bytes::from_static(b"late"))),
@@ -457,7 +524,7 @@ mod tests {
         ])
         .chain(futures::stream::pending());
         let start = time::Instant::now();
-        finish(tokio::spawn(async { true }), &mut messages).await;
+        finish(tokio::spawn(async { Some(()) }), &mut messages).await;
         assert_eq!(start.elapsed(), Duration::ZERO);
     }
 

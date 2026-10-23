@@ -2,7 +2,7 @@
 
 use super::{
     StreamingServer,
-    session::{InputEvent, ResizeRx, SessionInput},
+    session::{ClientRx, InputEvent, SessionInput},
 };
 use crate::conmon_capnp::conmon::CgroupManager;
 use crate::{
@@ -13,10 +13,10 @@ use crate::{
     container_io::{ContainerIO, Drain, EarlyStdio, Message as IOMessage, SharedContainerIO},
     container_log::ContainerLog,
     process::Process,
-    remotecommand::{Output, STDERR_BYTE, STDOUT_BYTE, Status, Stdin},
+    remotecommand::{MESSAGE_TOO_LARGE, Output, STDERR_BYTE, STDOUT_BYTE, Status},
     server::{GenerateRuntimeArgs, Server},
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use async_channel::Receiver as IOReceiver;
 use bytes::Bytes;
 use nix::sys::signal::Signal;
@@ -28,10 +28,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::{
-    sync::{broadcast, mpsc::Receiver as MpscReceiver},
-    time::Duration,
-};
+use tokio::{sync::broadcast, time::Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -164,8 +161,7 @@ impl StreamingServer {
     pub(super) async fn exec_loop(
         started: StartedExec,
         sender: &mut Output,
-        stdin_rx: MpscReceiver<Stdin>,
-        resize_rx: ResizeRx,
+        client: ClientRx,
         status: &mut Option<Status>,
     ) -> Result<()> {
         let StartedExec {
@@ -178,13 +174,7 @@ impl StreamingServer {
             teardown,
         } = started;
         let (stdout_rx, stderr_rx) = teardown.stdio.clone().context("no stdio channels")?;
-        let mut input = SessionInput::new(
-            io,
-            teardown.attach.clone(),
-            stdin_rx,
-            resize_rx,
-            stdin_enabled,
-        );
+        let mut input = SessionInput::new(io, teardown.attach.clone(), client, stdin_enabled);
 
         // Streams which are disabled or whose read loop signalled the end are
         // not polled anymore. A disabled one is not read at all, so let its
@@ -260,6 +250,7 @@ impl StreamingServer {
                     // The client closed the connection, everything it sent
                     // reached the process.
                     InputEvent::Ended => break,
+                    InputEvent::TooLarge => bail!(MESSAGE_TOO_LARGE),
                 },
 
                 Ok(exit_data) = exit_rx.recv() => {
@@ -405,70 +396,92 @@ mod tests {
     use anyhow::{Context, Result};
     use bytes::Bytes;
 
-    use std::sync::Arc;
-    use tokio::{io::AsyncWriteExt, net::TcpStream, task::LocalSet, time::Duration};
+    use crate::{remotecommand::STREAM_ERR_BYTE, web};
+    use std::{os::unix::fs::PermissionsExt, path::Path, sync::Arc};
+    use tokio::{
+        io::AsyncWriteExt,
+        net::TcpStream,
+        task::LocalSet,
+        time::{self, Duration},
+    };
 
-    #[tokio::test]
-    async fn slow_exec_starts_are_no_idleness() -> Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-
-        // A runtime which takes longer than the idle timeout to start the
-        // process, which then writes its output.
-        let dir = tempfile::tempdir()?;
-        let runtime = dir.path().join("runtime");
+    /// A runtime which takes `delay` to start the process, which then
+    /// writes its output, and its config, none without the config of a
+    /// test.
+    fn slow_runtime(dir: &Path, delay: &str) -> Result<Option<Config>> {
+        let runtime = dir.join("runtime");
         std::fs::write(
             &runtime,
-            "#!/bin/sh\n\
-             sleep 1\n\
-             for arg; do case $arg in --pid-file=*) pidfile=${arg#--pid-file=};; esac; done\n\
-             sh -c 'echo started' &\n\
-             echo $! >\"$pidfile\"\n",
+            format!(
+                "#!/bin/sh\n\
+                 sleep {delay}\n\
+                 for arg; do case $arg in --pid-file=*) pidfile=${{arg#--pid-file=}};; esac; done\n\
+                 sh -c 'echo started' &\n\
+                 echo $! >\"$pidfile\"\n"
+            ),
         )?;
         std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755))?;
-        let Some(config) = Config::parse_for_test([
+        Ok(Config::parse_for_test([
             "--runtime",
             runtime.to_str().context("runtime path")?,
             "--runtime-dir",
-            dir.path().to_str().context("runtime dir")?,
-        ]) else {
+            dir.to_str().context("runtime dir")?,
+        ]))
+    }
+
+    /// An exec session over a WebSocket with the runtime of the config.
+    async fn exec_websocket(
+        config: Config,
+        idle_timeout: Option<Duration>,
+    ) -> Result<(StreamingServer, TcpStream)> {
+        let mut server = StreamingServer::default();
+        server.start_if_required().await?;
+        let url = server
+            .exec_url(ExecSession {
+                child_reaper: Arc::new(ChildReaper::default()),
+                tty: false,
+                server_config: Arc::new(config),
+                cgroup_manager: CgroupManager::Cgroupfs,
+                container_id: "id".into(),
+                command: vec!["true".into()],
+                stdin: false,
+                stdout: true,
+                stderr: false,
+                idle_timeout,
+            })
+            .await?;
+        let path = url
+            .strip_prefix(&format!("http://{ADDR}:{}", server.port))
+            .context("url")?;
+        let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+        stream
+            .write_all(
+                format!(
+                    "GET {path} HTTP/1.1\r\nHost: {ADDR}\r\nUpgrade: websocket\r\n\
+                     Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+                     Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                     Sec-WebSocket-Protocol: {PROTOCOL_V5}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await?;
+        let response = response_head(&mut stream).await?;
+        assert!(response.starts_with("http/1.1 101"), "{response}");
+        Ok((server, stream))
+    }
+
+    #[tokio::test]
+    async fn slow_exec_starts_are_no_idleness() -> Result<()> {
+        // The runtime takes longer than the idle timeout.
+        let dir = tempfile::tempdir()?;
+        let Some(config) = slow_runtime(dir.path(), "1")? else {
             return Ok(());
         };
 
         LocalSet::new()
             .run_until(async {
-                let mut server = StreamingServer::default();
-                server.start_if_required().await?;
-                let url = server
-                    .exec_url(ExecSession {
-                        child_reaper: Arc::new(ChildReaper::default()),
-                        tty: false,
-                        server_config: Arc::new(config),
-                        cgroup_manager: CgroupManager::Cgroupfs,
-                        container_id: "id".into(),
-                        command: vec!["true".into()],
-                        stdin: false,
-                        stdout: true,
-                        stderr: false,
-                        idle_timeout: Some(Duration::from_millis(500)),
-                    })
-                    .await?;
-                let path = url
-                    .strip_prefix(&format!("http://{ADDR}:{}", server.port))
-                    .context("url")?;
-                let mut stream = TcpStream::connect((ADDR, server.port)).await?;
-                stream
-                    .write_all(
-                        format!(
-                            "GET {path} HTTP/1.1\r\nHost: {ADDR}\r\nUpgrade: websocket\r\n\
-                             Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
-                             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-                             Sec-WebSocket-Protocol: {PROTOCOL_V5}\r\n\r\n"
-                        )
-                        .as_bytes(),
-                    )
-                    .await?;
-                let response = response_head(&mut stream).await?;
-                assert!(response.starts_with("http/1.1 101"), "{response}");
+                let (_server, mut stream) =
+                    exec_websocket(config, Some(Duration::from_millis(500))).await?;
 
                 // The output arrives, the wait for the runtime did not end
                 // the session.
@@ -483,6 +496,30 @@ mod tests {
                 assert!(output.contains("started"), "{output}");
                 assert!(!output.contains("idle timeout"), "{output}");
                 answer_close(&mut stream).await
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn too_large_messages_fail_slow_exec_starts() -> Result<()> {
+        // The runtime takes longer than the session waits for its end.
+        let dir = tempfile::tempdir()?;
+        let Some(config) = slow_runtime(dir.path(), "4")? else {
+            return Ok(());
+        };
+
+        LocalSet::new()
+            .run_until(async {
+                let (_server, stream) = exec_websocket(config, None).await?;
+                let (mut reader, writer) = send_too_large(stream);
+
+                // The status and the close come without the runtime.
+                let (opcode, status) =
+                    time::timeout(web::CLOSE_TIMEOUT / 2, server_frame(&mut reader)).await??;
+                assert_eq!((opcode, status.first()), (2, Some(&STREAM_ERR_BYTE)));
+                let status = String::from_utf8_lossy(&status[1..]);
+                assert!(status.contains(MESSAGE_TOO_LARGE), "{status}");
+                too_large_close(reader, writer).await
             })
             .await
     }

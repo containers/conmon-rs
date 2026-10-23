@@ -68,10 +68,16 @@ where
     /// Whether the map holds an element for the key which has not expired,
     /// without taking it.
     pub fn contains_key(&self, k: &K) -> bool {
+        self.get(k).is_some()
+    }
+
+    /// The element for the key if it has not expired, without taking it.
+    pub fn get(&self, k: &K) -> Option<&V> {
         let now = Instant::now();
         self.entries
             .iter()
-            .any(|(key, inserted, _)| key == k && now - *inserted <= self.max_duration)
+            .find(|(key, inserted, _)| key == k && now - *inserted <= self.max_duration)
+            .map(|(_, _, value)| value)
     }
 
     /// Remove the expired elements, which may hold resources until then.
