@@ -9,6 +9,7 @@ use tokio::{
     select,
     time::{self, Duration, Instant},
 };
+use tokio_util::sync::CancellationToken;
 
 /// When a connection was active the last time, by what the client sent or
 /// got. Clones share the time.
@@ -63,6 +64,27 @@ impl Activity {
             output = run => Some(output),
             () = idle => None,
         }
+    }
+
+    /// Watch the connection in a task of its own until `ended` gets
+    /// cancelled, and run `on_idle` once it was not active for the timeout
+    /// before that.
+    pub fn watch(
+        &self,
+        timeout: Option<Duration>,
+        ended: CancellationToken,
+        on_idle: impl FnOnce() + Send + 'static,
+    ) {
+        let activity = self.clone();
+        tokio::spawn(async move {
+            if activity
+                .until_idle(timeout, ended.cancelled(), || {})
+                .await
+                .is_none()
+            {
+                on_idle();
+            }
+        });
     }
 }
 

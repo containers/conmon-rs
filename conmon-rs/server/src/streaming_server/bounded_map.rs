@@ -1,3 +1,6 @@
+//! The tokens of the streaming sessions which wait for their clients, bounded
+//! in age and number.
+
 use std::{collections::VecDeque, fmt::Debug, time::Duration};
 // The tokio clock, so that tests can pause and advance it.
 use tokio::time::Instant;
@@ -8,23 +11,23 @@ use tracing::debug;
 /// them got taken or expired, a valid element never gets dropped for a new
 /// one. Clients take their element right after it got inserted, the map
 /// holds few of them and a linear search is quick enough.
-pub struct BoundedHashMap<K, V> {
+pub struct BoundedMap<K, V> {
     /// The elements with the time of their insert, the oldest first.
     entries: VecDeque<(K, Instant, V)>,
     capacity: usize,
     max_duration: Duration,
 }
 
-impl<K, V> Debug for BoundedHashMap<K, V> {
+impl<K, V> Debug for BoundedMap<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BoundedHashMap")
+        f.debug_struct("BoundedMap")
             .field("len", &self.entries.len())
             .field("max_duration", &self.max_duration)
             .finish()
     }
 }
 
-impl<K, V> BoundedHashMap<K, V>
+impl<K, V> BoundedMap<K, V>
 where
     K: Eq + Debug,
     V: Debug,
@@ -125,7 +128,7 @@ where
 /// until the elements expire.
 pub const DEFAULT_CAPACITY: usize = 1000;
 
-impl<K, V> Default for BoundedHashMap<K, V> {
+impl<K, V> Default for BoundedMap<K, V> {
     fn default() -> Self {
         Self {
             entries: VecDeque::new(),
@@ -144,7 +147,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn contains_key_leaves_the_element() {
-        let mut sut = BoundedHashMap::default();
+        let mut sut = BoundedMap::default();
         assert_eq!(sut.insert(1, "one"), Ok(None));
         assert!(sut.contains_key(&1));
         assert!(!sut.contains_key(&2));
@@ -156,8 +159,8 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn bounded_hashmap_test() {
-        let mut sut = BoundedHashMap {
+    async fn bounded_map_test() {
+        let mut sut = BoundedMap {
             entries: VecDeque::new(),
             capacity: 2,
             max_duration: Duration::new(60 * 60, 0),
@@ -221,7 +224,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn expired_elements_are_not_handed_out() {
-        let mut sut = BoundedHashMap::default();
+        let mut sut = BoundedMap::default();
         assert_eq!(sut.insert(1, "one"), Ok(None));
         assert_eq!(sut.insert(2, "two"), Ok(None));
         advance(sut.max_duration + Duration::from_secs(1)).await;

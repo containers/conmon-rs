@@ -3,7 +3,7 @@
 //! base64 protocols send text messages with the channel as an ASCII digit
 //! offset and the payload base64 encoded.
 
-use crate::web::Message;
+use crate::streaming_server::web::Message;
 use bytes::{BufMut, Bytes, BytesMut};
 use data_encoding::BASE64;
 use tracing::debug;

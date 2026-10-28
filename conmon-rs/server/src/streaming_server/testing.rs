@@ -5,9 +5,10 @@ use crate::{
     child_reaper::ReapableChild,
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
-    spdy::testing::Client,
-    streaming_server::{ADDR, AttachSession, MAX_MESSAGE_SIZE, StreamingServer},
-    web::CloseCode,
+    streaming_server::{
+        ADDR, AttachSession, MAX_MESSAGE_SIZE, StreamingServer, spdy::testing::Client,
+        web::CloseCode,
+    },
 };
 use anyhow::{Context, Result};
 use nix::unistd::Pid;
@@ -101,18 +102,7 @@ pub(super) async fn attach_session_with(
     stop_after_stdin_eof: bool,
     idle_timeout: Option<Duration>,
 ) -> Result<(SharedContainerIO, StreamingServer, TcpStream)> {
-    let io = SharedContainerIO::new(ContainerIO::new(terminal, ContainerLog::new())?);
-    let (_, child) = ReapableChild::from_child(Child {
-        id: "id".into(),
-        kind: ChildKind::Container,
-        pid: Pid::from_raw(0),
-        exit_paths: vec![],
-        oom_exit_paths: vec![],
-        timeout: None,
-        io: io.clone(),
-        cleanup_cmd: vec![],
-        token: CancellationToken::new(),
-    });
+    let (io, child, _) = attach_child(terminal)?;
     let mut server = StreamingServer::default();
     server.start_if_required().await?;
     let url = server
@@ -348,4 +338,55 @@ pub(super) async fn websocket_attach_with(
     )
     .await?;
     Ok((io, server, stream, token, response))
+}
+
+/// Upgrade a port forward request to a WebSocket with the subprotocols
+/// and the query, return the response head and the connection.
+pub(super) async fn port_forward_websocket(
+    server: &StreamingServer,
+    query: &str,
+    protocols: &str,
+) -> Result<(String, TcpStream)> {
+    port_forward_websocket_with(server, query, protocols, None).await
+}
+
+pub(super) async fn port_forward_websocket_with(
+    server: &StreamingServer,
+    query: &str,
+    protocols: &str,
+    idle_timeout: Option<Duration>,
+) -> Result<(String, TcpStream)> {
+    let url = server
+        .port_forward_url("/proc/self/ns/net".into(), idle_timeout)
+        .await?;
+    port_forward_websocket_to(server, &url, query, protocols).await
+}
+
+/// Upgrade a request for the URL to a WebSocket.
+pub(super) async fn port_forward_websocket_to(
+    server: &StreamingServer,
+    url: &str,
+    query: &str,
+    protocols: &str,
+) -> Result<(String, TcpStream)> {
+    let path = url
+        .strip_prefix(&format!("http://{ADDR}:{}", server.port))
+        .context("url")?;
+    let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+    let protocols = if protocols.is_empty() {
+        String::new()
+    } else {
+        format!("Sec-WebSocket-Protocol: {protocols}\r\n")
+    };
+    stream
+        .write_all(
+            format!(
+                "GET {path}{query} HTTP/1.1\r\nHost: {ADDR}\r\nUpgrade: websocket\r\n\
+                 Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+                 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n{protocols}\r\n"
+            )
+            .as_bytes(),
+        )
+        .await?;
+    Ok((response_head(&mut stream).await?, stream))
 }

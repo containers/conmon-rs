@@ -11,7 +11,8 @@ use crate::{
     pause::Pause,
     process::Process,
     random_id::RandomId,
-    server::{GenerateRuntimeArgs, Server},
+    runtime_args::GenerateRuntimeArgs,
+    server::Server,
     streaming_server::{AttachSession, ExecSession, StreamingServer},
     version::Version,
 };
@@ -29,7 +30,7 @@ use std::{
 use tokio::{
     select,
     sync::{RwLock, oneshot},
-    task,
+    task::{self, JoinHandle},
     time::Instant,
 };
 use tracing::{Instrument, Span, debug, debug_span, error};
@@ -46,11 +47,17 @@ macro_rules! capnp_err {
     };
 }
 
+/// The result of a call which runs in a task of its own, a panic of the task
+/// fails the call like an error of it.
+async fn task_result<T>(task: JoinHandle<anyhow::Result<T>>) -> Result<T, Error> {
+    capnp_err!(capnp_err!(task.await)?)
+}
+
 #[cfg(feature = "tracing")]
 fn set_parent_context(
     reader: capnp::struct_list::Reader<'_, conmon::text_text_map_entry::Owned>,
 ) -> Result<(), Error> {
-    Telemetry::set_parent_context(reader).map_err(|e| Error::failed(format!("{e:#}")))
+    capnp_err!(Telemetry::set_parent_context(reader))
 }
 
 #[cfg(not(feature = "tracing"))]
@@ -60,13 +67,17 @@ fn set_parent_context(
     Ok(())
 }
 
-macro_rules! new_root_span {
-    ($name:expr_2021, $container_id:expr_2021) => {
-        debug_span!(
+/// Enter the root span of a request for the rest of the handler, with the
+/// parent context the client sent.
+macro_rules! enter_request {
+    ($req:expr_2021, $name:literal $(, $container_id:expr_2021)?) => {
+        let span = debug_span!(
             $name,
-            container_id = $container_id,
+            $(container_id = $container_id,)?
             request_id = %RandomId::new()
-        )
+        );
+        let _enter = span.enter();
+        pry!(set_parent_context(pry!($req.get_metadata())));
     };
 }
 
@@ -195,9 +206,7 @@ impl conmon::Server for Server {
         debug!("Got a version request");
         let req = pry!(pry!(params.get()).get_request());
 
-        let span = debug_span!("version", request_id = %RandomId::new());
-        let _enter = span.enter();
-        pry!(set_parent_context(pry!(req.get_metadata())));
+        enter_request!(req, "version");
 
         let version = Version::new(req.get_verbose());
         let mut response = results.get().init_response();
@@ -228,9 +237,7 @@ impl conmon::Server for Server {
         let req = pry!(pry!(params.get()).get_request());
         let id = pry!(pry!(req.get_id()).to_string());
 
-        let span = new_root_span!("create_container", id.as_str());
-        let _enter = span.enter();
-        pry!(set_parent_context(pry!(req.get_metadata())));
+        enter_request!(req, "create_container", id.as_str());
 
         let cleanup_cmd: Vec<String> = capnp_vec_str!(req.get_cleanup_cmd());
 
@@ -350,7 +357,7 @@ impl conmon::Server for Server {
                     })
                     .instrument(Span::current()),
                 );
-                let grandchild_pid = capnp_err!(capnp_err!(create.await)?)?;
+                let grandchild_pid = task_result(create).await?;
 
                 results
                     .get()
@@ -371,9 +378,7 @@ impl conmon::Server for Server {
         let req = pry!(pry!(params.get()).get_request());
         let id = pry!(pry!(req.get_id()).to_string());
 
-        let span = new_root_span!("exec_sync_container", id.as_str());
-        let _enter = span.enter();
-        pry!(set_parent_context(pry!(req.get_metadata())));
+        enter_request!(req, "exec_sync_container", id.as_str());
 
         // The timeout starts now, the runtime may hang before the process
         // even starts.
@@ -511,7 +516,7 @@ impl conmon::Server for Server {
                     () = sleep_until(time_to_timeout) => false,
                 };
                 let output = if started {
-                    capnp_err!(capnp_err!(exec.await)?)?
+                    task_result(exec).await?
                 } else {
                     debug!("Runtime did not start the exec before its timeout");
                     ExecSyncOutput {
@@ -542,9 +547,7 @@ impl conmon::Server for Server {
         let req = pry!(pry!(params.get()).get_request());
         let id = pry_err!(pry_err!(req.get_id()).to_str());
 
-        let span = new_root_span!("attach_container", id);
-        let _enter = span.enter();
-        pry!(set_parent_context(pry!(req.get_metadata())));
+        enter_request!(req, "attach_container", id);
 
         debug!("Got an attach container request");
 
@@ -582,9 +585,7 @@ impl conmon::Server for Server {
         let req = pry!(pry!(params.get()).get_request());
         let id = pry_err!(pry_err!(req.get_id()).to_str());
 
-        let span = new_root_span!("reopen_log_container", id);
-        let _enter = span.enter();
-        pry!(set_parent_context(pry!(req.get_metadata())));
+        enter_request!(req, "reopen_log_container", id);
 
         debug!("Got a reopen container log request");
 
@@ -598,7 +599,7 @@ impl conmon::Server for Server {
                     async move { child.io().logger().await.write().await.reopen().await }
                         .instrument(Span::current()),
                 );
-                capnp_err!(capnp_err!(reopen.await)?)
+                task_result(reopen).await
             }
             .instrument(debug_span!("promise")),
         )
@@ -613,9 +614,7 @@ impl conmon::Server for Server {
         let req = pry!(pry!(params.get()).get_request());
         let id = pry_err!(pry_err!(req.get_id()).to_str());
 
-        let span = new_root_span!("set_window_size_container", id);
-        let _enter = span.enter();
-        pry!(set_parent_context(pry!(req.get_metadata())));
+        enter_request!(req, "set_window_size_container", id);
 
         debug!("Got a set window size container request");
 
@@ -639,9 +638,7 @@ impl conmon::Server for Server {
         let req = pry!(pry!(params.get()).get_request());
         let pod_id = pry_err!(pry_err!(req.get_pod_id()).to_str());
 
-        let span = new_root_span!("create_namespaces", pod_id);
-        let _enter = span.enter();
-        pry!(set_parent_context(pry!(req.get_metadata())));
+        enter_request!(req, "create_namespaces", pod_id);
 
         let base_path = pry!(pry!(req.get_base_path()).to_string());
         let pod_id = pod_id.to_owned();
@@ -684,12 +681,7 @@ impl conmon::Server for Server {
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
 
-        let span = debug_span!(
-            "start_fd_socket",
-            request_id = %RandomId::new()
-        );
-        let _enter = span.enter();
-        pry!(set_parent_context(pry!(req.get_metadata())));
+        enter_request!(req, "start_fd_socket");
 
         debug!("Got a start fd socket request");
 
@@ -717,12 +709,7 @@ impl conmon::Server for Server {
         debug!("Got a serve exec container request");
         let req = pry!(pry!(params.get()).get_request());
 
-        let span = debug_span!(
-            "serve_exec_container",
-            request_id = %RandomId::new()
-        );
-        let _enter = span.enter();
-        pry!(set_parent_context(pry!(req.get_metadata())));
+        enter_request!(req, "serve_exec_container");
 
         let id = pry_err!(pry_err!(req.get_id()).to_string());
 
@@ -777,12 +764,7 @@ impl conmon::Server for Server {
         debug!("Got a serve attach container request");
         let req = pry!(pry!(params.get()).get_request());
 
-        let span = debug_span!(
-            "serve_attach_container",
-            request_id = %RandomId::new()
-        );
-        let _enter = span.enter();
-        pry!(set_parent_context(pry!(req.get_metadata())));
+        enter_request!(req, "serve_attach_container");
 
         let id = pry_err!(pry_err!(req.get_id()).to_str());
         let (stdin, stdout, stderr) = (req.get_stdin(), req.get_stdout(), req.get_stderr());
@@ -824,12 +806,7 @@ impl conmon::Server for Server {
         debug!("Got a serve port forward container request");
         let req = pry!(pry!(params.get()).get_request());
 
-        let span = debug_span!(
-            "serve_port_forward_container",
-            request_id = %RandomId::new()
-        );
-        let _enter = span.enter();
-        pry!(set_parent_context(pry!(req.get_metadata())));
+        enter_request!(req, "serve_port_forward_container");
 
         let netns_path = pry_err!(pry_err!(req.get_net_ns_path()).to_str());
         if netns_path.is_empty() {
@@ -863,174 +840,4 @@ impl conmon::Server for Server {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        bounded_hashmap::DEFAULT_CAPACITY, child_reaper::ReapableChild, config::Config,
-        conmon_capnp::conmon::CgroupManager,
-    };
-    use std::sync::Arc;
-    use tokio::task::LocalSet;
-    use tokio_util::sync::CancellationToken;
-
-    #[tokio::test]
-    async fn too_many_streaming_sessions_fail_with_the_bare_message() -> anyhow::Result<()> {
-        let Some(config) = Config::parse_for_test::<_, &str>([]) else {
-            return Ok(());
-        };
-        let config = Arc::new(config);
-        let (_, child) = ReapableChild::from_child(Child {
-            id: "id".into(),
-            kind: ChildKind::Container,
-            pid: Pid::from_raw(0),
-            exit_paths: vec![],
-            oom_exit_paths: vec![],
-            timeout: None,
-            io: SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?),
-            cleanup_cmd: vec![],
-            token: CancellationToken::new(),
-        });
-        let exec = || {
-            StreamingRequest::Exec(ExecSession {
-                child_reaper: Arc::default(),
-                tty: false,
-                server_config: config.clone(),
-                cgroup_manager: CgroupManager::Cgroupfs,
-                container_id: "id".into(),
-                command: vec!["true".into()],
-                stdin: false,
-                stdout: true,
-                stderr: false,
-                idle_timeout: None,
-            })
-        };
-        let attach = || {
-            StreamingRequest::Attach(AttachSession {
-                container_id: "id".into(),
-                child: child.clone(),
-                stdin: false,
-                stdout: true,
-                stderr: false,
-                stop_after_stdin_eof: false,
-                idle_timeout: None,
-            })
-        };
-        let port_forward = || StreamingRequest::PortForward {
-            netns_path: PathBuf::new(),
-            idle_timeout: None,
-        };
-
-        LocalSet::new()
-            .run_until(async {
-                let streaming_server = RwLock::new(StreamingServer::default());
-                // Exec and attach sessions count together.
-                for i in 0..DEFAULT_CAPACITY {
-                    let request = if i % 2 == 0 { exec() } else { attach() };
-                    Server::streaming_url(&streaming_server, request).await?;
-                    Server::streaming_url(&streaming_server, port_forward()).await?;
-                }
-                for (kind, request) in [
-                    ("exec", exec()),
-                    ("attach", attach()),
-                    ("port forward", port_forward()),
-                ] {
-                    let err = Server::streaming_url(&streaming_server, request)
-                        .await
-                        .expect_err(kind);
-                    // The message alone reaches the client, the start of it
-                    // matches `ErrTooManyRequests` of the Go client.
-                    assert_eq!(err.kind, capnp::ErrorKind::Failed, "{kind}");
-                    assert_eq!(
-                        err.extra, "maximum number of in-flight requests exceeded",
-                        "{kind}"
-                    );
-                }
-                Ok(())
-            })
-            .await
-    }
-
-    /// Run an exec through the RPC with a runtime which runs `script`, with
-    /// a timeout of a second.
-    async fn exec_sync_with_runtime(script: &str) -> anyhow::Result<Option<ExecSyncOutput>> {
-        let dir = tempfile::tempdir()?;
-        let runtime = dir.path().join("runtime");
-        crate::test_util::write_script(&runtime, script)?;
-        let Some(config) = Config::parse_for_test([
-            "--runtime",
-            runtime.to_str().context("runtime")?,
-            "--runtime-dir",
-            dir.path().to_str().context("runtime dir")?,
-        ]) else {
-            return Ok(None);
-        };
-
-        let client: conmon::Client = capnp_rpc::new_client(Server::with_config(config));
-        let mut request = client.exec_sync_container_request();
-        let mut req = request.get().init_request();
-        req.set_id("ctr");
-        req.set_timeout_sec(1);
-        req.init_command(1).set(0, "true");
-        let reply = request.send().promise.await?;
-        let resp = reply.get()?.get_response()?;
-        Ok(Some(ExecSyncOutput {
-            stdout: resp.get_stdout()?.to_vec(),
-            stderr: resp.get_stderr()?.to_vec(),
-            exit_code: resp.get_exit_code(),
-            timed_out: resp.get_timed_out(),
-        }))
-    }
-
-    #[tokio::test]
-    async fn exec_sync_reports_runtimes_which_do_not_start_the_process() -> anyhow::Result<()> {
-        LocalSet::new()
-            .run_until(async {
-                // The runtime fails, its stderr tells why.
-                let Some(failed) = exec_sync_with_runtime("echo boom >&2; exit 1").await? else {
-                    return Ok(());
-                };
-                assert_eq!(failed.exit_code, EXIT_CODE_NOT_STARTED);
-                assert!(!failed.timed_out);
-                let stderr = String::from_utf8_lossy(&failed.stderr);
-                assert!(stderr.contains("boom"), "{stderr}");
-
-                // The runtime hangs beyond the timeout of the exec.
-                let hung = exec_sync_with_runtime("exec sleep 60")
-                    .await?
-                    .context("output")?;
-                assert_eq!(hung.exit_code, EXIT_CODE_TIMED_OUT);
-                assert!(hung.timed_out);
-                let stderr = String::from_utf8_lossy(&hung.stderr);
-                assert!(
-                    stderr.contains("timed out waiting for the runtime"),
-                    "{stderr}"
-                );
-                Ok(())
-            })
-            .await
-    }
-
-    #[test]
-    fn exec_deadline() {
-        assert!(Server::exec_deadline(0).is_none());
-        // Too far in the future to represent, which is no timeout either.
-        assert!(Server::exec_deadline(u64::MAX).is_none());
-        let deadline = Server::exec_deadline(10).expect("deadline");
-        assert!(deadline > Instant::now() + Duration::from_secs(9));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn exec_runtimes_always_get_a_deadline() {
-        let now = Instant::now();
-        let timeout = now + Duration::from_secs(10);
-        assert_eq!(
-            Server::exec_runtime_deadline(Some(timeout)),
-            Some(timeout + Server::EXEC_RUNTIME_GRACE)
-        );
-        // Without a timeout of the process, the runtime still gets one.
-        assert_eq!(
-            Server::exec_runtime_deadline(None),
-            Some(now + Server::EXEC_RUNTIME_GRACE)
-        );
-    }
-}
+mod tests;
