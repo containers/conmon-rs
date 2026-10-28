@@ -17,7 +17,7 @@ use std::{
     fmt, fs,
     io::ErrorKind,
     os::fd::{AsFd, AsRawFd},
-    path::{Path, PathBuf},
+    path::{self, Path, PathBuf},
 };
 use tracing_subscriber::filter::LevelFilter;
 
@@ -407,6 +407,18 @@ impl Config {
         Ok(())
     }
 
+    /// Make the paths absolute, the server changes into the root directory
+    /// once it started, see `Server::start`.
+    pub fn make_absolute(&mut self) -> Result<()> {
+        self.runtime = path::absolute(&self.runtime).context("make runtime path absolute")?;
+        self.runtime_dir =
+            path::absolute(&self.runtime_dir).context("make runtime dir absolute")?;
+        if let Some(rr) = &mut self.runtime_root {
+            *rr = path::absolute(&*rr).context("make runtime root absolute")?;
+        }
+        Ok(())
+    }
+
     /// Create the runtime directories and remove stale sockets. Separate from
     /// [`Config::validate`], which only checks and changes nothing on disk.
     pub fn prepare(&self) -> Result<()> {
@@ -571,6 +583,26 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn paths_get_absolute() -> Result<()> {
+        let Some(mut config) = Config::parse_for_test([
+            "--runtime",
+            "bin/runc",
+            "--runtime-dir",
+            "run",
+            "--runtime-root",
+            "/root",
+        ]) else {
+            return Ok(());
+        };
+        config.make_absolute()?;
+        let cwd = std::env::current_dir()?;
+        assert_eq!(config.runtime(), cwd.join("bin/runc"));
+        assert_eq!(config.runtime_dir(), cwd.join("run"));
+        assert_eq!(config.runtime_root(), Some(Path::new("/root")));
+        Ok(())
     }
 
     #[test]

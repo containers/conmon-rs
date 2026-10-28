@@ -16,6 +16,7 @@ use nix::{
     unistd::Pid,
 };
 use std::{
+    num::ParseIntError,
     path::{Path, PathBuf},
     sync::LazyLock,
 };
@@ -79,17 +80,32 @@ impl OOMWatcher {
         exit_paths: &[PathBuf],
     ) -> Option<OOMEvent> {
         let res = if *IS_CGROUP_V2 {
-            Self::oom_handling_cgroup_v2(token, pid, exit_paths)
+            Self::oom_handling_cgroup_v2(token, pid)
                 .await
                 .context("setup cgroupv2 oom handling")
         } else {
-            Self::oom_handling_cgroup_v1(token, pid, exit_paths)
+            Self::oom_handling_cgroup_v1(token, pid)
                 .await
                 .context("setup cgroupv1 oom handling")
         };
-        res.inspect_err(|e| error!("Failed to watch OOM: {e:#}"))
+        let event = res
+            .inspect_err(|e| error!("Failed to watch OOM: {e:#}"))
             .ok()
-            .flatten()
+            .flatten();
+        if event.is_some_and(|event| event.oom) {
+            Self::write_oom_files(exit_paths).await;
+        }
+        debug!("Done watching for ooms");
+        event
+    }
+
+    /// The counters of a cgroup file of `key value` lines, like
+    /// `memory.events`, by their key.
+    fn counters(content: &str) -> impl Iterator<Item = (&str, Result<u64, ParseIntError>)> {
+        content
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .map(|(key, value)| (key, value.trim().parse()))
     }
 
     /// Checks if a file does not exist on disk.

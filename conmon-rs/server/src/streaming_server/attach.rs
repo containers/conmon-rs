@@ -191,7 +191,9 @@ mod tests {
         remotecommand::{CLOSE_BYTE, STDIN_BYTE, STDOUT_BYTE, STREAM_ERR_BYTE},
         spdy::testing::Frame,
         streaming_server::{
-            AttachSession, StreamingServer, session::PENDING_STDIN_MAX_BYTES, testing::*,
+            AttachSession, StreamingServer,
+            session::{PENDING_STDIN_MAX_BYTES, PING_INTERVAL},
+            testing::*,
         },
     };
     use anyhow::Result;
@@ -199,7 +201,7 @@ mod tests {
     use data_encoding::BASE64;
     use tokio::{
         io::AsyncWriteExt,
-        task::LocalSet,
+        task::{self, LocalSet},
         time::{self, Duration},
     };
 
@@ -349,6 +351,141 @@ mod tests {
                         data: Bytes::from_static(b"out")
                     }
                 );
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn spdy_attach_with_every_version() -> Result<()> {
+        for version in [
+            "channel.k8s.io",
+            "v2.channel.k8s.io",
+            "v3.channel.k8s.io",
+            "v4.channel.k8s.io",
+        ] {
+            LocalSet::new()
+                .run_until(async {
+                    let headers = format!(
+                        "Connection: Upgrade\r\nUpgrade: SPDY/3.1\r\n\
+                         X-Stream-Protocol-Version: {version}\r\n"
+                    );
+                    let (io, _server, mut client) =
+                        spdy_attach_version(false, false, None, &headers).await?;
+                    client
+                        .send(Frame::Data {
+                            stream_id: 3,
+                            fin: false,
+                            data: Bytes::from_static(b"in"),
+                        })
+                        .await?;
+                    let attach = io.attach().await;
+                    let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
+                    assert_eq!(data, b"in".as_slice(), "{version}");
+
+                    attach.write(IOMessage::Data(Bytes::from_static(b"out"), Pipe::StdOut));
+                    let frame = client
+                        .frame_until(|f| matches!(f, Frame::Data { stream_id: 5, data, .. } if !data.is_empty()))
+                        .await?;
+                    assert!(
+                        matches!(frame, Frame::Data { data, .. } if data == "out"),
+                        "{version}"
+                    );
+
+                    // Closing stdin ends the session, only v4 tells about the
+                    // success.
+                    client
+                        .send(Frame::Data {
+                            stream_id: 3,
+                            fin: true,
+                            data: Bytes::new(),
+                        })
+                        .await?;
+                    let mut status = vec![];
+                    while let Some(frame) =
+                        time::timeout(Duration::from_secs(5), client.frame()).await??
+                    {
+                        if let Frame::Data {
+                            stream_id: 1, data, ..
+                        } = frame
+                        {
+                            status.extend_from_slice(&data);
+                        }
+                    }
+                    let expected: &[u8] = if version.starts_with("v4") {
+                        br#"{"metadata":{},"status":"Success"}"#
+                    } else {
+                        b""
+                    };
+                    assert_eq!(status, expected, "{version}");
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn spdy_stdin_before_the_close_reaches_the_container() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let (io, _server, mut client) = spdy_attach(false).await?;
+                for (fin, data) in [(false, "a"), (true, "tail")] {
+                    client
+                        .send(Frame::Data {
+                            stream_id: 3,
+                            fin,
+                            data: Bytes::from_static(data.as_bytes()),
+                        })
+                        .await?;
+                }
+                drop(client);
+
+                let attach = io.attach().await;
+                let mut stdin = vec![];
+                while stdin.len() < 5 {
+                    let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
+                    stdin.extend_from_slice(&data);
+                }
+                assert_eq!(stdin, b"atail");
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn spdy_stdin_before_the_close_of_an_older_session_reaches_the_container() -> Result<()> {
+        LocalSet::new()
+            .run_until(async {
+                let (io, _server, mut client) = spdy_attach(false).await?;
+                // The session pings the client while its input waits, which
+                // must not end it once the connection ended after stdin.
+                time::sleep(3 * PING_INTERVAL).await;
+                for (fin, data) in [(false, "a"), (true, "tail")] {
+                    client
+                        .send(Frame::Data {
+                            stream_id: 3,
+                            fin,
+                            data: Bytes::from_static(data.as_bytes()),
+                        })
+                        .await?;
+                }
+                client.io().shutdown().await?;
+                // A client which closes with frames unread resets the
+                // connection, so keep reading.
+                let reader =
+                    task::spawn_local(
+                        async move { while let Ok(Some(_)) = client.frame().await {} },
+                    );
+
+                let attach = io.attach().await;
+                let mut stdin = vec![];
+                while stdin.len() < 5 {
+                    let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
+                    stdin.extend_from_slice(&data);
+                }
+                assert_eq!(stdin, b"atail");
+                reader.abort();
                 Ok(())
             })
             .await

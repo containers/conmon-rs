@@ -82,5 +82,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "log_lines"
+path = "fuzz_targets/log_lines.rs"
+test = false
+doc = false
+bench = false
+
 [lints]
 workspace = true

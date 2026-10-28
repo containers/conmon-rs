@@ -5,12 +5,13 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use std::{
-    io::ErrorKind,
+    io::{self, ErrorKind},
     path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
 use tokio::task;
 use tracing::{debug, info, warn};
@@ -151,7 +152,10 @@ impl JournaldLogger {
     /// with one which did not take a line in time, the rest of the chunk is
     /// dropped right away instead of failing the same way line by line.
     /// Without waiting, the sending stops at the first line which the
-    /// journal does not take right away.
+    /// journal does not take right away. Waiting, the lines which did not
+    /// go out by the deadline of the wait get dropped, a journal which takes
+    /// each line just in time would block the log of the container for
+    /// minutes per chunk otherwise.
     fn send(shared: &Shared, pipe: Pipe, lines: &[Line], wait: Wait) -> usize {
         let priority = Self::priority(pipe);
         let mut entry = Entry::default();
@@ -159,6 +163,16 @@ impl JournaldLogger {
         let mut failed = 0;
         let mut last_error = None;
         for (i, line) in lines.iter().enumerate() {
+            if let Wait::Bounded(deadline) = wait
+                && Instant::now() >= deadline
+            {
+                failed += lines.len() - i;
+                last_error = Some(io::Error::new(
+                    ErrorKind::TimedOut,
+                    format!("journal did not take the chunk within {CHUNK_TIMEOUT:?}"),
+                ));
+                break;
+            }
             entry.reset(priority, &line.text).extend(&shared.fields);
             if line.partial {
                 entry.field(Self::PARTIAL_FIELD.0, Self::PARTIAL_FIELD.1);
@@ -193,6 +207,12 @@ impl JournaldLogger {
     }
 }
 
+/// How long the lines of a chunk which the journal did not take right away
+/// may wait for it in total. A line which started before it may take one
+/// more `journal::SEND_TIMEOUT`, sends which a signal interrupted get
+/// retried only until it.
+const CHUNK_TIMEOUT: Duration = Duration::from_secs(1);
+
 impl Logger for JournaldLogger {
     const BUFFERS_LINES: bool = true;
 
@@ -217,10 +237,15 @@ impl Logger for JournaldLogger {
         };
         let shared = self.shared.clone();
         let rest = rest.to_vec();
-        task::spawn_blocking(move || Self::send(&shared, pipe, &rest, Wait::Bounded))
-            .await
-            .map(drop)
-            .context("journal spawn_blocking")
+        // From when a thread of the blocking pool took it, a busy pool must
+        // not drop the chunk without trying.
+        task::spawn_blocking(move || {
+            let deadline = Instant::now() + CHUNK_TIMEOUT;
+            Self::send(&shared, pipe, &rest, Wait::Bounded(deadline))
+        })
+        .await
+        .map(drop)
+        .context("journal spawn_blocking")
     }
 }
 
@@ -276,6 +301,44 @@ mod tests {
                 field("CONTAINER_ID_FULL", "abc"),
                 field("CONTAINER_ID", "abc"),
                 field("SYSLOG_IDENTIFIER", "conmonrs"),
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn name_tag_and_labels_come_from_the_request() -> Result<()> {
+        use crate::{
+            conmon_capnp::conmon::{create_container_request, log_driver::Type},
+            container_log::{ContainerLog, Driver},
+        };
+
+        let mut message = capnp::message::Builder::new_default();
+        let mut drivers = message
+            .init_root::<create_container_request::Builder<'_>>()
+            .init_log_drivers(1);
+        let mut driver = drivers.reborrow().get(0);
+        driver.set_type(Type::Journald);
+        driver.set_container_name("k8s_ctr");
+        driver.set_tag("tag");
+        let mut label = driver.init_labels(1).get(0);
+        label.set_key("POD");
+        label.set_value("web");
+
+        let log = ContainerLog::from_request("abc", drivers.into_reader())?;
+        let log = log.read().await;
+        let [Driver::Journald(logger)] = log.drivers.as_slice() else {
+            bail!("no journald driver");
+        };
+        assert_eq!(
+            decode(logger.shared.fields.as_bytes()),
+            [
+                field("CONTAINER_ID_FULL", "abc"),
+                field("CONTAINER_ID", "abc"),
+                field("CONTAINER_NAME", "k8s_ctr"),
+                field("CONTAINER_TAG", "tag"),
+                field("SYSLOG_IDENTIFIER", "tag"),
+                field("POD", "web"),
             ]
         );
         Ok(())
@@ -418,6 +481,24 @@ mod tests {
                 .join()
                 .map_err(|_| anyhow::anyhow!("reader panicked"))??
         );
+        Ok(())
+    }
+
+    /// The lines which did not go out by the deadline get dropped.
+    #[test]
+    fn lines_after_the_deadline_get_dropped() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("socket");
+        let socket = UnixDatagram::bind(&path)?;
+        let logger = JournaldLogger::with_socket("test", &path);
+        let mut buffer = LineBuffer::default();
+        let lines = buffer.push(Pipe::StdOut, b"one\ntwo\n");
+        let past = Instant::now();
+        let handled =
+            JournaldLogger::send(&logger.shared, Pipe::StdOut, &lines, Wait::Bounded(past));
+        assert_eq!(handled, 2);
+        assert!(logger.shared.failing.load(Ordering::Relaxed));
+        assert!(received(&socket)?.is_empty());
         Ok(())
     }
 

@@ -252,7 +252,8 @@ mod tests {
         let first = OffsetDateTime::parse(sut.update()?, &Rfc3339)?;
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let second = OffsetDateTime::parse(sut.update()?, &Rfc3339)?;
-        assert!(second > first, "{first} {second}");
+        // Not later, the clock may get set back meanwhile.
+        assert_ne!(first, second);
         // Nine digits of the fraction like conmon.
         let fraction = sut.update()?[Timestamp::DATE_TIME_LEN..]
             .strip_prefix('.')

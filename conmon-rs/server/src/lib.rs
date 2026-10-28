@@ -22,7 +22,7 @@ use version::Version;
 pub fn run() -> Result<()> {
     // Before the heap grows, see the function.
     init::disable_thp();
-    let config = Config::parse_args();
+    let mut config = Config::parse_args();
 
     if let Some(v) = config.version() {
         Version::new(v == Verbosity::Full).print();
@@ -46,6 +46,7 @@ pub fn run() -> Result<()> {
     }
 
     config.validate().context("validate config")?;
+    config.make_absolute()?;
     config.prepare().context("prepare runtime directories")?;
 
     Server::new(config)
@@ -72,6 +73,7 @@ pub mod conmon_capnp {
 pub mod fuzzing {
     pub use crate::{
         channel::fuzzing::channel,
+        container_log::fuzzing::lines as log_lines,
         port_forward::fuzzing::{query_ports, spdy as port_forward_spdy},
         remotecommand::fuzzing::resize_events,
         spdy::fuzzing::{

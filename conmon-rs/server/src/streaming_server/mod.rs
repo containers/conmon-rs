@@ -62,7 +62,7 @@ const ADDR: &str = "127.0.0.1";
 /// the requests of others by up to this long, the backlog of the listener
 /// serves them in order.
 const HEADER_READ_TIMEOUT: Duration = if cfg!(test) {
-    Duration::from_secs(2)
+    Duration::from_secs(1)
 } else {
     Duration::from_secs(5)
 };

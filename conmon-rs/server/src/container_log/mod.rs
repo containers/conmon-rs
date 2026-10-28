@@ -335,17 +335,32 @@ impl LineBuffer {
     /// and a "\r" waiting for its "\n" in the buffer. Invalid bytes are not
     /// held back, they would stay in front forever.
     fn cut(tail: &mut BytesMut) -> Line {
-        let mut end = match str::from_utf8(tail) {
-            Ok(_) => tail.len(),
-            Err(e) if e.error_len().is_none() => e.valid_up_to(),
-            Err(_) => tail.len(),
-        };
+        let mut end = Self::complete_len(tail);
         if tail[..end].ends_with(b"\r") {
             end -= 1;
         }
         Line {
             text: tail.split_to(end).freeze(),
             partial: true,
+        }
+    }
+
+    /// The length of the bytes without the unfinished multi byte character
+    /// they end with, if any. Only the last character matters, which starts
+    /// within the last three bytes if it is unfinished, an invalid byte in
+    /// front of it does not.
+    fn complete_len(bytes: &[u8]) -> usize {
+        let window = bytes.len().saturating_sub(3);
+        let Some(start) = bytes[window..]
+            .iter()
+            .rposition(|b| b & 0xc0 != 0x80)
+            .map(|i| window + i)
+        else {
+            return bytes.len();
+        };
+        match str::from_utf8(&bytes[start..]) {
+            Err(e) if e.error_len().is_none() => start + e.valid_up_to(),
+            _ => bytes.len(),
         }
     }
 
@@ -553,10 +568,10 @@ impl LogFile {
     }
 
     /// Account for the entry appended to `buf` since `start`. If it would
-    /// exceed the maximum log size, the file gets replaced and the entry
-    /// becomes the first one of the new file. The entries of the chunk before
-    /// it are dropped instead of written, the rotation would discard them
-    /// right away.
+    /// exceed the maximum log size, the entries of the chunk before it go to
+    /// the old file, which readers following it still read to its end, and
+    /// the file gets replaced, the entry becomes the first one of the new
+    /// file.
     pub(crate) async fn commit_entry(&mut self, start: usize) -> Result<()> {
         let len = self.buf.len() - start;
         let mut total = self.bytes_written.saturating_add(len);
@@ -582,18 +597,17 @@ impl LogFile {
 
         if self.max_size.is_some_and(|max| total > max) {
             debug!("Rotate log file {}", self.path.display());
+            let entry = self.buf.split_off(start);
+            if let Err(e) = self.flush().await {
+                error!("Unable to flush log file before rotation: {e:#}");
+            }
             if let Err(e) = self.replace().await {
-                // The old file stays in place. Drop the uncounted entry and
-                // write the ones which fit into it now. The next entry tries
-                // the rotation again, until then entries which exceed the size
-                // get dropped.
-                self.buf.truncate(start);
-                if let Err(e) = self.flush().await {
-                    debug!("Unable to flush log file after failed rotation: {e:#}");
-                }
+                // The old file stays in place. Drop the uncounted entry, the
+                // next entry tries the rotation again, until then entries
+                // which exceed the size get dropped.
                 return Err(e).context("reopen log file because of exceeded size");
             }
-            self.buf.drain(..start);
+            self.buf.extend_from_slice(&entry);
             self.bytes_written = len;
         } else {
             self.bytes_written = total;
@@ -697,6 +711,54 @@ impl LogFile {
             error!("Unable to flush log file before reopen: {e:#}");
         }
         self.replace().await
+    }
+}
+
+/// The entry points of the fuzz targets, see `crate::fuzzing`.
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing {
+    use super::{Line, LineBuffer};
+    use crate::container_io::Pipe;
+
+    /// The output of a pipe, read in chunks split at NUL bytes, with a pause
+    /// after every chunk whose length is a multiple of three. Joining the
+    /// lines gives back the output, with "\n" for every line ending, the
+    /// buffer never holds a whole line, and the lines of valid UTF-8 output
+    /// are valid UTF-8 as well, none got cut inside a character.
+    pub fn lines(data: &[u8]) {
+        let output: Vec<u8> = data.iter().copied().filter(|b| *b != 0).collect();
+        let utf8 = str::from_utf8(&output).is_ok();
+        let mut buffer = LineBuffer::default();
+        let mut joined = vec![];
+        let mut join = |lines: Vec<Line>| {
+            for line in lines {
+                assert!(!utf8 || str::from_utf8(&line.text).is_ok());
+                joined.extend_from_slice(&line.text);
+                if !line.partial {
+                    joined.push(b'\n');
+                }
+            }
+        };
+        for chunk in data.split(|b| *b == 0) {
+            join(buffer.push(Pipe::StdOut, chunk));
+            assert!(buffer.stdout.len() < LineBuffer::MAX_LINE);
+            if chunk.len() % 3 == 0 {
+                join(buffer.flush(Pipe::StdOut));
+                assert!(buffer.stdout.len() <= 4);
+            }
+        }
+        join(buffer.finish(Pipe::StdOut));
+        assert!(!buffer.has_pending(Pipe::StdOut));
+
+        let mut expected = Vec::with_capacity(output.len());
+        let mut rest = output.as_slice();
+        while let Some(end) = memchr::memmem::find(rest, b"\r\n") {
+            expected.extend_from_slice(&rest[..end]);
+            expected.push(b'\n');
+            rest = &rest[end + 2..];
+        }
+        expected.extend_from_slice(rest);
+        assert_eq!(joined, expected);
     }
 }
 
@@ -838,6 +900,17 @@ mod tests {
         assert_eq!(
             collect(buffer.push(Pipe::StdOut, b"\n")),
             vec![("".into(), false)]
+        );
+
+        // An invalid byte in front does not cut an unfinished character.
+        let mut buffer = LineBuffer::default();
+        let mut line = vec![b'a'; LineBuffer::MAX_LINE - 4];
+        line.extend_from_slice(&[0xff, b'a', euro[0], euro[1]]);
+        let out = buffer.push(Pipe::StdOut, &line);
+        assert_eq!(out[0].text.len(), LineBuffer::MAX_LINE - 2);
+        assert_eq!(
+            collect(buffer.push(Pipe::StdOut, &[&euro[2..], b"\n"].concat())),
+            vec![("€".into(), false)]
         );
 
         // Invalid bytes are not held back, the buffer would grow forever.
@@ -1001,10 +1074,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rotation_drops_earlier_entries_of_chunk() -> Result<()> {
-        let file = NamedTempFile::new()?;
-        let mut sut = LogFile::new(file.path(), None, Some(10));
+    async fn rotation_writes_earlier_entries_of_chunk_to_old_file() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("log");
+        let mut sut = LogFile::new(&path, None, Some(10));
         sut.open().await?;
+        // A reader which follows the old file.
+        let old = dir.path().join("old");
+        fs::hard_link(&path, &old)?;
 
         sut.buf.extend_from_slice(b"first\n");
         sut.commit_entry(0).await?;
@@ -1013,7 +1090,8 @@ mod tests {
         assert_eq!(sut.buf, b"second\n");
         sut.flush().await?;
 
-        assert_eq!(fs::read_to_string(file.path())?, "second\n");
+        assert_eq!(fs::read_to_string(&old)?, "first\n");
+        assert_eq!(fs::read_to_string(&path)?, "second\n");
         assert_eq!(sut.bytes_written, 7);
         Ok(())
     }

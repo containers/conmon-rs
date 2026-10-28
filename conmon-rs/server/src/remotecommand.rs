@@ -22,7 +22,6 @@ use futures::{
 };
 use serde::{Serialize, de::IgnoredAny};
 use std::{
-    collections::VecDeque,
     future::{self, Future},
     sync::{
         Arc,
@@ -249,7 +248,8 @@ pub enum ClientEvent {
     /// A resize event as JSON.
     Resize(Bytes),
 
-    /// The client closed the connection cleanly.
+    /// The client closed the connection cleanly: a WebSocket with a close,
+    /// a SPDY connection which ended after the stdin of the client ended.
     Closed,
 
     /// The client sent a message larger than the server takes, which fails
@@ -346,6 +346,16 @@ impl ClientInput for WebSocketInput {
 /// attach, so it may also come after the session started.
 pub struct SpdyInput {
     stdin: Option<StreamReceiver>,
+
+    /// Whether the client closed stdin cleanly. The end of the connection is
+    /// a clean close then, which still forwards the stdin the client sent
+    /// before.
+    stdin_ended: bool,
+
+    /// Set once the client closed its stdin, so that the output, which fails
+    /// once the connection ended, does not end the session before the stdin
+    /// got forwarded, see [`Output`].
+    peer_closed: Arc<AtomicBool>,
     resize: Option<StreamReceiver>,
     resize_events: ResizeEvents,
 
@@ -409,26 +419,27 @@ impl SpdyInput {
 }
 
 /// The events of the resize stream of a SPDY client, which carries JSON
-/// objects back to back.
+/// objects back to back. Only the latest one matters, the earlier sizes are
+/// gone already, so a client sending many at once does not queue them.
 #[derive(Debug, Default)]
 pub struct ResizeEvents {
     buf: BytesMut,
-    events: VecDeque<Bytes>,
+    latest: Option<Bytes>,
 }
 
 impl ResizeEvents {
-    /// Split what the client sent into its JSON objects. A broken one drops
-    /// what the client sent so far.
+    /// Split what the client sent into its JSON objects and keep the last
+    /// one. A broken one drops what the client sent so far.
     pub fn push(&mut self, data: &[u8]) {
         self.buf.extend_from_slice(data);
         let mut stream = serde_json::Deserializer::from_slice(&self.buf).into_iter::<IgnoredAny>();
         let mut start = 0;
+        let mut latest = None;
         loop {
             match stream.next() {
                 Some(Ok(_)) => {
                     let end = stream.byte_offset();
-                    let object = self.buf[start..end].trim_ascii();
-                    self.events.push_back(Bytes::copy_from_slice(object));
+                    latest = Some(start..end);
                     start = end;
                 }
                 Some(Err(e)) if e.is_eof() => break,
@@ -439,6 +450,9 @@ impl ResizeEvents {
                 }
                 None => break,
             }
+        }
+        if let Some(range) = latest {
+            self.latest = Some(Bytes::copy_from_slice(self.buf[range].trim_ascii()));
         }
         let _ = self.buf.split_to(start);
         let whitespace = self
@@ -454,7 +468,7 @@ impl ResizeEvents {
     }
 
     pub fn pop(&mut self) -> Option<Bytes> {
-        self.events.pop_front()
+        self.latest.take()
     }
 }
 
@@ -464,9 +478,14 @@ impl ClientInput for SpdyInput {
             if let Some(event) = self.resize_events.pop() {
                 return Some(ClientEvent::Resize(event));
             }
+            // The connection is done once its reader ended, which happens
+            // before the data queued on its streams got taken. What the
+            // client sent before closing still goes first. The rare resizes
+            // go before stdin, which a busy client keeps ready.
             let event = select! {
-                data = Self::recv(self.stdin.as_mut()) => SpdyEvent::Stdin(data),
+                biased;
                 data = Self::recv(self.resize.as_mut()) => SpdyEvent::Resize(data),
+                data = Self::recv(self.stdin.as_mut()) => SpdyEvent::Stdin(data),
                 stream = Self::accept(self.connection.as_mut()) => SpdyEvent::Stream(stream),
                 () = self.done.cancelled() => SpdyEvent::Done,
             };
@@ -476,10 +495,16 @@ impl ClientInput for SpdyInput {
                         return Some(ClientEvent::Stdin(stdin));
                     }
                 }
-                // The client closed stdin, unless the stream got reset.
+                // The client closed stdin, unless the stream got reset, also
+                // if the connection ended right after.
                 SpdyEvent::Stdin(None) => {
-                    let reset = self.stdin.take().is_some_and(|s| s.is_reset());
+                    let reset = self
+                        .stdin
+                        .take()
+                        .is_some_and(|s| s.is_reset() && !s.is_closed_by_client());
                     if !reset {
+                        self.stdin_ended = true;
+                        self.peer_closed.store(true, Ordering::Release);
                         return Some(ClientEvent::Stdin(Stdin::Close));
                     }
                 }
@@ -487,7 +512,7 @@ impl ClientInput for SpdyInput {
                 SpdyEvent::Resize(None) => self.resize = None,
                 SpdyEvent::Stream(Some(stream)) => self.late_stream(stream),
                 SpdyEvent::Stream(None) => self.connection = None,
-                SpdyEvent::Done => return None,
+                SpdyEvent::Done => return self.stdin_ended.then_some(ClientEvent::Closed),
             }
         }
     }
@@ -534,6 +559,9 @@ impl SpdyStreams {
     }
 
     /// Wait for the streams the session expects, others may come along.
+    /// Nothing reads the streams meanwhile: a client which sends more stdin
+    /// than a stream queues before it opened the others holds up the
+    /// connection until this times out. client-go opens all streams first.
     pub async fn wait(connection: &mut Connection, expected: ExpectedStreams) -> Result<Self> {
         let mut error = None;
         let (mut stdin, mut stdout, mut stderr, mut resize) = (None, None, None, None);
@@ -595,7 +623,9 @@ impl SpdyStreams {
             None => (None, None),
         };
         let sender = |stream: Option<Stream>| stream.map(|s| s.split().1);
+        let peer_closed = Arc::<AtomicBool>::default();
         let output = SpdyOutput {
+            peer_closed: peer_closed.clone(),
             version,
             error: self.error.split().1,
             stdin: stdin_sender,
@@ -604,6 +634,8 @@ impl SpdyStreams {
             connection: connection.handle(),
         };
         let input = SpdyInput {
+            stdin_ended: false,
+            peer_closed,
             stdin,
             resize: receiver(self.resize).await,
             resize_events: ResizeEvents::default(),
@@ -616,6 +648,8 @@ impl SpdyStreams {
 
 /// The sending sides of a SPDY session.
 pub struct SpdyOutput {
+    /// Shared with the input, see [`Output::spdy`].
+    peer_closed: Arc<AtomicBool>,
     version: Version,
     error: StreamSender,
     stdin: Option<StreamSender>,
@@ -732,7 +766,8 @@ struct ErrorCause {
 /// sends fail as well, the output gets dropped then. The session still
 /// forwards the stdin which the client sent before its close to the process
 /// and reads the output meanwhile, so that the process does not wait for it.
-/// SPDY clients do not close cleanly, they close stdin.
+/// A SPDY connection which ends after the client closed its stdin counts as
+/// a clean close.
 pub struct Output {
     transport: Transport,
     failed: bool,
@@ -763,22 +798,26 @@ impl Output {
         framing: Framing,
         activity: Activity,
     ) -> Self {
-        Self::new(Transport::WebSocket {
+        let transport = Transport::WebSocket {
             sender,
             framing,
             activity,
-        })
+        };
+        Self::new(transport, Arc::default())
     }
 
+    /// The output of a SPDY session, which shares whether the client closed
+    /// its stdin with its input, see [`SpdyInput`].
     pub fn spdy(output: SpdyOutput) -> Self {
-        Self::new(Transport::Spdy(output))
+        let peer_closed = output.peer_closed.clone();
+        Self::new(Transport::Spdy(output), peer_closed)
     }
 
-    fn new(transport: Transport) -> Self {
+    fn new(transport: Transport, peer_closed: Arc<AtomicBool>) -> Self {
         Self {
             transport,
             failed: false,
-            peer_closed: Arc::default(),
+            peer_closed,
             too_large: false,
         }
     }
@@ -869,7 +908,7 @@ impl Output {
         match &self.transport {
             Transport::WebSocket { .. } => self.send(Message::Ping(Bytes::new())).await,
             Transport::Spdy(output) if output.connection.done().is_cancelled() => {
-                bail!("SPDY connection closed")
+                self.sent(Err(anyhow!("SPDY connection closed")))
             }
             Transport::Spdy(_) => Ok(()),
         }
@@ -941,10 +980,21 @@ impl Output {
         self.sent(result)
     }
 
+    /// A send failed after a clean close: of a WebSocket, or of a SPDY
+    /// connection which ended after the stdin of the client ended. A stream
+    /// of a connection which is still up got reset, which fails the session.
+    fn closed(&self) -> bool {
+        self.peer_closed.load(Ordering::Acquire)
+            && match &self.transport {
+                Transport::WebSocket { .. } => true,
+                Transport::Spdy(output) => output.connection.done().is_cancelled(),
+            }
+    }
+
     fn sent(&mut self, result: Result<()>) -> Result<()> {
         match result {
             Ok(()) => Ok(()),
-            Err(e) if self.peer_closed.load(Ordering::Acquire) => {
+            Err(e) if self.closed() => {
                 debug!("Dropping the output of the session after the close: {e:#}");
                 self.failed = true;
                 Ok(())
@@ -1217,23 +1267,33 @@ mod tests {
         let mut input = ResizeEvents::default();
         // Go encodes one object per line, which may arrive in parts.
         input.push(b"{\"Width\":80,\"Height\":24}\n{\"Width\":");
+        assert_eq!(
+            input.pop(),
+            Some(Bytes::from_static(b"{\"Width\":80,\"Height\":24}"))
+        );
         input.push(b"100,\"Height\":40}\n");
         assert_eq!(
-            input.events,
-            [
-                Bytes::from_static(b"{\"Width\":80,\"Height\":24}"),
-                Bytes::from_static(b"{\"Width\":100,\"Height\":40}"),
-            ]
+            input.pop(),
+            Some(Bytes::from_static(b"{\"Width\":100,\"Height\":40}"))
         );
         assert!(input.buf.is_empty());
+        assert_eq!(input.pop(), None);
+
+        // Only the latest of many sizes at once gets applied.
+        input.push(&b"{\"Width\":1,\"Height\":2}".repeat(1000));
+        input.push(b"{\"Width\":3,\"Height\":4}");
+        assert_eq!(
+            input.pop(),
+            Some(Bytes::from_static(b"{\"Width\":3,\"Height\":4}"))
+        );
+        assert_eq!(input.pop(), None);
 
         // Garbage gets dropped, later events still work.
-        input.events.clear();
         input.push(b"}{\"Width\":1,\"Height\":2}");
         input.push(b"{\"Width\":1,\"Height\":2}");
         assert_eq!(
-            input.events,
-            [Bytes::from_static(b"{\"Width\":1,\"Height\":2}")]
+            input.pop(),
+            Some(Bytes::from_static(b"{\"Width\":1,\"Height\":2}"))
         );
 
         // An object which never ends is bounded.
@@ -1308,6 +1368,122 @@ mod tests {
         let resets = time::timeout(Duration::from_secs(10), resets).await??;
         assert!(!resets.contains(&5), "{resets:?}");
         drop((input, output));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stdin_before_the_end_of_the_connection_gets_taken() -> Result<()> {
+        for fin in [true, false] {
+            let (client, server) = duplex(1024);
+            let mut connection =
+                Connection::serve(server, None, None, |h| SpdyStreams::accept(h, Version::V4));
+            let mut client = Client::new(client)?;
+            client.open(1, [("streamType", "error")].into()).await?;
+            client.open(3, [("streamType", "stdin")].into()).await?;
+            let streams = SpdyStreams::wait(
+                &mut connection,
+                ExpectedStreams {
+                    stdin: true,
+                    stdout: false,
+                    stderr: false,
+                },
+            )
+            .await?;
+            let (mut input, _output) = streams.into_parts(connection, Version::V4).await;
+
+            client
+                .send(Frame::Data {
+                    stream_id: 3,
+                    fin,
+                    data: Bytes::from_static(b"data"),
+                })
+                .await?;
+            drop(client);
+            let done = input.done.clone();
+            time::timeout(Duration::from_secs(5), done.cancelled()).await?;
+
+            let data = Bytes::from_static(b"data");
+            assert_eq!(
+                input.next().await,
+                Some(ClientEvent::Stdin(Stdin::Data(data)))
+            );
+            // Only after the end of stdin, the end of the connection is a
+            // clean close.
+            if fin {
+                assert_eq!(input.next().await, Some(ClientEvent::Stdin(Stdin::Close)));
+                assert_eq!(input.next().await, Some(ClientEvent::Closed));
+            } else {
+                assert_eq!(input.next().await, None);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connection_end_without_stdin_is_no_clean_close() -> Result<()> {
+        let (client, server) = duplex(1024);
+        let mut connection =
+            Connection::serve(server, None, None, |h| SpdyStreams::accept(h, Version::V4));
+        let mut client = Client::new(client)?;
+        client.open(1, [("streamType", "error")].into()).await?;
+        client.open(3, [("streamType", "stdout")].into()).await?;
+        let streams = SpdyStreams::wait(
+            &mut connection,
+            ExpectedStreams {
+                stdin: false,
+                stdout: true,
+                stderr: false,
+            },
+        )
+        .await?;
+        let (mut input, output) = streams.into_parts(connection, Version::V4).await;
+        drop(client);
+        assert_eq!(
+            time::timeout(Duration::from_secs(5), input.next()).await?,
+            None
+        );
+        assert!(!output.peer_closed.load(Ordering::Acquire));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reset_output_after_the_stdin_close_fails_the_session() -> Result<()> {
+        let (client, server) = duplex(64 * 1024);
+        let mut connection =
+            Connection::serve(server, None, None, |h| SpdyStreams::accept(h, Version::V4));
+        let mut client = Client::new(client)?;
+        client.open(1, [("streamType", "error")].into()).await?;
+        client.open(3, [("streamType", "stdout")].into()).await?;
+        let streams = SpdyStreams::wait(
+            &mut connection,
+            ExpectedStreams {
+                stdin: false,
+                stdout: true,
+                stderr: false,
+            },
+        )
+        .await?;
+        let (_input, output) = streams.into_parts(connection, Version::V4).await;
+        let mut output = Output::spdy(output);
+        // Like after the stdin close of the client.
+        output.peer_closed().store(true, Ordering::Release);
+
+        // The client resets stdout while the connection is still up.
+        client
+            .send(Frame::RstStream {
+                stream_id: 3,
+                // CANCEL
+                status: 5,
+            })
+            .await?;
+        let data = Bytes::from_static(b"out");
+        time::timeout(Duration::from_secs(5), async {
+            while output.data(STDOUT_BYTE, &data).await.is_ok() {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        drop(client);
         Ok(())
     }
 

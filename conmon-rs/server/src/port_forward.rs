@@ -1273,11 +1273,67 @@ pub mod fuzzing {
         STREAM_TYPE_DATA, STREAM_TYPE_ERROR,
     };
     use crate::{spdy::fuzzing::client_frames, stream_protocol::STREAM_TYPE_HEADER};
-    use tokio::{
-        io::{self, AsyncWriteExt},
-        runtime, task,
-        time::{self, Duration},
+    use std::{
+        pin::{Pin, pin},
+        sync::{Arc, Mutex, PoisonError},
+        task::{Context, Poll},
     };
+    use tokio::{
+        io::{self, AsyncRead, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf},
+        runtime, select, task,
+        time::{self, Duration, Instant},
+    };
+
+    /// How long the server may go without reading the client before the
+    /// session counts as hung. A stream which does not take its data stops
+    /// reading the client until its request expires, at most
+    /// [`STREAM_CREATION_TIMEOUT`] after the read which created it, and the
+    /// client waits a little longer than that before it closes the
+    /// connection.
+    const MAX_STALL: Duration = STREAM_CREATION_TIMEOUT.saturating_mul(2);
+
+    /// The server side of the connection, which notes when the server read
+    /// from the client the last time.
+    struct Watched {
+        io: DuplexStream,
+        last_read: Arc<Mutex<Instant>>,
+    }
+
+    impl AsyncRead for Watched {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            let poll = Pin::new(&mut this.io).poll_read(cx, buf);
+            if poll.is_ready() {
+                *this
+                    .last_read
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Instant::now();
+            }
+            poll
+        }
+    }
+
+    impl AsyncWrite for Watched {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.get_mut().io).poll_write(cx, buf)
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().io).poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().io).poll_shutdown(cx)
+        }
+    }
 
     /// Parse the query of a channel protocol request, the ports it gives
     /// are the ones a session can forward.
@@ -1296,6 +1352,13 @@ pub mod fuzzing {
     /// errors run. The session has to end with the client. The namespace
     /// thread answers in real time while the clock is paused, so whether an
     /// error reaches the client before it closes varies between runs.
+    ///
+    /// The server may stop reading the client while a stream waits for the
+    /// other one of its request, until the request expires. The client
+    /// waits for the server meanwhile, and a request which arrives after
+    /// one expired may stop the server again. So the session as a whole
+    /// may take several request timeouts, but the server must never go
+    /// [`MAX_STALL`] without reading the client until it ended.
     pub fn spdy(input: &[u8]) {
         let frames = client_frames(input, |next| {
             // Mostly valid streams, so that requests pair up.
@@ -1350,13 +1413,26 @@ pub mod fuzzing {
                 idle_timeout: None,
                 ping_interval: None,
             };
-            let served = async {
+            let last_read = Arc::new(Mutex::new(Instant::now()));
+            let server = Watched {
+                io: server,
+                last_read: last_read.clone(),
+            };
+            let mut served = pin!(async {
                 session.serve_spdy(server).await;
                 let _ = client.await;
-            };
-            time::timeout(2 * STREAM_CREATION_TIMEOUT, served)
-                .await
-                .expect("the session ended with the client");
+            });
+            let last_read = || *last_read.lock().unwrap_or_else(PoisonError::into_inner);
+            loop {
+                select! {
+                    biased;
+                    () = &mut served => break,
+                    () = time::sleep_until(last_read() + MAX_STALL) => assert!(
+                        last_read().elapsed() < MAX_STALL,
+                        "the session ended with the client"
+                    ),
+                }
+            }
         });
     }
 }

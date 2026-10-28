@@ -31,7 +31,7 @@ use std::{
     mem,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicU32, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     },
 };
 use tokio::{
@@ -459,6 +459,9 @@ struct StreamState {
     /// Cancelled when the stream got reset or the connection ended.
     reset: CancellationToken,
 
+    /// Set once the client closed its side, shared with the receiver.
+    remote_closed: Arc<AtomicBool>,
+
     /// Whether the server closed its side.
     local_closed: bool,
 }
@@ -485,6 +488,8 @@ impl Shared {
     fn remote_closed(&self, id: u32) {
         let mut streams = self.lock_streams();
         if let Some(state) = streams.get_mut(&id) {
+            // Before the data ends, which the receiver may see right away.
+            state.remote_closed.store(true, Ordering::Release);
             state.data = None;
             if state.local_closed {
                 streams.remove(&id);
@@ -753,12 +758,14 @@ where
         }
 
         let reset = self.shared.done.child_token();
+        let remote_closed = Arc::new(AtomicBool::new(fin));
         let (data_tx, data_rx) = mpsc::channel(STREAM_QUEUE);
         self.shared.lock_streams().insert(
             stream_id,
             StreamState {
                 data: (!fin).then_some(data_tx),
                 reset: reset.clone(),
+                remote_closed: remote_closed.clone(),
                 local_closed: false,
             },
         );
@@ -776,6 +783,7 @@ where
             receiver: StreamReceiver {
                 data: data_rx,
                 reset: reset.clone(),
+                remote_closed,
                 _live: live.clone(),
             },
             sender: StreamSender {
@@ -847,6 +855,7 @@ impl Stream {
 pub struct StreamReceiver {
     data: mpsc::Receiver<Held>,
     reset: CancellationToken,
+    remote_closed: Arc<AtomicBool>,
     _live: Arc<Live>,
 }
 
@@ -866,6 +875,12 @@ impl StreamReceiver {
     /// Whether the stream got reset or the connection ended.
     pub fn is_reset(&self) -> bool {
         self.reset.is_cancelled()
+    }
+
+    /// Whether the client closed its side, also if the stream got reset or
+    /// the connection ended afterwards.
+    pub fn is_closed_by_client(&self) -> bool {
+        self.remote_closed.load(Ordering::Acquire)
     }
 }
 
