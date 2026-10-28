@@ -40,7 +40,7 @@ GOLANGCI_LINT_VERSION := v2.15.0
 # version updates as well, see dependencies.yaml and verify-digests.
 PRETTIER_VERSION := 3.9.10
 NODE_VERSION := 24.22.1
-NODE_DIGEST := sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
+NODE_DIGEST := sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c
 NODE_IMAGE := docker.io/library/node:$(NODE_VERSION)-slim@$(NODE_DIGEST)
 PRETTIER = $(CONTAINER_RUNTIME) run --rm -v $(CURDIR):/w:z -w /w --entrypoint npx \
 	$(NODE_IMAGE) --yes prettier@$(PRETTIER_VERSION)
@@ -176,8 +176,16 @@ lint-workflows: .install.actionlint ## Lint the GitHub workflows with actionlint
 	$(CONTAINER_RUNTIME) run --rm -e GH_TOKEN -v $(CURDIR):/w:z,ro -w /w \
 		$(ZIZMOR_IMAGE) $(ZIZMOR_FLAGS) .
 
+# The version of the lint-typos job of CI, typos publishes no checksums to
+# install it with.
+TYPOS_VERSION = $(shell sed -n 's|.*crate-ci/typos@.* \# v||p' .github/workflows/ci.yml)
+
 .PHONY: lint-typos
-lint-typos: ## Check the spelling, typos has to be installed.
+lint-typos: ## Check the spelling, typos of the version of CI has to be installed.
+	@VERSION=$$(typos --version) && if [ "$$VERSION" != "typos-cli $(TYPOS_VERSION)" ]; then \
+		echo "typos $(TYPOS_VERSION) is required, found $$VERSION" >&2 ; \
+		exit 1 ; \
+	fi
 	typos --config .github/typos.toml
 
 .PHONY: verify

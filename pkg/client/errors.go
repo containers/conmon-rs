@@ -33,6 +33,10 @@ var (
 	// with a nil configuration.
 	ErrMissingConfig = errors.New("config must be specified")
 
+	// ErrTerminalSizeNil gets returned by SetWindowSizeContainer if the
+	// configuration has no Size.
+	ErrTerminalSizeNil = errors.New("terminal size cannot be nil")
+
 	// ErrContainerNotFound gets matched by the error of a method if the
 	// server does not know the container of the request, for example because
 	// it got created by another server or the server restarted. Use

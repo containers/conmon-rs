@@ -112,3 +112,15 @@ func pidfdExited(pidfd *os.File) (bool, error) {
 
 	return exited, nil
 }
+
+// openDirPath opens the directory only as a location, which needs no read
+// permission on it, the search permission which a lookup through it needs
+// is enough.
+func openDirPath(path string) (*os.File, error) {
+	fd, err := unix.Open(path, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+
+	return os.NewFile(uintptr(fd), path), nil
+}

@@ -41,10 +41,19 @@ prepare_system() {
 }
 
 install_crio() {
-    # Pinned to a commit, the script runs as root.
-    PACKAGING_COMMIT=d3d936cd4d7c627f0ed33ecef4bcc8544df10e54
+    # Pinned to a commit, the script runs as root, see dependencies.yaml. It
+    # has to verify the signatures of the bundle with the cosign of the job,
+    # which sudo would drop from the PATH. Root only gets the directory of
+    # cosign in front of the standard PATH, not the user writable ones of
+    # the runner.
+    PACKAGING_COMMIT=4196859aba59fa6dbe0e2b0e0b1a8f66ede832cd
+    local cosign
+    cosign=$(command -v cosign) || {
+        echo "::error::cosign is required to verify the CRI-O bundle" >&2
+        exit 1
+    }
     curl_retry "https://raw.githubusercontent.com/cri-o/packaging/$PACKAGING_COMMIT/get" |
-        sudo bash -s --
+        sudo env PATH="${cosign%/*}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" bash -s -- -v
 
     cat <<EOT | sudo tee /etc/crio/crio.conf.d/10-crun.conf
 [crio.runtime]

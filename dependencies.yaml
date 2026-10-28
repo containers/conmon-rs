@@ -55,6 +55,8 @@ dependencies:
         match: "RUST_VERSION:"
       - path: .github/workflows/gh-pages.yml
         match: "RUST_VERSION:"
+      - path: .github/workflows/advisories.yml
+        match: "RUST_VERSION:"
 
   # The fuzz targets need a nightly toolchain. zeitgeist cannot track the
   # dated nightlies, so bump it together with the stable rust version above to
@@ -94,6 +96,19 @@ dependencies:
     refPaths:
       - path: contrib/tracing/start
         match: JAEGER_IMG=
+
+  # The commit of the script which installs CRI-O for critest, see
+  # .github/setup. It runs as root, so a bump needs a look at its changes.
+  - name: cri-o-packaging
+    version: 4196859aba59fa6dbe0e2b0e0b1a8f66ede832cd
+    scheme: random
+    upstream:
+      flavour: github
+      url: cri-o/packaging
+      branch: main
+    refPaths:
+      - path: .github/setup
+        match: PACKAGING_COMMIT=
 
   - name: cri-tools
     version: 1.37.0
@@ -159,8 +174,9 @@ dependencies:
   # The LTS release which runs prettier. Up to 26, only the even majors
   # became LTS (26 on 2026-10-28). From 27 on, every major does, in the
   # October after its first release. The constraint shows the next LTS major:
-  # move the pin to it once it is LTS and raise the constraint by one major
-  # then.
+  # move the pin to it once a release of it is LTS, which
+  # https://nodejs.org/dist/index.json names with its codename, and raise the
+  # constraint by one major then.
   - name: node
     version: 24.22.1
     upstream:

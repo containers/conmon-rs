@@ -57,14 +57,23 @@ got attested or before the VEX document
 got built before the tag existed, the version and commit identify them and
 their tag stays empty.
 
+The release waits for that ci run and fails unless all of its jobs besides
+the publish ones passed in its latest attempt, so a commit whose tests or
+checks failed, like the vulnerability scans, does not get released. Wait for
+the ci run of the merge commit to pass before pushing the tag. If it fails
+anyway, "Re-run failed jobs" of the ci run and then rerun the release
+workflow. A failure which a rerun cannot fix needs a new version bump PR for
+the next patch version once the cause is fixed: the tag cannot move to
+another commit, and the crate version has to match the tag.
+
 Use only "Re-run failed jobs" for a ci run on main, never "Re-run all jobs".
 The latter builds the binaries again, and if they do not have the same bits,
 the publish-static jobs refuse to replace the signed ones in the bucket and
-fail. A release still takes the binaries of the earlier attempt, but the run
-stays failed. A cancelled publish-marker job is fine: the runs of main publish
-the `latest-main.txt` marker one at a time, and a job which queues later
-replaces one which waits. The marker only moves forward, at worst it stays
-behind until the run of the next commit.
+fail. A release still takes the binaries of the earlier attempt as long as
+the other jobs pass, but the run stays failed. A cancelled publish-marker job
+is fine: the runs of main publish the `latest-main.txt` marker one at a time,
+and a job which queues later replaces one which waits. The marker only moves
+forward, at worst it stays behind until the run of the next commit.
 
 The same tag also versions the Go module `github.com/containers/conmon-rs`, so
 consumers like CRI-O pick the release up with `go get
