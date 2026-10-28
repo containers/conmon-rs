@@ -8,15 +8,15 @@ use nix::{
     unistd::Pid,
 };
 use std::{
-    io,
+    fs::{File, OpenOptions},
+    io::{self, Write},
     os::fd::{AsRawFd, RawFd},
-    path::{Path, PathBuf},
+    path::Path,
     pin::Pin,
     task::{Context as TaskContext, Poll, ready},
 };
 use tokio::{
-    fs::{File, OpenOptions},
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ErrorKind, Interest, ReadBuf, unix::AsyncFd},
+    io::{AsyncRead, AsyncReadExt, ErrorKind, Interest, ReadBuf, unix::AsyncFd},
     time::{self, Duration},
 };
 use tokio_util::sync::CancellationToken;
@@ -38,11 +38,8 @@ struct OomControl {
 impl OomControl {
     fn parse(content: &str) -> Self {
         let mut control = Self::default();
-        for line in content.lines() {
-            let Some((key, value)) = line.split_once(' ') else {
-                continue;
-            };
-            let value = value.trim().parse::<u64>().ok();
+        for (key, value) in OOMWatcher::counters(content) {
+            let value = value.ok();
             match key {
                 "oom_kill_disable" => control.kill_disable = value.is_some_and(|v| v != 0),
                 "under_oom" => control.under_oom = value.is_some_and(|v| v != 0),
@@ -113,7 +110,6 @@ impl OOMWatcher {
     pub(super) async fn oom_handling_cgroup_v1(
         token: &CancellationToken,
         pid: Pid,
-        exit_paths: &[PathBuf],
     ) -> Result<Option<OOMEvent>> {
         // The setup reads procfs and cgroupfs inline, which does not block,
         // instead of adding a blocking task to every container and exec.
@@ -147,17 +143,14 @@ impl OOMWatcher {
         };
 
         // Registering an event only needs the file open, like for conmon.
-        let oom_cgroup_file = File::open(&memory_cgroup_file_oom_path)
-            .await
-            .context("opening cgroup oom file")?;
+        // The kernel keeps what it needs of it once registered.
+        let oom_cgroup_file =
+            File::open(&memory_cgroup_file_oom_path).context("opening cgroup oom file")?;
         let oom_event_fd = AsyncEventFd::new().context("creating eventfd")?;
-
-        let mut event_control = OpenOptions::new()
+        OpenOptions::new()
             .write(true)
             .open(event_control_path)
-            .await
-            .context("opening cgroup event control file")?;
-        event_control
+            .context("opening cgroup event control file")?
             .write_all(
                 format!(
                     "{} {}",
@@ -166,19 +159,14 @@ impl OOMWatcher {
                 )
                 .as_bytes(),
             )
-            .await
             .context("writing control data")?;
-        event_control.flush().await.context("flush control data")?;
+        drop(oom_cgroup_file);
 
         debug!("Successfully setup cgroup v1 oom detection");
 
         let event =
             Self::watch_cgroup_v1(token, oom_event_fd, &memory_cgroup_file_oom_path, baseline)
                 .await;
-        if event.oom {
-            Self::write_oom_files(exit_paths).await;
-        }
-        debug!("Done watching for ooms");
         Ok(Some(event))
     }
 
@@ -343,7 +331,9 @@ impl OOMWatcher {
 mod tests {
     use super::*;
     use nix::sys::signal::Signal;
+    use std::path::PathBuf;
     use tokio::{
+        io::AsyncWriteExt,
         task,
         time::{sleep, timeout},
     };

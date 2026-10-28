@@ -282,17 +282,17 @@ documentation of [fd_socket.rs](conmon-rs/server/src/fd_socket.rs).
 
 ## Logging
 
-Container output goes to the log drivers requested per container. When the
-next entry would exceed the configured maximum size, the server replaces the
-log file with a new empty one, like conmon: it creates `.<name>.conmonrs-tmp`
-next to it, a name which the log cleanup of the kubelet does not match, and
-renames it over the path, so that a reader which follows the log, like
-`kubectl logs -f`, reads the old file to its end first. `reopenLogContainer`,
-which CRI-O calls after the kubelet rotated the log, starts a new file at the
-path the same way. The server appends to the log files, so a file which gets
-truncated in place, for example to free disk space, continues at its new end.
-A write which fails in the middle of an entry, like on a full disk, drops the
-rest of it, the next entry starts on a line of its own.
+Container output goes to the log drivers requested per container. When the next
+entry would exceed the configured maximum size, the server writes the entries
+read before it to the old file and replaces the log file with a new empty one,
+like conmon: it creates `.<name>.conmonrs-tmp` next to it, a name which the log
+cleanup of the kubelet does not match, and renames it over the path, so that a
+reader which follows the log, like `kubectl logs -f`, reads the old file to its
+end first. `reopenLogContainer`, which CRI-O calls after the kubelet rotated the
+log, starts a new file at the path the same way. The server appends to the log
+files, so a file which gets truncated in place, for example to free disk space,
+continues at its new end. A write which fails in the middle of an entry, like on
+a full disk, drops the rest of it, the next entry starts on a line of its own.
 
 - `containerRuntimeInterface`: the CRI log format, one line per entry with an
   RFC 3339 timestamp in nanoseconds of when the server read the output, the
@@ -341,12 +341,13 @@ The first command shows the logs of the server together with the output of
 the containers which use the `journald` log driver without a `tag`, the
 second one only the output of one container.
 
-The server never waits for the journal with its own entries, they get lost
-while journald does not keep up, for example while it restarts. A line of
-container output waits up to a second, the rest of what the server read gets
-dropped after that, which the server logs as a warning, once until the journal
-takes lines again. The log files of the
-`containerRuntimeInterface` and `json` drivers lose nothing this way.
+The server never waits for the journal with its own entries, they get lost while
+journald does not keep up, for example while it restarts. The lines of container
+output which the journal does not take right away wait up to about two seconds
+together, the rest of what the server read gets dropped after that, which the
+server logs as a warning, once until the journal takes lines again. The log
+files of the `containerRuntimeInterface` and `json` drivers lose nothing this
+way.
 
 To see what the server does without an engine, run it in the foreground with
 its logs on stdout and talk to its socket with a client:

@@ -28,7 +28,7 @@ use std::{
     io::{Read, Write},
     os::unix::{net::UnixStream, process::ExitStatusExt},
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     sync::{
         Arc, LazyLock, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -359,7 +359,13 @@ impl Pause {
         debug!("Pause namespaces: {:?}", namespaces);
         debug!("Pause args: {:?}", args);
 
-        fs::create_dir_all(base_path).context("create base path")?;
+        // On the blocking pool, a hung file system must not stall the
+        // runtime thread and with it every request.
+        let dir = base_path.to_path_buf();
+        task::spawn_blocking(move || fs::create_dir_all(dir))
+            .await
+            .context("join creating base path")?
+            .context("create base path")?;
         debug!("Pause base path: {}", base_path.display());
 
         // The running binary, also after a package upgrade replaced the file
@@ -395,7 +401,7 @@ impl Pause {
         let process = Process::open(child_pid(child.id()).context("PID of pause child")?);
         PAUSE.set_child(Some(process));
         let output = RuntimeOutput::spawn(None, child.stderr.take());
-        let status = child.wait().await;
+        let status = Self::wait_or_kill(&mut child, Self::SETUP_TIMEOUT).await;
         PAUSE.set_child(None);
 
         let mut pause = Self {
@@ -408,6 +414,13 @@ impl Pause {
             exited: Arc::default(),
         };
 
+        let Some(status) = status else {
+            // Stuck in the kernel, it gets reaped once it exits. The setup
+            // may have bound namespaces already.
+            task::spawn(async move { child.wait().await });
+            stop_blocking(move || pause.stop()).await;
+            bail!("pause did not exit after getting killed")
+        };
         let status = status.context("wait for pause child")?;
         if !status.success() {
             // The pause subcommand undoes its own failed setup, but not if it
@@ -445,6 +458,26 @@ impl Pause {
         }
 
         Ok(pause)
+    }
+
+    /// How long the pause subcommand may take to set up the namespaces. A
+    /// hung mount must not keep the requests which wait for it hanging.
+    const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
+
+    /// Wait for the pause subcommand, kill it once the `timeout` passed and
+    /// wait for that up to [`Pause::KILL_WAIT`]. None if it did not exit.
+    async fn wait_or_kill(
+        child: &mut tokio::process::Child,
+        timeout: Duration,
+    ) -> Option<std::io::Result<ExitStatus>> {
+        if let Ok(status) = time::timeout(timeout, child.wait()).await {
+            return Some(status);
+        }
+        warn!("Pause did not finish within {timeout:?}, killing it");
+        if let Err(e) = child.start_kill() {
+            debug!("Unable to kill pause child: {e}");
+        }
+        time::timeout(Self::KILL_WAIT, child.wait()).await.ok()
     }
 
     /// Read the PID of the init which the pause process left behind.
@@ -1189,6 +1222,20 @@ mod tests {
             let _ = self.0.kill();
             let _ = self.0.wait();
         }
+    }
+
+    #[tokio::test]
+    async fn hanging_setup_gets_killed() -> Result<()> {
+        let mut child = Command::new("sleep")
+            .arg("600")
+            .kill_on_drop(true)
+            .spawn()?;
+        // Not with paused time, which would not wait for the kill either.
+        let status = Pause::wait_or_kill(&mut child, Duration::from_millis(100))
+            .await
+            .context("pause child did not exit")??;
+        assert_eq!(status.signal(), Some(Signal::SIGKILL as i32));
+        Ok(())
     }
 
     /// A value which counts how often it got stopped.

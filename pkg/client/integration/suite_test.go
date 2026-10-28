@@ -982,10 +982,10 @@ func testAttach(
 		}
 		// Print in synchrony to prevent races with terminals.
 		// Run twice to ensure all data is processed.
-		for range 2 {
+		for i := range 2 {
 			_, err := fmt.Fprintf(stdinWriter, "%s%s\n", command, pipe)
 			Expect(err).To(Succeed())
-			verifyBuffer(reader, terminal, command, testString)
+			verifyBuffer(reader, terminal, i == 0, command, testString)
 		}
 
 		// terminate the container
@@ -998,7 +998,7 @@ func testAttach(
 	Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))
 }
 
-func verifyBuffer(reader io.Reader, terminal bool, command, expected string) {
+func verifyBuffer(reader io.Reader, terminal, first bool, command, expected string) {
 	// A read blocks on the pipe until output arrives, which never happens
 	// after a mismatch, so bound it.
 	readSection := func() string {
@@ -1035,10 +1035,7 @@ func verifyBuffer(reader io.Reader, terminal bool, command, expected string) {
 	// number of reads.
 	fullExpectedBuffers := []string{expected}
 	if terminal {
-		fullExpectedBuffers = []string{
-			command + "\r\n" + expected + "/ # \x1b[6n",
-			command + "\r\n" + expected + "~ # ",
-		}
+		fullExpectedBuffers = terminalBuffers(first, command, expected)
 	}
 
 	maxLen := 0
@@ -1053,6 +1050,29 @@ func verifyBuffer(reader io.Reader, terminal bool, command, expected string) {
 	}
 
 	Expect(str).To(BeElementOf(fullExpectedBuffers))
+}
+
+// terminalBuffers returns the possible terminal outputs of a command, the
+// echo, its output and the prompt.
+func terminalBuffers(first bool, command, expected string) []string {
+	prompts := []string{"/ # \x1b[6n", "~ # "}
+
+	buffers := []string{}
+	for _, prompt := range prompts {
+		buffers = append(buffers, command+"\r\n"+expected+prompt)
+	}
+
+	// The first prompt goes to the log before attach clients, so an attach
+	// right after it may still get it.
+	if first {
+		for _, before := range prompts {
+			for _, after := range prompts {
+				buffers = append(buffers, before+command+"\r\n"+expected+after)
+			}
+		}
+	}
+
+	return buffers
 }
 
 // streamTransports are the transports of exec and attach sessions: WebSocket

@@ -29,7 +29,8 @@ interface Conmon {
         # `servePortForwardContainer`; `idletimeout`, the `idleTimeoutSec` of
         # the exec and attach serve requests, which older servers ignore;
         # `streamingprotocols`, exec and attach sessions over SPDY and the
-        # WebSocket protocols before `v5.channel.k8s.io`.
+        # WebSocket protocols before `v5.channel.k8s.io`; `journaldfields`,
+        # the `containerName`, `tag` and `labels` of the journald logger.
         features @10 :List(Text);
     }
 
@@ -170,8 +171,9 @@ interface Conmon {
     # Attach
     struct AttachRequest {
         id @0 :Text;
-        # The path of the `SOCK_SEQPACKET` socket the server listens on for
-        # the attach clients of the container until it exited, see usage.md.
+        # The absolute path of the `SOCK_SEQPACKET` socket the server listens
+        # on for the attach clients of the container until it exited, see
+        # usage.md.
         socketPath @1 :Text;
         # Deprecated, only logged, attach sessions are per container.
         execSessionId @2 :Text;
@@ -344,7 +346,7 @@ interface Conmon {
     # ServePortForwardContainer
     struct ServePortForwardContainerRequest {
         metadata @0 :Metadata; # Standard metadata to carry.
-        netNsPath @1 :Text;
+        netNsPath @1 :Text; # The absolute path of the network namespace.
         # How long a connection may go without a frame of the client and
         # without data either way before it gets closed, 0 disables the
         # timeout. WebSocket pings and pongs, the pings of the server and the

@@ -1069,6 +1069,14 @@ var _ = Describe("ConmonClient", func() {
 			It(testName(name, test.terminal), func(ctx SpecContext) {
 				runContainer(ctx, terminal, []string{"/busybox", "sh"})
 
+				if terminal {
+					// Input before the shell put the terminal into raw mode
+					// gets echoed by the terminal as well.
+					Eventually(fileContents, 5*time.Second).
+						WithArguments(tr.logPath()).
+						Should(ContainSubstring("# "))
+				}
+
 				stdinReader, stdinWriter := io.Pipe()
 				stdReader, stdWriter := io.Pipe()
 

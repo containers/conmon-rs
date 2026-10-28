@@ -6,11 +6,7 @@ use super::{
 };
 use anyhow::{Context, Result, bail};
 use nix::unistd::Pid;
-use std::{
-    fs::File as StdFile,
-    io::{BufRead, BufReader},
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 use tokio::{
     sync::mpsc::{Receiver, channel},
     time::{self, Duration, Instant},
@@ -49,22 +45,13 @@ impl OomCounters {
 }
 
 /// The memory events of a cgroup v2 leaf and of the cgroups above it.
+///
+/// crun places the process in a leaf below the container cgroup and applies
+/// the memory limit to both. The kill is always counted in the victim's own
+/// cgroup, the leaf, so it tells about an OOM which the limit of the cgroup
+/// wrapping it caused as well.
 struct CgroupV2 {
-    leaf: PathBuf,
     events: MemoryEvents,
-
-    /// The cgroup which merely wraps the leaf, crun places the process in
-    /// a leaf below the container cgroup and applies the memory limit to
-    /// that parent as well, whose `oom` counter goes up when its limit gets
-    /// hit. The kill itself gets counted in the leaf of the victim, its
-    /// memory.events is hierarchical and includes it, so with the kill
-    /// counter the leaf tells and the parent only matters for kernels
-    /// without it. Only follow the parent in that layout. A pod cgroup
-    /// shared with sibling containers (runc) must not be watched, otherwise
-    /// an OOM of a sibling would be reported for this container. Prefer
-    /// memory.events.local, the counters in memory.events include events
-    /// from below, and fall back on kernels without the local file.
-    parent: Option<MemoryEvents>,
 
     /// The hierarchical memory events of the pod cgroup, which outlives a
     /// leaf the systemd cgroup manager removes, or of the parent without
@@ -94,9 +81,7 @@ impl CgroupV2 {
                 }
             });
         Self {
-            leaf: leaf.to_path_buf(),
             events: MemoryEvents::new(leaf.join("memory.events")),
-            parent: OOMWatcher::wrapper_events_path(leaf).map(MemoryEvents::new),
             outer,
         }
     }
@@ -145,18 +130,17 @@ impl CgroupV2 {
         }
     }
 
-    /// Whether the counters of the leaf or its wrapper went up. After an
-    /// event of the outer cgroup, its kills since the last check stem from
-    /// a sibling otherwise, as long as the leaf still exists. The kernel
-    /// counts a kill in the leaf before its ancestors, so the outer cgroup
-    /// gets read first.
+    /// Whether the counters of the leaf went up. After an event of the outer
+    /// cgroup, its kills since the last check stem from a sibling otherwise,
+    /// as long as the leaf still exists. The kernel counts a kill in the leaf
+    /// before its ancestors, so the outer cgroup gets read first.
     fn check(&mut self, outer_changed: bool) -> bool {
         let outer = self
             .outer
             .as_ref()
             .filter(|_| outer_changed)
             .and_then(|(path, _)| OOMWatcher::read_oom_counters(path).ok());
-        if OOMWatcher::check_cgroups(&self.leaf, &mut self.events, self.parent.as_mut()) {
+        if self.events.check() {
             return true;
         }
         if let (Some(counters), Some((_, baseline))) = (outer, self.outer.as_mut())
@@ -185,12 +169,10 @@ impl CgroupV2 {
         match OOMWatcher::read_oom_counters(path) {
             Ok(counters) => {
                 debug!(
-                    "Leaf cgroup gone, OOM kills of {}: {} since {}",
+                    "Leaf cgroup gone, OOM counters of {}: {counters:?} since {baseline:?}",
                     path.display(),
-                    counters.oom_kill,
-                    baseline.oom_kill
                 );
-                OOMEvent::possible(counters.oom_kill > baseline.oom_kill)
+                OOMEvent::possible(counters.increased_since(baseline))
             }
             Err(e) => {
                 debug!("Unable to read outer OOM counters: {e:#}");
@@ -238,7 +220,6 @@ impl MemoryEvents {
 struct Subscriptions {
     rx: Receiver<WatchEvent>,
     subscription: Subscription,
-    _parent_subscription: Option<Subscription>,
     _pod_subscription: Option<Subscription>,
 }
 
@@ -254,7 +235,6 @@ impl OOMWatcher {
     pub(super) async fn oom_handling_cgroup_v2(
         token: &CancellationToken,
         pid: Pid,
-        exit_paths: &[PathBuf],
     ) -> Result<Option<OOMEvent>> {
         // The setup reads procfs and cgroupfs inline, which does not block,
         // instead of adding a blocking task to every container and exec.
@@ -270,24 +250,17 @@ impl OOMWatcher {
             subsystem_path.display()
         );
 
-        let event = Self::watch_cgroup_v2(token, &subsystem_path).await;
-        if event.oom {
-            debug!("Writing OOM files");
-            Self::write_oom_files(exit_paths).await;
-        }
-        debug!("Done watching for ooms");
-        Ok(Some(event))
+        Ok(Some(Self::watch_cgroup_v2(token, &subsystem_path).await))
     }
 
     /// Wait for an OOM of the cgroup v2 `leaf` until `token` gets cancelled
     /// and return what was found.
     ///
-    /// An OOM counts once the counters of the leaf, or of the cgroup which
-    /// merely wraps it, went up. The leaf may be gone at the exit, the
-    /// systemd cgroup manager removes the scope of a container once its
-    /// processes exited. Then the hierarchical `oom_kill` counter of the
-    /// nearest ancestor which outlives it tells whether a kill happened
-    /// meanwhile, see [`OOMEvent::possible_oom`]. A removal is no OOM
+    /// An OOM counts once the counters of the leaf went up. The leaf may be
+    /// gone at the exit, the systemd cgroup manager removes the scope of a
+    /// container once its processes exited. Then the hierarchical `oom_kill`
+    /// counter of the nearest ancestor which outlives it tells whether a kill
+    /// happened meanwhile, see [`OOMEvent::possible_oom`]. A removal is no OOM
     /// on its own. cgroupfs reports it with `IN_IGNORED` only, which the
     /// watcher drops, the remove event shows up for other file systems.
     async fn watch_cgroup_v2(token: &CancellationToken, leaf: &Path) -> OOMEvent {
@@ -298,7 +271,6 @@ impl OOMWatcher {
 
         let mut subscriptions = match Self::subscribe(
             &cgroup.events,
-            cgroup.parent.as_ref(),
             cgroup.outer.as_ref().map(|(path, _)| path.as_path()),
         ) {
             Ok(subscriptions) => subscriptions,
@@ -339,7 +311,6 @@ impl OOMWatcher {
                         warn!(path, "Watcher of the memory events stopped, watching again");
                         match Self::subscribe(
                             &cgroup.events,
-                            cgroup.parent.as_ref(),
                             cgroup.outer.as_ref().map(|(path, _)| path.as_path()),
                         ) {
                             Ok(new) => subscriptions = new,
@@ -421,29 +392,13 @@ impl OOMWatcher {
     const MIN_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
     /// Watch the memory events of the container and, if present, the ones of
-    /// its wrapper cgroup.
-    fn subscribe(
-        events: &MemoryEvents,
-        parent_events: Option<&MemoryEvents>,
-        pod_events: Option<&Path>,
-    ) -> Result<Subscriptions> {
+    /// the outer cgroup.
+    fn subscribe(events: &MemoryEvents, pod_events: Option<&Path>) -> Result<Subscriptions> {
         let watcher = SharedWatcher::get()?;
         let (events_tx, rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
         let subscription = watcher
             .subscribe(&events.path, events_tx.clone())
             .context("watch memory events file")?;
-
-        let mut parent_subscription = None;
-        if let Some(parent) = parent_events {
-            debug!(
-                "Also watching parent memory events: {}",
-                parent.path.display()
-            );
-            match watcher.subscribe(&parent.path, events_tx.clone()) {
-                Ok(subscription) => parent_subscription = Some(subscription),
-                Err(e) => debug!("Could not watch parent memory events: {e:#}"),
-            }
-        }
 
         // The kills of siblings advance the baseline of the outer cgroup.
         let mut pod_subscription = None;
@@ -458,36 +413,8 @@ impl OOMWatcher {
         Ok(Subscriptions {
             rx,
             subscription,
-            _parent_subscription: parent_subscription,
             _pod_subscription: pod_subscription,
         })
-    }
-
-    /// Check the memory events of the container and of its wrapper cgroup for
-    /// new OOMs. An OOM of the parent only counts while it wraps the container
-    /// alone, otherwise it may stem from a sibling.
-    fn check_cgroups(
-        leaf: &Path,
-        events: &mut MemoryEvents,
-        parent_events: Option<&mut MemoryEvents>,
-    ) -> bool {
-        if events.check() {
-            return true;
-        }
-        let Some(parent) = parent_events else {
-            return false;
-        };
-        // Only list the parent once its counters went up, memory events change
-        // often under memory pressure. The counters are the baseline for the
-        // next check either way, so an OOM skipped here is not reported later.
-        if !parent.check() {
-            return false;
-        }
-        if Self::is_only_child(leaf) {
-            return true;
-        }
-        debug!("Ignoring OOM of parent cgroup with siblings");
-        false
     }
 
     /// Read the current OOM counters of a memory events file to establish a
@@ -509,38 +436,6 @@ impl OOMWatcher {
         }
     }
 
-    /// The memory events file of the parent of `leaf`, if it merely wraps it.
-    fn wrapper_events_path(leaf: &Path) -> Option<PathBuf> {
-        leaf.parent()
-            .filter(|_| Self::is_only_child(leaf))
-            .and_then(|parent| {
-                [
-                    parent.join("memory.events.local"),
-                    parent.join("memory.events"),
-                ]
-                .into_iter()
-                .find(|path| path.exists())
-            })
-    }
-
-    /// Whether the parent of `leaf` contains no other cgroup than `leaf`, so
-    /// that it merely wraps it. The memory limit cannot tell the layouts
-    /// apart, crun applies it to both the wrapper and the leaf. A parent
-    /// without any child still counts, the leaf may already be gone when
-    /// checking for an OOM after the exit.
-    fn is_only_child(leaf: &Path) -> bool {
-        let (Some(parent), Some(name)) = (leaf.parent(), leaf.file_name()) else {
-            return false;
-        };
-        match std::fs::read_dir(parent) {
-            Ok(entries) => entries
-                .flatten()
-                .filter(|entry| entry.file_type().is_ok_and(|typ| typ.is_dir()))
-                .all(|entry| entry.file_name() == name),
-            Err(_) => false,
-        }
-    }
-
     fn check_for_oom(
         memory_events_file_path: &Path,
         last: OomCounters,
@@ -557,18 +452,13 @@ impl OOMWatcher {
 
     /// Parse the `oom` and `oom_kill` counters of a memory events file.
     fn read_oom_counters(path: &Path) -> Result<OomCounters> {
-        let fp = StdFile::open(path)
-            .with_context(|| format!("open memory events file: {}", path.display()))?;
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("read memory events file: {}", path.display()))?;
+        trace!(content);
         let mut counters = OomCounters::default();
         let mut has_oom = false;
 
-        for line in BufReader::new(fp).lines() {
-            let line = line.context("read line from memory events file")?;
-            trace!(line);
-
-            let Some((key, value)) = line.split_once(' ') else {
-                continue;
-            };
+        for (key, value) in Self::counters(&content) {
             let target = match key {
                 "oom" => {
                     has_oom = true;
@@ -580,7 +470,7 @@ impl OOMWatcher {
                 }
                 _ => continue,
             };
-            *target = value.trim_end().parse().context("parse u64 counter")?;
+            *target = value.context("parse u64 counter")?;
         }
 
         // Every memory events file has it, also of kernels without the kill
@@ -720,59 +610,6 @@ mod tests {
         token.cancel();
         let event = timeout(Duration::from_secs(5), task).await??;
         assert_eq!(event, OOMEvent::default());
-        Ok(())
-    }
-
-    #[test]
-    fn only_child_of_wrapper_cgroup() -> Result<()> {
-        let parent = tempfile::tempdir()?;
-        let leaf = parent.path().join("container");
-        std::fs::create_dir(&leaf)?;
-        std::fs::write(parent.path().join("memory.events"), "oom 0\n")?;
-        assert!(OOMWatcher::is_only_child(&leaf));
-
-        std::fs::create_dir(parent.path().join("sibling"))?;
-        assert!(!OOMWatcher::is_only_child(&leaf));
-
-        assert!(!OOMWatcher::is_only_child(
-            &parent.path().join("missing").join("container")
-        ));
-
-        std::fs::remove_dir(&leaf)?;
-        std::fs::remove_dir(parent.path().join("sibling"))?;
-        assert!(OOMWatcher::is_only_child(&leaf));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn parent_oom_ignored_with_siblings() -> Result<()> {
-        let parent = tempfile::tempdir()?;
-        let leaf = parent.path().join("container");
-        std::fs::create_dir(&leaf)?;
-        std::fs::write(leaf.join("memory.events"), "oom 0\noom_kill 0\n")?;
-        let parent_file = parent.path().join("memory.events.local");
-        std::fs::write(&parent_file, "oom 0\noom_kill 0\n")?;
-
-        let mut events = MemoryEvents::new(leaf.join("memory.events"));
-        let mut parent_events = MemoryEvents::new(parent_file.clone());
-        let mut check = || OOMWatcher::check_cgroups(&leaf, &mut events, Some(&mut parent_events));
-
-        // An OOM recorded in the wrapper is found although the leaf is unchanged.
-        std::fs::write(&parent_file, "oom 1\noom_kill 1\n")?;
-        assert!(check());
-        assert!(!check());
-
-        // While a sibling exists, its OOMs are not attributed to this container.
-        let sibling = parent.path().join("sibling");
-        std::fs::create_dir(&sibling)?;
-        std::fs::write(&parent_file, "oom 2\noom_kill 2\n")?;
-        assert!(!check());
-
-        // Once it is gone again, neither are its earlier OOMs, only new ones.
-        std::fs::remove_dir(&sibling)?;
-        assert!(!check());
-        std::fs::write(&parent_file, "oom 3\noom_kill 3\n")?;
-        assert!(check());
         Ok(())
     }
 

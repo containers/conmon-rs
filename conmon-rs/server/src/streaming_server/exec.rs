@@ -6,7 +6,7 @@ use super::{
 };
 use crate::conmon_capnp::conmon::CgroupManager;
 use crate::{
-    attach::SharedContainerAttach,
+    attach::{SharedContainerAttach, StopOutput},
     child::{Child, ChildKind},
     child_reaper::{ChildReaper, ExitChannelData, RuntimeCall},
     config::Config,
@@ -28,7 +28,10 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::{sync::broadcast, time::Duration};
+use tokio::{
+    sync::broadcast::{self, error::RecvError},
+    time::Duration,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -122,6 +125,9 @@ impl StreamingServer {
             cleanup_cmd: vec![],
             token: token.clone(),
         };
+        // Also if the registration fails, its watcher reports the exit.
+        let attach = io.attach().await;
+        let stop_output = attach.stop_output_on_exit(token.clone());
         let exit_rx = match session.child_reaper.watch_grandchild(child, vec![], call) {
             Ok(exit_rx) => exit_rx,
             Err(e) => {
@@ -135,7 +141,8 @@ impl StreamingServer {
 
         let mut teardown = ExecTeardown {
             stdio: None,
-            attach: io.attach().await,
+            _stop_output: stop_output,
+            attach,
             token,
             process,
             kill: Arc::default(),
@@ -253,8 +260,13 @@ impl StreamingServer {
                     InputEvent::TooLarge => bail!(MESSAGE_TOO_LARGE),
                 },
 
-                Ok(exit_data) = exit_rx.recv() => {
-                    *status = Some(Status::exited(exit_data.exit_code));
+                res = exit_rx.recv() => {
+                    // Nothing ends the process otherwise, kill it like after
+                    // the idle timeout.
+                    if res.is_err() {
+                        teardown.kill.store(true, Ordering::Release);
+                    }
+                    *status = Some(Self::exit_status(res));
                     // Forward what the read loops still deliver before closing.
                     for (frames, stream_byte) in [(&mut early_stdout, STDOUT_BYTE), (&mut early_stderr, STDERR_BYTE)] {
                         for frame in frames.drain(..) {
@@ -273,6 +285,16 @@ impl StreamingServer {
         }
 
         Ok(())
+    }
+
+    /// The status of the exit the watcher of the process sent. It sends it
+    /// once, and only goes away without it if it got aborted, like by a
+    /// panic, the session must not wait for the exit forever then.
+    fn exit_status(res: Result<ExitChannelData, RecvError>) -> Status {
+        match res {
+            Ok(exit_data) => Status::exited(exit_data.exit_code),
+            Err(e) => Status::Error(format!("unable to get the exit of the command: {e}")),
+        }
     }
 
     /// Split the output collected while the runtime ran into frames, without
@@ -321,7 +343,8 @@ pub(super) struct StartedExec {
 
 /// Ends an exec session however it ends, also if the client went away and
 /// the loop got aborted, or before the process even got started. The loop
-/// only ends before the exit of the process if the WebSocket is gone.
+/// only ends before the exit of the process if the connection is gone or
+/// the exit got lost.
 pub(super) struct ExecTeardown {
     /// The stdout and stderr channels of the process.
     stdio: Option<(IOReceiver<IOMessage>, IOReceiver<IOMessage>)>,
@@ -334,10 +357,15 @@ pub(super) struct ExecTeardown {
     /// cancelled, so it does not get signalled by its PID.
     process: Process,
 
-    /// Set once the session ended with the idle timeout, which kills the
-    /// process, like the reaper kills one after its timeout. Without a
-    /// client the process would run on with nothing waiting for it.
+    /// Set once the session ended with the idle timeout or lost the exit,
+    /// which kills the process, like the reaper kills one after its timeout.
+    /// Without a session the process would run on with nothing waiting for
+    /// it.
     pub(super) kill: Arc<AtomicBool>,
+
+    /// Stops the read loops once the session took the output, after the
+    /// exit, dropped after the rest.
+    _stop_output: StopOutput,
 }
 
 impl Drop for ExecTeardown {
@@ -354,10 +382,13 @@ impl Drop for ExecTeardown {
         }
         if self.kill.load(Ordering::Acquire) {
             let pid = self.process.pid();
-            debug!("Killing exec process {pid} after the idle timeout");
+            debug!("Killing exec process {pid}, its session ended");
             if let Err(e) = self.process.signal_group(Signal::SIGKILL) {
                 debug!("Not killing exec process {pid}, it is gone: {e}");
             }
+            // A lost exit never cancels the token, which `StopOutput` waits
+            // for.
+            self.attach.stop_output();
             return;
         }
         // Without a client the process would wait for stdin forever. Close
@@ -396,8 +427,18 @@ mod tests {
     use anyhow::{Context, Result};
     use bytes::Bytes;
 
+    use crate::{
+        process::child_pid,
+        remotecommand::{ExpectedStreams, SpdyStreams, Version},
+        spdy::{Connection, testing::Client},
+        streaming_server::session::ClientRx,
+    };
     use crate::{remotecommand::STREAM_ERR_BYTE, web};
-    use std::{os::unix::fs::PermissionsExt, path::Path, sync::Arc};
+    use std::{
+        os::unix::{fs::PermissionsExt, process::CommandExt, process::ExitStatusExt},
+        path::Path,
+        sync::Arc,
+    };
     use tokio::{
         io::AsyncWriteExt,
         net::TcpStream,
@@ -522,6 +563,69 @@ mod tests {
                 too_large_close(reader, writer).await
             })
             .await
+    }
+
+    #[tokio::test]
+    async fn lost_exit_ends_the_session_and_kills_the_process() -> Result<()> {
+        // The output goes to a SPDY client.
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let mut connection =
+            Connection::serve(server, None, None, |h| SpdyStreams::accept(h, Version::V4));
+        let mut client = Client::new(client)?;
+        client.open(1, [("streamType", "error")].into()).await?;
+        client.open(3, [("streamType", "stdout")].into()).await?;
+        let expected = ExpectedStreams {
+            stdin: false,
+            stdout: true,
+            stderr: false,
+        };
+        let streams = SpdyStreams::wait(&mut connection, expected).await?;
+        let (_input, output) = streams.into_parts(connection, Version::V4).await;
+        let mut output = Output::spdy(output);
+
+        let mut process = std::process::Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()?;
+        let io = SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?);
+        // Like a watcher which got aborted before it sent the exit.
+        let exit_rx = broadcast::channel(1).1;
+        let attach = io.attach().await;
+        let stopped = attach.output_stopped().clone();
+        let token = CancellationToken::new();
+        let teardown = ExecTeardown {
+            stdio: Some(io.stdio().await?),
+            _stop_output: attach.stop_output_on_exit(token.clone()),
+            attach,
+            token,
+            process: Process::open(child_pid(process.id())?),
+            kill: Arc::default(),
+        };
+        let started = StartedExec {
+            io,
+            early_stdio: EarlyStdio::default(),
+            exit_rx,
+            stdin_enabled: false,
+            stdout_enabled: true,
+            stderr_enabled: false,
+            teardown,
+        };
+        let (client_rx, _senders) = ClientRx::idle();
+        let mut status = None;
+        time::timeout(
+            Duration::from_secs(5),
+            StreamingServer::exec_loop(started, &mut output, client_rx, &mut status),
+        )
+        .await??;
+        assert!(
+            matches!(&status, Some(Status::Error(e)) if e.contains("unable to get the exit")),
+            "{status:?}"
+        );
+        let exit = tokio::task::spawn_blocking(move || process.wait()).await??;
+        assert_eq!(exit.signal(), Some(Signal::SIGKILL as i32));
+        // Nothing waits for the read loops, which a lost exit never stops.
+        assert!(stopped.is_cancelled());
+        Ok(())
     }
 
     #[test]

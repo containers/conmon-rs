@@ -65,9 +65,10 @@ pub(crate) const DRAIN_MAX_WAIT: Duration = Duration::from_secs(1);
 
 /// Upper bound for the time the exit files wait for the log drivers to take
 /// the output after the process exited, which does not count as a pause of
-/// the output, see `SharedContainerAttach::logging`. A journal which stalls
-/// takes up to a second per chunk, a pipe full of them must not keep the
-/// exit from being reported for minutes.
+/// the output, see `SharedContainerAttach::logging`, and for the read loops
+/// to end once stopped, see `ReapableChild::finish_output`. A journal which
+/// stalls takes up to two seconds per chunk, a pipe full of them must not
+/// keep the exit from being reported for minutes.
 pub(crate) const DRAIN_MAX_LOG_WAIT: Duration = Duration::from_secs(5);
 
 /// Bounds forwarding the output after the process exited.
@@ -601,7 +602,10 @@ impl ContainerIO {
     }
 
     /// Attach the stderr output of a runtime which failed to its error. With
-    /// a terminal, the error carries it already.
+    /// a terminal, the error carries it already. The read loops get stopped
+    /// afterwards, a process which the runtime left behind, like a daemon of
+    /// the process it started, may keep the pipes open, see
+    /// [`SharedContainerAttach::stop_output`].
     pub async fn runtime_error(&mut self, e: anyhow::Error) -> anyhow::Error {
         let stderr = match self.typ() {
             ContainerIOType::Streams(_) => {
@@ -626,6 +630,7 @@ impl ContainerIO {
             }
             ContainerIOType::Terminal(_) => vec![],
         };
+        self.attach.stop_output();
         let stderr = String::from_utf8_lossy(&stderr);
         let stderr = stderr.trim();
         if stderr.is_empty() {
@@ -786,6 +791,7 @@ impl ContainerIO {
     {
         let mut buf = BytesMut::with_capacity(READ_BUFFER_SIZE);
         let mut log_errors = LogErrors::default();
+        let stopped = attach.output_stopped().clone();
 
         // When the line which waits for its ending in the log gets written as
         // a partial one, known from the last write, so that the logger is not
@@ -800,20 +806,23 @@ impl ContainerIO {
             // process made at once.
             buf.reserve(READ_BUFFER_SIZE);
 
-            // The drivers decide whether they buffer lines at all.
-            let read = if let Some(deadline) = flush_at {
-                select! {
-                    read = reader.read_buf(&mut buf) => read,
-                    () = time::sleep_until(deadline) => {
-                        let _logging = attach.logging();
-                        let res = logger.write().await.flush(pipe).await;
-                        log_errors.check(pipe, res.context("flush paused log line"));
-                        flush_at = None;
-                        continue;
-                    }
+            // Once stopped, nothing gets read anymore, also if more is there.
+            let read = select! {
+                biased;
+                () = stopped.cancelled() => {
+                    debug!("Stopping read loop, nothing takes the output anymore");
+                    Self::forward(&mut message_tx, Message::Done).await;
+                    return Ok(());
                 }
-            } else {
-                reader.read_buf(&mut buf).await
+                read = reader.read_buf(&mut buf) => read,
+                // The drivers decide whether they buffer lines at all.
+                () = sleep_until(flush_at) => {
+                    let _logging = attach.logging();
+                    let res = logger.write().await.flush(pipe).await;
+                    log_errors.check(pipe, res.context("flush paused log line"));
+                    flush_at = None;
+                    continue;
+                }
             };
 
             match read {
@@ -1328,6 +1337,43 @@ mod tests {
         drop(writer);
         assert_eq!(rx.recv().await?, Message::Done);
         read_loop.await?
+    }
+
+    #[tokio::test]
+    async fn stopped_output_ends_read_while_pipe_is_held_open() -> Result<()> {
+        // The writer stays, like a process left behind holding the pipe.
+        let (mut writer, reader) = duplex(1024);
+        let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+        let sender = StdioSender::new(tx, &Arc::new(AtomicBool::new(true)));
+        let attach = SharedContainerAttach::default();
+        let read_loop = task::spawn(ContainerIO::read_loop(
+            reader,
+            Pipe::StdOut,
+            ContainerLog::new(),
+            Some(sender),
+            attach.clone(),
+            attach.output(),
+        ));
+        writer.write_all(b"data").await?;
+        assert_eq!(data(rx.recv().await?), "data");
+
+        attach.stop_output();
+        assert_eq!(time::timeout(WAIT, rx.recv()).await??, Message::Done);
+        time::timeout(WAIT, read_loop).await???;
+        assert!(attach.subscribe().1, "output did not end");
+        // Its writes fail once nothing reads the pipe anymore.
+        assert!(writer.write_all(b"more").await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runtime_errors_stop_the_output() -> Result<()> {
+        // A runtime which left a process behind holding the pipes.
+        let mut io = ContainerIO::new(false, ContainerLog::new())?;
+        let e = io.runtime_error(anyhow::anyhow!("failed")).await;
+        assert_eq!(format!("{e:#}"), "failed");
+        assert!(io.attach().output_stopped().is_cancelled());
+        Ok(())
     }
 
     #[tokio::test]

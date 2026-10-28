@@ -248,6 +248,23 @@ pub(super) async fn spdy_attach_with(
     stop_after_stdin_eof: bool,
     idle_timeout: Option<Duration>,
 ) -> Result<(SharedContainerIO, StreamingServer, Client<TcpStream>)> {
+    spdy_attach_version(
+        terminal,
+        stop_after_stdin_eof,
+        idle_timeout,
+        SPDY_EXEC_UPGRADE,
+    )
+    .await
+}
+
+/// Like [`spdy_attach_with`], with the protocols the client asks for in the
+/// upgrade, which gets the first one the client lists besides v5.
+pub(super) async fn spdy_attach_version(
+    terminal: bool,
+    stop_after_stdin_eof: bool,
+    idle_timeout: Option<Duration>,
+    upgrade_headers: &str,
+) -> Result<(SharedContainerIO, StreamingServer, Client<TcpStream>)> {
     let (io, child, _token) = attach_child(terminal)?;
     let mut server = StreamingServer::default();
     server.start_if_required().await?;
@@ -262,11 +279,15 @@ pub(super) async fn spdy_attach_with(
             idle_timeout,
         })
         .await?;
-    let (response, stream) = upgrade(&server, &url, "POST", SPDY_EXEC_UPGRADE).await?;
+    let (response, stream) = upgrade(&server, &url, "POST", upgrade_headers).await?;
     assert!(response.starts_with("http/1.1 101"), "{response}");
     // The server does not speak v5 over SPDY.
+    let expected = upgrade_headers
+        .split(['\r', '\n', ',', ' '])
+        .find(|v| v.ends_with("channel.k8s.io") && !v.starts_with("v5"))
+        .context("no protocol besides v5")?;
     assert!(
-        response.contains("x-stream-protocol-version: v4.channel.k8s.io"),
+        response.contains(&format!("x-stream-protocol-version: {expected}\r")),
         "{response}"
     );
 

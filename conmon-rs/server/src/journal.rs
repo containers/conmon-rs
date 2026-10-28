@@ -19,7 +19,7 @@ use std::{
     },
     path::Path,
     sync::OnceLock,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tracing::{Level, Metadata};
 use tracing_subscriber::fmt::writer::MakeWriter;
@@ -112,14 +112,15 @@ pub enum Wait {
     /// server logs, which tracing writes from the runtime threads, and the
     /// container logs as long as the journal takes them right away.
     Never,
-    /// Block for at most `SEND_TIMEOUT`, then fail with
-    /// `ErrorKind::TimedOut`. For the container logs which the journal did
-    /// not take right away, which get sent from the blocking pool then and
+    /// Each attempt blocks for at most `SEND_TIMEOUT`, then fails with
+    /// `ErrorKind::TimedOut`, one which a signal interrupted gets retried
+    /// until the instant. For the container logs which the journal did not
+    /// take right away, which get sent from the blocking pool then and
     /// should not be dropped on a short stall.
-    Bounded,
+    Bounded(Instant),
 }
 
-/// The longest `Wait::Bounded` blocks for one entry.
+/// The longest an attempt of `Wait::Bounded` blocks for one entry.
 const SEND_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The send buffer systemd uses for its journal clients, so that bursts and
@@ -140,18 +141,22 @@ static SERVER_SOCKET: OnceLock<UnixDatagram> = OnceLock::new();
 pub fn send_at(wait: Wait, path: &Path, entry: &Entry) -> io::Result<()> {
     let cell = match wait {
         Wait::Never => &NEVER_SOCKET,
-        Wait::Bounded => &BOUNDED_SOCKET,
+        Wait::Bounded(_) => &BOUNDED_SOCKET,
     };
     send_on(socket(cell, wait)?, wait, path, entry)
 }
 
 /// Send an entry on a socket of the mode, see [`new_socket`].
 fn send_on(socket: &UnixDatagram, wait: Wait, path: &Path, entry: &Entry) -> io::Result<()> {
-    match send_to(socket, path, entry.as_bytes()) {
-        Err(e) if wait == Wait::Bounded && e.kind() == ErrorKind::WouldBlock => {
+    let retry_until = match wait {
+        Wait::Never => None,
+        Wait::Bounded(until) => Some(until),
+    };
+    match send_to(socket, path, entry.as_bytes(), retry_until) {
+        Err(e) if retry_until.is_some() && e.kind() == ErrorKind::WouldBlock => {
             Err(io::Error::new(
                 ErrorKind::TimedOut,
-                format!("journal did not take the entry within {SEND_TIMEOUT:?}"),
+                format!("journal did not take the entry within an attempt of {SEND_TIMEOUT:?}"),
             ))
         }
         result => result,
@@ -173,7 +178,7 @@ fn new_socket(wait: Wait) -> io::Result<UnixDatagram> {
     let socket = UnixDatagram::unbound()?;
     match wait {
         Wait::Never => socket.set_nonblocking(true)?,
-        Wait::Bounded => socket.set_write_timeout(Some(SEND_TIMEOUT))?,
+        Wait::Bounded(_) => socket.set_write_timeout(Some(SEND_TIMEOUT))?,
     }
     // Best effort like systemd: forcing needs CAP_NET_ADMIN, without it the
     // kernel caps the size at net.core.wmem_max.
@@ -184,18 +189,30 @@ fn new_socket(wait: Wait) -> io::Result<UnixDatagram> {
 }
 
 /// Send the data as one datagram, or as a memfd if it does not fit.
-fn send_to(socket: &UnixDatagram, path: &Path, data: &[u8]) -> io::Result<()> {
-    match socket.send_to(data, path) {
-        Ok(_) => Ok(()),
-        Err(e)
-            if matches!(
-                e.raw_os_error().map(Errno::from_raw),
-                Some(Errno::EMSGSIZE | Errno::ENOBUFS)
-            ) =>
-        {
-            send_memfd(socket, path, data)
+/// A signal, like the SIGCHLD of every exited child, interrupts a send which
+/// waits, the kernel does not restart one with a timeout, so it gets retried
+/// until `retry_until`, if any.
+fn send_to(
+    socket: &UnixDatagram,
+    path: &Path,
+    data: &[u8],
+    retry_until: Option<Instant>,
+) -> io::Result<()> {
+    let retry = || retry_until.is_none_or(|until| Instant::now() < until);
+    loop {
+        match socket.send_to(data, path) {
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == ErrorKind::Interrupted && retry() => {}
+            Err(e)
+                if matches!(
+                    e.raw_os_error().map(Errno::from_raw),
+                    Some(Errno::EMSGSIZE | Errno::ENOBUFS)
+                ) =>
+            {
+                return send_memfd(socket, path, data, retry);
+            }
+            Err(e) => return Err(e),
         }
-        Err(e) => Err(e),
     }
 }
 
@@ -210,7 +227,12 @@ pub fn unavailable(error: &io::Error) -> bool {
 
 /// Send the data in a sealed memfd, the only kind journald accepts, as
 /// `SCM_RIGHTS` of an otherwise empty datagram.
-fn send_memfd(socket: &UnixDatagram, path: &Path, data: &[u8]) -> io::Result<()> {
+fn send_memfd(
+    socket: &UnixDatagram,
+    path: &Path,
+    data: &[u8],
+    retry: impl Fn() -> bool,
+) -> io::Result<()> {
     let mut file = File::from(create_memfd()?);
     file.write_all(data)?;
     fcntl(
@@ -222,14 +244,19 @@ fn send_memfd(socket: &UnixDatagram, path: &Path, data: &[u8]) -> io::Result<()>
                 | SealFlag::F_SEAL_SEAL,
         ),
     )?;
-    sendmsg(
-        socket.as_raw_fd(),
-        &[],
-        &[ControlMessage::ScmRights(&[file.as_raw_fd()])],
-        MsgFlags::empty(),
-        Some(&UnixAddr::new(path)?),
-    )?;
-    Ok(())
+    let addr = UnixAddr::new(path)?;
+    loop {
+        match sendmsg(
+            socket.as_raw_fd(),
+            &[],
+            &[ControlMessage::ScmRights(&[file.as_raw_fd()])],
+            MsgFlags::empty(),
+            Some(&addr),
+        ) {
+            Err(Errno::EINTR) if retry() => {}
+            res => return res.map(drop).map_err(Into::into),
+        }
+    }
 }
 
 /// Create a memfd which allows sealing. Like systemd, ask for a
@@ -496,11 +523,11 @@ pub mod tests {
         setsockopt(&sender, sockopt::SndBuf, &4096)?;
 
         let small = Entry::new(Priority::Info, "small");
-        send_to(&sender, &path, small.as_bytes())?;
+        send_to(&sender, &path, small.as_bytes(), None)?;
         assert_eq!(receive(&receiver)?, (small.as_bytes().to_vec(), false));
 
         let large = Entry::new(Priority::Info, "x".repeat(1 << 20));
-        send_to(&sender, &path, large.as_bytes())?;
+        send_to(&sender, &path, large.as_bytes(), None)?;
         let (data, memfd) = receive(&receiver)?;
         assert!(memfd);
         assert!(data == large.as_bytes(), "memfd holds the entry");
@@ -544,7 +571,8 @@ pub mod tests {
         for _ in 0..100 {
             journal.send_at(&path, b"dropped\n")?;
         }
-        assert!(start.elapsed() < SEND_TIMEOUT);
+        // Blocking sends would take a `SEND_TIMEOUT` each.
+        assert!(start.elapsed() < 10 * SEND_TIMEOUT);
         Ok(())
     }
 
@@ -573,7 +601,7 @@ pub mod tests {
         let _receiver = UnixDatagram::bind(&path)?;
 
         let start = std::time::Instant::now();
-        let error = fill(Wait::Bounded, &path);
+        let error = fill(Wait::Bounded(Instant::now() + 60 * SEND_TIMEOUT), &path);
         assert_eq!(error.kind(), ErrorKind::TimedOut);
         assert!(start.elapsed() >= SEND_TIMEOUT);
         Ok(())

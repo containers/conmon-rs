@@ -96,6 +96,10 @@ impl Terminal {
     pub fn new(logger: SharedContainerLog, attach: SharedContainerAttach) -> Result<Self> {
         debug!("Creating new terminal");
         // The guard removes the socket again, also if the setup below fails.
+        // In the temporary directory, not the runtime directory of the server:
+        // runc dials the console socket by its path, which a Unix socket
+        // address limits to 108 bytes, and the runtime directory of CRI-O is
+        // far too long for that.
         let temp_file = ContainerIO::temp_file(None, "conmon-term-", ".sock");
         let path = temp_file.path();
 
@@ -284,22 +288,20 @@ impl Terminal {
             }
         };
 
-        // Allow only one single read
+        // Allow only one single connection. Failing to clean up must not
+        // drop the terminal, which the runtime handed over already.
         let path = config.path();
         debug!("Removing socket path {}", path.display());
-        fs::remove_file(path).await?;
-
+        if let Err(e) = fs::remove_file(path).await {
+            debug!("Unable to remove terminal socket: {e}");
+        }
         debug!("Shutting down receiver stream");
-        stream.shutdown().await?;
-
-        if fd.is_none() {
-            error!("No file descriptor received");
+        if let Err(e) = stream.shutdown().await {
+            debug!("Unable to shut down terminal socket stream: {e}");
         }
 
         let fd = fd.context("got no file descriptor")?;
-
         debug!("Received terminal file descriptor");
-
         config
             .connected_tx
             .send(fd)
@@ -529,6 +531,28 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), read).await???,
             0
         );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn removed_socket_does_not_drop_the_terminal() -> Result<()> {
+        let mut sut = Terminal::new(ContainerLog::new(), SharedContainerAttach::default())?;
+        // Short enough for runc, which dials it by its path.
+        assert!(
+            sut.path().as_os_str().len() < 108,
+            "{}",
+            sut.path().display()
+        );
+        let res = pty::openpty(None, None)?;
+        let stream = UnixStream::connect(sut.path()).await?;
+        // Like a cleaner of the directory, the connection is up already.
+        std::fs::remove_file(sut.path())?;
+        send_fd(&stream, b"x", res.master.as_fd()).await?;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            sut.wait_connected(false, CancellationToken::new()),
+        )
+        .await??;
         Ok(())
     }
 

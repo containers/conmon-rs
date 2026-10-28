@@ -4,7 +4,9 @@ use crate::{
     async_fd,
     attach::SharedContainerAttach,
     child::{Child, ChildKind, sleep_until},
-    container_io::{ContainerIO, ContainerIOType, DRAIN_MAX_LOG_WAIT, Drain, SharedContainerIO},
+    container_io::{
+        ContainerIO, ContainerIOType, DRAIN_MAX_LOG_WAIT, Drain, Message, SharedContainerIO,
+    },
     init,
     mutex::lock,
     oom_watcher::{OOMEvent, OOMWatcher},
@@ -26,7 +28,9 @@ use nix::{
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::OsString,
-    os::fd::{OwnedFd, RawFd},
+    io,
+    ops::{Deref, DerefMut},
+    os::fd::{AsFd, OwnedFd, RawFd},
     path::{Path, PathBuf},
     pin::pin,
     process::Stdio,
@@ -304,6 +308,15 @@ impl ChildReaper {
             additional_fds,
         } = call;
         let mut in_flight = self.begin_call(runtime_deadline)?;
+        // A PID file left from before, like of a container created in the
+        // same bundle earlier, would name a process which the cleanup of a
+        // failed call kills, see `cleanup_failed_grandchild`.
+        match std::fs::remove_file(pidfile) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                return Err(e).context("remove stale PID file");
+            }
+            _ => {}
+        }
         debug!("Running: {:?} {:?}", runtime, args);
         let mut cmd = Command::new(runtime);
         // A runtime which gets dropped, for example on a panic, must not keep
@@ -338,7 +351,7 @@ impl ChildReaper {
         // server started with, below which the mappings may have to move a
         // descriptor of the server.
         init::reset_inherited(&mut cmd);
-        let mut child = cmd.spawn().context("spawn child process")?;
+        let mut child = Runtime(cmd.spawn().context("spawn child process")?);
 
         // The mappings own the passed descriptors and live in the command's
         // pre_exec hook, dropping the command closes them in the parent.
@@ -445,8 +458,9 @@ impl ChildReaper {
                 None => format_err!("child command exited with signal"),
             },
         };
-        // Nothing registers the process, so the read loops have to be stopped
-        // here.
+        // Nothing registers the process, so the stdin loops have to be
+        // stopped here. The caller stops the output once it took the error of
+        // the runtime, see `ContainerIO::runtime_error`.
         token.cancel();
         Err(self.fail_create(pidfile, error, &stderr))
     }
@@ -479,7 +493,7 @@ impl ChildReaper {
     /// on its own, so that it still writes the PID file the cleanup needs,
     /// kill it otherwise, and return its stderr.
     async fn stop_runtime(
-        mut child: RuntimeChild,
+        mut child: Runtime,
         output: Option<RuntimeOutput>,
         grace: Duration,
     ) -> Vec<u8> {
@@ -966,6 +980,40 @@ impl ChildReaper {
     }
 }
 
+/// A runtime whose process group gets killed if it is dropped before it got
+/// reaped, like a call in progress which the shutdown drops once it stops
+/// waiting for it. `kill_on_drop` only kills the runtime, its helpers in its
+/// group, like hooks or a runc init which did not set up the container yet,
+/// would be left running, see [`ChildReaper::stop_runtime`]. Until it got
+/// reaped, the ID of the group is still the one of the runtime.
+#[derive(Debug)]
+struct Runtime(RuntimeChild);
+
+impl Deref for Runtime {
+    type Target = RuntimeChild;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Runtime {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        // No ID once it got reaped.
+        if let Ok(pid) = child_pid(self.0.id())
+            && let Err(e) = killpg(pid, Signal::SIGKILL)
+        {
+            debug!("Unable to kill process group of dropped runtime: {e}");
+        }
+    }
+}
+
 /// Runs a closure once dropped, at the end of a task however it ends.
 struct OnDrop<F: FnOnce()>(Option<F>);
 
@@ -1113,17 +1161,15 @@ impl ReapableChild {
     /// Wait until the output ended, or until the [`Drain`] gives up. A
     /// process which inherited the pipes and keeps them open must not delay
     /// the exit file. Output on its way into the log is no pause, a slow log
-    /// driver must not cut off the end of the log, up to
-    /// [`DRAIN_MAX_LOG_WAIT`] in total.
-    async fn wait_for_output(attach: SharedContainerAttach) {
+    /// driver must not cut off the end of the log, up to the `deadline`.
+    async fn wait_for_output(attach: SharedContainerAttach, deadline: Instant) {
         let (mut rx, ended) = attach.subscribe();
         if ended {
             return;
         }
-        let log_deadline = Instant::now() + DRAIN_MAX_LOG_WAIT;
         let mut drain = Drain::default();
         loop {
-            if time::timeout_at(log_deadline, attach.wait_logged())
+            if time::timeout_at(deadline, attach.wait_logged())
                 .await
                 .is_err()
             {
@@ -1132,11 +1178,39 @@ impl ReapableChild {
             }
             // A read loop which got output while the drain waited gives it
             // another chance.
-            if drain.recv_output(&mut rx, false).await.is_none()
-                && (drain.exhausted() || !attach.is_logging())
-            {
+            let Ok(output) = time::timeout_at(deadline, drain.recv_output(&mut rx, false)).await
+            else {
+                debug!("Output did not end in time, not waiting for it");
+                return;
+            };
+            if output.is_none() && (drain.exhausted() || !attach.is_logging()) {
                 return;
             }
+        }
+    }
+
+    /// Wait for the output like [`ReapableChild::wait_for_output`], then
+    /// stop the read loops and wait for them to end, which writes the lines
+    /// still waiting for their ending into the log. Nothing reaches the log
+    /// after the exit file this way. A log write which hangs must not hold
+    /// the exit file back, all of it takes [`DRAIN_MAX_LOG_WAIT`] at most.
+    async fn finish_output(attach: SharedContainerAttach) {
+        let deadline = Instant::now() + DRAIN_MAX_LOG_WAIT;
+        Self::wait_for_output(attach.clone(), deadline).await;
+        attach.stop_output();
+        let (mut rx, ended) = attach.subscribe();
+        // Without read loops, the output never ends.
+        if ended || !attach.has_output() {
+            return;
+        }
+        let end = async {
+            while !matches!(
+                rx.recv().await,
+                Ok(Message::Done) | Err(broadcast::error::RecvError::Closed)
+            ) {}
+        };
+        if time::timeout_at(deadline, end).await.is_err() {
+            warn!("Read loops did not end in time, not waiting for them");
         }
     }
 
@@ -1176,6 +1250,7 @@ impl ReapableChild {
         let exit_token = stop_token.clone();
         let cleanup_cmd_raw = self.cleanup_cmd.clone();
         let io = self.io.clone();
+        let kind = self.kind;
 
         let task = task::spawn(
             async move {
@@ -1248,9 +1323,11 @@ impl ReapableChild {
                 exit_token.cancel();
 
                 // The exit file tells that the log is complete, so let the read
-                // loops write what the process left in the pipes.
-                if !exit_paths.is_empty() {
-                    Self::wait_for_output(io.attach().await).await;
+                // loops write what the process left in the pipes, and stop
+                // them, see `stop_output`. The output of an exec gets stopped
+                // by its consumer, see `StopOutput`.
+                if kind == ChildKind::Container {
+                    Self::finish_output(io.attach().await).await;
                 }
 
                 let exit_channel_data = ExitChannelData {
@@ -1354,7 +1431,15 @@ impl ReapableChild {
     async fn try_pidfd_wait(pid: Pid) -> Option<i32> {
         // The readiness comes from epoll and the wait uses WNOHANG, so the
         // descriptor itself does not need to be non-blocking.
-        let owned_fd = pidfd_open(pid).ok()?;
+        let owned_fd = match pidfd_open(pid) {
+            Ok(fd) => fd,
+            // Gone already, the blocking wait would only learn the same.
+            Err(Errno::ESRCH) => {
+                debug!("PID {pid} got reaped already");
+                return Some(EXIT_CODE_UNKNOWN);
+            }
+            Err(_) => return None,
+        };
 
         let async_fd = match async_fd::register(owned_fd, Interest::READABLE) {
             Ok(fd) => fd,
@@ -1368,8 +1453,15 @@ impl ReapableChild {
             return None;
         }
 
+        // Through the pidfd, which refers to this process only: once the
+        // orphan sweep took it, its PID may belong to another child already.
+        // Kernels before 5.4 only know the PID.
+        let flags = WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG;
         let reaping = reap_guard();
-        let status = waitpid(pid, WaitPidFlag::WNOHANG.into());
+        let status = match waitid(Id::PIDFd(async_fd.get_ref().as_fd()), flags) {
+            Err(Errno::EINVAL) => waitpid(pid, WaitPidFlag::WNOHANG.into()),
+            status => status,
+        };
         drop(reaping);
         match status.map(status_exit_code) {
             Ok(Some(code)) => Some(code),
@@ -1383,7 +1475,7 @@ impl ReapableChild {
                 Some(EXIT_CODE_UNKNOWN)
             }
             Err(e) => {
-                error!("waitpid after pidfd readable failed: {e:#}");
+                error!("waitid after pidfd readable failed: {e:#}");
                 Some(EXIT_CODE_UNKNOWN)
             }
         }
@@ -2055,33 +2147,91 @@ mod tests {
     async fn hanging_runtime_gets_killed_with_its_group() -> Result<()> {
         let reaper = ChildReaper::default();
         let dir = tempfile::tempdir()?;
+        let run = async |terminal: bool| -> Result<()> {
+            let pidfile = dir.path().join(format!("pid-{terminal}"));
+            let helper_pidfile = dir.path().join(format!("helper-{terminal}"));
+            // Like a runc init which the runtime started before it hung,
+            // which holds the pipes of the runtime as well.
+            let script = format!(
+                "sleep 60 & echo $! > {}; exec sleep 60",
+                helper_pidfile.display()
+            );
+            let args = ["-c".into(), script];
+            let mut io = ContainerIO::new(terminal, ContainerLog::new())?;
+            let call = RuntimeCall {
+                deadline: Some(Instant::now() + Duration::from_secs(1)),
+                ..RuntimeCall::new(Path::new("sh"), &args, &pidfile)
+            };
+            // Its output does not wait for the helper either, which runs
+            // for a minute.
+            let res =
+                time::timeout(Duration::from_secs(20), reaper.create_child(call, &mut io)).await?;
+            let err = format!("{:#}", res.err().context("runtime failure expected")?);
+            assert!(err.contains("did not finish in time"), "{err}");
+            // Reparented to the init or a subreaper above the tests.
+            let helper = read_pid_file(&helper_pidfile)?;
+            wait_until(|| is_gone(helper) || is_zombie(helper)).await;
+            Ok(())
+        };
+        let (streams, terminal) = tokio::join!(run(false), run(true));
+        streams.and(terminal)
+    }
+
+    #[tokio::test]
+    async fn stale_pid_file_does_not_get_cleaned_up() -> Result<()> {
+        let reaper = ChildReaper::default();
+        let dir = tempfile::tempdir()?;
+        let pidfile = dir.path().join("pid");
+        // A child of the server which nobody registered, like the pause init.
+        let other = spawn_sh("exec sleep 60")?;
+        std::fs::write(&pidfile, other.pid.to_string())?;
+
+        let mut io = ContainerIO::new(false, ContainerLog::new())?;
+        let args = ["-c".into(), "exit 1".into()];
+        let call = RuntimeCall::new(Path::new("sh"), &args, &pidfile);
+        assert!(reaper.create_child(call, &mut io).await.is_err());
+        assert!(!pidfile.exists());
+        time::sleep(Duration::from_millis(100)).await;
+        assert!(!is_gone(other.pid) && !is_zombie(other.pid));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropped_runtime_gets_killed_with_its_group() -> Result<()> {
+        let reaper = ChildReaper::default();
+        let dir = tempfile::tempdir()?;
         let pidfile = dir.path().join("pid");
         let helper_pidfile = dir.path().join("helper");
-        // Like a runc init which the runtime started before it hung, which
-        // holds the pipes of the runtime as well.
         let script = format!(
             "sleep 60 & echo $! > {}; exec sleep 60",
             helper_pidfile.display()
         );
         let args = ["-c".into(), script];
-        for terminal in [false, true] {
-            let mut io = ContainerIO::new(terminal, ContainerLog::new())?;
-            let call = RuntimeCall {
-                deadline: Some(Instant::now() + Duration::from_secs(2)),
-                ..RuntimeCall::new(Path::new("sh"), &args, &pidfile)
-            };
-            let start = Instant::now();
-            let res =
-                time::timeout(Duration::from_secs(20), reaper.create_child(call, &mut io)).await?;
-            let err = format!("{:#}", res.err().context("runtime failure expected")?);
-            assert!(err.contains("did not finish in time"), "{err}");
-            // Its output did not wait for the helper either.
-            assert!(start.elapsed() < ChildReaper::CONNECT_AFTER_EXIT_TIMEOUT);
-            // Reparented to the init or a subreaper above the tests.
-            let helper = read_pid_file(&helper_pidfile)?;
-            wait_until(|| is_gone(helper) || is_zombie(helper)).await;
-            std::fs::remove_file(&helper_pidfile)?;
+        let mut io = ContainerIO::new(false, ContainerLog::new())?;
+        let call = RuntimeCall::new(Path::new("sh"), &args, &pidfile);
+        // Like a call in progress which the shutdown drops.
+        select! {
+            _ = reaper.create_child(call, &mut io) => bail!("runtime finished"),
+            () = wait_until(|| read_pid_file(&helper_pidfile).is_ok()) => {}
         }
+        let helper = read_pid_file(&helper_pidfile)?;
+        wait_until(|| is_gone(helper) || is_zombie(helper)).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn wait_for_reaped_process_is_unknown() -> Result<()> {
+        let mut reaped = Command::new("true").spawn()?;
+        let pid = child_pid(reaped.id())?;
+        reaped.wait()?;
+        let token = CancellationToken::new();
+        let code = time::timeout(
+            Duration::from_secs(5),
+            ReapableChild::wait_for_exit_code_async(token.clone(), pid),
+        )
+        .await?;
+        assert_eq!(code, EXIT_CODE_UNKNOWN);
+        assert!(token.is_cancelled());
         Ok(())
     }
 
@@ -2227,7 +2377,7 @@ mod tests {
 
         // Nothing flows, a process holds the pipes open.
         let start = Instant::now();
-        ReapableChild::wait_for_output(attach.clone()).await;
+        ReapableChild::wait_for_output(attach.clone(), Instant::now() + DRAIN_MAX_LOG_WAIT).await;
         assert_eq!(start.elapsed(), DRAIN_TIMEOUT);
 
         // Output which keeps flowing is bounded.
@@ -2244,14 +2394,14 @@ mod tests {
             }
         });
         let start = Instant::now();
-        ReapableChild::wait_for_output(attach.clone()).await;
+        ReapableChild::wait_for_output(attach.clone(), Instant::now() + DRAIN_MAX_LOG_WAIT).await;
         assert_eq!(start.elapsed(), DRAIN_MAX_WAIT);
         writer.abort();
 
         // Ended output does not wait at all.
         drop(output);
         let start = Instant::now();
-        ReapableChild::wait_for_output(attach).await;
+        ReapableChild::wait_for_output(attach, Instant::now() + DRAIN_MAX_LOG_WAIT).await;
         assert_eq!(start.elapsed(), Duration::ZERO);
         Ok(())
     }
@@ -2316,7 +2466,10 @@ mod tests {
         wait_logging(&l.attach).await?;
 
         // The log takes longer than the drain waits for a pause.
-        let wait = task::spawn(ReapableChild::wait_for_output(l.attach.clone()));
+        let wait = task::spawn(ReapableChild::wait_for_output(
+            l.attach.clone(),
+            Instant::now() + DRAIN_MAX_LOG_WAIT,
+        ));
         time::sleep(2 * DRAIN_MAX_WAIT).await;
         assert!(!wait.is_finished());
 
@@ -2339,7 +2492,10 @@ mod tests {
         let held = hold(&l.logger).await;
         drop(l.writer);
         wait_logging(&l.attach).await?;
-        let wait = task::spawn(ReapableChild::wait_for_output(l.attach.clone()));
+        let wait = task::spawn(ReapableChild::wait_for_output(
+            l.attach.clone(),
+            Instant::now() + DRAIN_MAX_LOG_WAIT,
+        ));
         time::sleep(2 * DRAIN_MAX_WAIT).await;
         assert!(!wait.is_finished());
 
@@ -2353,6 +2509,95 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn nothing_gets_logged_after_the_output_finished() -> Result<()> {
+        let mut l = log_loop().await?;
+        let (mut rx, _) = l.attach.subscribe();
+        l.writer.write_all(b"no newline").await?;
+        rx.recv().await?;
+
+        // A process left behind keeps the pipe open, the line waits for its
+        // ending. It gets written once the read loop ended.
+        ReapableChild::finish_output(l.attach.clone()).await;
+        (&mut l.task).await??;
+        let read = || crate::container_log::test_helpers::read(&l.json);
+        assert!(read()?.contains(r#""message":"no newline","partial":true"#));
+
+        // Its later output does not reach the log anymore.
+        assert!(l.writer.write_all(b"late\n").await.is_err());
+        assert!(!read()?.contains("late"));
+        Ok(())
+    }
+
+    /// The output of an exec whose consumer is slower than the drain after
+    /// the exit waits for a pause, which blocks the read loop, arrives in
+    /// full.
+    #[tokio::test(start_paused = true)]
+    async fn slow_exec_consumers_get_all_output() -> Result<()> {
+        use crate::container_io::{STDIO_CHANNEL_SIZE, StdioSender};
+
+        const OUTPUT: usize = 1024 * 1024;
+        let reaper = ChildReaper::default();
+        let dir = tempfile::tempdir()?;
+        let io = SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?);
+        let attach = io.attach().await;
+        let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+        let sender = StdioSender::new(tx, &Arc::new(AtomicBool::new(true)));
+        let (mut writer, reader) = tokio::io::duplex(64 * 1024);
+        task::spawn(ContainerIO::read_loop(
+            reader,
+            crate::container_io::Pipe::StdOut,
+            ContainerLog::new(),
+            Some(sender),
+            attach.clone(),
+            attach.output(),
+        ));
+        let write = task::spawn(async move {
+            writer.write_all(&vec![b'x'; OUTPUT]).await?;
+            Ok::<_, std::io::Error>(writer)
+        });
+
+        // The process wrote its output and exited.
+        let sh = spawn_sh("exit 0")?;
+        let call = reaper.begin_call(None)?;
+        let mut child = child(sh.pid, None, &dir.path().join("exit"), &[])?;
+        child.kind = ChildKind::Exec;
+        child.exit_paths = vec![];
+        child.io = io.clone();
+        let token = child.token.clone();
+        let _stop = attach.stop_output_on_exit(token.clone());
+        let mut exit_rx = reaper.watch_grandchild(child, vec![], call)?;
+        exit_rx.recv().await?;
+
+        let mut received = 0;
+        while received < OUTPUT {
+            time::sleep(4 * DRAIN_TIMEOUT).await;
+            match rx.recv().await? {
+                Message::Data(data, _) => received += data.len(),
+                Message::Done => break,
+            }
+        }
+        assert_eq!(received, OUTPUT);
+        drop(write.await??);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn finished_output_is_bounded_with_a_hanging_log() -> Result<()> {
+        let mut l = log_loop().await?;
+        let held = hold(&l.logger).await;
+        l.writer.write_all(b"never logged\n").await?;
+        wait_logging(&l.attach).await?;
+
+        let start = Instant::now();
+        ReapableChild::finish_output(l.attach.clone()).await;
+        assert_eq!(start.elapsed(), DRAIN_MAX_LOG_WAIT);
+
+        drop(held);
+        drop(l.writer);
+        l.task.await?
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn exit_files_wait_for_log_drivers_bounded() -> Result<()> {
         let mut l = log_loop().await?;
         let held = hold(&l.logger).await;
@@ -2360,7 +2605,7 @@ mod tests {
         wait_logging(&l.attach).await?;
 
         let start = Instant::now();
-        ReapableChild::wait_for_output(l.attach).await;
+        ReapableChild::wait_for_output(l.attach, Instant::now() + DRAIN_MAX_LOG_WAIT).await;
         assert_eq!(start.elapsed(), DRAIN_MAX_LOG_WAIT);
 
         drop(held);

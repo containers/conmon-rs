@@ -70,7 +70,7 @@ const STDIN_CHANNEL_SIZE: usize = 1;
 /// How often a session pings the client, to notice a client which went away
 /// also while its stdin waits for the container. A WebSocket session pings
 /// only while stdin waits, a SPDY connection all the time.
-const PING_INTERVAL: Duration = if cfg!(test) {
+pub(super) const PING_INTERVAL: Duration = if cfg!(test) {
     Duration::from_millis(100)
 } else {
     spdy::PING_INTERVAL
@@ -112,6 +112,22 @@ pub(super) struct ClientRx {
     /// Cancelled once the client sent a message larger than the server
     /// takes, which fails the session.
     too_large: CancellationToken,
+}
+
+#[cfg(test)]
+impl ClientRx {
+    /// The input of a client which sends nothing while the returned senders
+    /// live.
+    pub(super) fn idle() -> (Self, (MpscSender<Stdin>, watch::Sender<Option<Bytes>>)) {
+        let (stdin_tx, stdin) = mpsc::channel(STDIN_CHANNEL_SIZE);
+        let (resize_tx, resize) = watch::channel(None);
+        let client = Self {
+            stdin,
+            resize,
+            too_large: CancellationToken::new(),
+        };
+        (client, (stdin_tx, resize_tx))
+    }
 }
 
 /// Terminal resize event for exec and attach. Kubernetes decodes it with
@@ -283,7 +299,7 @@ impl StreamingServer {
                     // After a clean close the session forwards the stdin which
                     // the client sent before, for a short time.
                     Ok(InputEnd::Closed) => {
-                        info!("Client closed the connection");
+                        info!("Client closed the connection cleanly, or after its stdin ended");
                         if time::timeout(STDIN_FLUSH_TIMEOUT, &mut send_task).await.is_err() {
                             debug!("Session did not end after the close, stopping it");
                         }
@@ -443,7 +459,12 @@ impl StreamingServer {
     /// Build a common read task. Every message of the client it reads counts
     /// as activity, also stdin. Once stdin backs up behind a process which
     /// does not take it, the client is not read anymore and the connection
-    /// may go idle, like a spdystream connection whose reader waits.
+    /// may go idle, like a spdystream connection whose reader waits. Its
+    /// pings get no answer meanwhile either, a WebSocket client which fails
+    /// without pongs, like the one of client-go after about a minute, ends
+    /// the session once the process does not take stdin for that long. The
+    /// pings sit behind the stdin in the socket, reading them would mean
+    /// buffering the stdin without a bound.
     fn read_task<I>(
         mut input: I,
         stdin_tx: MpscSender<Stdin>,
@@ -463,7 +484,9 @@ impl StreamingServer {
                         // The session ended, nothing takes stdin anymore.
                         Err(_) => pending.clear(),
                     },
-                    event = input.next(), if !pending.is_full() => match event {
+                    // Once stdin got closed, nothing gets added anymore, so
+                    // keep reading for the end of the connection.
+                    event = input.next(), if !pending.is_full() || pending.closed => match event {
                         Some(event) => {
                             if let ControlFlow::Break(end) =
                                 Self::read_event(event, &mut pending, &resize_tx)

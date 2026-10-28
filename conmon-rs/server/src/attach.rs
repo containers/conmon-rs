@@ -70,6 +70,10 @@ pub struct SharedContainerAttach {
     stop_after_stdin_eof: Arc<AtomicBool>,
     terminal: bool,
 
+    /// Cancelled once nothing takes the output anymore, see
+    /// [`SharedContainerAttach::stop_output`].
+    output_stopped: CancellationToken,
+
     /// The listening attach sockets by path.
     listeners: Arc<Mutex<HashMap<PathBuf, AttachListener>>>,
 }
@@ -116,6 +120,10 @@ struct OutputState {
     /// Set once the output ended, before the done message gets sent.
     ended: AtomicBool,
 
+    /// Set once an output got registered, see
+    /// [`SharedContainerAttach::output`].
+    registered: AtomicBool,
+
     /// The read loops with output on its way into the log, see
     /// [`SharedContainerAttach::logging`].
     logging: AtomicUsize,
@@ -142,6 +150,7 @@ impl SharedContainerAttach {
             stdin_closed: CancellationToken::new(),
             stop_after_stdin_eof: Arc::default(),
             terminal,
+            output_stopped: CancellationToken::new(),
             listeners: Arc::default(),
         }
     }
@@ -209,6 +218,7 @@ impl SharedContainerAttach {
     /// message only then, otherwise the done of one pipe could cut off the
     /// remaining output of another one.
     pub fn output(&self) -> Arc<AttachOutput> {
+        self.output.registered.store(true, Ordering::SeqCst);
         Arc::new(AttachOutput {
             output: self.output.clone(),
         })
@@ -217,6 +227,35 @@ impl SharedContainerAttach {
     /// Whether the container has a terminal.
     pub fn is_terminal(&self) -> bool {
         self.terminal
+    }
+
+    /// Stop reading the output once nothing takes it anymore, like once it
+    /// got drained after the exit of the process. A process left behind
+    /// which holds the pipes or the terminal open would keep the read loops
+    /// going forever otherwise, and writing to the log after the exit file
+    /// told that it is complete. Closing them lets its writes fail, like
+    /// once conmon exited.
+    pub fn stop_output(&self) {
+        self.output_stopped.cancel();
+    }
+
+    /// Stop the output once the consumer of an exec is done with it and the
+    /// process exited, see [`StopOutput`].
+    pub fn stop_output_on_exit(&self, exited: CancellationToken) -> StopOutput {
+        StopOutput {
+            attach: self.clone(),
+            exited,
+        }
+    }
+
+    /// Whether an output got registered, which read loops did then.
+    pub fn has_output(&self) -> bool {
+        self.output.registered.load(Ordering::SeqCst)
+    }
+
+    /// The token cancelled by [`SharedContainerAttach::stop_output`].
+    pub fn output_stopped(&self) -> &CancellationToken {
+        &self.output_stopped
     }
 
     /// The token cancelled once an attach client closed the container stdin.
@@ -313,6 +352,39 @@ impl SharedContainerAttach {
     }
 }
 
+/// Stops the output of an exec once dropped by the consumer of its output,
+/// after the process exited, see [`SharedContainerAttach::stop_output`].
+/// Without exit files, the consumer decides when the output is complete: a
+/// slow one blocks the read loops, which a stop after a pause of the output
+/// would cut off with data left in the pipes. A consumer which went away
+/// before the exit takes nothing anymore, the output stops with the exit.
+pub struct StopOutput {
+    attach: SharedContainerAttach,
+    exited: CancellationToken,
+}
+
+impl Drop for StopOutput {
+    fn drop(&mut self) {
+        if self.attach.output_stopped().is_cancelled() {
+            return;
+        }
+        if self.exited.is_cancelled() {
+            self.attach.stop_output();
+            return;
+        }
+        // Not waiting forever for an exit which got lost, after which the
+        // output got stopped otherwise.
+        let attach = self.attach.clone();
+        let exited = self.exited.clone();
+        task::spawn(async move {
+            select! {
+                () = exited.cancelled() => attach.stop_output(),
+                () = attach.output_stopped().cancelled() => {}
+            }
+        });
+    }
+}
+
 /// Output on its way into the log, see [`SharedContainerAttach::logging`].
 pub struct Logging<'a>(&'a OutputState);
 
@@ -343,6 +415,38 @@ impl Drop for AttachOutput {
             let _ = tx.send(Message::Done);
         }
     }
+}
+
+/// Check if no more input will arrive after a zero byte read. That is the
+/// case once the peer closed its write side, which a SOCK_SEQPACKET socket
+/// reports as POLLRDHUP, and no data is queued anymore. Checking the flag
+/// first makes sure that no data arrives in between.
+#[expect(unsafe_code, reason = "the FIONREAD ioctl")]
+pub(crate) fn input_ended(socket: &UnixSeqpacket) -> io::Result<bool> {
+    // Besides POLLRDHUP, poll can only report a hangup or an error, which
+    // end the reading as well. The number of ready fds tells that, nix
+    // does not decode the POLLRDHUP bit of the returned events.
+    let events = PollFlags::from_bits_retain(libc::POLLRDHUP);
+    let read_closed = loop {
+        match poll(
+            &mut [PollFd::new(socket.as_fd(), events)],
+            PollTimeout::ZERO,
+        ) {
+            Err(Errno::EINTR) => continue,
+            res => break res? > 0,
+        }
+    };
+    if !read_closed {
+        return Ok(false);
+    }
+
+    // For a SOCK_SEQPACKET socket, FIONREAD sums up all queued packets.
+    let mut queued: libc::c_int = 0;
+    // SAFETY: FIONREAD writes a single c_int.
+    if unsafe { libc::ioctl(socket.as_raw_fd(), libc::FIONREAD, &mut queued) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(queued == 0)
 }
 
 /// Removes the entry of a listener and its socket however its task ends.
@@ -588,7 +692,7 @@ impl Attach {
                     // A zero byte read on a SOCK_SEQPACKET socket is either an
                     // empty packet or the peer closing its write side, so
                     // check the socket rather than guessing from another read.
-                    if !Self::input_ended(&socket).context("check attach socket for more input")? {
+                    if !input_ended(&socket).context("check attach socket for more input")? {
                         trace!("Ignoring empty packet");
                         continue;
                     }
@@ -618,38 +722,6 @@ impl Attach {
                 },
             }
         }
-    }
-
-    /// Check if no more input will arrive after a zero byte read. That is the
-    /// case once the peer closed its write side, which a SOCK_SEQPACKET socket
-    /// reports as POLLRDHUP, and no data is queued anymore. Checking the flag
-    /// first makes sure that no data arrives in between.
-    #[expect(unsafe_code, reason = "the FIONREAD ioctl")]
-    fn input_ended(socket: &UnixSeqpacket) -> io::Result<bool> {
-        // Besides POLLRDHUP, poll can only report a hangup or an error, which
-        // end the reading as well. The number of ready fds tells that, nix
-        // does not decode the POLLRDHUP bit of the returned events.
-        let events = PollFlags::from_bits_retain(libc::POLLRDHUP);
-        let read_closed = loop {
-            match poll(
-                &mut [PollFd::new(socket.as_fd(), events)],
-                PollTimeout::ZERO,
-            ) {
-                Err(Errno::EINTR) => continue,
-                res => break res? > 0,
-            }
-        };
-        if !read_closed {
-            return Ok(false);
-        }
-
-        // For a SOCK_SEQPACKET socket, FIONREAD sums up all queued packets.
-        let mut queued: libc::c_int = 0;
-        // SAFETY: FIONREAD writes a single c_int.
-        if unsafe { libc::ioctl(socket.as_raw_fd(), libc::FIONREAD, &mut queued) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(queued == 0)
     }
 
     /// Whether a send failed because the client closed its end. A client
@@ -878,6 +950,45 @@ mod tests {
         ) -> Poll<io::Result<()>> {
             Poll::Ready(Err(io::Error::from_raw_os_error(Errno::EBADF as i32)))
         }
+    }
+
+    #[tokio::test]
+    async fn output_stops_once_consumed_and_exited() -> Result<()> {
+        // The consumer is done before the exit, like one which went away.
+        let attach = SharedContainerAttach::default();
+        let exited = CancellationToken::new();
+        drop(attach.stop_output_on_exit(exited.clone()));
+        task::yield_now().await;
+        assert!(!attach.output_stopped().is_cancelled());
+        exited.cancel();
+        tokio::time::timeout(Duration::from_secs(5), attach.output_stopped().cancelled()).await?;
+
+        // The consumer is done after the exit.
+        let attach = SharedContainerAttach::default();
+        let exited = CancellationToken::new();
+        exited.cancel();
+        drop(attach.stop_output_on_exit(exited));
+        assert!(attach.output_stopped().is_cancelled());
+
+        // The exit got lost, the output got stopped otherwise, nothing waits
+        // for the exit anymore.
+        let attach = SharedContainerAttach::default();
+        drop(attach.stop_output_on_exit(CancellationToken::new()));
+        task::yield_now().await;
+        assert_eq!(Arc::strong_count(&attach.output), 2);
+        attach.stop_output();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Arc::strong_count(&attach.output) > 1 {
+                task::yield_now().await;
+            }
+        })
+        .await?;
+
+        // Nothing waits if the output got stopped already.
+        drop(attach.stop_output_on_exit(CancellationToken::new()));
+        task::yield_now().await;
+        assert_eq!(Arc::strong_count(&attach.output), 1);
+        Ok(())
     }
 
     #[tokio::test]

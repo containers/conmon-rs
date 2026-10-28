@@ -24,7 +24,7 @@ use nix::{
         prctl,
         signal::{Signal, kill},
     },
-    unistd::{ForkResult, fork},
+    unistd::{ForkResult, chdir, fork},
 };
 #[cfg(feature = "tracing")]
 use opentelemetry::trace::{FutureExt as OpenTelemetryFutureExt, TracerProvider};
@@ -250,6 +250,12 @@ impl Server {
         // Deliberately outside the `skip_fork` check above: the server outlives
         // its parent either way, so the descriptors have to go either way.
         Self::close_inherited_fds();
+
+        // Do not keep the working directory of the caller busy, like a mount
+        // which then cannot be unmounted. The paths of the configuration are
+        // absolute, see `Config::make_absolute`, and so are the ones of the
+        // requests.
+        chdir("/").context("change into the root directory")?;
 
         // The container processes get reparented to the server once their
         // runtime exits.

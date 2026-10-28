@@ -9,6 +9,7 @@ use crate::{
     container_log::ContainerLog,
     notify::NotifySocket,
     pause::Pause,
+    process::Process,
     random_id::RandomId,
     server::{GenerateRuntimeArgs, Server},
     streaming_server::{AttachSession, ExecSession, StreamingServer},
@@ -18,7 +19,7 @@ use anyhow::Context;
 use capnp::{Error, capability::Promise};
 use capnp_rpc::pry;
 use futures::FutureExt;
-use nix::unistd::Pid;
+use nix::{sys::signal::Signal, unistd::Pid};
 use std::{
     path::{Path, PathBuf},
     process,
@@ -455,6 +456,9 @@ impl conmon::Server for Server {
                         // register grandchild with server, a timeout which
                         // already passed kills it right away
                         let io = SharedContainerIO::new(container_io);
+                        // Not reaped before the registration below, so the
+                        // PID is still its own.
+                        let process = Process::open(grandchild_pid);
                         let child = Child {
                             id: id.into(),
                             kind: ChildKind::Exec,
@@ -466,11 +470,27 @@ impl conmon::Server for Server {
                             cleanup_cmd: vec![],
                             token: token.clone(),
                         };
+                        let _stop_output = io.attach().await.stop_output_on_exit(token.clone());
                         let mut exit_rx = child_reaper.watch_grandchild(child, vec![], call)?;
 
+                        // Reads until the output ended or the drain after the
+                        // exit gave up, under the write lock of the IO, the
+                        // read loops get stopped only after that.
                         let (stdout, stderr, timed_out) =
                             io.read_all_with_timeout(time_to_timeout, &token).await?;
-                        let exit_data = exit_rx.recv().await?;
+                        let exit_data = match exit_rx.recv().await {
+                            Ok(exit_data) => exit_data,
+                            // The watcher got aborted, nothing ends the
+                            // process and its output otherwise, like for a
+                            // streaming exec.
+                            Err(e) => {
+                                if let Err(e) = process.signal_group(Signal::SIGKILL) {
+                                    debug!("Not killing exec process {grandchild_pid}: {e}");
+                                }
+                                io.attach().await.stop_output();
+                                return Err(e).context("receive the exit of the exec");
+                            }
+                        };
                         Ok::<_, anyhow::Error>(ExecSyncOutput {
                             stdout,
                             stderr,
@@ -534,6 +554,10 @@ impl conmon::Server for Server {
         }
 
         let socket_path = pry!(pry!(req.get_socket_path()).to_string());
+        pry_err!(capnp_util::check_absolute(
+            "socket path",
+            Path::new(&socket_path)
+        ));
         let child = pry_err!(self.reaper().get(id));
         let stop_after_stdin_eof = req.get_stop_after_stdin_eof();
 
@@ -812,6 +836,10 @@ impl conmon::Server for Server {
             return Promise::err(Error::failed("network namespace path is empty".into()));
         }
         let netns_path = PathBuf::from(netns_path);
+        pry_err!(capnp_util::check_absolute(
+            "network namespace path",
+            &netns_path
+        ));
         let idle_timeout = Server::idle_timeout(req.get_idle_timeout_sec());
         let streaming_server = self.streaming_server().clone();
 

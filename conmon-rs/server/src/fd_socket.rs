@@ -41,7 +41,7 @@
 //! the server, a request which would exceed either fails with an error
 //! response.
 
-use crate::{listener, mutex::lock};
+use crate::{attach::input_ended, listener, mutex::lock};
 use anyhow::{Result, bail};
 use nix::sys::resource::{Resource, getrlimit};
 use std::{
@@ -288,7 +288,9 @@ impl Server {
                 .await?;
 
             let id_and_num_fds = match n.bytes_read() {
-                0 => break Ok(()), // EOF
+                // An empty packet reads like the end of the connection, which
+                // releases its descriptors, see `attach::input_ended`.
+                0 if input_ended(&conn)? => break Ok(()),
                 8 => u64::from_le_bytes(buf[..8].try_into().expect("8-byte slice")),
                 _ => continue, // ignore invalid message
             };
@@ -418,14 +420,18 @@ mod tests {
     #[tokio::test]
     async fn messages_of_other_sizes_are_ignored() -> Result<()> {
         let (_dir, fd_socket, conn) = connect().await?;
+        let resp = request(&conn, 1, 1, &null_fds(1)?).await?;
+        let slot = word(&resp, 1);
         // Too short and too long, with a descriptor which must not end up in
-        // a slot.
+        // a slot. An empty one does not end the connection either.
         send(&conn, &[1; 4], &null_fds(1)?).await?;
         send(&conn, &[1; 16], &null_fds(1)?).await?;
+        send(&conn, &[], &[]).await?;
 
         let resp = request(&conn, 3, 1, &null_fds(1)?).await?;
         assert_eq!(word(&resp, 0), (3 << 32) | 1);
-        assert_eq!(lock(&fd_socket.state).fds.len(), 1);
+        assert_eq!(lock(&fd_socket.state).fds.len(), 2);
+        assert!(has_slot(&fd_socket, slot));
         Ok(())
     }
 
