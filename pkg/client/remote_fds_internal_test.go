@@ -86,7 +86,19 @@ func newTestRemoteFDs(t *testing.T, replies ...fdServerReply) *RemoteFDs {
 func packetPair(t *testing.T) (a, b *net.UnixConn) {
 	t.Helper()
 
-	pair, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_SEQPACKET|syscall.SOCK_CLOEXEC, 0)
+	// Without SOCK_CLOEXEC, which not every platform the client builds for
+	// has, under the fork lock like the net package does it, so that no
+	// child of a parallel test inherits the descriptors.
+	syscall.ForkLock.RLock()
+
+	pair, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+	if err == nil {
+		syscall.CloseOnExec(pair[0])
+		syscall.CloseOnExec(pair[1])
+	}
+
+	syscall.ForkLock.RUnlock()
+
 	if err != nil {
 		t.Fatalf("socketpair: %v", err)
 	}

@@ -473,6 +473,78 @@ var _ = Describe("ConmonClient", func() {
 			}, SpecTimeout(specTimeout))
 		}
 
+		// sendPipe sends the write end of a new pipe to the fd socket of the
+		// server and closes it, so that only the server holds it then. It
+		// returns the read end and the slot of the write end. The fd socket
+		// gets closed with the spec, which releases the slots the container
+		// did not take.
+		sendPipe := func(ctx context.Context) (*os.File, client.RemoteFD) {
+			remoteFDs, err := sut.RemoteFDs(ctx)
+			Expect(err).To(Succeed())
+			DeferCleanup(remoteFDs.Close)
+
+			reader, writer, err := os.Pipe()
+			Expect(err).To(Succeed())
+			DeferCleanup(reader.Close)
+
+			slots, err := remoteFDs.SendContext(ctx, int(writer.Fd()))
+			Expect(err).To(Succeed())
+			Expect(slots).To(HaveLen(1))
+			Expect(writer.Close()).To(Succeed())
+
+			return reader, slots[0]
+		}
+
+		It("should pass additional file descriptors to the container", func(ctx SpecContext) {
+			tr = newTestRunner()
+			tr.createRuntimeConfigWithProcessArgs(
+				false,
+				[]string{"/busybox", "sh", "-c", "echo passed >&3"},
+				nil,
+			)
+			sut = tr.configGivenEnv()
+
+			reader, slot := sendPipe(ctx)
+
+			// The runtime gets the descriptor as fd 3 and passes it on.
+			cfg := tr.defaultConfig(false)
+			cfg.AdditionalFDs = []client.RemoteFD{slot}
+			cfg.CommandArgs = []string{"--preserve-fds", "1"}
+			tr.createContainerWithConfig(ctx, sut, cfg)
+			tr.startContainer()
+
+			// Neither the server nor the runtime keep a copy, the output
+			// ends with the container.
+			Expect(reader.SetReadDeadline(time.Now().Add(10 * time.Second))).To(Succeed())
+			Expect(io.ReadAll(reader)).To(BeEquivalentTo("passed\n"))
+		}, SpecTimeout(specTimeout))
+
+		It("should hold leaked file descriptors until the container exits", func(ctx SpecContext) {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			reader, slot := sendPipe(ctx)
+
+			cfg := tr.defaultConfig(false)
+			cfg.LeakFDs = []client.RemoteFD{slot}
+			tr.createContainerWithConfig(ctx, sut, cfg)
+
+			// The server holds it while the container waits for its start.
+			Expect(reader.SetReadDeadline(time.Now().Add(500 * time.Millisecond))).To(Succeed())
+
+			_, err := reader.Read(make([]byte, 1))
+			Expect(err).To(MatchError(os.ErrDeadlineExceeded))
+
+			// And closes it once the container exited.
+			tr.startContainer()
+			Expect(reader.SetReadDeadline(time.Now().Add(10 * time.Second))).To(Succeed())
+
+			_, err = reader.Read(make([]byte, 1))
+			Expect(err).To(MatchError(io.EOF))
+			Eventually(fileContents, 5*time.Second).WithArguments(tr.exitPath()).Should(Equal("0"))
+		}, SpecTimeout(specTimeout))
+
 		It("should relay sd_notify messages", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfigWithProcessArgs(
@@ -733,6 +805,41 @@ var _ = Describe("ConmonClient", func() {
 			Expect(result.ExitCode).To(Equal(client.ExecExitCodeNotStarted))
 			Expect(result.TimedOut).To(BeFalse())
 			Expect(result.Stderr).NotTo(BeEmpty())
+		}, SpecTimeout(specTimeout))
+
+		It("should pass the environment variables to the runtime", func(ctx SpecContext) {
+			tr = newTestRunner()
+			tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "10"}, nil)
+
+			// A runtime which records the variable of its exec calls, the
+			// container process does not get it.
+			envFile := filepath.Join(tr.tmpDir, "runtime-env")
+			wrapper := filepath.Join(tr.tmpDir, "runtime")
+			script := fmt.Sprintf(
+				"#!/bin/sh\n"+
+					"if [ -n \"$CONMON_TEST_ENV\" ]; then printf %%s \"$CONMON_TEST_ENV\" >'%s'; fi\n"+
+					"exec '%s' \"$@\"\n",
+				envFile, runtimePath,
+			)
+			//nolint:gosec // the runtime has to be executable
+			Expect(os.WriteFile(wrapper, []byte(script), 0o700)).To(Succeed())
+
+			sut = tr.configGivenEnvWith(func(cfg *client.ConmonServerConfig) {
+				cfg.Runtime = wrapper
+			})
+			tr.createContainer(ctx, sut, false)
+			tr.startContainer()
+			Expect(envFile).NotTo(BeAnExistingFile())
+
+			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+				ID:      tr.ctrID,
+				Command: []string{"/busybox", "true"},
+				Timeout: 10,
+				EnvVars: map[string]string{"CONMON_TEST_ENV": "set"},
+			})
+			Expect(err).To(Succeed())
+			Expect(result.ExitCode).To(BeEquivalentTo(0))
+			Expect(fileContents(envFile)).To(Equal("set"))
 		}, SpecTimeout(specTimeout))
 
 		It("should not pass its transparent huge pages setting on", func(ctx SpecContext) {
@@ -1923,6 +2030,49 @@ var _ = Describe("JournaldLogger", func() {
 				}
 			}, SpecTimeout(specTimeout))
 		}
+
+		It("should write the container name, tag and labels", func(ctx SpecContext) {
+			tr = newTestRunner()
+			marker := uuid.New().String()
+			tr.createRuntimeConfigWithProcessArgs(
+				false,
+				[]string{"/busybox", "echo", "hello " + marker},
+				nil,
+			)
+
+			sut = tr.configGivenEnv()
+			Expect(sut.SupportsFeature(client.FeatureJournaldFields)).To(BeTrue())
+
+			cfg := tr.defaultConfig(false)
+			cfg.LogDrivers = []client.ContainerLogDriver{{
+				Type:          client.LogDriverTypeJournald,
+				ContainerName: "name-" + marker,
+				Tag:           "tag-" + marker,
+				Labels:        map[string]string{"CONMON_TEST_LABEL": "label-" + marker},
+			}}
+			tr.createContainerWithConfig(ctx, sut, cfg)
+			tr.startContainer()
+
+			// The matches of different fields all have to hold, so the line
+			// only shows up with every field set. The tag names the
+			// identifier as well.
+			args := []string{
+				"--since", "-1min",
+				"CONTAINER_ID=" + tr.ctrID[:12],
+				"CONTAINER_NAME=name-" + marker,
+				"CONTAINER_TAG=tag-" + marker,
+				"SYSLOG_IDENTIFIER=tag-" + marker,
+				"CONMON_TEST_LABEL=label-" + marker,
+			}
+			Eventually(func(g Gomega) string {
+				cmd := exec.CommandContext(ctx, "journalctl", args...)
+				stdout := strings.Builder{}
+				cmd.Stdout = &stdout
+				g.Expect(cmd.Run()).To(Succeed())
+
+				return stdout.String()
+			}, 10*time.Second).Should(ContainSubstring("hello " + marker))
+		}, SpecTimeout(specTimeout))
 	})
 })
 

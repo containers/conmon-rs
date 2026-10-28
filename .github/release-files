@@ -37,17 +37,25 @@ check() {
 }
 
 # The ci run of the commit uploads the binaries, which may take as long as its
-# slowest build when the cache misses. Wait for it, then fetch them. A publish
-# job of any attempt counts: one of a later attempt fails rather than replace
-# the binary with other bits, like after "Re-run all jobs" did not reproduce
-# it, and the files get verified anyway.
+# slowest build when the cache misses. Wait for it, then fetch them. The other
+# jobs of the latest attempt have to pass, a commit whose tests or checks
+# failed does not get released. A publish job of any attempt counts: one of a
+# later attempt fails rather than replace the binary with other bits, like
+# after "Re-run all jobs" did not reproduce it, and the files get verified
+# anyway. The cache and marker jobs only matter for main.
 fetch() {
     local run
     run=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&branch=main" --jq '.workflow_runs[0].id')
     echo "Waiting for ci run $run of $SHA"
     gh run watch "$run" --repo "$REPO" --interval 60 >/dev/null
-    local attempt attempts jobs=
+    local attempt attempts failed jobs=
     attempts=$(gh run view "$run" --repo "$REPO" --json attempt --jq .attempt)
+    failed=$(gh run view "$run" --repo "$REPO" --attempt "$attempts" --json jobs \
+        --jq '.jobs[] | select((.name | startswith("publish-") | not) and .conclusion != "success" and .conclusion != "skipped") | "\(.name) \(.conclusion)"')
+    if [[ -n $failed ]]; then
+        echo "::error::ci run $run of $SHA did not pass: ${failed//$'\n'/, }. Use \"Re-run failed jobs\" of the run, never \"Re-run all jobs\", then rerun the release workflow. A failure which a rerun cannot fix needs a version bump PR for the next patch version, the tag cannot move and the crate version has to match it, see release.md." >&2
+        exit 1
+    fi
     for ((attempt = 1; attempt <= attempts; attempt++)); do
         jobs+=$(gh run view "$run" --repo "$REPO" --attempt "$attempt" --json jobs \
             --jq '.jobs[] | select(.name | startswith("publish-static-")) | "\(.name) \(.conclusion)"')$'\n'

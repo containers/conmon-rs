@@ -10,6 +10,9 @@ on:
   workflow_dispatch: {}
 permissions:
   contents: read
+env:
+  # The toolchain of the ci workflow.
+  RUST_VERSION: "1.99.1"
 jobs:
   verify-advisories:
     if: github.repository == 'containers/conmon-rs'
@@ -132,3 +135,144 @@ jobs:
       - name: Check the digests of the images
         if: ${{ !cancelled() }}
         run: make verify-digests
+
+  # The unit tests on a big-endian architecture, under qemu-user, which no
+  # runner of the ci workflow has: the build-static job of s390x only runs the
+  # binary once. The protocols of the server encode their integers by hand.
+  # nextest runs the tests through qemu, the binfmt registration of
+  # qemu-user-binfmt the test binary which a test starts itself. Like the
+  # test-unit job, the ci profile of .config/nextest.toml retries failed
+  # tests and reports the ones which passed on a retry.
+  test-unit-s390x:
+    if: github.repository == 'containers/conmon-rs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_LINKER: s390x-linux-gnu-gcc
+      CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_RUNNER: qemu-s390x -L /usr/s390x-linux-gnu
+      QEMU_LD_PREFIX: /usr/s390x-linux-gnu
+      NEXTEST_PROFILE: ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the cross toolchain and qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y capnproto gcc-s390x-linux-gnu libc6-dev-s390x-cross qemu-user-binfmt
+      - name: Select Toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target s390x-unknown-linux-gnu
+          rustup default "$RUST_VERSION"
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-nextest
+      # The skipped test finds the reaped leader of a process group through
+      # the children of the test process, which fails under qemu-user.
+      - run: |
+          cargo nextest run --locked --target s390x-unknown-linux-gnu \
+            -E 'not test(=process::tests::signal_group_reaches_members_of_reaped_leader)'
+      - name: Report flaky tests
+        if: ${{ !cancelled() }}
+        run: .github/report-flakes target/nextest/ci/junit.xml
+
+  # Fuzzes every target for half an hour, the test-fuzz jobs of the ci
+  # workflow only for two minutes. The targets are the ones of the latest
+  # passed ci run of main, the corpus the one of main, which the run extends.
+  list-fuzz-targets:
+    if: github.repository == 'containers/conmon-rs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read # downloads the fuzz targets of the ci run
+      contents: read
+    outputs:
+      run-id: ${{ steps.run.outputs.run-id }}
+      targets: ${{ steps.list.outputs.targets }}
+    steps:
+      - name: Find the latest ci run of main
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main \
+            --event push --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [[ ! $RUN_ID =~ ^[0-9]+$ ]]; then
+            echo "::error::No passed ci run of main found, which the fuzz targets come from: ${RUN_ID:-none}"
+            exit 1
+          fi
+          echo "run-id=$RUN_ID" >>"$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fuzz-targets
+          path: fuzz-targets
+          run-id: ${{ steps.run.outputs.run-id }}
+          github-token: ${{ github.token }}
+      - name: List the fuzz targets
+        id: list
+        env:
+          RUN_ID: ${{ steps.run.outputs.run-id }}
+        run: |
+          TARGETS=$(find fuzz-targets -type f -printf '%f\n' | sort | jq -Rnc '[inputs]')
+          if [[ $TARGETS == "[]" ]]; then
+            echo "::error::The fuzz-targets artifact of ci run $RUN_ID holds no fuzz targets"
+            exit 1
+          fi
+          echo "targets=$TARGETS" >>"$GITHUB_OUTPUT"
+
+  fuzz:
+    needs: list-fuzz-targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read # downloads the fuzz targets of the ci run
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.list-fuzz-targets.outputs.targets) }}
+    name: fuzz-${{ matrix.target }}
+    env:
+      TARGET: ${{ matrix.target }}
+      # Like cargo-fuzz runs the targets.
+      ASAN_OPTIONS: detect_odr_violation=0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fuzz-targets
+          path: fuzz-targets
+          run-id: ${{ needs.list-fuzz-targets.outputs.run-id }}
+          github-token: ${{ github.token }}
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      # Like the test-fuzz jobs of the ci workflow, which a crash reproduces
+      # the same way.
+      - name: Fuzz
+        run: |
+          chmod +x "fuzz-targets/$TARGET"
+          mkdir -p corpus artifacts "fuzz/seeds/$TARGET"
+          "fuzz-targets/$TARGET" -max_total_time=1800 -artifact_prefix=artifacts/ corpus "fuzz/seeds/$TARGET"
+      - name: Minimize the corpus
+        run: |
+          mkdir minimized
+          cp -r "fuzz/seeds/$TARGET/." minimized
+          "fuzz-targets/$TARGET" -merge=1 minimized corpus
+          find "fuzz/seeds/$TARGET" -type f -printf '%f\0' | (cd minimized && xargs -0r rm --)
+          rm -rf corpus
+          mv minimized corpus
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: fuzz-${{ matrix.target }}-artifacts
+          path: artifacts

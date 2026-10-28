@@ -8,7 +8,7 @@ body:
       label: What happened?
       description: |
         Please provide as much info as possible. Not doing so may result in your bug not being addressed in a timely manner.
-        If this matter is security related, please disclose it privately via [a github security advisory](https://github.com/containers/conmon-rs/security/advisories).
+        If this matter is security related, please disclose it privately as described in the [security policy](https://github.com/containers/conmon-rs/blob/main/SECURITY.md).
     validations:
       required: true
 

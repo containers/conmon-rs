@@ -253,41 +253,19 @@ func (c *ConmonClient) RemoteFDs(ctx context.Context) (_ *RemoteFDs, retErr erro
 	ctx, span := c.startSpan(ctx, "RemoteFDs")
 	defer endSpan(span, &retErr)
 
-	rpcClient, err := c.client(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("create RPC client: %w", err)
-	}
-
-	future, free := rpcClient.StartFdSocket(
-		ctx,
-		func(p proto.Conmon_startFdSocket_Params) (err error) {
-			req, err := p.NewRequest()
+	path, err := call(ctx, c, proto.Conmon.StartFdSocket,
+		noRequest,
+		func(res proto.Conmon_StartFdSocketResponse) (string, error) {
+			path, err := res.Path()
 			if err != nil {
-				return fmt.Errorf("create request: %w", err)
+				return "", fmt.Errorf("get path: %w", err)
 			}
 
-			if err := c.setMetadata(ctx, req); err != nil {
-				return fmt.Errorf("set metadata: %w", err)
-			}
-
-			return nil
+			return path, nil
 		},
 	)
-	defer free()
-
-	result, err := rpcResult(future)
 	if err != nil {
 		return nil, err
-	}
-
-	res, err := result.Response()
-	if err != nil {
-		return nil, fmt.Errorf("get response: %w", err)
-	}
-
-	path, err := res.Path()
-	if err != nil {
-		return nil, fmt.Errorf("get path: %w", err)
 	}
 
 	r, err := NewRemoteFDs(path)

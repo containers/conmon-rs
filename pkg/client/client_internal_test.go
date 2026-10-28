@@ -303,18 +303,30 @@ func serveSilentSocket(t *testing.T, dir string) {
 	})
 }
 
+// shortTimeouts returns the waits for servers which do not answer or go
+// away, shortened for the tests which run into them on purpose.
+func shortTimeouts() *serverTimeouts {
+	return &serverTimeouts{
+		probe:   500 * time.Millisecond,
+		gone:    500 * time.Millisecond,
+		cleanup: 500 * time.Millisecond,
+	}
+}
+
 func TestNewKeepsServerWhichDoesNotAnswer(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	serveSilentSocket(t, dir)
 
+	timeouts := shortTimeouts()
 	start := time.Now()
 	_, err := New(&ConmonServerConfig{
 		ServerRunDir:     dir,
 		ConmonServerPath: "/does/not/exist",
 		Runtime:          "/does/not/exist",
 		ClientLogger:     logrus.New(),
+		timeouts:         timeouts,
 	})
 
 	if !errors.Is(err, ErrServerNotResponding) {
@@ -326,8 +338,8 @@ func TestNewKeepsServerWhichDoesNotAnswer(t *testing.T) {
 		t.Fatalf("error %q does not name %s", err, pid)
 	}
 
-	if elapsed := time.Since(start); elapsed > serverProbeTimeout+time.Second {
-		t.Fatalf("probe took %s, want about %s", elapsed, serverProbeTimeout)
+	if elapsed := time.Since(start); elapsed > timeouts.probe+time.Second {
+		t.Fatalf("probe took %s, want about %s", elapsed, timeouts.probe)
 	}
 
 	if _, err := os.Stat(filepath.Join(dir, socketName)); err != nil {
@@ -392,6 +404,7 @@ func TestNewReplacesServerWhichGoesAway(t *testing.T) {
 			ConmonServerPath: "/does/not/exist",
 			Runtime:          "/does/not/exist",
 			ClientLogger:     logrus.New(),
+			timeouts:         shortTimeouts(),
 		})
 
 		return err
@@ -522,23 +535,29 @@ func TestClientReplacesUnusableConnection(t *testing.T) {
 			c := &ConmonClient{runDir: dir, logger: logrus.New()}
 			t.Cleanup(c.resetConn)
 
-			if _, err := c.client(t.Context()); err != nil {
+			rpcClient, err := c.client(t.Context())
+			if err != nil {
 				t.Fatalf("create client: %v", err)
 			}
+
+			rpcClient.Release()
 
 			first := c.conn
 
 			if withBootstrap {
-				if err := capnp.Client(first.client).Resolve(t.Context()); err != nil {
+				if err = capnp.Client(first.client).Resolve(t.Context()); err != nil {
 					t.Fatalf("resolve bootstrap: %v", err)
 				}
 			} else {
 				waitBroken(t, first)
 			}
 
-			if _, err := c.client(t.Context()); err != nil {
+			rpcClient, err = c.client(t.Context())
+			if err != nil {
 				t.Fatalf("create client again: %v", err)
 			}
+
+			rpcClient.Release()
 
 			// A failed bootstrap makes the connection unusable for good.
 			if replaced := c.conn != first; replaced == withBootstrap {
@@ -552,9 +571,12 @@ func TestClientReplacesUnusableConnection(t *testing.T) {
 			// A closed connection gets replaced as well.
 			c.conn.conn.Close()
 
-			if _, err := c.client(t.Context()); err != nil {
+			rpcClient, err = c.client(t.Context())
+			if err != nil {
 				t.Fatalf("create client after close: %v", err)
 			}
+
+			rpcClient.Release()
 
 			if c.conn == first {
 				t.Fatal("closed connection not replaced")
@@ -1160,9 +1182,12 @@ func TestNewKillsServerWhichDoesNotComeUp(t *testing.T) {
 		`(trap '' INT; exec sleep 60) </dev/null >/dev/null 2>&1 & printf %s $! >"$4/pidfile"`,
 	)
 
-	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	const ctxTimeout = 500 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(t.Context(), ctxTimeout)
 	defer cancel()
 
+	timeouts := shortTimeouts()
 	start := time.Now()
 
 	_, err := NewContext(ctx, &ConmonServerConfig{
@@ -1170,6 +1195,7 @@ func TestNewKillsServerWhichDoesNotComeUp(t *testing.T) {
 		ConmonServerPath: binary,
 		Runtime:          "/does/not/exist",
 		ClientLogger:     logrus.New(),
+		timeouts:         timeouts,
 	})
 	if !errors.Is(err, ErrServerNotUp) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("got error %v, want %v and %v", err, ErrServerNotUp, context.DeadlineExceeded)
@@ -1182,8 +1208,9 @@ func TestNewKillsServerWhichDoesNotComeUp(t *testing.T) {
 		t.Fatal("server still running")
 	}
 
-	// SIGINT did not end it, SIGKILL did.
-	if elapsed := time.Since(start); elapsed < serverCleanupTimeout {
+	// SIGINT did not end it, SIGKILL did after the cleanup wait, which
+	// starts once the context expired.
+	if elapsed := time.Since(start); elapsed < ctxTimeout+timeouts.cleanup {
 		t.Fatalf("server gone after %s, before the SIGKILL", elapsed)
 	}
 }
@@ -1492,15 +1519,16 @@ func TestRefreshServerKeepsTheRecordedOnesWithoutAnswer(t *testing.T) {
 	c.setFeatures([]string{"recorded"})
 	recorded := c.currentServer()
 
-	conn, dialed, err := c.usableConn(t.Context())
+	conn, rpcClient, dialed, err := c.usableConn(t.Context())
 	if err != nil || !dialed {
 		t.Fatalf("dial: %v, dialed %v", err, dialed)
 	}
+	defer rpcClient.Release()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 
-	c.refreshServer(ctx, conn)
+	c.refreshServer(ctx, conn, rpcClient)
 
 	if c.currentServer() != recorded {
 		t.Fatal("replaced the recorded server without an answer")
@@ -2098,6 +2126,13 @@ func TestMissingConfig(t *testing.T) {
 	// A nil port forward config always failed with the missing path.
 	if _, err := c.ServePortForwardContainer(ctx, nil); !errors.Is(err, ErrMissingNetNsPath) {
 		t.Errorf("got error %v, want %v", err, ErrMissingNetNsPath)
+	}
+
+	// Like a nil config, a missing terminal size fails before the client
+	// connects.
+	err := c.SetWindowSizeContainer(ctx, &SetWindowSizeContainerConfig{ID: "id"})
+	if !errors.Is(err, ErrTerminalSizeNil) {
+		t.Errorf("got error %v, want %v", err, ErrTerminalSizeNil)
 	}
 }
 
@@ -2740,5 +2775,143 @@ func TestSetCgroupManagerWarnsOnce(t *testing.T) {
 
 	if req.manager != proto.Conmon_CgroupManager_cgroupfs {
 		t.Fatalf("got cgroup manager %v, want the per command one", req.manager)
+	}
+}
+
+func TestValidateCgroupManager(t *testing.T) {
+	t.Parallel()
+
+	c := newTestClient(t, t.TempDir(), logrus.New())
+
+	// A per command value which gets ignored is not checked.
+	c.cgroupManager = CgroupManagerSystemd
+	if err := c.validateCgroupManager(CgroupManager(42)); err != nil {
+		t.Fatalf("ignored cgroup manager rejected: %v", err)
+	}
+
+	c.cgroupManager = CgroupManagerPerCommand
+
+	for _, tc := range []struct {
+		manager CgroupManager
+		want    error
+	}{
+		{manager: CgroupManagerSystemd},
+		{manager: CgroupManagerCgroupfs},
+		{manager: CgroupManagerPerCommand, want: ErrCgroupManagerPerCommand},
+		{manager: CgroupManager(42), want: errInvalidValue},
+	} {
+		if err := c.validateCgroupManager(tc.manager); !errors.Is(err, tc.want) {
+			t.Fatalf("cgroup manager %d: got error %v, want %v", tc.manager, err, tc.want)
+		}
+	}
+
+	// The global one gets checked by New.
+	_, err := New(&ConmonServerConfig{ServerRunDir: t.TempDir(), CgroupManager: CgroupManager(42)})
+	if !errors.Is(err, errInvalidValue) {
+		t.Fatalf("got error %v, want %v", err, errInvalidValue)
+	}
+}
+
+func TestValidateLogLevelAndDriver(t *testing.T) {
+	t.Parallel()
+
+	for _, level := range []LogLevel{
+		LogLevelTrace, LogLevelDebug, LogLevelInfo, LogLevelWarn, LogLevelError, LogLevelOff,
+	} {
+		if err := validateLogLevel(level); err != nil {
+			t.Errorf("log level %q rejected: %v", level, err)
+		}
+	}
+
+	for _, driver := range []LogDriver{LogDriverNone, LogDriverStdout, LogDriverSystemd} {
+		if err := validateLogDriver(driver); err != nil {
+			t.Errorf("log driver %q rejected: %v", driver, err)
+		}
+	}
+
+	// The server only knows the lower case names.
+	for _, err := range []error{
+		validateLogLevel("Debug"),
+		validateLogLevel(""),
+		validateLogDriver("journald"),
+		validateLogDriver(""),
+	} {
+		if !errors.Is(err, errInvalidValue) {
+			t.Errorf("got error %v, want %v", err, errInvalidValue)
+		}
+	}
+}
+
+func TestMappingsToSlice(t *testing.T) {
+	t.Parallel()
+
+	// The server parses "<container ID> <host ID> <size>" per mapping.
+	got := mappingsToSlice([]idtools.IDMap{
+		{ContainerID: 0, HostID: 100000, Size: 65536},
+		{ContainerID: 65536, HostID: 1000, Size: 1},
+	})
+	if want := []string{"0 100000 65536", "65536 1000 1"}; !slices.Equal(got, want) {
+		t.Fatalf("got mappings %q, want %q", got, want)
+	}
+
+	if got := mappingsToSlice(nil); len(got) != 0 {
+		t.Fatalf("got mappings %q without any", got)
+	}
+}
+
+func TestCallOnResetConnectionIsDisconnected(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	serveVersionSocket(t, dir, versionConmon{pid: 1})
+
+	c := newTestClient(t, dir, logrus.New())
+
+	t.Cleanup(func() { c.Close() })
+
+	// A call which got the RPC client right before another one reset the
+	// connection, like Close, Shutdown or a reconnect.
+	rpcClient, err := c.client(t.Context())
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	defer rpcClient.Release()
+
+	c.resetConn()
+
+	if _, err := c.version(t.Context(), rpcClient, nil); !errors.Is(err, ErrServerDisconnected) {
+		t.Fatalf("got error %v, want %v", err, ErrServerDisconnected)
+	}
+
+	// The next call connects again.
+	if _, err := c.Version(t.Context(), nil); err != nil {
+		t.Fatalf("version after the reset: %v", err)
+	}
+}
+
+func TestTraceEnabled(t *testing.T) {
+	t.Parallel()
+
+	logger := logrus.New()
+	logger.SetLevel(logrus.DebugLevel)
+
+	for _, tc := range []struct {
+		logger logrus.Ext1FieldLogger
+		want   bool
+	}{
+		{logger: logger, want: false},
+		{logger: logger.WithField("key", "value"), want: false},
+	} {
+		c := &ConmonClient{logger: tc.logger}
+		if got := c.traceEnabled(); got != tc.want {
+			t.Fatalf("%T: got %v, want %v", tc.logger, got, tc.want)
+		}
+	}
+
+	logger.SetLevel(logrus.TraceLevel)
+
+	c := &ConmonClient{logger: logger.WithField("key", "value")}
+	if !c.traceEnabled() {
+		t.Fatal("trace level not enabled")
 	}
 }

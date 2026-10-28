@@ -78,7 +78,7 @@ func TestHandlePacket(t *testing.T) {
 		{packet: []byte{42, 'x'}, cont: true},
 		{packet: []byte{attachPipeDone}, cont: false},
 	} {
-		cont, err := c.handlePacket(t.Context(), cfg, tc.packet, len(tc.packet))
+		cont, err := c.handlePacket(cfg, tc.packet, len(tc.packet), true)
 		if err != nil || cont != tc.cont {
 			t.Fatalf("packet %v: got %v, %v, want %v", tc.packet, cont, err, tc.cont)
 		}
@@ -95,36 +95,20 @@ func TestHandlePacket(t *testing.T) {
 	// Output for a stream which is not attached gets dropped.
 	packet := []byte{attachPipeStdout, 'x'}
 
-	cont, err := c.handlePacket(t.Context(), &AttachConfig{}, packet, len(packet))
+	cont, err := c.handlePacket(&AttachConfig{}, packet, len(packet), true)
 	if err != nil || !cont {
 		t.Fatalf("got %v, %v for a missing stream, want to continue", cont, err)
 	}
 
 	cfg = &AttachConfig{Streams: AttachStreams{Stdout: &Out{&testOut{err: io.ErrClosedPipe}}}}
 
-	if _, err := c.handlePacket(
-		t.Context(),
-		cfg,
-		packet,
-		len(packet),
-	); !errors.Is(
-		err,
-		io.ErrClosedPipe,
-	) {
+	if _, err := c.handlePacket(cfg, packet, len(packet), true); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("got error %v, want %v", err, io.ErrClosedPipe)
 	}
 
 	cfg = &AttachConfig{Streams: AttachStreams{Stdout: &Out{shortOut{}}}}
 
-	if _, err := c.handlePacket(
-		t.Context(),
-		cfg,
-		packet,
-		len(packet),
-	); !errors.Is(
-		err,
-		io.ErrShortWrite,
-	) {
+	if _, err := c.handlePacket(cfg, packet, len(packet), true); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("got error %v, want %v", err, io.ErrShortWrite)
 	}
 }

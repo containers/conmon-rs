@@ -34,8 +34,11 @@ updates:
           - "capnp*"
           - "opentelemetry*"
           - "tracing-opentelemetry"
+  # The workflows and the composite actions they use.
   - package-ecosystem: "github-actions"
-    directory: "/"
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: daily
     cooldown:
@@ -52,6 +55,23 @@ updates:
     open-pull-requests-limit: 0
     labels:
       - "release-note-none"
+  # The integration suite is a module of its own, whose dependencies follow
+  # the latest releases, see the Makefile. The client it tests comes from the
+  # checkout through a replace directive.
+  - package-ecosystem: gomod
+    directory: "/pkg/client/integration"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+    labels:
+      - "release-note-none"
+    groups:
+      integration-dependencies:
+        update-types:
+          - minor
+          - patch
   # nixpkgs decides the toolchain and the C library of the static binaries,
   # see the build-static jobs, which print the rustc version.
   - package-ecosystem: nix

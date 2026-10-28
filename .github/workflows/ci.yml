@@ -605,9 +605,10 @@ jobs:
       - uses: ./.github/actions/setup-go
         id: go
       # The tests run as root and keep their files per user ID.
-      - name: Setup Testfiles Cache
+      - name: Restore Testfiles Cache
+        id: test-files
         if: env.ARCH == 'amd64'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             /tmp/conmon-test-images-0
@@ -640,7 +641,8 @@ jobs:
       - name: create symlink
         run: sudo ln -f -s "$(go env GOROOT)"/bin/* /usr/bin/
       # make integration installs ginkgo, which has no binaries.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: ginkgo
         with:
           path: .build/gotools/bin/ginkgo
           key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pkg/client/integration/go.mod') }}
@@ -651,6 +653,11 @@ jobs:
           go mod download
           go -C pkg/client/integration mod download
           make .install.ginkgo
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: env.SAVE_CACHE == 'true' && steps.ginkgo.outputs.cache-hit != 'true'
+        with:
+          path: .build/gotools/bin/ginkgo
+          key: ${{ steps.ginkgo.outputs.cache-primary-key }}
       # The output names the failed plain Go tests, which the report of the
       # specs does not, see .github/report-flakes.
       - name: Integration tests
@@ -681,6 +688,21 @@ jobs:
         with:
           name: test-integration-${{ env.ARCH }}-report
           path: .build/report/report.json
+      # The files the tests downloaded on a miss, also if they failed, but not
+      # the directory alone, which a failed download leaves behind.
+      - name: Check the test files
+        id: test-files-complete
+        if: ${{ !cancelled() && env.ARCH == 'amd64' }}
+        run: |
+          if [[ -f /tmp/conmon-test-images-0/busybox ]]; then
+            echo "complete=true" >>"$GITHUB_OUTPUT"
+          fi
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ !cancelled() && env.ARCH == 'amd64' && env.SAVE_CACHE == 'true' && steps.test-files.outputs.cache-hit != 'true' && steps.test-files-complete.outputs.complete == 'true' }}
+        with:
+          path: |
+            /tmp/conmon-test-images-0
+          key: ${{ steps.test-files.outputs.cache-primary-key }}
       # The tests write into the caches as root, they get saved as the runner
       # user.
       - name: Chown cache
@@ -749,7 +771,8 @@ jobs:
           cargo llvm-cov clean --workspace
           cargo build --locked
           mkdir -m 1777 "$PROFILE_DIR"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: ginkgo
         with:
           path: .build/gotools/bin/ginkgo
           key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pkg/client/integration/go.mod') }}
@@ -760,6 +783,11 @@ jobs:
           go mod download
           go -C pkg/client/integration mod download
           make .install.ginkgo
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: env.SAVE_CACHE == 'true' && steps.ginkgo.outputs.cache-hit != 'true'
+        with:
+          path: .build/gotools/bin/ginkgo
+          key: ${{ steps.ginkgo.outputs.cache-primary-key }}
       # The memory budget does not apply to an instrumented debug build. A
       # failure only costs the coverage, the job stays green and uploads what
       # got covered, which shows as a drop of the coverage. A failing job would
@@ -854,9 +882,14 @@ jobs:
         with:
           name: build-static-amd64
           path: .build/static
+      # Verifies the signatures of the CRI-O bundle, see .github/setup.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.4
       - run: .github/setup
       # critest runs the parallel specs with ginkgo, which has no binaries.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: ginkgo
         with:
           path: .build/gotools/bin/ginkgo
           key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pkg/client/integration/go.mod') }}
@@ -865,6 +898,11 @@ jobs:
           make .install.ginkgo
           sudo cp .build/gotools/bin/ginkgo /usr/local/bin
           ginkgo version
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: env.SAVE_CACHE == 'true' && steps.ginkgo.outputs.cache-hit != 'true'
+        with:
+          path: .build/gotools/bin/ginkgo
+          key: ${{ steps.ginkgo.outputs.cache-primary-key }}
       - name: Run critest
         shell: bash
         run: |

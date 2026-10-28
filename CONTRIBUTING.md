@@ -8,6 +8,7 @@ that we follow.
 - [Reporting Issues](#reporting-issues)
 - [Submitting Pull Requests](#submitting-pull-requests)
 - [Communications](#communications)
+- [Security](#security)
 
 ## Reporting Issues
 
@@ -24,6 +25,7 @@ to remove the extra stuff that doesn't really relate to the issue itself.
 The easier it is for us to reproduce it, the faster it'll be fixed!
 
 Please don't include any private/sensitive information in your issue!
+Security issues get reported privately, see the [Security](#security) section.
 
 ## Submitting Pull Requests
 
@@ -163,6 +165,11 @@ For general questions, or discussions, please use our [channel on the Kubernetes
 For discussions around issues/bugs and features, you can use the github
 [issues](https://github.com/containers/conmon-rs/issues) and
 [PRs](https://github.com/containers/conmon-rs/pulls) tracking system.
+
+## Security
+
+Report security issues privately as described in the
+[security policy](SECURITY.md).
 
 ## Code of Conduct
 
