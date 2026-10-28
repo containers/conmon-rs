@@ -20,6 +20,10 @@ with pkgs; rustPlatform.buildRustPackage {
     ];
   RUSTFLAGS = [
     "-Ctarget-feature=+crt-static"
+  ] ++ lib.optionals stdenv.hostPlatform.isPower64 [
+    # Rust links static PIE on ppc64le, but the glibc of nixpkgs has no
+    # rcrt1.o there.
+    "-Crelocation-model=static"
   ] ++ lib.optionals stdenv.hostPlatform.isMusl [
     "-Clink-args=-nostartfiles"
     "-Clink-args=-L${libunwind}/lib"
