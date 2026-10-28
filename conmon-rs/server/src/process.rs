@@ -1,21 +1,28 @@
-//! Signalling child processes without hitting another process which reused
-//! their PID.
+//! Signalling, waiting for and reaping child processes without hitting
+//! another process which reused their PID.
 
+use crate::{
+    async_fd,
+    mutex::{self, lock},
+};
 use anyhow::{Context, Result, bail};
 use nix::{
     errno::Errno,
     sys::{
         signal::{Signal, kill},
-        wait::{Id, WaitPidFlag, WaitStatus, waitid},
+        wait::{Id, WaitPidFlag, WaitStatus, waitid, waitpid},
     },
     unistd::{Pid, getpgid, getpid},
 };
 use std::{
     os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
     path::Path,
-    sync::{PoisonError, RwLock, RwLockWriteGuard},
+    sync::{Arc, LazyLock, Mutex, RwLock, RwLockWriteGuard},
+    thread,
 };
-use tracing::debug;
+use tokio::{io::Interest, sync::oneshot, task};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error};
 
 /// Read a PID file like the runtimes write it, the number may be followed by
 /// a line ending.
@@ -56,7 +63,7 @@ static REAP_LOCK: RwLock<()> = RwLock::new(());
 
 /// Hold while reaping a child of the server, see [`REAP_LOCK`].
 pub fn reap_guard() -> RwLockWriteGuard<'static, ()> {
-    REAP_LOCK.write().unwrap_or_else(PoisonError::into_inner)
+    mutex::write(&REAP_LOCK)
 }
 
 /// The fields of `/proc/<pid>/stat` which follow the parenthesized command
@@ -166,7 +173,7 @@ pub struct Process {
 
     /// Keeps referring to the process after it got reaped, unlike the PID.
     /// None if the kernel does not support pidfds.
-    pub(crate) pidfd: Option<OwnedFd>,
+    pidfd: Option<OwnedFd>,
 }
 
 impl Process {
@@ -198,14 +205,14 @@ impl Process {
     /// refers to the exited process then and the signal fails with `ESRCH`
     /// instead of hitting another process.
     pub fn signal(&self, signal: impl Into<Option<Signal>>) -> nix::Result<()> {
-        let _guard = REAP_LOCK.read().unwrap_or_else(PoisonError::into_inner);
+        let _guard = mutex::read(&REAP_LOCK);
         self.signal_unlocked(signal.into())
     }
 
     /// Whether the child still runs. A zombie which was not reaped yet does
     /// not, although it can still be signalled.
     pub fn is_running(&self) -> bool {
-        let _guard = REAP_LOCK.read().unwrap_or_else(PoisonError::into_inner);
+        let _guard = mutex::read(&REAP_LOCK);
         self.signal_unlocked(None).is_ok()
             && matches!(
                 waitid(
@@ -226,7 +233,7 @@ impl Process {
     /// the subreaper, so the group gets signalled as long as one of them is
     /// an unreaped child of the server, which keeps the group ID in use.
     pub fn signal_group(&self, signal: Signal) -> nix::Result<()> {
-        let _guard = REAP_LOCK.read().unwrap_or_else(PoisonError::into_inner);
+        let _guard = mutex::read(&REAP_LOCK);
         let own_pgid = getpgid(None).ok();
         if let Err(e) = self.signal_unlocked(None) {
             if signals_group(self.pid, own_pgid) && group_has_child(self.pid) {
@@ -260,141 +267,229 @@ impl Process {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::process::{CommandExt, ExitStatusExt};
+/// Whether a child of any thread of this process exited and was not
+/// reaped yet, without reaping it.
+pub fn has_zombie() -> bool {
+    !matches!(
+        waitid(
+            Id::All,
+            WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT
+        ),
+        Ok(WaitStatus::StillAlive) | Err(Errno::ECHILD)
+    )
+}
 
-    #[test]
-    fn stat_follows_the_command_name() {
-        assert_eq!(
-            Stat::parse(b"42 (a) b) (c) Z 1 42 42 0 -1"),
-            Some(Stat {
-                state: 'Z',
-                ppid: 1,
-                pgrp: 42
-            })
+/// The zombie children of this process, and whether the list is
+/// complete, see [`children`].
+pub fn zombie_children() -> (Vec<Pid>, bool) {
+    let (children, complete) = children();
+    let zombies = children.into_iter().filter(|pid| is_zombie(*pid)).collect();
+    (zombies, complete)
+}
+
+/// The children of all threads of this process. The kernel lists them in
+/// `/proc/self/task/<tid>/children`, which needs `CONFIG_PROC_CHILDREN`,
+/// fall back to scanning all processes without it. The list is not
+/// complete if a thread exited while listing them.
+fn children() -> (Vec<Pid>, bool) {
+    static PROC_CHILDREN: LazyLock<bool> =
+        LazyLock::new(|| Path::new("/proc/thread-self/children").exists());
+    if !*PROC_CHILDREN {
+        return (children_by_scan(), true);
+    }
+    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+        return (vec![], true);
+    };
+    let mut children = vec![];
+    let mut complete = true;
+    for task in tasks.flatten() {
+        // A thread which exited meanwhile took its list along, its
+        // children got another thread as parent.
+        let list = match std::fs::read_to_string(task.path().join("children")) {
+            Ok(list) => list,
+            Err(e) => {
+                if matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) {
+                    complete = false;
+                }
+                continue;
+            }
+        };
+        children.extend(
+            list.split_whitespace()
+                .filter_map(|pid| pid.parse().ok())
+                .map(Pid::from_raw),
         );
-        assert_eq!(Stat::parse(b"42 (a) R"), None);
-        // Any process can give itself a name which is not UTF-8.
-        assert_eq!(
-            Stat::parse(b"42 (\xff\xfe) Z 1 7 7 0 -1"),
-            Some(Stat {
-                state: 'Z',
-                ppid: 1,
-                pgrp: 7
-            })
-        );
     }
+    (children, complete)
+}
 
-    #[test]
-    fn pid_files_hold_positive_pids() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("pid");
-        for (content, pid) in [
-            ("42", Some(42)),
-            ("42\n", Some(42)),
-            ("0", None),
-            ("-1", None),
-            ("x", None),
-            ("", None),
-        ] {
-            std::fs::write(&path, content)?;
-            assert_eq!(
-                read_pid_file(&path).ok(),
-                pid.map(Pid::from_raw),
-                "{content:?}"
-            );
+/// The exit code of a process whose exit status is not known, because it did
+/// neither exit nor get killed by a signal, or waitpid failed after its pidfd
+/// got readable.
+pub(crate) const EXIT_CODE_UNKNOWN: i32 = -1;
+
+/// The exit code of a process whose exit status the blocking wait, used
+/// without pidfds, could not get, for example because it got reaped already.
+/// It is the same as
+/// [`EXIT_CODE_TIMED_OUT`](crate::child_reaper::EXIT_CODE_TIMED_OUT) for
+/// compatibility, the pidfd wait reports [`EXIT_CODE_UNKNOWN`] instead.
+pub(crate) const EXIT_CODE_WAIT_FAILED: i32 = -3;
+
+/// The exit code of a process which exited or got killed by a signal, the
+/// latter like a shell reports it.
+fn status_exit_code(status: WaitStatus) -> Option<i32> {
+    match status {
+        WaitStatus::Exited(_, code) => {
+            debug!("Exited {code}");
+            Some(code)
         }
-        assert!(read_pid_file(&dir.path().join("missing")).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn child_ids_are_positive_pids() {
-        let pid = |id: Option<u32>| child_pid(id).ok().map(Pid::as_raw);
-        assert_eq!(pid(Some(42)), Some(42));
-        assert_eq!(child_pid(42).ok(), Some(Pid::from_raw(42)));
-        assert_eq!(pid(Some(i32::MAX as u32)), Some(i32::MAX));
-        // A reaped child has none, zero and what does not fit would refer
-        // to process groups.
-        assert_eq!(pid(None), None);
-        assert_eq!(pid(Some(0)), None);
-        assert_eq!(pid(Some(i32::MAX as u32 + 1)), None);
-        assert_eq!(pid(Some(u32::MAX)), None);
-        for id in [None, Some(0), Some(u32::MAX)] {
-            let err = child_pid(id).err().map(|e| format!("{e:#}"));
-            assert!(err.is_some_and(|e| !e.is_empty()));
+        WaitStatus::Signaled(_, sig, _) => {
+            debug!("Signaled: {sig}");
+            Some(sig as i32 + 128)
         }
-    }
-
-    #[test]
-    fn children_are_found_by_scan() -> Result<()> {
-        let mut child = std::process::Command::new("sleep").arg("60").spawn()?;
-        let pid = child_pid(child.id())?;
-        let found = children_by_scan().contains(&pid);
-        let zombie = is_zombie(pid);
-        child.kill()?;
-        child.wait()?;
-        assert!(found);
-        assert!(!zombie);
-        Ok(())
-    }
-
-    #[test]
-    fn own_process_group_is_not_signalled() -> Result<()> {
-        let own = getpgid(None)?;
-        assert!(!signals_group(own, Some(own)));
-        assert!(!signals_group(Pid::from_raw(1), Some(own)));
-        assert!(!signals_group(Pid::from_raw(0), None));
-        assert!(signals_group(Pid::from_raw(own.as_raw() + 1), Some(own)));
-        Ok(())
-    }
-
-    #[test]
-    fn signal_group_reaches_the_group_until_reaped() -> Result<()> {
-        for use_pidfd in [true, false] {
-            // A shell in a group of its own with a child in the same group.
-            let mut child = std::process::Command::new("sh")
-                .args(["-c", "sleep 60 & wait"])
-                .process_group(0)
-                .spawn()?;
-            let pid = child_pid(child.id())?;
-            let process = if use_pidfd {
-                Process::open(pid)
-            } else {
-                Process::child(pid)
-            };
-
-            process.signal_group(Signal::SIGTERM)?;
-            assert_eq!(child.wait()?.signal(), Some(Signal::SIGTERM as i32));
-            // Its group is gone with it, nothing gets signalled anymore.
-            assert!(process.signal_group(Signal::SIGTERM).is_err());
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn signal_group_reaches_members_of_reaped_leader() -> Result<()> {
-        // The leader of a group, and a member which outlives it.
-        let mut leader = std::process::Command::new("sleep")
-            .arg("60")
-            .process_group(0)
-            .spawn()?;
-        let pgid = child_pid(leader.id())?;
-        let mut member = std::process::Command::new("sleep")
-            .arg("60")
-            .process_group(pgid.as_raw())
-            .spawn()?;
-        leader.kill()?;
-        leader.wait()?;
-
-        let process = Process::child(pgid);
-        process.signal_group(Signal::SIGTERM)?;
-        assert_eq!(member.wait()?.signal(), Some(Signal::SIGTERM as i32));
-
-        // Without members, nothing gets signalled.
-        assert!(process.signal_group(Signal::SIGTERM).is_err());
-        Ok(())
+        _ => None,
     }
 }
+
+/// Wait for a process to exit using pidfd_open for async polling,
+/// with a blocking waitpid fallback for older kernels.
+pub async fn wait_for_exit_code(token: CancellationToken, pid: Pid) -> i32 {
+    debug!("Waiting for exit code of pid {pid}");
+
+    let exit_code = match try_pidfd_wait(pid).await {
+        Some(code) => code,
+        None => {
+            debug!("pidfd not available, falling back to blocking waitpid");
+            let (tx, rx) = oneshot::channel();
+            spawn_waitpid_thread(move || {
+                let _ = tx.send(wait_for_exit_code_blocking(pid));
+            });
+            rx.await.unwrap_or_else(|_| {
+                error!("waitpid thread exited without a result");
+                EXIT_CODE_WAIT_FAILED
+            })
+        }
+    };
+
+    token.cancel();
+    exit_code
+}
+
+/// Stack size of the waitpid threads, which only wait and log.
+const WAITPID_STACK_SIZE: usize = 256 * 1024;
+
+/// Run a blocking waitpid on a dedicated thread. It blocks for the lifetime
+/// of the process, so it must not occupy a thread of the bounded blocking
+/// pool, which serves the file I/O of all containers. If no thread can be
+/// spawned, for example because of a pids limit, queue it on the pool
+/// rather than failing the wait.
+fn spawn_waitpid_thread<F: FnOnce() + Send + 'static>(f: F) {
+    // The builder drops the closure on failure, keep it for the fallback.
+    let slot = Arc::new(Mutex::new(Some(f)));
+    fn run<F: FnOnce()>(slot: &Mutex<Option<F>>) {
+        if let Some(f) = lock(slot).take() {
+            f();
+        }
+    }
+
+    let thread_slot = slot.clone();
+    if let Err(e) = thread::Builder::new()
+        .name("waitpid".into())
+        .stack_size(WAITPID_STACK_SIZE)
+        .spawn(move || run(&thread_slot))
+    {
+        error!("Unable to spawn waitpid thread, using blocking pool: {e:#}");
+        task::spawn_blocking(move || run(&slot));
+    }
+}
+
+/// Try to use pidfd_open + async polling. Returns None if pidfd is unavailable.
+async fn try_pidfd_wait(pid: Pid) -> Option<i32> {
+    // The readiness comes from epoll and the wait uses WNOHANG, so the
+    // descriptor itself does not need to be non-blocking.
+    let owned_fd = match pidfd_open(pid) {
+        Ok(fd) => fd,
+        // Gone already, the blocking wait would only learn the same.
+        Err(Errno::ESRCH) => {
+            debug!("PID {pid} got reaped already");
+            return Some(EXIT_CODE_UNKNOWN);
+        }
+        Err(_) => return None,
+    };
+
+    let async_fd = match async_fd::register(owned_fd, Interest::READABLE) {
+        Ok(fd) => fd,
+        Err(e) => {
+            error!("Failed to create AsyncFd from pidfd: {e:#}");
+            return None;
+        }
+    };
+
+    if async_fd.readable().await.is_err() {
+        return None;
+    }
+
+    // Through the pidfd, which refers to this process only: once the
+    // orphan sweep took it, its PID may belong to another child already.
+    // Kernels before 5.4 only know the PID.
+    let flags = WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG;
+    let reaping = reap_guard();
+    let status = match waitid(Id::PIDFd(async_fd.get_ref().as_fd()), flags) {
+        Err(Errno::EINVAL) => waitpid(pid, WaitPidFlag::WNOHANG.into()),
+        status => status,
+    };
+    drop(reaping);
+    match status.map(status_exit_code) {
+        Ok(Some(code)) => Some(code),
+        Ok(None) => {
+            debug!("Unexpected wait status after pidfd readable");
+            Some(EXIT_CODE_UNKNOWN)
+        }
+        // The orphan sweep may have taken it meanwhile.
+        Err(Errno::ECHILD) => {
+            debug!("PID {pid} got reaped already");
+            Some(EXIT_CODE_UNKNOWN)
+        }
+        Err(e) => {
+            error!("waitid after pidfd readable failed: {e:#}");
+            Some(EXIT_CODE_UNKNOWN)
+        }
+    }
+}
+
+/// Wait for the exit without reaping, which then happens under the
+/// [`reap_guard`].
+fn wait_for_exit_code_blocking(pid: Pid) -> i32 {
+    loop {
+        match waitid(Id::Pid(pid), WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT) {
+            Ok(_) => {}
+            Err(Errno::EINTR) => continue,
+            Err(Errno::ECHILD) => {
+                debug!("PID {pid} got reaped already");
+                return EXIT_CODE_WAIT_FAILED;
+            }
+            Err(err) => {
+                error!("Unable to wait for pid {pid}: {err:#}");
+                return EXIT_CODE_WAIT_FAILED;
+            }
+        }
+        let reaping = reap_guard();
+        let status = waitpid(pid, Some(WaitPidFlag::WNOHANG));
+        drop(reaping);
+        match status.map(status_exit_code) {
+            Ok(Some(code)) => return code,
+            Ok(None) => continue,
+            Err(Errno::EINTR) => {
+                debug!("Failed to wait for pid on EINTR, retrying");
+                continue;
+            }
+            Err(err) => {
+                error!("Unable to waitpid on {err:#}");
+                return EXIT_CODE_WAIT_FAILED;
+            }
+        };
+    }
+}
+
+#[cfg(test)]
+mod tests;

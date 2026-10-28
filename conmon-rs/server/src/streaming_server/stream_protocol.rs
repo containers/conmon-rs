@@ -10,6 +10,19 @@ pub const STREAM_TYPE_HEADER: &str = "streamType";
 /// together, the default of the kubelet and CRI-O.
 pub const STREAM_CREATION_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The first of the protocols a client requested which the server supports,
+/// in the order of the client, with its name.
+pub fn first_supported<'a, T: Copy>(
+    requested: impl IntoIterator<Item = &'a str>,
+    supported: &[(&'static str, T)],
+) -> Option<(T, &'static str)> {
+    requested.into_iter().find_map(|protocol| {
+        supported
+            .iter()
+            .find_map(|(name, value)| (*name == protocol).then_some((*value, *name)))
+    })
+}
+
 /// How much of what a client sent a log shows.
 const MAX_LOGGED_LEN: usize = 64;
 

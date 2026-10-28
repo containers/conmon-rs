@@ -6,11 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/detach"
 )
 
 // testOut is an output stream which records what got written and whether
@@ -252,5 +257,199 @@ func TestStdinEOFEndsAttachOnlyWhenOutputCannotEnd(t *testing.T) {
 				t.Fatalf("got error %v, want %v", err, context.Canceled)
 			}
 		})
+	}
+}
+
+// serveAttachSocket listens like the attach socket of a container and sends
+// output on every connection until it gets closed.
+func serveAttachSocket(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "attach")
+
+	listener, err := net.ListenUnix("unixpacket", &net.UnixAddr{Name: path, Net: "unixpacket"})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	t.Cleanup(func() { listener.Close() })
+
+	go func() {
+		for {
+			conn, err := listener.AcceptUnix()
+			if err != nil {
+				return
+			}
+
+			go func() {
+				defer conn.Close()
+
+				for {
+					if _, err := conn.Write([]byte{attachPipeStdout, 'x'}); err != nil {
+						return
+					}
+
+					time.Sleep(10 * time.Millisecond)
+				}
+			}()
+		}
+	}()
+
+	return path
+}
+
+func TestCloseEndsAttach(t *testing.T) {
+	t.Parallel()
+
+	for _, withStdin := range []bool{false, true} {
+		t.Run("stdin "+strconv.FormatBool(withStdin), func(t *testing.T) {
+			t.Parallel()
+
+			c := newTestClient(t, t.TempDir(), logrus.New())
+
+			stdout, stdoutWriter := io.Pipe()
+			cfg := &AttachConfig{
+				ID:         "id",
+				SocketPath: serveAttachSocket(t),
+				Streams:    AttachStreams{Stdout: &Out{stdoutWriter}},
+			}
+
+			if withStdin {
+				stdin, _ := io.Pipe()
+				cfg.Streams.Stdin = &In{stdin}
+			}
+
+			attachErr := make(chan error, 1)
+
+			go func() { attachErr <- c.attach(t.Context(), cfg) }()
+
+			// The attach is running once the output arrives.
+			if _, err := io.ReadFull(stdout, make([]byte, 1)); err != nil {
+				t.Fatalf("read output: %v", err)
+			}
+
+			// The output stream gets closed.
+			drained := make(chan error, 1)
+
+			go func() {
+				_, err := io.Copy(io.Discard, stdout)
+				drained <- err
+			}()
+
+			if err := c.Close(); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+
+			select {
+			case err := <-attachErr:
+				if !errors.Is(err, ErrClientClosed) {
+					t.Fatalf("got error %v, want %v", err, ErrClientClosed)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("attach still running after Close")
+			}
+
+			if err := <-drained; err != nil {
+				t.Fatalf("drain output: %v", err)
+			}
+		})
+	}
+}
+
+func TestClosedFileStdinKeepsAttach(t *testing.T) {
+	t.Parallel()
+
+	c := newTestClient(t, t.TempDir(), logrus.New())
+
+	stdin, stdinWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+
+	t.Cleanup(func() { stdinWriter.Close() })
+
+	stdout, stdoutWriter := io.Pipe()
+	cfg := &AttachConfig{
+		ID:         "id",
+		SocketPath: serveAttachSocket(t),
+		Streams:    AttachStreams{Stdin: &In{stdin}, Stdout: &Out{stdoutWriter}},
+	}
+
+	attachErr := make(chan error, 1)
+
+	go func() { attachErr <- c.attach(t.Context(), cfg) }()
+
+	// The attach is running once the output arrives.
+	if _, err := io.ReadFull(stdout, make([]byte, 1)); err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+
+	go func() { _, _ = io.Copy(io.Discard, stdout) }() //nolint:errcheck // drained only
+
+	// Like on Shutdown, a read of the closed file fails with os.ErrClosed,
+	// which does not end the attach.
+	c.closeAttachStdins()
+
+	select {
+	case err := <-attachErr:
+		t.Fatalf("attach ended with %v after its stdin got closed", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if err := <-attachErr; !errors.Is(err, ErrClientClosed) {
+		t.Fatalf("got error %v, want %v", err, ErrClientClosed)
+	}
+}
+
+func TestDetachStopsOutput(t *testing.T) {
+	t.Parallel()
+
+	c := newTestClient(t, t.TempDir(), logrus.New())
+
+	stdin, stdinWriter := io.Pipe()
+	// A slow stream, which is still being written to on the detach.
+	stdout := &testOut{delay: 20 * time.Millisecond}
+	cfg := &AttachConfig{
+		ID:         "id",
+		SocketPath: serveAttachSocket(t),
+		Streams:    AttachStreams{Stdin: &In{stdin}, Stdout: &Out{stdout}},
+		DetachKeys: []byte{16, 17},
+	}
+
+	attachErr := make(chan error, 1)
+
+	go func() { attachErr <- c.attach(t.Context(), cfg) }()
+
+	waitFor(t, "no output", func() bool {
+		out, _ := stdout.state()
+
+		return out != ""
+	})
+
+	// The keys get read one at a time, like from a terminal.
+	for _, key := range cfg.DetachKeys {
+		if _, err := stdinWriter.Write([]byte{key}); err != nil {
+			t.Fatalf("write detach key: %v", err)
+		}
+	}
+
+	if err := <-attachErr; !errors.Is(err, detach.ErrDetach) {
+		t.Fatalf("got error %v, want %v", err, detach.ErrDetach)
+	}
+
+	// The output stopped before the attach returned.
+	out, closed := stdout.state()
+	if !closed {
+		t.Fatal("stdout not closed when the attach returned")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	if later, _ := stdout.state(); later != out {
+		t.Fatalf("output written after the attach returned: %q", later[len(out):])
 	}
 }

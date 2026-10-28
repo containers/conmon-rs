@@ -71,24 +71,12 @@ pub mod conmon_capnp {
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing {
-    pub use crate::{
-        channel::fuzzing::channel,
-        container_log::fuzzing::lines as log_lines,
-        port_forward::fuzzing::{query_ports, spdy as port_forward_spdy},
-        remotecommand::fuzzing::resize_events,
-        spdy::fuzzing::{
-            connection as spdy_connection, frames as spdy_frames, header_block as spdy_header_block,
-        },
-        streaming_server::fuzzing::{client_messages, pending_stdin, upgrade_headers},
-    };
+    pub use crate::{container_log::fuzzing::lines as log_lines, streaming_server::fuzzing::*};
 }
 
 mod async_fd;
 mod attach;
-mod bounded_hashmap;
-mod budget;
 mod capnp_util;
-mod channel;
 mod child;
 mod child_reaper;
 mod config;
@@ -96,7 +84,6 @@ mod container_io;
 mod container_log;
 mod fd_mapping;
 mod fd_socket;
-mod idle;
 mod init;
 mod journal;
 mod listener;
@@ -104,14 +91,12 @@ mod mutex;
 mod notify;
 mod oom_watcher;
 mod pause;
-mod port_forward;
 mod process;
 mod random_id;
-mod remotecommand;
 mod rpc;
+mod runtime_args;
 mod server;
-mod spdy;
-mod stream_protocol;
+mod single_flight;
 mod streaming_server;
 mod streams;
 mod tail;
@@ -123,4 +108,3 @@ mod test_util;
 #[cfg(all(target_os = "linux", target_arch = "s390x", target_env = "musl"))]
 mod unwind;
 mod version;
-mod web;
