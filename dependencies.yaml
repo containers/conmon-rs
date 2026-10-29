@@ -55,8 +55,6 @@ dependencies:
         match: "RUST_VERSION:"
       - path: .github/workflows/gh-pages.yml
         match: "RUST_VERSION:"
-      - path: .github/workflows/advisories.yml
-        match: "RUST_VERSION:"
 
   # The fuzz targets need a nightly toolchain. zeitgeist cannot track the
   # dated nightlies, so bump it together with the stable rust version above to

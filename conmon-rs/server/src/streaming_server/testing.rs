@@ -6,17 +6,17 @@ use crate::{
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     streaming_server::{
-        ADDR, AttachSession, MAX_MESSAGE_SIZE, StreamingServer, spdy::testing::Client,
-        web::CloseCode,
+        ADDR, AttachSession, MAX_MESSAGE_SIZE, Session, StreamingServer, remotecommand::Version,
+        spdy::testing::Client, web::CloseCode,
     },
 };
 use anyhow::{Context, Result};
 use nix::unistd::Pid;
 use std::io;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, duplex},
     net::{TcpStream, tcp::OwnedReadHalf},
-    task::JoinHandle,
+    task::{self, JoinHandle},
     time::{self, Duration},
 };
 use tokio_util::sync::CancellationToken;
@@ -259,15 +259,11 @@ pub(super) async fn spdy_attach_version(
     let mut server = StreamingServer::default();
     server.start_if_required().await?;
     let url = server
-        .attach_url(AttachSession {
-            container_id: "id".into(),
+        .attach_url(spdy_attach_config(
             child,
-            stdin: true,
-            stdout: true,
-            stderr: false,
             stop_after_stdin_eof,
             idle_timeout,
-        })
+        ))
         .await?;
     let (response, stream) = upgrade(&server, &url, "POST", upgrade_headers).await?;
     assert!(response.starts_with("http/1.1 101"), "{response}");
@@ -281,11 +277,57 @@ pub(super) async fn spdy_attach_version(
         "{response}"
     );
 
-    let mut client = Client::new(stream)?;
+    let client = open_attach_streams(Client::new(stream)?).await?;
+    Ok((io, server, client))
+}
+
+/// Like [`spdy_attach_version`] without the upgrade and without a terminal,
+/// the session runs on an in memory connection of the capacity in a task of
+/// the current [`tokio::task::LocalSet`].
+pub(super) async fn spdy_attach_duplex(
+    stop_after_stdin_eof: bool,
+    idle_timeout: Option<Duration>,
+    version: Version,
+    capacity: usize,
+) -> Result<(SharedContainerIO, Client<DuplexStream>)> {
+    let (io, child, _token) = attach_child(false)?;
+    let (client, server) = duplex(capacity);
+    let session = Session::Attach(spdy_attach_config(
+        child,
+        stop_after_stdin_eof,
+        idle_timeout,
+    ));
+    task::spawn_local(StreamingServer::handle_spdy(server, session, version));
+    let client = open_attach_streams(Client::new(client)?).await?;
+    Ok((io, client))
+}
+
+/// An attach session of the child with stdin and stdout.
+fn spdy_attach_config(
+    child: ReapableChild,
+    stop_after_stdin_eof: bool,
+    idle_timeout: Option<Duration>,
+) -> AttachSession {
+    AttachSession {
+        container_id: "id".into(),
+        child,
+        stdin: true,
+        stdout: true,
+        stderr: false,
+        stop_after_stdin_eof,
+        idle_timeout,
+    }
+}
+
+/// Open the streams of an attach client: error 1, stdin 3 and stdout 5.
+async fn open_attach_streams<T>(mut client: Client<T>) -> Result<Client<T>>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
     for (stream_id, typ) in [(1, "error"), (3, "stdin"), (5, "stdout")] {
         client.open(stream_id, [("streamType", typ)].into()).await?;
     }
-    Ok((io, server, client))
+    Ok(client)
 }
 
 /// An attach session over a WebSocket with the subprotocol, the token
