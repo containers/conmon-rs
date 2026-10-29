@@ -1,6 +1,6 @@
 ---
-# The container images of alpine, grype, node and zizmor are pinned by the
-# digest of their index as well, which a bump of the version updates, see
+# The container images of alpine, binfmt, grype, node and zizmor are pinned by
+# the digest of their index as well, which a bump of the version updates, see
 # `skopeo inspect --format '{{.Digest}}' docker://<image>:<tag>`. make
 # verify-digests checks them, the advisories workflow every day.
 dependencies:
@@ -122,10 +122,8 @@ dependencies:
   - name: nix
     version: 2.35.3
     refPaths:
-      - path: .github/workflows/ci.yml
-        match: "NIX_VERSION:"
-      - path: .github/workflows/build-static.yml
-        match: "NIX_VERSION:"
+      - path: .github/actions/setup-nix/action.yml
+        match: releases.nixos.org/nix/nix-
 
   - name: cosign
     version: 3.1.4
@@ -178,11 +176,11 @@ dependencies:
   # https://nodejs.org/dist/index.json names with its codename, and raise the
   # constraint by one major then.
   - name: node
-    version: 24.22.1
+    version: 26.13.0
     upstream:
       flavour: github
       url: nodejs/node
-      constraints: < 27.0.0
+      constraints: < 28.0.0
     refPaths:
       - path: .github/workflows/ci.yml
         match: "node-version:"
@@ -220,6 +218,16 @@ dependencies:
     refPaths:
       - path: .github/workflows/build-static.yml
         match: "alpine:"
+
+  # The qemu of the smoke tests of the build-static workflow, whose image
+  # runs privileged. The tag names the build as well, qemu-vX.Y.Z-BUILD, so
+  # that a rebuild does not move it. The tags have no upstream which
+  # zeitgeist can check, see https://hub.docker.com/r/tonistiigi/binfmt/tags.
+  - name: binfmt
+    version: 10.2.3
+    refPaths:
+      - path: .github/workflows/build-static.yml
+        match: "binfmt:qemu-v"
 
   # The runners of the jobs which run the server, the other jobs use
   # ubuntu-latest.

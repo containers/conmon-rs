@@ -1,0 +1,58 @@
+name: setup-rust
+description: >-
+  Installs capnproto, which the build script needs, and a Rust toolchain
+  through rustup as the default one, and restores the Rust caches. Like for
+  the Go caches, only main saves them. Swatinem/rust-cache hashes every
+  installed toolchain into its key, so the toolchains of the runner image get
+  removed: an update of its stable toolchain would start new caches otherwise,
+  which push the ones of main out of the 10 GB of the repository.
+inputs:
+  toolchain:
+    description: The toolchain to install and make the default one.
+    required: true
+  components:
+    description: Additional components of the toolchain, separated by commas.
+    default: ""
+  msrv:
+    description: Also install the rust-version toolchain of Cargo.toml, which make lint-msrv uses.
+    default: "false"
+  key:
+    description: An additional key of the caches, like for another toolchain or profile.
+    default: ""
+  save-if:
+    description: Whether to save the caches, like SAVE_CACHE of the ci workflow.
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: Install capnproto
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y capnproto
+    - name: Select Toolchain
+      shell: bash
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
+        COMPONENTS: ${{ inputs.components }}
+        INSTALL_MSRV: ${{ inputs.msrv }}
+      run: |
+        rustup toolchain install "$TOOLCHAIN" --profile minimal ${COMPONENTS:+--component "$COMPONENTS"}
+        rustup default "$TOOLCHAIN"
+        HOST=$(rustc -vV | sed -n 's/^host: //p')
+        KEEP=("$TOOLCHAIN-$HOST")
+        if [[ $INSTALL_MSRV == true ]]; then
+          MSRV=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          rustup toolchain install "$MSRV" --profile minimal
+          KEEP+=("$MSRV-$HOST")
+        fi
+        for INSTALLED in $(rustup toolchain list --quiet); do
+          if [[ " ${KEEP[*]} " != *" $INSTALLED "* ]]; then
+            rustup toolchain uninstall "$INSTALLED"
+          fi
+        done
+        rustup toolchain list
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        key: ${{ inputs.key }}
+        save-if: ${{ inputs.save-if }}

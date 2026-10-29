@@ -1,0 +1,30 @@
+name: publish-marker
+description: >-
+  Points the latest-X.txt marker of the bucket to the commit of a branch or
+  tag checked out at the root of the workspace, see .github/create-marker,
+  which only moves it forward.
+inputs:
+  credentials:
+    description: The credentials of the service account which writes to the bucket.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Create the marker
+      id: marker
+      shell: bash
+      run: .github/create-marker
+    - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+      if: steps.marker.outputs.forward == 'true'
+      with:
+        credentials_json: ${{ inputs.credentials }}
+    # The marker changes in place, caches must not serve an old one.
+    - uses: google-github-actions/upload-cloud-storage@6397bd7208e18d13ba2619ee21b9873edc94427a # v3.0.0
+      if: steps.marker.outputs.forward == 'true'
+      with:
+        path: .
+        glob: latest-*.txt
+        destination: cri-o/conmon-rs
+        process_gcloudignore: false
+        headers: |-
+          cache-control: no-cache

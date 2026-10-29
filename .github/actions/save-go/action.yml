@@ -1,0 +1,33 @@
+name: save-go
+description: >-
+  Saves the Go caches which the setup-go action restored, with its key and
+  paths, at the end of a job. The jobs which run the tests as root leave
+  files of root in the caches, they get saved as the runner user.
+inputs:
+  key:
+    description: The key output of setup-go.
+    required: true
+  paths:
+    description: The paths output of setup-go.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Chown the caches
+      shell: bash
+      env:
+        CACHE_PATHS: ${{ inputs.paths }}
+      run: |
+        DIRS=()
+        while read -r DIR; do
+          if [[ -n $DIR && -d $DIR ]]; then
+            DIRS+=("$DIR")
+          fi
+        done <<<"$CACHE_PATHS"
+        if ((${#DIRS[@]})); then
+          sudo chown -R "$(id -u):$(id -g)" "${DIRS[@]}"
+        fi
+    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.paths }}
+        key: ${{ inputs.key }}

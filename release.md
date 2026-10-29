@@ -73,7 +73,9 @@ fail. A release still takes the binaries of the earlier attempt as long as
 the other jobs pass, but the run stays failed. A cancelled publish-marker job
 is fine: the runs of main publish the `latest-main.txt` marker one at a time,
 and a job which queues later replaces one which waits. The marker only moves
-forward, at worst it stays behind until the run of the next commit.
+forward, at worst it stays behind until the run of the next commit. A job
+which cannot read the current marker from the bucket fails instead of
+replacing it, rerun it once the bucket answers again.
 
 The same tag also versions the Go module `github.com/containers/conmon-rs`, so
 consumers like CRI-O pick the release up with `go get

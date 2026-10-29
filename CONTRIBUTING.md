@@ -98,6 +98,11 @@ $ sudo env PATH="$PATH" GOENV="$(go env GOENV)" GOMODCACHE="$(go env GOMODCACHE)
     GOTOOLCHAIN="$(go env GOTOOLCHAIN)" make integration CONMON_BINARY=result/bin/conmonrs MAX_RSS_KB=5500
 ```
 
+`make release-static` builds the static binary for the local architecture,
+the flake supports x86_64 and aarch64 Linux hosts. `nix build .#amd64`,
+`.#arm64`, `.#ppc64le` or `.#s390x` builds the binary of an architecture into
+`result/bin/conmonrs`, cross compiled on the other ones, like CI does.
+
 PRs that fix issues should include a reference like `Fixes #XXXX` in the PR
 description, as the PR template asks, so that GitHub closes the referenced
 issue when the PR is merged.

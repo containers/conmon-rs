@@ -1,0 +1,14 @@
+name: setup-nix
+description: >-
+  Installs the pinned release of nix. A stalled download from the binary
+  caches fails after half a minute, nix retries it, instead of hanging for the
+  five minutes of the default.
+runs:
+  using: composite
+  steps:
+    - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+      with:
+        install_url: https://releases.nixos.org/nix/nix-2.35.3/install
+        extra_nix_config: |
+          connect-timeout = 10
+          stalled-download-timeout = 30

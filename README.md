@@ -75,11 +75,11 @@ copr](https://copr.fedorainfracloud.org/coprs/rhcontainerbot/podman-next/package
 
 The bucket serves the files of a commit at
 `https://storage.googleapis.com/cri-o/conmon-rs/$COMMIT/`, `latest-main.txt`
-names the latest commit of `main` and `latest-X.Y.txt` the latest release tag
-of a minor version. Since v1.1.0, the [GitHub
-releases](https://github.com/containers/conmon-rs/releases) carry the same
-binaries as `conmonrs.$ARCH` with their signatures, built from the commit of
-the tag. To verify a binary by hand, download it with its files and set
+names the latest commit of `main` whose binaries got published and whose tests
+passed, and `latest-X.Y.txt` the latest release tag of a minor version. Since
+v1.1.0, the [GitHub releases](https://github.com/containers/conmon-rs/releases)
+carry the same binaries as `conmonrs.$ARCH` with their signatures, built from
+the commit of the tag. To verify a binary by hand, download it with its files and set
 `COMMIT` to that commit (the assignments `COMMIT=$(...)` need a POSIX shell
 like bash or zsh), either for a release:
 

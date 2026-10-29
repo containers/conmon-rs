@@ -1,18 +1,76 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# update the latest version marker file for the branch
+# Writes the latest-X.txt marker of the checked out commit into the current
+# directory, which the publish-marker action uploads to the bucket. A branch
+# gets latest-BRANCH.txt with the commit, a tag vX.Y.Z gets latest-X.Y.txt with
+# the tag. Runs finish in any order, so the marker only moves forward: no
+# marker gets written if the one of the bucket already points to a newer
+# commit of the branch or a newer release. Only a missing marker counts as
+# none, any other error to read it fails, an older run could move it back
+# otherwise. Sets forward in GITHUB_OUTPUT to whether the marker got written.
+BASE_URL=https://storage.googleapis.com/cri-o/conmon-rs
+
 MARKER=$(git rev-parse --abbrev-ref HEAD)
 VERSION=$(git rev-parse HEAD)
-
-# if in detached head state, we assume we're on a tag
+TAG=
+# A detached HEAD is the checkout of a tag, the one of the run if more than
+# one points to the commit.
 if [[ $MARKER == HEAD ]]; then
-    # use the major.minor as marker and the tag as content
-    VERSION=$(git describe --tags --exact-match)
+    # The marker is the major.minor version, its content the tag.
+    if [[ ${GITHUB_REF_TYPE:-} == tag ]]; then
+        VERSION=$GITHUB_REF_NAME
+    else
+        VERSION=$(git describe --tags --exact-match)
+    fi
     if [[ ! $VERSION =~ ^v([0-9]+\.[0-9]+)\. ]]; then
         echo "Tag $VERSION does not look like vX.Y.Z" >&2
         exit 1
     fi
     MARKER=${BASH_REMATCH[1]}
+    TAG=$VERSION
+elif [[ $(git rev-parse --is-shallow-repository) == true ]]; then
+    echo "The marker of a branch needs the full history to compare the commits" >&2
+    exit 1
 fi
-echo "$VERSION" >"latest-$MARKER.txt"
+FILE=latest-$MARKER.txt
+
+# The timestamp keeps caches from serving an old marker. Without --fail, a
+# missing marker is no error to retry, transient errors of the server and of
+# the connection are.
+TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
+STATUS=$(curl -sSL --retry 5 --retry-delay 3 --retry-all-errors -o "$TMP" -w '%{http_code}' \
+    "$BASE_URL/$FILE?ts=$(date +%s)") || true
+CURRENT=
+case $STATUS in
+200) CURRENT=$(<"$TMP") ;;
+404) echo "The bucket has no $FILE yet" ;;
+*)
+    echo "Unable to read $BASE_URL/$FILE: HTTP $STATUS" >&2
+    exit 1
+    ;;
+esac
+
+# A marker which names no release or no commit of the history gets replaced.
+FORWARD=true
+if [[ -n $TAG ]]; then
+    if [[ $CURRENT =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] &&
+        [[ $(printf '%s\n' "$CURRENT" "$TAG" | sort -V | tail -1) != "$TAG" ]]; then
+        FORWARD=false
+    fi
+elif [[ $CURRENT =~ ^[0-9a-f]{40}$ ]] &&
+    git cat-file -e "$CURRENT^{commit}" 2>/dev/null &&
+    ! git merge-base --is-ancestor "$CURRENT" "$VERSION"; then
+    FORWARD=false
+fi
+
+if [[ $FORWARD == true ]]; then
+    echo "$VERSION" >"$FILE"
+    echo "Pointing $FILE from ${CURRENT:-nothing} to $VERSION"
+else
+    echo "$FILE already points to the newer $CURRENT"
+fi
+if [[ -n ${GITHUB_OUTPUT:-} ]]; then
+    echo "forward=$FORWARD" >>"$GITHUB_OUTPUT"
+fi
