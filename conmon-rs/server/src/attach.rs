@@ -1,6 +1,7 @@
 use crate::{
     async_fd,
     container_io::{DRAIN_MAX_WAIT, Drain, Message, Pipe},
+    fs_util::{FileId, RemoveError},
     listener,
     mutex::lock,
 };
@@ -18,7 +19,7 @@ use std::{
     io::{self, IoSlice},
     os::{
         fd::{AsFd, AsRawFd},
-        unix::fs::{FileTypeExt, MetadataExt},
+        unix::fs::FileTypeExt,
     },
     path::{Path, PathBuf},
     pin::{Pin, pin},
@@ -85,8 +86,7 @@ pub struct SharedContainerAttach {
 struct AttachListener {
     /// Tells the listeners of a path apart.
     id: u64,
-    dev: u64,
-    ino: u64,
+    file: FileId,
 
     /// Stops accepting connections, the accepted ones stay.
     stop: CancellationToken,
@@ -100,11 +100,7 @@ impl AttachListener {
 
     /// Whether the socket file at the path is still the one listened on.
     fn is_bound_at(&self, path: &Path) -> bool {
-        Self::is_file(path, self.dev, self.ino)
-    }
-
-    fn is_file(path: &Path, dev: u64, ino: u64) -> bool {
-        fs::symlink_metadata(path).is_ok_and(|m| m.dev() == dev && m.ino() == ino)
+        self.file.is_at(path)
     }
 }
 
@@ -287,10 +283,14 @@ impl SharedContainerAttach {
             listeners.insert(path.to_path_buf(), listener);
             return;
         }
-        if listener.is_bound_at(path)
-            && let Err(e) = fs::remove_file(path)
-        {
-            debug!("Unable to remove attach socket {}: {e}", path.display());
+        match listener.file.remove_at(path) {
+            Ok(_) => {}
+            Err(RemoveError::Stat(e)) => {
+                debug!("Unable to stat attach socket {}: {e}", path.display());
+            }
+            Err(RemoveError::Remove(e)) => {
+                debug!("Unable to remove attach socket {}: {e}", path.display());
+            }
         }
     }
 
@@ -562,8 +562,7 @@ impl Attach {
             path.to_path_buf(),
             AttachListener {
                 id,
-                dev: metadata.dev(),
-                ino: metadata.ino(),
+                file: FileId::new(&metadata),
                 stop: stop.clone(),
             },
         );

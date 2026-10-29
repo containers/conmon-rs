@@ -589,7 +589,7 @@ impl Encoder {
 }
 
 /// The entry points of the fuzz targets.
-#[cfg(feature = "fuzzing")]
+#[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 
 /// The Adler-32 checksum of the dictionary, which the zlib header names.

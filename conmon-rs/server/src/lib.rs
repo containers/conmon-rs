@@ -59,6 +59,7 @@ pub fn run() -> Result<()> {
 pub mod conmon_capnp {
     #![allow(
         clippy::all,
+        clippy::nursery,
         clippy::pedantic,
         clippy::restriction,
         unused_parens,
@@ -68,10 +69,16 @@ pub mod conmon_capnp {
 }
 
 /// The entry points of the fuzz targets in `fuzz/`, not an API.
-#[cfg(feature = "fuzzing")]
+#[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub mod fuzzing {
-    pub use crate::{container_log::fuzzing::lines as log_lines, streaming_server::fuzzing::*};
+    pub use crate::{
+        container_log::fuzzing::lines as log_lines, journal::fuzzing::entry as journal_entry,
+        notify::fuzzing::filter as notify_filter, streaming_server::fuzzing::*,
+    };
+
+    #[cfg(test)]
+    mod tests;
 }
 
 mod async_fd;
@@ -84,6 +91,7 @@ mod container_io;
 mod container_log;
 mod fd_mapping;
 mod fd_socket;
+mod fs_util;
 mod init;
 mod journal;
 mod listener;

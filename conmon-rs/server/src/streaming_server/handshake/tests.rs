@@ -30,8 +30,8 @@ fn upgrade_headers_count_in_all_values() {
         HeaderValue::from_static("v4.channel.k8s.io"),
     );
     assert!(matches!(
-        StreamingServer::spdy_handshake(&headers, &["v4.channel.k8s.io"]),
-        Ok("v4.channel.k8s.io")
+        StreamingServer::spdy_handshake(&headers, &[("v4.channel.k8s.io", ())]),
+        Ok(((), "v4.channel.k8s.io"))
     ));
     assert!(!StreamingServer::is_websocket_request(&headers));
 
@@ -42,7 +42,8 @@ fn upgrade_headers_count_in_all_values() {
     let mut headers = HeaderMap::new();
     headers.append(header::CONNECTION, HeaderValue::from_static("upgrade"));
     headers.append(header::UPGRADE, HeaderValue::from_static("SPDY/3.10"));
-    let Err(response) = StreamingServer::spdy_handshake(&headers, &["v4.channel.k8s.io"]) else {
+    let Err(response) = StreamingServer::spdy_handshake(&headers, &[("v4.channel.k8s.io", ())])
+    else {
         panic!("upgraded to SPDY/3.10");
     };
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);

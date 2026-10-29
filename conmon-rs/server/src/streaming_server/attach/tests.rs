@@ -74,6 +74,8 @@ async fn attach_ends_on_disconnect_while_stdin_waits() -> Result<()> {
             for _ in 0..PENDING_STDIN_MAX_BYTES / 60_000 + 40 {
                 stream.write_all(&frame).await?;
             }
+            // Nothing tells that the session goes on, one which ends later
+            // passes.
             time::sleep(Duration::from_millis(200)).await;
             assert!(!attach.stdin_closed().is_cancelled());
             drop(stream);
@@ -124,6 +126,8 @@ async fn attach_without_stdin_ignores_stdin_close() -> Result<()> {
                 (0x2, vec![STDOUT_BYTE, b'o', b'u', b't'])
             );
             drop(stream);
+            // Nothing tells that the session ended, a close which comes
+            // later passes.
             time::sleep(Duration::from_millis(50)).await;
             assert!(!attach.stdin_closed().is_cancelled());
             Ok(())

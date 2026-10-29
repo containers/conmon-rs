@@ -122,9 +122,9 @@ pub fn connection(input: &[u8]) {
                 }));
             }
             for stream in streams {
-                let _ = stream.await;
+                stream.await.expect("stream task");
             }
-            let _ = client.await;
+            client.await.expect("client task");
         };
         time::timeout(Duration::from_secs(30), served)
             .await

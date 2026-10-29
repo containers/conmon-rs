@@ -460,10 +460,7 @@ async fn written_input_gives_its_budget_back() -> Result<()> {
         let mut buf = [0; 3];
         pod.read_exact(&mut buf).await?;
         assert_eq!(&buf, b"abc");
-        while connect_budget.available() != 10 || client_budget.available() != 10 {
-            time::sleep(Duration::from_millis(10)).await;
-        }
-        anyhow::Ok(())
+        wait_for(|| connect_budget.available() == 10 && client_budget.available() == 10).await
     };
     time::timeout(Duration::from_secs(5), async {
         select! {

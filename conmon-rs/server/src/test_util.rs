@@ -9,6 +9,7 @@ use std::{
 };
 use tokio::{
     net::TcpSocket,
+    task,
     time::{self, Duration},
 };
 
@@ -50,6 +51,38 @@ pub async fn wait_for(mut condition: impl FnMut() -> bool) -> Result<()> {
     })
     .await?;
     Ok(())
+}
+
+/// Wait in real time until `condition` holds, checking it every 10ms for at
+/// most 10s, without blocking the runtime of the test. Unlike [`wait_for`],
+/// it also waits with a paused clock, which processes do not advance.
+pub async fn wait_for_real(condition: impl Fn() -> bool) {
+    for _ in 0..1000 {
+        if condition() {
+            return;
+        }
+        task::spawn_blocking(|| std::thread::sleep(std::time::Duration::from_millis(10)))
+            .await
+            .ok();
+    }
+    panic!("condition never became true");
+}
+
+/// Call `f` again for up to 5s while it fails because a socket is in use. A
+/// process which a parallel test forks holds the sockets of this one until
+/// it execs.
+pub async fn retry_while_in_use<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut result = f();
+    for _ in 0..500 {
+        match &result {
+            Err(e) if format!("{e:#}").contains("in use") => {
+                time::sleep(Duration::from_millis(10)).await;
+                result = f();
+            }
+            _ => break,
+        }
+    }
+    result
 }
 
 /// A socket bound to a port which does not listen, so that connecting to

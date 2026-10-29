@@ -1,5 +1,5 @@
 use super::*;
-use crate::{container_log::LineBuffer, journal::tests::decode};
+use crate::{container_log::LineBuffer, journal::testing::decode};
 use std::os::unix::net::UnixDatagram;
 
 type Fields = Vec<(String, Vec<u8>)>;

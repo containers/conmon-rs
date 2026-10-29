@@ -51,13 +51,13 @@ pub(crate) use bounded_map::DEFAULT_CAPACITY;
 pub use exec::ExecSession;
 
 /// The entry points of the fuzz targets.
-#[cfg(feature = "fuzzing")]
+#[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing {
     pub use super::{
         channel::fuzzing::channel,
         handshake::fuzzing::upgrade_headers,
         port_forward::fuzzing::{query_ports, spdy as port_forward_spdy},
-        remotecommand::fuzzing::resize_events,
+        remotecommand::fuzzing::{resize_events, spdy as remotecommand_spdy},
         session::fuzzing::{client_messages, pending_stdin},
         spdy::fuzzing::{
             connection as spdy_connection, frames as spdy_frames, header_block as spdy_header_block,

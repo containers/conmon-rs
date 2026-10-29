@@ -98,8 +98,10 @@ impl Connection {
     /// Serve SPDY on the connection. The client opens streams, `accept`
     /// decides about each by its headers, rejected ones get reset. The
     /// connection ends when the client closes it, violates the protocol, a
-    /// ping fails, or when no frame went either way for the idle timeout.
-    /// The pings of the server do not count, see [`PING_INTERVAL`].
+    /// write fails, like of a ping, or when it was idle for the timeout.
+    /// Nothing waits for the echoes of the pings. Only the frames of the
+    /// client keep the connection active, except for these echoes, and the
+    /// data of the server, not its control frames, see [`Self::is_activity`].
     pub fn serve<T, F>(
         io: T,
         idle_timeout: Option<Duration>,
@@ -139,8 +141,7 @@ impl Connection {
             .run(),
         );
         // On its own, the reader may wait for a stream which does not take
-        // its data. Ends the connection once no frame went either way for the
-        // timeout.
+        // its data. Ends the connection once it was idle for the timeout.
         shared.activity.watch(idle_timeout, shared.done.clone(), {
             let shared = shared.clone();
             move || {
@@ -538,7 +539,9 @@ impl Shared {
 
     /// Forget a stream which got reset by either side.
     fn remove(&self, id: u32) {
-        if let Some(state) = self.lock_streams().remove(&id) {
+        // Not under the lock, which the reader and all streams take.
+        let state = self.lock_streams().remove(&id);
+        if let Some(state) = state {
             state.reset.cancel();
         }
     }
@@ -568,7 +571,7 @@ impl Drop for Live {
 }
 
 /// The entry points of the fuzz targets.
-#[cfg(feature = "fuzzing")]
+#[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 
 /// A SPDY client for the tests of the protocols on top.

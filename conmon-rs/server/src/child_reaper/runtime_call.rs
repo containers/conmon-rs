@@ -5,8 +5,8 @@ use super::{ChildReaper, InFlight, PendingPid};
 use crate::{
     child::sleep_until,
     container_io::{ContainerIO, ContainerIOType},
-    fd_mapping::{CommandFdExt, FdMapping},
-    init,
+    fd_mapping::{self, CommandFdExt, FdMapping},
+    fs_util, init,
     mutex::lock,
     process::{Process, child_pid, read_pid_file, wait_for_exit_code},
     tail::Tail,
@@ -100,6 +100,13 @@ impl RuntimeOutput {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many spawns of the thread fail as if a target of the descriptors
+    /// changed, see [`ChildReaper::spawn_command`].
+    pub(super) static TARGET_CHANGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// first usable file descriptor after stdin, stdout and stderr
 const FIRST_FD_AFTER_STDIO: RawFd = 3;
 
@@ -140,6 +147,95 @@ impl<'a> RuntimeCall<'a> {
 }
 
 impl ChildReaper {
+    /// Spawn the runtime with the descriptors from 3 on, see
+    /// [`ChildReaper::create_child`]. A spawn which failed because a target
+    /// of the descriptors changed meanwhile gets tried once more, see
+    /// [`fd_mapping`]. With descriptors, the commands get built, spawned and
+    /// dropped under the [`fd_mapping::spawn_lock`], and the descriptors get
+    /// closed under it as well.
+    fn spawn_runtime(
+        runtime: &Path,
+        args: &[String],
+        stdin: bool,
+        env_vars: &[(String, String)],
+        fds: Vec<OwnedFd>,
+    ) -> Result<RuntimeChild> {
+        // Only commands with mappings take part, the others do not wait.
+        let spawning = (!fds.is_empty()).then(fd_mapping::spawn_lock);
+        let spawn = || Self::spawn_command(runtime, args, stdin, env_vars, &fds);
+        let result = match spawn() {
+            Err(e) if fd_mapping::target_changed(&e) => {
+                debug!("Retrying the runtime spawn: {e}");
+                spawn()
+            }
+            result => result,
+        };
+        drop(fds);
+        drop(spawning);
+        result.map_err(|e| {
+            if fd_mapping::target_changed(&e) {
+                anyhow::Error::from(e).context("a target descriptor changed during spawn")
+            } else {
+                e.into()
+            }
+        })
+    }
+
+    /// Spawn the runtime once, with duplicates of the descriptors, which
+    /// its command owns in its pre_exec hook. The caller holds the
+    /// [`fd_mapping::spawn_lock`] with descriptors.
+    fn spawn_command(
+        runtime: &Path,
+        args: &[String],
+        stdin: bool,
+        env_vars: &[(String, String)],
+        fds: &[OwnedFd],
+    ) -> io::Result<RuntimeChild> {
+        #[cfg(test)]
+        if TARGET_CHANGES.with(|n| n.replace(n.get().saturating_sub(1))) > 0 {
+            return Err(io::Error::from_raw_os_error(libc::EBUSY));
+        }
+        let mappings = fds
+            .iter()
+            .enumerate()
+            .map(|(i, fd)| {
+                Ok(FdMapping {
+                    parent_fd: fd.try_clone()?,
+                    child_fd: i as RawFd + FIRST_FD_AFTER_STDIO,
+                })
+            })
+            .collect::<io::Result<_>>()?;
+        let mut cmd = Command::new(runtime);
+        // A runtime which gets dropped, for example on a panic, must not keep
+        // running unobserved.
+        cmd.kill_on_drop(true);
+        // In a process group of its own, which a runtime that hangs gets
+        // killed with, see `stop_runtime`. Signals for the group of the
+        // server, like a SIGINT from a terminal, do not reach it, the
+        // server stops it on its own.
+        cmd.process_group(0);
+
+        // Without one it must not inherit the stdin of the server, which the
+        // runtime would pass on to the container.
+        cmd.stdin(if stdin { Stdio::piped() } else { Stdio::null() });
+
+        cmd.args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .envs(env_vars.iter().map(|(k, v)| (k, v)))
+            .fd_mappings(mappings)
+            .map_err(io::Error::other)?;
+        // After the mappings: the pre_exec hooks run in the order they got
+        // added, and this one lowers the open files limit to the one the
+        // server started with, below which the mappings may have to move a
+        // descriptor of the server.
+        init::reset_inherited(&mut cmd);
+        // The mappings live in the pre_exec hook of the command, dropping it
+        // after the spawn closes the duplicates and the placeholders in the
+        // parent.
+        cmd.spawn()
+    }
+
     /// How long to wait for the console connection of a runtime which already
     /// exited successfully.
     pub(super) const CONNECT_AFTER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -165,51 +261,10 @@ impl ChildReaper {
         // A PID file left from before, like of a container created in the
         // same bundle earlier, would name a process which the cleanup of a
         // failed call kills, see `cleanup_failed_grandchild`.
-        match std::fs::remove_file(pidfile) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                return Err(e).context("remove stale PID file");
-            }
-            _ => {}
-        }
+        fs_util::remove_file(pidfile).context("remove stale PID file")?;
         debug!("Running: {:?} {:?}", runtime, args);
-        let mut cmd = Command::new(runtime);
-        // A runtime which gets dropped, for example on a panic, must not keep
-        // running unobserved.
-        cmd.kill_on_drop(true);
-        // In a process group of its own, which a runtime that hangs gets
-        // killed with, see `stop_runtime`. Signals for the group of the
-        // server, like a SIGINT from a terminal, do not reach it, the
-        // server stops it on its own.
-        cmd.process_group(0);
-
-        // Without one it must not inherit the stdin of the server, which the
-        // runtime would pass on to the container.
-        cmd.stdin(if stdin { Stdio::piped() } else { Stdio::null() });
-
-        cmd.args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .envs(env_vars)
-            .fd_mappings(
-                additional_fds
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, fd)| FdMapping {
-                        parent_fd: fd,
-                        child_fd: i as RawFd + FIRST_FD_AFTER_STDIO,
-                    })
-                    .collect(),
-            )?;
-        // After the mappings: the pre_exec hooks run in the order they got
-        // added, and this one lowers the open files limit to the one the
-        // server started with, below which the mappings may have to move a
-        // descriptor of the server.
-        init::reset_inherited(&mut cmd);
-        let mut child = Runtime(cmd.spawn().context("spawn child process")?);
-
-        // The mappings own the passed descriptors and live in the command's
-        // pre_exec hook, dropping the command closes them in the parent.
-        drop(cmd);
+        let child = Self::spawn_runtime(runtime, args, stdin, &env_vars, additional_fds);
+        let mut child = Runtime(child.context("spawn child process")?);
 
         // Not waited for yet, so it has its PID. Dropping it on a failure
         // kills it.

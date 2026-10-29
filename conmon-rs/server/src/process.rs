@@ -116,12 +116,24 @@ pub fn children_by_scan() -> Vec<Pid> {
         .collect()
 }
 
-/// Whether a child of this process belongs to the process group.
+/// Whether the kernel lists the children of a thread, see [`children`].
+static PROC_CHILDREN: LazyLock<bool> =
+    LazyLock::new(|| Path::new("/proc/thread-self/children").exists());
+
+/// Whether a child of this process belongs to the process group. The
+/// children the kernel lists come first, only without a member among them
+/// all processes get scanned: the lists are reliable for stopped children
+/// only. A listed child may have got reaped meanwhile, tokio does not take
+/// the [`REAP_LOCK`], so its parent gets checked again.
 fn group_has_child(pgid: Pid) -> bool {
     let own = getpid().as_raw();
-    pids()
-        .filter_map(Stat::read)
-        .any(|stat| stat.ppid == own && stat.pgrp == pgid.as_raw())
+    let member = |pids: Vec<Pid>| {
+        pids.into_iter()
+            .filter_map(Stat::read)
+            .any(|stat| stat.ppid == own && stat.pgrp == pgid.as_raw())
+    };
+    // Without the lists, children() scanned already.
+    member(children().0) || *PROC_CHILDREN && member(children_by_scan())
 }
 
 /// Whether the process group of a child gets signalled. Group 1 would end up
@@ -214,13 +226,7 @@ impl Process {
     pub fn is_running(&self) -> bool {
         let _guard = mutex::read(&REAP_LOCK);
         self.signal_unlocked(None).is_ok()
-            && matches!(
-                waitid(
-                    Id::Pid(self.pid),
-                    WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
-                ),
-                Ok(WaitStatus::StillAlive)
-            )
+            && matches!(peek_exit(Id::Pid(self.pid)), Ok(WaitStatus::StillAlive))
     }
 
     /// Signal the process group of the process and the process itself, once
@@ -259,22 +265,26 @@ impl Process {
         // Without pidfds (Linux before 5.3) check that the process is still a
         // child of this server which was not reaped yet, its PID cannot be
         // reused then. The caller holds the lock which keeps it unreaped.
-        waitid(
-            Id::Pid(self.pid),
-            WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
-        )?;
+        peek_exit(Id::Pid(self.pid))?;
         kill(self.pid, signal)
     }
+}
+
+/// Whether a child exited, without waiting or reaping it. Fails with
+/// `ECHILD` if there is no such child of the server, also once it got
+/// reaped.
+fn peek_exit(id: Id<'_>) -> nix::Result<WaitStatus> {
+    waitid(
+        id,
+        WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+    )
 }
 
 /// Whether a child of any thread of this process exited and was not
 /// reaped yet, without reaping it.
 pub fn has_zombie() -> bool {
     !matches!(
-        waitid(
-            Id::All,
-            WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT
-        ),
+        peek_exit(Id::All),
         Ok(WaitStatus::StillAlive) | Err(Errno::ECHILD)
     )
 }
@@ -292,11 +302,11 @@ pub fn zombie_children() -> (Vec<Pid>, bool) {
 /// fall back to scanning all processes without it. The list is not
 /// complete if a thread exited while listing them.
 fn children() -> (Vec<Pid>, bool) {
-    static PROC_CHILDREN: LazyLock<bool> =
-        LazyLock::new(|| Path::new("/proc/thread-self/children").exists());
     if !*PROC_CHILDREN {
         return (children_by_scan(), true);
     }
+    // Nothing gets reaped for children which cannot be listed, which is the
+    // safe side.
     let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
         return (vec![], true);
     };
@@ -387,7 +397,9 @@ fn spawn_waitpid_thread<F: FnOnce() + Send + 'static>(f: F) {
     // The builder drops the closure on failure, keep it for the fallback.
     let slot = Arc::new(Mutex::new(Some(f)));
     fn run<F: FnOnce()>(slot: &Mutex<Option<F>>) {
-        if let Some(f) = lock(slot).take() {
+        // Not under the lock, the closure blocks.
+        let f = lock(slot).take();
+        if let Some(f) = f {
             f();
         }
     }

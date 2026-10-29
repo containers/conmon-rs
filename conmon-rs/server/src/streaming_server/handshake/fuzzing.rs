@@ -22,11 +22,12 @@ pub fn upgrade_headers(input: &[u8]) {
         }
     }
 
-    let supported = SPDY_PROTOCOLS.map(|(protocol, _)| protocol);
-    if let Ok(protocol) = StreamingServer::spdy_handshake(request.headers(), &supported) {
-        assert!(supported.contains(&protocol));
+    if let Ok((version, protocol)) =
+        StreamingServer::spdy_handshake(request.headers(), &SPDY_PROTOCOLS)
+    {
+        assert!(SPDY_PROTOCOLS.contains(&(protocol, version)));
     }
-    let _ = StreamingServer::spdy_handshake(request.headers(), &[port_forward::PROTOCOL]);
+    let _ = StreamingServer::spdy_handshake(request.headers(), &[(port_forward::PROTOCOL, ())]);
     let requested = StreamingServer::websocket_protocols(request.headers());
     let _ = Framing::negotiate(requested.iter().map(String::as_str));
     let _ = WebSocketProtocol::negotiate(requested.iter().map(String::as_str));

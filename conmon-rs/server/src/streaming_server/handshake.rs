@@ -6,7 +6,8 @@ use crate::{
     random_id::RandomId,
     streaming_server::{
         port_forward::{self, PortForward, WebSocketProtocol},
-        remotecommand::{Framing, SPDY_PROTOCOLS, Version, spdy_version},
+        remotecommand::{Framing, SPDY_PROTOCOLS},
+        stream_protocol::first_supported,
         web::{self, Response, WebSocketUpgrade},
     },
 };
@@ -75,15 +76,11 @@ impl StreamingServer {
                     });
             }
 
-            let supported = SPDY_PROTOCOLS.map(|(protocol, _)| protocol);
             Self::upgrade_spdy(
                 request,
-                &supported,
+                &SPDY_PROTOCOLS,
                 Self::take_session(&state, token),
-                |io, session, protocol| {
-                    let version = spdy_version(protocol).unwrap_or(Version::V1);
-                    Self::handle_spdy(io, session, version)
-                },
+                Self::handle_spdy,
                 debug_span!("spdy", ?token),
             )
             .await
@@ -93,20 +90,22 @@ impl StreamingServer {
     }
 
     /// Answer a SPDY upgrade request with one of the supported protocols and
-    /// serve the connection with the session once it got upgraded. The
-    /// session gets taken only for a valid request.
-    async fn upgrade_spdy<S, F>(
+    /// serve the connection with the session and what the protocol stands
+    /// for once it got upgraded. The session gets taken only for a valid
+    /// request.
+    async fn upgrade_spdy<S, T, F>(
         mut request: Request<Incoming>,
-        supported: &[&'static str],
+        supported: &[(&'static str, T)],
         take_session: impl Future<Output = Option<S>>,
-        serve: impl FnOnce(TokioIo<Upgraded>, S, &'static str) -> F + Send + 'static,
+        serve: impl FnOnce(TokioIo<Upgraded>, S, T) -> F + Send + 'static,
         span: Span,
     ) -> Response
     where
         S: Send + 'static,
+        T: Copy + Send + 'static,
         F: Future<Output = ()> + Send + 'static,
     {
-        let protocol = match Self::spdy_handshake(request.headers(), supported) {
+        let (value, protocol) = match Self::spdy_handshake(request.headers(), supported) {
             Ok(protocol) => protocol,
             Err(response) => return *response,
         };
@@ -122,7 +121,7 @@ impl StreamingServer {
         task::spawn(
             async move {
                 match on_upgrade.await {
-                    Ok(upgraded) => serve(TokioIo::new(upgraded), session, protocol).await,
+                    Ok(upgraded) => serve(TokioIo::new(upgraded), session, value).await,
                     Err(e) => debug!("Unable to upgrade connection: {e}"),
                 }
             }
@@ -143,13 +142,7 @@ impl StreamingServer {
 
     /// The WebSocket subprotocols a client requested.
     fn websocket_protocols(headers: &HeaderMap) -> Vec<String> {
-        headers
-            .get_all(header::SEC_WEBSOCKET_PROTOCOL)
-            .into_iter()
-            .filter_map(|v| v.to_str().ok())
-            .flat_map(|v| v.split(','))
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
+        web::header_tokens(headers, header::SEC_WEBSOCKET_PROTOCOL)
             .map(str::to_owned)
             .collect()
     }
@@ -180,9 +173,9 @@ impl StreamingServer {
             }
             Self::upgrade_spdy(
                 request,
-                &[port_forward::PROTOCOL],
+                &[(port_forward::PROTOCOL, ())],
                 Self::take_port_forward(&state, token),
-                |io, session: PortForward, _| session.serve_spdy(io),
+                |io, session: PortForward, ()| session.serve_spdy(io),
                 debug_span!("port_forward", ?token),
             )
             .await
@@ -237,16 +230,10 @@ impl StreamingServer {
     /// Check that the request asks for a SPDY/3.1 upgrade and negotiate one
     /// of the supported protocols, by the order of the client. The rejections
     /// are the ones of the SPDY server of Kubernetes.
-    fn spdy_handshake(
+    fn spdy_handshake<T: Copy>(
         headers: &HeaderMap,
-        supported: &[&'static str],
-    ) -> Result<&'static str, Box<Response>> {
-        let values = |name| {
-            headers
-                .get_all(name)
-                .into_iter()
-                .filter_map(|v| v.to_str().ok())
-        };
+        supported: &[(&'static str, T)],
+    ) -> Result<(T, &'static str), Box<Response>> {
         if !web::header_has_token(headers, header::CONNECTION, "upgrade")
             || !web::header_has_token(headers, header::UPGRADE, SPDY_31)
         {
@@ -256,40 +243,34 @@ impl StreamingServer {
             )));
         }
 
-        let protocols: Vec<_> = values(PROTOCOL_VERSION_HEADER)
-            .flat_map(|v| v.split(','))
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .collect();
+        let protocols: Vec<_> = web::header_tokens(headers, PROTOCOL_VERSION_HEADER).collect();
         if protocols.is_empty() {
             return Err(Box::new(web::text(
                 StatusCode::BAD_REQUEST,
                 format!("unable to upgrade: header {PROTOCOL_VERSION_HEADER} is required"),
             )));
         }
-        protocols
-            .iter()
-            .find_map(|protocol| supported.iter().find(|s| *s == protocol).copied())
-            .ok_or_else(|| {
-                let mut response = web::text(
-                    StatusCode::FORBIDDEN,
-                    format!(
-                        "unable to upgrade: unable to negotiate protocol: client supports {protocols:?}, server accepts {supported:?}"
-                    ),
+        first_supported(protocols.iter().copied(), supported).ok_or_else(|| {
+            let supported: Vec<_> = supported.iter().map(|(protocol, _)| *protocol).collect();
+            let mut response = web::text(
+                StatusCode::FORBIDDEN,
+                format!(
+                    "unable to upgrade: unable to negotiate protocol: client supports {protocols:?}, server accepts {supported:?}"
+                ),
+            );
+            for protocol in supported {
+                response.headers_mut().append(
+                    ACCEPTED_PROTOCOL_VERSIONS_HEADER,
+                    HeaderValue::from_static(protocol),
                 );
-                for protocol in supported {
-                    response.headers_mut().append(
-                        ACCEPTED_PROTOCOL_VERSIONS_HEADER,
-                        HeaderValue::from_static(protocol),
-                    );
-                }
-                Box::new(response)
-            })
+            }
+            Box::new(response)
+        })
     }
 }
 
 /// The entry points of the fuzz targets.
-#[cfg(feature = "fuzzing")]
+#[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 
 #[cfg(test)]

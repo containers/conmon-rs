@@ -11,6 +11,7 @@ use crate::{
     container_log::cri::CriLogger,
     container_log::journald::JournaldLogger,
     container_log::json::JsonLogger,
+    fs_util,
 };
 use anyhow::{Context, Result};
 use bytes::{Bytes, BytesMut};
@@ -491,9 +492,7 @@ impl LogFile {
         let path = self.path.clone();
         let file = task::spawn_blocking(move || {
             let tmp = Self::tmp_path(&path);
-            if let Err(e) = fs::remove_file(&tmp)
-                && e.kind() != io::ErrorKind::NotFound
-            {
+            if let Err(e) = fs_util::remove_file(&tmp) {
                 debug!("Unable to remove {}: {e}", tmp.display());
             }
             options.open(path)
@@ -715,7 +714,7 @@ impl LogFile {
 }
 
 /// The entry points of the fuzz targets, see `crate::fuzzing`.
-#[cfg(feature = "fuzzing")]
+#[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 
 #[cfg(test)]

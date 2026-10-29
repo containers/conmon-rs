@@ -5,6 +5,7 @@
 
 use bytes::Bytes;
 use futures::{
+    sink::{Sink, SinkExt},
     stream::{SplitSink, SplitStream, Stream, StreamExt},
     task::AtomicWaker,
 };
@@ -63,25 +64,31 @@ const DRAIN_LIMIT: usize = 64 * 1024 * 1024;
 /// they get read. Tungstenite allocates 128 KiB otherwise, for every session.
 const READ_BUFFER_SIZE: usize = 16 * 1024;
 
-/// The close of the server once it is done.
-pub fn close_message(reason: &str) -> Message {
-    Message::Close(Some(CloseFrame {
-        code: CloseCode::Normal,
-        reason: reason.into(),
-    }))
-}
-
 /// The close of the server once it is done, or after the client sent a
 /// message larger than the server takes, see [`is_too_large`], which tells
 /// the client why.
 pub fn close(too_large: bool, reason: &str) -> Message {
-    if !too_large {
-        return close_message(reason);
-    }
+    let (code, reason) = if too_large {
+        (CloseCode::Size, "message too large")
+    } else {
+        (CloseCode::Normal, reason)
+    };
     Message::Close(Some(CloseFrame {
-        code: CloseCode::Size,
-        reason: "message too large".into(),
+        code,
+        reason: reason.into(),
     }))
+}
+
+/// Send the close of the server without a reason, see [`close`], the sink
+/// once it went out.
+pub async fn send_close<S>(mut sink: S, too_large: bool) -> Option<S>
+where
+    S: Sink<Message> + Unpin,
+{
+    sink.send(close(too_large, ""))
+        .await
+        .is_ok()
+        .then_some(sink)
 }
 
 /// Whether a read failed for a message larger than the server takes. The
@@ -527,15 +534,23 @@ fn header_eq(headers: &HeaderMap, name: HeaderName, value: &str) -> bool {
         .any(|v| v.as_bytes().eq_ignore_ascii_case(value.as_bytes()))
 }
 
-/// Whether one of the comma separated tokens of all values of the header is
-/// `token`, ignoring the case, like `Connection: keep-alive, Upgrade`.
-pub(crate) fn header_has_token(headers: &HeaderMap, name: HeaderName, token: &str) -> bool {
+/// The comma separated tokens of all values of the header, without the
+/// empty ones, like `keep-alive` and `Upgrade` of
+/// `Connection: keep-alive, Upgrade`.
+pub(crate) fn header_tokens(headers: &HeaderMap, name: HeaderName) -> impl Iterator<Item = &str> {
     headers
         .get_all(name)
-        .iter()
+        .into_iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(','))
-        .any(|t| t.trim().eq_ignore_ascii_case(token))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+}
+
+/// Whether one of the tokens of the header is `token`, ignoring the case,
+/// see [`header_tokens`].
+pub(crate) fn header_has_token(headers: &HeaderMap, name: HeaderName, token: &str) -> bool {
+    header_tokens(headers, name).any(|t| t.eq_ignore_ascii_case(token))
 }
 
 #[cfg(test)]

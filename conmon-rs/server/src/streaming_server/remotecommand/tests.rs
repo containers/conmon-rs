@@ -1,7 +1,10 @@
 use super::{spdy::ResizeEvents, status::ErrorMessage, *};
-use crate::streaming_server::spdy::{
-    Connection,
-    testing::{Client, Frame},
+use crate::streaming_server::{
+    spdy::{
+        Connection,
+        testing::{Client, Frame},
+    },
+    stream_protocol::first_supported,
 };
 use tokio::io::duplex;
 
@@ -43,9 +46,10 @@ fn websocket_protocols_get_negotiated() {
 
 #[test]
 fn spdy_versions() {
-    assert_eq!(spdy_version("v4.channel.k8s.io"), Some(Version::V4));
-    assert_eq!(spdy_version("channel.k8s.io"), Some(Version::V1));
-    assert_eq!(spdy_version("v5.channel.k8s.io"), None);
+    let version = |protocol| first_supported([protocol], &SPDY_PROTOCOLS).map(|(v, _)| v);
+    assert_eq!(version("v4.channel.k8s.io"), Some(Version::V4));
+    assert_eq!(version("channel.k8s.io"), Some(Version::V1));
+    assert_eq!(version("v5.channel.k8s.io"), None);
     assert!(Version::V3.spdy_resize());
     assert!(!Version::V2.spdy_resize());
 }
@@ -157,13 +161,30 @@ fn exit_statuses() -> Result<()> {
         Some(serde_json::to_vec(&ErrorMessage::new(137))?)
     );
     // Clients cannot parse a negative exit code, it is an error instead.
-    let internal = serde_json::to_vec(&ErrorMessage::internal(
-        "unable to get the exit code of the command (-3)".into(),
-    ))?;
-    assert_eq!(Status::exited(-3).encode(Version::V4)?, Some(internal));
+    assert_eq!(
+        Status::exited(-3).encode(Version::V4)?.as_deref(),
+        Some(
+            &br#"{"status":"Failure","message":"Internal error occurred: error executing command in container: unable to get the exit code of the command (-3)","reason":"InternalError","code":500}"#[..]
+        )
+    );
     assert_eq!(
         Status::exited(-1).encode(Version::V2)?.as_deref(),
-        Some(&b"unable to get the exit code of the command (-1)"[..])
+        Some(
+            &b"Internal error occurred: error executing command in container: unable to get the exit code of the command (-1)"[..]
+        )
+    );
+    Ok(())
+}
+
+/// A failed session gets the status of k8s.io/cri-streaming, which has no
+/// details, unlike the one of an exit code.
+#[test]
+fn failures_like_cri_streaming() -> Result<()> {
+    assert_eq!(
+        Status::failed(Operation::Attach, "gone").encode(Version::V5)?.as_deref(),
+        Some(
+            &br#"{"status":"Failure","message":"Internal error occurred: error attaching to container: gone","reason":"InternalError","code":500}"#[..]
+        )
     );
     Ok(())
 }
@@ -183,7 +204,7 @@ fn success_status() {
 fn exit_code_error_message() -> Result<()> {
     assert_eq!(
         serde_json::to_string(&ErrorMessage::new(137))?,
-        r#"{"status":"Failure","reason":"NonZeroExitCode","details":{"causes":[{"reason":"ExitCode","message":"137"}]},"message":"command terminated with non-zero exit code"}"#
+        r#"{"status":"Failure","message":"command terminated with non-zero exit code: exit status 137","reason":"NonZeroExitCode","details":{"causes":[{"reason":"ExitCode","message":"137"}]}}"#
     );
     Ok(())
 }
@@ -371,7 +392,7 @@ async fn connection_end_without_stdin_is_no_clean_close() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn reset_output_after_the_stdin_close_fails_the_session() -> Result<()> {
     let (client, server) = duplex(64 * 1024);
     let mut connection =

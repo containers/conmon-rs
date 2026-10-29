@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_util::wait_for;
+use crate::test_util::{retry_while_in_use, wait_for};
 use std::{
     os::{
         linux::net::SocketAddrExt,
@@ -167,17 +167,7 @@ async fn bind_replaces_a_stale_socket_but_not_a_live_one() -> Result<()> {
     // which a parallel test forks may hold it until it execs.
     let stale = StdUnixDatagram::bind(&path)?;
     drop(stale);
-    let mut again = NotifySocket::bind(bundle.path(), host);
-    for _ in 0..500 {
-        match &again {
-            Err(e) if format!("{e:#}").contains("in use") => {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                again = NotifySocket::bind(bundle.path(), host);
-            }
-            _ => break,
-        }
-    }
-    let again = again?;
+    let again = retry_while_in_use(|| NotifySocket::bind(bundle.path(), host)).await?;
     drop(again);
     assert!(!path.exists());
     Ok(())

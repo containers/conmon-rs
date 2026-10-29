@@ -231,7 +231,7 @@ impl SharedContainerIO {
             .await
     }
 
-    /// Resize the shared container IO to the provided with and height.
+    /// Resize the shared container IO to the provided width and height.
     /// Errors in case of no terminal containers.
     pub async fn resize(&self, width: u16, height: u16) -> Result<()> {
         if !self.try_resize(width, height).await? {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_util::retry_while_in_use;
 use std::{
     ffi::OsStr,
     fs::Permissions,
@@ -68,8 +69,8 @@ fn paths_get_absolute() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn prepare_keeps_the_sockets_of_a_running_server() -> Result<()> {
+#[tokio::test]
+async fn prepare_keeps_the_sockets_of_a_running_server() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let runtime_dir = dir.path().to_str().context("utf8 path")?;
     let Some(config) = Config::parse_for_test(["--runtime-dir", runtime_dir]) else {
@@ -80,17 +81,7 @@ fn prepare_keeps_the_sockets_of_a_running_server() -> Result<()> {
     // test forks may hold it until it execs.
     drop(std::os::unix::net::UnixListener::bind(config.socket())?);
     std::fs::write(config.fd_socket(), "")?;
-    let mut res = config.prepare();
-    for _ in 0..500 {
-        match &res {
-            Err(e) if format!("{e:#}").contains("in use") => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                res = config.prepare();
-            }
-            _ => break,
-        }
-    }
-    res?;
+    retry_while_in_use(|| config.prepare()).await?;
     assert!(!config.socket().exists());
     assert!(!config.fd_socket().exists());
 
@@ -191,4 +182,34 @@ fn validate_reports_each_check() {
         error(&file_root),
         format!("--runtime-root '{}' is not a directory", runtime.display())
     );
+}
+
+/// The boolean flags take the values of their environment variables like
+/// systemd and the Go client write them.
+#[test]
+fn boolean_environment_variables() {
+    let command = <Config as clap::CommandFactory>::command();
+    for id in ["skip_fork", "enable_tracing"] {
+        let arg = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == id)
+            .expect("argument");
+        assert!(arg.get_env().is_some(), "{id}");
+        // The flag itself takes no value, its parser gets the one of the
+        // variable.
+        let parse = |value: &str| {
+            clap::Command::new("test")
+                .arg(
+                    clap::Arg::new("flag")
+                        .long("flag")
+                        .value_parser(arg.get_value_parser().clone()),
+                )
+                .try_get_matches_from(["test", "--flag", value])
+                .map(|matches| matches.get_one::<bool>("flag").copied())
+        };
+        for (value, expected) in [("1", true), ("true", true), ("yes", true), ("0", false)] {
+            assert_eq!(parse(value).ok(), Some(Some(expected)), "{id}={value}");
+        }
+        assert!(parse("maybe").is_err(), "{id}");
+    }
 }

@@ -40,7 +40,7 @@ pub fn decode(base64: bool, message: Bytes) -> Option<(u8, Bytes)> {
 }
 
 /// The entry points of the fuzz targets.
-#[cfg(feature = "fuzzing")]
+#[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing {
     use super::*;
 

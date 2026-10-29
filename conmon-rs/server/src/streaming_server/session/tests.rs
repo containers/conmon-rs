@@ -244,19 +244,22 @@ fn only_one_final_status() {
     // A status the loop decided on goes out also after the idle timeout,
     // a failure never turns into a success.
     assert_eq!(
-        StreamingServer::final_status(idle(), Some(Status::exited(1)), "exec"),
+        StreamingServer::final_status(idle(), Some(Status::exited(1)), Operation::Exec),
         Some(Status::ExitCode(1))
     );
     assert_eq!(
-        StreamingServer::final_status(Ok(()), Some(Status::exited(1)), "exec"),
+        StreamingServer::final_status(Ok(()), Some(Status::exited(1)), Operation::Exec),
         Some(Status::ExitCode(1))
     );
     assert!(matches!(
-        StreamingServer::final_status(idle(), None, "exec"),
+        StreamingServer::final_status(idle(), None, Operation::Exec),
         Some(Status::Error(e)) if e.contains("idle timeout")
     ));
     // A client which went away gets none.
-    assert_eq!(StreamingServer::final_status(Ok(()), None, "attach"), None);
+    assert_eq!(
+        StreamingServer::final_status(Ok(()), None, Operation::Attach),
+        None
+    );
 }
 
 #[tokio::test]
@@ -555,6 +558,42 @@ async fn idle_timeouts_of_stuck_spdy_sessions_send_one_status() -> Result<()> {
             assert_eq!(statuses.len(), 1, "{statuses:?}");
             assert!(statuses[0].contains("\"Failure\""), "{statuses:?}");
             Ok(())
+        })
+        .await
+}
+
+/// A client which floods pings and never reads. Its pings count as
+/// activity, but the answers back up and stop the server from reading the
+/// client, so the session still goes idle. A v1 client, whose stdin the
+/// server closes at the start.
+#[tokio::test]
+async fn clients_which_flood_pings_without_reading_go_idle() -> Result<()> {
+    LocalSet::new()
+        .run_until(async {
+            let timeout = Duration::from_millis(500);
+            let (io, _server, mut client) = spdy_attach_version(
+                false,
+                true,
+                Some(timeout),
+                "Connection: Upgrade\r\nUpgrade: SPDY/3.1\r\n\
+                X-Stream-Protocol-Version: channel.k8s.io\r\n",
+            )
+            .await?;
+            let attach = io.attach().await;
+            // Until the server ended the connection.
+            let flood = async {
+                let mut id: u32 = 1;
+                while client.send(Frame::Ping { id }).await.is_ok() {
+                    id = id.wrapping_add(2);
+                }
+                std::future::pending::<()>().await;
+            };
+            tokio::select! {
+                result = time::timeout(10 * timeout, attach.stdin_closed().cancelled()) => {
+                    result.context("the session of a flooding client did not end")
+                }
+                () = flood => unreachable!(),
+            }
         })
         .await
 }

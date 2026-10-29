@@ -326,12 +326,15 @@ to be installed), actionlint and zizmor, some of them in containers. `make
 help` lists the rest. Contributions follow [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 The [fuzz](./fuzz) directory holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)
-targets for the parsers of client input, the SPDY frames, header blocks and
-connections, the WebSocket channel messages, the resize events, the port forward
-query and the upgrade headers, and for the stream pairing of SPDY port
-forwarding and the pending stdin of a session. `cargo fuzz list` lists them.
-They need a nightly toolchain, for example
-`cargo +nightly fuzz run spdy_frames`, CI pins the one of `FUZZ_TOOLCHAIN` in
+targets for what clients and containers send: the streaming protocols (SPDY
+frames, header blocks and connections, WebSocket messages, resize events,
+upgrade headers and port forward queries, the setup of exec, attach and port
+forward sessions and their pending stdin), the container output as log lines
+and the notify messages, and for the journal entries the server writes.
+`cargo fuzz list` lists them, each file in
+[fuzz/fuzz_targets](./fuzz/fuzz_targets) tells what its target covers. They
+need a nightly toolchain, for example `cargo +nightly fuzz run spdy_frames`, CI
+pins the one of `FUZZ_TOOLCHAIN` in
 [ci.yml](.github/workflows/ci.yml). [fuzz/seeds](./fuzz/seeds) holds a few
 valid inputs per target to start from, pass the directory after the corpus,
 which libFuzzer does not create:

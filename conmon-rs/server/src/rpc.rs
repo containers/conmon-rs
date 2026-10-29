@@ -53,17 +53,22 @@ async fn task_result<T>(task: JoinHandle<anyhow::Result<T>>) -> Result<T, Error>
     capnp_err!(capnp_err!(task.await)?)
 }
 
+/// Make the context the client sent in the metadata of a request the parent
+/// of its span, before the span got entered. Metadata which cannot be read
+/// does not fail the request, it only loses the parent.
 #[cfg(feature = "tracing")]
 fn set_parent_context(
-    reader: capnp::struct_list::Reader<'_, conmon::text_text_map_entry::Owned>,
-) -> Result<(), Error> {
-    capnp_err!(Telemetry::set_parent_context(reader))
+    span: &Span,
+    metadata: capnp::Result<capnp::struct_list::Reader<'_, conmon::text_text_map_entry::Owned>>,
+) -> anyhow::Result<()> {
+    Telemetry::set_parent_context(span, metadata?)
 }
 
 #[cfg(not(feature = "tracing"))]
 fn set_parent_context(
-    _reader: capnp::struct_list::Reader<'_, conmon::text_text_map_entry::Owned>,
-) -> Result<(), Error> {
+    _span: &Span,
+    _metadata: capnp::Result<capnp::struct_list::Reader<'_, conmon::text_text_map_entry::Owned>>,
+) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -76,8 +81,12 @@ macro_rules! enter_request {
             $(container_id = $container_id,)?
             request_id = %RandomId::new()
         );
+        // Entering starts the span, its parent is fixed then.
+        let parent = set_parent_context(&span, $req.get_metadata());
         let _enter = span.enter();
-        pry!(set_parent_context(pry!($req.get_metadata())));
+        if let Err(e) = parent {
+            debug!("Unable to set the parent context of the request: {e:#}");
+        }
     };
 }
 
@@ -709,9 +718,9 @@ impl conmon::Server for Server {
         debug!("Got a serve exec container request");
         let req = pry!(pry!(params.get()).get_request());
 
-        enter_request!(req, "serve_exec_container");
-
         let id = pry_err!(pry_err!(req.get_id()).to_string());
+
+        enter_request!(req, "serve_exec_container", id.as_str());
 
         // Validate that the container actually exists
         pry_err!(self.reaper().get(&id));
@@ -764,9 +773,10 @@ impl conmon::Server for Server {
         debug!("Got a serve attach container request");
         let req = pry!(pry!(params.get()).get_request());
 
-        enter_request!(req, "serve_attach_container");
-
         let id = pry_err!(pry_err!(req.get_id()).to_str());
+
+        enter_request!(req, "serve_attach_container", id);
+
         let (stdin, stdout, stderr) = (req.get_stdin(), req.get_stdout(), req.get_stderr());
         let stop_after_stdin_eof = req.get_stop_after_stdin_eof();
         let idle_timeout = Server::idle_timeout(req.get_idle_timeout_sec());

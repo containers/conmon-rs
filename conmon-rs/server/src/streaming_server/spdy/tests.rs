@@ -542,7 +542,7 @@ async fn closing_flushes_before_the_idle_timeout() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn ended_connections_read_the_client_until_it_closed() -> Result<()> {
     let (mut client, mut connection) = connect(accept_data, None)?;
     connection.handle().close();
@@ -589,7 +589,7 @@ async fn closing_a_stuck_connection_ends_with_the_idle_timeout() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn streams_get_refused_without_the_connection() -> Result<()> {
     let (mut client, mut connection) = connect(accept_data, None)?;
     client.open(1, [("streamtype", "data")].into()).await?;
@@ -732,7 +732,7 @@ async fn streams_reset_by_the_client_count_until_dropped() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[expect(clippy::cast_possible_truncation, reason = "small constants")]
 async fn streams_share_a_byte_budget() -> Result<()> {
     const FRAME_LEN: usize = 64 * 1024;

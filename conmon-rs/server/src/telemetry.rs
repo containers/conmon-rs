@@ -10,7 +10,7 @@ use opentelemetry_sdk::{Resource, propagation::TraceContextPropagator, trace::Sd
 use opentelemetry_semantic_conventions::resource::{HOST_NAME, PROCESS_PID};
 use std::{collections::HashMap, process};
 use tracing::Span;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing_opentelemetry::{OpenTelemetrySpanExt, SetParentError};
 
 /// The main structure of this module.
 pub struct Telemetry;
@@ -48,8 +48,12 @@ impl Telemetry {
         Ok(tracer)
     }
 
-    /// Set a new parent context from the provided slice data.
-    pub fn set_parent_context(reader: Reader<conmon::text_text_map_entry::Owned>) -> Result<()> {
+    /// Set the parent context of a span from the provided slice data. It has
+    /// to happen before the span got entered the first time, which starts it.
+    pub fn set_parent_context(
+        span: &Span,
+        reader: Reader<conmon::text_text_map_entry::Owned>,
+    ) -> Result<()> {
         if reader.is_empty() {
             // Make it a noop if no data is provided.
             return Ok(());
@@ -57,9 +61,12 @@ impl Telemetry {
 
         let metadata = Metadata(capnp_util::into_map(reader)?);
         let ctx = global::get_text_map_propagator(|prop| prop.extract(&metadata));
-        let _ = Span::current().set_parent(ctx);
-
-        Ok(())
+        // Without the telemetry layer, which only exists with tracing
+        // enabled, there is nothing to set.
+        match span.set_parent(ctx) {
+            Ok(()) | Err(SetParentError::LayerNotFound | SetParentError::SpanDisabled) => Ok(()),
+            Err(e) => Err(e).context("set parent context"),
+        }
     }
 }
 
@@ -76,3 +83,6 @@ impl Extractor for Metadata<'_> {
         self.0.keys().copied().collect()
     }
 }
+
+#[cfg(test)]
+mod tests;

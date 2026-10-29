@@ -153,7 +153,7 @@ pub fn spdy(input: &[u8]) {
         };
         let mut served = pin!(async {
             session.serve_spdy(server).await;
-            let _ = client.await;
+            client.await.expect("client task");
         });
         let last_read = || *lock(&last_read);
         loop {

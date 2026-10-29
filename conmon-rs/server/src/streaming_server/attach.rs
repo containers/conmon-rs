@@ -129,7 +129,7 @@ impl StreamingServer {
         Ok(())
     }
 
-    /// Forward a single output message to the WebSocket client.
+    /// Forward a single output message to the client.
     async fn forward_output(
         message: IOMessage,
         stdout_enabled: bool,

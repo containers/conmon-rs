@@ -28,13 +28,6 @@ pub const SPDY_PROTOCOLS: [(&str, Version); 4] = [
     ("channel.k8s.io", Version::V1),
 ];
 
-/// The version of a SPDY protocol.
-pub fn spdy_version(protocol: &str) -> Option<Version> {
-    SPDY_PROTOCOLS
-        .iter()
-        .find_map(|(p, version)| (*p == protocol).then_some(*version))
-}
-
 /// The input of a SPDY client: the stdin stream, whose end closes stdin, and
 /// the resize stream, which carries consecutive JSON objects. Clients open a
 /// resize stream only with a terminal, which the server does not know for an
