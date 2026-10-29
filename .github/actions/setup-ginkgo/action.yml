@@ -10,7 +10,8 @@ inputs:
 runs:
   using: composite
   steps:
-    # The binary depends on the Go which built it.
+    # A Go bump rebuilds the binary with the patched standard library, it
+    # compiles the tests with the installed Go either way.
     - name: Go version
       id: go
       shell: bash
