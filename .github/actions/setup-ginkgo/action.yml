@@ -10,11 +10,16 @@ inputs:
 runs:
   using: composite
   steps:
+    # The binary depends on the Go which built it.
+    - name: Go version
+      id: go
+      shell: bash
+      run: echo "version=$(go env GOVERSION)" >>"$GITHUB_OUTPUT"
     - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: ginkgo
       with:
         path: .build/gotools/bin/ginkgo
-        key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pkg/client/integration/go.mod') }}
+        key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.version }}-${{ hashFiles('pkg/client/integration/go.mod') }}
     - name: Install ginkgo
       shell: bash
       run: make .install.ginkgo

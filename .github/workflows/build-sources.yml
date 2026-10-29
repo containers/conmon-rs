@@ -9,10 +9,11 @@ on:
 permissions: {}
 jobs:
   # Waits for the ci run of the commit, see .github/release-files fetch, whose
-  # build-static jobs take up to 180 minutes on a cold cache.
+  # build-static jobs take up to 180 minutes on a cold cache, followed by the
+  # publish jobs and the time the jobs wait for a runner.
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 200
+    timeout-minutes: 240
     permissions:
       actions: read # looks up the ci runs of the commit
       attestations: read # verifies the attestations of the binaries

@@ -37,29 +37,41 @@ FILE=latest-$MARKER.txt
 
 # The timestamp keeps caches from serving an old marker. Without --fail, a
 # missing marker is no error to retry, transient errors of the server and of
-# the connection are.
+# the connection are. Only a missing marker counts as none. Any other status,
+# or a failed or incomplete transfer, fails: an empty or truncated marker
+# would let an older run move it back.
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
+RC=0
 STATUS=$(curl -sSL --retry 5 --retry-delay 3 --retry-all-errors -o "$TMP" -w '%{http_code}' \
-    "$BASE_URL/$FILE?ts=$(date +%s)") || true
+    "$BASE_URL/$FILE?ts=$(date +%s)") || RC=$?
 CURRENT=
-case $STATUS in
-200) CURRENT=$(<"$TMP") ;;
-404) echo "The bucket has no $FILE yet" ;;
-*)
-    echo "Unable to read $BASE_URL/$FILE: HTTP $STATUS" >&2
+if [[ $STATUS == 404 ]]; then
+    echo "The bucket has no $FILE yet"
+elif [[ $RC != 0 || $STATUS != 200 ]]; then
+    echo "Unable to read $BASE_URL/$FILE: HTTP $STATUS, curl exit code $RC" >&2
     exit 1
-    ;;
-esac
+else
+    CURRENT=$(<"$TMP")
+    # The marker of a tag names a release, the one of a branch a commit. One
+    # which names something else gets fixed by hand rather than replaced,
+    # this run cannot tell whether it is newer.
+    if [[ -n $TAG && ! $CURRENT =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+        [[ -z $TAG && ! $CURRENT =~ ^[0-9a-f]{40}$ ]]; then
+        echo "$BASE_URL/$FILE names neither a release nor a commit: $CURRENT" >&2
+        exit 1
+    fi
+fi
 
-# A marker which names no release or no commit of the history gets replaced.
+# A commit which is not part of the history, like after a force push, gets
+# replaced.
 FORWARD=true
 if [[ -n $TAG ]]; then
-    if [[ $CURRENT =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] &&
+    if [[ -n $CURRENT ]] &&
         [[ $(printf '%s\n' "$CURRENT" "$TAG" | sort -V | tail -1) != "$TAG" ]]; then
         FORWARD=false
     fi
-elif [[ $CURRENT =~ ^[0-9a-f]{40}$ ]] &&
+elif [[ -n $CURRENT ]] &&
     git cat-file -e "$CURRENT^{commit}" 2>/dev/null &&
     ! git merge-base --is-ancestor "$CURRENT" "$VERSION"; then
     FORWARD=false
