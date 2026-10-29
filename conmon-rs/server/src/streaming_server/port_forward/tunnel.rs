@@ -118,8 +118,7 @@ impl PortForward {
                         }
                     }
                 }
-                let close = web::close(too_large.is_cancelled(), "");
-                sink.send(close).await.is_ok().then_some(sink)
+                web::send_close(sink, too_large.is_cancelled()).await
             }
         });
 

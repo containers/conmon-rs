@@ -3,6 +3,33 @@
 use super::{SUCCESS_STATUS, Version};
 use anyhow::{Context, Result};
 use serde::Serialize;
+use std::fmt;
+
+/// What a session runs, which the status of its failure names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Operation {
+    Exec,
+    Attach,
+}
+
+impl Operation {
+    /// What k8s.io/cri-streaming puts before the error of a session.
+    fn context(self) -> &'static str {
+        match self {
+            Self::Exec => "error executing command in container",
+            Self::Attach => "error attaching to container",
+        }
+    }
+}
+
+impl fmt::Display for Operation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Exec => "exec",
+            Self::Attach => "attach",
+        })
+    }
+}
 
 /// The final status of a session.
 #[derive(Debug, PartialEq)]
@@ -11,7 +38,8 @@ pub enum Status {
     ExitCode(i32),
 
     /// The session itself failed, for example a command which could not be
-    /// started.
+    /// started. The message is the one of the internal error, see
+    /// [`Status::failed`].
     Error(String),
 }
 
@@ -23,10 +51,19 @@ impl Status {
         match code {
             0 => Self::Success,
             1.. => Self::ExitCode(code),
-            _ => Self::Error(format!(
-                "unable to get the exit code of the command ({code})"
-            )),
+            _ => Self::failed(
+                Operation::Exec,
+                format_args!("unable to get the exit code of the command ({code})"),
+            ),
         }
+    }
+
+    /// The failure of a session, worded like k8s.io/cri-streaming does.
+    pub fn failed(operation: Operation, error: impl fmt::Display) -> Self {
+        Self::Error(format!(
+            "Internal error occurred: {}: {error}",
+            operation.context()
+        ))
     }
 
     /// The status on the error stream, none for a success before v4.
@@ -56,40 +93,48 @@ impl Status {
 }
 
 #[derive(Debug, Serialize)]
-/// Error message type used for exec in case that the command fails.
+/// The status of a failed session in JSON, the fields in the order of
+/// k8s.io/cri-streaming.
 pub struct ErrorMessage {
     status: &'static str,
-    reason: &'static str,
-    details: ErrorDetails,
     message: String,
+    reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<ErrorDetails>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<u16>,
 }
 
 impl ErrorMessage {
+    /// The status of a command which exited with the code, its message ends
+    /// with the exit error like the text status before v4.
     pub fn new<T>(exit_code: T) -> Self
     where
-        T: ToString,
+        T: fmt::Display,
     {
         Self {
             status: "Failure",
+            message: format!("command terminated with non-zero exit code: exit status {exit_code}"),
             reason: "NonZeroExitCode",
-            details: ErrorDetails {
+            details: Some(ErrorDetails {
                 causes: vec![ErrorCause {
                     reason: "ExitCode",
                     message: exit_code.to_string(),
                 }],
-            },
-            message: "command terminated with non-zero exit code".into(),
+            }),
+            code: None,
         }
     }
 
     /// An error of the session itself, for example a command which could not
-    /// be started.
+    /// be started, see [`Status::failed`].
     pub fn internal(message: String) -> Self {
         Self {
             status: "Failure",
-            reason: "InternalError",
-            details: ErrorDetails { causes: vec![] },
             message,
+            reason: "InternalError",
+            details: None,
+            code: Some(500),
         }
     }
 }

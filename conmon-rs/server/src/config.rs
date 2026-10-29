@@ -1,5 +1,5 @@
 //! Configuration related structures
-use crate::{listener, process::is_zombie};
+use crate::{fs_util, listener, process::is_zombie};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use nix::{
@@ -15,7 +15,6 @@ use nix::{
 };
 use std::{
     fmt, fs,
-    io::ErrorKind,
     os::fd::{AsFd, AsRawFd},
     path::{self, Path, PathBuf},
 };
@@ -131,6 +130,8 @@ pub struct Config {
         env(concat!(prefix!(), "ENABLE_TRACING")),
         long("enable-tracing"),
         short('e'),
+        // Like `skip_fork`.
+        value_parser = clap::builder::BoolishValueParser::new(),
     )]
     /// Enable OpenTelemetry tracing.
     enable_tracing: bool,
@@ -352,7 +353,7 @@ impl Config {
     }
 }
 
-// Sync with `pkg/client/client.go`
+// The socket and the PID file are the ones of `pkg/client/client.go`.
 const SOCKET: &str = "conmon.sock";
 const PIDFILE: &str = "pidfile";
 const FD_SOCKET: &str = "conmon-fd.sock";
@@ -440,13 +441,8 @@ impl Config {
             {
                 bail!("socket {} is in use by a running server", socket.display())
             }
-            match fs::remove_file(&socket) {
-                Err(e) if e.kind() != ErrorKind::NotFound => {
-                    return Err(e)
-                        .with_context(|| format!("remove stale socket {}", socket.display()));
-                }
-                _ => {}
-            }
+            fs_util::remove_file(&socket)
+                .with_context(|| format!("remove stale socket {}", socket.display()))?;
         }
 
         Ok(())

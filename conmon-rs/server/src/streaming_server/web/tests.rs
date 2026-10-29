@@ -164,7 +164,7 @@ async fn closes_which_did_not_go_out_get_no_answer() {
     assert_eq!(start.elapsed(), CLOSE_TIMEOUT);
     let mut messages = futures::stream::iter([
         Ok::<_, Infallible>(Message::Binary(Bytes::from_static(b"late"))),
-        Ok(close_message("")),
+        Ok(close(false, "")),
     ])
     .chain(futures::stream::pending());
     let start = time::Instant::now();
@@ -180,7 +180,7 @@ async fn bodies_are_sent_at_once() {
     assert_eq!(collect(response.into_body()).await, b"bad");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn drains_have_a_budget_of_their_own() -> anyhow::Result<()> {
     let (server, mut client) = tokio::io::duplex(1024);
     let mut socket =
@@ -209,7 +209,7 @@ async fn drains_have_a_budget_of_their_own() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn dropped_input_wakes_waiting_writes() -> anyhow::Result<()> {
     // A write which waits for the client gets woken once its input gets
     // dropped, which lets the client go on and read.

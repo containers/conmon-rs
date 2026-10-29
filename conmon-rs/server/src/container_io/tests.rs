@@ -185,6 +185,7 @@ async fn exec_output_during_runtime_is_kept() -> Result<()> {
         ContainerIOType::Terminal(_) => bail!("no streams"),
     }
     child.wait().await?;
+    // The read loops take all of it before anything reads the output.
     time::sleep(Duration::from_millis(100)).await;
 
     token.cancel();

@@ -8,13 +8,14 @@ use crate::{
         Process, child_pid, children_by_scan, has_zombie, is_zombie, read_pid_file,
         wait_for_exit_code, zombie_children,
     },
+    test_util::wait_for_real,
 };
 use nix::sys::{
     signal::kill,
     wait::{WaitStatus, waitpid},
 };
+use std::path::Path;
 use std::process::Command;
-use std::{path::Path, thread};
 use tokio::io::AsyncWriteExt;
 use tokio::{select, task};
 
@@ -199,20 +200,6 @@ async fn sweep_in_own_process() -> Result<()> {
     Ok(())
 }
 
-/// Wait in real time until the condition holds, without blocking the
-/// runtime of the test.
-async fn wait_until(f: impl Fn() -> bool) {
-    for _ in 0..1000 {
-        if f() {
-            return;
-        }
-        task::spawn_blocking(|| thread::sleep(std::time::Duration::from_millis(10)))
-            .await
-            .ok();
-    }
-    panic!("condition never became true");
-}
-
 fn is_gone(pid: Pid) -> bool {
     kill(pid, None).is_err()
 }
@@ -356,8 +343,8 @@ async fn watch_kills_on_timeout() -> Result<()> {
     assert_eq!(exit.exit_code, EXIT_CODE_TIMED_OUT);
     assert!(exit.timed_out);
     assert_eq!(std::fs::read_to_string(&exit_path)?, "-3");
-    wait_until(|| is_gone(pid)).await;
-    wait_until(|| cleaned.exists()).await;
+    wait_for_real(|| is_gone(pid)).await;
+    wait_for_real(|| cleaned.exists()).await;
     Ok(())
 }
 
@@ -377,7 +364,7 @@ async fn failed_create_cleanup_spares_claimed_pid() -> Result<()> {
 
     lock(&reaper.pending).remove(&pid);
     reaper.cleanup_failed_grandchild(&pidfile);
-    wait_until(|| is_gone(pid)).await;
+    wait_for_real(|| is_gone(pid)).await;
     Ok(())
 }
 
@@ -422,7 +409,7 @@ async fn leaked_fds_stay_open_until_the_exit() -> Result<()> {
 
     sh.process.signal(Signal::SIGKILL)?;
     exit_rx.recv().await?;
-    wait_until(|| matches!((&reader).read(&mut [0; 1]), Ok(0))).await;
+    wait_for_real(|| matches!((&reader).read(&mut [0; 1]), Ok(0))).await;
     assert!(matches!(reader.read(&mut buf), Ok(0)));
     Ok(())
 }
@@ -493,7 +480,7 @@ async fn registration_after_shutdown_kills_child() -> Result<()> {
             )
             .is_err()
     );
-    wait_until(|| is_gone(pid)).await;
+    wait_for_real(|| is_gone(pid)).await;
 
     // New calls do not start at all.
     let mut io = ContainerIO::new(false, ContainerLog::new())?;
@@ -610,7 +597,7 @@ async fn hanging_runtime_gets_killed_with_its_group() -> Result<()> {
         assert!(err.contains("did not finish in time"), "{err}");
         // Reparented to the init or a subreaper above the tests.
         let helper = read_pid_file(&helper_pidfile)?;
-        wait_until(|| is_gone(helper) || is_zombie(helper)).await;
+        wait_for_real(|| is_gone(helper) || is_zombie(helper)).await;
         Ok(())
     };
     let (streams, terminal) = tokio::join!(run(false), run(true));
@@ -631,6 +618,8 @@ async fn stale_pid_file_does_not_get_cleaned_up() -> Result<()> {
     let call = RuntimeCall::new(Path::new("sh"), &args, &pidfile);
     assert!(reaper.create_child(call, &mut io).await.is_err());
     assert!(!pidfile.exists());
+    // A killed process takes a moment to exit, nothing tells that no kill
+    // comes.
     time::sleep(Duration::from_millis(100)).await;
     assert!(!is_gone(other.pid) && !is_zombie(other.pid));
     Ok(())
@@ -652,10 +641,10 @@ async fn dropped_runtime_gets_killed_with_its_group() -> Result<()> {
     // Like a call in progress which the shutdown drops.
     select! {
         _ = reaper.create_child(call, &mut io) => bail!("runtime finished"),
-        () = wait_until(|| read_pid_file(&helper_pidfile).is_ok()) => {}
+        () = wait_for_real(|| read_pid_file(&helper_pidfile).is_ok()) => {}
     }
     let helper = read_pid_file(&helper_pidfile)?;
-    wait_until(|| is_gone(helper) || is_zombie(helper)).await;
+    wait_for_real(|| is_gone(helper) || is_zombie(helper)).await;
     Ok(())
 }
 
@@ -1035,4 +1024,38 @@ async fn exit_files_wait_for_log_drivers_bounded() -> Result<()> {
     drop(held);
     drop(l.writer);
     l.task.await?
+}
+
+/// A spawn which failed because a target of the passed descriptors changed
+/// gets tried once more. The passed descriptor and its duplicates get closed
+/// either way.
+#[tokio::test]
+async fn spawns_with_changed_targets_get_retried_once() -> Result<()> {
+    let reaper = ChildReaper::default();
+    let dir = tempfile::tempdir()?;
+    let pidfile = dir.path().join("pid");
+    let args = ["-c".into(), "exit 1".into()];
+    for (changes, retried) in [(1, true), (2, false)] {
+        // Reading it ends once all copies of the other end got closed.
+        let (passed, reader) = std::os::unix::net::UnixStream::pair()?;
+        reader.set_nonblocking(true)?;
+        runtime_call::TARGET_CHANGES.with(|n| n.set(changes));
+        let mut io = ContainerIO::new(false, ContainerLog::new())?;
+        let call = RuntimeCall {
+            additional_fds: vec![passed.into()],
+            ..RuntimeCall::new(Path::new("sh"), &args, &pidfile)
+        };
+        let err = reaper.create_child(call, &mut io).await.unwrap_err();
+        runtime_call::TARGET_CHANGES.with(|n| n.set(0));
+        // The runtime ran and failed on its own.
+        assert_eq!(
+            !format!("{err:#}").contains("a target descriptor changed during spawn"),
+            retried,
+            "{err:#}"
+        );
+        // A process which a parallel test forks may hold a copy until it
+        // execs.
+        wait_for_real(|| matches!(std::io::Read::read(&mut &reader, &mut [0; 1]), Ok(0))).await;
+    }
+    Ok(())
 }

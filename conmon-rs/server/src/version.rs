@@ -185,7 +185,7 @@ mod tests {
         v.print();
     }
 
-    /// The JSON keys are what the Go client reads, see pkg/client/client.go.
+    /// The JSON keys are what the Go client reads, see pkg/client/version.go.
     #[test]
     fn version_json() -> Result<()> {
         let v = Version::new(false);
@@ -214,7 +214,7 @@ mod tests {
     }
 
     /// The Go client matches the names, see the `Feature` constants in
-    /// pkg/client/client.go.
+    /// pkg/client/version.go.
     #[test]
     fn version_features() -> Result<()> {
         let v = Version::new(false);

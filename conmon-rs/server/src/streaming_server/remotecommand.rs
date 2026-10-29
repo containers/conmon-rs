@@ -29,8 +29,8 @@ mod status;
 mod websocket;
 
 use spdy::SpdyOutput;
-pub use spdy::{ExpectedStreams, SPDY_PROTOCOLS, SpdyStreams, spdy_version};
-pub use status::Status;
+pub use spdy::{ExpectedStreams, SPDY_PROTOCOLS, SpdyStreams};
+pub use status::{Operation, Status};
 pub use websocket::{Framing, WebSocketInput};
 
 pub const STDIN_BYTE: u8 = 0;
@@ -376,7 +376,7 @@ impl Output {
 }
 
 /// The entry points of the fuzz targets.
-#[cfg(feature = "fuzzing")]
+#[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 
 #[cfg(test)]

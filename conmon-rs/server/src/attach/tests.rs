@@ -5,7 +5,10 @@ use crate::{
     test_util::wait_for,
 };
 use nix::sys::socket::{AddressFamily, MsgFlags, SockFlag, connect, send, socket};
-use std::os::{fd::OwnedFd, unix::fs::PermissionsExt};
+use std::os::{
+    fd::OwnedFd,
+    unix::fs::{MetadataExt, PermissionsExt},
+};
 use std::{
     io,
     net::Shutdown,
@@ -283,6 +286,7 @@ async fn write_loop_gives_up_on_stuck_client_after_exit() -> Result<()> {
         attach.write(Message::Data(data.clone(), Pipe::StdOut));
         task::yield_now().await;
     }
+    // Nothing tells that it waits, a loop which gives up later passes.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!write_loop.is_finished());
 
@@ -429,10 +433,8 @@ async fn read_loop_continues_after_empty_packet() -> Result<()> {
     let token = CancellationToken::new();
     let (client, task) = spawn_read_loop(&attach, &token)?;
 
+    // The data after it still gets read.
     client.send(b"").await?;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(!task.is_finished());
-
     client.send(b"a").await?;
     let data = timeout(Duration::from_secs(5), attach.read()).await??;
     assert_eq!(data, &b"a"[..]);

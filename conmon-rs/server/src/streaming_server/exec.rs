@@ -16,7 +16,7 @@ use crate::{
     runtime_args::GenerateRuntimeArgs,
     server::Server,
     streaming_server::remotecommand::{
-        MESSAGE_TOO_LARGE, Output, STDERR_BYTE, STDOUT_BYTE, Status,
+        MESSAGE_TOO_LARGE, Operation, Output, STDERR_BYTE, STDOUT_BYTE, Status,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -291,12 +291,16 @@ impl StreamingServer {
     }
 
     /// The status of the exit the watcher of the process sent. It sends it
-    /// once, and only goes away without it if it got aborted, like by a
-    /// panic, the session must not wait for the exit forever then.
+    /// once, and only goes away without it if its task got aborted, the
+    /// session must not wait for the exit forever then. A panic aborts the
+    /// whole server in release builds.
     fn exit_status(res: Result<ExitChannelData, RecvError>) -> Status {
         match res {
             Ok(exit_data) => Status::exited(exit_data.exit_code),
-            Err(e) => Status::Error(format!("unable to get the exit of the command: {e}")),
+            Err(e) => Status::failed(
+                Operation::Exec,
+                format_args!("unable to get the exit of the command: {e}"),
+            ),
         }
     }
 

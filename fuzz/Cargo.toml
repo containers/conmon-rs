@@ -89,5 +89,26 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "remotecommand_spdy"
+path = "fuzz_targets/remotecommand_spdy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "journal_entry"
+path = "fuzz_targets/journal_entry.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "notify_filter"
+path = "fuzz_targets/notify_filter.rs"
+test = false
+doc = false
+bench = false
+
 [lints]
 workspace = true

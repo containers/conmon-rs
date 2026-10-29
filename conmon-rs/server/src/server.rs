@@ -5,7 +5,7 @@ use crate::{
     child_reaper::ChildReaper,
     config::{Config, LogDriver},
     fd_socket::FdSocket,
-    init,
+    fs_util, init,
     journal::Journal,
     listener,
     pause::Pause,
@@ -55,7 +55,7 @@ type Tracer = Option<SdkTracerProvider>;
 type Tracer = ();
 
 /// How long the clients wait for the server to exit on a shutdown before
-/// they kill it, `serverStopTimeout` in `pkg/client/client.go`.
+/// they kill it, `serverStopTimeout` in `pkg/client/server.go`.
 const CLIENT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 // The whole shutdown ends before the clients kill the server.
@@ -218,11 +218,9 @@ impl Server {
     /// Start the `Server` instance and consume it.
     #[expect(unsafe_code, reason = "forking")]
     pub fn start(self) -> Result<()> {
-        // We need to fork as early as possible, especially before setting up tokio.
-        // If we don't, the child will have a strange thread space and we're at risk of deadlocking.
-        // We also have to treat the parent as the child (as described in [1]) to ensure we don't
-        // interrupt the child's execution.
-        // 1: https://docs.rs/nix/0.23.0/nix/unistd/fn.fork.html#safety
+        // Fork as early as possible, before setting up tokio: a child of a
+        // process with threads may only call async-signal-safe functions
+        // until it execs, see the safety section of `nix::unistd::fork`.
         if !self.config().skip_fork() {
             // SAFETY: nothing else runs yet, the tokio runtime is built only
             // after the fork, so the child does not inherit a half initialized
@@ -561,10 +559,7 @@ impl Server {
 
         debug!("Removing fd socket file {}", fd_socket.as_ref().display());
         let fd_socket_removed = Self::until(deadline, async {
-            match fs::remove_file(fd_socket).await {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
-                _ => Ok(()),
-            }
+            fs_util::removed(fs::remove_file(fd_socket).await).map_err(Into::into)
         })
         .await
         .context("remove fd socket file");

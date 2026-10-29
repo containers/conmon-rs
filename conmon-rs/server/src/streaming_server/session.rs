@@ -8,8 +8,8 @@ use crate::{
     streaming_server::{
         idle::Activity,
         remotecommand::{
-            ClientEvent, ClientInput, ExpectedStreams, Framing, MESSAGE_TOO_LARGE, Output,
-            SpdyStreams, Status, Stdin, Version, WebSocketInput,
+            ClientEvent, ClientInput, ExpectedStreams, Framing, MESSAGE_TOO_LARGE, Operation,
+            Output, SpdyStreams, Status, Stdin, Version, WebSocketInput,
         },
         spdy::{self, Connection},
         web::{self, WebSocket},
@@ -347,7 +347,7 @@ impl StreamingServer {
         tokio::spawn(async move {
             let mut sender = sender;
             let mut status = None;
-            let (result, typ) = match session {
+            let (result, operation) = match session {
                 Session::Exec(s) => (
                     async {
                         // The runtime runs in a task of its own. A client
@@ -373,7 +373,7 @@ impl StreamingServer {
                         .await
                     }
                     .await,
-                    "exec",
+                    Operation::Exec,
                 ),
                 Session::Attach(s) => (
                     Self::until_idle(
@@ -386,11 +386,11 @@ impl StreamingServer {
                         || {},
                     )
                     .await,
-                    "attach",
+                    Operation::Attach,
                 ),
             };
 
-            if let Some(status) = Self::final_status(result, status, typ)
+            if let Some(status) = Self::final_status(result, status, operation)
                 && let Err(e) = sender.status(&status).await
             {
                 debug!("Unable to send the status: {e:#}");
@@ -408,7 +408,11 @@ impl StreamingServer {
     /// The one status a client gets, out of how the loop of its session
     /// ended and the status the loop decided on, none for a client which
     /// went away.
-    fn final_status(result: Result<()>, status: Option<Status>, typ: &str) -> Option<Status> {
+    fn final_status(
+        result: Result<()>,
+        status: Option<Status>,
+        operation: Operation,
+    ) -> Option<Status> {
         match result {
             Ok(()) => status,
             // The process exited before, its status tells the client.
@@ -418,8 +422,8 @@ impl StreamingServer {
             }
             // Otherwise the client sees a clean close and assumes success.
             Err(e) => {
-                error!("Unable to run {typ} for container: {e:#}");
-                Some(Status::Error(format!("{typ} failed: {e:#}")))
+                error!("Unable to run {operation} for container: {e:#}");
+                Some(Status::failed(operation, format_args!("{e:#}")))
             }
         }
     }
@@ -802,7 +806,7 @@ impl PendingStdin {
 }
 
 /// The entry points of the fuzz targets.
-#[cfg(feature = "fuzzing")]
+#[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 
 #[cfg(test)]

@@ -23,7 +23,7 @@ use crate::streaming_server::{
     spdy::{PING_INTERVAL, StreamReceiver},
 };
 use anyhow::{Context, Result, bail, ensure};
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use std::{
     future::{self, Future},
     io,
@@ -31,8 +31,11 @@ use std::{
     pin::pin,
 };
 use tokio::{
-    io::AsyncWriteExt,
-    net::{TcpSocket, TcpStream, tcp::OwnedWriteHalf},
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{
+        TcpSocket, TcpStream,
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+    },
     select,
     sync::mpsc,
     time::{self, Duration},
@@ -244,6 +247,25 @@ impl PortForward {
         }
     }
 
+    /// The next output of the pod, at most [`READ_BUFFER`] bytes, none once it
+    /// closed its side. Nothing gets lost if it got cancelled.
+    async fn read_pod(
+        from_container: &mut OwnedReadHalf,
+        buf: &mut BytesMut,
+    ) -> Result<Option<Bytes>> {
+        buf.reserve(READ_BUFFER);
+        let read = from_container
+            .read_buf(&mut (&mut *buf).limit(READ_BUFFER))
+            .await
+            .context("read from the pod")?;
+        Ok((read > 0).then(|| buf.split().freeze()))
+    }
+
+    /// What the client gets told about a failed connection of a port.
+    fn forward_error(port: u16, e: &anyhow::Error) -> String {
+        format!("error forwarding port {port}: {e:#}")
+    }
+
     /// Write what the client sends to the pod until the client is done,
     /// starting with what it sent while the connection got established,
     /// which gives its budget back once it got written.
@@ -304,7 +326,7 @@ impl PortForward {
 }
 
 /// The entry points of the fuzz targets.
-#[cfg(feature = "fuzzing")]
+#[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 
 #[cfg(test)]

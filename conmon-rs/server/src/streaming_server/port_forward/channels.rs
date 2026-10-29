@@ -3,7 +3,7 @@
 
 use super::{
     CHANNEL_BUFFER, CHANNEL_QUEUE, Early, MAX_CHANNEL_PORTS, OUTPUT_QUEUE, PORT_QUERY, PortForward,
-    READ_BUFFER, namespace::Namespace,
+    namespace::Namespace,
 };
 use crate::streaming_server::{
     budget::{Budget, Held},
@@ -12,11 +12,11 @@ use crate::streaming_server::{
     web::{self, Message, WebSocket},
 };
 use anyhow::{Context, Result, ensure};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use percent_encoding::percent_decode_str;
 use std::sync::Arc;
-use tokio::{io::AsyncReadExt, net::TcpStream, select, sync::mpsc, task::JoinSet};
+use tokio::{net::TcpStream, select, sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
 
@@ -113,8 +113,7 @@ impl PortForward {
                 }
                 writer_activity.touch();
             }
-            let close = web::close(writer_too_large.is_cancelled(), "");
-            sink.send(close).await.is_ok().then_some(sink)
+            web::send_close(sink, writer_too_large.is_cancelled()).await
         });
 
         let namespace = Namespace::new(self.netns_path);
@@ -269,7 +268,7 @@ impl PortForward {
         // read on while the error waits for a client which does not read.
         drop(input);
         if let Err(e) = result {
-            let message = format!("error forwarding port {port}: {e:#}");
+            let message = Self::forward_error(port, &e);
             debug!("Port forward over WebSocket: {message}");
             let _ = output.send(output.error, message.as_bytes()).await;
         }
@@ -289,20 +288,14 @@ impl PortForward {
         let upstream = Self::write_input(early, input, &mut to_container);
 
         let downstream = async {
-            let mut buf = vec![0; READ_BUFFER];
-            loop {
-                let read = from_container
-                    .read(&mut buf)
-                    .await
-                    .context("read from the pod")?;
-                if read == 0 {
-                    return anyhow::Ok(());
-                }
-                if output.send(output.data, &buf[..read]).await.is_err() {
+            let mut buf = BytesMut::new();
+            while let Some(data) = Self::read_pod(&mut from_container, &mut buf).await? {
+                if output.send(output.data, &data).await.is_err() {
                     // The client went away.
                     return Ok(());
                 }
             }
+            anyhow::Ok(())
         };
 
         select! {

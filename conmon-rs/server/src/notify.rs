@@ -12,17 +12,16 @@
 //! conmon passes. `MAINPID=` would for example make systemd manage an
 //! arbitrary host process.
 
-use crate::{listener, random_id::RandomId};
+use crate::{
+    fs_util::{self, FileId, Removal, RemoveError},
+    listener,
+    random_id::RandomId,
+};
 use anyhow::{Context, Result, bail};
 use nix::sys::socket::{MsgFlags, UnixAddr, connect, recv, send};
 use std::{
     fs::{self, File, Metadata, Permissions},
-    io::ErrorKind,
-    os::unix::{
-        fs::{MetadataExt, PermissionsExt},
-        io::AsRawFd,
-        net::UnixDatagram as StdUnixDatagram,
-    },
+    os::unix::{fs::PermissionsExt, io::AsRawFd, net::UnixDatagram as StdUnixDatagram},
     path::{Path, PathBuf},
 };
 use tokio::{net::UnixDatagram, select, task};
@@ -45,8 +44,7 @@ pub struct NotifySocket {
     /// The path of the container side and the identity of the socket bound
     /// there, so that only that one gets removed again.
     path: PathBuf,
-    dev: u64,
-    ino: u64,
+    file: FileId,
 }
 
 impl NotifySocket {
@@ -100,11 +98,8 @@ impl NotifySocket {
         if StdUnixDatagram::unbound()?.connect(&short_path).is_ok() {
             bail!("notify socket {} is in use", path.display())
         }
-        if let Err(e) = fs::remove_file(&short_path)
-            && e.kind() != ErrorKind::NotFound
-        {
-            return Err(e).with_context(|| format!("remove stale {}", path.display()));
-        }
+        fs_util::remove_file(&short_path)
+            .with_context(|| format!("remove stale {}", path.display()))?;
 
         let (socket, metadata) = Self::bind_in_place(bundle_path, &short_path)
             .with_context(|| format!("bind notify socket {}", path.display()))?;
@@ -116,8 +111,7 @@ impl NotifySocket {
             host_addr,
             _host_dir: host_dir,
             path,
-            dev: metadata.dev(),
-            ino: metadata.ino(),
+            file: FileId::new(&metadata),
         })
     }
 
@@ -309,18 +303,18 @@ impl Drop for NotifySocket {
     fn drop(&mut self) {
         // The bundle usually gets removed anyway, this just does not leave a
         // dead socket behind in case it stays, and only the own one.
-        match fs::symlink_metadata(&self.path) {
-            Ok(metadata) if metadata.dev() == self.dev && metadata.ino() == self.ino => {
-                if let Err(e) = fs::remove_file(&self.path) {
-                    debug!("Unable to remove notify socket: {e}");
-                }
-            }
-            Ok(_) => debug!("Notify socket got replaced, keeping it"),
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => debug!("Unable to stat notify socket: {e}"),
+        match self.file.remove_at(&self.path) {
+            Ok(Removal::Removed | Removal::Missing) => {}
+            Ok(Removal::Replaced) => debug!("Notify socket got replaced, keeping it"),
+            Err(RemoveError::Stat(e)) => debug!("Unable to stat notify socket: {e}"),
+            Err(RemoveError::Remove(e)) => debug!("Unable to remove notify socket: {e}"),
         }
     }
 }
+
+/// The entry point of the fuzz target.
+#[cfg(any(test, feature = "fuzzing"))]
+pub mod fuzzing;
 
 #[cfg(test)]
 mod tests;

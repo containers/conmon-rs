@@ -421,7 +421,7 @@ jobs:
           tool: cargo-llvm-cov,cargo-nextest
       # The default features are what gets shipped, the tracing feature covers
       # the optional tracing code. The coverage of both runs gets merged. The
-      # fuzzing feature only exists for the fuzz targets, which no test runs.
+      # fuzzing feature is not needed, the tests build the fuzz entry points.
       # The ci profile of .config/nextest.toml retries failed tests and writes
       # a JUnit report, which lists the ones which passed on a retry.
       - name: Generate code coverage

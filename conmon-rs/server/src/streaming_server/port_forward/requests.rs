@@ -2,15 +2,15 @@
 //! then the request forwards one connection.
 
 use super::{
-    CLOSE_GRACE_PERIOD, Early, PORT_HEADER, PortForward, READ_BUFFER, REQUEST_ID_HEADER,
-    STREAM_TYPE_DATA, STREAM_TYPE_ERROR, namespace::Namespace,
+    CLOSE_GRACE_PERIOD, Early, PORT_HEADER, PortForward, REQUEST_ID_HEADER, STREAM_TYPE_DATA,
+    STREAM_TYPE_ERROR, namespace::Namespace,
 };
 use crate::streaming_server::{
     spdy::{Connection, Headers, Stream, StreamReceiver, StreamSender},
     stream_protocol::{ClientStr, STREAM_CREATION_TIMEOUT, STREAM_TYPE_HEADER},
 };
 use anyhow::{Context, Result, bail, ensure};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::BytesMut;
 use futures::{StreamExt, stream::FuturesUnordered};
 use std::{
     collections::HashMap,
@@ -18,11 +18,7 @@ use std::{
     pin::{Pin, pin},
     sync::Arc,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-    select, time,
-};
+use tokio::{io::AsyncWriteExt, net::TcpStream, select, time};
 use tokio_util::{
     sync::{CancellationToken, DropGuard},
     time::{DelayQueue, delay_queue::Key},
@@ -285,7 +281,7 @@ impl PortForward {
         match result {
             Ok(()) => debug!("Done forwarding port {port} for request {id:?}"),
             Err(e) => {
-                let message = format!("error forwarding port {port}: {e:#}");
+                let message = Self::forward_error(port, &e);
                 debug!("Port forward request {id:?}: {message}");
                 if let Err(e) = error.send(message.into()).await {
                     debug!("Unable to report port forward error: {e:#}");
@@ -321,17 +317,14 @@ impl PortForward {
         let downstream = async {
             let mut buf = BytesMut::new();
             loop {
-                buf.reserve(READ_BUFFER);
-                let mut limited = (&mut buf).limit(READ_BUFFER);
-                let read = select! {
-                    read = from_container.read_buf(&mut limited) => read.context("read from the pod")?,
+                let data = select! {
+                    data = Self::read_pod(&mut from_container, &mut buf) => data?,
                     // Nothing takes the output anymore.
                     () = to_client.reset_by_peer() => return Ok(()),
                 };
-                if read == 0 {
+                let Some(data) = data else {
                     break;
-                }
-                let data: Bytes = buf.split().freeze();
+                };
                 if let Err(e) = to_client.send(data).await {
                     return Self::unless_reset(&to_client, e);
                 }
