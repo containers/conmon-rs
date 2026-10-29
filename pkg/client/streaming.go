@@ -10,7 +10,8 @@ import (
 
 // ServeExecContainerConfig is the configuration for calling the ServeExecContainer method.
 type ServeExecContainerConfig struct {
-	// ID is the container identifier.
+	// ID is the container identifier. Servers since v1.2.1 fail the session
+	// for one which CreateContainerConfig.ID does not allow.
 	ID string
 
 	// Command is the command to be run.
@@ -186,7 +187,8 @@ func (c *ConmonClient) ServeAttachContainer(
 
 // ServePortForwardContainerConfig is the configuration for calling the ServePortForwardContainer method.
 type ServePortForwardContainerConfig struct {
-	// NetNsPath is the path to the network namespace of the container.
+	// NetNsPath is the absolute path to the network namespace of the
+	// container. Servers since unreleased reject other ones.
 	NetNsPath string
 
 	// IdleTimeout closes a connection which got no frame of the client and
@@ -227,14 +229,17 @@ func (c *ConmonClient) ServePortForwardContainer(
 		return nil, ErrMissingNetNsPath
 	}
 
-	if err := c.requireServerFeature(ctx, FeaturePortForward, "port forwarding"); err != nil {
+	// The request goes to the checked server.
+	rpcClient, err := c.requireServerFeature(ctx, FeaturePortForward, "port forwarding")
+	if err != nil {
 		return nil, err
 	}
+	defer rpcClient.Release()
 
-	url, err := call(ctx, c, proto.Conmon.ServePortForwardContainer,
+	url, err := callOn(ctx, c, rpcClient, proto.Conmon.ServePortForwardContainer,
 		func(req proto.Conmon_ServePortForwardContainerRequest) error {
-			if err := req.SetNetNsPath(cfg.NetNsPath); err != nil {
-				return fmt.Errorf("set network namespace path: %w", err)
+			if setErr := req.SetNetNsPath(cfg.NetNsPath); setErr != nil {
+				return fmt.Errorf("set network namespace path: %w", setErr)
 			}
 
 			req.SetIdleTimeoutSec(idleTimeoutSeconds(cfg.IdleTimeout))

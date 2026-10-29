@@ -167,30 +167,51 @@ const FeatureJournaldFields = "journaldfields"
 // connects to, which can be older than the binary on disk: a server keeps
 // running across restarts of its callers and upgrades. A call which dials a
 // new connection to the server, because the last one broke, records them
-// again. SupportsFeature does not ask the server itself, so it reports the
-// features of a server which got replaced until a call reconnected.
+// again once the server told them. SupportsFeature does not ask the server
+// itself, so it reports the features of a server which got replaced until a
+// call reconnected, and keeps them if the new server did not tell its
+// features within a few seconds. Methods which need a feature ask the server
+// again then.
 func (c *ConmonClient) SupportsFeature(feature string) bool {
 	return c.serverFeatures()[feature]
 }
 
 // requireServerFeature fails with ErrUnsupported if the server does not
-// report the feature. New records the features, a client without them asks
-// the server once.
-func (c *ConmonClient) requireServerFeature(ctx context.Context, feature, usage string) error {
-	features := c.serverFeatures()
-	if features == nil {
+// report the feature. It replaces a broken connection first and only relies
+// on features which got recorded on the connection it uses, otherwise it
+// asks the server, also if the client which dialed the connection is still
+// asking or failed to. It returns a reference of the RPC client of the
+// checked connection, which the caller makes its call on and releases then,
+// so that the call goes to the checked server: once that connection broke,
+// the call fails rather than reaching another server.
+func (c *ConmonClient) requireServerFeature(
+	ctx context.Context, feature, usage string,
+) (_ proto.Conmon, retErr error) {
+	conn, rpcClient, err := c.clientConn(ctx)
+	if err != nil {
+		return proto.Conmon{}, fmt.Errorf("create RPC client: %w", err)
+	}
+
+	defer func() {
+		if retErr != nil {
+			rpcClient.Release()
+		}
+	}()
+
+	features, current := c.featuresOn(conn)
+	if !current {
 		// Asked without holding the lock, a server which does not answer
 		// must not block other callers beyond their own context.
-		resp, err := c.Version(ctx, &VersionConfig{})
+		resp, err := c.version(ctx, rpcClient)
 		if err != nil {
-			return fmt.Errorf("get server version: %w", err)
+			return proto.Conmon{}, fmt.Errorf("get server version: %w", err)
 		}
 
-		features = c.setFeatures(resp.Features)
+		features = c.recordFeatures(conn, resp.Features)
 	}
 
 	if !features[feature] {
-		return fmt.Errorf(
+		return proto.Conmon{}, fmt.Errorf(
 			"%s needs the %q feature of the server: %w",
 			usage,
 			feature,
@@ -198,11 +219,12 @@ func (c *ConmonClient) requireServerFeature(ctx context.Context, feature, usage 
 		)
 	}
 
-	return nil
+	return rpcClient, nil
 }
 
 // serverFeatures returns the recorded features of the server, nil if they
-// are unknown.
+// are unknown. They may belong to a server which got replaced, see
+// featuresOn.
 func (c *ConmonClient) serverFeatures() map[string]bool {
 	c.featuresMu.Lock()
 	defer c.featuresMu.Unlock()
@@ -210,17 +232,58 @@ func (c *ConmonClient) serverFeatures() map[string]bool {
 	return c.features
 }
 
-// setFeatures records the features the server reported and returns them.
-func (c *ConmonClient) setFeatures(list []string) map[string]bool {
-	features := make(map[string]bool, len(list))
-	for _, feature := range list {
-		features[feature] = true
+// featuresOn returns the recorded features of the server, and whether they
+// got recorded on the connection.
+func (c *ConmonClient) featuresOn(conn *rpcConn) (map[string]bool, bool) {
+	c.featuresMu.Lock()
+	defer c.featuresMu.Unlock()
+
+	return c.features, conn != nil && c.features != nil && c.featuresConn == conn
+}
+
+// setFeatures records the features the server reported on the connection in
+// use. Only for New, which makes no other calls meanwhile.
+func (c *ConmonClient) setFeatures(list []string) {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+
+	c.recordFeaturesLocked(c.conn, list)
+}
+
+// recordFeatures records the features the server reported on the
+// connection, unless another one replaced it meanwhile, and returns them.
+func (c *ConmonClient) recordFeatures(conn *rpcConn, list []string) map[string]bool {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+
+	if c.conn != conn {
+		return featureSet(list)
 	}
+
+	return c.recordFeaturesLocked(conn, list)
+}
+
+// recordFeaturesLocked records the features the server reported on the
+// connection and returns them. The caller holds connMu, which always gets
+// taken before featuresMu.
+func (c *ConmonClient) recordFeaturesLocked(conn *rpcConn, list []string) map[string]bool {
+	features := featureSet(list)
 
 	c.featuresMu.Lock()
 	defer c.featuresMu.Unlock()
 
 	c.features = features
+	c.featuresConn = conn
+
+	return features
+}
+
+// featureSet converts the features the server reported.
+func featureSet(list []string) map[string]bool {
+	features := make(map[string]bool, len(list))
+	for _, feature := range list {
+		features[feature] = true
+	}
 
 	return features
 }
@@ -236,11 +299,13 @@ func (c *ConmonClient) Version(
 	return call(ctx, c, proto.Conmon.Version, versionRequest(cfg), readVersionResponse)
 }
 
-// version asks the server for its version on the RPC client.
+// version asks the server for its version on the RPC client, without the
+// verbose fields.
 func (c *ConmonClient) version(
-	ctx context.Context, rpcClient proto.Conmon, cfg *VersionConfig,
+	ctx context.Context,
+	rpcClient proto.Conmon,
 ) (*VersionResponse, error) {
-	return callOn(ctx, c, rpcClient, proto.Conmon.Version, versionRequest(cfg), readVersionResponse)
+	return callOn(ctx, c, rpcClient, proto.Conmon.Version, versionRequest(nil), readVersionResponse)
 }
 
 // versionRequest fills the request of a Version call.

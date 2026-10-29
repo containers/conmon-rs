@@ -10,6 +10,7 @@ import (
 
 	"capnproto.org/go/capnp/v3"
 	"github.com/containers/conmon-rs/internal/proto"
+	"github.com/sirupsen/logrus"
 )
 
 func TestLogDriverTypes(t *testing.T) {
@@ -97,8 +98,24 @@ func TestLogDriverTypes(t *testing.T) {
 
 	if _, err := logDriversToProto([]ContainerLogDriver{
 		{Type: LogDriverTypeJournald}, {Type: LogDriverType(42)},
-	}); !errors.Is(err, errInvalidValue) {
-		t.Errorf("unknown type: got %v, want %v", err, errInvalidValue)
+	}); !errors.Is(err, ErrInvalidValue) {
+		t.Errorf("unknown type: got %v, want %v", err, ErrInvalidValue)
+	}
+}
+
+func TestCreateContainerValidatesWithoutServer(t *testing.T) {
+	t.Parallel()
+
+	// No server runs, the configuration fails before the feature check
+	// of the sd_notify socket dials one.
+	c := newTestClient(t, t.TempDir(), logrus.New())
+
+	if _, err := c.CreateContainer(t.Context(), &CreateContainerConfig{
+		ID:             "id",
+		LogDrivers:     []ContainerLogDriver{{Type: LogDriverType(42)}},
+		SdNotifySocket: "/notify.sock",
+	}); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("got error %v, want %v", err, ErrInvalidValue)
 	}
 }
 

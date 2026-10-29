@@ -22,19 +22,26 @@ import (
 // which gets reset during the call, like by Close or Shutdown, fails it as
 // disconnected, see ErrServerDisconnected.
 func (c *ConmonClient) client(ctx context.Context) (proto.Conmon, error) {
+	_, rpcClient, err := c.clientConn(ctx)
+
+	return rpcClient, err
+}
+
+// clientConn works like client and also returns the connection.
+func (c *ConmonClient) clientConn(ctx context.Context) (*rpcConn, proto.Conmon, error) {
 	conn, rpcClient, dialed, err := c.usableConn(ctx)
 	if err != nil {
-		return proto.Conmon{}, err
+		return nil, proto.Conmon{}, err
 	}
 
 	// Without the lock, a server which does not answer must not block other
 	// callers. Features which are not recorded yet get asked for by New and
-	// requireServerFeature.
+	// requireServerFeature, which also asks while this refresh runs.
 	if dialed && c.serverFeatures() != nil {
 		c.refreshServer(ctx, conn, rpcClient)
 	}
 
-	return rpcClient, nil
+	return conn, rpcClient, nil
 }
 
 // usableConn returns the connection with a reference of its RPC client, and
@@ -169,16 +176,17 @@ func noResponse[T any](T) (struct{}, error) {
 // connection, which may be another server than before, for example one
 // which got restarted. Shutdown and KillContext stop that one then. If the
 // server does not tell them within serverProbeTimeout, the recorded ones
-// stay and the call which dialed the connection goes on. The peer
-// credentials of the socket are no replacement: they name the process
-// which called listen at that time, which may have exited by the time the
-// PID gets used, and the PID may belong to another process by then. Only
-// the PID which the server reports itself is trusted.
+// stay for SupportsFeature and the call which dialed the connection goes on,
+// requireServerFeature asks the server again. The peer credentials of the
+// socket are no replacement: they name the process which called listen at
+// that time, which may have exited by the time the PID gets used, and the
+// PID may belong to another process by then. Only the PID which the server
+// reports itself is trusted.
 func (c *ConmonClient) refreshServer(ctx context.Context, conn *rpcConn, rpcClient proto.Conmon) {
 	ctx, cancel := context.WithTimeout(ctx, c.serverTimeouts().probe)
 	defer cancel()
 
-	resp, err := c.version(ctx, rpcClient, nil)
+	resp, err := c.version(ctx, rpcClient)
 	if err != nil {
 		c.logger.WithError(err).
 			Debug("Unable to get the features of the server, keeping the recorded ones")
@@ -200,7 +208,7 @@ func (c *ConmonClient) refreshServer(ctx context.Context, conn *rpcConn, rpcClie
 		return
 	}
 
-	c.setFeatures(resp.Features)
+	c.recordFeaturesLocked(conn, resp.Features)
 
 	if resp.ProcessID == 0 || same {
 		return
@@ -324,6 +332,12 @@ func (c *ConmonClient) closeConnLocked() {
 		// The calls in progress hold references of their own, see client,
 		// they fail like on the closed connection.
 		c.conn.client.Release()
+
+		// The features stay for SupportsFeature, they only belonged to
+		// the connection.
+		c.featuresMu.Lock()
+		c.featuresConn = nil
+		c.featuresMu.Unlock()
 
 		c.conn = nil
 	}

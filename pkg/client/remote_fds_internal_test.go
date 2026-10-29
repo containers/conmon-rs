@@ -198,6 +198,21 @@ func TestRemoteFDsFailedSendKeepsConnection(t *testing.T) {
 	}
 }
 
+func TestRemoteFDsTooManyKeepsConnection(t *testing.T) {
+	t.Parallel()
+
+	r := newTestRemoteFDs(t, slotsReply)
+
+	// Rejected before anything gets sent, the descriptors are not looked at.
+	if _, err := r.Send(make([]int, maxFDs+1)...); !errors.Is(err, ErrTooManyFileDescriptors) {
+		t.Fatalf("got error %v, want %v", err, ErrTooManyFileDescriptors)
+	}
+
+	if _, err := r.Send(testFD(t)); err != nil {
+		t.Fatalf("send after too many descriptors: %v", err)
+	}
+}
+
 func TestRemoteFDsInvalidResponseBreaksConnection(t *testing.T) {
 	t.Parallel()
 

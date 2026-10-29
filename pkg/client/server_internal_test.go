@@ -792,6 +792,7 @@ func TestShutdownWithoutPID(t *testing.T) {
 	// stopped then, the attach sessions keep their stdin.
 	for name, stop := range map[string]func() error{
 		"Shutdown":    c.Shutdown,
+		"Kill":        c.Kill,
 		"KillContext": func() error { return c.KillContext(t.Context()) },
 	} {
 		if err := stop(); !errors.Is(err, ErrServerPIDUnknown) {
@@ -1337,7 +1338,7 @@ func TestKillContext(t *testing.T) {
 	}
 
 	// A server which is gone already is no error.
-	if err := c.KillContext(t.Context()); err != nil {
+	if err := c.Kill(); err != nil {
 		t.Fatalf("kill again: %v", err)
 	}
 

@@ -98,7 +98,7 @@ func (t enumTable[C, P]) toProto(value C) (P, error) {
 
 	var zero P
 
-	return zero, fmt.Errorf("%w: %v", errInvalidValue, value)
+	return zero, fmt.Errorf("%w: %v", ErrInvalidValue, value)
 }
 
 //nolint:ireturn // the type parameters are enums, not interfaces
@@ -111,5 +111,5 @@ func (t enumTable[C, P]) fromProto(value P) (C, error) {
 
 	var zero C
 
-	return zero, fmt.Errorf("%w: %v from server", errInvalidValue, value)
+	return zero, fmt.Errorf("%w: %v from server", ErrInvalidValue, value)
 }

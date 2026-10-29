@@ -31,7 +31,6 @@ const (
 var (
 	errRuntimeUnspecified = errors.New("runtime must be specified")
 	errRunDirUnspecified  = errors.New("RunDir must be specified")
-	errInvalidValue       = errors.New("invalid value")
 	errRunDirNotCreated   = errors.New("could not create RunDir")
 )
 
@@ -61,10 +60,14 @@ type ConmonClient struct {
 	// cgroupManagerWarning warns once about per command cgroup managers
 	// which get ignored.
 	cgroupManagerWarning sync.Once
-	featuresMu           sync.Mutex
-	features             map[string]bool
-	connMu               sync.Mutex
-	conn                 *rpcConn
+	// features are the recorded features of the server and featuresConn
+	// the connection they got recorded on, guarded by featuresMu, which
+	// gets taken after connMu.
+	featuresMu   sync.Mutex
+	features     map[string]bool
+	featuresConn *rpcConn
+	connMu       sync.Mutex
+	conn         *rpcConn
 	// timeouts are the waits for servers which do not answer or go away,
 	// nil for the default ones, see serverTimeouts.
 	timeouts *serverTimeouts
@@ -176,7 +179,13 @@ func (c *ConmonClient) serverTimeouts() serverTimeouts {
 
 // Tracing is the structure for managing server-side OpenTelemetry tracing.
 type Tracing struct {
-	// Enabled tells the server to run with OpenTelemetry tracing.
+	// Enabled tells the server to run with OpenTelemetry tracing. The client
+	// then passes the span of the context of each call to the server, through
+	// the global propagator of OpenTelemetry. The server extracts the W3C
+	// Trace Context, so the caller has to register that propagator, for
+	// example with otel.SetTextMapPropagator(propagation.TraceContext{}).
+	// The default global propagator passes nothing, the spans of the server
+	// do not join the trace of the call then.
 	Enabled bool
 
 	// Endpoint is the GRPC tracing endpoint for OTLP.
@@ -202,8 +211,10 @@ type Heaptrack struct {
 }
 
 // NewConmonServerConfig creates a new ConmonServerConfig instance for the
-// required arguments. Optional arguments are pointing to their corresponding
-// default values.
+// required arguments. It sets the LogLevel to LogLevelDebug, which is more
+// verbose than the LogLevelInfo the server defaults to, the LogDriver to
+// LogDriverSystemd and Stdout and Stderr to os.Stdout and os.Stderr. The
+// other fields keep their zero values.
 func NewConmonServerConfig(
 	runtime, runtimeRoot, serverRunDir string,
 ) *ConmonServerConfig {
@@ -413,7 +424,7 @@ func (c *ConmonServerConfig) toClient() (*ConmonClient, error) {
 	}
 
 	if !validCgroupManager(c.CgroupManager, true) {
-		return nil, fmt.Errorf("%w: cgroup manager %d", errInvalidValue, c.CgroupManager)
+		return nil, fmt.Errorf("%w: cgroup manager %d", ErrInvalidValue, c.CgroupManager)
 	}
 
 	const perm = 0o755
@@ -590,7 +601,7 @@ func validateStringSlice(typ, given string, possibleValues ...string) error {
 		return nil
 	}
 
-	return fmt.Errorf("%w: %s %q", errInvalidValue, typ, given)
+	return fmt.Errorf("%w: %s %q", ErrInvalidValue, typ, given)
 }
 
 // validateCgroupManager checks a per command cgroup manager before a request
@@ -608,7 +619,7 @@ func (c *ConmonClient) validateCgroupManager(cfg CgroupManager) error {
 	}
 
 	if !validCgroupManager(cfg, false) {
-		return fmt.Errorf("%w: cgroup manager %d", errInvalidValue, cfg)
+		return fmt.Errorf("%w: cgroup manager %d", ErrInvalidValue, cfg)
 	}
 
 	return nil

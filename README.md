@@ -25,8 +25,10 @@ crun. CI runs the integration tests on cgroup v2 only.
 ## Documentation
 
 - [usage.md](usage.md): configuring CRI-O, the command line, the `pause`
-  subcommand and the protocols between the server and its clients.
+  subcommand, the protocols between the server and its clients, logging,
+  troubleshooting, tracing and the use on Red Hat OpenShift.
 - [release.md](release.md): how to cut a release.
+- [SECURITY.md](SECURITY.md): how to report a security issue.
 - [Rust docs](https://containers.github.io/conmon-rs/conmonrs/index.html) of
   the server internals on `main` and the [Go client
   docs](https://pkg.go.dev/github.com/containers/conmon-rs/pkg/client).

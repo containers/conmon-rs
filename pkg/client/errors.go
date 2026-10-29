@@ -33,6 +33,14 @@ var (
 	// with a nil configuration.
 	ErrMissingConfig = errors.New("config must be specified")
 
+	// ErrInvalidValue gets matched by the error of New and of a method if
+	// the configuration has a value which none of the constants of its type
+	// names, like an unknown CgroupManager, LogDriverType or Namespace, and
+	// if the server answered with a value the client does not know. New only
+	// checks the LogLevel and LogDriver if it starts a server, they do not
+	// apply to one which runs already. Use errors.Is to check for it.
+	ErrInvalidValue = errors.New("invalid value")
+
 	// ErrTerminalSizeNil gets returned by SetWindowSizeContainer if the
 	// configuration has no Size.
 	ErrTerminalSizeNil = errors.New("terminal size cannot be nil")

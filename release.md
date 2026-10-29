@@ -6,7 +6,9 @@ files it lists, the `version` in the `[workspace.package]` section of
 [Cargo.toml](Cargo.toml) and the `Version` in
 [rpm/conmon-rs.spec](rpm/conmon-rs.spec). The PR also runs
 `cargo update --workspace` to update [Cargo.lock](Cargo.lock) and replaces
-"unreleased" in [usage.md](usage.md) with the version.
+"unreleased" with the version in [usage.md](usage.md), the Go documentation in
+[pkg/client](pkg/client) and the comments of
+[conmon-rs/server/proto/conmon.capnp](conmon-rs/server/proto/conmon.capnp).
 `make verify-dependencies verify-spec` has to pass.
 
 After that PR got merged, push an annotated tag for its merge commit with git:

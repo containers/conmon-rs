@@ -14,6 +14,19 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// requireFeature checks the feature like a method which needs it and
+// releases the RPC client the check returned.
+func requireFeature(ctx context.Context, c *ConmonClient, feature string) error {
+	rpcClient, err := c.requireServerFeature(ctx, feature, "test")
+	if err != nil {
+		return err
+	}
+
+	rpcClient.Release()
+
+	return nil
+}
+
 func TestRequireServerFeatureDoesNotBlock(t *testing.T) {
 	t.Parallel()
 
@@ -37,7 +50,7 @@ func TestRequireServerFeatureDoesNotBlock(t *testing.T) {
 	slow := make(chan error, 1)
 
 	go func() {
-		slow <- c.requireServerFeature(t.Context(), FeaturePortForward, "test")
+		slow <- requireFeature(t.Context(), c, FeaturePortForward)
 	}()
 
 	<-called
@@ -49,7 +62,7 @@ func TestRequireServerFeatureDoesNotBlock(t *testing.T) {
 
 	start := time.Now()
 
-	err = c.requireServerFeature(ctx, FeaturePortForward, "test")
+	err = requireFeature(ctx, c, FeaturePortForward)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("got error %v, want %v", err, context.DeadlineExceeded)
 	}
@@ -72,23 +85,31 @@ func TestRequireServerFeatureDoesNotBlock(t *testing.T) {
 func TestRequireServerFeature(t *testing.T) {
 	t.Parallel()
 
-	// Recorded features need no server.
-	c := &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
-	c.setFeatures([]string{FeatureSdNotify})
+	dir := t.TempDir()
+	serveVersionSocket(t, dir, versionConmon{features: []string{FeatureSdNotify}})
 
-	if err := c.requireServerFeature(t.Context(), FeatureSdNotify, "test"); err != nil {
-		t.Fatalf("recorded feature: %v", err)
+	c := newTestClient(t, dir, logrus.New())
+	t.Cleanup(func() { c.Close() })
+
+	if err := requireFeature(t.Context(), c, FeatureSdNotify); err != nil {
+		t.Fatalf("reported feature: %v", err)
 	}
 
-	if err := c.requireServerFeature(
-		t.Context(),
-		FeaturePortForward,
-		"test",
-	); !errors.Is(
+	if err := requireFeature(t.Context(), c, FeaturePortForward); !errors.Is(
 		err,
 		ErrUnsupported,
 	) {
 		t.Fatalf("got error %v, want %v", err, ErrUnsupported)
+	}
+
+	// A closed client does not check the features at all.
+	c.Close()
+
+	if err := requireFeature(t.Context(), c, FeatureSdNotify); !errors.Is(
+		err,
+		ErrClientClosed,
+	) {
+		t.Fatalf("got error %v, want %v", err, ErrClientClosed)
 	}
 }
 
@@ -217,6 +238,170 @@ func TestSupportsFeatureAfterReconnect(t *testing.T) {
 		if !c.SupportsFeature(FeatureSdNotify) {
 			t.Fatalf("server with %v: feature %q not supported", server.features, FeatureSdNotify)
 		}
+	}
+}
+
+func TestRequireServerFeatureAfterReconnect(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	stop := serveVersionSocket(t, dir, versionConmon{features: []string{FeatureSdNotify}})
+
+	c := newTestClient(t, dir, logrus.New())
+	t.Cleanup(func() { c.Close() })
+
+	connected, err := c.connectRunningServer(t.Context())
+	if err != nil || !connected {
+		t.Fatalf("connect: %v, connected %v", err, connected)
+	}
+
+	// stopServer stops the server the client is connected to, the next
+	// call connects to the one which replaces it.
+	stopServer := func() {
+		t.Helper()
+
+		conn := c.conn
+
+		stop()
+		waitBroken(t, conn)
+	}
+
+	// An upgraded server forwards ports, which the recorded features do not
+	// list.
+	stopServer()
+
+	requests, stop := serveRecording(t, dir, FeatureSdNotify, FeaturePortForward)
+
+	if _, err := c.ServePortForwardContainer(t.Context(), &ServePortForwardContainerConfig{
+		NetNsPath: "/proc/1/ns/net",
+	}); err != nil {
+		t.Fatalf("port forward on an upgraded server: %v", err)
+	}
+
+	if got := lastRequest(t, requests); got.method != "ServePortForwardContainer" {
+		t.Fatalf("got request %q, want ServePortForwardContainer", got.method)
+	}
+
+	// An older server does not, which would reject the call as
+	// unimplemented.
+	stopServer()
+
+	stop = serveVersionSocket(t, dir, versionConmon{features: []string{FeatureSdNotify}})
+
+	if _, err := c.ServePortForwardContainer(t.Context(), &ServePortForwardContainerConfig{
+		NetNsPath: "/proc/1/ns/net",
+	}); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("port forward on an older server: got error %v, want %v", err, ErrUnsupported)
+	}
+
+	// An even older one ignores the sd_notify socket.
+	stopServer()
+	serveVersionSocket(t, dir, versionConmon{})
+
+	if _, err := c.CreateContainer(t.Context(), &CreateContainerConfig{
+		ID:             "id",
+		SdNotifySocket: "/notify.sock",
+	}); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("sd_notify socket on an older server: got error %v, want %v", err, ErrUnsupported)
+	}
+}
+
+func TestRequireServerFeatureDuringRefresh(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	stop := serveVersionSocket(t, dir, versionConmon{features: []string{FeaturePortForward}})
+
+	c := newTestClient(t, dir, logrus.New())
+	t.Cleanup(func() { c.Close() })
+
+	connected, err := c.connectRunningServer(t.Context())
+	if err != nil || !connected {
+		t.Fatalf("connect: %v, connected %v", err, connected)
+	}
+
+	conn := c.conn
+
+	stop()
+	waitBroken(t, conn)
+
+	// An older server, whose answers wait for the release.
+	called := make(chan struct{}, 1)
+	release := make(chan struct{})
+	serveVersionSocket(t, dir, versionConmon{called: called, release: release})
+
+	check := func() <-chan error {
+		done := make(chan error, 1)
+
+		go func() {
+			done <- requireFeature(t.Context(), c, FeaturePortForward)
+		}()
+
+		return done
+	}
+
+	// The first check dials the new connection and refreshes the features.
+	first := check()
+
+	<-called
+
+	// The second one uses the new connection meanwhile, it must not go by
+	// the features of the replaced server but ask the new one.
+	second := check()
+
+	select {
+	case err := <-second:
+		t.Fatalf("checked the features of the replaced server: %v", err)
+	case <-called:
+	}
+
+	close(release)
+
+	for _, done := range []<-chan error{first, second} {
+		if err := <-done; !errors.Is(err, ErrUnsupported) {
+			t.Fatalf("got error %v, want %v", err, ErrUnsupported)
+		}
+	}
+}
+
+func TestRequireServerFeatureKeepsTheCheckedServer(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	stop := serveVersionSocket(t, dir, versionConmon{features: []string{FeaturePortForward}})
+
+	c := newTestClient(t, dir, logrus.New())
+	t.Cleanup(func() { c.Close() })
+
+	rpcClient, err := c.requireServerFeature(t.Context(), FeaturePortForward, "test")
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	defer rpcClient.Release()
+
+	// An older server replaces the checked one before the call.
+	conn := c.conn
+
+	stop()
+	waitBroken(t, conn)
+
+	requests, _ := serveRecording(t, dir)
+
+	_, err = callOn(t.Context(), c, rpcClient, proto.Conmon.ServePortForwardContainer,
+		func(req proto.Conmon_ServePortForwardContainerRequest) error {
+			return req.SetNetNsPath("/proc/1/ns/net")
+		},
+		readURL,
+	)
+	// Disconnected, or failed to send on the broken connection.
+	if err == nil {
+		t.Fatal("call on the broken connection succeeded")
+	}
+
+	select {
+	case req := <-requests:
+		t.Fatalf("request %s reached the replacement", req.method)
+	default:
 	}
 }
 

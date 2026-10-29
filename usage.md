@@ -34,7 +34,7 @@ debug logs when creating a container:
 ```text
 …
 DEBU[…] Using conmonrs version: …, tag: …, commit: …, build: …, \
-            target: x86_64-unknown-linux-gnu, rustc …, cargo …  file="oci/runtime_pod.go:147"
+            target: x86_64-unknown-linux-gnu, rustc …, cargo …  file="oci/runtime_pod.go"
 …
 ```
 
@@ -43,8 +43,8 @@ projects are kept working together.
 
 ## Command line
 
-The client starts the server with these flags, every flag can also be set
-through the environment variable in parentheses:
+The server takes these flags, every flag can also be set through the
+environment variable in parentheses:
 
 | Flag                              | Environment               | Default                 | Purpose                                                                            |
 | --------------------------------- | ------------------------- | ----------------------- | ---------------------------------------------------------------------------------- |
@@ -117,9 +117,12 @@ which gets killed with it, so the helpers it started do not stay behind.
 ### Attach socket
 
 `attachContainer` makes the server listen on a `SOCK_SEQPACKET` UNIX socket at
-the requested path. Packets from the client are the container's stdin, passed
-on as they are, NUL bytes included. The client's input ends when it shuts down
-the write side of its connection. Packets to the client start with one byte
+the requested path, which has to be absolute since unreleased. Packets from the
+client are the container's stdin, passed on as they are, NUL bytes included. A
+packet of more than 64 KiB gets truncated to its first 64 KiB. The Go client
+sends one read of its stdin per packet, at most 32 KiB plus the start of a
+detach key sequence which it held back. The client's input ends when it shuts
+down the write side of its connection. Packets to the client start with one byte
 selecting the stream, `2` for stdout and `3` for stderr, followed by up to 8191
 bytes of data. A single `0` byte tells the client that the container output
 ended. This is the same protocol conmon speaks, so existing attach clients
@@ -179,13 +182,13 @@ SPDY/3.1, which the kubelet uses towards the runtime also when the client
 connected with a WebSocket. Per forwarded connection the client opens an
 `error` and a `data` stream with the `port` and `requestID` headers. The
 server connects to that port on `localhost` within the network namespace of
-the request and copies between the connection and the data stream, a failure
-is reported as text on the error stream, what the client sends on it gets
-dropped. Only what the SPDY implementation of
-Kubernetes uses is supported: a connection has at most 1024 streams, which
-count until the server let go of them, also after a reset, and a stream at most
-32 headers in 8 KiB. There is no flow control: the server holds about
-4 MiB of what the client sent on a connection, plus the frame it waits to
+the request, whose `netNsPath` has to be absolute since unreleased, and copies
+between the connection and the data stream, a failure is reported as text on
+the error stream, what the client sends on it gets dropped. Only what the SPDY
+implementation of Kubernetes uses is supported: a connection has at most 1024
+streams, which count until the server let go of them, also after a reset, and a
+stream at most 32 headers in 8 KiB. There is no flow control: the server holds
+about 4 MiB of what the client sent on a connection, plus the frame it waits to
 place, and stops reading it until the streams took their data. What a
 forwarded connection sends while it gets established, up to 1 MiB, moves into a
 connect budget of 16 MiB per session instead, so that a port which does not
@@ -197,11 +200,11 @@ binary WebSocket messages with the `SPDY/3.1+portforward.k8s.io` subprotocol.
 
 The URL also serves the older WebSocket channel protocol (`v4.channel.k8s.io`,
 `v4.base64.channel.k8s.io` or no subprotocol), which forwards one connection
-per port of the `port` query parameter. Port `i` gets the data channel `2i`
-and the error channel `2i+1`, every message starts with its channel (an ASCII
-digit offset in base64 text messages) and the first message of each channel
-carries the port as a little endian `u16`. The session ends once all
-connections ended.
+per port of the `port` query parameter, at most 40 ports, a request with more
+gets a 400. Port `i` gets the data channel `2i` and the error channel `2i+1`,
+every message starts with its channel (an ASCII digit offset in base64 text
+messages) and the first message of each channel carries the port as a little
+endian `u16`. The session ends once all connections ended.
 
 `idleTimeoutSec` closes a connection which got no frame of the client and no
 data either way for that long. A stream which slowly takes its data keeps it
@@ -259,6 +262,17 @@ it did not get the URL of:
 - A token which no client used expires after 60 seconds.
 - The server keeps a bounded number of unused URLs per kind (exec and attach,
   port forward).
+- A token only works on the path of its kind, `/exec/`, `/attach/` or
+  `/portforward/`, an exec token on the attach path gets a 404 like an unknown
+  one. Before v1.2.1, exec and attach tokens work on either of their paths.
+
+Since v1.2.1, at most 256 connections which did not get upgraded yet get
+served at once, more wait in the backlog of the listener. A connection serves a
+single request, it has 5 seconds to send the head of the request and 10 seconds
+until it got upgraded, otherwise the server closes it. A local process which
+holds all of these connections open delays the requests of others by up to 5
+seconds, as it has to send a request head within that time, but cannot use up
+the file descriptors of the server.
 
 The logs show only the first 8 hex digits of a token, which tell the sessions
 apart but are not enough to use one. Responses never name the token: a request
@@ -273,11 +287,13 @@ passing file descriptors, which the client can then reference by slot number in
 descriptors as `SCM_RIGHTS` ancillary data and one little endian `u64`
 `(request_id << 32) | num_fds`. The response repeats that `u64` followed by one
 `u64` slot per descriptor. On error the lower 32 bits of the first word are
-all ones and the rest of the message is the error text. Received descriptors
-are closed when the connection ends or on an empty request. Since v1.2.1, a
-connection holds at most 1024 descriptors which no request took yet, and all
-connections together a quarter of the open files limit of the server, a
-request beyond that fails. The full description lives in the module
+all ones and the rest of the message is the error text. A request carries at
+most 253 descriptors, the most the kernel passes with one message
+(`SCM_MAX_FD`). Received descriptors are closed when the connection ends or on
+an empty request, a `u64` of zero without descriptors, which gets no response.
+Since v1.2.1, a connection holds at most 1024 descriptors which no request took
+yet, and all connections together a quarter of the open files limit of the
+server, a request beyond that fails. The full description lives in the module
 documentation of [fd_socket.rs](conmon-rs/server/src/fd_socket.rs).
 
 ## Logging
@@ -326,20 +342,23 @@ try when debugging a container that misbehaves under conmon-rs.
 ## Troubleshooting
 
 With the `systemd` log driver, the default of `conmonrs`, the server's own
-logs go to the journal under its process name. CRI-O passes its `log_level` on
-to the servers, but since v1.34 starts them with the log driver `none`, unless
-the `monitor_env` of the runtime handler contains `LOG_DRIVER=systemd`. The
-container output only goes to the journal with the `journald` log driver of
-the container, sent by the same process:
+logs go to the journal, since v1.2.1 with the `SYSLOG_IDENTIFIER` `conmonrs`,
+before only under its process name (`_COMM=conmonrs`). CRI-O passes
+its `log_level` on to the servers, but since v1.34 starts them with the log
+driver `none`, unless the `monitor_env` of the runtime handler contains
+`LOG_DRIVER=systemd`. The container output only goes to the journal with the
+`journald` log driver of the container, sent by the same process:
 
 ```console
 > journalctl -t conmonrs
+> journalctl _COMM=conmonrs
 > journalctl CONTAINER_ID_FULL=<id>
 ```
 
 The first command shows the logs of the server together with the output of
 the containers which use the `journald` log driver without a `tag`, the
-second one only the output of one container.
+second one also the logs of older servers and the output of containers with a
+`tag`. The third one shows only the output of one container.
 
 The server never waits for the journal with its own entries, they get lost while
 journald does not keep up, for example while it restarts. The lines of container
@@ -368,6 +387,20 @@ containers. Collect the logs of that server, then kill it, the next
 `client.New` starts a new one. The containers of the pod lose their monitor
 that way and should be recreated.
 
+To profile the memory of a server, the Go client attaches
+[heaptrack](https://github.com/KDE/heaptrack) to a server which `client.New`
+starts if its configuration has `Heaptrack: &client.Heaptrack{Enabled: true}`.
+It runs `heaptrack --record-only -p <pid>` from the `BinaryPath` of the
+configuration or the `PATH`, as a child of the client process, with
+`-o <OutputPath>` if that is set, otherwise heaptrack writes the profile to the
+working directory of the client under its default name. A server which already
+runs does not get profiled. CRI-O enables it with `HEAPTRACK_OUTPUT_PATH` or
+`HEAPTRACK_BINARY_PATH` in the `monitor_env` of the runtime handler. With
+`HEAPTRACK_OUTPUT_PATH`, the profiles end up below that path as
+`cri-o.conmon-rs.<container id>`, named after the container whose creation
+started the server, with only `HEAPTRACK_BINARY_PATH` in the working directory
+of CRI-O.
+
 ## Tracing
 
 The server can export OpenTelemetry traces of its RPCs over OTLP gRPC. This
@@ -384,7 +417,9 @@ default. The Go client starts the server with these flags if its
 configuration has `Tracing: &client.Tracing{Enabled: true}`. It then passes the
 span of the context of a call along with the RPC, if there is one, through the
 global propagator of OpenTelemetry (`otel.SetTextMapPropagator`), which does
-nothing unless the caller registers one, like CRI-O does.
+nothing unless the caller registers one, like CRI-O does. The server reads the
+W3C Trace Context, so the propagator has to write it, like
+`propagation.TraceContext{}`.
 [contrib/tracing](contrib/tracing) runs a local Jaeger to look at the traces.
 
 ## Red Hat OpenShift
