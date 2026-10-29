@@ -39,6 +39,8 @@ interface Conmon {
     ###############################################
     # CreateContainer
     struct CreateContainerRequest {
+        # The ID the runtime gets as an argument, since v1.2.1 an empty one and
+        # one which starts with "-" get rejected.
         id @0 :Text;
         # The OCI bundle of the container, an absolute path like all paths
         # of the request.
@@ -140,7 +142,7 @@ interface Conmon {
     ###############################################
     # ExecSync
     struct ExecSyncContainerRequest {
-        id @0 :Text;
+        id @0 :Text; # Rejected like the one of `CreateContainerRequest`.
         # How long the command may run before it gets killed, 0 for no limit.
         # A call which gets dropped does not stop the command.
         timeoutSec @1 :UInt64;
@@ -173,7 +175,7 @@ interface Conmon {
         id @0 :Text;
         # The absolute path of the `SOCK_SEQPACKET` socket the server listens
         # on for the attach clients of the container until it exited, see
-        # usage.md.
+        # usage.md. Other paths get rejected since unreleased.
         socketPath @1 :Text;
         # Deprecated, only logged, attach sessions are per container.
         execSessionId @2 :Text;
@@ -293,6 +295,7 @@ interface Conmon {
     # requests exceeded".
     struct ServeExecContainerRequest {
         metadata @0 :Metadata; # Standard metadata to carry.
+        # The session fails for an ID which `CreateContainerRequest` rejects.
         id @1 :Text;
         command @2 :List(Text);
         tty @3 :Bool;
@@ -346,7 +349,9 @@ interface Conmon {
     # ServePortForwardContainer
     struct ServePortForwardContainerRequest {
         metadata @0 :Metadata; # Standard metadata to carry.
-        netNsPath @1 :Text; # The absolute path of the network namespace.
+        # The absolute path of the network namespace, other ones get rejected
+        # since unreleased.
+        netNsPath @1 :Text;
         # How long a connection may go without a frame of the client and
         # without data either way before it gets closed, 0 disables the
         # timeout. WebSocket pings and pongs, the pings of the server and the

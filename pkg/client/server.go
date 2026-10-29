@@ -482,7 +482,7 @@ func processStat(pid uint32) [][]byte {
 }
 
 // Shutdown kills the server via SIGINT and waits up to 10 seconds for the
-// server PID to be removed from the system.
+// server PID to be removed from the system, see ShutdownContext.
 func (c *ConmonClient) Shutdown() error {
 	return c.ShutdownContext(context.Background())
 }
@@ -522,6 +522,12 @@ func (c *ConmonClient) ShutdownContext(ctx context.Context) (retErr error) {
 	c.resetConn()
 
 	return c.stopServer(ctx, server, serverStopTimeout, false)
+}
+
+// Kill kills the server via SIGKILL and waits up to 10 seconds for the
+// server PID to be removed from the system, see KillContext.
+func (c *ConmonClient) Kill() error {
+	return c.KillContext(context.Background())
 }
 
 // KillContext kills the server via SIGKILL and waits for the server PID to
@@ -565,8 +571,12 @@ func (c *ConmonClient) KillContext(ctx context.Context) (retErr error) {
 //
 // The methods of the client fail with ErrClientClosed afterwards, calls in
 // progress fail as well, attach sessions with ErrClientClosed. A Shutdown or
-// KillContext in progress still finishes. Closing a closed client does
-// nothing.
+// KillContext (or Kill) in progress still finishes. Close is safe to call at
+// any time: on a closed client it does nothing, after Shutdown or KillContext
+// (or Kill) it closes the client for good. Those do not mark the client as
+// closed, its methods connect again to a server which runs on the
+// ServerRunDir later. Close does not close a RemoteFDs which the RemoteFDs
+// method returned, the caller closes it.
 func (c *ConmonClient) Close() error {
 	// Set before taking pidfdMu, so that usePidfd fails once Close got the
 	// lock.
@@ -621,7 +631,7 @@ func (c *ConmonClient) pickUpReplacement(ctx context.Context) {
 
 	// The recorded server exited, an answering one replaced it, also one
 	// which got the same PID, which the new pidfd tells apart.
-	resp, err := c.version(ctx, conn.client, nil)
+	resp, err := c.version(ctx, conn.client)
 	if err != nil || resp.ProcessID == 0 {
 		return
 	}

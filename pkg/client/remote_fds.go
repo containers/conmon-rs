@@ -22,8 +22,12 @@ import (
 // connection usable.
 var ErrRemoteFDsBroken = errors.New("fd socket connection broken")
 
+// ErrTooManyFileDescriptors gets returned by Send and SendContext of
+// RemoteFDs for more than 253 file descriptors, which the kernel does not
+// pass in one message. Nothing gets sent then, the connection stays usable.
+var ErrTooManyFileDescriptors = errors.New("too many file descriptors")
+
 var (
-	errTooManyFileDescriptors  = errors.New("too many file descriptors")
 	errResponseTooShort        = errors.New("response too short")
 	errResponseIDDoesNotMatch  = errors.New("response id does not match")
 	errNumberOfFDsDoesNotMatch = errors.New("number of fds does not match")
@@ -105,7 +109,7 @@ func (r *RemoteFDs) SendContext(ctx context.Context, fds ...int) ([]RemoteFD, er
 	}
 
 	if len(fds) > maxFDs {
-		return nil, errTooManyFileDescriptors
+		return nil, ErrTooManyFileDescriptors
 	}
 
 	r.mu.Lock()
@@ -248,7 +252,9 @@ func (r *RemoteFDs) Close() error {
 	return nil
 }
 
-// RemoteFDs can be used to start and connect to the remote fd socket.
+// RemoteFDs can be used to start and connect to the remote fd socket. The
+// caller closes the returned RemoteFDs once the requests which use its slots
+// returned, Close of the client does not.
 func (c *ConmonClient) RemoteFDs(ctx context.Context) (_ *RemoteFDs, retErr error) {
 	ctx, span := c.startSpan(ctx, "RemoteFDs")
 	defer endSpan(span, &retErr)

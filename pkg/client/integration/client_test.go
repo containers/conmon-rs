@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -237,9 +238,44 @@ var _ = Describe("ConmonClient", func() {
 			pid := startServer(ctx, false)
 			Expect(syscall.Kill(int(pid), syscall.SIGTERM)).To(Succeed())
 
+			// The hooks must not look at the server, which goes away by
+			// itself, only the client is left to release.
+			DeferCleanup(sut.Close)
+
 			sut = nil
 
 			expectServerGone(pid)
+		}, SpecTimeout(specTimeout))
+
+		It("should leave created children behind if being killed", func(ctx SpecContext) {
+			pid := startServer(ctx, false)
+
+			// Closing the client of the killed server is safe. A failed kill
+			// leaves the server to the cleanup.
+			DeferCleanup(sut.Close)
+			Expect(sut.KillContext(ctx)).To(Succeed())
+
+			sut = nil
+
+			// The kill returns once the server is a zombie, which its parent
+			// reaps later.
+			Eventually(func() error {
+				return syscall.Kill(int(pid), 0)
+			}, 10*time.Second).Should(MatchError(syscall.ESRCH))
+
+			// The server could not clean up: its socket and the container
+			// stay, the container has no monitor anymore.
+			Expect(filepath.Join(tr.tmpDir, "conmon.sock")).To(BeAnExistingFile())
+			Expect(tr.rr.RunCommandCheckOutput(tr.ctrID, "list")).To(Succeed())
+
+			// A new server replaces the socket left behind, it does not know
+			// the container. The cleanup deletes the container and stops the
+			// new server.
+			sut = tr.configGivenEnv()
+			Expect(sut.PID()).NotTo(Equal(pid))
+
+			err := sut.ReopenLogContainer(ctx, &client.ReopenLogContainerConfig{ID: tr.ctrID})
+			Expect(err).To(MatchError(client.ErrContainerNotFound))
 		}, SpecTimeout(specTimeout))
 	})
 
@@ -840,6 +876,66 @@ var _ = Describe("ConmonClient", func() {
 			Expect(err).To(Succeed())
 			Expect(result.ExitCode).To(BeEquivalentTo(0))
 			Expect(fileContents(envFile)).To(Equal("set"))
+		}, SpecTimeout(specTimeout))
+
+		It("should pass the cgroup manager of each call to the runtime", func(ctx SpecContext) {
+			tr = newTestRunner()
+			tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "10"}, nil)
+
+			// A runtime which records the arguments of its calls, one per
+			// line.
+			argsFile := filepath.Join(tr.tmpDir, "runtime-args")
+			wrapper := filepath.Join(tr.tmpDir, "runtime")
+			script := fmt.Sprintf(
+				"#!/bin/sh\n"+
+					"printf '%%s\\n' \"$*\" >>'%s'\n"+
+					"exec '%s' \"$@\"\n",
+				argsFile, runtimePath,
+			)
+			//nolint:gosec // the runtime has to be executable
+			Expect(os.WriteFile(wrapper, []byte(script), 0o700)).To(Succeed())
+
+			sut = tr.configGivenEnvWith(func(cfg *client.ConmonServerConfig) {
+				cfg.Runtime = wrapper
+				cfg.CgroupManager = client.CgroupManagerPerCommand
+			})
+			cfg := tr.defaultConfig(false)
+			cfg.CgroupManager = client.CgroupManagerCgroupfs
+			tr.createContainerWithConfig(ctx, sut, cfg)
+			tr.startContainer()
+
+			for _, manager := range []client.CgroupManager{
+				client.CgroupManagerCgroupfs,
+				client.CgroupManagerSystemd,
+			} {
+				result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+					ID:            tr.ctrID,
+					Command:       []string{"/busybox", "true"},
+					Timeout:       10,
+					CgroupManager: manager,
+				})
+				Expect(err).To(Succeed())
+				Expect(result.ExitCode).To(BeEquivalentTo(0), string(result.Stderr))
+			}
+
+			contents, err := fileContents(argsFile)
+			Expect(err).To(Succeed())
+
+			// The arguments of the create and exec calls.
+			var calls [][]string
+
+			for call := range strings.Lines(contents) {
+				if fields := strings.Fields(call); slices.Contains(fields, "create") ||
+					slices.Contains(fields, "exec") {
+					calls = append(calls, fields)
+				}
+			}
+
+			Expect(calls).To(HaveExactElements(
+				And(ContainElement("create"), Not(ContainElement("--systemd-cgroup"))),
+				And(ContainElement("exec"), Not(ContainElement("--systemd-cgroup"))),
+				And(ContainElement("exec"), ContainElement("--systemd-cgroup")),
+			))
 		}, SpecTimeout(specTimeout))
 
 		It("should not pass its transparent huge pages setting on", func(ctx SpecContext) {

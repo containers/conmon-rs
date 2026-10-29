@@ -28,17 +28,17 @@ func TestNamespaceConversion(t *testing.T) {
 		}
 	}
 
-	if _, err := namespaceTypes.toProto(Namespace(42)); !errors.Is(err, errInvalidValue) {
-		t.Errorf("unknown namespace: got %v, want %v", err, errInvalidValue)
+	if _, err := namespaceTypes.toProto(Namespace(42)); !errors.Is(err, ErrInvalidValue) {
+		t.Errorf("unknown namespace: got %v, want %v", err, ErrInvalidValue)
 	}
 
 	if _, err := namespaceTypes.fromProto(
 		proto.Conmon_Namespace(42),
 	); !errors.Is(
 		err,
-		errInvalidValue,
+		ErrInvalidValue,
 	) {
-		t.Errorf("unknown namespace from server: got %v, want %v", err, errInvalidValue)
+		t.Errorf("unknown namespace from server: got %v, want %v", err, ErrInvalidValue)
 	}
 }
 
@@ -66,7 +66,7 @@ func TestNamespacesToProto(t *testing.T) {
 		}, ErrMissingIDMappings},
 		{"unknown", &CreateNamespacesConfig{
 			Namespaces: []Namespace{NamespaceIPC, Namespace(-1)},
-		}, errInvalidValue},
+		}, ErrInvalidValue},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

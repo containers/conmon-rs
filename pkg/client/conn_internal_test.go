@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"maps"
 	"strconv"
 	"strings"
 	"testing"
@@ -12,6 +13,9 @@ import (
 	"capnproto.org/go/capnp/v3/rpc"
 	"github.com/containers/conmon-rs/internal/proto"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestRPCConnUsable(t *testing.T) {
@@ -242,12 +246,76 @@ func TestCallOnResetConnectionIsDisconnected(t *testing.T) {
 
 	c.resetConn()
 
-	if _, err := c.version(t.Context(), rpcClient, nil); !errors.Is(err, ErrServerDisconnected) {
+	if _, err := c.version(t.Context(), rpcClient); !errors.Is(err, ErrServerDisconnected) {
 		t.Fatalf("got error %v, want %v", err, ErrServerDisconnected)
 	}
 
 	// The next call connects again.
 	if _, err := c.Version(t.Context(), nil); err != nil {
 		t.Fatalf("version after the reset: %v", err)
+	}
+}
+
+// The global propagator gets set before the parallel tests run, so the test
+// must not be parallel itself. The first SetTextMapPropagator makes the
+// default global propagator of otel delegate to TraceContext for good, so
+// restoring the previous one does not bring back the no-op one. No other
+// test relies on it, the others run without tracing.
+func TestSetMetadataPropagatesTraceContext(t *testing.T) {
+	previous := otel.GetTextMapPropagator()
+
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() { otel.SetTextMapPropagator(previous) })
+
+	spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		SpanID:     trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8},
+		TraceFlags: trace.FlagsSampled,
+	})
+	ctx := trace.ContextWithSpanContext(t.Context(), spanContext)
+
+	_, seg, err := capnp.NewMessage(capnp.SingleSegment(nil))
+	if err != nil {
+		t.Fatalf("new message: %v", err)
+	}
+
+	for _, tc := range []struct {
+		enabled bool
+		want    map[string]string
+	}{
+		{enabled: false, want: map[string]string{}},
+		{
+			enabled: true,
+			want: map[string]string{
+				"traceparent": "00-0102030405060708090a0b0c0d0e0f10-0102030405060708-01",
+			},
+		},
+	} {
+		req, err := proto.NewRootConmon_VersionRequest(seg)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+
+		c := &ConmonClient{tracingEnabled: tc.enabled, logger: logrus.New()}
+		if err = c.setMetadata(ctx, req); err != nil {
+			t.Fatalf("set metadata: %v", err)
+		}
+
+		list, err := req.Metadata()
+		if err != nil {
+			t.Fatalf("get metadata: %v", err)
+		}
+
+		got := map[string]string{}
+
+		for i := range list.Len() {
+			key, _ := list.At(i).Key()     //nolint:errcheck // empty if broken
+			value, _ := list.At(i).Value() //nolint:errcheck // empty if broken
+			got[key] = value
+		}
+
+		if !maps.Equal(got, tc.want) {
+			t.Fatalf("tracing enabled %v: got metadata %v, want %v", tc.enabled, got, tc.want)
+		}
 	}
 }

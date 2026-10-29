@@ -12,7 +12,9 @@ import (
 // CreateContainerConfig is the configuration for calling the CreateContainer
 // method.
 type CreateContainerConfig struct {
-	// ID is the container identifier.
+	// ID is the container identifier, which the runtime gets as an
+	// argument. Servers since v1.2.1 reject an empty one and one which
+	// starts with "-", which the runtime would take for an option.
 	ID string
 
 	// BundlePath is the absolute path to the filesystem bundle. Servers
@@ -168,19 +170,28 @@ func (c *ConmonClient) CreateContainer(
 		return nil, err
 	}
 
-	// An older server ignores the field, the unit would never get ready.
-	if cfg.SdNotifySocket != "" {
-		if err := c.requireServerFeature(ctx, FeatureSdNotify, "sd_notify socket"); err != nil {
-			return nil, err
-		}
-	}
-
 	logDrivers, err := logDriversToProto(cfg.LogDrivers)
 	if err != nil {
 		return nil, err
 	}
 
-	return call(ctx, c, proto.Conmon.CreateContainer,
+	// An older server ignores the field, the unit would never get ready.
+	// Checked after the configuration, which needs no server, the request
+	// goes to the checked server.
+	var rpcClient proto.Conmon
+	if cfg.SdNotifySocket != "" {
+		rpcClient, err = c.requireServerFeature(ctx, FeatureSdNotify, "sd_notify socket")
+	} else if rpcClient, err = c.client(ctx); err != nil {
+		err = fmt.Errorf("create RPC client: %w", err)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	defer rpcClient.Release()
+
+	return callOn(ctx, c, rpcClient, proto.Conmon.CreateContainer,
 		func(req proto.Conmon_CreateContainerRequest) error {
 			if err := req.SetId(cfg.ID); err != nil {
 				return fmt.Errorf("set ID: %w", err)
@@ -249,7 +260,8 @@ func (c *ConmonClient) CreateContainer(
 // ExecSyncConfig is the configuration for calling the ExecSyncContainer
 // method.
 type ExecSyncConfig struct {
-	// ID is the container identifier.
+	// ID is the container identifier. Servers since v1.2.1 reject one which
+	// CreateContainerConfig.ID does not allow.
 	ID string
 
 	// Command is a slice of command line arguments.

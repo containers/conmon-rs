@@ -159,6 +159,9 @@ func (v versionConmon) Version(ctx context.Context, call proto.Conmon_version) e
 	}
 
 	if v.release != nil {
+		// The answers of other calls must not wait behind this one.
+		call.Go()
+
 		select {
 		case <-v.release:
 		case <-ctx.Done():
@@ -473,7 +476,7 @@ func TestValidateCgroupManager(t *testing.T) {
 		{manager: CgroupManagerSystemd},
 		{manager: CgroupManagerCgroupfs},
 		{manager: CgroupManagerPerCommand, want: ErrCgroupManagerPerCommand},
-		{manager: CgroupManager(42), want: errInvalidValue},
+		{manager: CgroupManager(42), want: ErrInvalidValue},
 	} {
 		if err := c.validateCgroupManager(tc.manager); !errors.Is(err, tc.want) {
 			t.Fatalf("cgroup manager %d: got error %v, want %v", tc.manager, err, tc.want)
@@ -482,8 +485,8 @@ func TestValidateCgroupManager(t *testing.T) {
 
 	// The global one gets checked by New.
 	_, err := New(&ConmonServerConfig{ServerRunDir: t.TempDir(), CgroupManager: CgroupManager(42)})
-	if !errors.Is(err, errInvalidValue) {
-		t.Fatalf("got error %v, want %v", err, errInvalidValue)
+	if !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("got error %v, want %v", err, ErrInvalidValue)
 	}
 }
 
@@ -511,8 +514,8 @@ func TestValidateLogLevelAndDriver(t *testing.T) {
 		validateLogDriver("journald"),
 		validateLogDriver(""),
 	} {
-		if !errors.Is(err, errInvalidValue) {
-			t.Errorf("got error %v, want %v", err, errInvalidValue)
+		if !errors.Is(err, ErrInvalidValue) {
+			t.Errorf("got error %v, want %v", err, ErrInvalidValue)
 		}
 	}
 }

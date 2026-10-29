@@ -97,7 +97,7 @@ body:
         <details>
 
         ```console
-        $ journalctl _COMM=conmonrs
+        $ journalctl _COMM=conmonrs + SYSLOG_IDENTIFIER=conmonrs
         # paste output here
         ```
 
