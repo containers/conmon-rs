@@ -449,6 +449,78 @@ jobs:
           # from forks fall back to tokenless uploads.
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  # The unit tests on the other architectures of the static binaries, whose
+  # build-static jobs only run the binary once. arm64 runs natively, where the
+  # weaker memory ordering shows races which x86 hides. ppc64le and s390x run
+  # under qemu-user, which no runner has: s390x is big-endian, and the
+  # protocols of the server encode their integers by hand. Tests which depend
+  # on timing show up under qemu as well, it is many times slower. nextest
+  # runs the tests through qemu, the binfmt registration of qemu-user-binfmt
+  # the test binary which a test starts itself. Their caches are not worth a
+  # place in the 10 GB of the repository, which would push out the ones of
+  # the other jobs, they build in less than a minute without them.
+  test-unit-arch:
+    name: test-unit-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: ppc64le
+            runner: ubuntu-latest
+            target: powerpc64le-unknown-linux-gnu
+            gnu: powerpc64le-linux-gnu
+            packages: gcc-powerpc64le-linux-gnu libc6-dev-ppc64el-cross
+          - arch: s390x
+            runner: ubuntu-latest
+            target: s390x-unknown-linux-gnu
+            gnu: s390x-linux-gnu
+            packages: gcc-s390x-linux-gnu libc6-dev-s390x-cross
+    env:
+      CARGO_TARGET_POWERPC64LE_UNKNOWN_LINUX_GNU_LINKER: powerpc64le-linux-gnu-gcc
+      CARGO_TARGET_POWERPC64LE_UNKNOWN_LINUX_GNU_RUNNER: qemu-ppc64le -L /usr/powerpc64le-linux-gnu
+      CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_LINKER: s390x-linux-gnu-gcc
+      CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_RUNNER: qemu-s390x -L /usr/s390x-linux-gnu
+      QEMU_LD_PREFIX: ${{ matrix.gnu && format('/usr/{0}', matrix.gnu) || '' }}
+      TARGET: ${{ matrix.target }}
+      NEXTEST_PROFILE: ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+      - name: Install the cross toolchain and qemu
+        if: matrix.target
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: |
+          read -ra PACKAGES <<<"$PACKAGES"
+          sudo apt-get update
+          sudo apt-get install -y "${PACKAGES[@]}" qemu-user-binfmt
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-nextest
+      # Under qemu-user, the skipped test fails to find the reaped leader of a
+      # process group through the children of the test process.
+      - name: Run the unit tests
+        run: |
+          if [[ -n $TARGET ]]; then
+            cargo nextest run --locked --target "$TARGET" \
+              -E 'not test(=process::tests::signal_group_reaches_members_of_reaped_leader)'
+          else
+            cargo nextest run --locked
+          fi
+      - name: Report flaky tests
+        if: ${{ !cancelled() }}
+        run: .github/report-flakes target/nextest/ci/junit.xml
+
   # The tests of the Go client which need no server and no root. The
   # integration suite, the module in pkg/client/integration, runs in the
   # test-integration jobs.
@@ -951,7 +1023,8 @@ jobs:
   # jobs, it does not wait for the scans and the fuzzing: CRI-O CI installs
   # the binaries of the marker, which a new advisory or a crash the fuzzing
   # finds in older code must not hold back. Neither for the coverage, whose
-  # integration tests may fail.
+  # integration tests may fail, nor for the s390x unit tests, which a test
+  # that is too slow under qemu fails.
   publish-marker:
     runs-on: ubuntu-latest
     timeout-minutes: 10

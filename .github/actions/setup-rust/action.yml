@@ -13,6 +13,9 @@ inputs:
   components:
     description: Additional components of the toolchain, separated by commas.
     default: ""
+  targets:
+    description: Additional targets of the toolchain, separated by commas.
+    default: ""
   msrv:
     description: Also install the rust-version toolchain of Cargo.toml, which make lint-msrv uses.
     default: "false"
@@ -35,9 +38,11 @@ runs:
       env:
         TOOLCHAIN: ${{ inputs.toolchain }}
         COMPONENTS: ${{ inputs.components }}
+        TARGETS: ${{ inputs.targets }}
         INSTALL_MSRV: ${{ inputs.msrv }}
       run: |
-        rustup toolchain install "$TOOLCHAIN" --profile minimal ${COMPONENTS:+--component "$COMPONENTS"}
+        rustup toolchain install "$TOOLCHAIN" --profile minimal \
+          ${COMPONENTS:+--component "$COMPONENTS"} ${TARGETS:+--target "$TARGETS"}
         rustup default "$TOOLCHAIN"
         HOST=$(rustc -vV | sed -n 's/^host: //p')
         KEEP=("$TOOLCHAIN-$HOST")
