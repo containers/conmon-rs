@@ -25,9 +25,18 @@ usage() {
     printf "  -t\tFull length SHA to be used (defaults to the latest available main)\n"
     printf "  -l\tTag to be used\n"
     printf "  -a\tArchitecture to retrieve: %s (defaults to the local system)\n" "${ARCHES[*]}"
-    printf "  -n\tDo not print the version after install, means don't execute the binary\n"
+    printf "  -n\tDo not print the version after install, means don't execute the binary; the version is never printed for another architecture\n"
     printf "  -k\tInstall the binary even if no checksum got published for it (insecure, only without cosign)\n"
     printf "  -h\tShow this help message\n"
+}
+
+# The architecture of the local system, empty for an unsupported one.
+local_arch() {
+    case $(uname -m) in
+    x86_64) echo amd64 ;;
+    aarch64) echo arm64 ;;
+    ppc64le | s390x) uname -m ;;
+    esac
 }
 
 parse_args() {
@@ -69,16 +78,11 @@ parse_args() {
     done
 
     if [[ $ARCH == "" ]]; then
-        LOCAL_ARCH=$(uname -m)
-        case $LOCAL_ARCH in
-        x86_64) ARCH=amd64 ;;
-        aarch64) ARCH=arm64 ;;
-        ppc64le | s390x) ARCH=$LOCAL_ARCH ;;
-        *)
-            echo "Unsupported local architecture: $LOCAL_ARCH"
+        ARCH=$(local_arch)
+        if [[ $ARCH == "" ]]; then
+            echo "Unsupported local architecture: $(uname -m)"
             exit 1
-            ;;
-        esac
+        fi
         echo "No architecture provided, using: $ARCH"
     elif [[ " ${ARCHES[*]} " != *" $ARCH "* ]]; then
         echo "Unsupported architecture: $ARCH, use one of: ${ARCHES[*]}"
@@ -176,7 +180,7 @@ check_marker() {
     local lag
     lag=$(jq -r '(.base_commit.commit.committer.date | fromdateiso8601) - (.merge_base_commit.commit.committer.date | fromdateiso8601)' <<<"$compare")
     if ((lag > MAX_MARKER_LAG)); then
-        echo "WARNING: the latest commit $COMMIT is $((lag / 3600)) hours older than the head of main: the binaries of the newer commits are not published yet or failed to publish, or the bucket points to an old commit" >&2
+        echo "WARNING: the latest commit $COMMIT is $((lag / 3600)) hours older than the head of main: the binaries of the newer commits are not published yet or failed to publish, their tests failed, or the bucket points to an old commit" >&2
     fi
 }
 
@@ -314,8 +318,13 @@ download_binary() {
     chmod +x "$OUTPUT"
     printf "Installed binary into: %s\n" "$OUTPUT"
 
+    # The binary of another architecture does not run here.
     if [[ $NO_EXEC == "" ]]; then
-        "$(realpath "$OUTPUT")" -v
+        if [[ $ARCH == "$(local_arch)" ]]; then
+            "$(realpath "$OUTPUT")" -v
+        else
+            echo "Not running the $ARCH binary on this $(uname -m) system"
+        fi
     fi
 }
 

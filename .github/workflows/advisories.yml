@@ -17,6 +17,7 @@ jobs:
   verify-advisories:
     if: github.repository == 'containers/conmon-rs'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -32,6 +33,7 @@ jobs:
   verify-go-advisories:
     if: github.repository == 'containers/conmon-rs'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -56,10 +58,12 @@ jobs:
   verify-vulnerabilities:
     if: github.repository == 'containers/conmon-rs'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
-      actions: write # deletes the databases of the days before
       attestations: read # verifies the SBOMs
       contents: read
+    outputs:
+      saved: ${{ steps.saved.outputs.key }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -78,8 +82,9 @@ jobs:
           cd .build/sboms
           ../../.github/release-files sboms "$COMMIT"
       # The only job which saves the vulnerability database, one of about
-      # 500 MB a day, and deletes the ones of the days before, so that it does
-      # not push the build caches out. The ci workflow only restores it.
+      # 500 MB a day, the delete-grype-databases job deletes the ones of the
+      # days before, so that they do not push the build caches out. The ci
+      # workflow only restores it.
       - name: Date
         id: date
         run: echo "date=$(date -u +%F)" >>"$GITHUB_OUTPUT"
@@ -96,16 +101,43 @@ jobs:
           SBOMS=(.build/sboms/*.spdx.json)
           make scan SBOMS="${SBOMS[*]}"
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: save
         if: ${{ !cancelled() && steps.grype-db.outputs.cache-hit != 'true' }}
         with:
           path: .build/grype-db
           key: grype-db-${{ steps.date.outputs.date }}
+      # The save only warns if the path is missing or another run saves the
+      # same key, the cleanup checks that the cache has the key.
+      - name: Saved database
+        id: saved
+        if: ${{ !cancelled() && steps.save.outcome == 'success' }}
+        env:
+          KEY: grype-db-${{ steps.date.outputs.date }}
+        run: |
+          if [[ -d .build/grype-db ]]; then
+            echo "key=$KEY" >>"$GITHUB_OUTPUT"
+          fi
+
+  # Deletes the databases of the days before, once the cache has the one of
+  # the day, also if the scan failed. The only job which deletes caches, so
+  # the only one with write access to them, it runs no code of the checkout.
+  delete-grype-databases:
+    needs: verify-vulnerabilities
+    if: ${{ !cancelled() && needs.verify-vulnerabilities.outputs.saved != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write # deletes the databases of the days before
+    steps:
       - name: Delete older databases
-        if: ${{ !cancelled() && steps.grype-db.outputs.cache-hit != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          KEEP: grype-db-${{ steps.date.outputs.date }}
+          KEEP: ${{ needs.verify-vulnerabilities.outputs.saved }}
         run: |
+          if ! gh cache list --repo "$GITHUB_REPOSITORY" --key "$KEEP" --json key --jq '.[].key' | grep -qxF "$KEEP"; then
+            echo "::warning::The cache has no $KEEP, keeping the older databases"
+            exit 0
+          fi
           gh cache list --repo "$GITHUB_REPOSITORY" --key grype-db- --limit 100 --json key --jq '.[].key' |
             while read -r KEY; do
               if [[ $KEY != "$KEEP" ]]; then
@@ -121,6 +153,7 @@ jobs:
   verify-dependencies-upstream:
     if: github.repository == 'containers/conmon-rs'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -178,8 +211,9 @@ jobs:
         run: .github/report-flakes target/nextest/ci/junit.xml
 
   # Fuzzes every target for half an hour, the test-fuzz jobs of the ci
-  # workflow only for two minutes. The targets are the ones of the latest
-  # passed ci run of main, the corpus the one of main, which the run extends.
+  # workflow only for two minutes, with the same .github/run-fuzz. The targets
+  # are the ones of the latest passed ci run of main, the corpus the one of
+  # main, which the run extends.
   list-fuzz-targets:
     if: github.repository == 'containers/conmon-rs'
     runs-on: ubuntu-latest
@@ -221,7 +255,7 @@ jobs:
           fi
           echo "targets=$TARGETS" >>"$GITHUB_OUTPUT"
 
-  fuzz:
+  test-fuzz:
     needs: list-fuzz-targets
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -232,11 +266,9 @@ jobs:
       fail-fast: false
       matrix:
         target: ${{ fromJSON(needs.list-fuzz-targets.outputs.targets) }}
-    name: fuzz-${{ matrix.target }}
+    name: test-fuzz-${{ matrix.target }}
     env:
       TARGET: ${{ matrix.target }}
-      # Like cargo-fuzz runs the targets.
-      ASAN_OPTIONS: detect_odr_violation=0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -252,21 +284,10 @@ jobs:
           path: corpus
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: fuzz-corpus-${{ matrix.target }}-
-      # Like the test-fuzz jobs of the ci workflow, which a crash reproduces
-      # the same way.
       - name: Fuzz
-        run: |
-          chmod +x "fuzz-targets/$TARGET"
-          mkdir -p corpus artifacts "fuzz/seeds/$TARGET"
-          "fuzz-targets/$TARGET" -max_total_time=1800 -artifact_prefix=artifacts/ corpus "fuzz/seeds/$TARGET"
+        run: .github/run-fuzz run "$TARGET" 1800
       - name: Minimize the corpus
-        run: |
-          mkdir minimized
-          cp -r "fuzz/seeds/$TARGET/." minimized
-          "fuzz-targets/$TARGET" -merge=1 minimized corpus
-          find "fuzz/seeds/$TARGET" -type f -printf '%f\0' | (cd minimized && xargs -0r rm --)
-          rm -rf corpus
-          mv minimized corpus
+        run: .github/run-fuzz minimize "$TARGET"
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: corpus

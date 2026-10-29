@@ -25,8 +25,6 @@ on:
         description: The artifact which holds the binary, its SBOM and its VEX document.
         value: ${{ jobs.build.outputs.artifact-id }}
 permissions: {}
-env:
-  NIX_VERSION: "2.35.3"
 jobs:
   # A cold cache builds the cross toolchains, which takes about an hour.
   build:
@@ -41,13 +39,15 @@ jobs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     env:
       ARCH: ${{ inputs.arch }}
+      # The images of the smoke test and of qemu, pinned by the digest of their
+      # index, see dependencies.yaml and make verify-digests.
+      ALPINE_IMAGE: docker.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+      BINFMT_IMAGE: docker.io/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
-        with:
-          install_url: https://releases.nixos.org/nix/nix-${{ env.NIX_VERSION }}/install
+      - uses: ./.github/actions/setup-nix
       # The cache holds the cross toolchains, which take an hour to build. The
       # build only reads it, the publish-cache job of the ci workflow pushes.
       - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
@@ -55,28 +55,6 @@ jobs:
           name: conmon-rs
       - run: nix build ".#$ARCH"
       - run: file result/bin/conmonrs | grep static | grep stripped
-      # Every binary runs once until it serves its socket, see
-      # .github/smoke-test, a build which links but does not run would
-      # otherwise only show up on the target machines. The integration tests
-      # only cover amd64 and arm64. flake.lock decides the Rust toolchain of
-      # the build, not RUST_VERSION of the ci workflow, the summary shows
-      # which one it was.
-      # The binfmt image is small, a cache entry for it is not worth the
-      # space, and the jobs of the architectures would race to save it.
-      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-        if: inputs.arch != 'amd64'
-        with:
-          cache-image: false
-      - name: Smoke test
-        timeout-minutes: 5
-        env:
-          IMAGE: docker.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
-        run: |
-          RUN=(docker run --rm --platform "linux/$ARCH" -v "$PWD/result/bin:/smoke:ro")
-          VERSION=$("${RUN[@]}" "$IMAGE" /smoke/conmonrs --version)
-          echo "$VERSION"
-          printf '### conmonrs.%s\n\n~~~\n%s\n~~~\n' "$ARCH" "$VERSION" >>"$GITHUB_STEP_SUMMARY"
-          "${RUN[@]}" -v "$PWD/.github/smoke-test:/smoke-test:ro" "$IMAGE" /smoke-test /smoke/conmonrs
       # The build embeds its dependencies with cargo-auditable, which syft
       # reads. syft writes SPDX 2.3, SPDX 3 needs a generator which reads them
       # and support in actions/attest. The SBOM names the file it scanned,
@@ -95,6 +73,7 @@ jobs:
         run: |
           .github/verify-vex
           cp vex/conmonrs.openvex.json static/conmonrs.vex.json
+      # Before qemu gets installed, whose image runs privileged.
       - name: Digest
         id: digest
         run: |
@@ -103,6 +82,40 @@ jobs:
             echo "sbom-digest=$(sha256sum static/conmonrs.spdx.json | cut -d' ' -f1)"
             echo "vex-digest=$(sha256sum static/conmonrs.vex.json | cut -d' ' -f1)"
           } >>"$GITHUB_OUTPUT"
+      # Every binary runs once until it serves its socket, see
+      # .github/smoke-test, a build which links but does not run would
+      # otherwise only show up on the target machines. The integration tests
+      # only cover amd64 and arm64. flake.lock decides the Rust toolchain of
+      # the build, not RUST_VERSION of the ci workflow, the summary shows
+      # which one it was.
+      # The binfmt image is small, a cache entry for it is not worth the
+      # space, and the jobs of the architectures would race to save it. It
+      # only registers the emulator of the architecture, whose name binfmt
+      # shares with the package of the flake.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        if: inputs.arch != 'amd64'
+        with:
+          image: ${{ env.BINFMT_IMAGE }}
+          platforms: ${{ inputs.arch }}
+          cache-image: false
+      - name: Smoke test
+        timeout-minutes: 5
+        run: |
+          RUN=(docker run --rm --platform "linux/$ARCH" -v "$PWD/static:/smoke:ro")
+          VERSION=$("${RUN[@]}" "$ALPINE_IMAGE" /smoke/conmonrs --version)
+          echo "$VERSION"
+          printf '### conmonrs.%s\n\n~~~\n%s\n~~~\n' "$ARCH" "$VERSION" >>"$GITHUB_STEP_SUMMARY"
+          "${RUN[@]}" -v "$PWD/.github/smoke-test:/smoke-test:ro" "$ALPINE_IMAGE" /smoke-test /smoke/conmonrs
+      # The artifact has to hold the files of the digests, which the publish
+      # job checks as well.
+      - name: Verify the digests
+        env:
+          DIGEST: ${{ steps.digest.outputs.digest }}
+          SBOM_DIGEST: ${{ steps.digest.outputs.sbom-digest }}
+          VEX_DIGEST: ${{ steps.digest.outputs.vex-digest }}
+        run: |
+          printf '%s  %s\n' "$DIGEST" static/conmonrs "$SBOM_DIGEST" static/conmonrs.spdx.json \
+            "$VEX_DIGEST" static/conmonrs.vex.json | sha256sum -c --strict
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:

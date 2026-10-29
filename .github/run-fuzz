@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Runs a fuzz target of the fuzz-targets directory, which the build-fuzz job of
+# the ci workflow builds, for SECONDS, or minimizes its corpus. The test-fuzz
+# jobs of the ci and of the advisories workflow use it, so that a crash, whose
+# input ends up in artifacts/, reproduces the same way with
+# `cargo fuzz run TARGET INPUT`.
+usage() {
+    echo "usage: $0 run TARGET SECONDS | minimize TARGET" >&2
+    exit 1
+}
+
+if (($# < 2)); then
+    usage
+fi
+COMMAND=$1
+TARGET=$2
+BINARY=fuzz-targets/$TARGET
+SEEDS=fuzz/seeds/$TARGET
+# Like cargo-fuzz runs the targets.
+export ASAN_OPTIONS=detect_odr_violation=0
+
+case $COMMAND in
+run)
+    if (($# != 3)); then
+        usage
+    fi
+    # New inputs go to the first directory, the seeds stay as they are. A
+    # target may have no seeds yet.
+    chmod +x "$BINARY"
+    mkdir -p corpus artifacts "$SEEDS"
+    "$BINARY" -max_total_time="$3" -artifact_prefix=artifacts/ corpus "$SEEDS"
+    ;;
+minimize)
+    if (($# != 2)); then
+        usage
+    fi
+    # Keeps only the inputs which add coverage beyond the seeds, so the
+    # corpus stays small. The merge adds the inputs which cover more than the
+    # first directory, which starts with the seeds for that. They come from
+    # the checkout and get removed again.
+    mkdir -p "$SEEDS"
+    rm -rf minimized
+    mkdir minimized
+    cp -r "$SEEDS/." minimized
+    "$BINARY" -merge=1 minimized corpus
+    find "$SEEDS" -type f -printf '%f\0' | (cd minimized && xargs -0r rm --)
+    rm -rf corpus
+    mv minimized corpus
+    ;;
+*)
+    usage
+    ;;
+esac

@@ -39,8 +39,8 @@ GOLANGCI_LINT_VERSION := v2.15.0
 # The images run pinned by the digest of their index, which a bump of the
 # version updates as well, see dependencies.yaml and verify-digests.
 PRETTIER_VERSION := 3.9.10
-NODE_VERSION := 24.22.1
-NODE_DIGEST := sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c
+NODE_VERSION := 26.13.0
+NODE_DIGEST := sha256:e4db4c914bf8ad241bd24804fc25d272d89bad97e68cdc8a1414862790a02c39
 NODE_IMAGE := docker.io/library/node:$(NODE_VERSION)-slim@$(NODE_DIGEST)
 PRETTIER = $(CONTAINER_RUNTIME) run --rm -v $(CURDIR):/w:z -w /w --entrypoint npx \
 	$(NODE_IMAGE) --yes prettier@$(PRETTIER_VERSION)
@@ -98,8 +98,9 @@ default: ## Build in debug mode.
 release: ## Build in release mode.
 	cargo build --locked --release
 
+# See CONTRIBUTING.md for the binaries of the other architectures.
 .PHONY: release-static
-release-static: ## Build the static release binary for the local architecture using nix.
+release-static: ## Build the static release binary for the local architecture (x86_64 or aarch64 Linux) using nix.
 	nix build .#default
 
 ##@ Test targets:
@@ -107,8 +108,8 @@ release-static: ## Build the static release binary for the local architecture us
 # feature only adds the entry points of the fuzz targets.
 .PHONY: unit
 unit: ## Run the unit tests with the default and with the tracing feature.
-	cargo test --no-fail-fast
-	cargo test --no-fail-fast --features tracing
+	cargo test --locked --no-fail-fast
+	cargo test --locked --no-fail-fast --features tracing
 
 .PHONY: unit-go
 unit-go: ## Run the unit tests of the Go client, which need no server.
@@ -201,13 +202,16 @@ verify-dependencies-upstream: .install.zeitgeist ## Check the dependencies for n
 	$(GOTOOLS_BINDIR)/zeitgeist validate --local-only=false --base-path . --config dependencies.yaml
 
 # zeitgeist only checks the tags, which a pull ignores next to a digest. The
-# image of the smoke test is the one of the build-static workflow. A tag which
-# moved fails as well, so the advisories workflow runs it, not the pull
-# requests.
+# images of the smoke test and of qemu are the ones of the build-static
+# workflow, a variable which is missing there gets passed empty and fails. A
+# tag which moved fails as well, so the advisories workflow runs it, not the
+# pull requests.
+BUILD_STATIC_IMAGE = $(shell sed -n 's/^ *$(1): //p' .github/workflows/build-static.yml)
+
 .PHONY: verify-digests
 verify-digests: ## Verify that the pinned images have the current digests of their tags.
-	.github/verify-digests $(NODE_IMAGE) $(ZIZMOR_IMAGE) $(GRYPE_IMAGE) \
-		"$$(sed -n 's/^ *IMAGE: //p' .github/workflows/build-static.yml)"
+	.github/verify-digests "$(NODE_IMAGE)" "$(ZIZMOR_IMAGE)" "$(GRYPE_IMAGE)" \
+		"$(call BUILD_STATIC_IMAGE,ALPINE_IMAGE)" "$(call BUILD_STATIC_IMAGE,BINFMT_IMAGE)"
 
 # Also catches new generated files. make removes the intermediate
 # internal/proto/conmon.capnp only after this recipe.
@@ -348,6 +352,13 @@ ZEITGEIST_PACKAGE = sigs.k8s.io/zeitgeist/remote/zeitgeist@$(ZEITGEIST_VERSION)
 .PHONY: clean
 clean: ## Cleanup the project files.
 	rm -rf target/ result
+
+# The build directory holds the tools, the vulnerability database of grype
+# and the busybox of the integration tests, which the targets download again.
+# Files which sudo make integration left behind need sudo to remove.
+.PHONY: clean-all
+clean-all: clean ## Cleanup the project files and the build directory.
+	rm -rf $(BUILD_DIR)
 
 .INTERMEDIATE: internal/proto/conmon.capnp
 internal/proto/conmon.capnp: $(PROTO_PATH)/conmon.capnp $(PROTO_PATH)/go-patch

@@ -14,20 +14,24 @@ env:
   RUST_VERSION: "1.99.1"
 jobs:
   # Runs the build scripts of all dependencies, so it gets no write access.
-  # The deploy job only publishes the artifact.
+  # The deploy job only publishes the artifact. Forks have no Pages of the
+  # repository to deploy to.
   build:
+    if: github.repository == 'containers/conmon-rs'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: .github/install-deps
-      - name: Select Toolchain
-        run: rustup toolchain install "$RUST_VERSION" --profile minimal && rustup default "$RUST_VERSION"
       # Only the docs get published, a cache entry cannot change the binaries.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The workflow only runs on main.
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          save-if: true
       # The crate has no public API besides the entry point, the private items
       # are the documentation of the server internals. The fuzzing feature only
       # adds the entry points of the fuzz targets.
@@ -40,8 +44,10 @@ jobs:
           path: target/doc
 
   deploy:
+    if: github.repository == 'containers/conmon-rs'
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       pages: write # deploys the artifact
       id-token: write # proves the origin of the deployment to Pages

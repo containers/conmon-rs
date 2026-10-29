@@ -8,8 +8,11 @@ on:
   workflow_call: {}
 permissions: {}
 jobs:
+  # Waits for the ci run of the commit, see .github/release-files fetch, whose
+  # build-static jobs take up to 180 minutes on a cold cache.
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 200
     permissions:
       actions: read # looks up the ci runs of the commit
       attestations: read # verifies the attestations of the binaries
@@ -69,6 +72,7 @@ jobs:
   attest:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       id-token: write # signs with cosign and the attestation

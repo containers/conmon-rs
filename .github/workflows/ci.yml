@@ -14,7 +14,10 @@ permissions:
   contents: read
 env:
   CARGO_TERM_COLOR: always
-  NIX_VERSION: "2.35.3"
+  # The file and line numbers of the backtraces of the tests, without the
+  # rest of the debug info, which would take most of the space of the build
+  # caches.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   # The toolchain of the Rust jobs. A new stable release brings new lints,
   # which a bump of this version picks up instead of unrelated pull requests.
   RUST_VERSION: "1.99.1"
@@ -34,6 +37,7 @@ env:
 jobs:
   verify-dependencies:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -45,6 +49,7 @@ jobs:
 
   verify-proto:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -54,13 +59,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
-        with:
-          install_url: https://releases.nixos.org/nix/nix-${{ env.NIX_VERSION }}/install
+      - uses: ./.github/actions/setup-nix
       - run: make verify-proto
 
   lint-go:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -91,32 +95,29 @@ jobs:
           version: v2.15.0
           working-directory: pkg/client/integration
           skip-save-cache: ${{ env.SAVE_CACHE != 'true' }}
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: ./.github/actions/save-go
         if: env.SAVE_CACHE == 'true' && steps.go.outputs.cache-hit != 'true'
         with:
-          path: ${{ steps.go.outputs.paths }}
           key: ${{ steps.go.outputs.key }}
+          paths: ${{ steps.go.outputs.paths }}
 
   # One build environment for all checks of the Rust sources. Every check runs
   # even if an earlier one fails, so that a run reports all of them.
   lint-rust:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: .github/install-deps
-      - name: Select Toolchain
-        run: rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt && rustup default "$RUST_VERSION"
-      # The oldest toolchain the locked dependencies support, which make
+      # With the oldest toolchain the locked dependencies support, which make
       # lint-msrv uses.
-      - name: Install the rust-version toolchain
-        run: |
-          MSRV=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
-          rustup toolchain install "$MSRV" --profile minimal
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: ./.github/actions/setup-rust
         id: setup
         with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy,rustfmt
+          msrv: true
           save-if: ${{ env.SAVE_CACHE }}
       # The checks are the ones of make lint-rust and make lint-msrv, see the
       # Makefile, and only run on a complete setup, which they would report as
@@ -136,6 +137,7 @@ jobs:
 
   lint-shell:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -154,6 +156,7 @@ jobs:
   # the GitHub API.
   lint-workflows:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -166,6 +169,7 @@ jobs:
 
   lint-typos:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -176,13 +180,14 @@ jobs:
 
   lint-prettier:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 26.13.0
       # prettier has no dependencies, npm checks it against the integrity of
       # the registry.
       - run: npx --yes "prettier@$PRETTIER_VERSION" --check .
@@ -191,6 +196,7 @@ jobs:
 
   verify-deny:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -212,6 +218,7 @@ jobs:
       - build-static-ppc64le
       - build-static-s390x
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -247,6 +254,7 @@ jobs:
   # the minimum version of go.mod.
   verify-go-vulnerabilities:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -376,6 +384,7 @@ jobs:
   publish-cache:
     if: github.repository == 'containers/conmon-rs' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -386,9 +395,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
-        with:
-          install_url: https://releases.nixos.org/nix/nix-${{ env.NIX_VERSION }}/install
+      - uses: ./.github/actions/setup-nix
       - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
         with:
           name: conmon-rs
@@ -398,15 +405,15 @@ jobs:
 
   test-unit:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: .github/install-deps
-      - name: Select Toolchain
-        run: rustup toolchain install "$RUST_VERSION" --profile minimal --component llvm-tools-preview && rustup default "$RUST_VERSION"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: ./.github/actions/setup-rust
         with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: llvm-tools-preview
           save-if: ${{ env.SAVE_CACHE }}
       - name: Install cargo-llvm-cov and cargo-nextest
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
@@ -447,6 +454,7 @@ jobs:
   # test-integration jobs.
   test-unit-go:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -461,11 +469,11 @@ jobs:
           go mod download
           go -C pkg/client/integration mod download
       - run: make unit-go
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: ./.github/actions/save-go
         if: env.SAVE_CACHE == 'true' && steps.go.outputs.cache-hit != 'true'
         with:
-          path: ${{ steps.go.outputs.paths }}
           key: ${{ steps.go.outputs.key }}
+          paths: ${{ steps.go.outputs.paths }}
 
   # Builds all fuzz targets once, so that they keep compiling, for test-fuzz
   # to run one per job. A new target gets fuzzed without a change here.
@@ -486,11 +494,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: .github/install-deps
-      - name: Select Toolchain
-        run: rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal && rustup default "$FUZZ_TOOLCHAIN"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: ./.github/actions/setup-rust
         with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
           key: fuzz
           save-if: ${{ env.SAVE_CACHE }}
       # cargo-fuzz resolves the dependencies itself, a lock file which does
@@ -547,31 +553,12 @@ jobs:
           path: corpus
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: fuzz-corpus-${{ matrix.target }}-
-      # New inputs go to the first directory, the seeds stay as they are. A
-      # target may have no seeds yet.
+      # See .github/run-fuzz, which the advisories workflow uses as well.
       - name: Fuzz
-        env:
-          # Like cargo-fuzz runs the targets.
-          ASAN_OPTIONS: detect_odr_violation=0
-        run: |
-          chmod +x "fuzz-targets/$TARGET"
-          mkdir -p corpus artifacts "fuzz/seeds/$TARGET"
-          "fuzz-targets/$TARGET" -max_total_time=120 -artifact_prefix=artifacts/ corpus "fuzz/seeds/$TARGET"
-      # Keeps only the inputs which add coverage beyond the seeds, so the
-      # corpus stays small. The merge adds the inputs which cover more than
-      # the first directory, which starts with the seeds for that. They come
-      # from the checkout and get removed again.
+        run: .github/run-fuzz run "$TARGET" 120
       - name: Minimize the corpus
         if: github.ref == 'refs/heads/main'
-        env:
-          ASAN_OPTIONS: detect_odr_violation=0
-        run: |
-          mkdir minimized
-          cp -r "fuzz/seeds/$TARGET/." minimized
-          "fuzz-targets/$TARGET" -merge=1 minimized corpus
-          find "fuzz/seeds/$TARGET" -type f -printf '%f\0' | (cd minimized && xargs -0r rm --)
-          rm -rf corpus
-          mv minimized corpus
+        run: .github/run-fuzz minimize "$TARGET"
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: github.ref == 'refs/heads/main'
         with:
@@ -612,13 +599,11 @@ jobs:
         with:
           path: |
             /tmp/conmon-test-images-0
-          key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/integration/files_test.go') }}
+          key: integration-test-files-${{ runner.os }}-${{ hashFiles('pkg/client/integration/files_test.go') }}
       # The busybox of the tests only runs on x86, the other architectures
       # use the static one of the nixpkgs of flake.lock, which behaves the same.
-      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+      - uses: ./.github/actions/setup-nix
         if: env.ARCH != 'amd64'
-        with:
-          install_url: https://releases.nixos.org/nix/nix-${{ env.NIX_VERSION }}/install
       - name: Install busybox
         if: env.ARCH != 'amd64'
         run: |
@@ -638,26 +623,18 @@ jobs:
           file .build/static/conmonrs
           .build/static/conmonrs --version
       - run: .github/install-crun
-      - name: create symlink
+      # The tests run as root, whose PATH has to find the same Go.
+      - name: Link Go into /usr/bin
         run: sudo ln -f -s "$(go env GOROOT)"/bin/* /usr/bin/
-      # make integration installs ginkgo, which has no binaries.
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: ginkgo
-        with:
-          path: .build/gotools/bin/ginkgo
-          key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pkg/client/integration/go.mod') }}
       # The tests run as root, the modules and ginkgo get downloaded as the
       # runner user before, so that the caches hold them on a miss.
-      - name: Download Go modules and ginkgo
+      - name: Download Go modules
         run: |
           go mod download
           go -C pkg/client/integration mod download
-          make .install.ginkgo
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: env.SAVE_CACHE == 'true' && steps.ginkgo.outputs.cache-hit != 'true'
+      - uses: ./.github/actions/setup-ginkgo
         with:
-          path: .build/gotools/bin/ginkgo
-          key: ${{ steps.ginkgo.outputs.cache-primary-key }}
+          save: ${{ env.SAVE_CACHE }}
       # The output names the failed plain Go tests, which the report of the
       # specs does not, see .github/report-flakes.
       - name: Integration tests
@@ -703,16 +680,13 @@ jobs:
           path: |
             /tmp/conmon-test-images-0
           key: ${{ steps.test-files.outputs.cache-primary-key }}
-      # The tests write into the caches as root, they get saved as the runner
-      # user.
-      - name: Chown cache
-        if: env.SAVE_CACHE == 'true' && steps.go.outputs.cache-hit != 'true'
-        run: sudo chown -R "$(id -u):$(id -g)" "$(go env GOMODCACHE)" "$(go env GOCACHE)"
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # The tests write into the caches as root, the action saves them as the
+      # runner user.
+      - uses: ./.github/actions/save-go
         if: env.SAVE_CACHE == 'true' && steps.go.outputs.cache-hit != 'true'
         with:
-          path: ${{ steps.go.outputs.paths }}
           key: ${{ steps.go.outputs.key }}
+          paths: ${{ steps.go.outputs.paths }}
 
   # The same suite on a native arm64 runner, the build-static jobs only run the
   # other architectures once under emulation.
@@ -748,19 +722,19 @@ jobs:
         with:
           path: |
             /tmp/conmon-test-images-0
-          key: ${{ runner.os }}-cargo-test-files-${{ hashFiles('pkg/client/integration/files_test.go') }}
-      - run: .github/install-deps
-      - name: Select Toolchain
-        run: rustup toolchain install "$RUST_VERSION" --profile minimal --component llvm-tools-preview && rustup default "$RUST_VERSION"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+          key: integration-test-files-${{ runner.os }}-${{ hashFiles('pkg/client/integration/files_test.go') }}
+      - uses: ./.github/actions/setup-rust
         with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: llvm-tools-preview
           save-if: ${{ env.SAVE_CACHE }}
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-llvm-cov
       - run: .github/install-crun
-      - name: create symlink
+      # The tests run as root, whose PATH has to find the same Go.
+      - name: Link Go into /usr/bin
         run: sudo ln -f -s "$(go env GOROOT)"/bin/* /usr/bin/
       # The environment makes the build instrumented and every server process
       # write its profile on exit.
@@ -771,23 +745,15 @@ jobs:
           cargo llvm-cov clean --workspace
           cargo build --locked
           mkdir -m 1777 "$PROFILE_DIR"
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: ginkgo
-        with:
-          path: .build/gotools/bin/ginkgo
-          key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pkg/client/integration/go.mod') }}
       # The tests run as root, the modules and ginkgo get downloaded as the
       # runner user before, so that the caches hold them on a miss.
-      - name: Download Go modules and ginkgo
+      - name: Download Go modules
         run: |
           go mod download
           go -C pkg/client/integration mod download
-          make .install.ginkgo
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: env.SAVE_CACHE == 'true' && steps.ginkgo.outputs.cache-hit != 'true'
+      - uses: ./.github/actions/setup-ginkgo
         with:
-          path: .build/gotools/bin/ginkgo
-          key: ${{ steps.ginkgo.outputs.cache-primary-key }}
+          save: ${{ env.SAVE_CACHE }}
       # The memory budget does not apply to an instrumented debug build. A
       # failure only costs the coverage, the job stays green and uploads what
       # got covered, which shows as a drop of the coverage. A failing job would
@@ -843,16 +809,13 @@ jobs:
         with:
           name: test-integration-coverage-report
           path: .build/report/report.json
-      # The tests write into the caches as root, they get saved as the runner
-      # user.
-      - name: Chown cache
-        if: env.SAVE_CACHE == 'true' && steps.go.outputs.cache-hit != 'true'
-        run: sudo chown -R "$(id -u):$(id -g)" "$(go env GOMODCACHE)" "$(go env GOCACHE)"
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # The tests write into the caches as root, the action saves them as the
+      # runner user.
+      - uses: ./.github/actions/save-go
         if: env.SAVE_CACHE == 'true' && steps.go.outputs.cache-hit != 'true'
         with:
-          path: ${{ steps.go.outputs.paths }}
           key: ${{ steps.go.outputs.key }}
+          paths: ${{ steps.go.outputs.paths }}
 
   # Runs critest against CRI-O with the static binary. With stream_websockets,
   # CRI-O hands exec and attach to the streaming server of conmon-rs, which
@@ -888,21 +851,13 @@ jobs:
           cosign-release: v3.1.4
       - run: .github/setup
       # critest runs the parallel specs with ginkgo, which has no binaries.
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: ginkgo
+      - uses: ./.github/actions/setup-ginkgo
         with:
-          path: .build/gotools/bin/ginkgo
-          key: ginkgo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pkg/client/integration/go.mod') }}
+          save: ${{ env.SAVE_CACHE }}
       - name: Install ginkgo
         run: |
-          make .install.ginkgo
           sudo cp .build/gotools/bin/ginkgo /usr/local/bin
           ginkgo version
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: env.SAVE_CACHE == 'true' && steps.ginkgo.outputs.cache-hit != 'true'
-        with:
-          path: .build/gotools/bin/ginkgo
-          key: ${{ steps.ginkgo.outputs.cache-primary-key }}
       - name: Run critest
         shell: bash
         run: |
@@ -959,6 +914,7 @@ jobs:
 
   test-get-script:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       matrix:
         cosign: [true, false]
@@ -989,54 +945,43 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/get -l v1.1.1 -o .build/old/conmonrs
 
-  # The release workflow publishes the marker of a tag.
+  # The release workflow publishes the marker of a tag. The marker of main
+  # only moves to a commit whose binaries got published and whose tests
+  # passed, all of these jobs run for every main commit. Like the publish
+  # jobs, it does not wait for the scans and the fuzzing: CRI-O CI installs
+  # the binaries of the marker, which a new advisory or a crash the fuzzing
+  # finds in older code must not hold back. Neither for the coverage, whose
+  # integration tests may fail.
   publish-marker:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.repository == 'containers/conmon-rs' && github.ref == 'refs/heads/main'
     needs:
       - publish-static-amd64
       - publish-static-arm64
       - publish-static-ppc64le
       - publish-static-s390x
+      - test-unit
+      - test-unit-go
+      - test-integration-amd64
+      - test-integration-arm64
+      - test-critest
     # Runs of main commits overlap and finish in any order. The marker only
-    # moves forward, so an older run finishing last cannot move it back and a
-    # failing newer run does not hold it up for the ones after it. The jobs
-    # run one at a time, two could both read the old marker and the older one
-    # upload last otherwise. A third job replaces a waiting one, which leaves
-    # the marker behind until the next commit, but never moves it back.
+    # moves forward, see .github/create-marker, so an older run finishing
+    # last cannot move it back and a failing newer run does not hold it up
+    # for the ones after it. The jobs run one at a time, two could both read
+    # the old marker and the older one upload last otherwise. A third job
+    # replaces a waiting one, which leaves the marker behind until the next
+    # commit, but never moves it back.
     concurrency:
       group: ${{ github.workflow }}-publish-marker
       cancel-in-progress: false
     steps:
+      # The full history, to compare the commit with the one of the marker.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Check the current marker
-        id: main
-        run: |
-          CURRENT=$(curl -sSfL "https://storage.googleapis.com/cri-o/conmon-rs/latest-main.txt?ts=$(date +%s)" || true)
-          if [[ ! $CURRENT =~ ^[0-9a-f]{40}$ ]] ||
-            ! git cat-file -e "$CURRENT^{commit}" 2>/dev/null ||
-            git merge-base --is-ancestor "$CURRENT" "$GITHUB_SHA"; then
-            echo "forward=true" >>"$GITHUB_OUTPUT"
-          else
-            echo "The marker already points to the newer commit $CURRENT"
-            echo "forward=false" >>"$GITHUB_OUTPUT"
-          fi
-      - run: .github/create-marker
-        if: steps.main.outputs.forward == 'true'
-      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
-        if: steps.main.outputs.forward == 'true'
+      - uses: ./.github/actions/publish-marker
         with:
-          credentials_json: ${{ secrets.GCS_CRIO_SA }}
-      # The marker changes in place, caches must not serve an old one.
-      - uses: google-github-actions/upload-cloud-storage@6397bd7208e18d13ba2619ee21b9873edc94427a # v3.0.0
-        if: steps.main.outputs.forward == 'true'
-        with:
-          path: .
-          glob: latest-*.txt
-          destination: cri-o/conmon-rs
-          process_gcloudignore: false
-          headers: |-
-            cache-control: no-cache
+          credentials: ${{ secrets.GCS_CRIO_SA }}

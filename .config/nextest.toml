@@ -4,6 +4,11 @@
 retries = 2
 fail-fast = false
 failure-output = "immediate-final"
+# The slowest tests take a few seconds, about 10 under the qemu of the s390x
+# job of the advisories workflow, which uses this profile as well. A hanging
+# one gets killed after a minute, so that it costs 3 minutes with its retries
+# instead of holding up the job until its timeout.
+slow-timeout = { period = "30s", terminate-after = 2 }
 
 [profile.ci.junit]
 path = "junit.xml"

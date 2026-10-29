@@ -27,6 +27,7 @@ jobs:
   release:
     needs: build-sources
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       attestations: read # verifies the attestations
       contents: write # creates the release
@@ -113,59 +114,25 @@ jobs:
           gh release edit "$TAG" --draft=false --latest="$LATEST"
 
   # Points the latest-X.Y.txt marker in the bucket to this tag, once the
-  # release has its binaries. The marker only moves forward, a rerun of an
-  # older patch release does not move it back. The jobs of a minor version
-  # run one at a time, the workflow only waits for the runs of the same tag,
-  # and two patch releases could both read the old marker and the older one
-  # upload last otherwise. A third job replaces a waiting one, which leaves
-  # the marker behind until a rerun, but never moves it back.
+  # release has its binaries. The marker only moves forward, see
+  # .github/create-marker, a rerun of an older patch release does not move it
+  # back. The jobs of a minor version run one at a time, the workflow only
+  # waits for the runs of the same tag, and two patch releases could both
+  # read the old marker and the older one upload last otherwise. A third job
+  # replaces a waiting one, which leaves the marker behind until a rerun, but
+  # never moves it back.
   publish-marker:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.repository == 'containers/conmon-rs'
     needs: release
     concurrency:
       group: ${{ github.workflow }}-publish-marker-${{ needs.release.outputs.minor }}
       cancel-in-progress: false
-    env:
-      TAG: ${{ github.ref_name }}
     steps:
-      - name: Check the current marker
-        id: marker
-        run: |
-          MINOR=${TAG%.*}
-          URL=https://storage.googleapis.com/cri-o/conmon-rs/latest-${MINOR#v}.txt
-          STATUS=$(curl -sSL --retry 5 -o "$RUNNER_TEMP/marker" -w '%{http_code}' "$URL?ts=$(date +%s)")
-          CURRENT=
-          if [[ $STATUS == 200 ]]; then
-            CURRENT=$(<"$RUNNER_TEMP/marker")
-          elif [[ $STATUS != 404 ]]; then
-            echo "::error::Unable to read $URL: HTTP $STATUS"
-            exit 1
-          fi
-          if [[ $CURRENT =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] &&
-            [[ $(printf '%s\n' "$CURRENT" "$TAG" | sort -V | tail -1) != "$TAG" ]]; then
-            echo "The marker already points to the newer release $CURRENT"
-            echo "forward=false" >>"$GITHUB_OUTPUT"
-          else
-            echo "forward=true" >>"$GITHUB_OUTPUT"
-          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: steps.marker.outputs.forward == 'true'
         with:
           persist-credentials: false
-      - run: .github/create-marker
-        if: steps.marker.outputs.forward == 'true'
-      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
-        if: steps.marker.outputs.forward == 'true'
+      - uses: ./.github/actions/publish-marker
         with:
-          credentials_json: ${{ secrets.GCS_CRIO_SA }}
-      # The marker changes in place, caches must not serve an old one.
-      - uses: google-github-actions/upload-cloud-storage@6397bd7208e18d13ba2619ee21b9873edc94427a # v3.0.0
-        if: steps.marker.outputs.forward == 'true'
-        with:
-          path: .
-          glob: latest-*.txt
-          destination: cri-o/conmon-rs
-          process_gcloudignore: false
-          headers: |-
-            cache-control: no-cache
+          credentials: ${{ secrets.GCS_CRIO_SA }}
