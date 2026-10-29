@@ -37,9 +37,8 @@ FILE=latest-$MARKER.txt
 
 # The timestamp keeps caches from serving an old marker. Without --fail, a
 # missing marker is no error to retry, transient errors of the server and of
-# the connection are. Only a missing marker counts as none. Any other status,
-# or a failed or incomplete transfer, fails: an empty or truncated marker
-# would let an older run move it back.
+# the connection are. A failed or incomplete transfer counts as an error, an
+# empty or truncated marker is no missing one.
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
 RC=0

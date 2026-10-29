@@ -355,7 +355,8 @@ clean: ## Cleanup the project files.
 
 # The build directory holds the tools, the vulnerability database of grype
 # and the busybox of the integration tests, which the targets download again.
-# Run it with sudo after sudo make integration, which leaves files of root.
+# Run it with sudo after sudo make integration, which leaves files owned by
+# root.
 .PHONY: clean-all
 clean-all: clean ## Cleanup the project files and the build directory.
 	rm -rf $(BUILD_DIR)
