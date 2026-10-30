@@ -6,7 +6,7 @@ use crate::conmon_capnp::conmon;
 use crate::telemetry::Telemetry;
 use crate::{
     capnp_util,
-    child::{Child, ChildKind, sleep_until},
+    child::{Child, ChildKind},
     child_reaper::{EXIT_CODE_NOT_STARTED, EXIT_CODE_TIMED_OUT, ExitChannelData, RuntimeCall},
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
@@ -17,6 +17,7 @@ use crate::{
     runtime_args::GenerateRuntimeArgs,
     server::Server,
     streaming_server::{AttachSession, ExecSession, StreamingServer},
+    util::sleep_until,
     version::Version,
 };
 use anyhow::Context;
@@ -252,10 +253,11 @@ impl conmon::Server for Server {
         params: conmon::VersionParams,
         mut results: conmon::VersionResults,
     ) -> Promise<(), capnp::Error> {
-        debug!("Got a version request");
         let req = pry!(pry!(params.get()).get_request());
 
         enter_request!(req, "version");
+
+        debug!("Got a version request");
 
         let version = Version::new(req.get_verbose());
         let mut response = results.get().init_response();
@@ -666,11 +668,12 @@ impl conmon::Server for Server {
         params: conmon::CreateNamespacesParams,
         mut results: conmon::CreateNamespacesResults,
     ) -> Promise<(), capnp::Error> {
-        debug!("Got a create namespaces request");
         let req = pry!(pry!(params.get()).get_request());
         let pod_id = pry_err!(pry_err!(req.get_pod_id()).to_str());
 
         enter_request!(req, "create_namespaces", pod_id);
+
+        debug!("Got a create namespaces request");
 
         let base_path = pry!(pry!(req.get_base_path()).to_string());
         let pod_id = pod_id.to_owned();
@@ -738,12 +741,13 @@ impl conmon::Server for Server {
         params: conmon::ServeExecContainerParams,
         mut results: conmon::ServeExecContainerResults,
     ) -> Promise<(), capnp::Error> {
-        debug!("Got a serve exec container request");
         let req = pry!(pry!(params.get()).get_request());
 
         let id = pry_err!(pry_err!(req.get_id()).to_string());
 
         enter_request!(req, "serve_exec_container", id.as_str());
+
+        debug!("Got a serve exec container request");
 
         // Validate that the container actually exists
         pry_err!(self.reaper().get(&id));
@@ -793,12 +797,13 @@ impl conmon::Server for Server {
         params: conmon::ServeAttachContainerParams,
         mut results: conmon::ServeAttachContainerResults,
     ) -> Promise<(), capnp::Error> {
-        debug!("Got a serve attach container request");
         let req = pry!(pry!(params.get()).get_request());
 
         let id = pry_err!(pry_err!(req.get_id()).to_str());
 
         enter_request!(req, "serve_attach_container", id);
+
+        debug!("Got a serve attach container request");
 
         let (stdin, stdout, stderr) = (req.get_stdin(), req.get_stdout(), req.get_stderr());
         let stop_after_stdin_eof = req.get_stop_after_stdin_eof();
@@ -836,10 +841,11 @@ impl conmon::Server for Server {
         params: conmon::ServePortForwardContainerParams,
         mut results: conmon::ServePortForwardContainerResults,
     ) -> Promise<(), capnp::Error> {
-        debug!("Got a serve port forward container request");
         let req = pry!(pry!(params.get()).get_request());
 
         enter_request!(req, "serve_port_forward_container");
+
+        debug!("Got a serve port forward container request");
 
         let netns_path = pry_err!(pry_err!(req.get_net_ns_path()).to_str());
         if netns_path.is_empty() {

@@ -3,13 +3,13 @@
 
 use super::{ChildReaper, InFlight, PendingPid};
 use crate::{
-    child::sleep_until,
     container_io::{ContainerIO, ContainerIOType},
     fd_mapping::{self, CommandFdExt, FdMapping},
     fs_util, init,
     mutex::lock,
     process::{Process, child_pid, read_pid_file, wait_for_exit_code},
     tail::Tail,
+    util::{sleep_until, with_stderr},
 };
 use anyhow::{Context, Result, format_err};
 use nix::{
@@ -21,7 +21,7 @@ use std::{
     ops::{Deref, DerefMut},
     os::fd::{OwnedFd, RawFd},
     path::Path,
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     sync::{Arc, Mutex},
 };
 use tokio::{
@@ -97,18 +97,6 @@ impl RuntimeOutput {
             output.task.abort();
         }
         std::mem::take(&mut *lock(&output.stderr)).into_end()
-    }
-}
-
-/// Append the stderr of a runtime which failed to its error, unless it wrote
-/// nothing. It usually holds the reason.
-pub(crate) fn with_stderr(error: anyhow::Error, stderr: &[u8]) -> anyhow::Error {
-    let stderr = String::from_utf8_lossy(stderr);
-    let stderr = stderr.trim();
-    if stderr.is_empty() {
-        error
-    } else {
-        format_err!("{error:#}: {stderr}")
     }
 }
 
@@ -293,76 +281,21 @@ impl ChildReaper {
         // with the one of the process. With a terminal, the runtime has pipes
         // of its own. They get read while waiting for it, a runtime which
         // writes more than they hold, like with debug logging, would block.
-        let mut output = None;
+        let output = matches!(container_io.typ(), ContainerIOType::Terminal(_))
+            .then(|| RuntimeOutput::spawn(child.stdout.take(), child.stderr.take()));
 
-        // How long a runtime which failed before it exited may take to exit on
-        // its own, none once its deadline passed.
-        let mut grace = Self::RUNTIME_GRACE;
-        let connected = match container_io.typ_mut() {
-            ContainerIOType::Terminal(terminal) => {
-                output = Some(RuntimeOutput::spawn(
-                    child.stdout.take(),
-                    child.stderr.take(),
-                ));
-                // The runtime connects to the console socket before it exits.
-                // If it fails before that, waiting for the connection alone
-                // would hang this call forever.
-                select! {
-                    res = terminal.wait_connected(stdin, token.clone()) => {
-                        res.context("wait for terminal socket connection")
-                    }
-                    () = sleep_until(runtime_deadline) => {
-                        grace = Duration::ZERO;
-                        Err(format_err!("runtime did not finish in time"))
-                    }
-                    status = child.wait() => match status.context("wait for child") {
-                        // The runtime succeeded, so it did connect and the
-                        // descriptor is queued already.
-                        Ok(status) if status.success() => time::timeout(
-                            Self::RUNTIME_GRACE,
-                            terminal.wait_connected(stdin, token.clone()),
-                        )
-                        .await
-                        .context("runtime exited without connecting the terminal")
-                        .and_then(|res| res.context("wait for terminal socket connection")),
-                        // A failure is reported below together with its output.
-                        Ok(_) => Ok(()),
-                        Err(e) => Err(e),
-                    },
-                }
-            }
-            ContainerIOType::Streams(streams) => {
-                let stdout = child.stdout.take();
-                let stderr = child.stderr.take();
-                let stdin = child.stdin.take();
-                streams.handle_stdio_receive(stdin, stdout, stderr, token.clone());
-                Ok(())
-            }
-        };
-
-        let connected = match (connected, runtime_deadline) {
-            // A runtime which hangs gets killed once its deadline passed.
-            (Ok(()), Some(deadline)) => {
-                if time::timeout_at(deadline, child.wait()).await.is_ok() {
-                    Ok(())
-                } else {
-                    grace = Duration::ZERO;
-                    Err(format_err!("runtime did not finish in time"))
-                }
-            }
-            (res, _) => res,
-        };
-        // A wait which fails gets cleaned up like a runtime which failed.
+        let connected =
+            Self::connect_io(&mut child, container_io, stdin, &token, runtime_deadline).await;
         let status = match connected {
-            Ok(()) => child.wait().await.context("wait for runtime"),
+            Ok(()) => Self::wait_runtime(&mut child, runtime_deadline).await,
             Err(e) => Err(e),
         };
         let status = match status {
             Ok(status) => status,
-            Err(e) => {
+            Err(RuntimeFailure { error, grace }) => {
                 token.cancel();
                 let stderr = Self::stop_runtime(child, output, grace).await;
-                return Err(self.fail_create(pidfile, e, &stderr));
+                return Err(self.fail_create(pidfile, error, &stderr));
             }
         };
 
@@ -392,6 +325,73 @@ impl ChildReaper {
         // the runtime, see `ContainerIO::runtime_error`.
         token.cancel();
         Err(self.fail_create(pidfile, error, &stderr))
+    }
+
+    /// Connect the I/O of the process which the runtime starts: wait until
+    /// the runtime connected the terminal, or read the pipes of the runtime,
+    /// which the process shares.
+    async fn connect_io(
+        child: &mut Runtime,
+        container_io: &mut ContainerIO,
+        stdin: bool,
+        token: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<(), RuntimeFailure> {
+        match container_io.typ_mut() {
+            ContainerIOType::Terminal(terminal) => {
+                // The runtime connects to the console socket before it exits.
+                // If it fails before that, waiting for the connection alone
+                // would hang this call forever.
+                select! {
+                    res = terminal.wait_connected(stdin, token.clone()) => {
+                        res.context("wait for terminal socket connection")
+                            .map_err(RuntimeFailure::new)
+                    }
+                    () = sleep_until(deadline) => Err(RuntimeFailure::timed_out()),
+                    status = child.wait() => match status.context("wait for child") {
+                        // The runtime succeeded, so it did connect and the
+                        // descriptor is queued already.
+                        Ok(status) if status.success() => time::timeout(
+                            Self::RUNTIME_GRACE,
+                            terminal.wait_connected(stdin, token.clone()),
+                        )
+                        .await
+                        .context("runtime exited without connecting the terminal")
+                        .and_then(|res| res.context("wait for terminal socket connection"))
+                        .map_err(RuntimeFailure::new),
+                        // A failure is reported later together with its output.
+                        Ok(_) => Ok(()),
+                        Err(e) => Err(RuntimeFailure::new(e)),
+                    },
+                }
+            }
+            ContainerIOType::Streams(streams) => {
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
+                let stdin = child.stdin.take();
+                streams.handle_stdio_receive(stdin, stdout, stderr, token.clone());
+                Ok(())
+            }
+        }
+    }
+
+    /// Wait for the exit of the runtime. A runtime which hangs gets killed
+    /// once its deadline passed, and a wait which fails gets cleaned up like
+    /// a runtime which failed.
+    async fn wait_runtime(
+        child: &mut Runtime,
+        deadline: Option<Instant>,
+    ) -> Result<ExitStatus, RuntimeFailure> {
+        if let Some(deadline) = deadline
+            && time::timeout_at(deadline, child.wait()).await.is_err()
+        {
+            return Err(RuntimeFailure::timed_out());
+        }
+        child
+            .wait()
+            .await
+            .context("wait for runtime")
+            .map_err(RuntimeFailure::new)
     }
 
     /// Stop a runtime which failed before it exited: give it `grace` to exit
@@ -471,6 +471,32 @@ impl ChildReaper {
         }
         debug!("Cleaning up PID {pid} of failed runtime call");
         task::spawn(wait_for_exit_code(CancellationToken::new(), pid));
+    }
+}
+
+/// A runtime call which failed before its runtime exited, see
+/// [`ChildReaper::stop_runtime`].
+struct RuntimeFailure {
+    error: anyhow::Error,
+
+    /// How long the runtime may take to exit on its own, none once its
+    /// deadline passed.
+    grace: Duration,
+}
+
+impl RuntimeFailure {
+    fn new(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            grace: ChildReaper::RUNTIME_GRACE,
+        }
+    }
+
+    fn timed_out() -> Self {
+        Self {
+            error: format_err!("runtime did not finish in time"),
+            grace: Duration::ZERO,
+        }
     }
 }
 

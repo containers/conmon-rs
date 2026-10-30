@@ -2,10 +2,11 @@
 //! pod shares, bind mounted below the base path so that they outlive it.
 
 use crate::{
-    child_reaper::{RuntimeOutput, with_stderr},
+    child_reaper::RuntimeOutput,
     conmon_capnp::conmon,
     process::{Process, child_pid, read_pid_file, wait_for_exit_code},
     single_flight::{SingleFlight, Stop, stop_blocking},
+    util::with_stderr,
 };
 use anyhow::{Context, Result, bail};
 use capnp::enum_list::Reader;
@@ -70,6 +71,16 @@ impl Pause {
     pub fn namespaces(&self) -> &[Namespace] {
         &self.namespaces
     }
+}
+
+/// A failed setup of the pause subcommand, see [`Pause::check_setup`].
+#[derive(Debug)]
+enum SetupFailure {
+    /// The subcommand undid what it set up.
+    Undone(anyhow::Error),
+
+    /// The bind mounts and the PID file may stay behind.
+    Left(anyhow::Error),
 }
 
 /// The pause instance of this server.
@@ -414,20 +425,23 @@ impl Pause {
             stop_blocking(move || pause.stop()).await;
             bail!("pause did not exit after getting killed")
         };
-        let status = status.context("wait for pause child")?;
-        if !status.success() {
-            // The pause subcommand undoes its own failed setup, but not if it
-            // got killed by the shutdown. Its child stops the init of a PID
-            // namespace then, the bind mounts and PID file stay.
-            if status.signal().is_some() {
-                stop_blocking(move || pause.stop()).await;
-                bail!("exit status not ok: {status}")
+        match Self::check_setup(status) {
+            Ok(()) => {}
+            Err(SetupFailure::Undone(e)) => {
+                let stderr = RuntimeOutput::finish(Some(output)).await;
+                return Err(with_stderr(e, &stderr));
             }
-            let stderr = RuntimeOutput::finish(Some(output)).await;
-            return Err(with_stderr(
-                anyhow::format_err!("exit status not ok: {status}"),
-                &stderr,
-            ));
+            Err(SetupFailure::Left(e)) => {
+                // A child which could not be waited for may still run, it has
+                // its ID until it got reaped.
+                if child.id().is_some()
+                    && let Err(e) = child.start_kill()
+                {
+                    debug!("Unable to kill pause child: {e}");
+                }
+                stop_blocking(move || pause.stop()).await;
+                return Err(e);
+            }
         }
 
         // Without a PID namespace the pause process already exited after
@@ -453,6 +467,26 @@ impl Pause {
         }
 
         Ok(pause)
+    }
+
+    /// Check the exit status of the pause subcommand. It undoes its own
+    /// failed setup, but not if it got killed, like by the shutdown: its
+    /// child stops the init of a PID namespace then, the bind mounts and the
+    /// PID file stay. Whether a child which could not be waited for set up
+    /// anything is unknown, so its setup gets undone the same way.
+    fn check_setup(status: std::io::Result<ExitStatus>) -> Result<(), SetupFailure> {
+        match status {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) if status.signal().is_some() => Err(SetupFailure::Left(
+                anyhow::format_err!("exit status not ok: {status}"),
+            )),
+            Ok(status) => Err(SetupFailure::Undone(anyhow::format_err!(
+                "exit status not ok: {status}"
+            ))),
+            Err(e) => Err(SetupFailure::Left(
+                anyhow::Error::from(e).context("wait for pause child"),
+            )),
+        }
     }
 
     /// How long the pause subcommand may take to set up the namespaces. A

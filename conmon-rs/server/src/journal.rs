@@ -280,6 +280,14 @@ pub struct Journal {
 impl Journal {
     const DEFAULT_PRIORITY: Priority = Priority::Notice;
 
+    /// A writer with the priority of errors, for the errors of the server
+    /// from before its logging got set up.
+    pub fn error() -> Self {
+        Self {
+            priority: Some(Priority::Error),
+        }
+    }
+
     /// The entry of a formatted event. The journal separates entries itself,
     /// so the line ending of the event is dropped.
     fn entry(&self, line: &[u8]) -> Entry {

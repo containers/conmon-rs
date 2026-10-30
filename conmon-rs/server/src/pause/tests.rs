@@ -18,6 +18,29 @@ async fn hanging_setup_gets_killed() -> Result<()> {
 }
 
 #[test]
+fn failed_setups_get_undone_unless_the_pause_process_did() {
+    assert!(Pause::check_setup(Ok(ExitStatus::from_raw(0))).is_ok());
+    // It exited on its own and undid its setup.
+    assert!(matches!(
+        Pause::check_setup(Ok(ExitStatus::from_raw(1 << 8))),
+        Err(SetupFailure::Undone(_))
+    ));
+    // It got killed, or nobody knows what it did.
+    assert!(matches!(
+        Pause::check_setup(Ok(ExitStatus::from_raw(Signal::SIGKILL as i32))),
+        Err(SetupFailure::Left(_))
+    ));
+    let err = Pause::check_setup(Err(std::io::Error::from_raw_os_error(libc::ECHILD)));
+    let Err(SetupFailure::Left(e)) = err else {
+        panic!("wait error not undone: {err:?}");
+    };
+    assert!(
+        format!("{e:#}").starts_with("wait for pause child: "),
+        "{e:#}"
+    );
+}
+
+#[test]
 fn dead_pause_process_is_noticed() -> Result<()> {
     let pause = |process| Pause {
         base_path: "/var/run".into(),

@@ -202,8 +202,8 @@ async fn exec_sync_output_takes_the_result_from_the_watcher() -> anyhow::Result<
         let (exit_tx, exit_rx) = broadcast::channel(1);
         let watcher = async {
             child.wait().await?;
-            // The read loops take the output before anything reads it.
-            time::sleep(Duration::from_millis(100)).await;
+            // Output still in flight gets picked up by the drain after the
+            // cancel.
             token.cancel();
             exit_tx.send(ExitChannelData {
                 exit_code: if timed_out { EXIT_CODE_TIMED_OUT } else { 0 },

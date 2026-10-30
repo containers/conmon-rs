@@ -22,21 +22,29 @@ use futures::{
 };
 use libc::_exit;
 use nix::{
+    fcntl::{OFlag, open},
     sys::{
         prctl,
         signal::{Signal, kill},
+        stat::Mode,
     },
-    unistd::{ForkResult, chdir, fork},
+    unistd::{ForkResult, Pid, chdir, dup2_stderr, dup2_stdin, dup2_stdout, fork},
 };
 #[cfg(feature = "tracing")]
 use opentelemetry::trace::{FutureExt as OpenTelemetryFutureExt, TracerProvider};
 #[cfg(feature = "tracing")]
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use std::{fs::File, io::Write, os::fd::RawFd, path::Path, sync::Arc};
+use std::{
+    fs::File,
+    io::Write,
+    os::fd::{AsRawFd, IntoRawFd, RawFd},
+    path::Path,
+    sync::Arc,
+};
 use tokio::{
     fs,
     net::UnixListener,
-    runtime::Builder,
+    runtime::{Builder, Runtime},
     signal::unix::{Signal as SignalStream, SignalKind, signal},
     sync::{RwLock, oneshot},
     task::{self, LocalSet},
@@ -50,12 +58,6 @@ use tracing::{Instrument, Span, debug, debug_span, error, info};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, prelude::*};
 use twoparty::VatNetwork;
-
-/// The tracer provider created by `init_logging`, if the feature is enabled.
-#[cfg(feature = "tracing")]
-type Tracer = Option<SdkTracerProvider>;
-#[cfg(not(feature = "tracing"))]
-type Tracer = ();
 
 /// How long the clients wait for the server to exit on a shutdown before
 /// they kill it, `serverStopTimeout` in `pkg/client/server.go`.
@@ -220,7 +222,7 @@ impl Server {
 
     /// Start the `Server` instance and consume it.
     #[expect(unsafe_code, reason = "forking")]
-    pub fn start(self) -> Result<()> {
+    pub fn start(mut self) -> Result<()> {
         // Fork as early as possible, before setting up tokio: a child of a
         // process with threads may only call async-signal-safe functions
         // until it execs, see the safety section of `nix::unistd::fork`.
@@ -229,46 +231,8 @@ impl Server {
             // after the fork, so the child does not inherit a half initialized
             // thread pool. The parent only writes the PID file and exits.
             match unsafe { fork()? } {
-                ForkResult::Parent { child, .. } => {
-                    let pidfile = self.config().conmon_pidfile();
-                    if let Err(e) = File::create(&pidfile).and_then(|mut f| write!(f, "{child}")) {
-                        // Without the PID file nobody knows the server, do not
-                        // leave it running behind a failure.
-                        eprintln!("Unable to write PID file {}: {e}", pidfile.display());
-                        let _ = kill(child, Signal::SIGKILL);
-                        // SAFETY: _exit(2) ends the process right away, the
-                        // parent has nothing to flush or clean up.
-                        unsafe { _exit(1) };
-                    }
-                    // SAFETY: as above.
-                    unsafe { _exit(0) };
-                }
-                ForkResult::Child => {
-                    // Like a daemon, do not keep the standard streams of the
-                    // caller, like the file the Go client reads the launch
-                    // errors from, see `startServer` in `pkg/client`. The
-                    // processes the server starts, like cleanup commands,
-                    // would write into it otherwise. Only the stdout log
-                    // driver writes to them.
-                    if self.config().log_driver() != LogDriver::Stdout {
-                        use nix::{
-                            fcntl::{OFlag, open},
-                            sys::stat::Mode,
-                            unistd::{dup2_stderr, dup2_stdin, dup2_stdout},
-                        };
-                        use std::os::fd::{AsRawFd, IntoRawFd};
-
-                        let null = open(c"/dev/null", OFlag::O_RDWR, Mode::empty())
-                            .context("open /dev/null")?;
-                        dup2_stdin(&null).context("redirect stdin")?;
-                        dup2_stdout(&null).context("redirect stdout")?;
-                        dup2_stderr(&null).context("redirect stderr")?;
-                        // A closed standard stream got it, which has to stay.
-                        if null.as_raw_fd() <= libc::STDERR_FILENO {
-                            let _: RawFd = null.into_raw_fd();
-                        }
-                    }
-                }
+                ForkResult::Parent { child, .. } => self.exit_parent(child),
+                ForkResult::Child => self.redirect_stdio().map_err(|e| self.log_early(e))?,
             }
         }
 
@@ -276,6 +240,118 @@ impl Server {
         // its parent either way, so the descriptors have to go either way.
         Self::close_inherited_fds();
 
+        let rt = match Self::build_runtime() {
+            Ok(rt) => rt,
+            Err(e) => return Err(self.log_early(e)),
+        };
+        // Nothing returns early from here on: a thread of the blocking pool
+        // which is stuck, like on a hung file system, ends with the process.
+        // Dropping the runtime would wait for it instead, so it gets shut
+        // down with a timeout however the server ends. The logging comes
+        // first, so that the errors which follow get logged. With a log
+        // driver other than `stdout`, the standard streams are gone after
+        // the fork. The exporter of the tracer needs the runtime.
+        let logging = rt
+            .block_on(async { self.init_logging() })
+            .context("init logging");
+        #[cfg(feature = "tracing")]
+        let tracer = self.tracer.clone();
+        let result = match logging {
+            Ok(()) => rt.block_on(self.serve()),
+            Err(e) => Err(self.log_early(e)),
+        };
+        #[cfg(feature = "tracing")]
+        let result = result.and(Self::shutdown_tracer(&rt, tracer));
+        rt.shutdown_timeout(Self::RUNTIME_SHUTDOWN_TIMEOUT);
+        result
+    }
+
+    /// Write the PID of the forked `child` to the PID file and exit, which
+    /// is all the parent does.
+    #[expect(unsafe_code, reason = "exiting without cleanup after the fork")]
+    fn exit_parent(&self, child: Pid) -> ! {
+        let pidfile = self.config().conmon_pidfile();
+        if let Err(e) = File::create(&pidfile).and_then(|mut f| write!(f, "{child}")) {
+            // Without the PID file nobody knows the server, do not leave it
+            // running behind a failure.
+            eprintln!("Unable to write PID file {}: {e}", pidfile.display());
+            let _ = kill(child, Signal::SIGKILL);
+            // SAFETY: _exit(2) ends the process right away, the parent has
+            // nothing to flush or clean up.
+            unsafe { _exit(1) };
+        }
+        // SAFETY: as above.
+        unsafe { _exit(0) };
+    }
+
+    /// Like a daemon, do not keep the standard streams of the caller, like
+    /// the file the Go client reads the launch errors from, see
+    /// `startServer` in `pkg/client`. The processes the server starts, like
+    /// cleanup commands, would write into it otherwise. Only the stdout log
+    /// driver writes to them.
+    fn redirect_stdio(&self) -> Result<()> {
+        if self.config().log_driver() == LogDriver::Stdout {
+            return Ok(());
+        }
+        let null = open(c"/dev/null", OFlag::O_RDWR, Mode::empty()).context("open /dev/null")?;
+        dup2_stdin(&null).context("redirect stdin")?;
+        dup2_stdout(&null).context("redirect stdout")?;
+        dup2_stderr(&null).context("redirect stderr")?;
+        // A closed standard stream got it, which has to stay.
+        if null.as_raw_fd() <= libc::STDERR_FILENO {
+            let _: RawFd = null.into_raw_fd();
+        }
+        Ok(())
+    }
+
+    /// The runtime of the server, see [`Server::MAX_BLOCKING_THREADS`].
+    fn build_runtime() -> Result<Runtime> {
+        Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .max_blocking_threads(Self::MAX_BLOCKING_THREADS)
+            .thread_stack_size(Self::BLOCKING_THREAD_STACK_SIZE)
+            .build()
+            .context("build runtime")
+    }
+
+    /// Log an error from before the logging got set up, and return it. The
+    /// systemd driver still gets it into the journal, the standard streams
+    /// are gone after the fork, see [`Server::redirect_stdio`]. With the
+    /// stdout driver, `main` prints it to the stderr of the caller.
+    fn log_early(&self, e: anyhow::Error) -> anyhow::Error {
+        if self.config().log_driver() == LogDriver::Systemd
+            && let Err(journal_error) = Journal::error().write_all(format!("{e:#}").as_bytes())
+        {
+            // Only seen while the stderr of the caller is kept, like without
+            // the fork.
+            eprintln!("Unable to log to the journal: {journal_error}");
+        }
+        e
+    }
+
+    /// Set up the process and serve until the server ends. Its failures get
+    /// logged, also the one of the backend, see [`Server::logged`].
+    async fn serve(self) -> Result<()> {
+        let result = match Self::init_process() {
+            Ok(()) => self.run_tasks().await,
+            Err(e) => Err(e),
+        };
+        Self::logged(result)
+    }
+
+    /// The result of the server, logged unless the shutdown logged it
+    /// already: the outer one is a failure of the server itself, the inner
+    /// one the result of the shutdown, see [`Server::start_signal_handler`].
+    fn logged(result: Result<Result<()>>) -> Result<()> {
+        result.unwrap_or_else(|e| {
+            error!("{e:#}");
+            Err(e)
+        })
+    }
+
+    /// Set up the process to serve, once the logging is.
+    fn init_process() -> Result<()> {
         // Do not keep the working directory of the caller busy, like a mount
         // which then cannot be unmounted. The paths of the configuration are
         // absolute, see `Config::make_absolute`, and so are the ones of the
@@ -284,31 +360,13 @@ impl Server {
 
         // The container processes get reparented to the server once their
         // runtime exits.
-        prctl::set_child_subreaper(true).context("set child subreaper")?;
-
-        let rt = Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .max_blocking_threads(Self::MAX_BLOCKING_THREADS)
-            .thread_stack_size(Self::BLOCKING_THREAD_STACK_SIZE)
-            .build()?;
-        // Nothing returns early from here on: a thread of the blocking pool
-        // which is stuck, like on a hung file system, ends with the process.
-        // Dropping the runtime would wait for it instead, so it gets shut
-        // down with a timeout however the server ends.
-        let (tracer, result) = rt.block_on(self.spawn_tasks());
-        #[cfg(feature = "tracing")]
-        let result = result.and(Self::shutdown_tracer(&rt, tracer));
-        #[cfg(not(feature = "tracing"))]
-        let () = tracer;
-        rt.shutdown_timeout(Self::RUNTIME_SHUTDOWN_TIMEOUT);
-        result
+        prctl::set_child_subreaper(true).context("set child subreaper")
     }
 
     /// Export the remaining spans. That needs the runtime the exporter was
     /// created on, so shut down from a blocking task while it is driven.
     #[cfg(feature = "tracing")]
-    fn shutdown_tracer(rt: &tokio::runtime::Runtime, tracer: Tracer) -> Result<()> {
+    fn shutdown_tracer(rt: &Runtime, tracer: Option<SdkTracerProvider>) -> Result<()> {
         let Some(tracer) = tracer else {
             return Ok(());
         };
@@ -319,13 +377,17 @@ impl Server {
             )
             .await
         });
-        if let Ok(res) = shutdown {
-            res.context("join tracer shutdown")?
-                .context("shutdown tracer")
-        } else {
+        let Ok(res) = shutdown else {
             warn!("Tracer did not shut down in time");
-            Ok(())
+            return Ok(());
+        };
+        let res = res
+            .context("join tracer shutdown")
+            .and_then(|res| res.context("shutdown tracer"));
+        if let Err(e) = &res {
+            error!("{e:#}");
         }
+        res
     }
 
     /// How long the shutdown may take from the signal on, below the
@@ -353,8 +415,9 @@ impl Server {
 
     fn init() -> Result<()> {
         // The server keeps the C locale, unlike conmon, so that the errors
-        // it returns to CRI-O do not depend on the environment.
-        init::set_default_umask();
+        // it returns to CRI-O do not depend on the environment. The umask is
+        // set before the configuration prepares the runtime directories, see
+        // `crate::run`.
         init::unset_notify_socket();
         init::save_oom_score();
         init::raise_nofile_limit();
@@ -430,24 +493,9 @@ impl Server {
         Ok(())
     }
 
-    /// Spawns all required tokio tasks until the server ends, and returns
-    /// the tracer provider which `init_logging` created along with the
-    /// result, so that it can be shut down after the runtime also on a
-    /// failure.
-    async fn spawn_tasks(mut self) -> (Tracer, Result<()>) {
-        let logging = self.init_logging().context("init logging");
-        #[cfg(feature = "tracing")]
-        let tracer = self.tracer.clone();
-        #[cfg(not(feature = "tracing"))]
-        let tracer = ();
-        if let Err(e) = logging {
-            return (tracer, Err(e));
-        }
-        (tracer, self.run_tasks().await)
-    }
-
-    /// Run the backend and the signal handler until the server ends.
-    async fn run_tasks(self) -> Result<()> {
+    /// Run the backend and the signal handler until the server ends, see
+    /// [`Server::logged`] for the result.
+    async fn run_tasks(self) -> Result<Result<()>> {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let socket = self.config().socket();
         let fd_socket = self.config().fd_socket();
@@ -498,6 +546,9 @@ impl Server {
         shutdown_tx: oneshot::Sender<Result<()>>,
     ) {
         let signalled = Self::wait_for_signal(signals).await;
+        if let Err(e) = &signalled {
+            error!("Unable to wait for a signal, shutting down: {e:#}");
+        }
         let shutdown = Self::shutdown(reaper, socket, fd_socket, Pause::shutdown).await;
         let result = Self::all_ok([signalled, shutdown]);
         // The backend returns it, the server exits non-zero on a failure.
@@ -553,9 +604,11 @@ impl Server {
     }
 
     /// The result of the server once the signal handler sent the shutdown
-    /// message, see [`Server::start_signal_handler`].
-    fn shutdown_result(received: Result<Result<()>, oneshot::error::RecvError>) -> Result<()> {
-        received.context("signal handler ended without a result")?
+    /// message, see [`Server::start_signal_handler`], which logged it.
+    fn shutdown_result(
+        received: Result<Result<()>, oneshot::error::RecvError>,
+    ) -> Result<Result<()>> {
+        received.context("signal handler ended without a result")
     }
 
     /// Kill the grandchildren and remove the socket files, until the
@@ -616,8 +669,15 @@ impl Server {
     /// fit into. Larger segments bypass them.
     const RPC_BUFFER_SIZE: usize = 4096;
 
-    async fn start_backend(self, mut shutdown_rx: oneshot::Receiver<Result<()>>) -> Result<()> {
-        let listener = listener::bind_long_path(&self.config().socket(), UnixListener::bind)?;
+    /// Serve the RPC socket until the shutdown message, see
+    /// [`Server::logged`] for the result.
+    async fn start_backend(
+        self,
+        mut shutdown_rx: oneshot::Receiver<Result<()>>,
+    ) -> Result<Result<()>> {
+        let socket = self.config().socket();
+        let listener = listener::bind_long_path(&socket, UnixListener::bind)
+            .context(format!("bind socket {}", socket.display()))?;
         let client: conmon::Client = capnp_rpc::new_client(self);
         let mut accept_errors = listener::AcceptErrors::default();
 

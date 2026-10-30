@@ -288,15 +288,11 @@ impl ReapableChild {
 
         tokio::spawn(async move {
             match cleanup_cmd.status().await {
-                Ok(status) => {
-                    if !status.success() {
-                        error!("Failed to execute cleanup command successfully: {}", status);
-                    }
+                Ok(status) if !status.success() => {
+                    error!("Unable to run cleanup command: {status}");
                 }
-                Err(e) => error!(
-                    "Failed to spawn and execute cleanup command process successfully: {}",
-                    e
-                ),
+                Ok(_) => {}
+                Err(e) => error!("Unable to run cleanup command: {e:#}"),
             }
         });
     }

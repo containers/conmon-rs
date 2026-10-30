@@ -302,6 +302,24 @@ async fn any_split_gives_the_same_lines() -> Result<()> {
 fn lines_split_a_chunk() {
     let got: Vec<_> = lines(b"a\nb").collect();
     assert_eq!(got, vec![(&b"a\n"[..], false), (&b"b"[..], true)]);
+    let none: [(&[u8], bool); 0] = [];
+    for (chunk, expected) in [
+        (&b""[..], &none[..]),
+        (b"a", &[(&b"a"[..], true)]),
+        (b"a\n", &[(&b"a\n"[..], false)]),
+        (b"\n", &[(&b"\n"[..], false)]),
+        (b"\n\n", &[(&b"\n"[..], false), (&b"\n"[..], false)]),
+        (b"a\r\nb\n", &[(&b"a\r\n"[..], false), (&b"b\n"[..], false)]),
+    ] {
+        let got: Vec<_> = lines(chunk).collect();
+        assert_eq!(got, expected, "{chunk:?}");
+        // Like splitting after every newline.
+        let split: Vec<_> = chunk
+            .split_inclusive(|&b| b == b'\n')
+            .map(|line| (line, !line.ends_with(b"\n")))
+            .collect();
+        assert_eq!(got, split, "{chunk:?}");
+    }
     assert_eq!(strip_line_ending(b"x\r\n"), b"x");
     assert_eq!(strip_line_ending(b"x\n"), b"x");
     assert_eq!(strip_line_ending(b"x"), b"x");
