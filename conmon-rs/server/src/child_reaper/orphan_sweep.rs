@@ -43,10 +43,10 @@ impl ChildReaper {
 
     /// How long after the deadline of its runtime a call may still claim
     /// its process: a runtime which exits right before it may still take
-    /// [`ChildReaper::CONNECT_AFTER_EXIT_TIMEOUT`] to connect the terminal,
+    /// the [`ChildReaper::RUNTIME_GRACE`] to connect the terminal,
     /// the [`ChildReaper::ORPHAN_GRACE`] on top covers the scheduling.
     pub(super) const CLAIM_MARGIN: Duration =
-        Self::CONNECT_AFTER_EXIT_TIMEOUT.saturating_add(Self::ORPHAN_GRACE);
+        Self::RUNTIME_GRACE.saturating_add(Self::ORPHAN_GRACE);
 
     /// Reap exited children which nobody waits for, in the background.
     ///
@@ -183,7 +183,8 @@ impl ChildReaper {
     /// `watch_grandchild` holds while it moves a child from one to the other.
     pub(super) fn is_claimed(&self, pid: Pid) -> bool {
         let map = lock(&self.grandchildren);
-        map.values().flatten().any(|child| child.pid == pid) || lock(&self.pending).contains(&pid)
+        map.values().flatten().any(|child| child.pid == pid)
+            || lock(&self.pending).contains_key(&pid)
     }
 
     /// The children which a watcher or a call in progress waits for, see
@@ -191,7 +192,7 @@ impl ChildReaper {
     fn claimed(&self) -> HashSet<Pid> {
         let map = lock(&self.grandchildren);
         let mut claimed: HashSet<_> = map.values().flatten().map(|child| child.pid).collect();
-        claimed.extend(lock(&self.pending).iter());
+        claimed.extend(lock(&self.pending).keys());
         claimed
     }
 }

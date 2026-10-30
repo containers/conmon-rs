@@ -298,12 +298,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ClientIo<T> {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.get_mut().poll_writing(cx, |io, cx| io.poll_flush(cx))
+        self.get_mut().poll_writing(cx, AsyncWrite::poll_flush)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.get_mut()
-            .poll_writing(cx, |io, cx| io.poll_shutdown(cx))
+        self.get_mut().poll_writing(cx, AsyncWrite::poll_shutdown)
     }
 }
 
@@ -312,12 +311,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ClientIo<T> {
 /// writer to a client which does not read would hold the connection. The
 /// output of the writer, `None` if it did not end in time.
 pub async fn join_or_abort<T>(mut writer: JoinHandle<T>) -> Option<T> {
-    match time::timeout(CLOSE_TIMEOUT, &mut writer).await {
-        Ok(output) => output.ok(),
-        Err(_) => {
-            writer.abort();
-            None
-        }
+    if let Ok(output) = time::timeout(CLOSE_TIMEOUT, &mut writer).await {
+        output.ok()
+    } else {
+        writer.abort();
+        None
     }
 }
 

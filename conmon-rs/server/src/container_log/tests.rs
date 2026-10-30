@@ -112,13 +112,53 @@ fn line_buffer_handles_split_line_endings_and_characters() {
 }
 
 #[test]
+fn line_buffer_borrows_whole_lines_of_the_chunk() {
+    let mut buffer = LineBuffer::default();
+    let chunk = b"first\r\nsecond\nthi";
+    let lines = buffer.push(Pipe::StdOut, chunk);
+    assert_eq!(
+        lines,
+        [
+            Line {
+                text: Text::Chunk(&chunk[..5]),
+                partial: false,
+            },
+            Line {
+                text: Text::Chunk(&chunk[7..13]),
+                partial: false,
+            },
+        ]
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|line| chunk.as_ptr_range().contains(&line.text.as_ptr()))
+    );
+
+    // The line which started in the buffer gets completed there, the ones
+    // after it borrow the chunk again.
+    let chunk = b"rd\nfourth\nfif";
+    let lines = buffer.push(Pipe::StdOut, chunk);
+    assert!(matches!(&lines[0].text, Text::Buffered(text) if text == "third"));
+    assert_eq!(lines[1].text, Text::Chunk(b"fourth"));
+    assert!(chunk.as_ptr_range().contains(&lines[1].text.as_ptr()));
+    assert_eq!(lines.len(), 2);
+    assert_eq!(&buffer.stdout[..], b"fif");
+
+    // Without an ending, the chunk only adds to the buffer.
+    assert!(buffer.push(Pipe::StdOut, b"th").is_empty());
+    assert_eq!(&buffer.stdout[..], b"fifth");
+}
+
+#[test]
 fn line_buffer_cuts_long_lines() {
     let euro = "€".as_bytes();
     let long = vec![b'a'; LineBuffer::MAX_LINE - 1];
 
     // An unfinished character at the cut stays buffered.
     let mut buffer = LineBuffer::default();
-    let out = buffer.push(Pipe::StdOut, &[long.as_slice(), &euro[..1]].concat());
+    let chunk = [long.as_slice(), &euro[..1]].concat();
+    let out = buffer.push(Pipe::StdOut, &chunk);
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].text.len(), LineBuffer::MAX_LINE - 1);
     assert!(out[0].partial);
@@ -129,7 +169,8 @@ fn line_buffer_cuts_long_lines() {
 
     // So does a "\r" which may be followed by its "\n".
     let mut buffer = LineBuffer::default();
-    let out = buffer.push(Pipe::StdOut, &[long.as_slice(), b"\r"].concat());
+    let chunk = [long.as_slice(), b"\r"].concat();
+    let out = buffer.push(Pipe::StdOut, &chunk);
     assert_eq!(out[0].text.len(), LineBuffer::MAX_LINE - 1);
     assert_eq!(
         collect(buffer.push(Pipe::StdOut, b"\n")),
@@ -353,6 +394,24 @@ async fn failed_rotation_writes_old_file() -> Result<()> {
     assert_eq!(sut.bytes_written, 6);
     assert_eq!(fs::read_to_string(&old)?, "first\n");
     assert!(!dir.path().join(".log.conmonrs-tmp").exists());
+
+    // The rest of the chunk still gets written, as long as it fits. The
+    // rotation is not tried again before the next chunk, which would work
+    // now, the entries which exceed the size get dropped.
+    fs::remove_dir(&path)?;
+    sut.buf.extend_from_slice(b"ab\n");
+    sut.commit_entry(0).await?;
+    sut.buf.extend_from_slice(b"third\n");
+    sut.commit_entry(3).await?;
+    sut.end_chunk().await?;
+    assert_eq!(fs::read_to_string(&old)?, "first\nab\n");
+    assert!(!path.exists());
+
+    sut.buf.extend_from_slice(b"fourth\n");
+    sut.commit_entry(0).await?;
+    sut.end_chunk().await?;
+    assert_eq!(fs::read_to_string(&old)?, "first\nab\n");
+    assert_eq!(fs::read_to_string(&path)?, "fourth\n");
     Ok(())
 }
 
@@ -596,6 +655,46 @@ async fn open_does_not_follow_symlinks() -> Result<()> {
     let mut sut = LogFile::new(&link, Some(0o600), None);
     assert!(sut.open().await.is_err());
     assert_eq!(fs::read_to_string(&target)?, "keep");
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_appends_to_the_existing_log() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("log");
+    fs::write(&path, "old\n")?;
+    let mut sut = LogFile::new(&path, None, Some(10));
+    sut.open().await?;
+    assert_eq!(sut.bytes_written, 4);
+
+    sut.buf.extend_from_slice(b"new\n");
+    sut.commit_entry(0).await?;
+    sut.end_chunk().await?;
+    assert_eq!(fs::read_to_string(&path)?, "old\nnew\n");
+
+    // The existing content counts for the size. A temporary file which got
+    // left behind does not end up in the new file.
+    fs::write(LogFile::tmp_path(&path), "left behind")?;
+    sut.buf.extend_from_slice(b"more\n");
+    sut.commit_entry(0).await?;
+    sut.end_chunk().await?;
+    assert_eq!(fs::read_to_string(&path)?, "more\n");
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_starts_after_a_torn_log_on_a_line_of_its_own() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("log");
+    fs::write(&path, "cut")?;
+    let mut sut = LogFile::new(&path, None, None);
+    sut.open().await?;
+
+    sut.buf.extend_from_slice(b"new\n");
+    sut.commit_entry(0).await?;
+    sut.end_chunk().await?;
+    assert_eq!(fs::read_to_string(&path)?, "cut\nnew\n");
+    assert_eq!(sut.bytes_written, 8);
     Ok(())
 }
 

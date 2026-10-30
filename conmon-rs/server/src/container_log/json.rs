@@ -33,7 +33,7 @@ pub struct JsonLogger {
 impl JsonLogger {
     pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> JsonLogger {
         Self {
-            // Readable by the owner only, like the CRI log.
+            // Created readable by the owner only, like the CRI log.
             file: LogFile::new(path, Some(0o600), max_log_size),
         }
     }
@@ -55,12 +55,14 @@ impl Logger for JsonLogger {
         self.file.reopen().await
     }
 
-    async fn write_lines(&mut self, pipe: Pipe, lines: &[Line]) -> Result<()> {
+    async fn write_lines(&mut self, pipe: Pipe, lines: &[Line<'_>]) -> Result<()> {
         let timestamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
+        // The first error, the lines after a failed one still get written.
+        let mut res = Ok(());
         for line in lines {
             let message = String::from_utf8_lossy(&line.text);
             let log_entry = LogEntry {
@@ -74,14 +76,15 @@ impl Logger for JsonLogger {
             let start = buf.len();
             if let Err(e) = serde_json::to_writer(&mut *buf, &log_entry) {
                 buf.truncate(start);
-                return Err(e).context("serialize log entry");
+                res = res.and(Err(e).context("serialize log entry"));
+                continue;
             }
             buf.push(b'\n');
-            self.file.commit_entry(start).await?;
+            res = res.and(self.file.commit_entry(start).await);
         }
 
         // Write the whole chunk at once instead of per line
-        self.file.flush().await
+        res.and(self.file.end_chunk().await)
     }
 }
 

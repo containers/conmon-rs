@@ -4,7 +4,7 @@ use crate::telemetry::Telemetry;
 use crate::{
     capnp_util,
     child::{Child, ChildKind, sleep_until},
-    child_reaper::{EXIT_CODE_NOT_STARTED, EXIT_CODE_TIMED_OUT, RuntimeCall},
+    child_reaper::{EXIT_CODE_NOT_STARTED, EXIT_CODE_TIMED_OUT, ExitChannelData, RuntimeCall},
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     notify::NotifySocket,
@@ -29,10 +29,11 @@ use std::{
 };
 use tokio::{
     select,
-    sync::{RwLock, oneshot},
+    sync::{RwLock, broadcast, oneshot},
     task::{self, JoinHandle},
     time::Instant,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span, debug, debug_span, error};
 
 macro_rules! pry_err {
@@ -135,6 +136,42 @@ impl Server {
             return None;
         }
         Instant::now().checked_add(Duration::from_secs(timeout_sec))
+    }
+
+    /// Read the output of an exec while waiting for its exit, and take the
+    /// result from the watcher alone. The watcher cancels the `token` once
+    /// it reaped the process or killed it at its timeout, the drain bounds
+    /// the reading after that. A deadline of the reading on its own would
+    /// race the one of the watcher, and report a timeout with the exit code
+    /// of a process which exited right at it, without its last output. A
+    /// watcher which got lost never cancels the token, nothing ends the
+    /// process and its output otherwise, like for a streaming exec, so it
+    /// gets killed with `kill`. Cancelling the token then stops the output,
+    /// see [`StopOutput`](crate::attach::StopOutput).
+    async fn exec_sync_output(
+        io: &SharedContainerIO,
+        token: &CancellationToken,
+        mut exit_rx: broadcast::Receiver<ExitChannelData>,
+        kill: impl FnOnce(),
+    ) -> anyhow::Result<ExecSyncOutput> {
+        let exit = async move {
+            let res = exit_rx.recv().await;
+            if res.is_err() {
+                kill();
+                token.cancel();
+            }
+            res.context("receive the exit of the exec")
+        };
+        // Reads until the output ended or the drain after the exit gave up,
+        // under the write lock of the IO, the read loops get stopped only
+        // after that.
+        let ((stdout, stderr), exit_data) = tokio::try_join!(io.read_all(token), exit)?;
+        Ok(ExecSyncOutput {
+            stdout,
+            stderr,
+            exit_code: exit_data.exit_code,
+            timed_out: exit_data.timed_out,
+        })
     }
 
     /// How long the runtime of an exec may take beyond its timeout before it
@@ -292,8 +329,10 @@ impl conmon::Server for Server {
             Some(pry_err!(NotifySocket::bind(bundle_path, sdnotify_socket)))
         };
 
-        // Take both lists at once and last, a failure leaves all descriptors
-        // in place for a retry.
+        // Take both lists at once and after everything else which can fail
+        // the request here: a failure up to and including the take leaves
+        // all descriptors in place for a retry. Once taken, they belong to
+        // this call, a later failure closes them.
         let additional_slots = pry!(req.get_additional_fds());
         let leak_slots = pry!(req.get_leak_fds());
         let mut additional_fds = pry_err!(
@@ -485,32 +524,13 @@ impl conmon::Server for Server {
                             token: token.clone(),
                         };
                         let _stop_output = io.attach().await.stop_output_on_exit(token.clone());
-                        let mut exit_rx = child_reaper.watch_grandchild(child, vec![], call)?;
-
-                        // Reads until the output ended or the drain after the
-                        // exit gave up, under the write lock of the IO, the
-                        // read loops get stopped only after that.
-                        let (stdout, stderr, timed_out) =
-                            io.read_all_with_timeout(time_to_timeout, &token).await?;
-                        let exit_data = match exit_rx.recv().await {
-                            Ok(exit_data) => exit_data,
-                            // The watcher got aborted, nothing ends the
-                            // process and its output otherwise, like for a
-                            // streaming exec.
-                            Err(e) => {
-                                if let Err(e) = process.signal_group(Signal::SIGKILL) {
-                                    debug!("Not killing exec process {grandchild_pid}: {e}");
-                                }
-                                io.attach().await.stop_output();
-                                return Err(e).context("receive the exit of the exec");
+                        let exit_rx = child_reaper.watch_grandchild(child, vec![], call)?;
+                        Self::exec_sync_output(&io, &token, exit_rx, || {
+                            if let Err(e) = process.signal_group(Signal::SIGKILL) {
+                                debug!("Not killing exec process {grandchild_pid}: {e}");
                             }
-                        };
-                        Ok::<_, anyhow::Error>(ExecSyncOutput {
-                            stdout,
-                            stderr,
-                            exit_code: exit_data.exit_code,
-                            timed_out: timed_out || exit_data.timed_out,
                         })
+                        .await
                     }
                     // Logged here as well, the client may have its reply
                     // already.

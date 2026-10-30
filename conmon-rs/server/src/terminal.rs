@@ -124,7 +124,7 @@ impl Terminal {
             async move {
                 if let Err(e) = Self::listen(listener, config).await {
                     error!("Unable to listen on terminal: {e:#}");
-                };
+                }
             }
             .instrument(debug_span!("listen")),
         );
@@ -408,7 +408,7 @@ impl AsyncRead for &TerminalFd {
                     buf.advance(n);
                     break Poll::Ready(Ok(()));
                 }
-                Err(_would_block) => continue,
+                Err(_would_block) => {}
             }
         }
     }
@@ -420,7 +420,7 @@ impl AsyncWrite for &TerminalFd {
             let mut guard = ready!(self.0.poll_write_ready(cx))?;
             match guard.try_io(|inner| (&**inner.get_ref()).write(buf)) {
                 Ok(result) => break Poll::Ready(result),
-                Err(_would_block) => continue,
+                Err(_would_block) => {}
             }
         }
     }

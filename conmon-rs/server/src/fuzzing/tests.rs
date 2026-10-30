@@ -9,7 +9,7 @@ type Target = fn(&[u8]);
 
 /// The entry points of the fuzz targets by their names, like the targets
 /// in `fuzz/fuzz_targets` call them.
-const TARGETS: [(&str, Target); 14] = [
+const TARGETS: [(&str, Target); 15] = [
     ("channel_decode", |data| {
         if let Some((&base64, message)) = data.split_first() {
             channel(base64 & 1 == 1, message);
@@ -24,6 +24,7 @@ const TARGETS: [(&str, Target); 14] = [
         query_ports(&String::from_utf8_lossy(data));
     }),
     ("port_forward_spdy", port_forward_spdy),
+    ("proc_stat", proc_stat),
     ("remotecommand_spdy", remotecommand_spdy),
     ("resize_events", resize_events),
     ("spdy_connection", spdy_connection),

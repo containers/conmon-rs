@@ -20,7 +20,8 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     mem,
-    os::unix::fs::OpenOptionsExt,
+    ops::Deref,
+    os::unix::fs::{FileExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -50,7 +51,7 @@ trait Logger {
     }
 
     /// Write whole lines of output of the given pipe.
-    async fn write_lines(&mut self, _: Pipe, _: &[Line]) -> Result<()> {
+    async fn write_lines(&mut self, _: Pipe, _: &[Line<'_>]) -> Result<()> {
         Ok(())
     }
 }
@@ -96,7 +97,7 @@ impl Driver {
         dispatch!(self, logger => logger.write_chunk(pipe, bytes).await)
     }
 
-    async fn write_lines(&mut self, pipe: Pipe, lines: &[Line]) -> Result<()> {
+    async fn write_lines(&mut self, pipe: Pipe, lines: &[Line<'_>]) -> Result<()> {
         dispatch!(self, logger => logger.write_lines(pipe, lines).await)
     }
 }
@@ -234,7 +235,7 @@ impl ContainerLog {
 
     /// Hand the lines to every driver which takes them. All of them get the
     /// lines even if one fails, the first error is returned.
-    async fn write_lines(&mut self, pipe: Pipe, lines: &[Line]) -> Result<()> {
+    async fn write_lines(&mut self, pipe: Pipe, lines: &[Line<'_>]) -> Result<()> {
         if lines.is_empty() {
             return Ok(());
         }
@@ -270,9 +271,47 @@ pub(crate) fn strip_line_ending(line: &[u8]) -> &[u8] {
 /// had no ending yet: it continues in the next entry, paused, or the output
 /// ended without one, the same as the `P` marker of the CRI log.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Line {
-    pub(crate) text: Bytes,
+pub(crate) struct Line<'a> {
+    pub(crate) text: Text<'a>,
     pub(crate) partial: bool,
+}
+
+impl Line<'_> {
+    /// The line with a text of its own, for a task which outlives the chunk.
+    pub(crate) fn into_owned(self) -> Line<'static> {
+        Line {
+            text: self.text.into_owned(),
+            partial: self.partial,
+        }
+    }
+}
+
+/// The text of a [`Line`]: borrowed from the chunk which held all of it, or
+/// collected across chunks in the buffer of its pipe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Text<'a> {
+    Chunk(&'a [u8]),
+    Buffered(Bytes),
+}
+
+impl Text<'_> {
+    fn into_owned(self) -> Text<'static> {
+        match self {
+            Text::Chunk(text) => Text::Buffered(Bytes::copy_from_slice(text)),
+            Text::Buffered(text) => Text::Buffered(text),
+        }
+    }
+}
+
+impl Deref for Text<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Text::Chunk(text) => text,
+            Text::Buffered(text) => text,
+        }
+    }
 }
 
 /// Collects the output of both pipes into whole lines for the drivers which
@@ -310,38 +349,59 @@ impl LineBuffer {
         .is_empty()
     }
 
-    /// Add a chunk and return the lines it completes. The lines share the
-    /// buffer, no copy is made.
-    pub(crate) fn push(&mut self, pipe: Pipe, bytes: &[u8]) -> Vec<Line> {
+    /// Add a chunk and return the lines it completes. The whole lines of the
+    /// chunk borrow it, only the end of a line which started in an earlier
+    /// chunk and the start of one which continues in a later one get copied
+    /// into the buffer of the pipe.
+    pub(crate) fn push<'a>(&mut self, pipe: Pipe, bytes: &'a [u8]) -> Vec<Line<'a>> {
         let tail = self.tail(pipe);
-        tail.extend_from_slice(bytes);
-
         let mut lines = vec![];
-        while let Some(end) = memchr::memchr(b'\n', tail) {
-            let line = tail.split_to(end + 1).freeze();
+        let mut rest = bytes;
+        if !tail.is_empty() {
+            let end = memchr::memchr(b'\n', rest).map_or(rest.len(), |end| end + 1);
+            let (end_of_line, after) = rest.split_at(end);
+            tail.extend_from_slice(end_of_line);
+            rest = after;
+            if tail.ends_with(b"\n") {
+                let line = tail.split().freeze();
+                lines.push(Line {
+                    text: Text::Buffered(line.slice(..strip_line_ending(&line).len())),
+                    partial: false,
+                });
+            }
+        }
+
+        while let Some(end) = memchr::memchr(b'\n', rest) {
+            let (line, after) = rest.split_at(end + 1);
             lines.push(Line {
-                text: line.slice(..strip_line_ending(&line).len()),
+                text: Text::Chunk(strip_line_ending(line)),
                 partial: false,
             });
+            rest = after;
         }
-
-        if tail.len() >= Self::MAX_LINE {
-            lines.push(Self::cut(tail));
-        }
-        Self::shrink(tail);
+        tail.extend_from_slice(rest);
+        lines.extend(Self::cut_long(tail));
         lines
+    }
+
+    /// Cut a line which grew too long without its ending, see
+    /// [`LineBuffer::cut`], and release the buffer once empty.
+    fn cut_long(tail: &mut BytesMut) -> Option<Line<'static>> {
+        let line = (tail.len() >= Self::MAX_LINE).then(|| Self::cut(tail));
+        Self::shrink(tail);
+        line
     }
 
     /// Cut the tail at a point which keeps an unfinished multi byte character
     /// and a "\r" waiting for its "\n" in the buffer. Invalid bytes are not
     /// held back, they would stay in front forever.
-    fn cut(tail: &mut BytesMut) -> Line {
+    fn cut(tail: &mut BytesMut) -> Line<'static> {
         let mut end = Self::complete_len(tail);
         if tail[..end].ends_with(b"\r") {
             end -= 1;
         }
         Line {
-            text: tail.split_to(end).freeze(),
+            text: Text::Buffered(tail.split_to(end).freeze()),
             partial: true,
         }
     }
@@ -375,7 +435,7 @@ impl LineBuffer {
     /// Return the line which waits for its ending as a partial one. The
     /// output paused, a prompt or progress output without a newline would
     /// otherwise stay invisible.
-    pub(crate) fn flush(&mut self, pipe: Pipe) -> Vec<Line> {
+    pub(crate) fn flush(&mut self, pipe: Pipe) -> Vec<Line<'static>> {
         // Like a long line, it keeps an unfinished multi byte character and
         // a "\r" back for the next chunk, see [`LineBuffer::cut`].
         let tail = self.tail(pipe);
@@ -392,13 +452,13 @@ impl LineBuffer {
 
     /// The output of the pipe ended, return the line which still waits for
     /// its ending as a partial one.
-    pub(crate) fn finish(&mut self, pipe: Pipe) -> Vec<Line> {
+    pub(crate) fn finish(&mut self, pipe: Pipe) -> Vec<Line<'static>> {
         let tail = self.tail(pipe);
         if tail.is_empty() {
             return vec![];
         }
         // Without a newline, so there is no line ending to strip.
-        let text = tail.split().freeze();
+        let text = Text::Buffered(tail.split().freeze());
         Self::shrink(tail);
         vec![Line {
             text,
@@ -411,9 +471,10 @@ impl LineBuffer {
 ///
 /// The drivers assemble their entries into `buf`, account each one with
 /// [`LogFile::commit_entry`] and write the buffer with a single call per read
-/// chunk, or per [`LogFile::FLUSH_SIZE`] of entries for chunks of short lines.
+/// chunk, see [`LogFile::end_chunk`], or per [`LogFile::FLUSH_SIZE`] of
+/// entries for chunks of short lines.
 /// The writes and the opens run on the blocking pool, so writeback
-/// throttling, a slow disk or truncating a huge log only stalls this log and
+/// throttling, a slow disk or replacing a huge log only stalls this log and
 /// not the thread which drives every container of the pod and the RPCs. The
 /// buffer moves to the blocking task and back, unlike an async file, which
 /// copies every write into a buffer of its own that keeps the size of the
@@ -421,23 +482,30 @@ impl LineBuffer {
 #[derive(Debug)]
 pub(crate) struct LogFile {
     path: PathBuf,
+
+    /// The mode of a file this creates, an existing one keeps its own.
     mode: Option<u32>,
     file: Option<Arc<File>>,
 
     /// Maximum allowed log size in bytes.
     max_size: Option<usize>,
 
-    /// Bytes written to the file since it got opened, including the
-    /// committed entries of `buf`.
+    /// The size of the file, counted from the one it had when it got
+    /// opened, including the committed entries of `buf`.
     bytes_written: usize,
 
     /// The pending output of the current chunk, allocated on first use, see
     /// [`LogFile::buf`].
     buf: Vec<u8>,
 
-    /// Whether a failed write left the file in the middle of an entry, so
-    /// that the next one has to start on a line of its own.
+    /// Whether a failed write left the file in the middle of an entry, or it
+    /// had such an end when it got opened, so that the next entry has to
+    /// start on a line of its own.
     torn: bool,
+
+    /// Whether the rotation failed during the current chunk, see
+    /// [`LogFile::commit_entry`].
+    rotation_failed: bool,
 }
 
 impl LogFile {
@@ -467,6 +535,7 @@ impl LogFile {
             bytes_written: 0,
             buf: Vec::new(),
             torn: false,
+            rotation_failed: false,
         }
     }
 
@@ -483,27 +552,43 @@ impl LogFile {
         &mut self.buf
     }
 
-    /// Open the file, truncating any existing content. A symlink in place of
-    /// the log is not followed, the truncation would hit its target. A
-    /// temporary file which a crashed server left behind gets removed, the
-    /// kubelet would never clean it up.
+    /// Open the file and append to its existing content, like conmon does.
+    /// The content counts for the maximum size, the first entry which
+    /// exceeds it rotates the file. Content which does not end with a
+    /// newline, like of a server which crashed in the middle of a write,
+    /// counts as torn, see [`LogFile::write_buf`]. A symlink in place of the
+    /// log is not followed, the writes would hit its target. A temporary file
+    /// which a crashed server left behind gets removed, the kubelet would
+    /// never clean it up.
     pub(crate) async fn open(&mut self) -> Result<()> {
-        let options = self.open_options();
+        let options = self.open_options(false);
         let path = self.path.clone();
-        let file = task::spawn_blocking(move || {
+        let (file, torn) = task::spawn_blocking(move || {
             let tmp = Self::tmp_path(&path);
             if let Err(e) = fs_util::remove_file(&tmp) {
                 debug!("Unable to remove {}: {e}", tmp.display());
             }
-            options.open(path)
+            let file = options.open(path)?;
+            let torn = Self::ends_torn(&file);
+            io::Result::Ok((file, torn))
         })
         .await
         .context("join log file open")?
         .with_context(|| format!("open log file path '{}'", self.path.display()))?;
         self.file = Some(Arc::new(file));
-        self.bytes_written = 0;
-        self.torn = false;
+        self.bytes_written = self.file_size().unwrap_or_default();
+        self.torn = torn;
         Ok(())
+    }
+
+    /// Whether the file has content which does not end with a newline. One
+    /// which cannot be read counts as complete.
+    fn ends_torn(file: &File) -> bool {
+        let Some(last) = file.metadata().ok().and_then(|m| m.len().checked_sub(1)) else {
+            return false;
+        };
+        let mut byte = [0];
+        matches!(file.read_at(&mut byte, last), Ok(1)) && byte != *b"\n"
     }
 
     /// The new file of a replacement before it gets renamed over the path:
@@ -524,7 +609,8 @@ impl LogFile {
     /// it to its end, before it notices the new one. A rename does not follow
     /// a symlink at the path either.
     async fn replace(&mut self) -> Result<()> {
-        let options = self.open_options();
+        // The new file starts empty, also over a temporary file left behind.
+        let options = self.open_options(true);
         let path = self.path.clone();
         let tmp = Self::tmp_path(&path);
         let file = task::spawn_blocking(move || -> Result<File> {
@@ -552,12 +638,12 @@ impl LogFile {
     /// of at the old offset, which leaves a hole of zeros in front of them.
     /// The standard library refuses append together with truncate, the
     /// kernel takes both.
-    fn open_options(&self) -> OpenOptions {
+    fn open_options(&self, truncate: bool) -> OpenOptions {
         let mut options = OpenOptions::new();
         options
             .create(true)
             .read(true)
-            .truncate(true)
+            .truncate(truncate)
             .write(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_APPEND);
         if let Some(mode) = self.mode {
@@ -571,6 +657,10 @@ impl LogFile {
     /// the old file, which readers following it still read to its end, and
     /// the file gets replaced, the entry becomes the first one of the new
     /// file.
+    ///
+    /// An error drops only this entry, or the entries of a failed write, the
+    /// writers still commit the later entries of the chunk and report the
+    /// first error once they ended it.
     pub(crate) async fn commit_entry(&mut self, start: usize) -> Result<()> {
         let len = self.buf.len() - start;
         let mut total = self.bytes_written.saturating_add(len);
@@ -595,6 +685,13 @@ impl LogFile {
         }
 
         if self.max_size.is_some_and(|max| total > max) {
+            if self.rotation_failed {
+                // A full disk would fail it again for every entry, the next
+                // chunk tries it again.
+                trace!("Dropping log entry which exceeds the size");
+                self.buf.truncate(start);
+                return Ok(());
+            }
             debug!("Rotate log file {}", self.path.display());
             let entry = self.buf.split_off(start);
             if let Err(e) = self.flush().await {
@@ -602,8 +699,9 @@ impl LogFile {
             }
             if let Err(e) = self.replace().await {
                 // The old file stays in place. Drop the uncounted entry, the
-                // next entry tries the rotation again, until then entries
+                // next chunk tries the rotation again, until then entries
                 // which exceed the size get dropped.
+                self.rotation_failed = true;
                 return Err(e).context("reopen log file because of exceeded size");
             }
             self.buf.extend_from_slice(&entry);
@@ -617,6 +715,13 @@ impl LogFile {
         Ok(())
     }
 
+    /// Write the entries of the chunk which are still pending, see
+    /// [`LogFile::commit_entry`].
+    pub(crate) async fn end_chunk(&mut self) -> Result<()> {
+        self.rotation_failed = false;
+        self.flush().await
+    }
+
     /// The size of the open file. A stat of an open file does not wait for
     /// the disk, unlike its writes.
     fn file_size(&self) -> Option<usize> {
@@ -624,8 +729,9 @@ impl LogFile {
         usize::try_from(metadata.len()).ok()
     }
 
-    /// Write the pending buffer to the file and clear it.
-    pub(crate) async fn flush(&mut self) -> Result<()> {
+    /// Write the pending buffer to the file and clear it. The writers end
+    /// their chunks with [`LogFile::end_chunk`] instead.
+    async fn flush(&mut self) -> Result<()> {
         if self.buf.is_empty() {
             return Ok(());
         }

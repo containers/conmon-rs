@@ -2,7 +2,7 @@
 //! pod shares, bind mounted below the base path so that they outlive it.
 
 use crate::{
-    child_reaper::RuntimeOutput,
+    child_reaper::{RuntimeOutput, with_stderr},
     conmon_capnp::conmon,
     process::{Process, child_pid, read_pid_file, wait_for_exit_code},
     single_flight::{SingleFlight, Stop, stop_blocking},
@@ -424,8 +424,10 @@ impl Pause {
                 bail!("exit status not ok: {status}")
             }
             let stderr = RuntimeOutput::finish(Some(output)).await;
-            let stderr = String::from_utf8_lossy(&stderr);
-            bail!("exit status not ok: {status}: {}", stderr.trim())
+            return Err(with_stderr(
+                anyhow::format_err!("exit status not ok: {status}"),
+                &stderr,
+            ));
         }
 
         // Without a PID namespace the pause process already exited after
@@ -524,7 +526,7 @@ impl fmt::Display for Namespace {
 
 impl Namespace {
     /// The name of the namespace as used in `/proc/<pid>/ns` and the flags.
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Ipc => "ipc",
             Self::Pid => "pid",
@@ -536,7 +538,7 @@ impl Namespace {
 
     /// Bind the namespace of the process `pid` to the provided base path and
     /// pod ID.
-    pub fn bind<T: AsRef<Path>>(&self, path: T, pod_id: &str, pid: Pid) -> Result<()> {
+    pub fn bind<T: AsRef<Path>>(self, path: T, pod_id: &str, pid: Pid) -> Result<()> {
         let bind_path = self.path(path, pod_id);
         fs::create_dir_all(
             bind_path
@@ -563,7 +565,7 @@ impl Namespace {
     }
 
     /// Umount the namespace.
-    pub fn umount<T: AsRef<Path>>(&self, path: T, pod_id: &str) -> Result<()> {
+    pub fn umount<T: AsRef<Path>>(self, path: T, pod_id: &str) -> Result<()> {
         let bind_path = self.path(path, pod_id);
         if let Err(e) = umount(&bind_path) {
             trace!("Unable to umount namespace {self}: {e:#}");
@@ -572,7 +574,7 @@ impl Namespace {
     }
 
     /// Retrieve the bind path of the namespace for the provided base path and pod ID.
-    pub fn path<T: AsRef<Path>>(&self, path: T, pod_id: &str) -> PathBuf {
+    pub fn path<T: AsRef<Path>>(self, path: T, pod_id: &str) -> PathBuf {
         path.as_ref().join(format!("{self}ns")).join(pod_id)
     }
 

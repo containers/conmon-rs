@@ -95,13 +95,14 @@ impl Framing {
             Message::Binary(data) => data,
             Message::Text(text) => Bytes::from(text),
             Message::Close(c) => {
-                match c {
-                    Some(cf) => info!(
+                if let Some(cf) = c {
+                    info!(
                         "Got websocket close with code {} and reason {:?}",
                         cf.code,
                         ClientStr(&cf.reason)
-                    ),
-                    None => info!("Got websocket close without close frame"),
+                    );
+                } else {
+                    info!("Got websocket close without close frame");
                 }
                 return Some(ClientEvent::Closed);
             }

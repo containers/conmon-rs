@@ -1,7 +1,9 @@
 //! File descriptor mapping for child process spawning.
 //!
 //! This mirrors the API of the `command-fds` crate (`CommandFdExt`,
-//! `FdMapping`, `FdMappingCollision`) without pulling in the dependency.
+//! `FdMapping`) without pulling in the dependency. The server maps its
+//! descriptors to 3 and up in order, so two mappings never share a target,
+//! which only debug builds check.
 //!
 //! On Linux, std creates a close-on-exec socket before it forks, the child
 //! writes the error of a failed exec into it and the parent reads the end of
@@ -30,7 +32,7 @@ use nix::{
 };
 use std::{
     cmp::max,
-    fmt, io,
+    io,
     mem::MaybeUninit,
     os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
     sync::{Mutex, MutexGuard},
@@ -59,28 +61,14 @@ pub struct FdMapping {
 
 /// Extension to add file descriptor mappings to a Command.
 pub trait CommandFdExt {
-    fn fd_mappings(&mut self, mappings: Vec<FdMapping>) -> Result<&mut Self, FdMappingCollision>;
+    /// Map the descriptors into the child, each target at most once.
+    fn fd_mappings(&mut self, mappings: Vec<FdMapping>) -> &mut Self;
 }
-
-/// Error when two or more mappings target the same child FD.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct FdMappingCollision;
-
-impl fmt::Display for FdMappingCollision {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Two or more mappings for the same child FD")
-    }
-}
-
-impl std::error::Error for FdMappingCollision {}
 
 impl CommandFdExt for Command {
     #[expect(unsafe_code, reason = "a pre_exec hook")]
-    fn fd_mappings(
-        &mut self,
-        mut mappings: Vec<FdMapping>,
-    ) -> Result<&mut Self, FdMappingCollision> {
-        let child_fds = validate_child_fds(&mappings)?;
+    fn fd_mappings(&mut self, mut mappings: Vec<FdMapping>) -> &mut Self {
+        let child_fds = child_fds(&mappings);
         // Before std creates its socket, see the module.
         let (placeholders, checks) = reserve_targets(&mappings, &child_fds);
 
@@ -96,7 +84,7 @@ impl CommandFdExt for Command {
             });
         }
 
-        Ok(self)
+        self
     }
 }
 
@@ -164,14 +152,15 @@ fn check_targets(checks: &[TargetCheck]) -> io::Result<()> {
     Ok(())
 }
 
-fn validate_child_fds(mappings: &[FdMapping]) -> Result<Vec<RawFd>, FdMappingCollision> {
+/// The target numbers of the mappings, see [`CommandFdExt::fd_mappings`].
+fn child_fds(mappings: &[FdMapping]) -> Vec<RawFd> {
     let mut child_fds: Vec<RawFd> = mappings.iter().map(|m| m.child_fd).collect();
     child_fds.sort_unstable();
-    child_fds.dedup();
-    if child_fds.len() != mappings.len() {
-        return Err(FdMappingCollision);
-    }
-    Ok(child_fds)
+    debug_assert!(
+        child_fds.windows(2).all(|fds| fds[0] != fds[1]),
+        "two mappings for the same target"
+    );
+    child_fds
 }
 
 // This function must not allocate, as it is called from the pre_exec hook.
@@ -222,23 +211,6 @@ mod tests {
     use super::*;
     use std::fs::File;
 
-    fn mapping(child_fd: RawFd) -> Result<FdMapping, std::io::Error> {
-        Ok(FdMapping {
-            parent_fd: File::open("/dev/null")?.into(),
-            child_fd,
-        })
-    }
-
-    #[test]
-    fn child_fds_must_be_unique() -> Result<(), std::io::Error> {
-        let mappings = [mapping(3)?, mapping(4)?];
-        assert_eq!(validate_child_fds(&mappings).unwrap(), vec![3, 4]);
-
-        let mappings = [mapping(3)?, mapping(3)?];
-        assert!(validate_child_fds(&mappings).is_err());
-        Ok(())
-    }
-
     /// Spawn the command with the mappings like the server does and take its
     /// output.
     async fn output(
@@ -249,7 +221,7 @@ mod tests {
             let _spawning = spawn_lock();
             // Dropped before the lock, also on a failure.
             let mut cmd = cmd;
-            cmd.fd_mappings(mappings)?
+            cmd.fd_mappings(mappings)
                 .stdout(std::process::Stdio::piped())
                 .spawn()?
         };
@@ -280,7 +252,7 @@ mod tests {
             cmd.fd_mappings(vec![FdMapping {
                 parent_fd: file_from("mapped", 0)?,
                 child_fd: target,
-            }])?;
+            }]);
             drop(held);
             let other = if change {
                 let other = file_from("other", target)?;
@@ -376,7 +348,7 @@ mod tests {
 
         let _spawning = spawn_lock();
         let mut cmd = Command::new("/does/not/exist");
-        cmd.fd_mappings(mappings)?;
+        cmd.fd_mappings(mappings);
         assert!(cmd.spawn().is_err());
         for path in paths {
             assert!(std::fs::read(path)?.is_empty());

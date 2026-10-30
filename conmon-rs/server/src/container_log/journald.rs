@@ -156,7 +156,7 @@ impl JournaldLogger {
     /// go out by the deadline of the wait get dropped, a journal which takes
     /// each line just in time would block the log of the container for
     /// minutes per chunk otherwise.
-    fn send(shared: &Shared, pipe: Pipe, lines: &[Line], wait: Wait) -> usize {
+    fn send(shared: &Shared, pipe: Pipe, lines: &[Line<'_>], wait: Wait) -> usize {
         let priority = Self::priority(pipe);
         let mut entry = Entry::default();
         let mut handled = lines.len();
@@ -173,7 +173,7 @@ impl JournaldLogger {
                 ));
                 break;
             }
-            entry.reset(priority, &line.text).extend(&shared.fields);
+            entry.reset(priority, &*line.text).extend(&shared.fields);
             if line.partial {
                 entry.field(Self::PARTIAL_FIELD.0, Self::PARTIAL_FIELD.1);
             }
@@ -228,15 +228,15 @@ impl Logger for JournaldLogger {
 
     /// A journal which keeps up takes the lines right away. The ones it does
     /// not take are sent from a single blocking task, which waits for it a
-    /// bounded time, instead of one per line. The lines share their buffer,
-    /// moving them is free.
-    async fn write_lines(&mut self, pipe: Pipe, lines: &[Line]) -> Result<()> {
+    /// bounded time, instead of one per line. The lines which borrow the
+    /// chunk get copied for it, the others share their buffer.
+    async fn write_lines(&mut self, pipe: Pipe, lines: &[Line<'_>]) -> Result<()> {
         let sent = Self::send(&self.shared, pipe, lines, Wait::Never);
         let Some(rest) = lines.get(sent..).filter(|rest| !rest.is_empty()) else {
             return Ok(());
         };
         let shared = self.shared.clone();
-        let rest = rest.to_vec();
+        let rest: Vec<_> = rest.iter().cloned().map(Line::into_owned).collect();
         // From when a thread of the blocking pool took it, a busy pool must
         // not drop the chunk without trying.
         task::spawn_blocking(move || {

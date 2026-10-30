@@ -258,7 +258,6 @@ impl Server {
         // runtime exits.
         prctl::set_child_subreaper(true).context("set child subreaper")?;
 
-        debug!("Configuring Tokio runtime with current_thread");
         let rt = Builder::new_current_thread()
             .enable_io()
             .enable_time()
@@ -292,14 +291,12 @@ impl Server {
             )
             .await
         });
-        match shutdown {
-            Ok(res) => res
-                .context("join tracer shutdown")?
-                .context("shutdown tracer"),
-            Err(_) => {
-                warn!("Tracer did not shut down in time");
-                Ok(())
-            }
+        if let Ok(res) = shutdown {
+            res.context("join tracer shutdown")?
+                .context("shutdown tracer")
+        } else {
+            warn!("Tracer did not shut down in time");
+            Ok(())
         }
     }
 
@@ -552,7 +549,7 @@ impl Server {
 
         debug!("Removing socket file {}", socket.as_ref().display());
         let socket_removed = Self::until(deadline, async {
-            fs::remove_file(socket).await.map_err(Into::into)
+            fs_util::removed(fs::remove_file(socket).await).map_err(Into::into)
         })
         .await
         .context("remove socket file");

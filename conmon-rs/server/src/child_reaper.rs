@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use futures::future::join_all;
 use nix::{errno::Errno, sys::signal::Signal, unistd::Pid};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     os::fd::OwnedFd,
     path::PathBuf,
     str,
@@ -31,7 +31,7 @@ mod runtime_call;
 mod watcher;
 
 pub use runtime_call::RuntimeCall;
-pub(crate) use runtime_call::RuntimeOutput;
+pub(crate) use runtime_call::{RuntimeOutput, with_stderr};
 
 #[derive(Debug, Default)]
 pub struct ChildReaper {
@@ -39,8 +39,8 @@ pub struct ChildReaper {
 
     /// The runtimes and container processes of calls in progress, which are
     /// not registered as grandchildren yet. Their exit status belongs to the
-    /// call, so the orphan sweep leaves them alone.
-    pending: Arc<Mutex<HashSet<Pid>>>,
+    /// call, so the orphan sweep leaves them alone. See [`PendingPid`].
+    pending: PendingPids,
 
     /// Wakes the orphan sweep up early, for example after a failed runtime
     /// call or on shutdown.
@@ -119,16 +119,22 @@ struct Candidate {
     calls_before: u64,
 }
 
-/// Marks a PID as pending for the lifetime of the guard.
+/// The pending PIDs with the number of their marks, see [`PendingPid`].
+type PendingPids = Arc<Mutex<HashMap<Pid, usize>>>;
+
+/// Marks a PID as pending for the lifetime of the guard. The marks get
+/// counted: a call keeps the mark of its runtime until it ends, and the PID
+/// of a runtime which got reaped may already be in use by the process of
+/// another call, whose mark must stay.
 #[derive(Debug)]
 struct PendingPid {
-    pending: Arc<Mutex<HashSet<Pid>>>,
+    pending: PendingPids,
     pid: Pid,
 }
 
 impl PendingPid {
-    fn new(pending: &Arc<Mutex<HashSet<Pid>>>, pid: Pid) -> Self {
-        lock(pending).insert(pid);
+    fn new(pending: &PendingPids, pid: Pid) -> Self {
+        *lock(pending).entry(pid).or_default() += 1;
         Self {
             pending: pending.clone(),
             pid,
@@ -138,7 +144,13 @@ impl PendingPid {
 
 impl Drop for PendingPid {
     fn drop(&mut self) {
-        lock(&self.pending).remove(&self.pid);
+        let mut pending = lock(&self.pending);
+        if let Some(marks) = pending.get_mut(&self.pid) {
+            *marks -= 1;
+            if *marks == 0 {
+                pending.remove(&self.pid);
+            }
+        }
     }
 }
 

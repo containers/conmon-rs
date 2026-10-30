@@ -64,7 +64,7 @@ impl OOMEvent {
     }
 
     /// Whether the process which exited with `exit_code` got OOM killed.
-    pub fn is_oom(&self, exit_code: i32) -> bool {
+    pub fn is_oom(self, exit_code: i32) -> bool {
         self.oom || (self.possible_oom && exit_code == 128 + Signal::SIGKILL as i32)
     }
 }

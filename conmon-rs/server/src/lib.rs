@@ -74,7 +74,8 @@ pub mod conmon_capnp {
 pub mod fuzzing {
     pub use crate::{
         container_log::fuzzing::lines as log_lines, journal::fuzzing::entry as journal_entry,
-        notify::fuzzing::filter as notify_filter, streaming_server::fuzzing::*,
+        notify::fuzzing::filter as notify_filter, process::fuzzing::stat as proc_stat,
+        streaming_server::fuzzing::*,
     };
 
     #[cfg(test)]

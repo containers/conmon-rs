@@ -366,19 +366,18 @@ fn status_exit_code(status: WaitStatus) -> Option<i32> {
 pub async fn wait_for_exit_code(token: CancellationToken, pid: Pid) -> i32 {
     debug!("Waiting for exit code of pid {pid}");
 
-    let exit_code = match try_pidfd_wait(pid).await {
-        Some(code) => code,
-        None => {
-            debug!("pidfd not available, falling back to blocking waitpid");
-            let (tx, rx) = oneshot::channel();
-            spawn_waitpid_thread(move || {
-                let _ = tx.send(wait_for_exit_code_blocking(pid));
-            });
-            rx.await.unwrap_or_else(|_| {
-                error!("waitpid thread exited without a result");
-                EXIT_CODE_WAIT_FAILED
-            })
-        }
+    let exit_code = if let Some(code) = try_pidfd_wait(pid).await {
+        code
+    } else {
+        debug!("pidfd not available, falling back to blocking waitpid");
+        let (tx, rx) = oneshot::channel();
+        spawn_waitpid_thread(move || {
+            let _ = tx.send(wait_for_exit_code_blocking(pid));
+        });
+        rx.await.unwrap_or_else(|_| {
+            error!("waitpid thread exited without a result");
+            EXIT_CODE_WAIT_FAILED
+        })
     };
 
     token.cancel();
@@ -490,18 +489,19 @@ fn wait_for_exit_code_blocking(pid: Pid) -> i32 {
         drop(reaping);
         match status.map(status_exit_code) {
             Ok(Some(code)) => return code,
-            Ok(None) => continue,
-            Err(Errno::EINTR) => {
-                debug!("Failed to wait for pid on EINTR, retrying");
-                continue;
-            }
+            Ok(None) => {}
+            Err(Errno::EINTR) => debug!("Failed to wait for pid on EINTR, retrying"),
             Err(err) => {
                 error!("Unable to waitpid on {err:#}");
                 return EXIT_CODE_WAIT_FAILED;
             }
-        };
+        }
     }
 }
+
+/// The entry point of the fuzz target.
+#[cfg(any(test, feature = "fuzzing"))]
+pub mod fuzzing;
 
 #[cfg(test)]
 mod tests;

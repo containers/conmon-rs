@@ -1,11 +1,10 @@
 use super::*;
 use crate::{
     child_reaper::ReapableChild, config::Config, conmon_capnp::conmon::CgroupManager,
-    streaming_server::DEFAULT_CAPACITY,
+    container_io::ContainerIOType, streaming_server::DEFAULT_CAPACITY,
 };
-use std::sync::Arc;
-use tokio::task::LocalSet;
-use tokio_util::sync::CancellationToken;
+use std::{process::Stdio, sync::Arc};
+use tokio::{process::Command, task::LocalSet, time};
 
 #[tokio::test]
 async fn too_many_streaming_sessions_fail_with_the_bare_message() -> anyhow::Result<()> {
@@ -166,4 +165,80 @@ async fn exec_runtimes_always_get_a_deadline() {
         Server::exec_runtime_deadline(None),
         Some(now + Server::EXEC_RUNTIME_GRACE)
     );
+}
+
+/// The IO of an exec which runs `script`, its process and the token which
+/// its watcher cancels.
+fn exec_io(
+    script: &str,
+) -> anyhow::Result<(SharedContainerIO, tokio::process::Child, CancellationToken)> {
+    let mut io = ContainerIO::new(false, ContainerLog::new())?;
+    let mut child = Command::new("sh")
+        .args(["-c", script])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let token = CancellationToken::new();
+    match io.typ_mut() {
+        ContainerIOType::Streams(s) => s.handle_stdio_receive(
+            None,
+            child.stdout.take(),
+            child.stderr.take(),
+            token.clone(),
+        ),
+        ContainerIOType::Terminal(_) => anyhow::bail!("no streams"),
+    }
+    Ok((SharedContainerIO::new(io), child, token))
+}
+
+#[tokio::test]
+async fn exec_sync_output_takes_the_result_from_the_watcher() -> anyhow::Result<()> {
+    // The process exits right at its timeout, after its last output. Only
+    // the watcher knows whether that was in time, the output is complete
+    // either way.
+    for timed_out in [false, true] {
+        let (io, mut child, token) = exec_io("echo last")?;
+        let (exit_tx, exit_rx) = broadcast::channel(1);
+        let watcher = async {
+            child.wait().await?;
+            // The read loops take the output before anything reads it.
+            time::sleep(Duration::from_millis(100)).await;
+            token.cancel();
+            exit_tx.send(ExitChannelData {
+                exit_code: if timed_out { EXIT_CODE_TIMED_OUT } else { 0 },
+                timed_out,
+            })?;
+            anyhow::Ok(())
+        };
+        let (output, watched) = tokio::join!(
+            Server::exec_sync_output(&io, &token, exit_rx, || {}),
+            watcher
+        );
+        watched?;
+        let output = output?;
+        assert_eq!(output.stdout, b"last\n");
+        assert_eq!(output.timed_out, timed_out);
+        assert_eq!(output.exit_code == EXIT_CODE_TIMED_OUT, timed_out);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn exec_sync_output_kills_the_process_of_a_lost_watcher() -> anyhow::Result<()> {
+    let (io, mut child, token) = exec_io("echo started; exec sleep 600")?;
+    let (exit_tx, exit_rx) = broadcast::channel::<ExitChannelData>(1);
+    // Nothing ever cancels the token, the process keeps the pipes open.
+    drop(exit_tx);
+    let mut killed = false;
+    let res = time::timeout(
+        Duration::from_secs(10),
+        Server::exec_sync_output(&io, &token, exit_rx, || killed = child.start_kill().is_ok()),
+    )
+    .await?;
+    assert!(res.is_err());
+    assert!(killed);
+    assert!(token.is_cancelled());
+    time::timeout(Duration::from_secs(10), child.wait()).await??;
+    Ok(())
 }

@@ -307,8 +307,13 @@ reader which follows the log, like `kubectl logs -f`, reads the old file to its
 end first. `reopenLogContainer`, which CRI-O calls after the kubelet rotated the
 log, starts a new file at the path the same way. The server appends to the log
 files, so a file which gets truncated in place, for example to free disk space,
-continues at its new end. A write which fails in the middle of an entry, like on
-a full disk, drops the rest of it, the next entry starts on a line of its own.
+continues at its new end. Since unreleased, a log file which exists when the
+container gets created is appended to like with conmon instead of truncated, its
+content counts for the maximum size. A write which fails in the middle of an
+entry, like on a full disk, drops the rest of it, the next entry starts on a
+line of its own, and so does the first entry after existing content without a
+final newline. A rotation which fails drops the entries which would exceed the
+size, the next read of output tries it again.
 
 - `containerRuntimeInterface`: the CRI log format, one line per entry with an
   RFC 3339 timestamp in nanoseconds of when the server read the output, the
