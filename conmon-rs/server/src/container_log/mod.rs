@@ -1,3 +1,6 @@
+//! The log drivers of the containers, which write the container output to
+//! the CRI or JSON log files or to journald.
+
 mod cri;
 mod journald;
 mod json;

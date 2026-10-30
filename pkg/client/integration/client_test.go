@@ -93,16 +93,18 @@ var _ = Describe("ConmonClient", func() {
 			Expect(err).To(Succeed())
 		}, SpecTimeout(specTimeout))
 
-		It("should start with an output writer which is no file", func(ctx SpecContext) {
+		It("should start with an output writer which is no file", func(_ SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 
 			// The server outlives New and keeps writing to it.
 			output := &syncBuffer{}
 			started := make(chan *client.ConmonClient, 1)
+			finished := make(chan struct{})
 
 			go func() {
 				defer GinkgoRecover()
+				defer close(finished)
 
 				started <- tr.configGivenEnvWith(func(cfg *client.ConmonServerConfig) {
 					cfg.Stdout = output
@@ -110,11 +112,23 @@ var _ = Describe("ConmonClient", func() {
 				})
 			}()
 
+			// A client which New returns once the wait below gave up still
+			// has a server to stop. New itself gives up after 20 seconds.
+			DeferCleanup(func() {
+				Eventually(finished, 30*time.Second).Should(BeClosed())
+
+				select {
+				case late := <-started:
+					cleanupSpec(nil, late)
+				default:
+				}
+			})
+
 			Eventually(started, 10*time.Second).Should(Receive(&sut))
 			Eventually(output.String, 10*time.Second).ShouldNot(BeEmpty())
 		}, SpecTimeout(specTimeout))
 
-		It("should start the server with the given environment", func(ctx SpecContext) {
+		It("should start the server with the given environment", func(_ SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnvWith(func(cfg *client.ConmonServerConfig) {
@@ -127,6 +141,20 @@ var _ = Describe("ConmonClient", func() {
 			environ := strings.Split(contents, "\x00")
 			Expect(environ).To(ContainElement("CONMON_TEST_ENV=set"))
 			Expect(environ).NotTo(ContainElement(HavePrefix("PATH=")))
+		}, SpecTimeout(specTimeout))
+
+		It("should not keep the launch stdio without the stdout log driver", func(_ SpecContext) {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnvWith(func(cfg *client.ConmonServerConfig) {
+				cfg.LogDriver = client.LogDriverNone
+			})
+
+			// Like the processes it starts, which inherit them.
+			for fd := range 3 {
+				Expect(os.Readlink(fmt.Sprintf("/proc/%d/fd/%d", sut.PID(), fd))).
+					To(Equal(os.DevNull))
+			}
 		}, SpecTimeout(specTimeout))
 
 		It("should start a new server once the old one got killed", func(ctx SpecContext) {

@@ -1,7 +1,7 @@
 # Contributing to conmon-rs
 
-We'd love to have you join the community! Below summarizes the processes
-that we follow.
+We'd love to have you join the community! The following summarizes the
+processes that we follow.
 
 ## Topics
 
@@ -9,6 +9,7 @@ that we follow.
 - [Submitting Pull Requests](#submitting-pull-requests)
 - [Communications](#communications)
 - [Security](#security)
+- [Code of Conduct](#code-of-conduct)
 
 ## Reporting Issues
 
@@ -45,7 +46,8 @@ review. But only if those smaller ones make sense as stand-alone PRs.
 Regardless of the type of PR, all PRs should include:
 
 - well documented code changes
-- additional testcases. Ideally, they should fail w/o your code change applied
+- additional test cases. Ideally, they should fail without your code change
+  applied
 - documentation changes
 
 Squash your commits into logical pieces of work that might want to be reviewed
@@ -53,10 +55,11 @@ separate from the rest of the PRs. But, squashing down to just one commit is ok
 too since in the end the entire PR will be reviewed anyway. When in doubt,
 squash.
 
-Test your changes by running:
+Format your changes with `make fmt`, then check them with the linters and the
+unit tests of the server and the Go client:
 
 ```console
-$ make lint
+$ make lint unit unit-go
 ```
 
 Changes to Markdown, YAML or JSON files have to pass prettier, which `make
@@ -167,7 +170,7 @@ commit automatically with `git commit -s`.
 
 For general questions, or discussions, please use our [channel on the Kubernetes slack](https://kubernetes.slack.com/archives/crio).
 
-For discussions around issues/bugs and features, you can use the github
+For discussions around issues/bugs and features, you can use the GitHub
 [issues](https://github.com/containers/conmon-rs/issues) and
 [PRs](https://github.com/containers/conmon-rs/pulls) tracking system.
 

@@ -1,4 +1,4 @@
-//! File descriptor passing via UDS (unix socket).
+//! File descriptor passing over a UNIX socket.
 //!
 //! ## File descriptor socket protocol
 //!
@@ -8,7 +8,8 @@
 //! Pass file descriptors via `SCM_RIGHTS` ancillary message.
 //!
 //! `request_id: u32`: Request id selected by client
-//! `num_fds: u32`: Number of file descriptors
+//! `num_fds: u32`: Number of file descriptors, at most 253, the most the
+//! kernel passes with one message (`SCM_MAX_FD`)
 //!
 //! ```txt
 //! u64: (request_id << 32) | num_fds

@@ -6,6 +6,7 @@ import (
 	"maps"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"capnproto.org/go/capnp/v3"
@@ -13,6 +14,7 @@ import (
 	"capnproto.org/go/capnp/v3/rpc"
 	"github.com/containers/conmon-rs/internal/proto"
 	"github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
@@ -318,4 +320,53 @@ func TestSetMetadataPropagatesTraceContext(t *testing.T) {
 			t.Fatalf("tracing enabled %v: got metadata %v, want %v", tc.enabled, got, tc.want)
 		}
 	}
+}
+
+func TestCallWithoutServerMatchesErrServerUnreachable(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	c := newTestClient(t, dir, logrus.New())
+
+	t.Cleanup(func() { c.Close() })
+
+	// No socket at all, like after the server exited and removed it.
+	if _, err := c.Version(t.Context(), &VersionConfig{}); !errors.Is(err, ErrServerUnreachable) {
+		t.Fatalf("got error %v, want %v", err, ErrServerUnreachable)
+	}
+
+	// A socket left behind, which nothing listens on, refuses the
+	// connection.
+	bindTestSocket(t, dir)
+
+	_, err := c.Version(t.Context(), &VersionConfig{})
+	if !errors.Is(err, ErrServerUnreachable) || !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("got error %v, want %v and %v", err, ErrServerUnreachable, syscall.ECONNREFUSED)
+	}
+}
+
+func TestRPCLogger(t *testing.T) {
+	t.Parallel()
+
+	logger, hook := logrustest.NewNullLogger()
+	logger.SetLevel(logrus.DebugLevel)
+
+	rpcLogger{logger: logger}.Error("abort", "error", "broken", "odd")
+
+	entry := hook.LastEntry()
+	if entry == nil {
+		t.Fatal("nothing logged")
+	}
+
+	// The errors fail calls or end the connection anyway.
+	if entry.Level != logrus.DebugLevel || entry.Message != "RPC: abort" {
+		t.Fatalf("got %s entry %q, want a debug one", entry.Level, entry.Message)
+	}
+
+	want := logrus.Fields{"rpcLevel": "error", "error": "broken", "odd": nil}
+	if !maps.Equal(entry.Data, want) {
+		t.Fatalf("got fields %v, want %v", entry.Data, want)
+	}
+
+	var _ rpc.Logger = rpcLogger{}
 }

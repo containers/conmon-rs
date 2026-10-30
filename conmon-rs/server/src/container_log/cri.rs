@@ -1,4 +1,4 @@
-//! File logging functionalities.
+//! The logger of the CRI log format.
 
 use crate::{
     container_io::Pipe,

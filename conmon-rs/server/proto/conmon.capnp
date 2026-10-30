@@ -12,14 +12,25 @@ interface Conmon {
     }
 
     struct VersionResponse {
+        # The PID of the server process.
         processId @0 :UInt32;
+        # The version of the crate.
         version @1 :Text;
+        # The tag of the build, `BUILD_TAG` or else what
+        # `git describe --tags --always --dirty` tells, empty without either.
         tag @2 :Text;
+        # The git commit of the build.
         commit @3 :Text;
+        # The date of the build.
         buildDate @4 :Text;
+        # The target triple of the build.
         target @5 :Text;
+        # The Rust version of the build.
         rustVersion @6 :Text;
+        # The Cargo version of the build.
         cargoVersion @7 :Text;
+        # The dependency tree of the build, empty without `verbose` or for a
+        # build with `CONMONRS_SKIP_CARGO_TREE`.
         cargoTree @8 :Text;
         # Reserved, do not reuse the ordinal.
         metadataOld @9 :Void;
@@ -34,6 +45,7 @@ interface Conmon {
         features @10 :List(Text);
     }
 
+    # Report the version and the features of the server, and its PID.
     version @0 (request: VersionRequest) -> (response: VersionResponse);
 
     ###############################################
@@ -45,7 +57,11 @@ interface Conmon {
         # The OCI bundle of the container, an absolute path like all paths
         # of the request.
         bundlePath @1 :Text;
+        # Whether the container gets a terminal, which the server sets up
+        # through the `--console-socket` of the runtime.
         terminal @2 :Bool;
+        # Whether the container gets a stdin, which the attach clients write
+        # to.
         stdin @3 :Bool;
         # The files the server writes the exit code of the container to once
         # it exited, as decimal text, 128 plus the signal number if a signal
@@ -69,6 +85,8 @@ interface Conmon {
         # Environment variables of the runtime, on top of the ones of the
         # server.
         envVars @12 :TextTextMap;
+        # The cgroup manager of the runtime, `systemd` adds `--systemd-cgroup`
+        # to the runtime arguments.
         cgroupManager @13 :CgroupManager;
         # Slots of the fd socket, see `startFdSocket`, whose file descriptors
         # the runtime gets as fd 3 and onwards in their order. With
@@ -128,15 +146,24 @@ interface Conmon {
         }
     }
 
+    # The cgroup manager the runtime uses for the container or the exec.
     enum CgroupManager {
+        # The runtime gets `--systemd-cgroup`.
         systemd @0;
+        # The runtime gets no flag for it and uses the cgroup file system.
         cgroupfs @1;
     }
 
     struct CreateContainerResponse {
+        # The PID of the container process, which the runtime created but did
+        # not start yet.
         containerPid @0 :UInt32;
     }
 
+    # Create a container with the runtime and monitor it until it exited:
+    # write its output to the log drivers, its exit code to the exit files,
+    # and run the cleanup command. The container gets started with the
+    # runtime by the caller.
     createContainer @1 (request: CreateContainerRequest) -> (response: CreateContainerResponse);
 
     ###############################################
@@ -146,12 +173,19 @@ interface Conmon {
         # How long the command may run before it gets killed, 0 for no limit.
         # A call which gets dropped does not stop the command.
         timeoutSec @1 :UInt64;
+        # The command and its arguments, which the runtime runs in the
+        # container.
         command @2 :List(Text);
+        # Whether the command gets a terminal.
         terminal @3 :Bool;
         # Reserved, do not reuse the ordinal.
         metadataOld @4 :Void;
         metadata @5 :Metadata;
+        # Environment variables of the runtime, on top of the ones of the
+        # server, like the ones of `CreateContainerRequest`.
         envVars @6 :TextTextMap;
+        # Like the one of `CreateContainerRequest`, `systemd` adds
+        # `--systemd-cgroup` to the runtime arguments.
         cgroupManager @7 :CgroupManager;
     }
 
@@ -167,6 +201,8 @@ interface Conmon {
         timedOut @3 :Bool;
     }
 
+    # Run a command in a container with `exec` of the runtime, wait for it to
+    # exit and return its exit code and output.
     execSyncContainer @2 (request: ExecSyncContainerRequest) -> (response: ExecSyncContainerResponse);
 
     ###############################################
@@ -179,6 +215,11 @@ interface Conmon {
         socketPath @1 :Text;
         # Deprecated, only logged, attach sessions are per container.
         execSessionId @2 :Text;
+        # Close the container's stdin once the input of a client ended, the
+        # output is still forwarded until the container closes it. The stdin
+        # of a terminal is never closed. The value of the latest attach call
+        # applies to the connections the server accepts afterwards, on any
+        # attach socket of the container.
         stopAfterStdinEof @3 :Bool;
         # Reserved, do not reuse the ordinal.
         metadataOld @4 :Void;
@@ -188,6 +229,8 @@ interface Conmon {
     struct AttachResponse {
     }
 
+    # Listen for attach clients of a running container on `socketPath`, see
+    # usage.md. The call returns once the server listens.
     attachContainer @3 (request: AttachRequest) -> (response: AttachResponse);
 
     ###############################################
@@ -202,6 +245,8 @@ interface Conmon {
     struct ReopenLogResponse {
     }
 
+    # Reopen the log files of a running container, for example after they
+    # got rotated.
     reopenLogContainer @4 (request: ReopenLogRequest) -> (response: ReopenLogResponse);
 
     ###############################################
@@ -218,6 +263,7 @@ interface Conmon {
     struct SetWindowSizeResponse {
     }
 
+    # Set the size of the terminal of a running container.
     setWindowSizeContainer @5 (request: SetWindowSizeRequest) -> (response: SetWindowSizeResponse);
 
     ###############################################
@@ -257,6 +303,8 @@ interface Conmon {
         path @1 :Text; # Path to the bind mount of the namespace.
     }
 
+    # Create the namespaces of a pod with `conmonrs pause` and bind mount them
+    # below `basePath`, see usage.md.
     createNamespaces @6 (request: CreateNamespacesRequest) -> (response: CreateNamespacesResponse);
 
     ###############################################
@@ -269,6 +317,8 @@ interface Conmon {
         path @0 :Text; # The path to the fd socket.
     }
 
+    # Listen on the fd socket, whose file descriptors `createContainer`
+    # references by slot, see usage.md. Further calls return the same path.
     startFdSocket @7 (request: StartFdSocketRequest) -> (response: StartFdSocketResponse);
 
     ###############################################
@@ -297,11 +347,20 @@ interface Conmon {
         metadata @0 :Metadata; # Standard metadata to carry.
         # The session fails for an ID which `CreateContainerRequest` rejects.
         id @1 :Text;
+        # The command and its arguments, which the runtime runs in the
+        # container once the client connected.
         command @2 :List(Text);
+        # Whether the command gets a terminal.
         tty @3 :Bool;
+        # Whether the client sends the stdin of the command.
         stdin @4 :Bool;
+        # Whether the client gets the stdout of the command.
         stdout @5 :Bool;
+        # Whether the client gets the stderr of the command, a terminal has
+        # none.
         stderr @6 :Bool;
+        # Like the one of `CreateContainerRequest`, `systemd` adds
+        # `--systemd-cgroup` to the runtime arguments.
         cgroupManager @7 :CgroupManager;
         # How long a connection may go without a frame of the client and
         # without data either way before the session fails, 0 disables the
@@ -318,6 +377,7 @@ interface Conmon {
         url @0 :Text;
     }
 
+    # Return the URL of an exec session on the streaming server.
     serveExecContainer @8 (request: ServeExecContainerRequest) -> (response: ServeExecContainerResponse);
 
     ###############################################
@@ -328,6 +388,11 @@ interface Conmon {
         stdin @2 :Bool;
         stdout @3 :Bool;
         stderr @4 :Bool;
+        # With `stdin`, close the container's stdin once the stdin of the
+        # client ended, or the session ended otherwise, the output is still
+        # forwarded until the container closes it. A terminal stays open, it
+        # gets its end of file character once the stdin of the client ended,
+        # like from Ctrl-D.
         stopAfterStdinEof @5 :Bool;
         # How long a connection may go without a frame of the client and
         # without data either way before the session fails, 0 disables the
@@ -343,6 +408,7 @@ interface Conmon {
         url @0 :Text;
     }
 
+    # Return the URL of an attach session on the streaming server.
     serveAttachContainer @9 (request: ServeAttachContainerRequest) -> (response: ServeAttachContainerResponse);
 
     ###############################################
@@ -365,5 +431,6 @@ interface Conmon {
         url @0 :Text;
     }
 
+    # Return the URL of a port forward session on the streaming server.
     servePortForwardContainer @10 (request: ServePortForwardContainerRequest) -> (response: ServePortForwardContainerResponse);
 }

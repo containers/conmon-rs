@@ -144,6 +144,7 @@ linters:
     nestif:
       min-complexity: 15
     revive:
+      enable-default-rules: true
       rules:
         - name: dot-imports
           disabled: true

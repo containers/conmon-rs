@@ -124,3 +124,14 @@ func openDirPath(path string) (*os.File, error) {
 
 	return os.NewFile(uintptr(fd), path), nil
 }
+
+// serverErrorFile returns a file in memory for the errors of the server
+// launch, see tempErrorFile, which it falls back to.
+func serverErrorFile() (*os.File, error) {
+	fd, err := unix.MemfdCreate("conmonrs-errors", unix.MFD_CLOEXEC)
+	if err != nil {
+		return tempErrorFile()
+	}
+
+	return os.NewFile(uintptr(fd), "conmonrs-errors"), nil
+}

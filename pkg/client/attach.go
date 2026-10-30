@@ -41,7 +41,8 @@ type AttachStreams struct {
 	// ends, see AttachContainer.
 	Stdout *Out
 
-	// Standard error stream, can be nil. It gets closed like Stdout.
+	// Standard error stream, can be nil. It gets closed like Stdout, only
+	// once if it is the same as Stdout.
 	Stderr *Out
 }
 
@@ -370,15 +371,7 @@ func (c *ConmonClient) redirectResponseToOutputStreams(
 
 	buf := make([]byte, attachPacketBufSize+1) /* Sync with conmonrs Attach::PACKET_BUF_SIZE */
 
-	defer func() {
-		if cfg.Streams.Stdout != nil {
-			cfg.Streams.Stdout.Close()
-		}
-
-		if cfg.Streams.Stderr != nil {
-			cfg.Streams.Stderr.Close()
-		}
-	}()
+	defer closeOutputStreams(cfg.Streams)
 
 	// Checked once, the logs run for every packet.
 	trace := c.traceEnabled()
@@ -428,6 +421,18 @@ func (c *ConmonClient) redirectResponseToOutputStreams(
 	}
 
 	return nil
+}
+
+// closeOutputStreams closes stdout and stderr of the streams, a stream which
+// serves for both only once.
+func closeOutputStreams(streams AttachStreams) {
+	if streams.Stdout != nil {
+		streams.Stdout.Close()
+	}
+
+	if streams.Stderr != nil && streams.Stderr != streams.Stdout {
+		streams.Stderr.Close()
+	}
 }
 
 // handlePacket writes a packet of the attach connection to its stream. It

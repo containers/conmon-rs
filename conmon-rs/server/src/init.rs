@@ -1,3 +1,8 @@
+//! The setup of the server process before it serves: umask, environment, OOM
+//! score, open files limit, malloc and transparent huge pages, and giving the
+//! runtime calls and cleanup commands the OOM score, huge pages setting and
+//! open files limits the server started with.
+
 use anyhow::{Result, bail};
 use nix::{
     errno::Errno,

@@ -70,7 +70,7 @@ pub struct Config {
         value_enum,
         value_name("LEVEL")
     )]
-    /// The logging level of the conmon server.
+    /// The logging level of the server.
     log_level: LogLevel,
 
     #[arg(
@@ -81,7 +81,7 @@ pub struct Config {
         value_enum,
         value_name("DRIVER")
     )]
-    /// The logging driver used by the conmon server.
+    /// The logging driver used by the server.
     log_driver: LogDriver,
 
     // The blank default lets `--version` and `pause` work without the flag,
@@ -123,7 +123,7 @@ pub struct Config {
         // The environment variable also accepts 1, 0, yes and no.
         value_parser = clap::builder::BoolishValueParser::new(),
     )]
-    /// Do not fork if true.
+    /// Stay in the foreground instead of forking into the background.
     skip_fork: bool,
 
     #[arg(
@@ -133,7 +133,8 @@ pub struct Config {
         // Like `skip_fork`.
         value_parser = clap::builder::BoolishValueParser::new(),
     )]
-    /// Enable OpenTelemetry tracing.
+    /// Enable OpenTelemetry tracing. Builds without the `tracing` feature
+    /// ignore it.
     enable_tracing: bool,
 
     #[arg(
@@ -143,7 +144,8 @@ pub struct Config {
         short('t'),
         value_name("URL")
     )]
-    /// OpenTelemetry GRPC endpoint to be used for tracing.
+    /// OpenTelemetry gRPC endpoint to be used for tracing. Builds without the
+    /// `tracing` feature ignore it.
     tracing_endpoint: String,
 }
 
@@ -188,7 +190,7 @@ impl Config {
         self.runtime_root.as_deref()
     }
 
-    /// Do not fork if true.
+    /// Stay in the foreground instead of forking into the background.
     pub fn skip_fork(&self) -> bool {
         self.skip_fork
     }
@@ -199,7 +201,7 @@ impl Config {
         self.enable_tracing
     }
 
-    /// OpenTelemetry GRPC endpoint.
+    /// OpenTelemetry gRPC endpoint.
     #[cfg(feature = "tracing")]
     pub fn tracing_endpoint(&self) -> &str {
         &self.tracing_endpoint
@@ -212,9 +214,8 @@ pub enum Commands {
     /// Run pause, which bind mounts selected namespaces to the local file system.
     ///
     /// Only the namespaces selected by the flags are created and bind mounted to
-    /// `$BASE_PATH/[ipc,pid,net,user,uts]ns/$POD_ID`, whereas the POD_ID is being passed from the
-    /// client. The bind mounts keep the namespaces alive, so `conmonrs pause` exits once they
-    /// are in place.
+    /// `$BASE_PATH/[ipc,pid,net,user,uts]ns/$POD_ID`, where POD_ID comes from the client. The
+    /// bind mounts keep the namespaces alive, so `conmonrs pause` exits once they are in place.
     ///
     /// Only a PID namespace (via `--pid`) dies with its init process, which therefore keeps
     /// running. Its PID is tracked in `$BASE_PATH/conmonrs/$POD_ID.pid`.
@@ -266,12 +267,12 @@ pub struct PauseArgs {
 
     #[arg(long("uid-mappings"), required_if_eq("user", "true"), short('u'))]
     /// User ID mappings for unsharing the user namespace.
-    /// Allows multiple mappings in the format: "CONTAINER_ID HOST_ID SIZE".
+    /// Repeat the flag for more mappings, each in the format: "CONTAINER_ID HOST_ID SIZE".
     pub uid_mappings: Vec<String>,
 
     #[arg(long("gid-mappings"), required_if_eq("user", "true"), short('g'))]
     /// Group ID mappings for unsharing the user namespace.
-    /// Allows multiple mappings in the format: "CONTAINER_ID HOST_ID SIZE".
+    /// Repeat the flag for more mappings, each in the format: "CONTAINER_ID HOST_ID SIZE".
     pub gid_mappings: Vec<String>,
 }
 
@@ -318,7 +319,7 @@ pub enum LogDriver {
     Stdout,
 
     #[default]
-    /// Use systemd journald as log driver
+    /// Use systemd journald as log driver.
     Systemd,
 }
 

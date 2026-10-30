@@ -1,3 +1,6 @@
+//! Helpers for the Cap'n Proto requests: the check of their paths and the
+//! conversion of their maps.
+
 pub(crate) use map_entry::into_map;
 
 use std::path::Path;

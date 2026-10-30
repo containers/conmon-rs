@@ -1,4 +1,7 @@
-/// Open Telemetry related source code.
+//! The OpenTelemetry tracing of the server, built with the `tracing` feature:
+//! the exporter of the spans and the trace context the clients pass with their
+//! requests.
+
 use crate::capnp_util;
 use crate::conmon_capnp::conmon;
 use anyhow::{Context, Result};

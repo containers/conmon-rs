@@ -443,8 +443,9 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// cleanupSpec deletes the container, shuts the server down and removes the
-// temp dir of a spec, whatever the spec got around to create.
+// cleanupSpec deletes the container, shuts the server down, or kills it if
+// it does not exit in time, closes the client and removes the temp dir of a
+// spec, whatever the spec got around to create.
 func cleanupSpec(tr *testRunner, sut *client.ConmonClient) {
 	// Every step runs even if an earlier one failed, a leaked server would
 	// otherwise fail the whole suite.
@@ -460,6 +461,18 @@ func cleanupSpec(tr *testRunner, sut *client.ConmonClient) {
 	if sut != nil {
 		if err := sut.Shutdown(); err != nil {
 			errs = append(errs, fmt.Errorf("shutdown server: %w", err))
+
+			// Like CRI-O does it, a server which does not exit in time
+			// gets killed.
+			if errors.Is(err, client.ErrShutdownTimeout) {
+				if err := sut.KillContext(context.Background()); err != nil {
+					errs = append(errs, fmt.Errorf("kill server: %w", err))
+				}
+			}
+		}
+
+		if err := sut.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close client: %w", err))
 		}
 	}
 

@@ -47,7 +47,8 @@ download the latest version:
 It is also possible to select a specific commit by its full 40 character SHA
 (`-t`), a release tag like `vX.Y.Z` (`-l`), the architecture (`-a`, defaults to
 the local one) or the output binary path (`-o`), and to skip running the
-installed binary for its version (`-n`):
+installed binary for its version (`-n`). With `-l`, the script resolves the tag
+through the GitHub API, which needs [`jq`](https://jqlang.org):
 
 ```console
 > curl -fsSL https://raw.githubusercontent.com/containers/conmon-rs/main/scripts/get | \

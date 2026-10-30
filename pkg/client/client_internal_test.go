@@ -1,12 +1,15 @@
 package client
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -43,7 +46,7 @@ func newTestConn(t *testing.T, withBootstrap bool) (*rpcConn, net.Conn) {
 	t.Helper()
 
 	local, remote := net.Pipe()
-	conn := newRPCConn(t.Context(), local)
+	conn := newRPCConn(t.Context(), local, logrus.New())
 	peer := rpc.NewConn(rpc.NewStreamTransport(remote), serverOptions(withBootstrap))
 
 	t.Cleanup(func() {
@@ -560,4 +563,276 @@ func newTestClient(t *testing.T, dir string, logger logrus.Ext1FieldLogger) *Con
 	c.logger = logger
 
 	return c
+}
+
+func TestToArgs(t *testing.T) {
+	t.Parallel()
+
+	// The flags are the ones of conmon-rs/server/src/config.rs.
+	base := []string{"--runtime", "/runtime", "--runtime-dir", "/run/dir"}
+
+	for _, tc := range []struct {
+		name    string
+		config  ConmonServerConfig
+		want    []string
+		wantErr error
+	}{
+		{
+			name: "required only",
+			want: base,
+		},
+		{
+			name:   "runtime root",
+			config: ConmonServerConfig{RuntimeRoot: "/runtime/root"},
+			want:   append(slices.Clone(base), "--runtime-root", "/runtime/root"),
+		},
+		{
+			name:   "log level and driver",
+			config: ConmonServerConfig{LogLevel: LogLevelTrace, LogDriver: LogDriverStdout},
+			want:   append(slices.Clone(base), "--log-level", "trace", "--log-driver", "stdout"),
+		},
+		{
+			name:   "tracing",
+			config: ConmonServerConfig{Tracing: &Tracing{Enabled: true}},
+			want:   append(slices.Clone(base), "--enable-tracing"),
+		},
+		{
+			name: "tracing endpoint",
+			config: ConmonServerConfig{
+				Tracing: &Tracing{Enabled: true, Endpoint: "http://localhost:4317"},
+			},
+			want: append(
+				slices.Clone(base),
+				"--enable-tracing", "--tracing-endpoint", "http://localhost:4317",
+			),
+		},
+		{
+			// The endpoint only applies to enabled tracing.
+			name:   "tracing endpoint without tracing",
+			config: ConmonServerConfig{Tracing: &Tracing{Endpoint: "http://localhost:4317"}},
+			want:   base,
+		},
+		{
+			name:    "invalid log level",
+			config:  ConmonServerConfig{LogLevel: "verbose"},
+			wantErr: ErrInvalidValue,
+		},
+		{
+			name:    "invalid log driver",
+			config:  ConmonServerConfig{LogDriver: "file"},
+			wantErr: ErrInvalidValue,
+		},
+		{
+			name:    "no runtime",
+			config:  ConmonServerConfig{Runtime: "-"},
+			wantErr: errRuntimeUnspecified,
+		},
+		{
+			name:    "no run dir",
+			config:  ConmonServerConfig{ServerRunDir: "-"},
+			wantErr: errRunDirUnspecified,
+		},
+		{
+			// The server gets the absolute path of the client.
+			name:   "relative run dir",
+			config: ConmonServerConfig{ServerRunDir: "dir"},
+			want:   base,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			config := tc.config
+			config.ConmonServerPath = "/conmonrs"
+
+			// A dash leaves the required field empty.
+			config.Runtime = cmp.Or(config.Runtime, "/runtime")
+			if config.Runtime == "-" {
+				config.Runtime = ""
+			}
+
+			config.ServerRunDir = cmp.Or(config.ServerRunDir, "/run/dir")
+			if config.ServerRunDir == "-" {
+				config.ServerRunDir = ""
+			}
+
+			entrypoint, args, err := (&ConmonClient{runDir: "/run/dir"}).toArgs(&config)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("got error %v, want %v", err, tc.wantErr)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("to args: %v", err)
+			}
+
+			if entrypoint != config.ConmonServerPath {
+				t.Errorf("got entrypoint %q, want %q", entrypoint, config.ConmonServerPath)
+			}
+
+			if !slices.Equal(args, tc.want) {
+				t.Errorf("got args %q, want %q", args, tc.want)
+			}
+		})
+	}
+}
+
+func TestFromLogrusLevel(t *testing.T) {
+	t.Parallel()
+
+	for level, want := range map[logrus.Level]LogLevel{
+		logrus.PanicLevel: LogLevelOff,
+		logrus.FatalLevel: LogLevelOff,
+		logrus.ErrorLevel: LogLevelError,
+		logrus.WarnLevel:  LogLevelWarn,
+		logrus.InfoLevel:  LogLevelInfo,
+		logrus.DebugLevel: LogLevelDebug,
+		logrus.TraceLevel: LogLevelTrace,
+		logrus.Level(42):  LogLevelDebug,
+	} {
+		if got := FromLogrusLevel(level); got != want {
+			t.Errorf("level %d: got %q, want %q", level, got, want)
+		}
+	}
+}
+
+func TestServerEnv(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want []string
+	}{
+		{
+			name: "empty",
+			env:  []string{},
+			want: []string{},
+		},
+		{
+			name: "denied",
+			env: []string{
+				"CONMON_VERSION=full",
+				"PATH=/bin",
+				"CONMON_VERSION_JSON=",
+				"CONMON_SKIP_FORK=1",
+				"CONMON_LOG_LEVEL=debug",
+				"CONMON_VERSION_FULL=1",
+				"conmon_version=1",
+			},
+			want: []string{"PATH=/bin", "CONMON_LOG_LEVEL=debug", "CONMON_VERSION_FULL=1", "conmon_version=1"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := slices.Clone(tc.env)
+
+			got := serverEnv(env)
+			if got == nil || !slices.Equal(got, tc.want) {
+				t.Errorf("got environment %q, want %q", got, tc.want)
+			}
+
+			if !slices.Equal(env, tc.env) {
+				t.Errorf("environment of the config changed to %q", env)
+			}
+		})
+	}
+}
+
+//nolint:paralleltest // changes the environment of the process
+func TestServerEnvInherited(t *testing.T) {
+	t.Setenv("CONMON_SKIP_FORK", "1")
+	t.Setenv("CONMON_TEST_ENV", "set")
+
+	got := serverEnv(nil)
+
+	if slices.ContainsFunc(got, func(entry string) bool {
+		return strings.HasPrefix(entry, "CONMON_SKIP_FORK=")
+	}) {
+		t.Errorf("got environment %q with CONMON_SKIP_FORK", got)
+	}
+
+	if !slices.Contains(got, "CONMON_TEST_ENV=set") {
+		t.Errorf("got environment %q without the one of the process", got)
+	}
+}
+
+func TestServerLogDriver(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		driver LogDriver
+		env    []string
+		want   LogDriver
+	}{
+		{name: "default", want: LogDriverSystemd},
+		{name: "config", driver: LogDriverNone, want: LogDriverNone},
+		{
+			name:   "config over environment",
+			driver: LogDriverNone,
+			env:    []string{"CONMON_LOG_DRIVER=stdout"},
+			want:   LogDriverNone,
+		},
+		{
+			// The command passes the last one of a variable.
+			name: "environment",
+			env: []string{
+				"CONMON_LOG_DRIVER=none",
+				"PATH=/bin",
+				"CONMON_LOG_DRIVER=stdout",
+				"CONMON_LOG_DRIVERS=none",
+			},
+			want: LogDriverStdout,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := serverLogDriver(tc.driver, tc.env); got != tc.want {
+				t.Errorf("got log driver %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+//nolint:paralleltest // changes the working directory of the process
+func TestToClientMakesRunDirAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	c, err := (&ConmonServerConfig{ServerRunDir: "run"}).toClient()
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+
+	if want := filepath.Join(dir, "run"); c.runDir != want {
+		t.Fatalf("got run directory %q, want %q", c.runDir, want)
+	}
+}
+
+// bindTestSocket binds a stream socket to the socket of a client in dir
+// without listening on it, which gets closed with the test.
+func bindTestSocket(t *testing.T, dir string) int {
+	t.Helper()
+
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("socket: %v", err)
+	}
+
+	t.Cleanup(func() { syscall.Close(fd) })
+
+	if err := syscall.Bind(
+		fd,
+		&syscall.SockaddrUnix{Name: filepath.Join(dir, socketName)},
+	); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+
+	return fd
 }

@@ -1,3 +1,5 @@
+//! The logger of the JSON log format, one JSON object per line.
+
 use crate::{
     container_io::Pipe,
     container_log::{Line, LogFile, Logger},

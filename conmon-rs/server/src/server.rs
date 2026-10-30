@@ -1,3 +1,6 @@
+//! The server process: its start and fork, its logging, the RPC socket it
+//! serves and its shutdown on a signal.
+
 use crate::conmon_capnp::conmon::{self};
 #[cfg(feature = "tracing")]
 use crate::telemetry::Telemetry;
@@ -240,7 +243,32 @@ impl Server {
                     // SAFETY: as above.
                     unsafe { _exit(0) };
                 }
-                ForkResult::Child => (),
+                ForkResult::Child => {
+                    // Like a daemon, do not keep the standard streams of the
+                    // caller, like the file the Go client reads the launch
+                    // errors from, see `startServer` in `pkg/client`. The
+                    // processes the server starts, like cleanup commands,
+                    // would write into it otherwise. Only the stdout log
+                    // driver writes to them.
+                    if self.config().log_driver() != LogDriver::Stdout {
+                        use nix::{
+                            fcntl::{OFlag, open},
+                            sys::stat::Mode,
+                            unistd::{dup2_stderr, dup2_stdin, dup2_stdout},
+                        };
+                        use std::os::fd::{AsRawFd, IntoRawFd};
+
+                        let null = open(c"/dev/null", OFlag::O_RDWR, Mode::empty())
+                            .context("open /dev/null")?;
+                        dup2_stdin(&null).context("redirect stdin")?;
+                        dup2_stdout(&null).context("redirect stdout")?;
+                        dup2_stderr(&null).context("redirect stderr")?;
+                        // A closed standard stream got it, which has to stay.
+                        if null.as_raw_fd() <= libc::STDERR_FILENO {
+                            let _: RawFd = null.into_raw_fd();
+                        }
+                    }
+                }
             }
         }
 
