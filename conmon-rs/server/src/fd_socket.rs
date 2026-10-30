@@ -160,7 +160,7 @@ impl State {
         loop {
             slot += 1;
             match self.fds.entry(slot.0) {
-                hash_map::Entry::Occupied(_) => continue,
+                hash_map::Entry::Occupied(_) => {}
                 hash_map::Entry::Vacant(entry) => {
                     entry.insert(fd);
                     break;

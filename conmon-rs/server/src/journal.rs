@@ -291,8 +291,8 @@ impl Journal {
         entry
     }
 
-    fn priority_for(level: &Level) -> Priority {
-        match *level {
+    fn priority_for(level: Level) -> Priority {
+        match level {
             Level::ERROR => Priority::Error,
             Level::WARN => Priority::Warning,
             Level::INFO => Priority::Info,
@@ -335,7 +335,7 @@ impl<'a> MakeWriter<'a> for Journal {
 
     fn make_writer_for(&'a self, meta: &Metadata<'_>) -> Self::Writer {
         Journal {
-            priority: Some(Self::priority_for(meta.level())),
+            priority: Some(Self::priority_for(*meta.level())),
         }
     }
 }

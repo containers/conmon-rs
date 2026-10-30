@@ -5,6 +5,7 @@
 use crate::{
     attach::{AttachOutput, SharedContainerAttach},
     child::sleep_until,
+    child_reaper::with_stderr,
     container_log::SharedContainerLog,
     random_id::RandomId,
     streams::Streams,
@@ -222,17 +223,9 @@ impl SharedContainerIO {
         Self(Arc::new(RwLock::new(io)))
     }
 
-    /// Read the output of an exec, see [`ContainerIO::read_all_with_timeout`].
-    pub async fn read_all_with_timeout(
-        &self,
-        timeout: Option<Instant>,
-        exited: &CancellationToken,
-    ) -> Result<(Vec<u8>, Vec<u8>, bool)> {
-        self.0
-            .write()
-            .await
-            .read_all_with_timeout(timeout, exited)
-            .await
+    /// Read the output of an exec, see [`ContainerIO::read_all`].
+    pub async fn read_all(&self, exited: &CancellationToken) -> Result<(Vec<u8>, Vec<u8>)> {
+        self.0.write().await.read_all(exited).await
     }
 
     /// Resize the shared container IO to the provided width and height.
@@ -419,7 +412,7 @@ pub enum Pipe {
 
 impl Pipe {
     /// The name of the pipe as used in the logs.
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::StdOut => "stdout",
             Self::StdErr => "stderr",
@@ -623,8 +616,8 @@ impl ContainerIO {
                 } else {
                     let exited = CancellationToken::new();
                     exited.cancel();
-                    match self.read_all_with_early(None, &exited, early).await {
-                        Ok((_, stderr, _)) => stderr,
+                    match self.read_all_with_early(&exited, early).await {
+                        Ok((_, stderr)) => stderr,
                         Err(read_err) => {
                             debug!("Unable to read runtime output: {read_err:#}");
                             vec![]
@@ -635,69 +628,55 @@ impl ContainerIO {
             ContainerIOType::Terminal(_) => vec![],
         };
         self.attach.stop_output();
-        let stderr = String::from_utf8_lossy(&stderr);
-        let stderr = stderr.trim();
-        if stderr.is_empty() {
-            e
-        } else {
-            anyhow::format_err!("{e:#}: {stderr}")
-        }
+        with_stderr(e, &stderr)
     }
 
-    /// Read the output until it ended, but at most until the deadline, and
-    /// return it with whether the deadline passed. Once `exited` got
-    /// cancelled, the output still in flight is taken as long as the
-    /// [`Drain`] does. A background process which holds the pipes open must
-    /// not keep this waiting. The channels get closed afterwards, so that the
-    /// read loops discard what follows.
-    pub async fn read_all_with_timeout(
-        &mut self,
-        time_to_timeout: Option<Instant>,
-        exited: &CancellationToken,
-    ) -> Result<(Vec<u8>, Vec<u8>, bool)> {
+    /// Read the output until it ended. Once `exited` got cancelled, the
+    /// output still in flight is taken as long as the [`Drain`] does. A
+    /// background process which holds the pipes open must not keep this
+    /// waiting. The channels get closed afterwards, so that the read loops
+    /// discard what follows. There is no deadline of its own: the watcher of
+    /// an exec cancels `exited` also when it kills the process at its
+    /// timeout, and a deadline which raced that one would end the output of
+    /// a process which exited right at it.
+    pub async fn read_all(&mut self, exited: &CancellationToken) -> Result<(Vec<u8>, Vec<u8>)> {
         self.consume_stdio();
         let early = self.take_early_stdio().await;
-        self.read_all_with_early(time_to_timeout, exited, early)
-            .await
+        self.read_all_with_early(exited, early).await
     }
 
     /// Read the output after the one collected before, see
-    /// [`ContainerIO::read_all_with_timeout`].
+    /// [`ContainerIO::read_all`].
     async fn read_all_with_early(
         &mut self,
-        time_to_timeout: Option<Instant>,
         exited: &CancellationToken,
         early: EarlyStdio,
-    ) -> Result<(Vec<u8>, Vec<u8>, bool)> {
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
         match self.typ_mut() {
             ContainerIOType::Terminal(t) => {
                 if let Some(message_rx) = t.message_rx_mut() {
-                    let (stdout, timed_out) =
-                        Self::read_stream(time_to_timeout, exited, message_rx, early.stdout).await;
-                    Ok((stdout, vec![], timed_out))
+                    let stdout = Self::read_stream(exited, message_rx, early.stdout).await;
+                    Ok((stdout, vec![]))
                 } else {
-                    bail!("read_all_with_timeout called before message_rx was registered");
+                    bail!("read_all called before message_rx was registered");
                 }
             }
             ContainerIOType::Streams(s) => {
                 let (stdout_rx, stderr_rx) = s.stdio_mut()?;
-                let (stdout, stderr) = tokio::join!(
-                    Self::read_stream(time_to_timeout, exited, stdout_rx, early.stdout),
-                    Self::read_stream(time_to_timeout, exited, stderr_rx, early.stderr),
-                );
-                let timed_out = stdout.1 || stderr.1;
-                Ok((stdout.0, stderr.0, timed_out))
+                Ok(tokio::join!(
+                    Self::read_stream(exited, stdout_rx, early.stdout),
+                    Self::read_stream(exited, stderr_rx, early.stderr),
+                ))
             }
         }
     }
 
     /// Read a stream, after the `early` output collected before.
     async fn read_stream(
-        time_to_timeout: Option<Instant>,
         exited: &CancellationToken,
         receiver: &Receiver<Message>,
         early: EarlyStream,
-    ) -> (Vec<u8>, bool) {
+    ) -> Vec<u8> {
         // Also after the size limit, a process which keeps writing must not
         // wait for this consumer.
         let _close = CloseOnDrop(receiver);
@@ -706,21 +685,19 @@ impl ContainerIO {
         // which handles most exec_sync outputs, doubling handles growth.
         let mut stdio = early.data;
         if early.done || early.truncated {
-            return (stdio, false);
+            return stdio;
         }
         stdio.reserve(4096);
         let mut drain = None;
         loop {
             let res = select! {
-                // An exit before the deadline ends the timeout, the drain is
-                // bounded on its own. Output after that is dropped, it is
-                // still no timeout.
+                // Once the process exited, the drain bounds the reading,
+                // output after it gave up is dropped.
                 biased;
                 () = exited.cancelled(), if drain.is_none() => {
                     drain = Some(Drain::default());
                     continue;
                 }
-                () = sleep_until(time_to_timeout), if drain.is_none() => return (stdio, true),
                 res = Self::next_message(receiver, drain.as_mut()) => res,
             };
             match res {
@@ -730,11 +707,11 @@ impl ContainerIO {
                     }
                     _ => break,
                 },
-                // A closed channel ends the output as well, it is no timeout.
+                // A closed channel ends the output as well.
                 Some(Ok(Message::Done) | Err(RecvError)) | None => break,
             }
         }
-        (stdio, false)
+        stdio
     }
 
     /// The next message, bounded by the drain once the process exited.
@@ -901,7 +878,7 @@ impl ContainerIO {
                         return Ok(());
                     }
                     Errno::EBADF => bail!(e),
-                    Errno::EAGAIN => continue,
+                    Errno::EAGAIN => {}
                     _ => return Err(e).context("read from container file descriptor"),
                 },
             }

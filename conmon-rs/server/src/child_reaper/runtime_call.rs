@@ -89,7 +89,7 @@ impl RuntimeOutput {
         let Some(mut output) = output else {
             return vec![];
         };
-        if time::timeout(ChildReaper::CONNECT_AFTER_EXIT_TIMEOUT, &mut output.task)
+        if time::timeout(ChildReaper::RUNTIME_GRACE, &mut output.task)
             .await
             .is_err()
         {
@@ -97,6 +97,18 @@ impl RuntimeOutput {
             output.task.abort();
         }
         std::mem::take(&mut *lock(&output.stderr)).into_end()
+    }
+}
+
+/// Append the stderr of a runtime which failed to its error, unless it wrote
+/// nothing. It usually holds the reason.
+pub(crate) fn with_stderr(error: anyhow::Error, stderr: &[u8]) -> anyhow::Error {
+    let stderr = String::from_utf8_lossy(stderr);
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        error
+    } else {
+        format_err!("{error:#}: {stderr}")
     }
 }
 
@@ -223,8 +235,7 @@ impl ChildReaper {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .envs(env_vars.iter().map(|(k, v)| (k, v)))
-            .fd_mappings(mappings)
-            .map_err(io::Error::other)?;
+            .fd_mappings(mappings);
         // After the mappings: the pre_exec hooks run in the order they got
         // added, and this one lowers the open files limit to the one the
         // server started with, below which the mappings may have to move a
@@ -236,9 +247,12 @@ impl ChildReaper {
         cmd.spawn()
     }
 
-    /// How long to wait for the console connection of a runtime which already
-    /// exited successfully.
-    pub(super) const CONNECT_AFTER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+    /// How long a runtime gets for what follows its exit or its failure: one
+    /// which exited successfully to connect the terminal, one which failed
+    /// to exit on its own and one which got killed to exit. The helpers of a
+    /// runtime which exited get it to close its output, see
+    /// [`RuntimeOutput::finish`].
+    pub(super) const RUNTIME_GRACE: Duration = Duration::from_secs(5);
 
     /// Run the runtime with the I/O of the process it starts, and return the
     /// PID of the process once the runtime exited. The caller registers it
@@ -283,7 +297,7 @@ impl ChildReaper {
 
         // How long a runtime which failed before it exited may take to exit on
         // its own, none once its deadline passed.
-        let mut grace = Self::CONNECT_AFTER_EXIT_TIMEOUT;
+        let mut grace = Self::RUNTIME_GRACE;
         let connected = match container_io.typ_mut() {
             ContainerIOType::Terminal(terminal) => {
                 output = Some(RuntimeOutput::spawn(
@@ -305,7 +319,7 @@ impl ChildReaper {
                         // The runtime succeeded, so it did connect and the
                         // descriptor is queued already.
                         Ok(status) if status.success() => time::timeout(
-                            Self::CONNECT_AFTER_EXIT_TIMEOUT,
+                            Self::RUNTIME_GRACE,
                             terminal.wait_connected(stdin, token.clone()),
                         )
                         .await
@@ -328,17 +342,23 @@ impl ChildReaper {
 
         let connected = match (connected, runtime_deadline) {
             // A runtime which hangs gets killed once its deadline passed.
-            (Ok(()), Some(deadline)) => match time::timeout_at(deadline, child.wait()).await {
-                Ok(_) => Ok(()),
-                Err(_) => {
+            (Ok(()), Some(deadline)) => {
+                if time::timeout_at(deadline, child.wait()).await.is_ok() {
+                    Ok(())
+                } else {
                     grace = Duration::ZERO;
                     Err(format_err!("runtime did not finish in time"))
                 }
-            },
+            }
             (res, _) => res,
         };
+        // A wait which fails gets cleaned up like a runtime which failed.
         let status = match connected {
-            Ok(()) => child.wait().await.context("wait for runtime")?,
+            Ok(()) => child.wait().await.context("wait for runtime"),
+            Err(e) => Err(e),
+        };
+        let status = match status {
+            Ok(status) => status,
             Err(e) => {
                 token.cancel();
                 let stderr = Self::stop_runtime(child, output, grace).await;
@@ -401,7 +421,7 @@ impl ChildReaper {
             // Its container process gets reparented to this server only once
             // it is gone, the cleanup relies on that. A runtime stuck in the
             // kernel is not waited for forever.
-            match time::timeout(Self::CONNECT_AFTER_EXIT_TIMEOUT, child.wait()).await {
+            match time::timeout(Self::RUNTIME_GRACE, child.wait()).await {
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => debug!("Unable to wait for runtime: {e}"),
                 Err(_) => warn!("Killed runtime did not exit, cleaning up anyway"),
@@ -420,13 +440,7 @@ impl ChildReaper {
         self.cleanup_failed_grandchild(pidfile);
         self.sweep.notify_one();
 
-        let stderr = String::from_utf8_lossy(stderr);
-        let stderr = stderr.trim();
-        let error = if stderr.is_empty() {
-            error
-        } else {
-            format_err!("{error:#}: {stderr}")
-        };
+        let error = with_stderr(error, stderr);
         // The caller logs the error it returns.
         debug!("Failed: {error:#}");
         error

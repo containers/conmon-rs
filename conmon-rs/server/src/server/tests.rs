@@ -34,10 +34,15 @@ async fn cleanup_removes_the_sockets() -> Result<()> {
     assert!(!socket.exists());
     assert!(!fd_socket.exists());
 
-    // An fd socket which was never started is fine, a missing main
-    // socket is reported.
+    // An fd socket which was never started is fine, and so is a socket
+    // which got removed already, like with its directory.
     File::create(&socket)?;
     Server::cleanup(reaper.clone(), &socket, &fd_socket, deadline()).await?;
+    assert!(!socket.exists());
+    Server::cleanup(reaper.clone(), &socket, &fd_socket, deadline()).await?;
+
+    // Other failures are reported.
+    std::fs::create_dir(&socket)?;
     let err = Server::cleanup(reaper, &socket, &fd_socket, deadline())
         .await
         .err()

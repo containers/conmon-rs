@@ -2,11 +2,11 @@ use super::{testing::decode, *};
 
 #[test]
 fn priorities_follow_the_level() {
-    assert_eq!(Journal::priority_for(&Level::ERROR), Priority::Error);
-    assert_eq!(Journal::priority_for(&Level::WARN), Priority::Warning);
-    assert_eq!(Journal::priority_for(&Level::INFO), Priority::Info);
-    assert_eq!(Journal::priority_for(&Level::DEBUG), Priority::Debug);
-    assert_eq!(Journal::priority_for(&Level::TRACE), Priority::Debug);
+    assert_eq!(Journal::priority_for(Level::ERROR), Priority::Error);
+    assert_eq!(Journal::priority_for(Level::WARN), Priority::Warning);
+    assert_eq!(Journal::priority_for(Level::INFO), Priority::Info);
+    assert_eq!(Journal::priority_for(Level::DEBUG), Priority::Debug);
+    assert_eq!(Journal::priority_for(Level::TRACE), Priority::Debug);
 }
 
 #[test]

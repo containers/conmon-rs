@@ -436,7 +436,7 @@ pub(crate) fn input_ended(socket: &UnixSeqpacket) -> io::Result<bool> {
             &mut [PollFd::new(socket.as_fd(), events)],
             PollTimeout::ZERO,
         ) {
-            Err(Errno::EINTR) => continue,
+            Err(Errno::EINTR) => {}
             res => break res? > 0,
         }
     };
@@ -714,7 +714,6 @@ impl Attach {
                         // of its output. The error gets reported only once,
                         // the stdin queued before is still readable.
                         debug!("Attach client reset the connection");
-                        continue;
                     }
                     Errno::EIO => {
                         debug!("Stopping read loop because of IO error");

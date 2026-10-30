@@ -332,8 +332,9 @@ The [fuzz](./fuzz) directory holds [cargo-fuzz](https://github.com/rust-fuzz/car
 targets for what clients and containers send: the streaming protocols (SPDY
 frames, header blocks and connections, WebSocket messages, resize events,
 upgrade headers and port forward queries, the setup of exec, attach and port
-forward sessions and their pending stdin), the container output as log lines
-and the notify messages, and for the journal entries the server writes.
+forward sessions and their pending stdin), the container output as log lines,
+the notify messages and the process stat files with their command names, and
+for the journal entries the server writes.
 `cargo fuzz list` lists them, each file in
 [fuzz/fuzz_targets](./fuzz/fuzz_targets) tells what its target covers. They
 need a nightly toolchain, for example `cargo +nightly fuzz run spdy_frames`, CI

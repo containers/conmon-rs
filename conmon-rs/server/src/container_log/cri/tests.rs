@@ -84,6 +84,32 @@ async fn rotate_on_exceeded_size_across_chunks() -> Result<()> {
 }
 
 #[tokio::test]
+async fn failed_rotation_keeps_the_rest_of_the_chunk() -> Result<()> {
+    // The second entry exceeds the size, the third one still fits.
+    let max_size = entry("stdout", "F", "abcd").len() + entry("stdout", "F", "a").len();
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("log");
+    let mut sut = CriLogger::new(&path, Some(max_size));
+    sut.freeze_timestamp(TIMESTAMP);
+    sut.init().await?;
+
+    // Keep the open file reachable, then make the rotation fail by putting
+    // a directory in its place.
+    let old = dir.path().join("old");
+    std::fs::hard_link(&path, &old)?;
+    std::fs::remove_file(&path)?;
+    std::fs::create_dir(&path)?;
+
+    let res = sut.write_chunk(Pipe::StdOut, b"abcd\nabcd\na\n").await;
+    assert!(res.is_err());
+    assert_eq!(
+        std::fs::read_to_string(&old)?,
+        entry("stdout", "F", "abcd") + &entry("stdout", "F", "a")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn timestamp_is_rfc3339() -> Result<()> {
     let file = NamedTempFile::new()?;
     let mut sut = CriLogger::new(file.path(), None);

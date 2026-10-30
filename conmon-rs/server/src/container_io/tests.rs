@@ -155,10 +155,8 @@ async fn read_stream_does_not_append_to_truncated_output() {
         truncated: true,
         tail: Tail::default(),
     };
-    let (stdio, timed_out) =
-        ContainerIO::read_stream(None, &CancellationToken::new(), &rx, early).await;
+    let stdio = ContainerIO::read_stream(&CancellationToken::new(), &rx, early).await;
     assert_eq!(stdio, b"early");
-    assert!(!timed_out);
     assert!(rx.is_closed());
 }
 
@@ -189,8 +187,7 @@ async fn exec_output_during_runtime_is_kept() -> Result<()> {
     time::sleep(Duration::from_millis(100)).await;
 
     token.cancel();
-    let (stdout, _, timed_out) = io.read_all_with_timeout(None, &token).await?;
-    assert!(!timed_out);
+    let (stdout, _) = io.read_all(&token).await?;
     let expected: String = (1..=300).map(|i| format!("{i}\n")).collect();
     assert_eq!(String::from_utf8(stdout)?, expected);
     Ok(())
@@ -213,10 +210,7 @@ async fn read_stream_after_exit_is_bounded_in_time() {
     let exited = CancellationToken::new();
     exited.cancel();
     let start = Instant::now();
-    let deadline = start + Duration::from_secs(10);
-    let (stdio, timed_out) =
-        ContainerIO::read_stream(Some(deadline), &exited, &rx, EarlyStream::default()).await;
-    assert!(!timed_out);
+    let stdio = ContainerIO::read_stream(&exited, &rx, EarlyStream::default()).await;
     assert_eq!(start.elapsed(), DRAIN_MAX_WAIT);
     assert_eq!(stdio.len(), 12);
     assert!(rx.is_closed());
@@ -413,10 +407,8 @@ async fn exec_output_is_capped_without_blocking() -> Result<()> {
         writer.write_all(&output).await
     });
 
-    let (stdout, timed_out) =
-        ContainerIO::read_stream(None, &CancellationToken::new(), &rx, EarlyStream::default())
-            .await;
-    assert!(!timed_out);
+    let stdout =
+        ContainerIO::read_stream(&CancellationToken::new(), &rx, EarlyStream::default()).await;
     assert!(stdout.len() < ContainerIO::MAX_STDIO_STREAM_SIZE);
     // At most the chunk which crossed the limit is missing.
     assert!(stdout.len() > ContainerIO::MAX_STDIO_STREAM_SIZE - 64 * 1024);
@@ -428,25 +420,35 @@ async fn exec_output_is_capped_without_blocking() -> Result<()> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn timeout_returns_partial_output() -> Result<()> {
+async fn read_stream_keeps_reading_until_the_exit() {
+    // The watcher of the process tells when it exited, or killed it at its
+    // timeout, the output written right before that belongs to it.
     let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
-    tx.send(Message::Data("partial".into(), Pipe::StdOut))
-        .await?;
+    let exited = CancellationToken::new();
+    let writer = tokio::spawn({
+        let exited = exited.clone();
+        async move {
+            time::sleep(Duration::from_secs(3600)).await;
+            tx.send(Message::Data(Bytes::from_static(b"last"), Pipe::StdOut))
+                .await
+                .expect("send");
+            exited.cancel();
+            // A process left behind keeps the pipe open.
+            time::sleep(Duration::from_secs(3600)).await;
+            drop(tx);
+        }
+    });
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let (stdout, timed_out) = ContainerIO::read_stream(
-        Some(deadline),
-        &CancellationToken::new(),
-        &rx,
-        EarlyStream::default(),
-    )
-    .await;
-    assert_eq!(stdout, b"partial");
-    assert!(timed_out);
-    assert_eq!(Instant::now(), deadline);
-    // The channel got closed for the read loop.
-    assert!(tx.is_closed());
-    Ok(())
+    let start = Instant::now();
+    let stdio = ContainerIO::read_stream(&exited, &rx, EarlyStream::default()).await;
+    assert_eq!(stdio, b"last");
+    let elapsed = start.elapsed();
+    assert!(elapsed >= Duration::from_secs(3600), "{elapsed:?}");
+    assert!(
+        elapsed <= Duration::from_secs(3600) + DRAIN_MAX_WAIT,
+        "{elapsed:?}"
+    );
+    writer.abort();
 }
 
 #[tokio::test(start_paused = true)]
@@ -459,10 +461,7 @@ async fn exit_ends_read_while_pipe_is_held_open() -> Result<()> {
 
     let read = task::spawn({
         let exited = exited.clone();
-        async move {
-            let deadline = Instant::now() + Duration::from_secs(60);
-            ContainerIO::read_stream(Some(deadline), &exited, &rx, EarlyStream::default()).await
-        }
+        async move { ContainerIO::read_stream(&exited, &rx, EarlyStream::default()).await }
     });
     task::yield_now().await;
     exited.cancel();
@@ -470,54 +469,22 @@ async fn exit_ends_read_while_pipe_is_held_open() -> Result<()> {
     tx.send(Message::Data("exit".into(), Pipe::StdOut)).await?;
 
     let start = Instant::now();
-    let (stdout, timed_out) = read.await?;
+    let stdout = read.await?;
     assert_eq!(stdout, b"before exit");
-    assert!(!timed_out);
     assert!(start.elapsed() < Duration::from_secs(1));
     Ok(())
 }
 
 #[tokio::test(start_paused = true)]
-async fn exit_before_the_deadline_is_no_timeout() -> Result<()> {
-    let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
-    let exited = CancellationToken::new();
-    let deadline = Instant::now() + Duration::from_secs(1);
-    let read = task::spawn({
-        let exited = exited.clone();
-        async move {
-            ContainerIO::read_stream(Some(deadline), &exited, &rx, EarlyStream::default()).await
-        }
-    });
-
-    time::sleep(Duration::from_millis(950)).await;
-    tx.send(Message::Data("before ".into(), Pipe::StdOut))
-        .await?;
-    exited.cancel();
-    // The output still drains past the deadline.
-    time::sleep(Duration::from_millis(80)).await;
-    tx.send(Message::Data("exit".into(), Pipe::StdOut)).await?;
-
-    let (stdout, timed_out) = read.await?;
-    assert_eq!(stdout, b"before exit");
-    assert!(!timed_out);
-    Ok(())
-}
-
-#[tokio::test(start_paused = true)]
-async fn closed_channel_is_no_timeout() -> Result<()> {
+async fn closed_channel_ends_the_output() -> Result<()> {
     let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
     tx.send(Message::Data("data".into(), Pipe::StdOut)).await?;
     drop(tx);
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let (stdout, timed_out) = ContainerIO::read_stream(
-        Some(deadline),
-        &CancellationToken::new(),
-        &rx,
-        EarlyStream::default(),
-    )
-    .await;
+    let start = Instant::now();
+    let stdout =
+        ContainerIO::read_stream(&CancellationToken::new(), &rx, EarlyStream::default()).await;
     assert_eq!(stdout, b"data");
-    assert!(!timed_out);
+    assert_eq!(start.elapsed(), Duration::ZERO);
     Ok(())
 }

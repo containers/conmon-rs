@@ -71,7 +71,7 @@ async fn sweep_in_own_process() -> Result<()> {
     assert!(!has_zombie());
     let orphan = spawn_zombie(0)?;
     let claimed = spawn_zombie(0)?;
-    lock(&reaper.pending).insert(claimed);
+    let _claimed = PendingPid::new(&reaper.pending, claimed);
     assert!(has_zombie());
 
     // Both ways of listing the children find them.
@@ -358,11 +358,11 @@ async fn failed_create_cleanup_spares_claimed_pid() -> Result<()> {
     std::fs::write(&pidfile, pid.to_string())?;
 
     // A stale PID file naming a process this server waits for.
-    lock(&reaper.pending).insert(pid);
+    let pending = PendingPid::new(&reaper.pending, pid);
     reaper.cleanup_failed_grandchild(&pidfile);
     assert!(!is_gone(pid) && !is_zombie(pid));
 
-    lock(&reaper.pending).remove(&pid);
+    drop(pending);
     reaper.cleanup_failed_grandchild(&pidfile);
     wait_for_real(|| is_gone(pid)).await;
     Ok(())
@@ -381,9 +381,24 @@ async fn registration_keeps_the_child_claimed() -> Result<()> {
     let child = child(sh.pid, None, &dir.path().join("exit"), &[])?;
     reaper.watch_grandchild(child, vec![], call)?;
     assert!(reaper.is_claimed(sh.pid));
-    assert!(!lock(&reaper.pending).contains(&sh.pid));
+    assert!(!lock(&reaper.pending).contains_key(&sh.pid));
     assert!(!reaper.calls_in_progress());
     Ok(())
+}
+
+#[test]
+fn pending_marks_of_a_reused_pid_are_counted() {
+    let reaper = ChildReaper::default();
+    let pid = Pid::from_raw(1234);
+    // The runtime of one call got reaped, its PID went to the process of
+    // another call, before the first call ended.
+    let runtime = PendingPid::new(&reaper.pending, pid);
+    let process = PendingPid::new(&reaper.pending, pid);
+    drop(runtime);
+    assert!(reaper.is_claimed(pid));
+    drop(process);
+    assert!(!reaper.is_claimed(pid));
+    assert!(lock(&reaper.pending).is_empty());
 }
 
 #[tokio::test]

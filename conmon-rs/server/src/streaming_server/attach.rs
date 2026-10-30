@@ -81,7 +81,7 @@ impl StreamingServer {
         }
 
         // Until nothing is left to forward in either direction.
-        while !(done && !input.stdin_open) {
+        while !done || input.stdin_open {
             tokio::select! {
                 res = attach_rx.recv(), if !done => match res {
                     Ok(IOMessage::Done) => done = true,

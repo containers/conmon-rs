@@ -110,5 +110,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "proc_stat"
+path = "fuzz_targets/proc_stat.rs"
+test = false
+doc = false
+bench = false
+
 [lints]
 workspace = true

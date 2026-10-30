@@ -350,8 +350,11 @@ pub(super) struct StartedExec {
 
 /// Ends an exec session however it ends, also if the client went away and
 /// the loop got aborted, or before the process even got started. The loop
-/// only ends before the exit of the process if the connection is gone or
-/// the exit got lost.
+/// ends before the exit of the process if the connection is gone, if the
+/// client sent a message which is too large, or if the session hit the idle
+/// timeout or lost the exit. Only the last two kill the process, see
+/// [`ExecTeardown::kill`], the others close its stdin or hang up its
+/// terminal.
 pub(super) struct ExecTeardown {
     /// The stdout and stderr channels of the process.
     stdio: Option<(IOReceiver<IOMessage>, IOReceiver<IOMessage>)>,

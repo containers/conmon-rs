@@ -4,7 +4,7 @@
 //! offset and the payload base64 encoded.
 
 use crate::streaming_server::web::Message;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use data_encoding::BASE64;
 use tracing::debug;
 
@@ -25,10 +25,11 @@ pub fn message(base64: bool, channel: u8, data: &[u8]) -> Message {
 
 /// The channel and the payload of a message of the client, none for an
 /// empty one or invalid base64. Binary payloads do not get copied.
-pub fn decode(base64: bool, message: Bytes) -> Option<(u8, Bytes)> {
+pub fn decode(base64: bool, mut message: Bytes) -> Option<(u8, Bytes)> {
     let &channel = message.first()?;
     if !base64 {
-        return Some((channel, message.slice(1..)));
+        message.advance(1);
+        return Some((channel, message));
     }
     match BASE64.decode(&message[1..]) {
         Ok(payload) => Some((channel.wrapping_sub(b'0'), payload.into())),

@@ -450,15 +450,14 @@ impl StreamingServer {
         timeout: Option<Duration>,
         on_idle: impl FnOnce(),
     ) -> Result<()> {
-        match activity.until_idle(timeout, run, on_idle).await {
-            Some(result) => result,
-            None => {
-                info!("Closing idle connection");
-                bail!(
-                    "no activity on the connection for the idle timeout of {:?}",
-                    timeout.unwrap_or_default()
-                )
-            }
+        if let Some(result) = activity.until_idle(timeout, run, on_idle).await {
+            result
+        } else {
+            info!("Closing idle connection");
+            bail!(
+                "no activity on the connection for the idle timeout of {:?}",
+                timeout.unwrap_or_default()
+            )
         }
     }
 

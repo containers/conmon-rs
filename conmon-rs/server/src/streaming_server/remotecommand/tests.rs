@@ -294,11 +294,11 @@ async fn late_resize_streams_survive_a_cancelled_next() -> Result<()> {
             data: Bytes::from_static(b"{\"Width\":1,\"Height\":2}\n"),
         })
         .await?;
-    // The resets the client got, until it got nothing for a second.
+    // The resets the client got, until the connection ended. A pause of the
+    // frames, like on a slow machine, must not end the collection early.
     let resets = tokio::spawn(async move {
         let mut resets = vec![];
-        while let Ok(Ok(Some(frame))) = time::timeout(Duration::from_secs(1), client.frame()).await
-        {
+        while let Ok(Some(frame)) = client.frame().await {
             if let Frame::RstStream { stream_id, .. } = frame {
                 resets.push(stream_id);
             }
@@ -311,9 +311,11 @@ async fn late_resize_streams_survive_a_cancelled_next() -> Result<()> {
             b"{\"Width\":1,\"Height\":2}"
         )))
     );
+    // Ends the connection once the frames which are queued went out.
+    assert!(output.close().await);
+    drop((input, output));
     let resets = time::timeout(Duration::from_secs(10), resets).await??;
     assert!(!resets.contains(&5), "{resets:?}");
-    drop((input, output));
     Ok(())
 }
 

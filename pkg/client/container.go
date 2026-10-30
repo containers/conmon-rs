@@ -273,7 +273,10 @@ type ExecSyncConfig struct {
 	// the context ends the call. The server needs at least one second, with
 	// less time left the command may outlive the caller by less than a
 	// second. A context which already ended fails the call without running
-	// the command.
+	// the command. Collecting the output still in flight after the command
+	// exited or got killed takes up to another second if a background
+	// process keeps writing it, a Timeout more than a second below the
+	// deadline keeps the context from ending the call first.
 	//
 	// A context which ends without a deadline, for example because it got
 	// cancelled, only ends the call: the server does not stop the command,

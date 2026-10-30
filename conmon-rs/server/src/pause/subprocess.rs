@@ -212,7 +212,7 @@ impl Pause {
                     debug!("Got signal {signal}, exiting pause init");
                     return Ok(());
                 }
-                Err(Errno::EINTR) => continue,
+                Err(Errno::EINTR) => {}
                 Err(e) => return Err(e).context("wait for signals"),
             }
         }
@@ -239,7 +239,7 @@ impl Pause {
             match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
                 Ok(WaitStatus::StillAlive) | Err(Errno::ECHILD) => return,
                 Ok(status) => trace!("Reaped child: {status:?}"),
-                Err(Errno::EINTR) => continue,
+                Err(Errno::EINTR) => {}
                 Err(e) => {
                     warn!("Unable to reap children: {e:#}");
                     return;
