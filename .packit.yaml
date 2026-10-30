@@ -21,8 +21,8 @@ jobs:
       # cover as well.
       - fedora-rawhide-s390x
       # Their Rust has to be at least the rust-version of Cargo.toml, like
-      # the commit builds into podman-next need it for all its chroots.
-      - centos-stream-9-x86_64
+      # the commit builds into podman-next need it for all its chroots. The
+      # EPEL ones cover EL, a CentOS Stream one has no capnproto without EPEL.
       - epel-9-x86_64
       - epel-9-aarch64
       - epel-10-x86_64

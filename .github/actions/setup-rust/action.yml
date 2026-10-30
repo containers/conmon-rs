@@ -25,6 +25,9 @@ inputs:
   save-if:
     description: Whether to save the caches, like SAVE_CACHE of the ci workflow.
     default: "false"
+  cache:
+    description: Whether to restore the caches, a job whose caches nothing saves skips them.
+    default: "true"
 runs:
   using: composite
   steps:
@@ -57,7 +60,14 @@ runs:
           fi
         done
         rustup toolchain list
+    # rust-cache turns off the incremental compilation, which only costs time
+    # and space for a build of CI.
+    - name: Disable incremental compilation
+      if: inputs.cache != 'true'
+      shell: bash
+      run: echo "CARGO_INCREMENTAL=0" >>"$GITHUB_ENV"
     - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      if: inputs.cache == 'true'
       with:
         key: ${{ inputs.key }}
         save-if: ${{ inputs.save-if }}

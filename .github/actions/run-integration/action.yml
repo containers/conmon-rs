@@ -1,0 +1,151 @@
+name: run-integration
+description: >-
+  Runs the integration tests as root against a server binary with crun,
+  reports the flaky specs and failed tests and uploads the report of the
+  specs. It sets up the Go of go.mod with its caches and ginkgo, the jobs on
+  the same runner image share the caches, and with save-cache saves them at
+  the end as the runner user. Used by the test-integration jobs, which test
+  the shipped binary, and by test-integration-coverage, which tests an
+  instrumented one.
+inputs:
+  conmon-binary:
+    description: The server binary to test.
+    required: true
+  max-rss-kb:
+    description: The resident set size every spec checks the server against, see the Makefile.
+    required: true
+  max-rss-growth-kb:
+    description: How much the resident set size may grow in the memory leak specs, the one of the Makefile if empty.
+    default: ""
+  test-flags:
+    description: Additional flags of ginkgo.
+    default: ""
+  test-env:
+    description: Additional environment variables of the tests, one NAME=VALUE per line.
+    default: ""
+  report-name:
+    description: The name of the artifact of the report.
+    required: true
+  allow-failure:
+    description: Whether the action passes if the tests fail, the outcome output tells.
+    default: "false"
+  restore-test-files:
+    description: Whether to restore the cache of the files the tests download, they only do on x86.
+    default: "false"
+  save-test-files:
+    description: Whether to save the cache of the files the tests download on a miss, which restores it as well.
+    default: "false"
+  save-cache:
+    description: Whether to save the Go and ginkgo caches on a miss, like SAVE_CACHE of the ci workflow.
+    default: "false"
+outputs:
+  outcome:
+    description: The outcome of the tests, failure if they failed.
+    value: ${{ steps.integration.outcome }}
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/setup-go
+      id: go
+    # The tests run as root and keep their files per user ID.
+    - name: Restore Testfiles Cache
+      id: test-files
+      if: inputs.restore-test-files == 'true' || inputs.save-test-files == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          /tmp/conmon-test-images-0
+        key: integration-test-files-${{ runner.os }}-${{ hashFiles('pkg/client/integration/files_test.go') }}
+    - shell: bash
+      run: .github/install-crun
+    # The tests run as root, whose PATH has to find the same Go.
+    - name: Link Go into /usr/bin
+      shell: bash
+      run: sudo ln -f -s "$(go env GOROOT)"/bin/* /usr/bin/
+    # The tests run as root, the modules and ginkgo get downloaded as the
+    # runner user before, so that the caches hold them on a miss.
+    - name: Download Go modules
+      shell: bash
+      run: |
+        go mod download
+        go -C pkg/client/integration mod download
+    - uses: ./.github/actions/setup-ginkgo
+      with:
+        save: ${{ inputs.save-cache }}
+    # The output names the failed plain Go tests, which the report of the
+    # specs does not, see .github/report-flakes.
+    - name: Integration tests
+      id: integration
+      continue-on-error: ${{ inputs.allow-failure == 'true' }}
+      shell: bash
+      env:
+        BINARY: ${{ inputs.conmon-binary }}
+        RSS_KB: ${{ inputs.max-rss-kb }}
+        RSS_GROWTH_KB: ${{ inputs.max-rss-growth-kb }}
+        EXTRA_FLAGS: ${{ inputs.test-flags }}
+        EXTRA_ENV: ${{ inputs.test-env }}
+      run: |
+        mkdir -p .build/report
+        # sudo sets HOME to the one of root, which would leave the Go
+        # caches unused, and sudo-rs, as on ubuntu-26.04, ignores -E, so
+        # env sets what has to reach the tests on every runner, including
+        # the busybox of the other architectures.
+        TEST_ENV=(
+          GOMODCACHE="$(go env GOMODCACHE)"
+          GOTOOLCHAIN="$(go env GOTOOLCHAIN)"
+          GOCACHE="$(go env GOCACHE)"
+          BUSYBOX_BINARY="${BUSYBOX_BINARY:-}"
+        )
+        while IFS= read -r LINE; do
+          if [[ -z $LINE ]]; then
+            continue
+          fi
+          if [[ ! $LINE =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+            echo "::error::Not a NAME=VALUE environment variable: $LINE"
+            exit 1
+          fi
+          TEST_ENV+=("$LINE")
+        done <<<"$EXTRA_ENV"
+        MAKE_VARS=(
+          RUNTIME_PATH=/usr/bin/crun
+          CONMON_BINARY="$BINARY"
+          MAX_RSS_KB="$RSS_KB"
+        )
+        if [[ -n $RSS_GROWTH_KB ]]; then
+          MAKE_VARS+=(MAX_RSS_GROWTH_KB="$RSS_GROWTH_KB")
+        fi
+        sudo -E env "${TEST_ENV[@]}" make integration "${MAKE_VARS[@]}" \
+          TEST_FLAGS="--flake-attempts 3 --output-dir .build/report --json-report report.json${EXTRA_FLAGS:+ $EXTRA_FLAGS}" 2>&1 |
+          tee .build/report/output.log
+    - name: Report flaky specs and failed tests
+      if: ${{ !cancelled() }}
+      shell: bash
+      run: .github/report-flakes .build/report/report.json .build/report/output.log
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      if: ${{ !cancelled() }}
+      with:
+        name: ${{ inputs.report-name }}
+        path: .build/report/report.json
+    # The files the tests downloaded on a miss, also if they failed, but not
+    # the directory alone, which a failed download leaves behind.
+    - name: Check the test files
+      id: test-files-complete
+      if: ${{ !cancelled() && inputs.save-test-files == 'true' }}
+      shell: bash
+      run: |
+        if [[ -f /tmp/conmon-test-images-0/busybox ]]; then
+          echo "complete=true" >>"$GITHUB_OUTPUT"
+        fi
+    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: ${{ !cancelled() && inputs.save-test-files == 'true' && steps.test-files.outputs.cache-hit != 'true' && steps.test-files-complete.outputs.complete == 'true' }}
+      with:
+        path: |
+          /tmp/conmon-test-images-0
+        key: ${{ steps.test-files.outputs.cache-primary-key }}
+    # The tests write into the caches as root, the action saves them as the
+    # runner user.
+    - uses: ./.github/actions/save-go
+      if: inputs.save-cache == 'true' && steps.go.outputs.cache-hit != 'true'
+      with:
+        key: ${{ steps.go.outputs.key }}
+        paths: ${{ steps.go.outputs.paths }}

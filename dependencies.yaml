@@ -228,9 +228,18 @@ dependencies:
         match: "binfmt:qemu-v"
 
   # The runners of the jobs which run the server, the other jobs use
-  # ubuntu-latest.
+  # ubuntu-latest, besides the one below.
   - name: ubuntu-runner
     version: 24.04
     refPaths:
       - path: .github/workflows/ci.yml
         match: "runs-on: ubuntu-[0-9]"
+
+  # The arm64 runner of the test-unit-arch jobs, which there is no
+  # ubuntu-latest for. It runs no server, so it can move to a newer release
+  # than the runners above, like the ubuntu-latest of the other architectures.
+  - name: ubuntu-arm-runner
+    version: 24.04
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: "runner: ubuntu-[0-9]"
