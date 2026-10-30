@@ -75,7 +75,7 @@ starts for it:
 
 | Entry                          | Effect                                                                                                                                                                                                                                                  | Since CRI-O |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| `LOG_DRIVER=<driver>`          | The server log driver (`--log-driver`): `systemd`, `stdout` or `none`. Without it, CRI-O starts the servers with `none`, so they write no logs (since unreleased, except for the message of a panic), see [Troubleshooting](#troubleshooting).          | v1.34       |
+| `LOG_DRIVER=<driver>`          | The server log driver (`--log-driver`): `systemd`, `stdout` or `none`. Without it, CRI-O starts the servers with `none`, so they write no logs (since v1.2.2, except for the message of a panic), see [Troubleshooting](#troubleshooting).              | v1.34       |
 | `HEAPTRACK_OUTPUT_PATH=<path>` | Profiles the memory of the servers with heaptrack, see [Troubleshooting](#troubleshooting).                                                                                                                                                             | v1.34       |
 | `HEAPTRACK_BINARY_PATH=<path>` | The heaptrack binary, also enables the profiling.                                                                                                                                                                                                       | v1.34       |
 | Any other `KEY=value`          | Part of the environment of the server, which passes it on to the runtime, its hooks and the cleanup commands, together with `CRI_O_EXTERNAL=1` and the `PATH` and `XDG_RUNTIME_DIR` of CRI-O. `CONMON_*` variables configure the server like its flags. | v1.38       |
@@ -201,7 +201,7 @@ of the request. If the file name of the runtime is `crun`, it also adds
 `--log=journald:<container ID>`, and for the log levels `trace` and `debug`
 of the server `--log-level=debug`, for `warn` `--log-level=warning` and for
 `error` `--log-level=error`. crun keeps its default for `info` and `off`, and
-before unreleased for `trace` as well.
+before v1.2.2 for `trace` as well.
 
 On SIGTERM or SIGINT, the server kills the containers, stops the pause process
 and removes its sockets within 9.5 seconds, before `Shutdown` of the Go client
@@ -231,7 +231,7 @@ Each requested namespace is unshared and bind mounted to
 namespaces alive, except for a PID namespace, which dies with its init process.
 Only when `--pid` is requested a pause process stays behind, its PID is written
 to `$BASE_PATH/conmonrs/$POD_ID.pid`. The mounts and the pause process are
-removed when the server shuts down. Since unreleased, the bind mounts get
+removed when the server shuts down. Since v1.2.2, the bind mounts get
 unmounted lazily (`MNT_DETACH`), a process which still holds one open keeps its
 namespace alive until it lets go of it. Before, a bind path which a process
 held open stayed mounted and its file stayed behind.
@@ -260,14 +260,14 @@ matches them with errors like `ErrContainerNotFound`.
 ### Attach socket
 
 `attachContainer` makes the server listen on a `SOCK_SEQPACKET` UNIX socket at
-the requested path, which has to be absolute since unreleased. Packets from the
+the requested path, which has to be absolute since v1.2.2. Packets from the
 client are the container's stdin, passed on as they are, NUL bytes included. A
-packet of more than 33 KiB (64 KiB before unreleased) gets truncated to its
+packet of more than 33 KiB (64 KiB before v1.2.2) gets truncated to its
 first 33 KiB. The Go client sends one read of its stdin per packet, at most
 32 KiB plus the start of a detach key sequence which it held back. The client's
 input ends when it shuts down the write side of its connection. Packets to the
 client start with one byte selecting the stream, `2` for stdout and `3` for
-stderr, followed by up to 8192 bytes of data, since unreleased. Before, a
+stderr, followed by up to 8192 bytes of data, since v1.2.2. Before, a
 packet had at most 8191 bytes of data, which split every full read of 8 KiB in
 two. A single `0` byte tells the client that the container output ended. This
 is the same protocol conmon speaks, so existing attach clients work unchanged.
@@ -331,7 +331,7 @@ stderr which come after the start end right away. The server supports
 decides. From v4 on, the final status is JSON, before only a failure is
 reported as text.
 
-Since unreleased, a client which takes the end of a session slowly, the
+Since v1.2.2, a client which takes the end of a session slowly, the
 output queued for it, the status and the close, gets all of it, only one which
 takes nothing of it for 60 seconds gets its connection closed. Before, a client
 which did not take all of it within a few seconds lost the rest, and client-go
@@ -349,10 +349,10 @@ kernel gives up resending to it, after 15 to 30 minutes with the default
 `tcp_retries2` of 15: there is no keepalive.
 
 An exec process which writes more than 16 MiB to stdout or stderr while the
-runtime still starts it gets its output cut there. Since unreleased, the
+runtime still starts it gets its output cut there. Since v1.2.2, the
 session then fails with an error status instead of reporting the exit code.
 
-Since unreleased, an exec process without a terminal whose client went away
+Since v1.2.2, an exec process without a terminal whose client went away
 gets the end of its stdin and its output pipes closed, so that its writes
 fail. Before, its output got read and dropped until it exited, which still
 happens with a terminal after its SIGHUP. Only the idle timeout or a lost exit
@@ -371,7 +371,7 @@ SPDY/3.1, which the API server also translates the WebSocket of kubectl to.
 Per forwarded connection the client opens an `error` and a `data` stream
 with the `port` and `requestID` headers. The
 server connects to that port on `localhost` within the network namespace of
-the request, whose `netNsPath` has to be absolute since unreleased, and copies
+the request, whose `netNsPath` has to be absolute since v1.2.2, and copies
 between the connection and the data stream, a failure is reported as text on
 the error stream, what the client sends on it gets dropped. Only what the SPDY
 implementation of Kubernetes uses is supported. There is no flow control: once
@@ -403,7 +403,7 @@ like `?port=80&port=443`, as CRI-O does.
 | -------------------------------------------------------------- | --------------------------------------------------------------------- |
 | URLs which wait for their client, per kind                     | 1000, see above                                                       |
 | Time until the token of an unused URL expires                  | 60 seconds, the first connection takes it                             |
-| WebSocket message or frame of the client                       | 1 MiB, 4 MiB for exec and attach since unreleased, more ends it       |
+| WebSocket message or frame of the client                       | 1 MiB, 4 MiB for exec and attach since v1.2.2, more ends it           |
 | Stdin of a session which the process did not take yet          | About 9 MiB, on top of what a SPDY connection holds                   |
 | What the client sent on a SPDY connection which no stream took | About 4 MiB, plus the frame which waits to be placed                  |
 | What a forwarded connection sends while it gets established    | 1 MiB per connection, from a connect budget of 16 MiB per session     |
@@ -412,9 +412,9 @@ like `?port=80&port=443`, as CRI-O does.
 | Ports of the WebSocket port forward protocol                   | 40                                                                    |
 | Connections which did not get upgraded yet                     | 256 since v1.2.1, see [Streaming security](#streaming-security)       |
 | Time to send the request head, to get upgraded                 | 5 seconds, 10 seconds, see [Streaming security](#streaming-security)  |
-| Request head                                                   | 64 KiB since unreleased, a larger one gets a 431                      |
+| Request head                                                   | 64 KiB since v1.2.2, a larger one gets a 431                          |
 | Exec output while the runtime starts the process               | 16 MiB per stream, the session fails above, see above                 |
-| End of a session the client takes nothing of                   | 60 seconds or a longer exec or attach idle timeout, since unreleased  |
+| End of a session the client takes nothing of                   | 60 seconds or a longer exec or attach idle timeout, since v1.2.2      |
 | Idle connection                                                | The `idleTimeoutSec` of the request, see below                        |
 
 `idleTimeoutSec` ends a connection which got no frame of the client and no
@@ -473,14 +473,14 @@ single request, it has 5 seconds to send the head of the request and 10 seconds
 until it got upgraded, otherwise the server closes it. A local process which
 holds all of these connections open delays the requests of others by up to 5
 seconds, as it has to send a request head within that time, but cannot use up
-the file descriptors of the server. Since unreleased, the head of a request may
+the file descriptors of the server. Since v1.2.2, the head of a request may
 take at most 64 KiB, a larger one gets a 431, so that these connections hold
 about 16 MiB at most.
 
 The logs show only the first 8 hex digits of a token, which tell the sessions
 apart but are not enough to use one. Responses never name the token: a request
 for a token which is unknown, used or expired gets a bare 404, one whose token
-is not 32 lowercase hex digits a 400 `Invalid URL`. Since unreleased, uppercase
+is not 32 lowercase hex digits a 400 `Invalid URL`. Since v1.2.2, uppercase
 hex digits get the 400 as well, before they matched the token like lowercase
 ones.
 
@@ -505,7 +505,7 @@ documentation of [fd_socket.rs](conmon-rs/server/src/fd_socket.rs).
 
 Beyond its version, `version` reports the optional features of a server,
 which clients check before they rely on them. `conmonrs --version-json` prints
-them as well, and so does `conmonrs --version` since unreleased:
+them as well, and so does `conmonrs --version` since v1.2.2:
 
 | Feature              | Since  | What the server does                                                                                                        |
 | -------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------- |
@@ -541,7 +541,7 @@ the log, like `kubectl logs -f`, reads the old file to its end first.
 `reopenLogContainer`, which CRI-O calls after the kubelet rotated the log,
 starts a new file at the path the same way. The server appends to the log
 files, so a file which gets truncated in place, for example to free disk
-space, continues at its new end. Since unreleased, a log file which exists
+space, continues at its new end. Since v1.2.2, a log file which exists
 when the container gets created is appended to like with conmon instead of
 truncated, its content counts for the maximum size. A write which fails in the
 middle of an entry, like on a full disk, drops the rest of the entries read
@@ -552,7 +552,7 @@ it again.
 
 - `containerRuntimeInterface`: the CRI log format, one line per entry with an
   RFC 3339 timestamp in nanoseconds of when the server read the output, the
-  stream, a `P` (partial) or `F` (full) marker and the line. Since unreleased,
+  stream, a `P` (partial) or `F` (full) marker and the line. Since v1.2.2,
   the files it creates are readable by their group (mode `0640`) like with
   conmon, before only by their owner.
 - `json`: one JSON object per line with `timestamp` (seconds since the epoch),
@@ -570,7 +570,7 @@ it again.
   fields, see `labels` in the schema for the rules and limits. journald drops
   entries with more than 1024 fields. Like for conmon, the `SYSLOG_IDENTIFIER`
   is the `tag`, the `containerName` without one, and the short ID without
-  both, since unreleased. Before, it was `conmonrs` without a `tag`.
+  both, since v1.2.2. Before, it was `conmonrs` without a `tag`.
 
 The JSON and journald drivers collect whole lines across reads, so a line
 written in several pieces or a multi byte character split by a read still
@@ -611,10 +611,10 @@ leaf is gone at the exit, a kill in that cgroup which the leaf did not account
 for, together with an exit by `SIGKILL` (status 137), counts as an OOM, which
 may also be the one of another container in it. Without such a cgroup, or if
 its counters cannot be read, an exit by `SIGKILL` with the leaf gone counts as
-an OOM as well. Before unreleased, the server watched the parent of the leaf
+an OOM as well. Before v1.2.2, the server watched the parent of the leaf
 instead of that ancestor, the container scope which the systemd cgroup manager
 removes along with the leaf, so that any exit by `SIGKILL` with the leaf gone
-counted as an OOM. Since unreleased, a leaf without the memory controller,
+counted as an OOM. Since v1.2.2, a leaf without the memory controller,
 which has no `memory.events`, is not gone: a kill counted by the cgroup above
 it may be an OOM the same way, but without such a cgroup, or if its counters
 cannot be read, nothing counts as one.
@@ -630,15 +630,15 @@ does not count.
 
 ## Troubleshooting
 
-| Symptom                                                                       | Cause                                                                                                                                                          |
-| ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| New pods fail, the server exits with `unexpected argument '--cgroup-manager'` | CRI-O v1.36 or older with a server of v1.0.0 or newer, see [Compatibility](#compatibility).                                                                    |
-| CRI-O logs `Container monitor of ... does not support ...`                    | The server of the pod predates the feature, for example one kept across an upgrade, see [Upgrading](#upgrading).                                               |
-| A server refuses to start with `socket ... is in use by a running server`     | Another server serves the runtime directory, see below.                                                                                                        |
-| `client.New` fails with `ErrServerNotResponding`                              | A server accepts connections but does not answer, see below.                                                                                                   |
-| `client.New` fails with `ErrServerExited`, the server has no logs             | The server log driver is `none`, the default of CRI-O. A crash leaves a core dump, since unreleased a panic also leaves its message in the journal, see below. |
-| Container output is missing in the journal                                    | journald did not keep up, see below.                                                                                                                           |
-| An attach client misses output                                                | It fell behind the container output, which the server logs as a warning, see [Attach socket](#attach-socket).                                                  |
+| Symptom                                                                       | Cause                                                                                                                                                      |
+| ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| New pods fail, the server exits with `unexpected argument '--cgroup-manager'` | CRI-O v1.36 or older with a server of v1.0.0 or newer, see [Compatibility](#compatibility).                                                                |
+| CRI-O logs `Container monitor of ... does not support ...`                    | The server of the pod predates the feature, for example one kept across an upgrade, see [Upgrading](#upgrading).                                           |
+| A server refuses to start with `socket ... is in use by a running server`     | Another server serves the runtime directory, see below.                                                                                                    |
+| `client.New` fails with `ErrServerNotResponding`                              | A server accepts connections but does not answer, see below.                                                                                               |
+| `client.New` fails with `ErrServerExited`, the server has no logs             | The server log driver is `none`, the default of CRI-O. A crash leaves a core dump, since v1.2.2 a panic also leaves its message in the journal, see below. |
+| Container output is missing in the journal                                    | journald did not keep up, see below.                                                                                                                       |
+| An attach client misses output                                                | It fell behind the container output, which the server logs as a warning, see [Attach socket](#attach-socket).                                              |
 
 With the `systemd` server log driver, the default of `conmonrs`, the server's
 own logs go to the journal, since v1.2.1 with the `SYSLOG_IDENTIFIER`
@@ -647,7 +647,7 @@ passes its `log_level` on to the servers, but since v1.34 starts them with the
 server log driver `none`, unless the `monitor_env` of the runtime handler
 contains `LOG_DRIVER=systemd`. A server with `none` writes no logs, the forked
 server has `/dev/null` as its stdin, stdout and stderr. Only the message of a
-panic still goes to the journal, since unreleased. The container output only
+panic still goes to the journal, since v1.2.2. The container output only
 goes to the journal with the `journald` container log driver, sent by the same
 process:
 
@@ -657,7 +657,7 @@ process:
 > journalctl CONTAINER_ID_FULL=<id>
 ```
 
-The first command shows the logs of the server, before unreleased together
+The first command shows the logs of the server, before v1.2.2 together
 with the output of the containers which use the `journald` container log
 driver without a `tag`, the second one also the logs of older servers and the
 output of all containers which use it. The third one shows only the output of
@@ -674,7 +674,7 @@ way.
 The server runs crun with `--log=journald:<container ID>`, so what crun logs
 goes to the journal, where `journalctl -t crun ID=<container ID>` shows it: its
 errors, at the server log levels `warn`, `debug` and `trace` its warnings and
-at `debug` and `trace` its debug messages, at `trace` since unreleased, before
+at `debug` and `trace` its debug messages, at `trace` since v1.2.2, before
 only its errors. crun copies its errors to its stderr as well, which ends up in
 the error of the failed call.
 
@@ -694,7 +694,7 @@ server which exits after it forked, before it accepted connections, makes
 logs of a server log driver other than `none` tell why. The release builds
 abort on a panic and leave a core dump. The panic message goes to stderr,
 which is `/dev/null` unless the server log driver is `stdout`, since
-unreleased with the other drivers to the journal as well
+v1.2.2 with the other drivers to the journal as well
 (`journalctl -t conmonrs -p err`). On hosts with systemd-coredump,
 `coredumpctl list conmonrs` lists the crashes and `coredumpctl info <pid>`
 shows the backtrace.

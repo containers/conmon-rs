@@ -6,7 +6,7 @@ default-members = ["conmon-rs/server"]
 
 [workspace.package]
 # Tracked in dependencies.yaml together with rpm/conmon-rs.spec.
-version = "1.2.1"
+version = "1.2.2"
 edition = "2024"
 # The oldest supported toolchain, which lint-msrv checks in CI. It may not be
 # lower than the highest rust-version of the locked dependencies, see

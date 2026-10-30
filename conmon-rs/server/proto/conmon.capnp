@@ -149,7 +149,7 @@ interface Conmon {
         containerName @3 :Text;
 
         # The tag of the entries, written as CONTAINER_TAG and as
-        # SYSLOG_IDENTIFIER. Without a tag, servers since unreleased use the
+        # SYSLOG_IDENTIFIER. Without a tag, servers since v1.2.2 use the
         # container name as the identifier, and the short container ID
         # without both, like conmon, older ones "conmonrs".
         tag @4 :Text;
@@ -240,7 +240,7 @@ interface Conmon {
         id @0 :Text;
         # The absolute path of the `SOCK_SEQPACKET` socket the server listens
         # on for the attach clients of the container until it exited, see
-        # usage.md. Other paths get rejected since unreleased.
+        # usage.md. Other paths get rejected since v1.2.2.
         socketPath @1 :Text;
         # Deprecated, only logged, attach sessions are per container.
         execSessionId @2 :Text;
@@ -459,7 +459,7 @@ interface Conmon {
     struct ServePortForwardContainerRequest {
         metadata @0 :Metadata; # Standard metadata to carry.
         # The absolute path of the network namespace, other ones get rejected
-        # since unreleased.
+        # since v1.2.2.
         netNsPath @1 :Text;
         # Like the one of `ServeExecContainerRequest`, but per forwarded
         # connection, which gets closed then. A stream which slowly takes its
