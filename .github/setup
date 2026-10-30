@@ -86,6 +86,15 @@ EOT
 
     sudo systemctl enable --now crio.service
 
+    # CRI-O turns stream_websockets off for a conmon-rs which lacks the
+    # streamingprotocols feature and serves the sessions itself, which
+    # critest only reports as failed exec and attach specs.
+    if sudo journalctl -u crio.service --no-pager |
+        grep -F "Disabling streaming over websockets" >/dev/null; then
+        echo "::error::CRI-O disabled streaming over websockets" >&2
+        exit 1
+    fi
+
     # Validate if the correct config is being loaded. grep -q would stop
     # reading at the first match, which fails the pipe with SIGPIPE if crio
     # writes more.
