@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# Global vars to be used
-# shellcheck source=stop
-source "$(dirname "${BASH_SOURCE[0]}")"/stop
+DIR=$(dirname "${BASH_SOURCE[0]}")
+
+# CONTAINER_RUNTIME and JAEGER_CTR.
+# shellcheck source=env
+source "$DIR"/env
+
+# A container of an earlier run would keep the name taken.
+"$DIR"/stop
 
 JAEGER_IMG="cr.jaegertracing.io/jaegertracing/jaeger:2.22.0"
 

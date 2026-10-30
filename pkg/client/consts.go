@@ -56,10 +56,10 @@ const (
 	// and manage cgroups.
 	CgroupManagerCgroupfs CgroupManager = CgroupManager(proto.Conmon_CgroupManager_cgroupfs)
 
-	// CgroupManagerPerCommand opts-in to the new CgroupManager option specified at the command level.
-	//
-	// Set `ConmonServerConfig.CgroupManager` to `CgroupManagerPerCommand` to use
-	// the CgroupManager specified in the command config (e.g. CreateContainerConfig).
+	// CgroupManagerPerCommand selects the cgroup manager per command: set
+	// [ConmonServerConfig.CgroupManager] to it to use the CgroupManager of
+	// the configuration of each command, like
+	// [CreateContainerConfig.CgroupManager].
 	CgroupManagerPerCommand CgroupManager = CgroupManager(0xffff)
 )
 

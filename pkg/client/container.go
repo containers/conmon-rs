@@ -61,7 +61,8 @@ type CreateContainerConfig struct {
 
 	// CgroupManager can be used to select the cgroup manager.
 	//
-	// To use this option set `ConmonServerConfig.CgroupManager` to `CgroupManagerPerCommand`.
+	// To use this option set [ConmonServerConfig.CgroupManager] to
+	// [CgroupManagerPerCommand].
 	CgroupManager CgroupManager
 
 	// AdditionalFDs can be used to pass additional file descriptors to the
@@ -78,13 +79,15 @@ type CreateContainerConfig struct {
 
 	// SdNotifySocket is the path of the host sd_notify socket, usually the
 	// NOTIFY_SOCKET of systemd. If set, the server binds
-	// `<BundlePath>/notify/notify.sock` before it runs the runtime and relays
+	// <BundlePath>/notify/notify.sock before it runs the runtime and relays
 	// the messages sent there to the host socket until the container exits.
-	// Like conmon, it only passes READY=1, RELOADING=1, STOPPING=1,
-	// WATCHDOG=1, WATCHDOG=trigger, STATUS=, ERRNO=, BUSERROR= and
-	// MONOTONIC_USEC=, it drops all other assignments. The caller mounts
-	// the `notify` directory into the container and sets NOTIFY_SOCKET for
-	// the container process accordingly.
+	// Like conmon, it only passes the assignments which tell the state of a
+	// service, like READY=1 or WATCHDOG=1, the sdnotifySocket field of
+	// conmon.capnp in the repository lists them. The caller mounts the
+	// notify directory into the container and sets NOTIFY_SOCKET for the
+	// container process accordingly. Servers without [FeatureSdNotify]
+	// would ignore it, CreateContainer fails with [ErrUnsupported] on them
+	// instead.
 	SdNotifySocket string
 }
 
@@ -113,12 +116,10 @@ type ContainerLogDriver struct {
 	Tag string
 
 	// Labels are additional fields of every entry of LogDriverTypeJournald,
-	// like the log labels of conmon. A key has to be a journal field name:
-	// uppercase letters, digits and underscores, starting with a letter, at
-	// most 64 characters, and none of the fields the driver sets itself,
-	// like MESSAGE or CONTAINER_ID. At most 256 labels with 64 KiB of names
-	// and values together. Servers without FeatureJournaldFields ignore
-	// them.
+	// like the log labels of conmon. A key has to be a journal field name
+	// like POD_NAME, the labels field of conmon.capnp in the repository has
+	// the rules and limits, which the server checks. Servers without
+	// [FeatureJournaldFields] ignore them.
 	Labels map[string]string
 }
 
@@ -268,15 +269,14 @@ type ExecSyncConfig struct {
 	Command []string
 
 	// Timeout is the maximum time the command can run in seconds, 0 for no
-	// limit. A deadline of the context limits it further, rounded down to
-	// whole seconds, so that the server usually reports the timeout before
-	// the context ends the call. The server needs at least one second, with
-	// less time left the command may outlive the caller by less than a
-	// second. A context which already ended fails the call without running
-	// the command. Collecting the output still in flight after the command
-	// exited or got killed takes up to another second if a background
-	// process keeps writing it, a Timeout more than a second below the
-	// deadline keeps the context from ending the call first.
+	// limit. A deadline of the context limits it further, to the whole
+	// seconds left minus one: the server answers once it killed the command
+	// and collected the output still in flight, which takes up to another
+	// second if a background process keeps writing it, so that it usually
+	// reports the timeout before the context ends the call. With less than
+	// two seconds left, the command gets the minimum of one second the
+	// server needs, and may outlive the caller by up to a second. A context
+	// which already ended fails the call without running the command.
 	//
 	// A context which ends without a deadline, for example because it got
 	// cancelled, only ends the call: the server does not stop the command,
@@ -292,7 +292,8 @@ type ExecSyncConfig struct {
 
 	// CgroupManager can be used to select the cgroup manager.
 	//
-	// To use this option set `ConmonServerConfig.CgroupManager` to `CgroupManagerPerCommand`.
+	// To use this option set [ConmonServerConfig.CgroupManager] to
+	// [CgroupManagerPerCommand].
 	CgroupManager CgroupManager
 }
 
@@ -404,10 +405,15 @@ func execTimeout(ctx context.Context, timeout uint64) uint64 {
 		return timeout
 	}
 
-	// Rounded down, so that the server usually reports the timeout before
-	// the context of the call ends. A short deadline still needs a timeout,
-	// 0 would mean none.
-	remaining := max(uint64(max(time.Until(deadline), 0)/time.Second), 1)
+	// The whole seconds left minus a margin, as the server answers only
+	// after it killed the command and collected its output for up to a
+	// second, so that it usually reports the timeout before the context of
+	// the call ends. A short deadline still gets one second, 0 would mean
+	// no timeout.
+	const margin = 1
+
+	secondsLeft := uint64(max(time.Until(deadline), 0) / time.Second)
+	remaining := max(secondsLeft, margin+1) - margin
 
 	if timeout == 0 {
 		return remaining
@@ -492,12 +498,16 @@ func initLogDrivers(req *proto.Conmon_CreateContainerRequest, logDrivers []proto
 // ReopenLogContainerConfig is the configuration for calling the
 // ReopenLogContainer method.
 type ReopenLogContainerConfig struct {
-	// ID is the container identifier.
+	// ID is the container identifier. A request for a container which the
+	// server does not know fails with an error matching
+	// [ErrContainerNotFound].
 	ID string
 }
 
-// ReopenLogContainer can be used to rotate all configured container log
-// drivers.
+// ReopenLogContainer starts new log files at the paths of the log drivers of
+// the container, after the caller rotated them, for example by renaming the
+// old files like the kubelet does. It does not rotate the files itself. The
+// journald driver is not affected.
 func (c *ConmonClient) ReopenLogContainer(
 	ctx context.Context,
 	cfg *ReopenLogContainerConfig,

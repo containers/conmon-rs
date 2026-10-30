@@ -275,10 +275,10 @@ const serverProbeTimeout = 3 * time.Second
 
 // New creates a new conmon server, starts it and connects a new client to it.
 //
-// If a server is already started with the same `ServerRunDir` specified
-// the client connects to the existing server instead.
-// Note: Other options from the `ConmonServerConfig` will be ignored
-// and the settings of the existing server will remain unchanged.
+// If a server is already started with the same
+// [ConmonServerConfig.ServerRunDir] the client connects to the existing server
+// instead. The other options of the [ConmonServerConfig] are ignored then and
+// the settings of the existing server remain unchanged.
 //
 // A new server only gets started if no server runs on the socket of the run
 // directory: the socket does not exist or refuses the connection, the

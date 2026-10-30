@@ -39,7 +39,89 @@ DEBU[…] Using conmonrs version: …, tag: …, commit: …, build: …, \
 ```
 
 CRI-O versions since v1.25 support conmon-rs, the `main` branches of both
-projects are kept working together.
+projects are kept working together. Which server versions a CRI-O release
+works with depends on the client it vendors, see
+[Compatibility](#compatibility).
+
+The `monitor_env` of the runtime handler configures the servers which CRI-O
+starts for it:
+
+| Entry                          | Effect                                                                                                                                                                                                                                                  | Since CRI-O |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `LOG_DRIVER=<driver>`          | The server log driver (`--log-driver`): `systemd`, `stdout` or `none`. Without it, CRI-O starts the servers with `none`, so they write no logs.                                                                                                         | v1.34       |
+| `HEAPTRACK_OUTPUT_PATH=<path>` | Profiles the memory of the servers with heaptrack, see [Troubleshooting](#troubleshooting).                                                                                                                                                             | v1.34       |
+| `HEAPTRACK_BINARY_PATH=<path>` | The heaptrack binary, also enables the profiling.                                                                                                                                                                                                       | v1.34       |
+| Any other `KEY=value`          | Part of the environment of the server, which passes it on to the runtime, its hooks and the cleanup commands, together with `CRI_O_EXTERNAL=1` and the `PATH` and `XDG_RUNTIME_DIR` of CRI-O. `CONMON_*` variables configure the server like its flags. | v1.38       |
+
+CRI-O v1.37.2 and older start the servers with the environment of CRI-O and
+use no other `monitor_env` entries for them. The releases of the 1.37 branch
+after v1.37.2 pass them on as well.
+
+## Compatibility
+
+A CRI-O release vendors one version of the Go client, which needs a server
+it can start and talk to. A server of v1.0.0 or newer does not work with the
+clients before v1.0.0, and the other way around:
+
+| CRI-O         | Vendored client                                            | Servers which work |
+| ------------- | ---------------------------------------------------------- | ------------------ |
+| v1.25, v1.26  | v0.4.0, a commit before v0.2.0 in v1.25.0 and v1.25.1      | v0.4.0 to v0.8.0   |
+| v1.27, v1.28  | v0.5.0, v0.5.1                                             | v0.5.0 to v0.8.0   |
+| v1.29, v1.30  | a commit before v0.6.2                                     | v0.6.2 to v0.8.0   |
+| v1.31         | v0.6.5                                                     | v0.6.5 to v0.8.0   |
+| v1.32, v1.33  | v0.6.6                                                     | v0.6.6 to v0.8.0   |
+| v1.34         | v0.7.2                                                     | v0.7.2 to v0.8.0   |
+| v1.35         | a commit before v0.7.3                                     | v0.7.3, v0.8.0     |
+| v1.36         | v0.7.3                                                     | v0.7.3, v0.8.0     |
+| v1.37         | v1.0.1 up to v1.37.2, v1.2.1 in the releases after v1.37.2 | v1.0.0 and newer   |
+| v1.38, `main` | v1.2.1                                                     | v1.0.0 and newer   |
+
+The clients before v1.0.0 start the server with `--cgroup-manager`, which
+v1.0.0 removed: a newer server exits right away with
+`error: unexpected argument '--cgroup-manager' found`, and CRI-O fails to
+create the pod. Since v0.6.0, the server takes the cgroup manager from each
+request instead, which the clients before v0.6.0 do not send, so CRI-O v1.25
+to v1.28 with the `cgroupfs` cgroup manager need a server before v0.6.0.
+
+v1.0.0 also broke the wire format: changing the type of the retired
+`metadataOld` fields from `Data` to `Void` moved the pointer slots of the
+fields after them, for example `metadata` of `CreateContainerRequest` from
+pointer 9 to 8, `envVars` from 10 to 9 and `namespaces` of
+`CreateNamespacesRequest` from 1 to 0. Across the break, both sides read
+these fields from the wrong slots: the server takes the tracing metadata of a
+request as its environment variables or the other way around,
+`createContainer` its file descriptors and sd_notify socket from other
+fields, and `createNamespaces` its namespaces and paths as well. CRI-O sets
+none of these fields besides the tracing metadata and does not call
+`createNamespaces`, so its requests only lose the tracing metadata, or it
+ends up in the environment of the runtime calls of a newer server. A client
+of v1.1.0 or newer reads the [features](#features) of a server before v1.0.0
+as empty.
+
+From v1.0.0 on, a newer client works with an older server: it checks the
+features of the server before it relies on them, and an older server ignores
+the fields it does not know, whose documentation tells since when the server
+uses them.
+
+## Upgrading
+
+Servers keep running when their binary gets replaced or CRI-O restarts. Each
+pod keeps its server, and with it its features, until the pod gets removed,
+only new pods get a server of the new binary. A restarted CRI-O connects to
+the servers of the existing pods again, which works as long as both are of
+v1.0.0 or newer, see [Compatibility](#compatibility).
+
+Upgrade and downgrade the `conmonrs` binary together with CRI-O whenever the
+client of the new CRI-O needs another server version. Between CRI-O v1.36 and
+v1.37 this crosses the wire format break of v1.0.0: CRI-O v1.36 and older
+cannot start a server of v1.0.0 or newer, and the old servers of the pods
+which keep running report no features to a newer CRI-O. They still serve its
+requests, which carry no affected field besides the tracing metadata, but a
+CRI-O with the client of v1.2.1 serves exec, attach and port forwarding for
+these pods with its own streaming server instead. Drain the node before an
+upgrade or downgrade across the break, or recreate its pods after it, to give
+them servers of the new version. A client which sets the other affected
+fields must not talk to servers across the break.
 
 ## Command line
 
@@ -69,12 +151,12 @@ container processes get the OOM score of the client unless it sets
 `process.oomScoreAdj` in the OCI configuration, like CRI-O does.
 
 When the server forks, the parent writes the child's PID to `pidfile` in the
-runtime directory and exits. With a log driver other than `stdout`, the child
-replaces its stdin, stdout and stderr with `/dev/null` like a daemon, so neither
-the server nor the processes it starts write to the ones of the caller anymore.
-The server closes the other file descriptors it inherited, changes into `/`,
-acts as child subreaper for the containers and listens on `conmon.sock` in the
-runtime directory.
+runtime directory and exits. With a server log driver other than `stdout`, the
+child replaces its stdin, stdout and stderr with `/dev/null` like a daemon, so
+neither the server nor the processes it starts write to the ones of the caller
+anymore. The server closes the other file descriptors it inherited, changes
+into `/`, acts as child subreaper for the containers and listens on
+`conmon.sock` in the runtime directory.
 
 The server adds arguments of its own to every runtime call for a container or
 an exec, before the arguments of the request: `--root=<RUNTIME_ROOT>`
@@ -130,6 +212,11 @@ killed and its call fails: for `createContainer` after 10 minutes, for an exec
 only starts the exec process. Each runtime runs in a process group of its own,
 which gets killed with it, so the helpers it started do not stay behind.
 
+A call which fails carries a message of the server. Only the prefixes which
+the comment of the `Conmon` interface in the schema lists stay stable, like
+`container not found` for a container the server does not know, the Go client
+matches them with errors like `ErrContainerNotFound`.
+
 ### Attach socket
 
 `attachContainer` makes the server listen on a `SOCK_SEQPACKET` UNIX socket at
@@ -168,48 +255,52 @@ client), like the kubelet fails requests beyond its limit. v1.1.1 and older drop
 the oldest URL instead. CRI-O passes these URLs to the kubelet, which connects
 directly.
 
+#### Exec and attach
+
 Exec and attach speak the Kubernetes remote command protocols on the same
-URL. Over WebSocket, `v5.channel.k8s.io` is what kubectl uses: the first byte
-of each binary message is the stream (`0` stdin, `1` stdout, `2` stderr, `3`
+URL.
+
+Over WebSocket, `v5.channel.k8s.io` is what kubectl uses: the first byte of
+each binary message is the stream (`0` stdin, `1` stdout, `2` stderr, `3`
 errors, `4` terminal resize events as JSON, `255` close). The versions before
-it (`v4.channel.k8s.io`, `channel.k8s.io` and their `base64` variants) frame the
-messages the same way without the close signal, base64 ones as text messages
-with the stream as an ASCII digit offset, and start with an empty message on
-the first output stream. Like for the Kubernetes runtime streaming server, a
-client without a subprotocol gets binary `channel.k8s.io`, and one which only
-requests unsupported subprotocols gets a 403. A WebSocket message or frame of
-the client may carry at most 1 MiB, also for port forwarding, a larger one ends
-the connection. Over SPDY/3.1, which the kubelet uses towards the runtime also
-for WebSocket clients, the client opens a stream per channel by the
-`streamType` header (`error`, `stdin`, `stdout`, `stderr` and with a terminal
-`resize`, which may also come after the start), the end of the stdin stream
-closes stdin. The server keeps its side of the stdin stream open until the
-session ends, except for `channel.k8s.io`, like the kubelet.
-Streams for stdout or stderr which come after the start end right away. The
-server supports `v4.channel.k8s.io`, `v3`, `v2` and `channel.k8s.io`, the order
-of the client decides. From v4 on, the final status is JSON, before only a
-failure is reported as text. Since unreleased, a client which takes the end of a
-session slowly, the output queued for it, the status and the close, gets all of
-it, only one which takes nothing of it for 60 seconds gets its connection
-closed. Before, a client which did not take all of it within a few seconds lost
-the rest, and client-go took the missing status for a success. After the close,
-the server reads and drops what the client still sends until it answered the
-WebSocket close or closed the SPDY connection, for up to 5 seconds, as closing a
-connection with unread input resets it, which may lose the end of the session.
-Port forwarding does the same. An exec process which writes more than 16 MiB to
-stdout or stderr while the runtime still starts it gets its output cut there,
-the session then fails with an error status instead of the exit code since
-unreleased. With `idleTimeoutSec`, a session whose connection got no frame of
-the client and no data either way for that long fails with an error status, an
-exec process gets killed then. The time the runtime takes to start an exec,
-WebSocket pings and pongs (like the heartbeat of client-go), the pings of the
-server and the answers to them and other control frames of the server do not
-count. Stdin counts once the server reads it. Stdin which backs up behind a
-process which does not read it stops the server from reading the client, which
-may then go idle, like a spdystream connection whose reader waits. A session
-holds at most about 3 MiB of stdin which the process did not take yet, on top of
-what a SPDY connection holds (see port forwarding below), empty stdin messages
-count as nothing.
+it (`v4.channel.k8s.io`, `channel.k8s.io` and their `base64` variants) frame
+the messages the same way without the close signal, base64 ones as text
+messages with the stream as an ASCII digit offset, and start with an empty
+message on the first output stream. Like for the Kubernetes runtime streaming
+server, a client without a subprotocol gets binary `channel.k8s.io`, and one
+which only requests unsupported subprotocols gets a 403.
+
+Over SPDY/3.1, which the kubelet uses towards the runtime also for WebSocket
+clients, the client opens a stream per channel by the `streamType` header
+(`error`, `stdin`, `stdout`, `stderr` and with a terminal `resize`, which may
+also come after the start), the end of the stdin stream closes stdin. The
+server keeps its side of the stdin stream open until the session ends, except
+for `channel.k8s.io`, like the kubelet. Streams for stdout or stderr which
+come after the start end right away. The server supports `v4.channel.k8s.io`,
+`v3`, `v2` and `channel.k8s.io`, the order of the client decides. From v4 on,
+the final status is JSON, before only a failure is reported as text.
+
+Since unreleased, a client which takes the end of a session slowly, the
+output queued for it, the status and the close, gets all of it, only one which
+takes nothing of it for 60 seconds gets its connection closed. Before, a client
+which did not take all of it within a few seconds lost the rest, and client-go
+took the missing status for a success. After the close, the server reads and
+drops what the client still sends until it answered the WebSocket close or
+closed the SPDY connection, for up to 5 seconds, as closing a connection with
+unread input resets it, which may lose the end of the session. Port forwarding
+does the same.
+
+An exec process which writes more than 16 MiB to stdout or stderr while the
+runtime still starts it gets its output cut there, the session then fails with
+an error status instead of the exit code since unreleased.
+
+Stdin counts towards the [idle timeout](#limits-and-timeouts) once the server
+reads it. Stdin which backs up behind a process which does not read it stops
+the server from reading the client, which may then go idle, like a spdystream
+connection whose reader waits. Empty stdin messages do not count towards the
+stdin limit of a session.
+
+#### Port forwarding
 
 Port forwarding speaks the Kubernetes `portforward.k8s.io` protocol over
 SPDY/3.1, which the kubelet uses towards the runtime also when the client
@@ -219,34 +310,56 @@ server connects to that port on `localhost` within the network namespace of
 the request, whose `netNsPath` has to be absolute since unreleased, and copies
 between the connection and the data stream, a failure is reported as text on
 the error stream, what the client sends on it gets dropped. Only what the SPDY
-implementation of Kubernetes uses is supported: a connection has at most 1024
-streams, which count until the server let go of them, also after a reset, and a
-stream at most 32 headers in 8 KiB. There is no flow control: the server holds
-about 4 MiB of what the client sent on a connection, plus the frame it waits to
-place, and stops reading it until the streams took their data. What a
-forwarded connection sends while it gets established, up to 1 MiB, moves into a
-connect budget of 16 MiB per session instead, so that a port which does not
-answer does not stop the other connections. Once that is used up, connecting
-streams stop taking their data like any stream which does not take it. Any
-number of connections get established at once. Clients which connect directly,
-like crictl with the WebSocket transport, may tunnel the SPDY connection through
-binary WebSocket messages with the `SPDY/3.1+portforward.k8s.io` subprotocol.
+implementation of Kubernetes uses is supported. There is no flow control: once
+a connection holds as much of what the client sent as it may, the server stops
+reading it until the streams took their data. What a forwarded connection
+sends while it gets established moves into a connect budget of the session
+instead, so that a port which does not answer does not stop the other
+connections. Once that is used up, connecting streams stop taking their data
+like any stream which does not take it. Any number of connections get
+established at once. Clients which connect directly, like crictl with the
+WebSocket transport, may tunnel the SPDY connection through binary WebSocket
+messages with the `SPDY/3.1+portforward.k8s.io` subprotocol.
 
 The URL also serves the older WebSocket channel protocol (`v4.channel.k8s.io`,
 `v4.base64.channel.k8s.io` or no subprotocol), which forwards one connection
-per port of the `port` query parameter, at most 40 ports, a request with more
-gets a 400. Port `i` gets the data channel `2i` and the error channel `2i+1`,
-every message starts with its channel (an ASCII digit offset in base64 text
+per port of the `port` query parameter, a request with too many gets a 400.
+Port `i` gets the data channel `2i` and the error channel `2i+1`, every
+message starts with its channel (an ASCII digit offset in base64 text
 messages) and the first message of each channel carries the port as a little
 endian `u16`. The session ends once all connections ended.
 
-`idleTimeoutSec` closes a connection which got no frame of the client and no
-data either way for that long. A stream which slowly takes its data keeps it
-active, WebSocket pings and pongs, the pings of the server and the answers to
-them and other control frames of the server do not. SPDY clients like client-go
-ping every few seconds, which counts like for CRI-O.
+#### Limits and timeouts
 
-### Streaming protocols by version
+| What                                                           | Limit                                                                 |
+| -------------------------------------------------------------- | --------------------------------------------------------------------- |
+| URLs which wait for their client, per kind                     | 1000, see above                                                       |
+| Time until the token of an unused URL expires                  | 60 seconds, the first connection takes it                             |
+| WebSocket message or frame of the client                       | 1 MiB, also for port forwarding, a larger one ends the connection     |
+| Stdin of a session which the process did not take yet          | About 3 MiB, on top of what a SPDY connection holds                   |
+| What the client sent on a SPDY connection which no stream took | About 4 MiB, plus the frame which waits to be placed                  |
+| What a forwarded connection sends while it gets established    | 1 MiB per connection, from a connect budget of 16 MiB per session     |
+| Streams of a SPDY connection                                   | 1024, which count until the server let go of them, also after a reset |
+| Headers of a SPDY stream                                       | 32 in 8 KiB                                                           |
+| Ports of the WebSocket port forward protocol                   | 40                                                                    |
+| Connections which did not get upgraded yet                     | 256 since v1.2.1, see [Streaming security](#streaming-security)       |
+| Time to send the request head, to get upgraded                 | 5 seconds, 10 seconds, see [Streaming security](#streaming-security)  |
+| Request head                                                   | 64 KiB since unreleased, a larger one gets a 431                      |
+| Exec output while the runtime starts the process               | 16 MiB per stream, the session fails above, see above                 |
+| End of a session the client takes nothing of                   | 60 seconds since unreleased, see above                                |
+| Idle connection                                                | The `idleTimeoutSec` of the request, see below                        |
+
+`idleTimeoutSec` ends a connection which got no frame of the client and no
+data either way for that long: an exec or attach session fails with an error
+status and an exec process gets killed, port forwarding closes the forwarded
+connection. The time the runtime takes to start an exec, WebSocket pings and
+pongs (like the heartbeat of client-go), the pings of the server and the
+answers to them and other control frames of the server do not count. A
+stream which slowly takes its data keeps it active. SPDY clients like
+client-go ping every few seconds, which counts like for CRI-O. The Go client
+rounds its `IdleTimeout` up to whole seconds.
+
+#### Streaming protocols by version
 
 The protocols the streaming server speaks and the first release with them:
 
@@ -267,21 +380,7 @@ with an unimplemented error. The `idleTimeoutSec` of the three RPCs is new in
 v1.2.0 as well: older servers ignore it for exec and attach, and do not serve
 port forwarding at all.
 
-Beyond its version, `version` reports the optional features of a server, which
-clients check before they rely on them:
-
-- `sdnotify`: the server relays the `sd_notify` messages of a container to
-  the `sdnotifySocket` of `createContainer`.
-- `portforward`: `servePortForwardContainer` forwards ports with the protocols
-  above.
-- `idletimeout`: exec and attach sessions apply their `idleTimeoutSec`, every
-  server with `portforward` applies the one of port forwarding.
-- `streamingprotocols`: exec and attach sessions speak SPDY/3.1 and the
-  WebSocket protocols before `v5.channel.k8s.io`.
-- `journaldfields`: the `journald` log driver writes its `containerName`,
-  `tag` and `labels`, see [Logging](#logging).
-
-### Streaming security
+#### Streaming security
 
 The streaming server speaks plain HTTP on `127.0.0.1`, without TLS or
 authentication, so the token in the URL is the only access control. Every
@@ -332,24 +431,53 @@ yet, and all connections together a quarter of the open files limit of the
 server, a request beyond that fails. The full description lives in the module
 documentation of [fd_socket.rs](conmon-rs/server/src/fd_socket.rs).
 
+## Features
+
+Beyond its version, `version` reports the optional features of a server,
+which clients check before they rely on them:
+
+| Feature              | Since  | What the server does                                                                                                        |
+| -------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------- |
+| `sdnotify`           | v1.1.0 | Relays the `sd_notify` messages of a container to the `sdnotifySocket` of `createContainer`.                                |
+| `portforward`        | v1.2.0 | `servePortForwardContainer` forwards ports, see [Port forwarding](#port-forwarding).                                        |
+| `idletimeout`        | v1.2.0 | Exec and attach sessions apply their `idleTimeoutSec`, every server with `portforward` applies the one of port forwarding.  |
+| `streamingprotocols` | v1.2.0 | Exec and attach sessions speak SPDY/3.1 and the WebSocket protocols before `v5.channel.k8s.io`.                             |
+| `journaldfields`     | v1.2.1 | The `journald` container log driver writes the `containerName`, `tag` and `labels` of the request, see [Logging](#logging). |
+
+How to rely on them:
+
+- Servers before v1.1.0 report an empty list, they do not know the field.
+- Features only get added, a later release never drops one. A client
+  ignores the ones it does not know.
+- Check the features of the server the client talks to, not the ones of the
+  binary on disk: a server keeps running across upgrades, see
+  [Upgrading](#upgrading).
+- Check them again after every reconnect, the server behind the socket may
+  have been replaced by one of another version. The Go client records them
+  on every connection, its methods which need a feature check it and fail
+  with `ErrUnsupported`, `SupportsFeature` reports them to the caller.
+
 ## Logging
 
-Container output goes to the log drivers requested per container. When the next
-entry would exceed the configured maximum size, the server writes the entries
-read before it to the old file and replaces the log file with a new empty one,
-like conmon: it creates `.<name>.conmonrs-tmp` next to it, a name which the log
-cleanup of the kubelet does not match, and renames it over the path, so that a
-reader which follows the log, like `kubectl logs -f`, reads the old file to its
-end first. `reopenLogContainer`, which CRI-O calls after the kubelet rotated the
-log, starts a new file at the path the same way. The server appends to the log
-files, so a file which gets truncated in place, for example to free disk space,
-continues at its new end. Since unreleased, a log file which exists when the
-container gets created is appended to like with conmon instead of truncated, its
-content counts for the maximum size. A write which fails in the middle of an
-entry, like on a full disk, drops the rest of it, the next entry starts on a
-line of its own, and so does the first entry after existing content without a
-final newline. A rotation which fails drops the entries which would exceed the
-size, the next read of output tries it again.
+Container output goes to the container log drivers requested per container,
+unlike the logs of the server itself, which go to the server log driver
+(`--log-driver`). When the next entry would exceed the configured maximum
+size, the server writes the entries read before it to the old file and
+replaces the log file with a new empty one, like conmon: it creates
+`.<name>.conmonrs-tmp` next to it, a name which the log cleanup of the kubelet
+does not match, and renames it over the path, so that a reader which follows
+the log, like `kubectl logs -f`, reads the old file to its end first.
+`reopenLogContainer`, which CRI-O calls after the kubelet rotated the log,
+starts a new file at the path the same way. The server appends to the log
+files, so a file which gets truncated in place, for example to free disk
+space, continues at its new end. Since unreleased, a log file which exists
+when the container gets created is appended to like with conmon instead of
+truncated, its content counts for the maximum size. A write which fails in the
+middle of an entry, like on a full disk, drops the rest of the entries read
+with it, the next entry starts on a line of its own, and so does the first
+entry after existing content without a final newline. A rotation which fails
+drops the entries which would exceed the size, the next read of output tries
+it again.
 
 - `containerRuntimeInterface`: the CRI log format, one line per entry with an
   RFC 3339 timestamp in nanoseconds of when the server read the output, the
@@ -365,10 +493,9 @@ size, the next read of output tries it again.
   `CONTAINER_PARTIAL_MESSAGE=true`. The maximum size does not apply. Like the
   options of conmon, `containerName` adds `CONTAINER_NAME`, `tag` adds
   `CONTAINER_TAG` and replaces the `SYSLOG_IDENTIFIER`, and `labels` add
-  fields of their own, whose names follow the rules of the journal: uppercase
-  letters, digits and underscores, starting with a letter, at most 64
-  characters. A container takes at most 256 labels with 64 KiB of names and
-  values together, journald drops entries with more than 1024 fields.
+  fields of their own, named like journal fields, see `labels` in the
+  schema for the rules and limits. journald drops entries with more than
+  1024 fields.
 
 The JSON and journald drivers collect whole lines across reads, so a line
 written in several pieces or a multi byte character split by a read still
@@ -376,19 +503,31 @@ ends up as one entry. Like the `P` marker of the CRI log, a partial entry is
 a line which had no ending yet: it grew beyond 16 KiB, the output paused for
 half a second, or the output ended without one.
 
-The server's own logs go to the `--log-driver`. Running with
+The server's own logs go to the server log driver. Running with
 `--log-level debug` prints every RPC and I/O decision and is the first thing to
 try when debugging a container that misbehaves under conmon-rs.
 
 ## Troubleshooting
 
-With the `systemd` log driver, the default of `conmonrs`, the server's own
-logs go to the journal, since v1.2.1 with the `SYSLOG_IDENTIFIER` `conmonrs`,
-before only under its process name (`_COMM=conmonrs`). CRI-O passes
-its `log_level` on to the servers, but since v1.34 starts them with the log
-driver `none`, unless the `monitor_env` of the runtime handler contains
-`LOG_DRIVER=systemd`. The container output only goes to the journal with the
-`journald` log driver of the container, sent by the same process:
+| Symptom                                                                       | Cause                                                                                                            |
+| ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| New pods fail, the server exits with `unexpected argument '--cgroup-manager'` | CRI-O v1.36 or older with a server of v1.0.0 or newer, see [Compatibility](#compatibility).                      |
+| CRI-O logs `Container monitor of ... does not support ...`                    | The server of the pod predates the feature, for example one kept across an upgrade, see [Upgrading](#upgrading). |
+| A server refuses to start with `socket ... is in use by a running server`     | Another server serves the runtime directory, see below.                                                          |
+| `client.New` fails with `ErrServerNotResponding`                              | A server accepts connections but does not answer, see below.                                                     |
+| `client.New` fails with `ErrServerExited`, the server has no logs             | The server log driver is `none`, the default of CRI-O. A crash leaves a core dump, see below.                    |
+| Container output is missing in the journal                                    | journald did not keep up, see below.                                                                             |
+| An attach client misses output                                                | It fell behind the container output, which the server logs as a warning, see [Attach socket](#attach-socket).    |
+
+With the `systemd` server log driver, the default of `conmonrs`, the server's
+own logs go to the journal, since v1.2.1 with the `SYSLOG_IDENTIFIER`
+`conmonrs`, before only under its process name (`_COMM=conmonrs`). CRI-O
+passes its `log_level` on to the servers, but since v1.34 starts them with the
+server log driver `none`, unless the `monitor_env` of the runtime handler
+contains `LOG_DRIVER=systemd`. A server with `none` writes no logs at all, the
+forked server has `/dev/null` as its stdin, stdout and stderr. The container
+output only goes to the journal with the `journald` container log driver, sent
+by the same process:
 
 ```console
 > journalctl -t conmonrs
@@ -397,9 +536,9 @@ driver `none`, unless the `monitor_env` of the runtime handler contains
 ```
 
 The first command shows the logs of the server together with the output of
-the containers which use the `journald` log driver without a `tag`, the
-second one also the logs of older servers and the output of containers with a
-`tag`. The third one shows only the output of one container.
+the containers which use the `journald` container log driver without a `tag`,
+the second one also the logs of older servers and the output of containers
+with a `tag`. The third one shows only the output of one container.
 
 The server never waits for the journal with its own entries, they get lost while
 journald does not keep up, for example while it restarts. The lines of container
@@ -418,8 +557,15 @@ its logs on stdout and talk to its socket with a client:
 
 A server which fails before it forks, for example because the runtime does not
 exist, makes `client.New` fail with what the server wrote to stderr. With the
-`stdout` log driver, also when `CONMON_LOG_DRIVER` in the `Env` of the
-configuration selects it, the `Stderr` writer gets that output instead.
+`stdout` server log driver, also when `CONMON_LOG_DRIVER` in the `Env` of the
+configuration selects it, the `Stderr` writer gets that output instead. A
+server which exits after it forked, before it accepted connections, makes
+`client.New` fail with an error matching `client.ErrServerExited`, only the
+logs of a server log driver other than `none` tell why. The release builds
+abort on a panic and leave a core dump, the panic message goes to stderr, which
+is `/dev/null` unless the server log driver is `stdout`. On hosts with
+systemd-coredump, `coredumpctl list conmonrs` lists the crashes and
+`coredumpctl info <pid>` shows the backtrace.
 
 Only one server runs per runtime directory. A server refuses to start with
 `socket ... is in use by a running server` while another one serves
@@ -497,3 +643,6 @@ The same can be done for the `master` role or any other configured runtime.
 Builds of every `main` commit are available in the [podman-next
 copr](https://copr.fedorainfracloud.org/coprs/rhcontainerbot/podman-next/package/conmon-rs)
 and can be installed on RHCOS with `rpm-ostree override replace <rpm url>`.
+They are of v1.0.0 or newer, which a CRI-O of v1.36 or older cannot start,
+see [Compatibility](#compatibility). The override takes effect with the next
+boot, which gives all pods servers of the new version.

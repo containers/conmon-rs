@@ -31,7 +31,7 @@ macro_rules! prefix {
     after_help("More info at: https://github.com/containers/conmon-rs"),
     disable_version_flag(true)
 )]
-/// An OCI container runtime monitor.
+/// A pod level OCI container runtime monitor, started by a container engine like CRI-O.
 pub struct Config {
     #[command(subcommand)]
     /// Possible subcommands.
@@ -114,7 +114,8 @@ pub struct Config {
         long("runtime-root"),
         value_name("RUNTIME_ROOT")
     )]
-    /// Root directory used by the OCI runtime to operate on containers.
+    /// Root directory used by the OCI runtime to operate on containers, passed to it as
+    /// `--root`.
     runtime_root: Option<PathBuf>,
 
     #[arg(
@@ -214,8 +215,9 @@ pub enum Commands {
     /// Run pause, which bind mounts selected namespaces to the local file system.
     ///
     /// Only the namespaces selected by the flags are created and bind mounted to
-    /// `$BASE_PATH/[ipc,pid,net,user,uts]ns/$POD_ID`, where POD_ID comes from the client. The
-    /// bind mounts keep the namespaces alive, so `conmonrs pause` exits once they are in place.
+    /// `$BASE_PATH/[ipc,pid,net,user,uts]ns/$POD_ID`, where POD_ID is the value of `--pod-id`.
+    /// The bind mounts keep the namespaces alive, so `conmonrs pause` exits once they are in
+    /// place.
     ///
     /// Only a PID namespace (via `--pid`) dies with its init process, which therefore keeps
     /// running. Its PID is tracked in `$BASE_PATH/conmonrs/$POD_ID.pid`.
@@ -242,7 +244,9 @@ pub struct PauseArgs {
         env(concat!(prefix!(), "PAUSE_POD_ID")),
         long("pod-id"),
     )]
-    /// The unique pod identifier for referring to the namespaces.
+    /// The unique pod identifier, which names the files of the namespaces. It consists of the
+    /// letters A-Z and a-z, the digits 0-9, "_", "." and "-" only, is not "." or "..", and takes
+    /// 251 bytes at most.
     pub pod_id: String,
 
     #[arg(long("ipc"))]

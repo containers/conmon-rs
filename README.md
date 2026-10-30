@@ -24,8 +24,9 @@ crun. CI runs the integration tests on cgroup v2 only.
 
 ## Documentation
 
-- [usage.md](usage.md): configuring CRI-O, the command line, the `pause`
-  subcommand, the protocols between the server and its clients, logging,
+- [usage.md](usage.md): configuring CRI-O, the compatibility between CRI-O
+  and server versions, upgrades, the command line, the `pause` subcommand, the
+  protocols between the server and its clients, the features, logging,
   troubleshooting, tracing and the use on Red Hat OpenShift.
 - [release.md](release.md): how to cut a release.
 - [SECURITY.md](SECURITY.md): how to report a security issue.
@@ -243,9 +244,10 @@ operations against it:
 - **File descriptors**: `startFdSocket` opens a socket on which a client passes
   file descriptors to the server, for example to leak into or hand over to a
   container.
-- **Maintenance**: `reopenLogContainer` rotates the log files of a container,
-  `setWindowSizeContainer` resizes its terminal, `version` reports the server
-  build.
+- **Maintenance**: `reopenLogContainer` starts new log files at the paths of
+  a container after the caller rotated them (the journald driver is not
+  affected), `setWindowSizeContainer` resizes its terminal, `version` reports
+  the server build and its features.
 
 The server is single threaded: a tokio `current_thread` runtime drives all I/O
 and runs the Cap'n Proto RPC on the same thread, and blocking work like file

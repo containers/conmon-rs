@@ -41,42 +41,8 @@ var _ = Describe("ConmonClient", func() {
 		sut *client.ConmonClient
 	)
 
-	// A spec which fails or skips before it created its server must not
-	// make the hooks below look at the server of the previous spec.
-	BeforeEach(func() {
-		tr = nil
-		sut = nil
-	})
-
-	JustAfterEach(func() {
-		if sut != nil {
-			pid := sut.PID()
-			Expect(pid).To(BeNumerically(">", 0))
-			rss := vmRSSGivenPID(pid)
-			// Named after the spec, so that a value can be attributed in the
-			// verbose output of a whole run.
-			GinkgoWriter.Printf(
-				"VmRSS for server is %d kB in %q\n",
-				rss,
-				CurrentSpecReport().FullText(),
-			)
-			Expect(rss).To(BeNumerically("<", maxRSSKB), "VmRSS of the server in kB")
-		}
-	})
-
-	AfterEach(func() {
-		cleanupSpec(tr, sut)
-	})
-
-	// runContainer starts a server with a started container which runs the
-	// process.
-	runContainer := func(ctx context.Context, terminal bool, processArgs []string) {
-		tr = newTestRunner()
-		tr.createRuntimeConfigWithProcessArgs(terminal, processArgs, nil)
-		sut = tr.configGivenEnv()
-		tr.createContainer(ctx, sut, terminal)
-		tr.startContainer()
-	}
+	registerSpecHooks(&tr, &sut)
+	runContainer := containerRunner(&tr, &sut)
 
 	Describe("New", func() {
 		It("should restore from running server", func(ctx SpecContext) {
@@ -2029,14 +1995,7 @@ var _ = Describe("JSONLogger", func() {
 		sut *client.ConmonClient
 	)
 
-	BeforeEach(func() {
-		tr = nil
-		sut = nil
-	})
-
-	AfterEach(func() {
-		cleanupSpec(tr, sut)
-	})
+	registerSpecHooks(&tr, &sut)
 
 	Describe("Logging", func() {
 		for _, terminal := range []bool{true, false} {
@@ -2100,14 +2059,7 @@ var _ = Describe("JournaldLogger", func() {
 		sut *client.ConmonClient
 	)
 
-	BeforeEach(func() {
-		tr = nil
-		sut = nil
-	})
-
-	AfterEach(func() {
-		cleanupSpec(tr, sut)
-	})
+	registerSpecHooks(&tr, &sut)
 
 	Describe("Logging", func() {
 		for _, terminal := range []bool{true, false} {
@@ -2214,24 +2166,8 @@ var _ = Describe("StreamingServer", func() {
 		sut *client.ConmonClient
 	)
 
-	BeforeEach(func() {
-		tr = nil
-		sut = nil
-	})
-
-	AfterEach(func() {
-		cleanupSpec(tr, sut)
-	})
-
-	// runContainer starts a server with a started container which runs the
-	// process.
-	runContainer := func(ctx context.Context, terminal bool, processArgs []string) {
-		tr = newTestRunner()
-		tr.createRuntimeConfigWithProcessArgs(terminal, processArgs, nil)
-		sut = tr.configGivenEnv()
-		tr.createContainer(ctx, sut, terminal)
-		tr.startContainer()
-	}
+	registerSpecHooks(&tr, &sut)
+	runContainer := containerRunner(&tr, &sut)
 
 	Describe("ServePortForwardContainer", func() {
 		It("should forward concurrent connections", func(ctx SpecContext) {
@@ -2283,6 +2219,26 @@ var _ = Describe("StreamingServer", func() {
 			// and connections with it.
 			stop()
 			expectNoResourceLeak(sut.PID(), resources)
+		}, SpecTimeout(specTimeout))
+
+		It("should fail requests beyond the limit of waiting URLs", func(ctx SpecContext) {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			// The server only checks that the path is absolute before it
+			// returns the URL, it enters the namespace once a client
+			// connected, which none does here.
+			cfg := &client.ServePortForwardContainerConfig{NetNsPath: "/proc/self/ns/net"}
+
+			const waitingURLs = 1000
+			for range waitingURLs {
+				_, err := sut.ServePortForwardContainer(ctx, cfg)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			_, err := sut.ServePortForwardContainer(ctx, cfg)
+			Expect(err).To(MatchError(client.ErrTooManyRequests))
 		}, SpecTimeout(specTimeout))
 
 		It("should forward connections through a WebSocket tunnel", func(ctx SpecContext) {

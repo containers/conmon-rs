@@ -31,17 +31,18 @@ type ServeExecContainerConfig struct {
 
 	// CgroupManager can be used to select the cgroup manager.
 	//
-	// To use this option set `ConmonServerConfig.CgroupManager` to
-	// `CgroupManagerPerCommand`.
+	// To use this option set [ConmonServerConfig.CgroupManager] to
+	// [CgroupManagerPerCommand].
 	CgroupManager CgroupManager
 
 	// IdleTimeout fails a session whose connection got no frame of the
-	// client and no data either way for this long. WebSocket pings and
-	// pongs, the pings of the server and the answers to them and other
-	// control frames of the server do not count. Stdin counts once the
-	// server reads it, stdin which backs up behind a process which does not
-	// read it stops that. The process gets killed then. Zero disables the
-	// timeout. Servers without FeatureIdleTimeout ignore it.
+	// client and no data either way for this long, rounded up to whole
+	// seconds, and kills the process then. WebSocket pings and pongs, the
+	// pings of the server and the answers to them and other control frames
+	// of the server do not count. Stdin counts once the server reads it,
+	// stdin which backs up behind a process which does not read it stops
+	// that. Zero disables the timeout. Servers without [FeatureIdleTimeout]
+	// ignore it.
 	IdleTimeout time.Duration
 }
 
@@ -106,7 +107,10 @@ func (c *ConmonClient) ServeExecContainer(
 
 // ServeAttachContainerConfig is the configuration for calling the ServeAttachContainer method.
 type ServeAttachContainerConfig struct {
-	// ID is the container identifier.
+	// ID is the container identifier. A request for a container which the
+	// server does not know fails with an error matching
+	// [ErrContainerNotFound], unlike ServeExecContainer, whose runtime
+	// fails the session.
 	ID string
 
 	// Stdin indicates if stdin should be available or not.
@@ -129,13 +133,11 @@ type ServeAttachContainerConfig struct {
 	// sent and has no effect.
 	CgroupManager CgroupManager
 
-	// IdleTimeout fails a session whose connection got no frame of the
-	// client and no data either way for this long. WebSocket pings and
-	// pongs, the pings of the server and the answers to them and other
-	// control frames of the server do not count. Stdin counts once the
-	// server reads it, stdin which backs up behind a container which does
-	// not read it stops that. Zero disables the timeout. Servers without
-	// FeatureIdleTimeout ignore it.
+	// IdleTimeout fails a session which was idle for this long, like
+	// [ServeExecContainerConfig.IdleTimeout], without killing anything.
+	// Stdin which backs up behind a container which does not read it stops
+	// counting. Zero disables the timeout. Servers without
+	// [FeatureIdleTimeout] ignore it.
 	IdleTimeout time.Duration
 }
 
@@ -191,10 +193,9 @@ type ServePortForwardContainerConfig struct {
 	// container. Servers since unreleased reject other ones.
 	NetNsPath string
 
-	// IdleTimeout closes a connection which got no frame of the client and
-	// no data either way for this long. WebSocket pings and pongs, the
-	// pings of the server and the answers to them and other control frames
-	// of the server do not count. Zero disables the timeout.
+	// IdleTimeout closes a connection which was idle for this long, like
+	// [ServeExecContainerConfig.IdleTimeout]. A stream which slowly takes
+	// its data keeps it active. Zero disables the timeout.
 	IdleTimeout time.Duration
 }
 

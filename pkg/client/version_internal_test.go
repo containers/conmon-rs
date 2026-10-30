@@ -82,6 +82,29 @@ func TestRequireServerFeatureDoesNotBlock(t *testing.T) {
 	}
 }
 
+func TestErrUnsupported(t *testing.T) {
+	t.Parallel()
+
+	err := fmt.Errorf("port forwarding: %w", ErrUnsupported)
+
+	if !errors.Is(err, ErrUnsupported) {
+		t.Errorf("%v does not match ErrUnsupported", err)
+	}
+
+	// Like CRI-O checks it for every runtime type.
+	if !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("%v does not match errors.ErrUnsupported", err)
+	}
+
+	if errors.Is(ErrUnsupported, ErrInvalidValue) {
+		t.Error("ErrUnsupported matches ErrInvalidValue")
+	}
+
+	if got, want := ErrUnsupported.Error(), "feature not supported by this conmon-rs version"; got != want {
+		t.Errorf("got message %q, want %q", got, want)
+	}
+}
+
 func TestRequireServerFeature(t *testing.T) {
 	t.Parallel()
 

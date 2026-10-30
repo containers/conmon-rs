@@ -483,6 +483,15 @@ func TestCloseOutputStreams(t *testing.T) {
 		t.Fatalf("shared stream closed %d times, want once", got)
 	}
 
+	// Each stream wraps the same writer in an Out of its own, like CRI-O
+	// does it.
+	wrapped := &countingOut{}
+	closeOutputStreams(AttachStreams{Stdout: &Out{wrapped}, Stderr: &Out{wrapped}})
+
+	if got := wrapped.closes.Load(); got != 1 {
+		t.Fatalf("wrapped stream closed %d times, want once", got)
+	}
+
 	stdout, stderr := &countingOut{}, &countingOut{}
 	closeOutputStreams(AttachStreams{Stdout: &Out{stdout}, Stderr: &Out{stderr}})
 

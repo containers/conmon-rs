@@ -38,8 +38,8 @@ type ServerVersion struct {
 	// The cargo dependency tree, only available in verbose output.
 	CargoTree string `json:"cargo_tree"` //nolint:tagliatelle // Rust's serde will use that format.
 
-	// The optional features the server supports, see the `Feature*`
-	// constants.
+	// The optional features the server supports, see the Feature constants
+	// like [FeatureSdNotify].
 	Features []string `json:"features"`
 }
 
@@ -134,32 +134,33 @@ type VersionResponse struct {
 	CargoTree string
 
 	// Features are the optional features the server supports, see the
-	// `Feature*` constants.
+	// Feature constants like [FeatureSdNotify].
 	Features []string
 }
 
-// FeatureSdNotify is reported by servers which relay sd_notify messages.
+// FeatureSdNotify is reported by servers which relay sd_notify messages,
+// see CreateContainerConfig.SdNotifySocket. Since v1.1.0.
 const FeatureSdNotify = "sdnotify"
 
 // FeaturePortForward is reported by servers which forward ports, see
-// ServePortForwardContainer.
+// ServePortForwardContainer. Since v1.2.0.
 const FeaturePortForward = "portforward"
 
 // FeatureIdleTimeout is reported by servers which apply the IdleTimeout of
 // ServeExecContainerConfig and ServeAttachContainerConfig. Others ignore it.
 // Every server with FeaturePortForward applies the one of
-// ServePortForwardContainerConfig.
+// ServePortForwardContainerConfig. Since v1.2.0.
 const FeatureIdleTimeout = "idletimeout"
 
 // FeatureStreamingProtocols is reported by servers which serve exec and
 // attach sessions over SPDY and the WebSocket protocols before
 // v5.channel.k8s.io, see ServeExecContainer. Others only speak
-// v5.channel.k8s.io.
+// v5.channel.k8s.io. Since v1.2.0.
 const FeatureStreamingProtocols = "streamingprotocols"
 
 // FeatureJournaldFields is reported by servers which write the
 // ContainerName, Tag and Labels of a ContainerLogDriver to the journal.
-// Others ignore them.
+// Others ignore them. Since v1.2.1.
 const FeatureJournaldFields = "journaldfields"
 
 // SupportsFeature reports whether the server reports the feature, see the
