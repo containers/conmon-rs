@@ -3,12 +3,13 @@
 
 use super::{MAX_MESSAGE_SIZE, PORT_FORWARD_MAX_MESSAGE_SIZE, Session, State, StreamingServer};
 use crate::{
+    mutex::lock,
     random_id::RandomId,
     streaming_server::{
         port_forward::{self, PortForward, WebSocketProtocol},
         remotecommand::{Framing, SPDY_PROTOCOLS},
         stream_protocol::first_supported,
-        web::{self, Response, WebSocketUpgrade},
+        web::{self, Response, WebSocket, WebSocketUpgrade},
     },
 };
 use anyhow::Result;
@@ -19,11 +20,11 @@ use hyper::{
     upgrade::{OnUpgrade, Upgraded},
 };
 use hyper_util::rt::TokioIo;
-use std::{future::Future, sync::Arc};
-use tokio::{sync::RwLock, task};
+use std::{future::Future, sync::Mutex};
+use tokio::task;
 use tracing::{Instrument, Span, debug, debug_span};
 
-/// The upgrade port forward clients ask for.
+/// The upgrade SPDY clients ask for, of exec, attach and port forwarding.
 const SPDY_31: &str = "SPDY/3.1";
 
 /// The streaming protocols of a SPDY upgrade request, and the one the server
@@ -37,18 +38,18 @@ const ACCEPTED_PROTOCOL_VERSIONS_HEADER: HeaderName =
 impl StreamingServer {
     /// Handle an exec or attach request, `kind` is the path of its URL, which
     /// the client upgrades to a WebSocket or SPDY.
-    pub(super) async fn handle(
+    pub(super) fn handle(
         kind: &str,
         token: RandomId,
-        state: Arc<RwLock<State>>,
-        mut request: Request<Incoming>,
+        state: &Mutex<State>,
+        request: Request<Incoming>,
     ) -> Response {
-        async move {
+        debug_span!("handle_common", ?token).in_scope(|| {
             debug!("Got request");
             // An unknown token comes first, the request cannot succeed. The
             // token of a session of the other kind is unknown on this path,
             // the session stays for its own.
-            let typ = state.read().await.sessions.get(&token).map(Session::typ);
+            let typ = lock(state).sessions.get(&token).map(Session::typ);
             if typ != Some(kind) {
                 debug!("Unable to find session");
                 return web::status(StatusCode::NOT_FOUND);
@@ -60,43 +61,63 @@ impl StreamingServer {
                 else {
                     return Self::unsupported_protocols(&requested);
                 };
-                let ws = match WebSocketUpgrade::from_request(&mut request) {
-                    Ok(ws) => ws,
-                    Err(rejection) => return *rejection,
-                };
-                let Some(session) = Self::take_session(&state, token).await else {
-                    return web::status(StatusCode::NOT_FOUND);
-                };
-                return ws
-                    .protocol(subprotocol)
-                    .max_message_size(MAX_MESSAGE_SIZE)
-                    .on_upgrade(move |socket| {
+                return Self::upgrade_websocket(
+                    request,
+                    subprotocol,
+                    MAX_MESSAGE_SIZE,
+                    || Self::take_session(state, token),
+                    move |socket, session| {
                         Self::handle_websocket(socket, session, framing)
                             .instrument(debug_span!("websocket", ?token))
-                    });
+                    },
+                );
             }
 
             Self::upgrade_spdy(
                 request,
                 &SPDY_PROTOCOLS,
-                Self::take_session(&state, token),
+                || Self::take_session(state, token),
                 Self::handle_spdy,
                 debug_span!("spdy", ?token),
             )
-            .await
-        }
-        .instrument(debug_span!("handle_common", ?token))
-        .await
+        })
+    }
+
+    /// Upgrade a request to a WebSocket with the `subprotocol` the server
+    /// picked, and serve it with the session once it got upgraded. The
+    /// session gets taken only for a valid request. The client may send
+    /// messages of up to `max_message_size` bytes.
+    fn upgrade_websocket<S, F>(
+        mut request: Request<Incoming>,
+        subprotocol: Option<&'static str>,
+        max_message_size: usize,
+        take_session: impl FnOnce() -> Option<S>,
+        serve: impl FnOnce(WebSocket, S) -> F + Send + 'static,
+    ) -> Response
+    where
+        S: Send + 'static,
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let ws = match WebSocketUpgrade::from_request(&mut request) {
+            Ok(ws) => ws,
+            Err(rejection) => return *rejection,
+        };
+        let Some(session) = take_session() else {
+            return web::status(StatusCode::NOT_FOUND);
+        };
+        ws.protocol(subprotocol)
+            .max_message_size(max_message_size)
+            .on_upgrade(move |socket| serve(socket, session))
     }
 
     /// Answer a SPDY upgrade request with one of the supported protocols and
     /// serve the connection with the session and what the protocol stands
     /// for once it got upgraded. The session gets taken only for a valid
     /// request.
-    async fn upgrade_spdy<S, T, F>(
+    fn upgrade_spdy<S, T, F>(
         mut request: Request<Incoming>,
         supported: &[(&'static str, T)],
-        take_session: impl Future<Output = Option<S>>,
+        take_session: impl FnOnce() -> Option<S>,
         serve: impl FnOnce(TokioIo<Upgraded>, S, T) -> F + Send + 'static,
         span: Span,
     ) -> Response
@@ -115,7 +136,7 @@ impl StreamingServer {
                 "unable to upgrade: connection does not support upgrades",
             );
         };
-        let Some(session) = take_session.await else {
+        let Some(session) = take_session() else {
             return web::status(StatusCode::NOT_FOUND);
         };
         task::spawn(
@@ -156,32 +177,29 @@ impl StreamingServer {
     }
 
     /// Handle a port forward request, which the client upgrades to SPDY.
-    pub(super) async fn handle_port_forward(
+    pub(super) fn handle_port_forward(
         token: RandomId,
-        state: Arc<RwLock<State>>,
+        state: &Mutex<State>,
         request: Request<Incoming>,
     ) -> Response {
-        async move {
+        debug_span!("handle_port_forward", ?token).in_scope(|| {
             debug!("Got port forward request");
             // An unknown token comes first, the request cannot succeed.
-            if !state.read().await.port_forwards.contains_key(&token) {
+            if !lock(state).port_forwards.contains_key(&token) {
                 debug!("Unable to find port forward session");
                 return web::status(StatusCode::NOT_FOUND);
             }
             if Self::is_websocket_request(request.headers()) {
-                return Self::upgrade_port_forward_websocket(token, &state, request).await;
+                return Self::upgrade_port_forward_websocket(token, state, request);
             }
             Self::upgrade_spdy(
                 request,
                 &[(port_forward::PROTOCOL, ())],
-                Self::take_port_forward(&state, token),
+                || Self::take_port_forward(state, token),
                 |io, session: PortForward, ()| session.serve_spdy(io),
                 debug_span!("port_forward", ?token),
             )
-            .await
-        }
-        .instrument(debug_span!("handle_port_forward", ?token))
-        .await
+        })
     }
 
     fn is_websocket_request(headers: &HeaderMap) -> bool {
@@ -190,10 +208,10 @@ impl StreamingServer {
 
     /// Upgrade a port forward request to a WebSocket, which tunnels SPDY or
     /// speaks the channel protocol, by the subprotocols of the client.
-    async fn upgrade_port_forward_websocket(
+    fn upgrade_port_forward_websocket(
         token: RandomId,
-        state: &RwLock<State>,
-        mut request: Request<Incoming>,
+        state: &Mutex<State>,
+        request: Request<Incoming>,
     ) -> Response {
         let requested = Self::websocket_protocols(request.headers());
         let Some((protocol, subprotocol)) =
@@ -211,20 +229,17 @@ impl StreamingServer {
             }
         };
 
-        let ws = match WebSocketUpgrade::from_request(&mut request) {
-            Ok(ws) => ws,
-            Err(rejection) => return *rejection,
-        };
-        let Some(session) = Self::take_port_forward(state, token).await else {
-            return web::status(StatusCode::NOT_FOUND);
-        };
-        ws.protocol(subprotocol)
-            .max_message_size(PORT_FORWARD_MAX_MESSAGE_SIZE)
-            .on_upgrade(move |socket| {
+        Self::upgrade_websocket(
+            request,
+            subprotocol,
+            PORT_FORWARD_MAX_MESSAGE_SIZE,
+            || Self::take_port_forward(state, token),
+            move |socket, session: PortForward| {
                 session
                     .serve_websocket(socket, protocol, ports)
                     .instrument(debug_span!("port_forward", ?token))
-            })
+            },
+        )
     }
 
     /// Check that the request asks for a SPDY/3.1 upgrade and negotiate one

@@ -5,7 +5,8 @@ set -euo pipefail
 # the ci workflow builds, for SECONDS, or minimizes its corpus. The test-fuzz
 # jobs of the ci and of the advisories workflow use it, so that a crash, whose
 # input ends up in artifacts/, reproduces the same way with
-# `cargo fuzz run TARGET INPUT`.
+# `cargo fuzz run TARGET INPUT -- -timeout=10 -malloc_limit_mb=256`, the
+# LIMITS below.
 usage() {
     echo "usage: $0 run TARGET SECONDS | minimize TARGET" >&2
     exit 1
@@ -20,6 +21,16 @@ BINARY=fuzz-targets/$TARGET
 SEEDS=fuzz/seeds/$TARGET
 # Like cargo-fuzz runs the targets.
 export ASAN_OPTIONS=detect_odr_violation=0
+# An input which runs for more than 10 seconds counts as a hang and lands in
+# artifacts/. libFuzzer would wait 20 minutes for it, past the timeout of the
+# ci jobs, which leaves no input behind. A single allocation above 256 MB
+# counts as a crash, libFuzzer only stops at its RSS limit of 2 GB otherwise.
+# The server bounds what a client makes it buffer, like a WebSocket message
+# to 4 MiB and a SPDY data frame to 16 MiB, so a larger one comes from a
+# length the input claims.
+LIMITS=(-timeout=10 -malloc_limit_mb=256)
+# The downloaded artifact loses the executable bit.
+chmod +x "$BINARY"
 
 case $COMMAND in
 run)
@@ -28,9 +39,8 @@ run)
     fi
     # New inputs go to the first directory, the seeds stay as they are. A
     # target may have no seeds yet.
-    chmod +x "$BINARY"
     mkdir -p corpus artifacts "$SEEDS"
-    "$BINARY" -max_total_time="$3" -artifact_prefix=artifacts/ corpus "$SEEDS"
+    "$BINARY" "${LIMITS[@]}" -max_total_time="$3" -artifact_prefix=artifacts/ corpus "$SEEDS"
     ;;
 minimize)
     if (($# != 2)); then
@@ -44,7 +54,7 @@ minimize)
     rm -rf minimized
     mkdir minimized
     cp -r "$SEEDS/." minimized
-    "$BINARY" -merge=1 minimized corpus
+    "$BINARY" "${LIMITS[@]}" -merge=1 minimized corpus
     find "$SEEDS" -type f -printf '%f\0' | (cd minimized && xargs -0r rm --)
     rm -rf corpus
     mv minimized corpus

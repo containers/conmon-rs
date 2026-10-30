@@ -4,7 +4,7 @@
 use super::{Session, StreamingServer};
 use crate::{
     attach::SharedContainerAttach,
-    container_io::SharedContainerIO,
+    container_io::{ContainerIO, SharedContainerIO},
     streaming_server::{
         idle::Activity,
         remotecommand::{
@@ -223,7 +223,7 @@ impl StreamingServer {
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
     {
-        let terminal = session.terminal().await;
+        let terminal = session.terminal();
         // A terminal merges stderr into stdout, Kubernetes clients do not
         // open a stream for it then.
         let expected = ExpectedStreams {
@@ -241,7 +241,7 @@ impl StreamingServer {
             Ok(streams) => streams,
             Err(e) => {
                 debug!("Unable to start the session: {e:#}");
-                connection.abort();
+                connection.handle().abort();
                 return;
             }
         };
@@ -663,8 +663,8 @@ impl SessionInput {
     /// character instead, like from a user pressing Ctrl-D. A process
     /// reading lines sees the end of its input then, one after a line
     /// without its ending needs a second one, like a user would type it.
-    pub(super) async fn close_container_stdin(&mut self) {
-        match self.io.terminal_eof().await {
+    pub(super) fn close_container_stdin(&mut self) {
+        match self.io.terminal_eof() {
             Some(eof) => self.pending = Some(Bytes::from(vec![eof])),
             None => {
                 self.attach.close_container_stdin();
@@ -674,13 +674,13 @@ impl SessionInput {
 
     /// Handle a resize event of the client, its JSON. Clients send them
     /// regardless of a terminal, a broken one does not end the session.
-    pub(super) async fn resize(&self, data: &[u8]) {
-        if let Err(e) = Self::try_resize(data, &self.io).await {
+    pub(super) fn resize(&self, data: &[u8]) {
+        if let Err(e) = Self::try_resize(data, &self.io) {
             debug!("Ignoring resize event: {e:#}");
         }
     }
 
-    async fn try_resize(data: &[u8], io: &SharedContainerIO) -> Result<()> {
+    fn try_resize(data: &[u8], io: &ContainerIO) -> Result<()> {
         let e = ResizeEvent::parse(data)?;
         trace!("Got resize message: {e:?}");
         // Like CRI-O, a terminal never gets a size without rows or columns,
@@ -689,7 +689,7 @@ impl SessionInput {
             debug!("Ignoring resize event without a size: {e:?}");
             return Ok(());
         }
-        if !io.try_resize(e.width, e.height).await? {
+        if !io.try_resize(e.width, e.height)? {
             debug!("Ignoring resize event, container has no terminal");
         }
         Ok(())

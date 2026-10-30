@@ -17,7 +17,7 @@ async fn write(logger: &mut JsonLogger, pipe: Pipe, bytes: &[u8]) -> Result<()> 
 async fn test_json_logger_new() -> Result<()> {
     let file = NamedTempFile::new()?;
     let logger = JsonLogger::new(file.path(), Some(1000));
-    assert_eq!(logger.file.path(), file.path());
+    assert_eq!(logger.file.path, file.path());
     assert_eq!(logger.file.max_size, Some(1000));
     Ok(())
 }

@@ -748,26 +748,7 @@ var _ = Describe("ConmonClient", func() {
 						defer GinkgoRecover()
 						defer wg.Done()
 
-						result, err := sut.ExecSyncContainer(
-							execCtx,
-							&client.ExecSyncConfig{
-								ID: tr.ctrID,
-								Command: []string{
-									"/busybox",
-									"echo",
-									"-n",
-									"hello",
-									"world",
-									strconv.Itoa(i),
-								},
-								Terminal: terminal,
-								Timeout:  timeoutUnlimited,
-							},
-						)
-						Expect(err).To(Succeed())
-						Expect(result).NotTo(BeNil())
-						Expect(string(result.Stdout)).To(Equal(fmt.Sprintf("hello world %d", i)))
-						GinkgoWriter.Println("done with", i, string(result.Stdout))
+						tr.execEcho(execCtx, sut, terminal, i)
 					}(i)
 				}
 
@@ -781,29 +762,7 @@ var _ = Describe("ConmonClient", func() {
 
 				pid := sut.PID()
 				execCtx := withoutDeadline(ctx)
-				execEcho := func(i int) {
-					result, err := sut.ExecSyncContainer(
-						execCtx,
-						&client.ExecSyncConfig{
-							ID: tr.ctrID,
-							Command: []string{
-								"/busybox",
-								"echo",
-								"-n",
-								"hello",
-								"world",
-								strconv.Itoa(i),
-							},
-							Terminal: terminal,
-							Timeout:  timeoutUnlimited,
-						},
-					)
-
-					Expect(err).To(Succeed())
-					Expect(result).NotTo(BeNil())
-					Expect(string(result.Stdout)).To(Equal(fmt.Sprintf("hello world %d", i)))
-					GinkgoWriter.Println("done with", i, string(result.Stdout))
-				}
+				execEcho := func(i int) { tr.execEcho(execCtx, sut, terminal, i) }
 
 				// The first execs grow the heap of the allocator once, which
 				// on AArch64 can take a whole transparent huge page of 2 MiB.
@@ -836,6 +795,59 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	Describe("ExecSyncContainer", func() {
+		It("should return a large output of both streams", func(ctx SpecContext) {
+			runContainer(ctx, false, []string{"/busybox", "sleep", "600"})
+
+			const size = 1 << 20
+
+			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+				ID: tr.ctrID,
+				Command: []string{
+					"/busybox",
+					"sh",
+					"-c",
+					fmt.Sprintf(
+						"/busybox head -c %d /dev/zero && /busybox head -c %d /dev/zero >&2",
+						size, size,
+					),
+				},
+				Timeout: 30,
+			})
+			Expect(err).To(Succeed())
+			Expect(result.ExitCode).To(BeEquivalentTo(0), string(result.Stderr))
+			Expect(result.TimedOut).To(BeFalse())
+			Expect(result.Stdout).To(HaveLen(size))
+			Expect(result.Stderr).To(HaveLen(size))
+		}, SpecTimeout(specTimeout))
+
+		It("should cut an output beyond the limit", func(ctx SpecContext) {
+			runContainer(ctx, false, []string{"/busybox", "sleep", "600"})
+
+			// The server keeps less than 16 MiB per stream, stops
+			// collecting it there and drops the rest, so the process still
+			// runs to its end.
+			const limit = 16 << 20
+
+			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+				ID: tr.ctrID,
+				Command: []string{
+					"/busybox",
+					"sh",
+					"-c",
+					fmt.Sprintf("/busybox head -c %d /dev/zero && echo -n done >&2", limit+(1<<20)),
+				},
+				Timeout: 30,
+			})
+			Expect(err).To(Succeed())
+			Expect(result.ExitCode).To(BeEquivalentTo(0), string(result.Stderr))
+			Expect(result.TimedOut).To(BeFalse())
+			Expect(len(result.Stdout)).To(And(
+				BeNumerically("<", limit),
+				BeNumerically(">", limit-(1<<20)),
+			))
+			Expect(string(result.Stderr)).To(Equal("done"))
+		}, SpecTimeout(specTimeout))
+
 		It("should not start a command in an unknown container", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
@@ -2103,17 +2115,9 @@ var _ = Describe("JournaldLogger", func() {
 				// Verify the journal logs, they arrive asynchronously. The
 				// documented short ID field finds both lines.
 				journal := func(extraArgs ...string) func(g Gomega) string {
-					return func(g Gomega) string {
-						args := append(
-							[]string{"--since", "-1min", "CONTAINER_ID=" + tr.ctrID[:12]},
-							extraArgs...)
-						cmd := exec.Command("journalctl", args...)
-						stdout := strings.Builder{}
-						cmd.Stdout = &stdout
-						g.Expect(cmd.Run()).NotTo(HaveOccurred())
-
-						return stdout.String()
-					}
+					return journalctl(ctx, append(
+						[]string{"--since", "-1min", "CONTAINER_ID=" + tr.ctrID[:12]},
+						extraArgs...)...)
 				}
 				Eventually(journal(), 10*time.Second).Should(And(
 					ContainSubstring("hello "+marker),
@@ -2164,14 +2168,8 @@ var _ = Describe("JournaldLogger", func() {
 				"SYSLOG_IDENTIFIER=tag-" + marker,
 				"CONMON_TEST_LABEL=label-" + marker,
 			}
-			Eventually(func(g Gomega) string {
-				cmd := exec.CommandContext(ctx, "journalctl", args...)
-				stdout := strings.Builder{}
-				cmd.Stdout = &stdout
-				g.Expect(cmd.Run()).To(Succeed())
-
-				return stdout.String()
-			}, 10*time.Second).Should(ContainSubstring("hello " + marker))
+			Eventually(journalctl(ctx, args...), 10*time.Second).
+				Should(ContainSubstring("hello " + marker))
 		}, SpecTimeout(specTimeout))
 	})
 })
@@ -2738,6 +2736,44 @@ var _ = Describe("StreamingServer", func() {
 					Stderr: io.Discard,
 				})).To(Succeed())
 				Expect(stdout.String()).To(Equal("got later\n"))
+			}, SpecTimeout(specTimeout))
+
+			It("should end the stdin of a terminal", func(ctx SpecContext) {
+				runContainer(ctx, true, []string{"/busybox", "sleep", "600"})
+
+				// cat only ends with the end of file character, which the
+				// server writes to the terminal once stdin ended.
+				result, err := sut.ServeExecContainer(
+					ctx,
+					&client.ServeExecContainerConfig{
+						ID: tr.ctrID,
+						Command: []string{
+							"/busybox",
+							"sh",
+							"-c",
+							"read -r l; echo \"got $l\"; /busybox cat >/dev/null; echo eof",
+						},
+						Tty:    true,
+						Stdin:  true,
+						Stdout: true,
+					},
+				)
+				Expect(err).To(Succeed())
+
+				stdout := &bytes.Buffer{}
+
+				streamCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+
+				Expect(streamURLOver(streamCtx, transport, result.URL, remotecommand.StreamOptions{
+					Stdin:  strings.NewReader("x\n"),
+					Stdout: stdout,
+					Tty:    true,
+				})).To(Succeed())
+				Expect(stdout.String()).To(And(
+					ContainSubstring("got x\r\n"),
+					HaveSuffix("eof\r\n"),
+				))
 			}, SpecTimeout(specTimeout))
 
 			It("should close an idle session", func(ctx SpecContext) {

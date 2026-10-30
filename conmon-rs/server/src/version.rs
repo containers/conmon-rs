@@ -151,6 +151,7 @@ impl Version {
         println!("target: {}", self.target());
         println!("{}", self.rust_version());
         println!("{}", self.cargo_version());
+        println!("features: {}", self.features().join(", "));
 
         if self.verbose() {
             println!("\ncargo tree: {}", self.cargo_tree());

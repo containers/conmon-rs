@@ -441,7 +441,7 @@ func (c *ConmonClient) setMetadata(ctx context.Context, req requestWithMetadata)
 	span := trace.SpanFromContext(ctx)
 
 	if !span.SpanContext().HasSpanID() {
-		return stringStringMapToMapEntryList(nil, req.NewMetadata)
+		return nil
 	}
 
 	m := make(map[string]string)

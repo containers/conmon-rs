@@ -346,9 +346,9 @@ impl PortForward {
                 Ok(())
             }
             // The client closed its side, the pod may still answer.
-            result = &mut upstream => {
-                result?;
-                downstream.await
+            result = &mut upstream => match result {
+                Ok(()) => downstream.await,
+                Err(e) => Self::upstream_failed(e, downstream).await,
             }
         }
     }

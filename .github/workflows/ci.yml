@@ -35,18 +35,6 @@ env:
 # verify-* checks that generated or pinned things are up to date, build-* and
 # test-* build and test the server, publish-* changes the bucket or the cache.
 jobs:
-  verify-dependencies:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      # zeitgeist is a release binary, see the Makefile.
-      - run: make verify-dependencies
-      - run: make verify-spec
-      - run: make verify-vex
-
   verify-proto:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -138,14 +126,21 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: make lint-msrv
 
-  lint-shell:
+  # The checks which take seconds each, in one job instead of a runner each:
+  # the shell scripts, the workflows, the spelling, the formatting of prettier
+  # and the pinned versions of dependencies.yaml, the RPM spec and the VEX
+  # document. Like in lint-rust, every check runs even if an earlier one
+  # fails, and only on a complete setup.
+  lint-files:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
         with:
           persist-credentials: false
       - name: Install shellcheck
+        id: shellcheck
         run: |
           curl -sSfL -o shellcheck.tar.xz \
             "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
@@ -153,49 +148,45 @@ jobs:
           sudo tar -xJf shellcheck.tar.xz --strip-components=1 -C /usr/local/bin "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
           rm shellcheck.tar.xz
           shellcheck --version
-      - run: make lint-shell
-
-  # actionlint and zizmor, see the Makefile. The online audits of zizmor read
-  # the GitHub API.
-  lint-workflows:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - run: make lint-workflows
+      - name: Shellcheck
+        if: ${{ !cancelled() && steps.shellcheck.outcome == 'success' }}
+        run: make lint-shell
+      # actionlint and zizmor, see the Makefile. The online audits of zizmor
+      # read the GitHub API.
+      - name: Lint workflows
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: make lint-workflows
         env:
           CONTAINER_RUNTIME: docker
           GH_TOKEN: ${{ github.token }}
           ZIZMOR_FLAGS: --format=github
-
-  lint-typos:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
+      - name: Typos
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
         with:
           config: .github/typos.toml
-
-  lint-prettier:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        id: node
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         with:
           node-version: 26.13.0
       # prettier has no dependencies, npm checks it against the integrity of
       # the registry.
-      - run: npx --yes "prettier@$PRETTIER_VERSION" --check .
+      - name: Prettier
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
+        run: npx --yes "prettier@$PRETTIER_VERSION" --check .
         env:
           PRETTIER_VERSION: 3.9.10
+      # zeitgeist is a release binary, see the Makefile.
+      - name: Verify dependencies
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: make verify-dependencies
+      - name: Verify the RPM spec
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: make verify-spec
+      - name: Verify the VEX document
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: make verify-vex
 
   verify-deny:
     runs-on: ubuntu-latest
@@ -230,24 +221,28 @@ jobs:
         with:
           pattern: build-static-*
           path: .build/static
-      # The vulnerability database which the daily advisories workflow saves,
-      # grype updates it if it is older. The runs here only restore it, so
-      # that the cache holds a single database.
-      - name: Date
-        id: date
-        run: echo "date=$(date -u +%F)" >>"$GITHUB_OUTPUT"
+      # The newest vulnerability database of main, which grype updates if a
+      # newer one got built. The key names the build of the database, see
+      # .github/scan-sboms, main saves one which grype updated, like the
+      # advisories workflow does, so that the runs after it start with it.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: grype-db
         with:
           path: .build/grype-db
-          key: grype-db-${{ steps.date.outputs.date }}
+          key: grype-db-
           restore-keys: grype-db-
       - name: Scan
+        id: scan
         env:
           CONTAINER_RUNTIME: docker
         run: |
           SBOMS=(.build/static/build-static-*/conmonrs.spdx.json)
           make scan SBOMS="${SBOMS[*]}"
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ !cancelled() && env.SAVE_CACHE == 'true' && steps.scan.outputs.db-key && steps.scan.outputs.db-key != steps.grype-db.outputs.cache-matched-key }}
+        with:
+          path: .build/grype-db
+          key: ${{ steps.scan.outputs.db-key }}
 
   # The Go dependencies follow CRI-O, which vendors the client, so a finding
   # only shows up as a warning and in the summary, without failing the pull
@@ -552,7 +547,9 @@ jobs:
           paths: ${{ steps.go.outputs.paths }}
 
   # Builds all fuzz targets once, so that they keep compiling, for test-fuzz
-  # to run one per job. A new target gets fuzzed without a change here.
+  # to run one per job, and on main for the advisories workflow, which fuzzes
+  # the targets of the latest passed run of main. A new target gets fuzzed
+  # without a change here.
   # cargo-fuzz needs a nightly toolchain. The shipped release profile would
   # strip the symbols and take long to build, the fuzz build overrides it.
   build-fuzz:
@@ -600,11 +597,16 @@ jobs:
           name: fuzz-targets
           path: fuzz-targets
 
-  # Runs a fuzz target for two minutes. A crash leaves its input in the
-  # artifacts, `cargo fuzz run <target> <input>` reproduces it. The run starts
-  # from the seeds in fuzz/seeds and the corpus collected so far, which only
-  # the runs on main save.
+  # Runs a fuzz target of a pull request for two minutes. A crash, hang or
+  # allocation above the limit leaves its input in the artifacts,
+  # `cargo fuzz run <target> <input> -- -timeout=10 -malloc_limit_mb=256`
+  # reproduces it, see .github/run-fuzz. The run starts from the seeds in
+  # fuzz/seeds and the corpus collected so far, which the daily runs of the
+  # advisories workflow save. They fuzz main for half an hour, a run of main
+  # here would only repeat the one of its pull request. Skipped jobs count as
+  # passed for a release, see .github/release-files.
   test-fuzz:
+    if: github.event_name == 'pull_request'
     needs: build-fuzz
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -623,7 +625,8 @@ jobs:
         with:
           name: fuzz-targets
           path: fuzz-targets
-      # Every run saves a new entry, the restore picks the latest one.
+      # Every run of the advisories workflow saves a new entry, the restore
+      # picks the latest one.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: corpus
@@ -632,14 +635,6 @@ jobs:
       # See .github/run-fuzz, which the advisories workflow uses as well.
       - name: Fuzz
         run: .github/run-fuzz run "$TARGET" 120
-      - name: Minimize the corpus
-        if: github.ref == 'refs/heads/main'
-        run: .github/run-fuzz minimize "$TARGET"
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: github.ref == 'refs/heads/main'
-        with:
-          path: corpus
-          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
@@ -934,13 +929,12 @@ jobs:
   # The release workflow publishes the marker of a tag. The marker of main
   # only moves to a commit whose binaries got published and whose tests
   # passed, all of these jobs run for every main commit. Like the publish
-  # jobs, it does not wait for the scans and the fuzzing: CRI-O CI installs
-  # the binaries of the marker, which a new advisory or a crash the fuzzing
-  # finds in older code must not hold back. Neither for the coverage, whose
-  # integration tests may fail, nor for the unit tests of the other
-  # architectures, the test-unit-arch jobs of arm64, ppc64le and s390x, which
-  # a timing sensitive test fails more often, under qemu above all. A release
-  # waits for them, see release.md.
+  # jobs, it does not wait for the scans: CRI-O CI installs the binaries of
+  # the marker, which a new advisory against older code must not hold back.
+  # Neither for the coverage, whose integration tests may fail, nor for the
+  # unit tests of the other architectures, the test-unit-arch jobs of arm64,
+  # ppc64le and s390x, which a timing sensitive test fails more often, under
+  # qemu above all. A release waits for them, see release.md.
   publish-marker:
     runs-on: ubuntu-latest
     timeout-minutes: 10

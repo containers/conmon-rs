@@ -12,10 +12,12 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"go.podman.io/common/pkg/detach"
 	"go.podman.io/common/pkg/resize"
 )
@@ -171,6 +173,77 @@ func TestRedirectResponseToOutputStreams(t *testing.T) {
 
 	if _, closed := stdout.state(); !closed {
 		t.Error("stdout not closed at the end of the connection")
+	}
+}
+
+// scriptedReader returns its reads in order, a packet or an error each,
+// and io.EOF after the last one.
+type scriptedReader struct {
+	reads []scriptedRead
+}
+
+type scriptedRead struct {
+	packet []byte
+	err    error
+}
+
+func (r *scriptedReader) Read(b []byte) (int, error) {
+	if len(r.reads) == 0 {
+		return 0, io.EOF
+	}
+
+	read := r.reads[0]
+	r.reads = r.reads[1:]
+
+	return copy(b, read.packet), read.err
+}
+
+func TestRedirectResponseToOutputStreamsRetriesAndSkips(t *testing.T) {
+	t.Parallel()
+
+	reset := &net.OpError{Op: "read", Err: os.NewSyscallError("read", syscall.ECONNRESET)}
+
+	logger, hook := logrustest.NewNullLogger()
+	c := &ConmonClient{logger: logger}
+	stdout := &testOut{}
+	cfg := &AttachConfig{Streams: AttachStreams{Stdout: &Out{stdout}}}
+	conn := &scriptedReader{reads: []scriptedRead{
+		{packet: []byte{attachPipeStdout, 'a'}},
+		// A reset connection gets read again.
+		{err: reset},
+		// Also with a packet which came along.
+		{packet: []byte{attachPipeStdout, 'b'}, err: reset},
+		// A packet of an unknown type gets skipped.
+		{packet: []byte{42, 'x'}},
+		{packet: []byte{attachPipeStdout, 'c'}},
+	}}
+
+	if err := c.redirectResponseToOutputStreams(t.Context(), cfg, conn); err != nil {
+		t.Fatalf("redirect: %v", err)
+	}
+
+	if out, closed := stdout.state(); out != "abc" || !closed {
+		t.Fatalf("got %q, closed %v, want %q, closed", out, closed, "abc")
+	}
+
+	const unexpected = "Received unexpected attach type +42"
+	if entry := hook.LastEntry(); entry == nil || entry.Message != unexpected {
+		t.Errorf("got log entry %v, want %q", entry, unexpected)
+	}
+
+	// Other errors end the output.
+	stdout = &testOut{}
+	cfg = &AttachConfig{Streams: AttachStreams{Stdout: &Out{stdout}}}
+	conn = &scriptedReader{reads: []scriptedRead{{err: io.ErrUnexpectedEOF}}}
+
+	if err := c.redirectResponseToOutputStreams(
+		t.Context(), cfg, conn,
+	); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("got error %v, want %v", err, io.ErrUnexpectedEOF)
+	}
+
+	if _, closed := stdout.state(); !closed {
+		t.Error("stdout not closed after a failed read")
 	}
 }
 
@@ -453,6 +526,119 @@ func TestDetachStopsOutput(t *testing.T) {
 
 	if later, _ := stdout.state(); later != out {
 		t.Fatalf("output written after the attach returned: %q", later[len(out):])
+	}
+}
+
+func TestStdinAfterServerClosedKeepsOutput(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "attach")
+
+	listener, err := net.ListenUnix("unixpacket", &net.UnixAddr{Name: path, Net: "unixpacket"})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	t.Cleanup(func() { listener.Close() })
+
+	// Like after the exit of the container, the server reads no input
+	// anymore, a write of the client fails with EPIPE, while the rest of
+	// the output is still to come.
+	sendRest := make(chan struct{})
+
+	go func() {
+		conn, err := listener.AcceptUnix()
+		if err != nil {
+			return
+		}
+
+		defer conn.Close()
+
+		if err := conn.CloseRead(); err != nil {
+			return
+		}
+
+		if _, err := conn.Write([]byte{attachPipeStdout, 'a'}); err != nil {
+			return
+		}
+
+		<-sendRest
+
+		_, _ = conn.Write([]byte{attachPipeStdout, 'b'}) //nolint:errcheck // checked by the output
+	}()
+
+	c := newTestClient(t, t.TempDir(), logrus.New())
+	t.Cleanup(func() { c.Close() })
+
+	stdin, stdinWriter := io.Pipe()
+	stdout := &testOut{}
+	cfg := &AttachConfig{
+		ID:         "id",
+		SocketPath: path,
+		Streams:    AttachStreams{Stdin: &In{stdin}, Stdout: &Out{stdout}},
+	}
+
+	attachErr := make(chan error, 1)
+
+	go func() { attachErr <- c.attach(t.Context(), cfg) }()
+
+	waitFor(t, "no output", func() bool {
+		out, _ := stdout.state()
+
+		return out != ""
+	})
+
+	if _, err := stdinWriter.Write([]byte("x")); err != nil {
+		t.Fatalf("write stdin: %v", err)
+	}
+
+	// The failed write of stdin does not end the attach.
+	select {
+	case err := <-attachErr:
+		t.Fatalf("attach ended with %v after the write of stdin failed", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(sendRest)
+
+	select {
+	case err := <-attachErr:
+		if err != nil {
+			t.Fatalf("attach failed: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("attach still running after the end of the output")
+	}
+
+	if out, closed := stdout.state(); out != "ab" || !closed {
+		t.Fatalf("got output %q, closed %v, want %q, closed", out, closed, "ab")
+	}
+}
+
+func TestStdinConnClosed(t *testing.T) {
+	t.Parallel()
+
+	for _, err := range []error{
+		io.ErrClosedPipe,
+		&net.OpError{Op: "write", Err: net.ErrClosed},
+		&net.OpError{Op: "write", Err: os.NewSyscallError("write", syscall.EPIPE)},
+		&net.OpError{Op: "write", Err: os.NewSyscallError("write", syscall.ECONNRESET)},
+	} {
+		if !stdinConnClosed(err) {
+			t.Errorf("%v: not a closed connection", err)
+		}
+	}
+
+	// Reading the stdin of the caller failed, like a connection which got
+	// reset, which the attach reports.
+	for _, err := range []error{
+		nil, io.ErrUnexpectedEOF, detach.ErrDetach, net.ErrClosed, syscall.EPIPE,
+		&net.OpError{Op: "read", Err: net.ErrClosed},
+		&net.OpError{Op: "read", Err: os.NewSyscallError("read", syscall.ECONNRESET)},
+	} {
+		if stdinConnClosed(err) {
+			t.Errorf("%v: a closed connection", err)
+		}
 	}
 }
 

@@ -7,7 +7,7 @@ use super::{
 use crate::{
     attach::SharedContainerAttach,
     child_reaper::ReapableChild,
-    container_io::{Drain, Message as IOMessage, Pipe},
+    container_io::{Drain, Lag, Message as IOMessage, Pipe},
     streaming_server::remotecommand::{
         MESSAGE_TOO_LARGE, Output, STDERR_BYTE, STDOUT_BYTE, Status,
     },
@@ -18,7 +18,7 @@ use tokio::{
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::debug;
 
 #[derive(Debug)]
 /// Required attach session data.
@@ -42,22 +42,22 @@ impl StreamingServer {
         client: ClientRx,
         status: &mut Option<Status>,
     ) -> Result<()> {
-        // Extract values we need for the I/O loop
-        let stdin_enabled = session.stdin;
-        let stdout_enabled = session.stdout;
-        let stderr_enabled = session.stderr;
-        let stop_after_stdin_eof = session.stop_after_stdin_eof;
-        let io = session.child.io().clone();
-        let token = session.child.token().clone();
-
-        // Explicitly drop session to free the ReapableChild before entering the I/O loop
-        drop(session);
+        let AttachSession {
+            child,
+            stdin: stdin_enabled,
+            stdout: stdout_enabled,
+            stderr: stderr_enabled,
+            stop_after_stdin_eof,
+            ..
+        } = session;
+        let io = child.io().clone();
+        let token = child.token().clone();
 
         // Subscribe to the attach broadcast rather than the stdio channels. The
         // broadcast only carries output produced while someone is attached,
         // whereas the stdio channels replay buffered history and are closed
         // for created containers anyway.
-        let attach = io.attach().await;
+        let attach = io.attach().clone();
         let terminal = attach.is_terminal();
         // Without stdin, there is none to wait for.
         let mut input = SessionInput::new(io, attach.clone(), client, stdin_enabled);
@@ -81,14 +81,16 @@ impl StreamingServer {
         }
 
         // Until nothing is left to forward in either direction.
+        let mut lag = Lag::default();
         while !done || input.stdin_open {
             tokio::select! {
                 res = attach_rx.recv(), if !done => match res {
                     Ok(IOMessage::Done) => done = true,
                     Ok(message) => {
+                        lag.received(&attach_rx);
                         Self::forward_output(message, stdout_enabled, stderr_enabled, sender).await?;
                     }
-                    Err(RecvError::Lagged(n)) => warn!("Attach client too slow, skipped {n} messages"),
+                    Err(RecvError::Lagged(n)) => lag.skipped(n),
                     Err(RecvError::Closed) => {
                         debug!("Exiting streaming attach because container I/O is gone");
                         break
@@ -96,7 +98,7 @@ impl StreamingServer {
                 },
 
                 event = input.next() => match event {
-                    InputEvent::Resize(data) => input.resize(&data).await,
+                    InputEvent::Resize(data) => input.resize(&data),
                     InputEvent::Ping => sender.ping().await?,
                     // Without a terminal and stdin once, that ends the
                     // session, like for CRI-O with conmon. Otherwise keep
@@ -106,7 +108,7 @@ impl StreamingServer {
                     InputEvent::StdinClosed => {
                         if stop_after_stdin_eof {
                             teardown.close_stdin = false;
-                            input.close_container_stdin().await;
+                            input.close_container_stdin();
                         }
                     }
                     // The client closed the connection, everything it sent
@@ -118,7 +120,7 @@ impl StreamingServer {
                 () = token.cancelled() => {
                     debug!("Exiting streaming attach because token cancelled");
                     if !done {
-                        Self::drain_attach(&mut attach_rx, stdout_enabled, stderr_enabled, sender).await?;
+                        Self::drain_attach(&mut attach_rx, &mut lag, stdout_enabled, stderr_enabled, sender).await?;
                     }
                     break
                 }
@@ -151,12 +153,13 @@ impl StreamingServer {
     /// container exited, until the output ended or the [`Drain`] gives up.
     async fn drain_attach(
         attach_rx: &mut broadcast::Receiver<IOMessage>,
+        lag: &mut Lag,
         stdout_enabled: bool,
         stderr_enabled: bool,
         sender: &mut Output,
     ) -> Result<()> {
         let mut drain = Drain::default();
-        while let Some(message) = drain.recv_output(attach_rx, true).await {
+        while let Some(message) = drain.recv_output(attach_rx, Some(lag)).await {
             Self::forward_output(message, stdout_enabled, stderr_enabled, sender).await?;
         }
         Ok(())

@@ -175,13 +175,7 @@ async fn wait_for_reaped_process_is_unknown() -> Result<()> {
     let mut reaped = std::process::Command::new("true").spawn()?;
     let pid = child_pid(reaped.id())?;
     reaped.wait()?;
-    let token = CancellationToken::new();
-    let code = time::timeout(
-        Duration::from_secs(5),
-        wait_for_exit_code(token.clone(), pid),
-    )
-    .await?;
+    let code = time::timeout(Duration::from_secs(5), wait_for_exit_code(pid)).await?;
     assert_eq!(code, EXIT_CODE_UNKNOWN);
-    assert!(token.is_cancelled());
     Ok(())
 }

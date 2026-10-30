@@ -33,20 +33,18 @@ where
     V: Debug,
 {
     /// Insert an element into the map, after removing the timed-out ones.
-    /// Returns the element which got replaced, or the new one back if the map
-    /// is full.
-    pub fn insert(&mut self, k: K, v: V) -> Result<Option<V>, V> {
+    /// Returns the new one back if the map is full. The keys are random
+    /// tokens, which do not repeat, so the map does not look for an element
+    /// with the same key.
+    pub fn insert(&mut self, k: K, v: V) -> Result<(), V> {
         let now = Instant::now();
         self.remove_expired(now);
 
-        let replaced = match self.position(&k) {
-            Some(pos) => self.entries.remove(pos),
-            None if self.entries.len() >= self.capacity => return Err(v),
-            None => None,
-        };
+        if self.entries.len() >= self.capacity {
+            return Err(v);
+        }
         self.entries.push_back((k, now, v));
-
-        Ok(replaced.map(|(_, _, val)| val))
+        Ok(())
     }
 
     /// Remove an element from the map and return it if the element has not
@@ -148,12 +146,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn contains_key_leaves_the_element() {
         let mut sut = BoundedMap::default();
-        assert_eq!(sut.insert(1, "one"), Ok(None));
+        assert_eq!(sut.insert(1, "one"), Ok(()));
         assert!(sut.contains_key(&1));
         assert!(!sut.contains_key(&2));
         assert_eq!(sut.remove(&1), Some("one"));
 
-        assert_eq!(sut.insert(3, "three"), Ok(None));
+        assert_eq!(sut.insert(3, "three"), Ok(()));
         advance(sut.max_duration + Duration::from_secs(1)).await;
         assert!(!sut.contains_key(&3));
     }
@@ -169,37 +167,32 @@ mod tests {
         assert_eq!(sut.len(), 0);
 
         // Insert first item should be fine
-        assert_eq!(sut.insert(0, 0), Ok(None));
+        assert_eq!(sut.insert(0, 0), Ok(()));
         assert_eq!(sut.len(), 1);
 
         // Insert second item should be fine, removal should work as well
-        assert_eq!(sut.insert(1, 0), Ok(None));
+        assert_eq!(sut.insert(1, 0), Ok(()));
         assert_eq!(sut.len(), 2);
         assert!(sut.remove(&1).is_some());
         assert_eq!(sut.len(), 1);
-        assert_eq!(sut.insert(1, 0), Ok(None));
+        assert_eq!(sut.insert(1, 0), Ok(()));
 
         // A full map takes no third item, the valid ones stay.
         assert_eq!(sut.insert(2, 2), Err(2));
         assert_eq!(sut.len(), 2);
         assert!(sut.remove(&2).is_none());
 
-        // An item with the same key replaces the old one.
-        assert_eq!(sut.insert(1, 1), Ok(Some(0)));
-        assert_eq!(sut.len(), 2);
-        assert_eq!(sut.remove(&1), Some(1));
-        assert_eq!(sut.insert(2, 0), Ok(None));
         assert!(sut.remove(&0).is_some());
-        assert!(sut.remove(&2).is_some());
+        assert!(sut.remove(&1).is_some());
 
         // Change the max age of the elements, all should be timed out
         sut.max_duration = Duration::from_millis(100);
-        assert_eq!(sut.insert(0, 0), Ok(None));
-        assert_eq!(sut.insert(1, 0), Ok(None));
+        assert_eq!(sut.insert(0, 0), Ok(()));
+        assert_eq!(sut.insert(1, 0), Ok(()));
         advance(Duration::from_millis(200)).await;
 
         // A full map of expired items takes a new one.
-        assert_eq!(sut.insert(2, 0), Ok(None));
+        assert_eq!(sut.insert(2, 0), Ok(()));
         assert_eq!(sut.len(), 1);
         assert!(sut.remove(&0).is_none());
 
@@ -208,14 +201,14 @@ mod tests {
         assert!(sut.remove(&2).is_none());
 
         // Removing any key removes all expired elements.
-        assert_eq!(sut.insert(0, 0), Ok(None));
-        assert_eq!(sut.insert(1, 0), Ok(None));
+        assert_eq!(sut.insert(0, 0), Ok(()));
+        assert_eq!(sut.insert(1, 0), Ok(()));
         advance(Duration::from_millis(200)).await;
         assert!(sut.remove(&2).is_none());
         assert_eq!(sut.len(), 0);
 
         // So does a sweep.
-        assert_eq!(sut.insert(0, 0), Ok(None));
+        assert_eq!(sut.insert(0, 0), Ok(()));
         advance(Duration::from_millis(200)).await;
         assert!(!sut.is_empty());
         sut.sweep();
@@ -225,10 +218,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn expired_elements_are_not_handed_out() {
         let mut sut = BoundedMap::default();
-        assert_eq!(sut.insert(1, "one"), Ok(None));
-        assert_eq!(sut.insert(2, "two"), Ok(None));
+        assert_eq!(sut.insert(1, "one"), Ok(()));
+        assert_eq!(sut.insert(2, "two"), Ok(()));
         advance(sut.max_duration + Duration::from_secs(1)).await;
-        assert_eq!(sut.insert(3, "three"), Ok(None));
+        assert_eq!(sut.insert(3, "three"), Ok(()));
 
         // The expired element is taken, but not handed out, the other expired
         // one goes as well.

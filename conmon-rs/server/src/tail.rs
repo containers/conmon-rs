@@ -9,11 +9,13 @@ pub struct Tail<const MAX: usize> {
 
 impl<const MAX: usize> Tail<MAX> {
     pub fn push(&mut self, data: &[u8]) {
-        self.buf.extend_from_slice(data);
+        // Only the end of a large push is kept, it does not get copied whole.
+        let data = &data[data.len().saturating_sub(MAX)..];
         // Dropping the front only once it doubled keeps it amortized.
-        if self.buf.len() > 2 * MAX {
-            self.buf.drain(..self.buf.len() - MAX);
+        if self.buf.len() + data.len() > 2 * MAX {
+            self.buf.drain(..self.buf.len() - (MAX - data.len()));
         }
+        self.buf.extend_from_slice(data);
     }
 
     /// The last `MAX` bytes.
@@ -43,6 +45,13 @@ mod tests {
             assert!(tail.buf.len() <= 8);
         }
         assert_eq!(tail.end(), [96, 97, 98, 99]);
-        assert_eq!(tail.into_end(), [96, 97, 98, 99]);
+
+        // A large push does not grow the buffer beyond its bound.
+        tail.push(&(0..100).collect::<Vec<u8>>());
+        assert!(tail.buf.capacity() <= 8);
+        assert_eq!(tail.end(), [96, 97, 98, 99]);
+        tail.push(&[1, 2]);
+        assert_eq!(tail.end(), [98, 99, 1, 2]);
+        assert_eq!(tail.into_end(), [98, 99, 1, 2]);
     }
 }

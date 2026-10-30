@@ -30,26 +30,17 @@ pub(super) struct WatchEvent {
     /// The file which changed. None if the kernel dropped events, every
     /// watched file may have changed then.
     pub(super) path: Option<Arc<Path>>,
-
-    /// Whether the file got removed, which ends its watch.
-    pub(super) removed: bool,
 }
 
 impl WatchEvent {
     /// Events got lost, by the kernel or a full channel.
-    pub(super) const LOST: Self = Self {
-        path: None,
-        removed: false,
-    };
+    pub(super) const LOST: Self = Self { path: None };
 }
 
-/// What a watch reports. Opening a file is no change, the watcher reads the
-/// files itself.
-const WATCH_FLAGS: AddWatchFlags = AddWatchFlags::IN_MODIFY
-    .union(AddWatchFlags::IN_ATTRIB)
-    .union(AddWatchFlags::IN_CLOSE_WRITE)
-    .union(AddWatchFlags::IN_DELETE_SELF)
-    .union(AddWatchFlags::IN_MOVE_SELF);
+/// What a watch reports. cgroupfs notifies a change of the memory events
+/// with `IN_MODIFY` and the removal of a cgroup with `IN_IGNORED` only,
+/// which every watch gets anyway.
+const WATCH_FLAGS: AddWatchFlags = AddWatchFlags::IN_MODIFY;
 
 /// The watches by descriptor. A watch belongs to a file rather than to its
 /// path: a file which got recreated gets a watch of its own, and the events
@@ -80,7 +71,6 @@ impl Watches {
         if event.mask.intersects(WATCH_FLAGS) {
             let watch_event = WatchEvent {
                 path: Some(watch.path.clone()),
-                removed: event.mask.contains(AddWatchFlags::IN_DELETE_SELF),
             };
             for (_, tx) in &watch.subscribers {
                 Self::deliver(tx, &watch_event);

@@ -7,7 +7,6 @@ use crate::{
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::{path::Path, time::SystemTime};
-use tracing::debug;
 
 /// A single line of output as JSON. The schema is documented in usage.md.
 #[derive(Serialize)]
@@ -44,17 +43,8 @@ impl JsonLogger {
 impl Logger for JsonLogger {
     const BUFFERS_LINES: bool = true;
 
-    async fn init(&mut self) -> Result<()> {
-        debug!(
-            "Initializing JSON logger in path {}",
-            self.file.path().display()
-        );
-        self.file.open().await
-    }
-
-    async fn reopen(&mut self) -> Result<()> {
-        debug!("Reopen JSON log {}", self.file.path().display());
-        self.file.reopen().await
+    fn file(&mut self) -> Option<&mut LogFile> {
+        Some(&mut self.file)
     }
 
     async fn write_lines(&mut self, pipe: Pipe, lines: &[Line<'_>]) -> Result<()> {

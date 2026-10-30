@@ -404,6 +404,46 @@ func (tr *testRunner) createContainerWithConfig(
 	}, time.Second*5).Should(Succeed())
 }
 
+// execEcho runs `echo -n hello world <i>` in the container of the runner
+// with ExecSyncContainer and checks its output.
+func (tr *testRunner) execEcho(
+	ctx context.Context, sut *client.ConmonClient, terminal bool, i int,
+) {
+	result, err := sut.ExecSyncContainer(
+		ctx,
+		&client.ExecSyncConfig{
+			ID: tr.ctrID,
+			Command: []string{
+				"/busybox",
+				"echo",
+				"-n",
+				"hello",
+				"world",
+				strconv.Itoa(i),
+			},
+			Terminal: terminal,
+			Timeout:  timeoutUnlimited,
+		},
+	)
+	Expect(err).To(Succeed())
+	Expect(result).NotTo(BeNil())
+	Expect(string(result.Stdout)).To(Equal(fmt.Sprintf("hello world %d", i)))
+	GinkgoWriter.Println("done with", i, string(result.Stdout))
+}
+
+// journalctl returns a function which runs journalctl with the arguments
+// and returns its output, for Eventually.
+func journalctl(ctx context.Context, args ...string) func(g Gomega) string {
+	return func(g Gomega) string {
+		cmd := exec.CommandContext(ctx, "journalctl", args...)
+		stdout := strings.Builder{}
+		cmd.Stdout = &stdout
+		g.Expect(cmd.Run()).To(Succeed())
+
+		return stdout.String()
+	}
+}
+
 func (tr *testRunner) startContainer() {
 	// Start the container
 	Expect(tr.rr.RunCommand("start", tr.ctrID)).To(Succeed())
@@ -670,7 +710,9 @@ func logGrownMappings(before, after map[string]int) {
 	}
 }
 
-func vmRSSGivenPID(pid uint32) uint32 {
+// vmRSSGivenPID returns the resident set size of the process in kB, as an
+// int, so that the difference of two values cannot wrap.
+func vmRSSGivenPID(pid uint32) int {
 	const procPath = "/proc"
 
 	procEntry := filepath.Join(procPath, strconv.Itoa(int(pid)), "status")
@@ -696,10 +738,10 @@ func vmRSSGivenPID(pid uint32) uint32 {
 		break
 	}
 
-	rssU64, err := strconv.ParseUint(rss, 10, 32)
+	rssKB, err := strconv.Atoi(rss)
 	Expect(err).To(Succeed())
 
-	return uint32(rssU64)
+	return rssKB
 }
 
 // serverResources are the open file descriptors and the threads of the

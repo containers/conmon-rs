@@ -30,6 +30,7 @@ MAX_RSS_GROWTH_KB ?= 2000
 CAPNP ?= nix shell --inputs-from . nixpkgs\#capnproto --command capnp
 # Evaluated in the recipes, so that a failing cargo stops the build.
 CRATE_VERSION := cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "$(BINARY)") | .version'
+CRATE_RUST_VERSION := cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "$(BINARY)") | .rust_version'
 SPEC_FILE := rpm/conmon-rs.spec
 PREFIX ?= /usr
 CI_TAG ?=
@@ -177,7 +178,7 @@ lint-workflows: .install.actionlint ## Lint the GitHub workflows with actionlint
 	$(CONTAINER_RUNTIME) run --rm -e GH_TOKEN -v $(CURDIR):/w:z,ro -w /w \
 		$(ZIZMOR_IMAGE) $(ZIZMOR_FLAGS) .
 
-# The version of the lint-typos job of CI, typos publishes no checksums to
+# The version of the lint-files job of CI, typos publishes no checksums to
 # install it with.
 TYPOS_VERSION = $(shell sed -n 's|.*crate-ci/typos@.* \# v||p' .github/workflows/ci.yml)
 
@@ -245,11 +246,17 @@ verify-deny: ## Check the dependencies with cargo-deny, which has to be installe
 	cargo deny check
 
 .PHONY: verify-spec
-verify-spec: ## Verify that the RPM spec version matches the crate version.
+verify-spec: ## Verify that the RPM spec version and cargo requirement match the crate.
 	VERSION=$$($(CRATE_VERSION)) && \
 	SPEC_VERSION=$$(sed -n 's/^Version: *//p' $(SPEC_FILE)) && \
 	if [ "$$VERSION" != "$$SPEC_VERSION" ]; then \
 		echo "$(SPEC_FILE) version $$SPEC_VERSION does not match crate version $$VERSION" ; \
+		exit 1 ; \
+	fi
+	RUST_VERSION=$$($(CRATE_RUST_VERSION)) && \
+	SPEC_CARGO=$$(sed -n 's/^BuildRequires: *cargo *>= *//p' $(SPEC_FILE)) && \
+	if [ "$$RUST_VERSION" != "$$SPEC_CARGO" ]; then \
+		echo "$(SPEC_FILE) requires cargo >= $$SPEC_CARGO, not the crate rust-version $$RUST_VERSION" ; \
 		exit 1 ; \
 	fi
 

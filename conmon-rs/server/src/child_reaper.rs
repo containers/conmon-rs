@@ -1,17 +1,17 @@
 //! Child process reaping and management.
 use crate::{
+    attach::StopOutput,
     child::{Child, ChildKind},
-    container_io::SharedContainerIO,
+    container_io::{ContainerIO, SharedContainerIO},
     mutex::lock,
     process::{Process, pidfd_open},
 };
 use anyhow::{Context, Result, bail};
-use futures::future::join_all;
 use nix::{errno::Errno, sys::signal::Signal, unistd::Pid};
 use std::{
     collections::{BTreeMap, HashMap},
     os::fd::OwnedFd,
-    path::PathBuf,
+    pin::pin,
     str,
     sync::{
         Arc, Mutex,
@@ -20,11 +20,10 @@ use std::{
 };
 use tokio::{
     sync::{Notify, broadcast::Receiver, watch},
-    task::JoinHandle,
     time::{self, Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, debug_span, error};
+use tracing::{debug, debug_span};
 
 mod orphan_sweep;
 mod runtime_call;
@@ -35,7 +34,12 @@ pub(crate) use runtime_call::RuntimeOutput;
 
 #[derive(Debug, Default)]
 pub struct ChildReaper {
+    /// The registered children, each until its watcher ended.
     grandchildren: Arc<Mutex<HashMap<Box<str>, Vec<ReapableChild>>>>,
+
+    /// Notified whenever a watcher ended and forgot its child, which the
+    /// shutdown waits for.
+    forgotten: Arc<Notify>,
 
     /// The runtimes and container processes of calls in progress, which are
     /// not registered as grandchildren yet. Their exit status belongs to the
@@ -53,10 +57,6 @@ pub struct ChildReaper {
     /// The runtime calls in progress, including the registration of their
     /// child, which the shutdown waits for.
     in_flight: Arc<watch::Sender<Calls>>,
-
-    /// The watchers of children registered after the shutdown took its
-    /// snapshot, which it waits for as well.
-    late_watchers: Mutex<Vec<(Pid, TaskHandle)>>,
 }
 
 /// Counts a runtime call as in progress until dropped. A successful
@@ -201,23 +201,23 @@ impl ChildReaper {
         call: InFlight,
     ) -> Result<Receiver<ExitChannelData>> {
         let pid = child.pid;
-        let (id, mut reapable_grandchild) = ReapableChild::from_child(child);
+        let (id, reapable_grandchild, exit) = ReapableChild::from_child(child);
         let seq = reapable_grandchild.seq;
 
         let mut map = lock(&self.grandchildren);
         // Under the lock, so that the child is registered before it can be
         // forgotten. A task which never runs, like one spawned while the
         // runtime shuts down, does not forget it, see `watch`.
-        let grandchildren = self.grandchildren.clone();
+        let (grandchildren, forgotten) = (self.grandchildren.clone(), self.forgotten.clone());
         let key = id.clone();
-        let exit_rx = reapable_grandchild.watch(move || {
+        let exit_rx = reapable_grandchild.watch(exit, move || {
             drop(leak_fds);
             Self::forget_grandchild(&grandchildren, &key, seq);
+            forgotten.notify_waiters();
         });
+        // A child registered after the shutdown took its snapshot is in the
+        // map as well, which the shutdown waits to empty.
         let shutting_down = self.shutting_down.load(Ordering::SeqCst);
-        if shutting_down && let Some(task) = &reapable_grandchild.task {
-            lock(&self.late_watchers).push((pid, task.clone()));
-        }
         map.entry(id).or_default().push(reapable_grandchild);
         // Ends the pending mark only once registered, so it is claimed all
         // the time, see `is_claimed`.
@@ -230,6 +230,46 @@ impl ChildReaper {
             bail!("server is shutting down")
         }
         Ok(exit_rx)
+    }
+
+    /// Register and watch an exec which `create_child` started under the
+    /// `id` of its container, which gets killed at its `timeout`, see
+    /// [`ChildReaper::watch_grandchild`].
+    pub(crate) fn watch_exec(
+        &self,
+        id: Box<str>,
+        (pid, token, call): (Pid, CancellationToken, InFlight),
+        timeout: Option<Instant>,
+        io: ContainerIO,
+    ) -> Result<WatchedExec> {
+        // Not reaped before the registration below, so the PID is still its
+        // own.
+        let process = Process::open(pid);
+        let io = SharedContainerIO::new(io);
+        let child = Child {
+            id,
+            kind: ChildKind::Exec,
+            pid,
+            exit_paths: vec![],
+            oom_exit_paths: vec![],
+            timeout,
+            io: io.clone(),
+            cleanup_cmd: vec![],
+            token: token.clone(),
+        };
+        // The output stops once the process exited. Also if the registration
+        // fails, its watcher reports the exit.
+        let stop_output = io.attach().stop_output_on_exit(token.clone());
+        // The registration fails only while the server shuts down, which
+        // killed the process already.
+        let exit_rx = self.watch_grandchild(child, vec![], call)?;
+        Ok(WatchedExec {
+            io,
+            token,
+            process,
+            exit_rx,
+            stop_output,
+        })
     }
 
     /// Kill a grandchild registered after the shutdown killed the others,
@@ -276,37 +316,31 @@ impl ChildReaper {
     /// keep the server from stopping. It fails if they did not end in time.
     pub async fn kill_grandchildren(&self, deadline: Instant) -> Result<()> {
         debug!("Killing grandchildren");
-        // Collect only PIDs and task handles to avoid cloning entire ReapableChild
-        let children: Vec<_> = {
+        let pids: Vec<_> = {
             let map = lock(&self.grandchildren);
             // Children registered after this snapshot get killed on their
             // registration, see `watch_grandchild`.
             self.shutting_down.store(true, Ordering::SeqCst);
-            map.values()
-                .flatten()
-                .map(|gc| (gc.pid, gc.task.clone()))
-                .collect()
+            map.values().flatten().map(|gc| gc.pid).collect()
         };
-        // Signal every grandchild first and wait for all of their tasks
-        // concurrently, so that the shutdown takes as long as the slowest
-        // child instead of the sum of all of them.
-        let mut tasks = Vec::with_capacity(children.len());
-        for (pid, task) in children {
+        // Signal every grandchild first, their watchers end concurrently, so
+        // that the shutdown takes as long as the slowest child instead of the
+        // sum of all of them.
+        for pid in pids {
             let span = debug_span!("kill_grandchild", %pid);
             let _enter = span.enter();
             debug!("Killing single grandchild");
             kill_grandchild(pid, Signal::SIGKILL);
-            tasks.extend(task.map(|task| (pid, task)));
         }
         // An init of a PID namespace only exits once every process of the
         // namespace is reaped, including zombies reparented to this process.
         // The sweep keeps running while the watchers are awaited.
         self.sweep.notify_one();
-        let mut left = Self::wait_for_watchers(tasks, deadline).await?;
 
         // Runtime calls in progress get to finish, the server would kill a
-        // runtime halfway otherwise. Their children got killed on registration.
-        // A call which hangs does not take the time of the late watchers.
+        // runtime halfway otherwise. Their children got killed on
+        // registration. A call which hangs does not take the time of the
+        // watchers, which end meanwhile.
         let mut in_flight = self.in_flight.subscribe();
         let in_flight_deadline = deadline.min(Instant::now() + Self::IN_FLIGHT_WAIT);
         let calls_ended = time::timeout_at(
@@ -315,8 +349,8 @@ impl ChildReaper {
         )
         .await
         .is_ok();
-        let late = std::mem::take(&mut *lock(&self.late_watchers));
-        left.extend(Self::wait_for_watchers(late, deadline).await?);
+        // Also the watchers of the children which the calls registered.
+        let left = self.wait_for_watchers(deadline).await;
 
         match (left.is_empty(), calls_ended) {
             (true, true) => {
@@ -333,36 +367,27 @@ impl ChildReaper {
     /// within its deadline.
     const IN_FLIGHT_WAIT: Duration = Duration::from_secs(5);
 
-    /// Wait for the watchers of the grandchildren until the deadline, and
-    /// return the PIDs of the ones which did not end.
-    async fn wait_for_watchers(
-        tasks: Vec<(Pid, TaskHandle)>,
-        deadline: Instant,
-    ) -> Result<Vec<i32>> {
-        let mut handles = Vec::with_capacity(tasks.len());
-        for (pid, task) in tasks {
-            if let Some(handle) = lock(&task).take() {
-                handles.push((pid, handle));
+    /// Wait until the watchers of all grandchildren ended, every watcher
+    /// forgets its child at its end. Return the PIDs of the children left at
+    /// the deadline.
+    async fn wait_for_watchers(&self, deadline: Instant) -> Vec<i32> {
+        loop {
+            // Enabled before the check, so that no end gets missed.
+            let mut forgotten = pin!(self.forgotten.notified());
+            forgotten.as_mut().enable();
+            let mut left: Vec<_> = lock(&self.grandchildren)
+                .values()
+                .flatten()
+                .map(|gc| gc.pid.as_raw())
+                .collect();
+            if left.is_empty() || Instant::now() >= deadline {
+                left.sort_unstable();
+                return left;
             }
+            debug!("Waiting for {} watchers to end", left.len());
+            // Checked again at the deadline.
+            let _ = time::timeout_at(deadline, forgotten).await;
         }
-        let waits = handles.iter_mut().map(|(pid, handle)| {
-            async move {
-                debug!("Waiting for task to close");
-                if let Err(e) = handle.await {
-                    error!("Unable to close grandchild: {e:#}");
-                }
-                debug!("Done killing single grandchild");
-            }
-            .instrument(debug_span!("close", %pid))
-        });
-        if time::timeout_at(deadline, join_all(waits)).await.is_ok() {
-            return Ok(vec![]);
-        }
-        Ok(handles
-            .iter()
-            .filter(|(_, handle)| !handle.is_finished())
-            .map(|(pid, _)| pid.as_raw())
-            .collect())
     }
 }
 
@@ -375,21 +400,32 @@ pub fn kill_grandchild(pid: Pid, s: Signal) {
     }
 }
 
-type TaskHandle = Arc<Mutex<Option<JoinHandle<()>>>>;
+/// An exec which got registered, see [`ChildReaper::watch_exec`].
+pub(crate) struct WatchedExec {
+    pub(crate) io: SharedContainerIO,
 
+    /// Cancelled once the process exited.
+    pub(crate) token: CancellationToken,
+
+    /// The process, which its watcher may reap before the token got
+    /// cancelled, so it does not get signalled by its PID.
+    pub(crate) process: Process,
+    pub(crate) exit_rx: Receiver<ExitChannelData>,
+
+    /// Stops the output once dropped by its consumer after the exit.
+    pub(crate) stop_output: StopOutput,
+}
+
+/// A registered child, until its watcher ended. What only the watcher needs
+/// moves into it, see [`ExitHandling`](watcher::ExitHandling).
 #[derive(Clone, Debug)]
 pub struct ReapableChild {
     /// Tells the registrations apart, unlike the PID, which gets reused.
     seq: u64,
     kind: ChildKind,
-    exit_paths: Arc<[PathBuf]>,
-    oom_exit_paths: Arc<[PathBuf]>,
     pid: Pid,
     io: SharedContainerIO,
-    timeout: Option<Instant>,
     token: CancellationToken,
-    task: Option<TaskHandle>,
-    cleanup_cmd: Arc<[String]>,
 }
 
 impl ReapableChild {
@@ -399,10 +435,6 @@ impl ReapableChild {
 
     pub fn io(&self) -> &SharedContainerIO {
         &self.io
-    }
-
-    pub fn timeout(&self) -> Option<Instant> {
-        self.timeout
     }
 
     pub fn token(&self) -> &CancellationToken {

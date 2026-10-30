@@ -4,7 +4,7 @@
 
 use crate::{
     async_fd,
-    container_io::{DRAIN_MAX_WAIT, Drain, Message, Pipe},
+    container_io::{DRAIN_MAX_WAIT, Drain, Lag, Message, Pipe, with_scratch},
     fs_util::{FileId, RemoveError},
     listener,
     mutex::lock,
@@ -31,6 +31,7 @@ use std::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence},
     },
+    task::{Poll, ready},
 };
 use tokio::{
     io::{ErrorKind, Interest},
@@ -50,12 +51,13 @@ const STDIN_CHANNEL_SIZE: usize = 16;
 
 /// Capacity of the output broadcast channel towards the attach clients. A
 /// client which falls further behind than this loses the oldest output,
-/// which gets logged with the number of skipped messages. The container
-/// output never waits for an attach client, a slow or stuck client must not
-/// block the container or the other clients, and the server does not buffer
-/// output without bound for it either. It matches what the stdio channels
-/// buffer for exec.
-const OUTPUT_CHANNEL_SIZE: usize = 100;
+/// which gets logged with the number of skipped messages, see [`Lag`]. The
+/// container output never waits for an attach client, a slow or stuck client
+/// must not block the container or the other clients, and the server does
+/// not buffer output without bound for it either. About what the stdio
+/// channels buffer for exec, as a power of two, which tokio rounds the
+/// capacity of a broadcast channel up to anyway.
+const OUTPUT_CHANNEL_SIZE: usize = 128;
 
 #[derive(Clone, Debug)]
 /// A shared container attach abstraction.
@@ -474,7 +476,9 @@ impl Drop for ListenerCleanup {
 struct Attach;
 
 impl Attach {
-    /// The size of an attach packet.
+    /// The most data of an output packet, after its pipe byte. Like for
+    /// conmon, CRI-O and the Go client read one byte more than this, so that
+    /// a full read of a pipe goes out as one packet.
     const PACKET_BUF_SIZE: usize = 8192;
 
     /// The maximum size of a stdin packet from an attach client, a larger one
@@ -664,25 +668,19 @@ impl Attach {
             }
         };
 
-        // Every read returns a single packet, which gets copied out so that
-        // the queued stdin holds only the data of the packets.
-        let mut buf = vec![0; Self::STDIN_PACKET_MAX_SIZE];
         loop {
             // A client which stays connected must not keep the loop going once
             // the container exited or its stdin got closed.
             let read = select! {
-                read = socket.recv(&mut buf) => read,
+                read = Self::recv_stdin(&socket) => read,
                 () = stopped() => return Ok(()),
             };
 
             match read {
-                Ok(info) if info.bytes_read() > 0 => {
-                    let n = info.bytes_read();
-                    if info.truncated() {
-                        warn!("Truncated attach stdin packet to {n} bytes");
+                Ok((data, truncated)) if !data.is_empty() => {
+                    if truncated {
+                        warn!("Truncated attach stdin packet to {} bytes", data.len());
                     }
-                    // Stdin is binary, null bytes are part of the data.
-                    let data = Bytes::copy_from_slice(&buf[..n]);
                     debug!("Read {} stdin bytes from client", data.len());
                     // Waiting for the container to take the data must not
                     // outlive the container or its stdin.
@@ -708,22 +706,31 @@ impl Attach {
                     }
                     return Ok(());
                 }
-                Err(e) => match Errno::from_raw(e.raw_os_error().context("get OS error")?) {
-                    Errno::ECONNRESET => {
-                        // The client closed the connection without reading all
-                        // of its output. The error gets reported only once,
-                        // the stdin queued before is still readable.
-                        debug!("Attach client reset the connection");
-                    }
-                    Errno::EIO => {
-                        debug!("Stopping read loop because of IO error");
-                        return Ok(());
-                    }
-                    Errno::EBADF => return Err(e).context("attach socket closed"),
-                    _ => return Err(e).context("read from attach socket"),
-                },
+                Err(e) if e.kind() == ErrorKind::ConnectionReset => {
+                    // The client closed the connection without reading all of
+                    // its output. The error gets reported only once, the
+                    // stdin queued before is still readable.
+                    debug!("Attach client reset the connection");
+                }
+                Err(e) => return Err(e).context("read from attach socket"),
             }
         }
+    }
+
+    /// Receive a stdin packet into the scratch buffer of the thread, see
+    /// [`with_scratch`], and copy it out, so that a connection holds no
+    /// buffer while it waits and the queued stdin only the data of the
+    /// packets. Stdin is binary, null bytes are part of the data. Returns
+    /// whether the packet got truncated as well.
+    async fn recv_stdin(socket: &UnixSeqpacket) -> io::Result<(Bytes, bool)> {
+        future::poll_fn(|cx| {
+            with_scratch(Self::STDIN_PACKET_MAX_SIZE, |buf| {
+                let info = ready!(socket.poll_recv(cx, buf))?;
+                let data = Bytes::copy_from_slice(&buf[..info.bytes_read()]);
+                Poll::Ready(Ok((data, info.truncated())))
+            })
+        })
+        .await
     }
 
     /// Whether a send failed because the client closed its end. A client
@@ -745,6 +752,7 @@ impl Attach {
         let hangup = Self::hangup(&socket);
         tokio::pin!(hangup);
         let mut drain: Option<Drain> = None;
+        let mut lag = Lag::default();
         loop {
             // The done message may have been sent before subscribing, so write
             // it once nothing is queued anymore.
@@ -764,12 +772,12 @@ impl Attach {
                         debug!("Exiting because the client hung up");
                         return Ok(());
                     }
-                    res = Self::next_message(&mut rx, drain.as_mut()) => res,
+                    res = Self::next_message(&mut rx, drain.as_mut(), &mut lag) => res,
                 };
                 match res {
                     Ok(message) => message,
                     Err(RecvError::Lagged(n)) => {
-                        warn!("Attach client too slow, skipped {n} messages");
+                        lag.skipped(n);
                         continue;
                     }
                     Err(RecvError::Closed) => {
@@ -796,8 +804,8 @@ impl Attach {
                         Pipe::StdErr => 3,
                     };
                     let header = [p];
-                    let len = buf.chunks(Self::PACKET_BUF_SIZE - 1).len();
-                    for (idx, chunk) in buf.chunks(Self::PACKET_BUF_SIZE - 1).enumerate() {
+                    let len = buf.chunks(Self::PACKET_BUF_SIZE).len();
+                    for (idx, chunk) in buf.chunks(Self::PACKET_BUF_SIZE).enumerate() {
                         // Send the pipe header and the chunk as one packet
                         // without copying the chunk into a separate buffer.
                         let packet = [IoSlice::new(&header), IoSlice::new(chunk)];
@@ -861,10 +869,20 @@ impl Attach {
     async fn next_message(
         rx: &mut Receiver<Message>,
         drain: Option<&mut Drain>,
+        lag: &mut Lag,
     ) -> Result<Message, RecvError> {
         match drain {
-            Some(drain) => Ok(drain.recv_output(rx, true).await.unwrap_or(Message::Done)),
-            None => rx.recv().await,
+            Some(drain) => Ok(drain
+                .recv_output(rx, Some(lag))
+                .await
+                .unwrap_or(Message::Done)),
+            None => {
+                let res = rx.recv().await;
+                if res.is_ok() {
+                    lag.received(rx);
+                }
+                res
+            }
         }
     }
 

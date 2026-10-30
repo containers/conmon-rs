@@ -240,7 +240,8 @@ operations against it:
   container attach socket, the protocol conmon speaks as well.
 - **Namespaces**: `createNamespaces` creates the pod level namespaces and bind
   mounts them, using the `conmonrs pause` subcommand to hold a PID namespace
-  open. This replaces what CRI-O otherwise does with `pinns`.
+  open. CRI-O does not use it and keeps pinning the namespaces with `pinns`,
+  other clients can use it instead of `pinns`.
 - **File descriptors**: `startFdSocket` opens a socket on which a client passes
   file descriptors to the server, for example to leak into or hand over to a
   container.
@@ -253,8 +254,11 @@ The server is single threaded: a tokio `current_thread` runtime drives all I/O
 and runs the Cap'n Proto RPC on the same thread, and blocking work like file
 I/O goes to a small bounded pool. With cgroup v2, all containers of a pod
 share one inotify instance for OOM detection, with cgroup v1 every container
-gets an eventfd on its `memory.oom_control`. Per container, the server keeps
-an 8 KiB read buffer per output pipe, the channels for exec output and a few
+gets an eventfd on its `memory.oom_control`. The read loops of all containers
+share one scratch buffer of the runtime thread, 8 KiB, or 64 KiB once an
+attach client sent stdin, so an idle container holds no read buffer. Per
+container, the server keeps an 8 KiB buffer per log
+file once the container wrote output, the channels for exec output and a few
 tasks. With glibc, the server limits malloc to a single arena instead of one
 per thread. That is why a pod with many containers still fits in a few
 megabytes.
@@ -318,6 +322,17 @@ follow the latest releases. To build and install a release binary:
 > make release
 > sudo make install PREFIX=/usr/local
 ```
+
+Packages built from a source tarball, which has no git metadata, pass in what
+`--version` shows: `BUILD_TAG=vX.Y.Z` or `BUILD_COMMIT=<sha>`, either one wins
+over git and leaves the other one empty, and `SOURCE_DATE_EPOCH` for the build
+date, which is the time of the build otherwise. The dependency tree of
+`--version full` comes from `cargo tree --locked --offline` during the build,
+which needs the crates of [Cargo.lock](./Cargo.lock) present, like after
+`cargo fetch` or `cargo vendor`, the tree stays empty otherwise.
+`CONMONRS_SKIP_CARGO_TREE` leaves it empty and skips that step. See
+[conmon-rs/server/build.rs](./conmon-rs/server/build.rs), and
+[rpm/conmon-rs.spec](./rpm/conmon-rs.spec) for how the RPM passes them.
 
 The [Makefile](./Makefile) has targets for most of what CI runs: `make` builds
 the server, `make lint` runs rustfmt, clippy, rustdoc, golangci-lint and

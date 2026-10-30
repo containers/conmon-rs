@@ -22,7 +22,7 @@ use std::{
 };
 use tokio::{fs::File, io::ErrorKind};
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, debug_span, error};
+use tracing::{debug, error};
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
@@ -113,29 +113,14 @@ impl OOMWatcher {
         std::fs::metadata(f).is_err_and(|e| e.kind() == ErrorKind::NotFound)
     }
 
-    /// Create the OOM files. Failures are logged, the OOM gets reported
-    /// through the channel either way.
+    /// Create the empty OOM files, like conmon does. A failure is only
+    /// logged, the exit gets reported either way, only without the OOM.
     pub async fn write_oom_files(exit_paths: &[PathBuf]) {
         for path in exit_paths {
-            let span = debug_span!("write_oom_file");
-            async {
-                debug!("Writing OOM file: {}", path.display());
-                match File::create(path).await {
-                    Ok(file) => {
-                        // Ensure the file is synced to disk
-                        if let Err(e) = file.sync_all().await {
-                            error!("Could not sync oom file to {}: {:#}", path.display(), e);
-                        } else {
-                            debug!("Successfully wrote and synced OOM file: {}", path.display());
-                        }
-                    }
-                    Err(e) => {
-                        error!("Could not create oom file at {}: {:#}", path.display(), e);
-                    }
-                }
+            debug!("Writing OOM file: {}", path.display());
+            if let Err(e) = File::create(path).await {
+                error!("Could not create oom file at {}: {:#}", path.display(), e);
             }
-            .instrument(span)
-            .await;
         }
     }
 }

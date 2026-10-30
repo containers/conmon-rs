@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/containers/conmon-rs/internal/proto"
+	"github.com/sirupsen/logrus"
 )
 
 // fdServerReply builds the response of the fake fd server to a request.
@@ -32,6 +37,16 @@ func newTestRemoteFDs(t *testing.T, replies ...fdServerReply) *RemoteFDs {
 	t.Helper()
 
 	client, server := packetPair(t)
+	serveFDRequests(t, server, replies...)
+
+	return &RemoteFDs{conn: client}
+}
+
+// serveFDRequests answers the requests on the server end of an fd socket
+// connection in order with the replies, until the test ends. A nil reply
+// answers nothing.
+func serveFDRequests(t *testing.T, server *net.UnixConn, replies ...fdServerReply) {
+	t.Helper()
 
 	done := make(chan struct{})
 
@@ -73,12 +88,9 @@ func newTestRemoteFDs(t *testing.T, replies ...fdServerReply) *RemoteFDs {
 	}()
 
 	t.Cleanup(func() {
-		client.Close()
 		server.Close()
 		<-done
 	})
-
-	return &RemoteFDs{conn: client}
 }
 
 // packetPair returns both ends of a unix packet socket pair, like the ones
@@ -342,5 +354,127 @@ func TestRemoteFDsCloseBeforeWrite(t *testing.T) {
 	// Like a request which checked for Close just before it ran.
 	if _, err := r.send([]int{testFD(t)}); !errors.Is(err, ErrRemoteFDsBroken) {
 		t.Fatalf("got error %v, want %v", err, ErrRemoteFDsBroken)
+	}
+}
+
+// fdSocketConmon answers StartFdSocket with its path.
+type fdSocketConmon struct {
+	proto.Conmon_Server
+
+	path string
+}
+
+func (f fdSocketConmon) StartFdSocket(_ context.Context, call proto.Conmon_startFdSocket) error {
+	results, err := call.AllocResults()
+	if err != nil {
+		return fmt.Errorf("alloc results: %w", err)
+	}
+
+	response, err := results.NewResponse()
+	if err != nil {
+		return fmt.Errorf("new response: %w", err)
+	}
+
+	if err := response.SetPath(f.path); err != nil {
+		return fmt.Errorf("set path: %w", err)
+	}
+
+	return nil
+}
+
+func TestClientRemoteFDs(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "fd")
+
+	listener, err := net.ListenUnix("unixpacket", &net.UnixAddr{Name: path, Net: "unixpacket"})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	t.Cleanup(func() { listener.Close() })
+
+	accepted := make(chan *net.UnixConn, 1)
+
+	go func() {
+		defer close(accepted)
+
+		if conn, acceptErr := listener.AcceptUnix(); acceptErr == nil {
+			accepted <- conn
+		}
+	}()
+
+	dir := t.TempDir()
+	serveVersionSocket(t, dir, fdSocketConmon{path: path})
+
+	c := newTestClient(t, dir, logrus.New())
+	t.Cleanup(func() { c.Close() })
+
+	r, err := c.RemoteFDs(t.Context())
+	if err != nil {
+		t.Fatalf("remote fds: %v", err)
+	}
+
+	server, ok := <-accepted
+	if !ok {
+		t.Fatal("fd socket did not accept the connection")
+	}
+
+	serveFDRequests(t, server, slices.Repeat([]fdServerReply{slotsReply}, 2)...)
+
+	slots, err := r.Send(testFD(t))
+	if err != nil || len(slots) != 1 || slots[0] != 100 {
+		t.Fatalf("got slots %v, %v, want [100]", slots, err)
+	}
+
+	// Close of the client leaves it open.
+	if err := c.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
+
+	if slots, err := r.Send(testFD(t)); err != nil || len(slots) != 1 {
+		t.Fatalf("got slots %v, %v after closing the client, want one", slots, err)
+	}
+
+	if err := r.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// A path the server reports without a socket fails.
+	dir = t.TempDir()
+	serveVersionSocket(t, dir, fdSocketConmon{path: filepath.Join(dir, "missing")})
+
+	c = newTestClient(t, dir, logrus.New())
+	t.Cleanup(func() { c.Close() })
+
+	if _, err := c.RemoteFDs(t.Context()); !errors.Is(err, syscall.ENOENT) {
+		t.Fatalf("got error %v, want %v", err, syscall.ENOENT)
+	}
+}
+
+func TestNewRemoteFDs(t *testing.T) {
+	t.Parallel()
+
+	for name, path := range map[string]string{
+		"missing socket":    filepath.Join(t.TempDir(), "fd"),
+		"missing directory": filepath.Join(t.TempDir(), "missing", "fd"),
+	} {
+		if _, err := NewRemoteFDs(path); !errors.Is(err, syscall.ENOENT) {
+			t.Errorf("%s: got error %v, want %v", name, err, syscall.ENOENT)
+		}
+	}
+
+	// A stream socket is no fd socket.
+	path := filepath.Join(t.TempDir(), "stream")
+
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	t.Cleanup(func() { listener.Close() })
+
+	if _, err := NewRemoteFDs(path); err == nil {
+		t.Fatal("connected to a stream socket")
 	}
 }

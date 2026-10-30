@@ -7,28 +7,23 @@ use crate::{
     container_io::{DRAIN_MAX_LOG_WAIT, Drain, Message},
     init,
     oom_watcher::{OOMEvent, OOMWatcher},
-    process::{self, EXIT_CODE_UNKNOWN},
+    process,
 };
 use anyhow::{Context, Result};
-use nix::sys::signal::Signal;
+use nix::{sys::signal::Signal, unistd::Pid};
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
-    pin::pin,
     process::Stdio,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 use tokio::{
     fs,
     process::Command,
     sync::broadcast::{self, Receiver},
     task,
-    time::{self, Duration, Instant},
+    time::{self, Instant},
 };
-use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error, warn};
 
 /// Runs a closure once dropped, at the end of a task however it ends.
@@ -42,29 +37,19 @@ impl<F: FnOnce()> Drop for OnDrop<F> {
     }
 }
 
+/// What only the watcher of a child needs, which moves into it, see
+/// [`ReapableChild::watch`].
+#[derive(Debug)]
+pub(crate) struct ExitHandling {
+    exit_paths: Vec<PathBuf>,
+    oom_exit_paths: Vec<PathBuf>,
+
+    /// When the process gets killed, only an exec_sync has one.
+    timeout: Option<Instant>,
+    cleanup_cmd: Vec<String>,
+}
+
 impl ReapableChild {
-    /// How long the result of the OOM watcher may take once the timeout of
-    /// a process which exited in time passed. That covers confirming an
-    /// event of a cgroup v1, see `OOMWatcher::CONFIRM_BACKOFF`.
-    pub(super) const OOM_RESULT_WAIT: Duration = Duration::from_secs(2);
-
-    /// Wait a bounded time for the result of the OOM watcher, see
-    /// [`ReapableChild::handle_oom`].
-    pub(super) async fn late_oom(
-        oom: impl Future<Output = Option<OOMEvent>>,
-        exit_code: i32,
-        oom_exit_paths: &[PathBuf],
-    ) -> bool {
-        let event = time::timeout(Self::OOM_RESULT_WAIT, oom)
-            .await
-            .ok()
-            .flatten();
-        if event.is_none() {
-            debug!("No OOM result in time");
-        }
-        Self::handle_oom(event, exit_code, oom_exit_paths).await
-    }
-
     /// Whether the process which exited with `exit_code` got OOM killed. The
     /// watcher writes the files for the OOMs it could tell on its own, this
     /// the ones which only the exit status tells.
@@ -104,7 +89,7 @@ impl ReapableChild {
             }
             // A read loop which got output while the drain waited gives it
             // another chance.
-            let Ok(output) = time::timeout_at(deadline, drain.recv_output(&mut rx, false)).await
+            let Ok(output) = time::timeout_at(deadline, drain.recv_output(&mut rx, None)).await
             else {
                 debug!("Output did not end in time, not waiting for it");
                 return;
@@ -140,23 +125,55 @@ impl ReapableChild {
         }
     }
 
-    pub fn from_child(child: Child) -> (Box<str>, Self) {
+    /// Split the child into the registered part and what only its watcher
+    /// needs.
+    pub fn from_child(child: Child) -> (Box<str>, Self, ExitHandling) {
         static NEXT_SEQ: AtomicU64 = AtomicU64::new(0);
+        let Child {
+            id,
+            kind,
+            pid,
+            exit_paths,
+            oom_exit_paths,
+            timeout,
+            io,
+            cleanup_cmd,
+            token,
+        } = child;
         (
-            child.id,
+            id,
             Self {
                 seq: NEXT_SEQ.fetch_add(1, Ordering::Relaxed),
-                kind: child.kind,
-                exit_paths: Arc::from(child.exit_paths),
-                oom_exit_paths: Arc::from(child.oom_exit_paths),
-                pid: child.pid,
-                io: child.io,
-                timeout: child.timeout,
-                token: child.token,
-                task: None,
-                cleanup_cmd: Arc::from(child.cleanup_cmd),
+                kind,
+                pid,
+                io,
+                token,
+            },
+            ExitHandling {
+                exit_paths,
+                oom_exit_paths,
+                timeout,
+                cleanup_cmd,
             },
         )
+    }
+
+    /// Wait for the exit of the process, or kill it at the `timeout`, and
+    /// return its exit code and whether it timed out. The wait gets dropped
+    /// on the timeout, the process gets reaped in the background once the
+    /// SIGKILL took effect. A process stuck in the kernel keeps only a pidfd
+    /// busy then, not a thread.
+    async fn wait_or_kill(pid: Pid, timeout: Option<Instant>) -> (i32, bool) {
+        let wait = process::wait_for_exit_code(pid).instrument(debug_span!("wait_for_exit_code"));
+        let Some(timeout) = timeout else {
+            return (wait.await, false);
+        };
+        if let Ok(code) = time::timeout_at(timeout, wait).await {
+            return (code, false);
+        }
+        kill_grandchild(pid, Signal::SIGKILL);
+        task::spawn(process::wait_for_exit_code(pid));
+        (EXIT_CODE_TIMED_OUT, true)
     }
 
     /// Watch the process and return the receiver for its exit, which exists
@@ -166,94 +183,53 @@ impl ReapableChild {
     /// drops right in `spawn` while the runtime shuts down, does not run it,
     /// so the caller may hold a lock which `forget` takes.
     pub(super) fn watch(
-        &mut self,
+        &self,
+        exit: ExitHandling,
         forget: impl FnOnce() + Send + 'static,
     ) -> Receiver<ExitChannelData> {
-        let exit_paths = self.exit_paths.clone();
-        let oom_exit_paths = self.oom_exit_paths.clone();
+        let ExitHandling {
+            exit_paths,
+            oom_exit_paths,
+            timeout,
+            cleanup_cmd,
+        } = exit;
         let pid = self.pid();
         // Only one exit code will be written.
         let (exit_tx, exit_rx) = broadcast::channel(1);
-        let timeout = self.timeout();
-        let stop_token = self.token().clone();
-        let exit_token = stop_token.clone();
-        let cleanup_cmd_raw = self.cleanup_cmd.clone();
+        let token = self.token().clone();
         let io = self.io.clone();
         let kind = self.kind;
 
-        let task = task::spawn(
+        task::spawn(
             async move {
                 // Only created on the first poll, see above.
                 let _forget = OnDrop(Some(forget));
                 debug!("Running task");
-                let mut exit_code = EXIT_CODE_UNKNOWN;
-                let mut oomed = false;
-                let mut timed_out = false;
                 // Nobody learns about an OOM without the files, like an exec.
                 let oom = async {
                     if oom_exit_paths.is_empty() {
                         return None;
                     }
-                    OOMWatcher::watch(&stop_token, pid, &oom_exit_paths)
+                    OOMWatcher::watch(&token, pid, &oom_exit_paths)
                         .instrument(debug_span!("cgroup_handling", %pid))
                         .await
                 };
-                let mut oom = pin!(oom);
-
-                let wait_for_exit_code = process::wait_for_exit_code(stop_token.clone(), pid)
-                    .instrument(debug_span!("wait_for_exit_code"));
-
-                // Known once the process got reaped and once the OOM watcher
-                // ended, also if the timeout hits while waiting for the other.
-                let mut reaped = None;
-                let mut oom_result = None;
-                let closure = async {
-                    let wait_for_exit_code = async {
-                        let code = wait_for_exit_code.await;
-                        reaped = Some(code);
-                        code
-                    };
-                    let watch_oom = async {
-                        let event = oom.as_mut().await;
-                        oom_result = Some(event);
-                        event
-                    };
-                    let (code, oom) = tokio::join!(wait_for_exit_code, watch_oom);
-                    exit_code = code;
-                    oomed = Self::handle_oom(oom, code, &oom_exit_paths).await;
+                let wait = async {
+                    let exit = Self::wait_or_kill(pid, timeout).await;
+                    // Tells the users of the token that the process is gone,
+                    // which ends the OOM watcher.
+                    token.cancel();
+                    exit
                 };
-                if let Some(timeout) = timeout {
-                    let res = time::timeout_at(timeout, closure).await;
-                    if let (Err(_), Some(code)) = (&res, reaped) {
-                        // It exited in time, only the OOM check did not end.
-                        debug!("Process exited before its timeout");
-                        exit_code = code;
-                        oomed = match oom_result {
-                            Some(event) => Self::handle_oom(event, code, &oom_exit_paths).await,
-                            None => Self::late_oom(oom, code, &oom_exit_paths).await,
-                        };
-                    } else if res.is_err() {
-                        timed_out = true;
-                        exit_code = EXIT_CODE_TIMED_OUT;
-                        kill_grandchild(pid, Signal::SIGKILL);
-                        exit_token.cancel();
-                        // Reap it once the SIGKILL took effect, the wait got
-                        // dropped with the timeout. A process stuck in the
-                        // kernel keeps only a pidfd busy, not a thread.
-                        task::spawn(process::wait_for_exit_code(CancellationToken::new(), pid));
-                    }
-                } else {
-                    closure.await;
-                }
-                // Tells the users of the token that the process is gone.
-                exit_token.cancel();
+                let ((exit_code, timed_out), event) = tokio::join!(wait, oom);
+                let oomed = Self::handle_oom(event, exit_code, &oom_exit_paths).await;
 
                 // The exit file tells that the log is complete, so let the read
                 // loops write what the process left in the pipes, and stop
                 // them, see `stop_output`. The output of an exec gets stopped
                 // by its consumer, see `StopOutput`.
                 if kind == ChildKind::Container {
-                    Self::finish_output(io.attach().await).await;
+                    Self::finish_output(io.attach().clone()).await;
                 }
 
                 let exit_channel_data = ExitChannelData {
@@ -263,8 +239,8 @@ impl ReapableChild {
                 debug!(?exit_paths, oomed, "Write to exit paths");
                 Self::write_to_exit_paths(exit_code, &exit_paths).await;
 
-                if !cleanup_cmd_raw.is_empty() {
-                    Self::spawn_cleanup_process(&cleanup_cmd_raw);
+                if !cleanup_cmd.is_empty() {
+                    Self::spawn_cleanup_process(&cleanup_cmd);
                 }
 
                 debug!("Sending exit struct to channel: {:?}", exit_channel_data);
@@ -275,8 +251,6 @@ impl ReapableChild {
             }
             .instrument(debug_span!("watch", %pid)),
         );
-
-        self.task = Some(Arc::new(Mutex::new(Some(task))));
         exit_rx
     }
 

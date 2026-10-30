@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     child_reaper::ReapableChild, config::Config, conmon_capnp::conmon::CgroupManager,
-    container_io::ContainerIOType, streaming_server::DEFAULT_CAPACITY,
+    streaming_server::DEFAULT_CAPACITY,
 };
 use std::{process::Stdio, sync::Arc};
 use tokio::{process::Command, task::LocalSet, time};
@@ -12,7 +12,7 @@ async fn too_many_streaming_sessions_fail_with_the_bare_message() -> anyhow::Res
         return Ok(());
     };
     let config = Arc::new(config);
-    let (_, child) = ReapableChild::from_child(Child {
+    let (_, child, _) = ReapableChild::from_child(Child {
         id: "id".into(),
         kind: ChildKind::Container,
         pid: Pid::from_raw(0),
@@ -55,7 +55,7 @@ async fn too_many_streaming_sessions_fail_with_the_bare_message() -> anyhow::Res
 
     LocalSet::new()
         .run_until(async {
-            let streaming_server = RwLock::new(StreamingServer::default());
+            let streaming_server = StreamingServer::default();
             // Exec and attach sessions count together.
             for i in 0..DEFAULT_CAPACITY {
                 let request = if i % 2 == 0 { exec() } else { attach() };
@@ -81,6 +81,72 @@ async fn too_many_streaming_sessions_fail_with_the_bare_message() -> anyhow::Res
             Ok(())
         })
         .await
+}
+
+/// The message of the error which a request fails with.
+async fn failure<T>(response: impl Future<Output = capnp::Result<T>>) -> String {
+    match response.await {
+        Ok(_) => panic!("request succeeded"),
+        Err(e) => {
+            assert_eq!(e.kind, capnp::ErrorKind::Failed, "{e}");
+            e.extra
+        }
+    }
+}
+
+#[tokio::test]
+async fn requests_get_validated() -> anyhow::Result<()> {
+    let Some(config) = Config::parse_for_test::<_, &str>([]) else {
+        return Ok(());
+    };
+    // A local capability, the requests need no socket.
+    let client: conmon::Client = capnp_rpc::new_client(Server::with_config(config));
+
+    let create = |id: &str, bundle: &str, exit_path: &str| {
+        let mut request = client.create_container_request();
+        let mut req = request.get().init_request();
+        req.set_id(id);
+        req.set_bundle_path(bundle);
+        req.init_exit_paths(1).set(0, exit_path);
+        request.send().promise
+    };
+    assert_eq!(
+        failure(create("id", "bundle", "/exit")).await,
+        r#"bundle path "bundle" is not absolute"#
+    );
+    assert_eq!(
+        failure(create("id", "/bundle", "exit")).await,
+        r#"exit path "exit" is not absolute"#
+    );
+    assert_eq!(
+        failure(create("--help", "/bundle", "/exit")).await,
+        r#"invalid container ID "--help""#
+    );
+
+    let mut request = client.attach_container_request();
+    let mut req = request.get().init_request();
+    req.set_id("id");
+    req.set_socket_path("attach");
+    assert_eq!(
+        failure(request.send().promise).await,
+        r#"socket path "attach" is not absolute"#
+    );
+
+    for path in ["netns", ""] {
+        let mut request = client.serve_port_forward_container_request();
+        request.get().init_request().set_net_ns_path(path);
+        assert_eq!(
+            failure(request.send().promise).await,
+            format!("network namespace path {path:?} is not absolute")
+        );
+    }
+
+    // Clients match the start, see `ErrContainerNotFound` of the Go client.
+    let mut request = client.reopen_log_container_request();
+    request.get().init_request().set_id("unknown");
+    let err = failure(request.send().promise).await;
+    assert!(err.starts_with("container not found"), "{err}");
+    Ok(())
 }
 
 /// Run an exec through the RPC with a runtime which runs `script`, with
@@ -180,15 +246,12 @@ fn exec_io(
         .kill_on_drop(true)
         .spawn()?;
     let token = CancellationToken::new();
-    match io.typ_mut() {
-        ContainerIOType::Streams(s) => s.handle_stdio_receive(
-            None,
-            child.stdout.take(),
-            child.stderr.take(),
-            token.clone(),
-        ),
-        ContainerIOType::Terminal(_) => anyhow::bail!("no streams"),
-    }
+    io.connect_streams(
+        None,
+        child.stdout.take(),
+        child.stderr.take(),
+        token.clone(),
+    );
     Ok((SharedContainerIO::new(io), child, token))
 }
 

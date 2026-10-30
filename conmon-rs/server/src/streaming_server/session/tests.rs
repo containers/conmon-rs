@@ -44,7 +44,7 @@ async fn stdin_before_close_reaches_the_container() -> Result<()> {
 
             // The container writes output meanwhile, which cannot be sent
             // after the close anymore. The stdin which waits gets merged.
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             let mut stdin = vec![];
             while stdin.len() < 50 {
                 attach.write(IOMessage::Data(Bytes::from_static(b"out"), Pipe::StdOut));
@@ -69,7 +69,7 @@ async fn messages_larger_than_the_pending_stdin_reach_the_container() -> Result<
             message.resize(PENDING_STDIN_MAX_BYTES + 1, b'x');
             stream.write_all(&client_frame(0x2, &message)).await?;
 
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             let mut stdin = 0;
             while stdin < PENDING_STDIN_MAX_BYTES {
                 let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
@@ -105,7 +105,7 @@ async fn too_large_messages_of_clients_which_do_not_read_fail_the_session() -> R
     LocalSet::new()
         .run_until(async {
             let (io, _server, stream) = attach_session(true, false).await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             // A small buffer, so that the message does not fit into it.
             setsockopt(&stream, sockopt::SndBuf, &4096)?;
 
@@ -207,7 +207,7 @@ async fn idle_websocket_sessions_end() -> Result<()> {
             let timeout = Duration::from_millis(500);
             let (io, _server, mut stream) =
                 attach_session_with(false, true, true, Some(timeout)).await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
 
             // Stdin keeps the session going.
             for _ in 0..20 {
@@ -259,7 +259,7 @@ async fn stdin_backed_up_behind_the_container_goes_idle() -> Result<()> {
             let timeout = Duration::from_millis(500);
             let (io, _server, mut stream) =
                 attach_session_with(false, true, true, Some(timeout)).await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
 
             // Stdin the container never reads, until the client is not
             // read anymore. The session ends like for a client which went
@@ -288,7 +288,7 @@ async fn clients_which_stop_reading_go_idle() -> Result<()> {
             let timeout = Duration::from_secs(1);
             let (io, _server, stream) =
                 attach_session_with(false, true, true, Some(timeout)).await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
 
             // The container writes output the client never reads.
             let output = {
@@ -345,7 +345,7 @@ async fn idle_timeouts_of_stuck_websocket_sessions_send_one_status() -> Result<(
             let timeout = Duration::from_millis(500);
             let (io, _server, mut stream) =
                 attach_session_with(false, false, true, Some(timeout)).await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
 
             // More output than the connection holds while the client does
             // not read, then the container exits, around the timeout.
@@ -382,10 +382,10 @@ async fn idle_timeouts_of_stuck_websocket_sessions_send_one_status() -> Result<(
 #[tokio::test]
 async fn resize_without_terminal_is_ignored() -> Result<()> {
     let io = SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?);
-    SessionInput::try_resize(br#"{"Width":80,"Height":24}"#, &io).await?;
+    SessionInput::try_resize(br#"{"Width":80,"Height":24}"#, &io)?;
 
     // Garbage is still an error.
-    assert!(SessionInput::try_resize(b"x", &io).await.is_err());
+    assert!(SessionInput::try_resize(b"x", &io).is_err());
     Ok(())
 }
 
@@ -426,18 +426,14 @@ async fn resize_events_without_a_size_are_ignored() -> Result<()> {
     // A terminal which the runtime did not connect fails every resize
     // which reaches it.
     let (io, _child, _token) = attach_child(true)?;
-    assert!(
-        SessionInput::try_resize(br#"{"width":80,"height":24}"#, &io)
-            .await
-            .is_err()
-    );
+    assert!(SessionInput::try_resize(br#"{"width":80,"height":24}"#, &io).is_err());
     for json in [
         r#"{"width":0,"height":0}"#,
         r#"{"width":100}"#,
         "{}",
         "null",
     ] {
-        SessionInput::try_resize(json.as_bytes(), &io).await?;
+        SessionInput::try_resize(json.as_bytes(), &io)?;
     }
     Ok(())
 }
@@ -474,7 +470,7 @@ async fn spdy_stdin_stays_open_until_the_end() -> Result<()> {
                     data: Bytes::from_static(b"in"),
                 })
                 .await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
             assert_eq!(data, b"in".as_slice());
             Ok(())
@@ -491,8 +487,7 @@ async fn late_output_streams_end_instead_of_failing() -> Result<()> {
             // started, also for versions without resize streams.
             for protocol in ["v2.channel.k8s.io", "v4.channel.k8s.io"] {
                 let (io, child, _token) = attach_child(true)?;
-                let mut server = StreamingServer::default();
-                server.start_if_required().await?;
+                let server = StreamingServer::default();
                 let url = server
                     .attach_url(AttachSession {
                         container_id: "id".into(),
@@ -526,7 +521,7 @@ async fn late_output_streams_end_instead_of_failing() -> Result<()> {
                         data: Bytes::from_static(b"in"),
                     })
                     .await?;
-                let attach = io.attach().await;
+                let attach = io.attach().clone();
                 let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
                 assert_eq!(data, b"in".as_slice());
 
@@ -557,7 +552,7 @@ async fn idle_spdy_sessions_end() -> Result<()> {
         .run_until(async {
             let timeout = Duration::from_millis(500);
             let (io, _server, mut client) = spdy_attach_with(false, true, Some(timeout)).await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
 
             // Stdin keeps the session going.
             for _ in 0..20 {
@@ -603,7 +598,7 @@ async fn idle_timeouts_of_stuck_spdy_sessions_send_one_status() -> Result<()> {
         .run_until(async {
             let timeout = Duration::from_millis(500);
             let (io, _server, mut client) = spdy_attach_with(false, true, Some(timeout)).await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
 
             // More output than the connection holds while the client does
             // not read, then the container exits, around the timeout.
@@ -652,7 +647,7 @@ async fn clients_which_flood_pings_without_reading_go_idle() -> Result<()> {
             let timeout = Duration::from_millis(500);
             let (io, mut client) =
                 spdy_attach_duplex(true, Some(timeout), Version::V1, 4096).await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             // Until the server ended the connection.
             let flood = async {
                 let mut id: u32 = 1;
@@ -699,7 +694,7 @@ async fn spdy_streams_after_the_start_get_refused() -> Result<()> {
                     data: Bytes::from_static(b"in"),
                 })
                 .await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
             assert_eq!(data, b"in".as_slice());
             Ok(())

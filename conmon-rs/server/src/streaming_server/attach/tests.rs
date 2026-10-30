@@ -40,7 +40,7 @@ async fn attach_ends_with_success_on_stdin_close() -> Result<()> {
             );
             assert_eq!(server_frame(&mut stream).await?.0, 0x8);
             // Without stdin once, the container stdin stays open.
-            assert!(!io.attach().await.stdin_closed().is_cancelled());
+            assert!(!io.attach().stdin_closed().is_cancelled());
             Ok(())
         })
         .await
@@ -51,7 +51,7 @@ async fn attach_closes_stdin_once_on_disconnect() -> Result<()> {
     LocalSet::new()
         .run_until(async {
             let (io, _server, stream) = attach_session(true, true).await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             drop(stream);
             time::timeout(Duration::from_secs(5), attach.stdin_closed().cancelled()).await?;
             Ok(())
@@ -64,7 +64,7 @@ async fn attach_ends_on_disconnect_while_stdin_waits() -> Result<()> {
     LocalSet::new()
         .run_until(async {
             let (io, _server, mut stream) = attach_session(true, true).await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
 
             // More stdin than the session holds while nothing reads it,
             // so the socket is not read anymore.
@@ -98,7 +98,7 @@ async fn terminal_attach_gets_eof_on_stdin_close() -> Result<()> {
 
             // The end of file character follows the stdin, like a user
             // pressing Ctrl-D.
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             for expected in [&b"a"[..], &[0x04]] {
                 let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
                 assert_eq!(data, expected);
@@ -113,7 +113,7 @@ async fn attach_without_stdin_ignores_stdin_close() -> Result<()> {
     LocalSet::new()
         .run_until(async {
             let (io, _server, mut stream) = attach_session(false, true).await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             stream
                 .write_all(&client_frame(0x2, &[CLOSE_BYTE, STDIN_BYTE]))
                 .await?;
@@ -147,7 +147,7 @@ async fn spdy_attach_forwards_stdin_and_output() -> Result<()> {
                     data: Bytes::from_static(b"in"),
                 })
                 .await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
             assert_eq!(data, b"in".as_slice());
 
@@ -191,7 +191,7 @@ async fn spdy_attach_with_every_version() -> Result<()> {
                         data: Bytes::from_static(b"in"),
                     })
                     .await?;
-                let attach = io.attach().await;
+                let attach = io.attach().clone();
                 let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
                 assert_eq!(data, b"in".as_slice(), "{version}");
 
@@ -255,7 +255,7 @@ async fn spdy_stdin_before_the_close_reaches_the_container() -> Result<()> {
             }
             drop(client);
 
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             let mut stdin = vec![];
             while stdin.len() < 5 {
                 let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
@@ -290,7 +290,7 @@ async fn spdy_stdin_before_the_close_of_an_older_session_reaches_the_container()
             let reader =
                 task::spawn_local(async move { while let Ok(Some(_)) = client.frame().await {} });
 
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             let mut stdin = vec![];
             while stdin.len() < 5 {
                 let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
@@ -346,7 +346,7 @@ async fn spdy_attach_ends_with_success_on_stdin_close() -> Result<()> {
             // Stdin ends only with the session.
             assert_eq!(ended, [1, 3, 5]);
             // Without stdin once, the container stdin stays open.
-            assert!(!io.attach().await.stdin_closed().is_cancelled());
+            assert!(!io.attach().stdin_closed().is_cancelled());
             Ok(())
         })
         .await
@@ -366,7 +366,7 @@ async fn spdy_attach_to_a_terminal_without_tty() -> Result<()> {
                     data: Bytes::from_static(b"in"),
                 })
                 .await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
             assert_eq!(data, b"in".as_slice());
 
@@ -392,7 +392,7 @@ async fn websocket_attach_closes_stdin_once_after_an_early_disconnect() -> Resul
             let (io, _server, stream, _token, response) =
                 websocket_attach_with("channel.k8s.io", true).await?;
             assert!(response.starts_with("http/1.1 101"), "{response}");
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             // Before the client reads the announce of the session.
             drop(stream);
             time::timeout(Duration::from_secs(5), attach.stdin_closed().cancelled()).await?;
@@ -406,7 +406,7 @@ async fn spdy_attach_closes_stdin_once() -> Result<()> {
     LocalSet::new()
         .run_until(async {
             let (io, _server, mut client) = spdy_attach(true).await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             client
                 .send(Frame::Data {
                     stream_id: 3,
@@ -425,7 +425,7 @@ async fn spdy_attach_ends_on_disconnect_while_stdin_waits() -> Result<()> {
     LocalSet::new()
         .run_until(async {
             let (io, _server, mut client) = spdy_attach(true).await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
 
             // More stdin than the session holds while nothing reads it,
             // so the stream queue fills and the connection is not read
@@ -459,8 +459,7 @@ async fn concurrent_attaches_share_the_container() -> Result<()> {
     LocalSet::new()
         .run_until(async {
             let (io, child, token) = attach_child(false)?;
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
+            let server = StreamingServer::default();
             let mut streams = vec![];
             for _ in 0..2 {
                 let url = server
@@ -474,22 +473,12 @@ async fn concurrent_attaches_share_the_container() -> Result<()> {
                         idle_timeout: None,
                     })
                     .await?;
-                let (response, stream) = upgrade(
-                    &server,
-                    &url,
-                    "GET",
-                    &format!(
-                        "Upgrade: websocket\r\nConnection: Upgrade\r\n\
-                         Sec-WebSocket-Version: 13\r\n\
-                         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-                         Sec-WebSocket-Protocol: {PROTOCOL_V5}\r\n"
-                    ),
-                )
-                .await?;
+                let (response, stream) =
+                    upgrade(&server, &url, "GET", &websocket_headers(PROTOCOL_V5)).await?;
                 assert!(response.starts_with("http/1.1 101"), "{response}");
                 streams.push(stream);
             }
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
 
             // The stdin of both reaches the container.
             for (stream, data) in streams.iter_mut().zip([b"a", b"b"]) {
@@ -547,7 +536,7 @@ async fn base64_websocket_attach() -> Result<()> {
             stream
                 .write_all(&client_frame(0x1, stdin.as_bytes()))
                 .await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
             assert_eq!(data, b"in".as_slice());
 
@@ -603,7 +592,7 @@ async fn v1_websocket_attach() -> Result<()> {
             stream
                 .write_all(&client_frame(0x2, &[CLOSE_BYTE, STDIN_BYTE]))
                 .await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             attach.write(IOMessage::Data(Bytes::from_static(b"out"), Pipe::StdOut));
             assert_eq!(server_frame(&mut stream).await?, (0x2, b"\x01out".to_vec()));
 

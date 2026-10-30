@@ -21,9 +21,7 @@ use tokio::{
 async fn port_forward_over_websocket_channels() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
-
+            let server = StreamingServer::default();
             for base64 in [false, true] {
                 // Two ports which listen and one between them which
                 // does not.
@@ -131,8 +129,7 @@ async fn port_forward_over_websocket_channels() -> Result<()> {
 async fn port_forward_over_websocket_ends_idle_sessions_with_stuck_ports() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
+            let server = StreamingServer::default();
             // A pod which accepts, but never reads.
             let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
             let port = listener.local_addr()?.port();
@@ -170,8 +167,7 @@ async fn port_forward_over_websocket_ends_idle_sessions_with_stuck_ports() -> Re
 async fn port_forward_over_websocket_ends_with_its_forwards() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
+            let server = StreamingServer::default();
             // A pod which closes the connection right away.
             let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
             let port = listener.local_addr()?.port();
@@ -215,8 +211,7 @@ async fn port_forward_over_websocket_ends_with_its_forwards() -> Result<()> {
 async fn port_forward_over_websocket_waits_for_the_close_answer() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
+            let server = StreamingServer::default();
             let (_socket, port) = closed_port()?;
             let (response, mut stream) =
                 port_forward_websocket(&server, &format!("?port={port}"), "").await?;
@@ -240,8 +235,7 @@ async fn port_forward_over_websocket_waits_for_the_close_answer() -> Result<()> 
 async fn port_forward_over_websocket_pings_do_not_keep_sessions_active() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
+            let server = StreamingServer::default();
             let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
             let port = listener.local_addr()?.port();
             let accepted = tokio::spawn(async move { listener.accept().await });
@@ -290,8 +284,7 @@ async fn port_forward_over_websocket_pings_do_not_keep_sessions_active() -> Resu
 async fn port_forward_over_websocket_reports_errors() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
+            let server = StreamingServer::default();
             let (_socket, port) = closed_port()?;
 
             let (response, mut stream) =
@@ -319,8 +312,7 @@ async fn port_forward_over_websocket_reports_errors() -> Result<()> {
 async fn port_forward_over_websocket_closes_on_too_large_messages() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
+            let server = StreamingServer::default();
             // A pod which accepts, but never sends.
             let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
             let port = listener.local_addr()?.port();
@@ -350,8 +342,7 @@ async fn port_forward_over_websocket_closes_on_too_large_messages() -> Result<()
 async fn port_forward_closes_on_too_large_messages_of_clients_which_do_not_read() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
+            let server = StreamingServer::default();
             // A pod which keeps sending.
             let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
             let port = listener.local_addr()?.port();
@@ -390,8 +381,7 @@ async fn port_forward_closes_on_too_large_messages_of_clients_which_do_not_read(
 async fn port_forward_over_websocket_rejects_invalid_requests() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
+            let server = StreamingServer::default();
             for (query, protocols, status) in [
                 ("", "v4.channel.k8s.io", "400"),
                 ("?port=0", "", "400"),
@@ -412,8 +402,7 @@ async fn port_forward_over_websocket_rejects_invalid_requests() -> Result<()> {
 async fn port_forward_over_websocket_tunnels_spdy() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
+            let server = StreamingServer::default();
             // The tunnel needs no ports, they are in the SPDY streams.
             let (response, mut stream) = port_forward_websocket(
                 &server,

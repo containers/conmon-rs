@@ -20,7 +20,11 @@ type ServeExecContainerConfig struct {
 	// Tty indicates if a tty should be used or not.
 	Tty bool
 
-	// Stdin indicates if stdin should be available or not.
+	// Stdin indicates if stdin should be available or not. The stdin of the
+	// process gets closed once the client closed its stdin, which only SPDY
+	// and v5.channel.k8s.io can signal, the WebSocket protocols before v5
+	// have no close message. A terminal is never closed, it gets its end of
+	// file character instead, like from Ctrl-D.
 	Stdin bool
 
 	// Stdout indicates if stdout should be available or not.
@@ -123,8 +127,11 @@ type ServeAttachContainerConfig struct {
 	Stderr bool
 
 	// StopAfterStdinEOF indicates if the container stdin should be closed
-	// once the client closes its stdin (stdin once). The output is then still
-	// forwarded until the container closes it. A terminal is never closed.
+	// once the client closes its stdin (stdin once), which only SPDY and
+	// v5.channel.k8s.io can signal, see ServeExecContainerConfig.Stdin. The
+	// output is then still forwarded until the container closes it. A
+	// terminal is never closed, it gets its end of file character instead
+	// once the client closed its stdin, like from Ctrl-D.
 	StopAfterStdinEOF bool
 
 	// CgroupManager can be used to select the cgroup manager.
@@ -187,7 +194,13 @@ func (c *ConmonClient) ServeAttachContainer(
 	return &ServeAttachContainerResult{URL: url}, nil
 }
 
-// ServePortForwardContainerConfig is the configuration for calling the ServePortForwardContainer method.
+// ServePortForwardContainerConfig is the configuration for calling the
+// ServePortForwardContainer method. It has no ports, the SPDY protocol names
+// them per stream. The WebSocket channel protocol reads them from the port
+// query parameters of the URL, which the kubelet does not pass on when it
+// proxies a client. A caller which hands out the URL for that protocol
+// appends the ports of the CRI PortForwardRequest as port query parameters,
+// like ?port=80&port=443.
 type ServePortForwardContainerConfig struct {
 	// NetNsPath is the absolute path to the network namespace of the
 	// container. Servers since unreleased reject other ones.
@@ -208,7 +221,8 @@ type ServePortForwardContainerResult struct {
 // ServePortForwardContainer returns a URL on which the server forwards ports
 // into the network namespace. Clients connect with SPDY/3.1 and the Kubernetes
 // portforward.k8s.io protocol like the kubelet, the same tunneled through a
-// WebSocket like crictl, or with the older WebSocket channel protocol.
+// WebSocket like crictl, or with the older WebSocket channel protocol, whose
+// ports the caller appends to the URL, see ServePortForwardContainerConfig.
 // Servers without the FeaturePortForward feature return ErrUnsupported.
 //
 // See the Streaming section of the package documentation for how long the

@@ -56,7 +56,13 @@ sections about it apply only then. CRI-O v1.38, `main` and the releases of the
 with a warning for a binary without the `streamingprotocols` feature. v1.34 to
 v1.37.2 only do that for a binary before v0.7.0, so leave it off there with a
 server before v1.2.0: those servers only speak `v5.channel.k8s.io`, while the
-kubelet talks SPDY to them.
+kubelet talks SPDY to them. The `stream_address`, `stream_port`,
+`stream_enable_tls` and `stream_tls_*` options of CRI-O do not apply to the
+sessions of conmon-rs: its streaming server listens on `127.0.0.1` with a
+random port in plain HTTP, see [Streaming security](#streaming-security). Of
+the streaming options, only `stream_idle_timeout` reaches the server, as the
+idle timeout of the sessions in the CRI-O versions which pass one, see
+[Exec and attach](#exec-and-attach).
 
 CRI-O versions since v1.25 support conmon-rs, the `main` branches of both
 projects are kept working together. Which server versions a CRI-O release
@@ -80,7 +86,8 @@ after v1.37.2 pass them on as well.
 CRI-O always passes `--runtime`, `--runtime-dir`, `--runtime-root`,
 `--log-level` and `--log-driver`, which take precedence over their `CONMON_*`
 variables. Only the variables of the other flags take effect, in practice the
-tracing ones while the tracing of CRI-O is off. Do not set `CONMON_SKIP_FORK`,
+tracing ones while the tracing of CRI-O is off, and only with a build with the
+`tracing` feature, see [Tracing](#tracing). Do not set `CONMON_SKIP_FORK`,
 `CONMON_VERSION` or `CONMON_VERSION_JSON`: the clients up to v1.2.1, which
 every CRI-O release vendors, pass them on to the server, which then hangs or
 fails every pod.
@@ -190,9 +197,9 @@ The server adds arguments of its own to every runtime call for a container or
 an exec, before the arguments of the request: `--root=<RUNTIME_ROOT>`
 for `--runtime-root`, and `--systemd-cgroup` for the `systemd` cgroup manager
 of the request. If the file name of the runtime is `crun`, it also adds
-`--log=journald:<container ID>`, and for the log levels `debug`, `warn` and
-`error` of the server `--log-level=debug`, `--log-level=warning` or
-`--log-level=error`, crun keeps its default for the other levels.
+`--log=journald:<container ID>`, and for the log levels `trace` and `debug`
+of the server `--log-level=debug`, for `warn` `--log-level=warning` and for
+`error` `--log-level=error`. crun keeps its default for `info` and `off`.
 
 On SIGTERM or SIGINT, the server kills the containers, stops the pause process
 and removes its sockets within 9.5 seconds, before `Shutdown` of the Go client
@@ -222,7 +229,9 @@ Each requested namespace is unshared and bind mounted to
 namespaces alive, except for a PID namespace, which dies with its init process.
 Only when `--pid` is requested a pause process stays behind, its PID is written
 to `$BASE_PATH/conmonrs/$POD_ID.pid`. The mounts and the pause process are
-removed when the server shuts down.
+removed when the server shuts down. The bind mounts get unmounted lazily
+(`MNT_DETACH`), a process which still holds one open keeps its namespace alive
+until it lets go of it.
 
 ## Protocols
 
@@ -254,7 +263,7 @@ packet of more than 64 KiB gets truncated to its first 64 KiB. The Go client
 sends one read of its stdin per packet, at most 32 KiB plus the start of a
 detach key sequence which it held back. The client's input ends when it shuts
 down the write side of its connection. Packets to the client start with one byte
-selecting the stream, `2` for stdout and `3` for stderr, followed by up to 8191
+selecting the stream, `2` for stdout and `3` for stderr, followed by up to 8192
 bytes of data. A single `0` byte tells the client that the container output
 ended. This is the same protocol conmon speaks, so existing attach clients
 work unchanged.
@@ -267,9 +276,10 @@ afterwards on any of its attach sockets, so all attach calls of a container
 should agree on it, CRI-O derives it from the container configuration.
 
 The container output never waits for an attach client. A client which falls
-more than 100 reads of the output behind, of up to 8 KiB each, about 800 KiB,
-skips the oldest output, which the server logs as a warning. The same applies
-to the attach sessions of the streaming server.
+more than 128 reads of the output behind, of up to 8 KiB each, about 1 MiB,
+skips the oldest output, which the server logs as a warning, once until the
+client caught up again. The same applies to the attach sessions of the
+streaming server.
 
 ### Streaming server
 
@@ -281,7 +291,8 @@ their client at once, a request beyond that fails with an error starting with
 `maximum number of in-flight requests exceeded` (`ErrTooManyRequests` of the Go
 client), like the kubelet fails requests beyond its limit. v1.1.1 and older drop
 the oldest URL instead. CRI-O passes these URLs to the kubelet, which connects
-directly.
+directly. Most streaming options of CRI-O do not apply to this server, see
+[Configure CRI-O](#configure-cri-o).
 
 #### Exec and attach
 
@@ -298,15 +309,19 @@ message on the first output stream. Like for the Kubernetes runtime streaming
 server, a client without a subprotocol gets binary `channel.k8s.io`, and one
 which only requests unsupported subprotocols gets a 403.
 
-Over SPDY/3.1, which the kubelet uses towards the runtime also for WebSocket
-clients, the client opens a stream per channel by the `streamType` header
-(`error`, `stdin`, `stdout`, `stderr` and with a terminal `resize`, which may
-also come after the start), the end of the stdin stream closes stdin. The
-server keeps its side of the stdin stream open until the session ends, except
-for `channel.k8s.io`, like the kubelet. Streams for stdout or stderr which
-come after the start end right away. The server supports `v4.channel.k8s.io`,
-`v3`, `v2` and `channel.k8s.io`, the order of the client decides. From v4 on,
-the final status is JSON, before only a failure is reported as text.
+Over SPDY/3.1, which the API server translates the WebSocket of kubectl to, the
+client opens a stream per channel by the `streamType` header (`error`, `stdin`,
+`stdout`, `stderr` and with a terminal `resize`, which may also come after the
+start), the end of the stdin stream closes stdin. The end of the stdin of the
+client, over SPDY or over WebSocket with `v5.channel.k8s.io` (the versions
+before have no close signal), closes the stdin of an exec process, and the one
+of an attached container with `stopAfterStdinEof`. A terminal is never closed,
+it gets its end of file character instead, like from Ctrl-D. The server keeps
+its side of the stdin stream open until the session ends, except for
+`channel.k8s.io`, like the kubelet. Streams for stdout or stderr which come
+after the start end right away. The server supports `v4.channel.k8s.io`, `v3`,
+`v2` and `channel.k8s.io`, the order of the client decides. From v4 on, the
+final status is JSON, before only a failure is reported as text.
 
 Since unreleased, a client which takes the end of a session slowly, the
 output queued for it, the status and the close, gets all of it, only one which
@@ -329,6 +344,12 @@ An exec process which writes more than 16 MiB to stdout or stderr while the
 runtime still starts it gets its output cut there. Since unreleased, the
 session then fails with an error status instead of reporting the exit code.
 
+Since unreleased, an exec process without a terminal whose client went away
+gets the end of its stdin and its output pipes closed, so that its writes
+fail. Before, its output got read and dropped until it exited, which still
+happens with a terminal after its SIGHUP. Only the idle timeout or a lost exit
+kill it.
+
 Stdin counts towards the [idle timeout](#limits-and-timeouts) once the server
 reads it. Stdin which backs up behind a process which does not read it stops
 the server from reading the client, which may then go idle, like a spdystream
@@ -338,9 +359,9 @@ stdin limit of a session.
 #### Port forwarding
 
 Port forwarding speaks the Kubernetes `portforward.k8s.io` protocol over
-SPDY/3.1, which the kubelet uses towards the runtime also when the client
-connected with a WebSocket. Per forwarded connection the client opens an
-`error` and a `data` stream with the `port` and `requestID` headers. The
+SPDY/3.1, which the API server also translates the WebSocket of kubectl to.
+Per forwarded connection the client opens an `error` and a `data` stream
+with the `port` and `requestID` headers. The
 server connects to that port on `localhost` within the network namespace of
 the request, whose `netNsPath` has to be absolute since unreleased, and copies
 between the connection and the data stream, a failure is reported as text on
@@ -362,7 +383,11 @@ per port of the `port` query parameter, a request with too many gets a 400.
 Port `i` gets the data channel `2i` and the error channel `2i+1`, every
 message starts with its channel (an ASCII digit offset in base64 text
 messages) and the first message of each channel carries the port as a little
-endian `u16`. The session ends once all connections ended.
+endian `u16`. The session ends once all connections ended. The request of
+`servePortForwardContainer` has no ports, and the kubelet does not pass the
+query of its client on, so an engine which hands out the URL for this protocol
+appends the ports of the CRI `PortForwardRequest` as `port` query parameters,
+like `?port=80&port=443`, as CRI-O does.
 
 #### Limits and timeouts
 
@@ -469,7 +494,8 @@ documentation of [fd_socket.rs](conmon-rs/server/src/fd_socket.rs).
 ## Features
 
 Beyond its version, `version` reports the optional features of a server,
-which clients check before they rely on them:
+which clients check before they rely on them. `conmonrs --version` and
+`--version-json` print them as well:
 
 | Feature              | Since  | What the server does                                                                                                        |
 | -------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------- |
@@ -521,7 +547,8 @@ it again.
   conmon, before only by their owner.
 - `json`: one JSON object per line with `timestamp` (seconds since the epoch),
   `pipe` (`stdout` or `stderr`), `message` (the line without its ending) and
-  `partial: true` when the line had no ending yet.
+  `partial: true` when the line had no ending yet. The files it creates are
+  only readable by their owner (mode `0600`).
 - `journald`: one journal entry per line with the fields `CONTAINER_ID_FULL`,
   `CONTAINER_ID` (the first 12 characters) and `SYSLOG_IDENTIFIER`, at
   priority info for stdout and error for stderr, so that
@@ -541,9 +568,49 @@ ends up as one entry. Like the `P` marker of the CRI log, a partial entry is
 a line which had no ending yet: it grew beyond 16 KiB, the output paused for
 half a second, or the output ended without one.
 
+The server never syncs the log files to disk, also not on a rotation or once
+the container exited, the entries sit in the page cache like other writes.
+conmon syncs them then unless it runs with `--no-sync-log`. CRI-O (since
+v1.31) rejects its `no_sync_log` option for a `pod` runtime handler, conmon-rs
+never syncs the container logs either way.
+
 The server's own logs go to the server log driver. Running with
 `--log-level debug` prints every RPC and I/O decision and is the first thing to
 try when debugging a container that misbehaves under conmon-rs.
+
+## OOM reporting
+
+The server reports an OOM kill of a container through its `oomExitPaths`
+(`OOMExitPaths` of the Go client): it creates each of them as an empty file
+before it writes the exit files, so a client which sees an exit file can check
+for the OOM file right away. The exit files wait for the OOM check, which
+reads the counters of the cgroup once the process exited. Execs get no OOM
+files.
+
+With cgroup v2, the server watches `memory.events` of the cgroup of the
+container process and takes a rise of its `oom_kill` counter for an OOM.
+Kernels without that counter fall back to the `oom` counter, which also rises
+when the OOM killer ends up killing nothing. crun places the process in a leaf
+below the container cgroup with the same memory limit, the kernel counts the
+kill in the leaf either way. As the systemd cgroup manager removes the leaf
+once its processes exited, the server also watches the hierarchical counters
+of the pod cgroup, the first one within two levels above the leaf with a name
+like the kubelet gives them (`pod<uid>`, `kubepods-...-pod<uid>.slice`), and
+without one those of the nearest ancestor which is no systemd scope. If the
+leaf is gone at the exit, a kill in that cgroup which the leaf did not account
+for, together with an exit by `SIGKILL` (status 137), counts as an OOM, which
+may also be the one of another container in it. Without such a cgroup, or if
+its counters cannot be read, an exit by `SIGKILL` with the leaf gone counts as
+an OOM as well.
+
+With cgroup v1, the server registers an eventfd for `memory.oom_control`
+through `cgroup.event_control` like conmon, and confirms an event with the
+`oom_kill` counter of `memory.oom_control`, which it reads a few more times
+within about 1.3 seconds, as the kernel signals the event before it kills. An
+event counts without a readable counter and while the cgroup is still under
+OOM, which covers a victim in a nested memory cgroup. An event which the
+counter does not confirm, like an OOM of an ancestor which killed a sibling,
+does not count.
 
 ## Troubleshooting
 
@@ -586,6 +653,12 @@ together, the rest of what the server read gets dropped after that, which the
 server logs as a warning, once until the journal takes lines again. The log
 files of the `containerRuntimeInterface` and `json` drivers lose nothing this
 way.
+
+The server runs crun with `--log=journald:<container ID>`, so what crun logs
+goes to the journal, where `journalctl -t crun ID=<container ID>` shows it: its
+errors, at the server log levels `warn`, `debug` and `trace` its warnings and
+at `debug` and `trace` its debug messages. crun copies its errors to its stderr
+as well, which ends up in the error of the failed call.
 
 To see what the server does without an engine, run it in the foreground with
 its logs on stdout and talk to its socket with a client:

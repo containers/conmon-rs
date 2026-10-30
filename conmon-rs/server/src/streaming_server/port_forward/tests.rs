@@ -12,10 +12,15 @@ use crate::{
 use bytes::{BufMut, BytesMut};
 use futures::{SinkExt, StreamExt};
 use std::{
-    net::Ipv4Addr,
+    net::{Ipv4Addr, Ipv6Addr},
     sync::{Arc, atomic::Ordering},
 };
-use tokio::{io::AsyncReadExt, net::TcpListener, sync::oneshot, task::JoinSet};
+use tokio::{
+    io::AsyncReadExt,
+    net::{TcpListener, TcpSocket},
+    sync::oneshot,
+    task::JoinSet,
+};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_util::sync::CancellationToken;
@@ -111,6 +116,54 @@ async fn forwards_a_connection() -> Result<()> {
 }
 
 #[tokio::test]
+async fn connections_fall_back_to_ipv6() -> Result<()> {
+    // Only IPv6 listens on the port, the connection to IPv4 gets refused.
+    // An IPv4 socket which does not listen holds the port, so that no
+    // listener of a test in parallel gets it. Another test may hold it
+    // already, the next port of IPv6 likely is free.
+    let mut bound = None;
+    for _ in 0..10 {
+        let Ok(listener) = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await else {
+            eprintln!("skipping, no IPv6 loopback");
+            return Ok(());
+        };
+        let port = listener.local_addr()?.port();
+        let ipv4 = TcpSocket::new_v4()?;
+        if ipv4.bind((Ipv4Addr::LOCALHOST, port).into()).is_ok() {
+            bound = Some((listener, port, ipv4));
+            break;
+        }
+    }
+    let (listener, port, _ipv4) = bound.context("no port free on IPv4 and IPv6")?;
+    let mut client = serve()?;
+    request(&mut client, port).await?;
+
+    client
+        .send(Frame::Data {
+            stream_id: 3,
+            fin: true,
+            data: Bytes::from_static(b"request"),
+        })
+        .await?;
+    let (mut connection, _) = time::timeout(Duration::from_secs(5), listener.accept()).await??;
+    let mut request = vec![];
+    connection.read_to_end(&mut request).await?;
+    assert_eq!(request, b"request");
+    connection.write_all(b"response").await?;
+    drop(connection);
+
+    assert_eq!(
+        client.frame().await?,
+        Some(Frame::Data {
+            stream_id: 3,
+            fin: false,
+            data: Bytes::from_static(b"response")
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn data_on_the_error_stream_gets_dropped() -> Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
     let port = listener.local_addr()?.port();
@@ -185,6 +238,75 @@ async fn failed_channels_let_go_of_their_input() -> Result<()> {
         .context("input still taken")?;
     assert_eq!(budget.available(), CHANNEL_BUFFER as usize);
     output.recv().await;
+    let error = output.recv().await.context("no error")?;
+    assert!(
+        matches!(&error, Message::Binary(data) if data.starts_with(b"\x01error forwarding port")),
+        "{error:?}"
+    );
+    forward.await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pods_which_reject_the_input_still_answer() -> Result<()> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let port = listener.local_addr()?.port();
+    let budget = Budget::new(CHANNEL_BUFFER);
+    let (input_tx, input) = mpsc::channel(CHANNEL_QUEUE);
+    // A client which does not read yet, the response waits.
+    let (messages, mut output) = mpsc::channel(1);
+    messages.send(Message::Binary(Bytes::new())).await?;
+    let forward = tokio::spawn(PortForward::forward_channel(
+        Namespace::new(NETNS.into()),
+        port,
+        input,
+        ChannelOutput {
+            messages,
+            base64: false,
+            data: 0,
+            error: 1,
+        },
+    ));
+
+    // Like a server which answers an upload it rejects early, and closes the
+    // connection with the rest of it unread, which resets it.
+    let send = |data: &'static [u8]| {
+        let (input_tx, budget) = (&input_tx, &budget);
+        async move {
+            let data = budget.hold(Bytes::from_static(data)).await;
+            input_tx.send(data).await.context("input closed")
+        }
+    };
+    send(b"head").await?;
+    let (mut connection, _) = time::timeout(Duration::from_secs(5), listener.accept()).await??;
+    let mut head = [0; 4];
+    connection.read_exact(&mut head).await?;
+    send(b"rest").await?;
+    connection.peek(&mut [0; 1]).await?;
+    connection.write_all(b"response").await?;
+    drop(connection);
+    // Writing to the pod fails, at the latest once the reset came back for
+    // the first write. Then the input stays queued, and only then the client
+    // reads, within the grace period, the response still waits.
+    let deadline = time::Instant::now() + Duration::from_secs(5);
+    loop {
+        send(b"more").await?;
+        time::sleep(Duration::from_millis(20)).await;
+        if budget.available() < CHANNEL_BUFFER as usize {
+            break;
+        }
+        assert!(
+            time::Instant::now() < deadline,
+            "writing to the pod never failed"
+        );
+    }
+
+    output.recv().await;
+    let response = output.recv().await.context("no response")?;
+    assert_eq!(
+        response,
+        Message::Binary(Bytes::from_static(b"\x00response"))
+    );
     let error = output.recv().await.context("no error")?;
     assert!(
         matches!(&error, Message::Binary(data) if data.starts_with(b"\x01error forwarding port")),

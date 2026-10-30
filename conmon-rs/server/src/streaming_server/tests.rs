@@ -1,4 +1,5 @@
 use crate::{
+    mutex::lock,
     random_id::RandomId,
     streaming_server::{
         ADDR, HEADER_READ_TIMEOUT, MAX_CONNECTIONS, MAX_HEADER_BUF_SIZE, SWEEP_INTERVAL,
@@ -22,9 +23,9 @@ use tokio::{
 async fn connections_without_a_request_get_closed() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
+            let server = StreamingServer::default();
             server.start_if_required().await?;
-            let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+            let mut stream = TcpStream::connect((ADDR, server.port())).await?;
             let mut rest = vec![];
             time::timeout(4 * HEADER_READ_TIMEOUT, stream.read_to_end(&mut rest))
                 .await
@@ -38,15 +39,15 @@ async fn connections_without_a_request_get_closed() -> Result<()> {
 async fn connections_wait_while_too_many_are_open() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
+            let server = StreamingServer::default();
             server.start_if_required().await?;
             let mut open = vec![];
             for _ in 0..MAX_CONNECTIONS {
-                open.push(TcpStream::connect((ADDR, server.port)).await?);
+                open.push(TcpStream::connect((ADDR, server.port())).await?);
             }
 
             // A request on another connection waits for one of them.
-            let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+            let mut stream = TcpStream::connect((ADDR, server.port())).await?;
             stream
                 .write_all(format!("GET /x HTTP/1.1\r\nHost: {ADDR}\r\n\r\n").as_bytes())
                 .await?;
@@ -83,7 +84,7 @@ async fn upgraded_sessions_outlive_the_upgrade_timeout() -> Result<()> {
             stream
                 .write_all(&client_frame(0x2, &[STDIN_BYTE, b'x']))
                 .await?;
-            let attach = io.attach().await;
+            let attach = io.attach().clone();
             let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
             assert_eq!(data, b"x".as_slice());
             Ok(())
@@ -95,14 +96,14 @@ async fn upgraded_sessions_outlive_the_upgrade_timeout() -> Result<()> {
 async fn clients_which_do_not_read_get_one_response() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
+            let server = StreamingServer::default();
             server.start_if_required().await?;
             // Clients which send requests without end and never read the
             // responses.
             let request = format!("GET /x HTTP/1.1\r\nHost: {ADDR}\r\n\r\n");
             let mut writers = vec![];
             for _ in 0..MAX_CONNECTIONS {
-                let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+                let mut stream = TcpStream::connect((ADDR, server.port())).await?;
                 let request = request.clone();
                 writers.push(tokio::spawn(async move {
                     while stream.write_all(request.as_bytes()).await.is_ok() {}
@@ -111,7 +112,7 @@ async fn clients_which_do_not_read_get_one_response() -> Result<()> {
 
             // They get closed after their response, which lets others in
             // before any timeout.
-            let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+            let mut stream = TcpStream::connect((ADDR, server.port())).await?;
             stream.write_all(request.as_bytes()).await?;
             let response = time::timeout(HEADER_READ_TIMEOUT, response_head(&mut stream))
                 .await
@@ -129,7 +130,7 @@ async fn clients_which_do_not_read_get_one_response() -> Result<()> {
 async fn request_heads_are_bounded() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
+            let server = StreamingServer::default();
             server.start_if_required().await?;
             let request = |padding: usize| {
                 format!(
@@ -138,7 +139,7 @@ async fn request_heads_are_bounded() -> Result<()> {
                 )
             };
             let respond = async |request: String| -> Result<String> {
-                let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+                let mut stream = TcpStream::connect((ADDR, server.port())).await?;
                 // A server which rejects the head early may close the
                 // connection before all of it went out.
                 let _ = stream.write_all(request.as_bytes()).await;
@@ -163,10 +164,9 @@ async fn request_heads_are_bounded() -> Result<()> {
 async fn sessions_wait_for_their_client_in_bounds() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
+            let server = StreamingServer::default();
             // Nothing wakes up the server while no session waits.
-            assert!(!server.state.read().await.sweeping);
+            assert!(!lock(&server.state).sweeping);
             let mut urls = vec![];
             for _ in 0..DEFAULT_CAPACITY {
                 urls.push(server.port_forward_url(PathBuf::new(), None).await?);
@@ -179,18 +179,15 @@ async fn sessions_wait_for_their_client_in_bounds() -> Result<()> {
                 .expect_err("full");
             // The message alone, which the RPC passes on as it is.
             assert_eq!(format!("{err:#}"), TOO_MANY_REQUESTS);
-            assert_eq!(
-                server.state.read().await.port_forwards.len(),
-                DEFAULT_CAPACITY
-            );
+            assert_eq!(lock(&server.state).port_forwards.len(), DEFAULT_CAPACITY);
 
             // The sessions whose client did not come go without a request,
             // then the sweeps stop until the next session.
             time::sleep(Duration::from_secs(60) + 2 * SWEEP_INTERVAL).await;
-            assert_eq!(server.state.read().await.port_forwards.len(), 0);
-            assert!(!server.state.read().await.sweeping);
+            assert_eq!(lock(&server.state).port_forwards.len(), 0);
+            assert!(!lock(&server.state).sweeping);
             server.port_forward_url(PathBuf::new(), None).await?;
-            assert!(server.state.read().await.sweeping);
+            assert!(lock(&server.state).sweeping);
             Ok(())
         })
         .await

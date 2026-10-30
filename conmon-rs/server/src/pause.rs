@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use capnp::enum_list::Reader;
 use nix::{
     errno::Errno,
-    mount::{MsFlags, mount, umount},
+    mount::{MntFlags, MsFlags, mount, umount2},
     sys::signal::Signal,
     unistd::Pid,
 };
@@ -33,8 +33,7 @@ use tokio::{
     task,
     time::{self, Instant},
 };
-use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, debug_span, info, trace, warn};
+use tracing::{Instrument, debug, debug_span, info, warn};
 
 mod subprocess;
 
@@ -288,8 +287,7 @@ impl Pause {
     fn spawn_reaper(pid: Pid, exited: Arc<AtomicBool>) {
         task::spawn(
             async move {
-                let code =
-                    wait_for_exit_code(CancellationToken::new(), pid).await;
+                let code = wait_for_exit_code(pid).await;
                 exited.store(true, Ordering::SeqCst);
                 if PAUSE.shutting_down() {
                     info!("Pause PID {pid} exited with code {code}");
@@ -598,11 +596,16 @@ impl Namespace {
         Ok(())
     }
 
-    /// Umount the namespace.
+    /// Umount the namespace and remove its bind path. A process which holds
+    /// the bind path open makes a plain unmount fail, which would keep the
+    /// namespace alive unnoticed, like a network namespace with its
+    /// interfaces. Detached, it ends once the last user let go of it.
     pub fn umount<T: AsRef<Path>>(self, path: T, pod_id: &str) -> Result<()> {
         let bind_path = self.path(path, pod_id);
-        if let Err(e) = umount(&bind_path) {
-            trace!("Unable to umount namespace {self}: {e:#}");
+        match umount2(&bind_path, MntFlags::MNT_DETACH) {
+            // Not mounted, like after a setup which failed before the bind.
+            Ok(()) | Err(Errno::EINVAL | Errno::ENOENT) => {}
+            Err(e) => warn!("Unable to umount namespace {self}: {e}"),
         }
         fs::remove_file(&bind_path).context("remove namespace bind path")
     }

@@ -164,6 +164,43 @@ async fn read_stream_does_not_append_to_truncated_output() {
     assert!(rx.is_closed());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn streams_forward_the_output() -> Result<()> {
+    let mut io = ContainerIO::new(false, ContainerLog::new())?;
+    let token = CancellationToken::new();
+    let expected = "hello world";
+    let mut child = tokio::process::Command::new("echo")
+        .arg("-n")
+        .arg(expected)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    io.connect_streams(
+        child.stdin.take(),
+        child.stdout.take(),
+        child.stderr.take(),
+        token.clone(),
+    );
+    let (stdout_rx, stderr_rx) = io.stdio()?;
+
+    let msg = stdout_rx.recv().await.context("no message on stdout")?;
+    assert_eq!(msg, Message::Data(expected.into(), Pipe::StdOut));
+
+    // The token only stops the stdin loop, the output ends with the
+    // process, which exits after its echo.
+    token.cancel();
+
+    let msg = stdout_rx.recv().await.context("no message on stdout")?;
+    assert_eq!(msg, Message::Done);
+    assert!(stdout_rx.try_recv().is_err());
+
+    let msg = stderr_rx.recv().await.context("no message on stderr")?;
+    assert_eq!(msg, Message::Done);
+    assert!(stderr_rx.try_recv().is_err());
+    Ok(())
+}
+
 #[tokio::test]
 async fn exec_output_during_runtime_is_kept() -> Result<()> {
     let mut io = ContainerIO::new(false, ContainerLog::new())?;
@@ -177,20 +214,16 @@ async fn exec_output_during_runtime_is_kept() -> Result<()> {
         .stderr(std::process::Stdio::piped())
         .spawn()?;
     let token = CancellationToken::new();
-    match io.typ_mut() {
-        ContainerIOType::Streams(s) => s.handle_stdio_receive(
-            None,
-            child.stdout.take(),
-            child.stderr.take(),
-            token.clone(),
-        ),
-        ContainerIOType::Terminal(_) => bail!("no streams"),
-    }
+    io.connect_streams(
+        None,
+        child.stdout.take(),
+        child.stderr.take(),
+        token.clone(),
+    );
     child.wait().await?;
-    // The read loops take all of it before anything reads the output.
-    time::sleep(Duration::from_millis(100)).await;
 
-    token.cancel();
+    // Not cancelled, so that the rest gets read until the output ended
+    // instead of as long as a drain waits for it.
     let (stdout, _) = io.read_all(&token).await?;
     let expected: String = (1..=300).map(|i| format!("{i}\n")).collect();
     assert_eq!(String::from_utf8(stdout)?, expected);
@@ -393,7 +426,7 @@ async fn stopped_output_ends_read_while_pipe_is_held_open() -> Result<()> {
 #[tokio::test(start_paused = true)]
 async fn runtime_errors_stop_the_output() -> Result<()> {
     // A runtime which left a process behind holding the pipes.
-    let mut io = ContainerIO::new(false, ContainerLog::new())?;
+    let io = ContainerIO::new(false, ContainerLog::new())?;
     let e = io.runtime_error(anyhow::anyhow!("failed")).await;
     assert_eq!(format!("{e:#}"), "failed");
     assert!(io.attach().output_stopped().is_cancelled());
@@ -490,5 +523,60 @@ async fn closed_channel_ends_the_output() -> Result<()> {
         ContainerIO::read_stream(&CancellationToken::new(), &rx, EarlyStream::default()).await;
     assert_eq!(stdout, b"data");
     assert_eq!(start.elapsed(), Duration::ZERO);
+    Ok(())
+}
+
+#[tokio::test]
+async fn closed_stdin_ends_the_stdin_loop() -> Result<()> {
+    // The process exited or closed its stdin.
+    let (stdin, process) = tokio::net::UnixStream::pair()?;
+    drop(process);
+    let attach = SharedContainerAttach::default();
+    let stdin_loop = task::spawn(ContainerIO::read_loop_stdin(
+        stdin,
+        attach.clone(),
+        CancellationToken::new(),
+    ));
+    attach.send_stdin(Bytes::from_static(b"late")).await;
+    time::timeout(WAIT, stdin_loop).await???;
+
+    // The input which follows gets dropped.
+    time::timeout(WAIT, attach.send_stdin(Bytes::from_static(b"dropped"))).await?;
+    Ok(())
+}
+
+#[test]
+fn lag_lasts_until_the_client_caught_up() -> Result<()> {
+    let (tx, mut rx) = broadcast::channel(2);
+    let mut lag = Lag::default();
+    lag.skipped(3);
+    lag.skipped(4);
+    assert_eq!(lag.skipped, Some(7));
+
+    tx.send(1)?;
+    tx.send(2)?;
+    assert_eq!(rx.try_recv()?, 1);
+    lag.received(&rx);
+    assert_eq!(lag.skipped, Some(7));
+    assert_eq!(rx.try_recv()?, 2);
+    lag.received(&rx);
+    assert_eq!(lag.skipped, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn drain_keeps_the_lag_of_the_client() -> Result<()> {
+    // A client which fell behind before the exit skips more while draining.
+    let (tx, mut rx) = broadcast::channel(1);
+    let mut lag = Lag::default();
+    lag.skipped(3);
+    let data = || Message::Data(Bytes::from_static(b"data"), Pipe::StdOut);
+    tx.send(data())?;
+    tx.send(data())?;
+    tx.send(Message::Done)?;
+
+    let mut drain = Drain::default();
+    assert!(drain.recv_output(&mut rx, Some(&mut lag)).await.is_none());
+    assert_eq!(lag.skipped, Some(5));
     Ok(())
 }

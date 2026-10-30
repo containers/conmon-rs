@@ -17,7 +17,7 @@ use crate::{
 use anyhow::{Context, Result, format_err};
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp::Side, twoparty};
 use futures::{
-    AsyncReadExt, FutureExt,
+    AsyncReadExt, FutureExt, TryFutureExt,
     io::{BufReader, BufWriter},
 };
 use libc::_exit;
@@ -46,7 +46,7 @@ use tokio::{
     net::UnixListener,
     runtime::{Builder, Runtime},
     signal::unix::{Signal as SignalStream, SignalKind, signal},
-    sync::{RwLock, oneshot},
+    sync::oneshot,
     task::{self, LocalSet},
     time::{self, Duration, Instant},
 };
@@ -93,7 +93,7 @@ pub struct Server {
     tracer: Option<SdkTracerProvider>,
 
     /// Streaming server instance.
-    streaming_server: Arc<RwLock<StreamingServer>>,
+    streaming_server: Arc<StreamingServer>,
 }
 
 impl Server {
@@ -113,7 +113,7 @@ impl Server {
     }
 
     /// Streaming server instance.
-    pub(crate) fn streaming_server(&self) -> &Arc<RwLock<StreamingServer>> {
+    pub(crate) fn streaming_server(&self) -> &Arc<StreamingServer> {
         &self.streaming_server
     }
 
@@ -435,12 +435,12 @@ impl Server {
         )
     )]
     fn init_logging(&mut self) -> Result<()> {
-        let level = LevelFilter::from(*self.config().log_level());
+        let level = LevelFilter::from(self.config().log_level());
 
         #[cfg(feature = "tracing")]
         let telemetry_layer = if self.config().enable_tracing() {
-            let tracer = Telemetry::layer(self.config().tracing_endpoint())
-                .context("build telemetry layer")?;
+            let tracer = Telemetry::tracer_provider(self.config().tracing_endpoint())
+                .context("build tracer provider")?;
 
             self.tracer = Some(tracer.clone());
 
@@ -706,7 +706,12 @@ impl Server {
                 Default::default(),
             ));
             let rpc_system = RpcSystem::new(network, Some(client.clone().client));
-            task::spawn_local(Box::pin(rpc_system.map(|_| ())));
+            // A client which goes away ends its connection with an error
+            // as well, which is no failure of the server.
+            let connection = rpc_system
+                .inspect_err(|e| debug!("RPC connection ended: {e}"))
+                .map(|_| ());
+            task::spawn_local(Box::pin(connection));
         }
     }
 }

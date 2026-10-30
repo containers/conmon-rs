@@ -1,5 +1,5 @@
 use super::*;
-use crate::container_log::ContainerLog;
+use crate::attach::SharedContainerAttach;
 use nix::{fcntl::FdFlag, pty, sys::socket::ControlMessage};
 use std::{io::IoSlice, os::unix::fs::PermissionsExt, time::Duration};
 
@@ -24,11 +24,7 @@ async fn send_fd(stream: &UnixStream, data: &[u8], fd: BorrowedFd<'_>) -> Result
 #[tokio::test(flavor = "multi_thread")]
 #[expect(unsafe_code, reason = "the TIOCGWINSZ ioctl")]
 async fn new_success() -> Result<()> {
-    let logger = ContainerLog::new();
-    let attach = SharedContainerAttach::default();
-    let token = CancellationToken::new();
-
-    let mut sut = Terminal::new(logger, attach)?;
+    let mut sut = Terminal::new()?;
     assert!(sut.path().exists());
     // Only the owner may connect.
     assert_eq!(
@@ -41,15 +37,11 @@ async fn new_success() -> Result<()> {
     let stream = UnixStream::connect(sut.path()).await?;
     send_fd(&stream, b"test", res.master.as_fd()).await?;
 
-    sut.wait_connected(true, token).await?;
+    let _io = sut.connect().await?;
     assert!(!sut.path().exists());
 
     // The received terminal does not leak into children.
-    let tty = sut
-        .tty()
-        .as_ref()
-        .and_then(Weak::upgrade)
-        .context("no tty")?;
+    let tty = sut.tty.as_ref().and_then(Weak::upgrade).context("no tty")?;
     let flags = FdFlag::from_bits_truncate(fcntl::fcntl(&*tty, FcntlArg::F_GETFD)?);
     assert!(flags.contains(FdFlag::FD_CLOEXEC));
 
@@ -76,11 +68,16 @@ async fn new_success() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn eof_char_ends_the_input() -> Result<()> {
     let attach = SharedContainerAttach::default();
-    let mut sut = Terminal::new(ContainerLog::new(), attach.clone())?;
+    let mut sut = Terminal::new()?;
     let res = pty::openpty(None, None)?;
     let stream = UnixStream::connect(sut.path()).await?;
     send_fd(&stream, b"x", res.master.as_fd()).await?;
-    sut.wait_connected(true, CancellationToken::new()).await?;
+    let io = sut.connect().await?;
+    task::spawn(ContainerIO::read_loop_stdin(
+        io,
+        attach.clone(),
+        tokio_util::sync::CancellationToken::new(),
+    ));
 
     let eof = sut.eof_char();
     assert_eq!(eof, 0x04);
@@ -98,7 +95,7 @@ async fn eof_char_ends_the_input() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn removed_socket_does_not_drop_the_terminal() -> Result<()> {
-    let mut sut = Terminal::new(ContainerLog::new(), SharedContainerAttach::default())?;
+    let mut sut = Terminal::new()?;
     // Short enough for runc, which dials it by its path.
     assert!(
         sut.path().as_os_str().len() < 108,
@@ -110,11 +107,7 @@ async fn removed_socket_does_not_drop_the_terminal() -> Result<()> {
     // Like a cleaner of the directory, the connection is up already.
     std::fs::remove_file(sut.path())?;
     send_fd(&stream, b"x", res.master.as_fd()).await?;
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        sut.wait_connected(false, CancellationToken::new()),
-    )
-    .await??;
+    tokio::time::timeout(Duration::from_secs(5), sut.connect()).await??;
     Ok(())
 }
 

@@ -3,10 +3,10 @@
 use crate::{
     config::{Config, LogLevel},
     conmon_capnp::conmon::CgroupManager,
-    container_io::{ContainerIO, ContainerIOType},
+    container_io::ContainerIO,
 };
-use anyhow::{Context, Result, bail};
-use std::path::Path;
+use anyhow::{Result, bail};
+use std::{fmt, path::Path};
 use tracing::debug;
 
 pub(crate) struct GenerateRuntimeArgs<'a> {
@@ -19,7 +19,6 @@ pub(crate) struct GenerateRuntimeArgs<'a> {
 
 impl GenerateRuntimeArgs<'_> {
     const SYSTEMD_CGROUP_ARG: &'static str = "--systemd-cgroup";
-    const RUNTIME_CRUN: &'static str = "crun";
     const LOG_LEVEL_FLAG_CRUN: &'static str = "--log-level";
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
@@ -30,7 +29,7 @@ impl GenerateRuntimeArgs<'_> {
         command_args: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<Vec<String>> {
         let mut args = Vec::with_capacity(16);
-        args.extend(self.default_args().context("build default runtime args")?);
+        args.extend(self.default_args());
 
         args.extend(global_args.into_iter().map(|arg| arg.as_ref().into()));
 
@@ -42,47 +41,43 @@ impl GenerateRuntimeArgs<'_> {
 
         args.extend(command_args.into_iter().map(|arg| arg.as_ref().into()));
 
-        if let ContainerIOType::Terminal(terminal) = self.container_io.typ() {
+        if let Some(terminal) = self.container_io.terminal() {
             args.push(format!("--console-socket={}", terminal.path().display()));
         }
 
         args.push(self.checked_id()?.into());
 
-        debug!("Runtime args {:?}", args.join(" "));
+        debug!("Runtime args {args:?}");
         Ok(args)
     }
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
+    /// They are not logged here, the command may carry secrets, see
+    /// [`LoggedArgs`].
     pub(crate) fn exec_sync_args(
         &self,
         command: impl IntoIterator<Item = impl AsRef<str>>,
-    ) -> Result<Vec<String>> {
-        let mut args = self
-            .exec_sync_args_without_command()
-            .context("exec sync args without command")?;
-
-        args.extend(command.into_iter().map(|arg| arg.as_ref().into()));
-
-        debug!("Exec args {:?}", args.join(" "));
-        Ok(args)
-    }
-
-    pub(crate) fn exec_sync_args_without_command(&self) -> Result<Vec<String>> {
+    ) -> Result<ExecArgs> {
         let mut args = Vec::with_capacity(12);
-        args.extend(self.default_args().context("build default runtime args")?);
+        args.extend(self.default_args());
 
         args.push("exec".into());
         args.push("-d".into());
 
-        if let ContainerIOType::Terminal(terminal) = self.container_io.typ() {
+        if let Some(terminal) = self.container_io.terminal() {
             args.push(format!("--console-socket={}", terminal.path().display()));
             args.push("--tty".into());
         }
 
         args.push(format!("--pid-file={}", self.pidfile.display()));
         args.push(self.checked_id()?.into());
+        let command_start = args.len();
+        args.extend(command.into_iter().map(|arg| arg.as_ref().into()));
 
-        Ok(args)
+        Ok(ExecArgs {
+            args,
+            command_start,
+        })
     }
 
     /// The container ID, which the runtimes take as a positional argument.
@@ -95,27 +90,22 @@ impl GenerateRuntimeArgs<'_> {
     }
 
     /// Build the default arguments for any provided runtime.
-    fn default_args(&self) -> Result<Vec<String>> {
+    fn default_args(&self) -> Vec<String> {
         let mut args = vec![];
 
-        if self
-            .config
-            .runtime()
-            .file_name()
-            .context("no filename in path")?
-            == Self::RUNTIME_CRUN
-        {
-            debug!("Found crun used as runtime");
+        if self.config.runtime_is_crun() {
             args.push(format!("--log=journald:{}", self.id));
 
-            match self.config.log_level() {
-                &LogLevel::Debug | &LogLevel::Error => args.push(format!(
-                    "{}={}",
-                    Self::LOG_LEVEL_FLAG_CRUN,
-                    self.config.log_level()
-                )),
-                &LogLevel::Warn => args.push(format!("{}=warning", Self::LOG_LEVEL_FLAG_CRUN)),
-                _ => {}
+            // crun takes no trace or info level, trace gets the most output
+            // it has.
+            let level = match self.config.log_level() {
+                LogLevel::Trace | LogLevel::Debug => Some("debug"),
+                LogLevel::Warn => Some("warning"),
+                LogLevel::Error => Some("error"),
+                LogLevel::Info | LogLevel::Off => None,
+            };
+            if let Some(level) = level {
+                args.push(format!("{}={level}", Self::LOG_LEVEL_FLAG_CRUN));
             }
         }
 
@@ -127,7 +117,37 @@ impl GenerateRuntimeArgs<'_> {
             args.push(Self::SYSTEMD_CGROUP_ARG.into());
         }
 
-        Ok(args)
+        args
+    }
+}
+
+/// The arguments of an exec, which end with the command of the user.
+pub(crate) struct ExecArgs {
+    pub(crate) args: Vec<String>,
+
+    /// Where the command starts in `args`, see [`LoggedArgs`].
+    pub(crate) command_start: usize,
+}
+
+/// The arguments of a runtime call as they get logged. Those of an exec end
+/// with the command of the user, which may carry secrets, so only the number
+/// of its arguments gets logged.
+pub(crate) struct LoggedArgs<'a> {
+    pub(crate) args: &'a [String],
+
+    /// Where the command of an exec starts in `args`.
+    pub(crate) command_start: Option<usize>,
+}
+
+impl fmt::Debug for LoggedArgs<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.command_start {
+            Some(start) => {
+                let (args, command) = self.args.split_at(start.min(self.args.len()));
+                write!(f, "{args:?} with {} command args", command.len())
+            }
+            None => write!(f, "{:?}", self.args),
+        }
     }
 }
 

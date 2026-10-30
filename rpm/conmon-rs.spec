@@ -15,7 +15,8 @@ License: Apache-2.0 AND BSD-2-Clause AND MIT AND Zlib
 URL: https://github.com/containers/%{name}
 Source0: %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
 BuildRequires: capnproto
-BuildRequires: cargo
+# The rust-version of Cargo.toml, make verify-spec checks it.
+BuildRequires: cargo >= 1.89
 BuildRequires: make
 Provides: %{bin_name} = %{?epoch:%{epoch}:}%{version}-%{release}
 ExclusiveArch: %{rust_arches}

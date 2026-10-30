@@ -111,8 +111,7 @@ pub(super) async fn attach_session_with(
     idle_timeout: Option<Duration>,
 ) -> Result<(SharedContainerIO, StreamingServer, TcpStream)> {
     let (io, child, _) = attach_child(terminal)?;
-    let mut server = StreamingServer::default();
-    server.start_if_required().await?;
+    let server = StreamingServer::default();
     let url = server
         .attach_url(AttachSession {
             container_id: "id".into(),
@@ -124,23 +123,7 @@ pub(super) async fn attach_session_with(
             idle_timeout,
         })
         .await?;
-    let path = url
-        .strip_prefix(&format!("http://{ADDR}:{}", server.port))
-        .context("url")?;
-
-    let mut stream = TcpStream::connect((ADDR, server.port)).await?;
-    stream
-        .write_all(
-            format!(
-                "GET {path} HTTP/1.1\r\nHost: {ADDR}\r\nUpgrade: websocket\r\n\
-                 Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
-                 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-                 Sec-WebSocket-Protocol: {PROTOCOL_V5}\r\n\r\n"
-            )
-            .as_bytes(),
-        )
-        .await?;
-    let response = response_head(&mut stream).await?;
+    let (response, stream) = upgrade(&server, &url, "GET", &websocket_headers(PROTOCOL_V5)).await?;
     assert!(response.starts_with("http/1.1 101"), "{response}");
     Ok((io, server, stream))
 }
@@ -191,7 +174,7 @@ pub(super) fn attach_child(
 ) -> Result<(SharedContainerIO, ReapableChild, CancellationToken)> {
     let io = SharedContainerIO::new(ContainerIO::new(terminal, ContainerLog::new())?);
     let token = CancellationToken::new();
-    let (_, child) = ReapableChild::from_child(Child {
+    let (_, child, _) = ReapableChild::from_child(Child {
         id: "id".into(),
         kind: ChildKind::Container,
         pid: Pid::from_raw(0),
@@ -214,9 +197,9 @@ pub(super) async fn upgrade(
     headers: &str,
 ) -> Result<(String, TcpStream)> {
     let path = url
-        .strip_prefix(&format!("http://{ADDR}:{}", server.port))
+        .strip_prefix(&format!("http://{ADDR}:{}", server.port()))
         .context("url")?;
-    let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+    let mut stream = TcpStream::connect((ADDR, server.port())).await?;
     stream
         .write_all(
             format!(
@@ -226,6 +209,18 @@ pub(super) async fn upgrade(
         )
         .await?;
     Ok((response_head(&mut stream).await?, stream))
+}
+
+/// The headers of a WebSocket upgrade request for [`upgrade`] with the
+/// subprotocols, none without them.
+pub(super) fn websocket_headers(protocols: &str) -> String {
+    let mut headers = "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+                       Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        .to_owned();
+    if !protocols.is_empty() {
+        headers.push_str(&format!("Sec-WebSocket-Protocol: {protocols}\r\n"));
+    }
+    headers
 }
 
 pub(super) const SPDY_EXEC_UPGRADE: &str = "Connection: Upgrade\r\nUpgrade: SPDY/3.1\r\n\
@@ -264,8 +259,7 @@ pub(super) async fn spdy_attach_version(
     upgrade_headers: &str,
 ) -> Result<(SharedContainerIO, StreamingServer, Client<TcpStream>)> {
     let (io, child, _token) = attach_child(terminal)?;
-    let mut server = StreamingServer::default();
-    server.start_if_required().await?;
+    let server = StreamingServer::default();
     let url = server
         .attach_url(spdy_attach_config(
             child,
@@ -364,8 +358,7 @@ pub(super) async fn websocket_attach_with(
     String,
 )> {
     let (io, child, token) = attach_child(false)?;
-    let mut server = StreamingServer::default();
-    server.start_if_required().await?;
+    let server = StreamingServer::default();
     let url = server
         .attach_url(AttachSession {
             container_id: "id".into(),
@@ -377,16 +370,7 @@ pub(super) async fn websocket_attach_with(
             idle_timeout: None,
         })
         .await?;
-    let (response, stream) = upgrade(
-        &server,
-        &url,
-        "GET",
-        &format!(
-            "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
-             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {protocol}\r\n"
-        ),
-    )
-    .await?;
+    let (response, stream) = upgrade(&server, &url, "GET", &websocket_headers(protocol)).await?;
     Ok((io, server, stream, token, response))
 }
 
@@ -419,24 +403,11 @@ pub(super) async fn port_forward_websocket_to(
     query: &str,
     protocols: &str,
 ) -> Result<(String, TcpStream)> {
-    let path = url
-        .strip_prefix(&format!("http://{ADDR}:{}", server.port))
-        .context("url")?;
-    let mut stream = TcpStream::connect((ADDR, server.port)).await?;
-    let protocols = if protocols.is_empty() {
-        String::new()
-    } else {
-        format!("Sec-WebSocket-Protocol: {protocols}\r\n")
-    };
-    stream
-        .write_all(
-            format!(
-                "GET {path}{query} HTTP/1.1\r\nHost: {ADDR}\r\nUpgrade: websocket\r\n\
-                 Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
-                 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n{protocols}\r\n"
-            )
-            .as_bytes(),
-        )
-        .await?;
-    Ok((response_head(&mut stream).await?, stream))
+    upgrade(
+        server,
+        &format!("{url}{query}"),
+        "GET",
+        &websocket_headers(protocols),
+    )
+    .await
 }

@@ -1,6 +1,8 @@
 //! A SPDY/3.1 server for the streaming protocols of Kubernetes. The kubelet
-//! still talks SPDY to the streaming server of a container runtime, also when
-//! the client used a WebSocket, which the API server or the kubelet unwrap.
+//! proxies the upgrade of a client to the streaming server of a container
+//! runtime unchanged. kubectl still arrives with SPDY when it connected with a
+//! WebSocket, the API server translates its `v5.channel.k8s.io` and port
+//! forwarding WebSockets to SPDY.
 //!
 //! Only what moby/spdystream, the SPDY implementation of Kubernetes, uses is
 //! supported: the client opens all streams, the server answers pings. There
@@ -171,16 +173,6 @@ impl Connection {
     /// The next stream the client opened, `None` once the connection ended.
     pub async fn accept(&mut self) -> Option<Stream> {
         self.streams.recv().await
-    }
-
-    /// End the connection right away.
-    pub fn abort(&self) {
-        self.handle().abort();
-    }
-
-    /// Cancelled once the connection ended.
-    pub fn done(&self) -> CancellationToken {
-        self.handle().done()
     }
 
     /// When the connection was active the last time, for an idle timeout

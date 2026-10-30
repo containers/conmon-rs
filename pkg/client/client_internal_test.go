@@ -488,8 +488,24 @@ func TestValidateCgroupManager(t *testing.T) {
 
 	// The global one gets checked by New.
 	_, err := New(&ConmonServerConfig{ServerRunDir: t.TempDir(), CgroupManager: CgroupManager(42)})
-	if !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("got error %v, want %v", err, ErrInvalidValue)
+	if !errors.Is(err, ErrInvalidValue) ||
+		!strings.HasSuffix(err.Error(), "cgroup manager CgroupManager(42)") {
+		t.Fatalf("got error %v, want %v for CgroupManager(42)", err, ErrInvalidValue)
+	}
+}
+
+func TestCgroupManagerString(t *testing.T) {
+	t.Parallel()
+
+	for manager, want := range map[CgroupManager]string{
+		CgroupManagerSystemd:    "systemd",
+		CgroupManagerCgroupfs:   "cgroupfs",
+		CgroupManagerPerCommand: "per command",
+		CgroupManager(42):       "CgroupManager(42)",
+	} {
+		if got := manager.String(); got != want {
+			t.Errorf("cgroup manager %d: got %q, want %q", manager, got, want)
+		}
 	}
 }
 
@@ -628,11 +644,6 @@ func TestToArgs(t *testing.T) {
 			wantErr: errRuntimeUnspecified,
 		},
 		{
-			name:    "no run dir",
-			config:  ConmonServerConfig{ServerRunDir: "-"},
-			wantErr: errRunDirUnspecified,
-		},
-		{
 			// The server gets the absolute path of the client.
 			name:   "relative run dir",
 			config: ConmonServerConfig{ServerRunDir: "dir"},
@@ -652,14 +663,11 @@ func TestToArgs(t *testing.T) {
 			}
 
 			config.ServerRunDir = cmp.Or(config.ServerRunDir, "/run/dir")
-			if config.ServerRunDir == "-" {
-				config.ServerRunDir = ""
-			}
 
 			entrypoint, args, err := (&ConmonClient{runDir: "/run/dir"}).toArgs(&config)
 			if tc.wantErr != nil {
-				if !errors.Is(err, tc.wantErr) {
-					t.Fatalf("got error %v, want %v", err, tc.wantErr)
+				if !errors.Is(err, tc.wantErr) || args != nil {
+					t.Fatalf("got error %v and args %q, want %v", err, args, tc.wantErr)
 				}
 
 				return

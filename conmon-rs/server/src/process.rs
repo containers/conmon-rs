@@ -21,7 +21,6 @@ use std::{
     thread,
 };
 use tokio::{io::Interest, sync::oneshot, task};
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
 
 /// Read a PID file like the runtimes write it, the number may be followed by
@@ -363,25 +362,21 @@ fn status_exit_code(status: WaitStatus) -> Option<i32> {
 
 /// Wait for a process to exit using pidfd_open for async polling,
 /// with a blocking waitpid fallback for older kernels.
-pub async fn wait_for_exit_code(token: CancellationToken, pid: Pid) -> i32 {
+pub async fn wait_for_exit_code(pid: Pid) -> i32 {
     debug!("Waiting for exit code of pid {pid}");
 
-    let exit_code = if let Some(code) = try_pidfd_wait(pid).await {
-        code
-    } else {
-        debug!("pidfd not available, falling back to blocking waitpid");
-        let (tx, rx) = oneshot::channel();
-        spawn_waitpid_thread(move || {
-            let _ = tx.send(wait_for_exit_code_blocking(pid));
-        });
-        rx.await.unwrap_or_else(|_| {
-            error!("waitpid thread exited without a result");
-            EXIT_CODE_WAIT_FAILED
-        })
-    };
-
-    token.cancel();
-    exit_code
+    if let Some(code) = try_pidfd_wait(pid).await {
+        return code;
+    }
+    debug!("pidfd not available, falling back to blocking waitpid");
+    let (tx, rx) = oneshot::channel();
+    spawn_waitpid_thread(move || {
+        let _ = tx.send(wait_for_exit_code_blocking(pid));
+    });
+    rx.await.unwrap_or_else(|_| {
+        error!("waitpid thread exited without a result");
+        EXIT_CODE_WAIT_FAILED
+    })
 }
 
 /// Stack size of the waitpid threads, which only wait and log.

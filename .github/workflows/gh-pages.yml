@@ -26,12 +26,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Only the docs get published, a cache entry cannot change the binaries.
-      # The workflow only runs on main.
+      # Nothing waits for the docs, a cache would only take space from the
+      # ones of the ci workflow.
       - uses: ./.github/actions/setup-rust
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          save-if: true
+          cache: false
       # The crate has no public API besides the entry point, the private items
       # are the documentation of the server internals. The fuzzing feature only
       # adds the entry points of the fuzz targets.

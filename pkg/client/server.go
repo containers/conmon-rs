@@ -524,13 +524,7 @@ func (c *ConmonClient) waitUntilServerUp(
 	pollCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 
-	const (
-		minInterval = time.Millisecond
-		maxInterval = 100 * time.Millisecond
-		backoff     = 2
-	)
-
-	for interval := minInterval; ; interval = min(backoff*interval, maxInterval) {
+	for interval := minWaitInterval; ; interval = nextWaitInterval(interval) {
 		resp, err := c.Version(pollCtx, &VersionConfig{})
 		if err == nil {
 			return resp, nil
@@ -627,23 +621,9 @@ func (c *ConmonClient) ShutdownContext(ctx context.Context) (retErr error) {
 	ctx, span := c.startSpan(ctx, "Shutdown")
 	defer endSpan(span, &retErr)
 
-	c.pickUpReplacement(ctx)
-
-	server, release, err := c.usePidfd()
-	if err != nil {
-		return err
-	}
-	defer release()
-
-	// Nothing ends while nothing can be stopped.
-	if server == nil || server.pid == 0 {
-		return fmt.Errorf("stop server: %w", ErrServerPIDUnknown)
-	}
-
-	c.closeAttachStdins()
-	c.resetConn()
-
-	return c.stopServer(ctx, server, serverStopTimeout, false)
+	return c.endServer(ctx, "stop server", func(server *serverProcess) error {
+		return c.stopServer(ctx, server, serverStopTimeout, false)
+	})
 }
 
 // Kill kills the server via SIGKILL and waits up to 10 seconds for the
@@ -656,14 +636,29 @@ func (c *ConmonClient) Kill() error {
 // be removed from the system, up to 10 seconds or until the context ends.
 // Unlike with ShutdownContext, the server cannot kill its containers, which
 // keep running without a monitor. Use it if ShutdownContext returned
-// ErrShutdownTimeout. Like ShutdownContext, it closes the stdin of the
-// attach sessions and the connection of the client first, stops a server
-// which replaced the recorded one, and fails with ErrServerPIDUnknown
-// without touching anything if the server PID is unknown.
+// ErrShutdownTimeout. It returns ErrShutdownTimeout itself if the server
+// still runs after the 10 seconds, for example because it is stuck in the
+// kernel. Like ShutdownContext, it closes the stdin of the attach sessions
+// and the connection of the client first, stops a server which replaced the
+// recorded one, and fails with ErrServerPIDUnknown without touching anything
+// if the server PID is unknown.
 func (c *ConmonClient) KillContext(ctx context.Context) (retErr error) {
 	ctx, span := c.startSpan(ctx, "Kill")
 	defer endSpan(span, &retErr)
 
+	return c.endServer(ctx, "kill server", func(server *serverProcess) error {
+		return c.killServer(ctx, server, serverStopTimeout)
+	})
+}
+
+// endServer runs end, which signals the server and waits for it to exit, for
+// ShutdownContext and KillContext. It picks up a server which replaced the
+// recorded one first, and fails with ErrServerPIDUnknown behind the action
+// without touching anything if the server PID is unknown. Otherwise it closes
+// the stdin of the attach sessions and the connection before end.
+func (c *ConmonClient) endServer(
+	ctx context.Context, action string, end func(*serverProcess) error,
+) error {
 	c.pickUpReplacement(ctx)
 
 	server, release, err := c.usePidfd()
@@ -675,13 +670,13 @@ func (c *ConmonClient) KillContext(ctx context.Context) (retErr error) {
 	// A zero PID would signal the process group of the caller. Nothing ends
 	// while nothing can be stopped.
 	if server == nil || server.pid == 0 {
-		return fmt.Errorf("kill server: %w", ErrServerPIDUnknown)
+		return fmt.Errorf("%s: %w", action, ErrServerPIDUnknown)
 	}
 
 	c.closeAttachStdins()
 	c.resetConn()
 
-	return c.killServer(ctx, server, serverStopTimeout)
+	return end(server)
 }
 
 // Close releases the resources of the client without stopping the server:
@@ -891,8 +886,8 @@ func (c *ConmonClient) killServer(
 	return c.waitServerExited(ctx, server, timeout)
 }
 
-// The first and the longest interval between the checks of waitServerExited,
-// and how much the interval grows after each check.
+// The first and the longest interval between the checks of waitServerExited
+// and waitUntilServerUp, and how much the interval grows after each check.
 const (
 	minWaitInterval = time.Millisecond
 	maxWaitInterval = 100 * time.Millisecond
@@ -900,7 +895,7 @@ const (
 )
 
 // nextWaitInterval grows the interval between the checks of
-// waitServerExited, up to maxWaitInterval.
+// waitServerExited and waitUntilServerUp, up to maxWaitInterval.
 func nextWaitInterval(interval time.Duration) time.Duration {
 	return min(waitBackoff*interval, maxWaitInterval)
 }

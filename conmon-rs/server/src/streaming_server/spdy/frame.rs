@@ -240,7 +240,9 @@ impl Decoder {
         let flags = header[4];
         let len =
             usize::from(header[5]) << 16 | usize::from(header[6]) << 8 | usize::from(header[7]);
-        if !control && len > DATA_CHUNK_LEN {
+        // Data frames do not get buffered as a whole, independent of the
+        // limit of the control frames.
+        if !control {
             let stream_id = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
             return self
                 .read_data(reader, stream_id, len, flags & FLAG_FIN != 0)
@@ -260,7 +262,7 @@ impl Decoder {
         self.decode(header, flags, payload.freeze()).map(Some)
     }
 
-    /// Read the next part of a large data frame.
+    /// Read a data frame, or the next part of a large one.
     async fn read_data<R>(
         &mut self,
         reader: &mut R,
@@ -286,19 +288,10 @@ impl Decoder {
         })
     }
 
-    /// Decode a frame from its header and complete payload.
+    /// Decode a control frame from its header and complete payload.
     fn decode(&mut self, header: [u8; HEADER_LEN], flags: u8, mut payload: Bytes) -> Result<Frame> {
         let fin = flags & FLAG_FIN != 0;
         let first = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
-
-        if first & 0x8000_0000 == 0 {
-            return Ok(Frame::Data {
-                stream_id: first,
-                fin,
-                data: payload,
-            });
-        }
-
         let version = (first >> 16) as u16 & 0x7fff;
         ensure!(version == VERSION, "unsupported SPDY version {version}");
 

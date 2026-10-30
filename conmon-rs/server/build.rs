@@ -1,5 +1,8 @@
-use std::{path::Path, process::Command};
-use time::{OffsetDateTime, macros::format_description};
+use std::{
+    path::Path,
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 fn run(cmd: &str, args: &[&str]) -> String {
     Command::new(cmd)
@@ -23,6 +26,33 @@ fn enabled_features() -> String {
         .collect();
     features.sort();
     features.join(",")
+}
+
+/// The first second of the year 10000, the build time has four digits for
+/// the year.
+const MAX_EPOCH: u64 = 253_402_300_800;
+
+/// The UTC time of the seconds since the Unix epoch, formatted as
+/// `YYYY-MM-DD hh:mm:ss`. The date is the one of the days since the epoch,
+/// see <https://howardhinnant.github.io/date_algorithms.html#civil_from_days>,
+/// with the days shifted to start at 0000-03-01, so that the leap day is the
+/// last one of a year.
+fn format_utc(epoch: u64) -> String {
+    let (days, secs) = (epoch / 86_400, epoch % 86_400);
+    let days = days + 719_468;
+    let (era, doe) = (days / 146_097, days % 146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = era * 400 + yoe + u64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        secs / 3_600,
+        secs / 60 % 60,
+        secs % 60
+    )
 }
 
 fn main() {
@@ -62,16 +92,17 @@ fn main() {
     };
 
     // Honor SOURCE_DATE_EPOCH for reproducible builds.
-    let now = std::env::var("SOURCE_DATE_EPOCH")
+    let epoch = std::env::var("SOURCE_DATE_EPOCH")
         .ok()
         .and_then(|epoch| epoch.parse().ok())
-        .and_then(|epoch| OffsetDateTime::from_unix_timestamp(epoch).ok())
-        .unwrap_or_else(OffsetDateTime::now_utc);
-    let build_time = now
-        .format(&format_description!(
-            "[year]-[month]-[day] [hour]:[minute]:[second]"
-        ))
-        .expect("format the build time");
+        .filter(|&epoch| epoch < MAX_EPOCH)
+        .unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("the clock is after the Unix epoch")
+                .as_secs()
+        });
+    let build_time = format_utc(epoch);
 
     // Report the toolchain cargo builds with, which is not necessarily the
     // one on PATH.
@@ -89,6 +120,12 @@ fn main() {
     let cargo_tree = if std::env::var_os("CONMONRS_SKIP_CARGO_TREE").is_some() {
         String::new()
     } else {
+        // The tree changes with the locked dependencies. The lock file of the
+        // workspace exists unless it got packaged without one.
+        let lock_file = Path::new("../../Cargo.lock");
+        if lock_file.exists() {
+            println!("cargo:rerun-if-changed={}", lock_file.display());
+        }
         let features = enabled_features();
         run(
             &cargo,

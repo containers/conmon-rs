@@ -57,9 +57,9 @@ async fn port_forward_request(
     headers: &str,
 ) -> Result<(String, TcpStream)> {
     let path = url
-        .strip_prefix(&format!("http://{ADDR}:{}", server.port))
+        .strip_prefix(&format!("http://{ADDR}:{}", server.port()))
         .context("url")?;
-    let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+    let mut stream = TcpStream::connect((ADDR, server.port())).await?;
     stream
         .write_all(
             format!("POST {path} HTTP/1.1\r\nHost: {ADDR}\r\nContent-Length: 0\r\n{headers}\r\n")
@@ -79,8 +79,7 @@ const SPDY_PORT_FORWARD: &str = "Connection: Upgrade\r\nUpgrade: SPDY/3.1\r\n\
 async fn port_forward_upgrades_to_spdy() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
+            let server = StreamingServer::default();
             let url = server
                 .port_forward_url("/proc/self/ns/net".into(), None)
                 .await?;
@@ -122,9 +121,7 @@ async fn port_forward_upgrades_to_spdy() -> Result<()> {
 async fn port_forward_tokens_survive_rejected_requests() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
-
+            let server = StreamingServer::default();
             // A SPDY request without the protocol, then a valid one.
             let url = server
                 .port_forward_url("/proc/self/ns/net".into(), None)
@@ -151,9 +148,7 @@ async fn port_forward_tokens_survive_rejected_requests() -> Result<()> {
 async fn port_forward_rejects_other_upgrades() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
-
+            let server = StreamingServer::default();
             for (headers, status) in [
                 (
                     "Connection: Upgrade\r\nUpgrade: websocket\r\n\
@@ -209,8 +204,7 @@ async fn port_forward_rejects_other_upgrades() -> Result<()> {
 async fn sessions_work_on_their_path_only() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
+            let server = StreamingServer::default();
             let (_, child, _token) = attach_child(false)?;
             let url = server
                 .attach_url(AttachSession {
@@ -240,8 +234,7 @@ async fn sessions_work_on_their_path_only() -> Result<()> {
 async fn spdy_upgrades_get_negotiated() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
+            let server = StreamingServer::default();
             for (headers, status) in [
                 ("Connection: Upgrade\r\nUpgrade: SPDY/3.1\r\n", "400"),
                 (
@@ -288,14 +281,7 @@ async fn spdy_upgrades_get_negotiated() -> Result<()> {
 async fn rejected_upgrades_keep_the_token() -> Result<()> {
     LocalSet::new()
         .run_until(async {
-            let mut server = StreamingServer::default();
-            server.start_if_required().await?;
-            let websocket = |protocol: &str| {
-                format!(
-                    "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
-                     Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {protocol}\r\n"
-                )
-            };
+            let server = StreamingServer::default();
             // An unknown token comes before the protocol.
             let (_, child, _token) = attach_child(false)?;
             let url = server
@@ -326,9 +312,9 @@ async fn rejected_upgrades_keep_the_token() -> Result<()> {
                 ),
                 ("".to_owned(), "400", SPDY_EXEC_UPGRADE.to_owned()),
                 (
-                    websocket("v3.channel.k8s.io"),
+                    websocket_headers("v3.channel.k8s.io"),
                     "403",
-                    websocket(PROTOCOL_V5),
+                    websocket_headers(PROTOCOL_V5),
                 ),
             ] {
                 let (_, child, _token) = attach_child(false)?;
@@ -344,11 +330,18 @@ async fn rejected_upgrades_keep_the_token() -> Result<()> {
                     })
                     .await?;
                 let (response, _) = upgrade(&server, &url, "POST", &rejected).await?;
-                assert!(response.starts_with(&format!("http/1.1 {status}")), "{response}");
+                assert!(
+                    response.starts_with(&format!("http/1.1 {status}")),
+                    "{response}"
+                );
 
                 // The client can retry with a request the server takes,
                 // which uses the token.
-                let method = if valid.contains("websocket") { "GET" } else { "POST" };
+                let method = if valid.contains("websocket") {
+                    "GET"
+                } else {
+                    "POST"
+                };
                 let (response, _) = upgrade(&server, &url, method, &valid).await?;
                 assert!(response.starts_with("http/1.1 101"), "{response}");
                 let (response, _) = upgrade(&server, &url, method, &valid).await?;

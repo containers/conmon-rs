@@ -67,9 +67,12 @@ var (
 	// ErrClientClosed gets returned by the methods of a client after Close.
 	ErrClientClosed = errors.New("client is closed")
 
-	// ErrShutdownTimeout gets returned by Shutdown if the server is still
-	// running once the wait for it timed out, while an ended context fails
-	// with the error of the context. KillContext stops it for good.
+	// ErrShutdownTimeout gets returned by ShutdownContext (or Shutdown) and
+	// KillContext (or Kill) if the server is still running once the wait for
+	// it timed out, while an ended context fails with the error of the
+	// context. After ShutdownContext, KillContext sends SIGKILL, which a
+	// server only survives while it is stuck in the kernel, KillContext
+	// returns ErrShutdownTimeout again then.
 	ErrShutdownTimeout = errors.New("timed out waiting for server PID to disappear")
 
 	// ErrServerExited gets matched by the error of New if the server it
@@ -111,6 +114,27 @@ var (
 	// connects again, also to a server which got started in the meantime.
 	// Use errors.Is to check for it.
 	ErrServerUnreachable = errors.New("no server listens on the socket")
+
+	// ErrServerNotResponding is returned by New if a server accepts
+	// connections on the socket of the run directory but does not answer in
+	// time, or the backlog of the socket is full. New does not start another
+	// server then, it would take over the sockets of the one which runs and
+	// orphan its containers.
+	ErrServerNotResponding = errors.New("server accepted the connection but did not respond")
+
+	// ErrRemoteFDsBroken gets matched by the error of a request of
+	// RemoteFDs which got no valid response, which got interrupted by its
+	// context after it was sent, or which ran into Close. Every request
+	// afterwards fails with it as well, a new RemoteFDs is needed then. A
+	// request which the server rejected, or which could not be sent, does
+	// not match it and keeps the connection usable.
+	ErrRemoteFDsBroken = errors.New("fd socket connection broken")
+
+	// ErrTooManyFileDescriptors gets returned by Send and SendContext of
+	// RemoteFDs for more than 253 file descriptors, which the kernel does
+	// not pass in one message. Nothing gets sent then, the connection stays
+	// usable.
+	ErrTooManyFileDescriptors = errors.New("too many file descriptors")
 )
 
 // unsupportedError is the type of ErrUnsupported. It matches

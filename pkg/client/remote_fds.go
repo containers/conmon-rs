@@ -14,19 +14,6 @@ import (
 	"github.com/containers/conmon-rs/internal/proto"
 )
 
-// ErrRemoteFDsBroken gets matched by the error of a request of RemoteFDs
-// which got no valid response, which got interrupted by its context after
-// it was sent, or which ran into Close. Every request afterwards fails with
-// it as well, a new RemoteFDs is needed then. A request which the server
-// rejected, or which could not be sent, does not match it and keeps the
-// connection usable.
-var ErrRemoteFDsBroken = errors.New("fd socket connection broken")
-
-// ErrTooManyFileDescriptors gets returned by Send and SendContext of
-// RemoteFDs for more than 253 file descriptors, which the kernel does not
-// pass in one message. Nothing gets sent then, the connection stays usable.
-var ErrTooManyFileDescriptors = errors.New("too many file descriptors")
-
 var (
 	errResponseTooShort        = errors.New("response too short")
 	errResponseIDDoesNotMatch  = errors.New("response id does not match")
