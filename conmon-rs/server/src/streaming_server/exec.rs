@@ -201,7 +201,8 @@ impl StreamingServer {
         // What the process wrote while the runtime ran comes first, in the
         // loop, so that a slow client does not hold up the stdin, resizing
         // and the exit meanwhile. Output which got dropped for its size would
-        // leave a gap, so the stream ends with it.
+        // leave a gap, so the stream ends with it, and the session fails.
+        let truncated = early_stdio.stdout.truncated || early_stdio.stderr.truncated;
         let (mut early_stdout, mut early_stderr) = (VecDeque::new(), VecDeque::new());
         for (early, rx, frames, done) in [
             (
@@ -269,7 +270,7 @@ impl StreamingServer {
                     if res.is_err() {
                         teardown.kill.store(true, Ordering::Release);
                     }
-                    *status = Some(Self::exit_status(res));
+                    *status = Some(Self::exit_status(res, truncated));
                     // Forward what the read loops still deliver before closing.
                     for (frames, stream_byte) in [(&mut early_stdout, STDOUT_BYTE), (&mut early_stderr, STDERR_BYTE)] {
                         for frame in frames.drain(..) {
@@ -293,9 +294,21 @@ impl StreamingServer {
     /// The status of the exit the watcher of the process sent. It sends it
     /// once, and only goes away without it if its task got aborted, the
     /// session must not wait for the exit forever then. A panic aborts the
-    /// whole server in release builds.
-    fn exit_status(res: Result<ExitChannelData, RecvError>) -> Status {
+    /// whole server in release builds. A session whose output got
+    /// `truncated` while the runtime ran fails, the client must not take
+    /// output with a gap for the complete one, see
+    /// [`ContainerIO::collect_stdio`].
+    fn exit_status(res: Result<ExitChannelData, RecvError>, truncated: bool) -> Status {
         match res {
+            Ok(exit_data) if truncated => Status::failed(
+                Operation::Exec,
+                format_args!(
+                    "the command wrote more than {} MiB while the runtime started it, \
+                     the rest of it got dropped (exit code {})",
+                    ContainerIO::MAX_STDIO_STREAM_SIZE / (1024 * 1024),
+                    exit_data.exit_code,
+                ),
+            ),
             Ok(exit_data) => Status::exited(exit_data.exit_code),
             Err(e) => Status::failed(
                 Operation::Exec,

@@ -92,6 +92,7 @@ impl PortForward {
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let discard = socket.get_ref().discarder();
+        let written = socket.get_ref().written();
         let (mut sink, mut messages) = socket.split();
         let (mut from_server, mut to_server) = tokio::io::split(connection);
         // Cancelled once the client sent a message larger than the server
@@ -161,7 +162,7 @@ impl PortForward {
                 sink = &mut to_client => Some(sink.ok().flatten()),
             };
             match closed_first {
-                None => web::join_or_abort(to_client).await.flatten(),
+                None => web::join_or_abort(to_client, &written).await.flatten(),
                 // The SPDY connection ended, the client answers the close.
                 Some(Some(sink)) => {
                     let _ = time::timeout(web::CLOSE_TIMEOUT, from_client).await;

@@ -11,6 +11,20 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// How long the end of a connection waits for a client which takes nothing
+/// of what the server sends, like the rest of the output, the status of a
+/// session and the close, before the connection gets ended. A slow client
+/// gets all of it, only one which stopped reading gets dropped, see
+/// [`Activity::until_stalled`]. Not too short: the kernel wakes up a write
+/// which waits for the client only once a third of the send buffer drained,
+/// which can take a while with a send buffer of a few MiB and a slow
+/// client.
+pub const STALL_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_secs(5)
+} else {
+    Duration::from_secs(60)
+};
+
 /// When a connection was active the last time, by what the client sent or
 /// got. Clones share the time.
 #[derive(Clone, Debug)]
@@ -63,6 +77,35 @@ impl Activity {
         select! {
             output = run => Some(output),
             () = idle => None,
+        }
+    }
+
+    /// Run `run` until it is done, or until the activity was not touched
+    /// for the `timeout`, counted from `start` at the earliest, which gives
+    /// `None`. The writes of a connection touch it as they go out, which
+    /// lets the end of a connection take as long as a slow client needs,
+    /// see [`STALL_TIMEOUT`].
+    pub async fn until_stalled<T>(
+        &self,
+        start: Instant,
+        timeout: Duration,
+        run: impl Future<Output = T>,
+    ) -> Option<T> {
+        let stalled = async {
+            loop {
+                let Some(deadline) = self.last().max(start).checked_add(timeout) else {
+                    return future::pending().await;
+                };
+                if Instant::now() >= deadline {
+                    return;
+                }
+                time::sleep_until(deadline).await;
+            }
+        };
+        select! {
+            biased;
+            output = run => Some(output),
+            () = stalled => None,
         }
     }
 
@@ -138,6 +181,37 @@ mod tests {
             .await;
         assert_eq!(result, None);
         assert_eq!(start.elapsed(), Duration::from_secs(30));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_stalls_end_runs() {
+        let activity = Activity::new();
+        let timeout = Duration::from_secs(5);
+        // An activity from long ago does not count against a run which
+        // starts now.
+        time::sleep(Duration::from_secs(60)).await;
+        let start = Instant::now();
+        let progress = async {
+            for _ in 0..10 {
+                time::sleep(Duration::from_secs(4)).await;
+                activity.touch();
+            }
+        };
+        assert_eq!(
+            activity.until_stalled(start, timeout, progress).await,
+            Some(())
+        );
+        assert_eq!(start.elapsed(), Duration::from_secs(40));
+
+        // A run which stops making progress ends after the timeout.
+        let start = Instant::now();
+        let stalls = async {
+            time::sleep(Duration::from_secs(3)).await;
+            activity.touch();
+            future::pending::<()>().await;
+        };
+        assert_eq!(activity.until_stalled(start, timeout, stalls).await, None);
+        assert_eq!(start.elapsed(), Duration::from_secs(8));
     }
 
     #[tokio::test(start_paused = true)]

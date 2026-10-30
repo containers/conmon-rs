@@ -212,6 +212,26 @@ async fn lost_exit_ends_the_session_and_kills_the_process() -> Result<()> {
 }
 
 #[test]
+fn truncated_early_output_fails_the_session() {
+    let exit = || {
+        Ok(ExitChannelData {
+            exit_code: 0,
+            timed_out: false,
+        })
+    };
+    assert_eq!(
+        StreamingServer::exit_status(exit(), false),
+        Status::exited(0)
+    );
+    // The client must not take output with a gap for a success.
+    let status = StreamingServer::exit_status(exit(), true);
+    assert!(
+        matches!(&status, Status::Error(e) if e.contains("more than 16 MiB") && e.contains("exit code 0")),
+        "{status:?}"
+    );
+}
+
+#[test]
 #[expect(clippy::cast_possible_truncation, reason = "a wrapping byte pattern")]
 fn early_output_gets_split_into_frames() {
     let data: Vec<u8> = (0..2 * EARLY_FRAME_SIZE + 10).map(|i| i as u8).collect();

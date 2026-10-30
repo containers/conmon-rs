@@ -438,7 +438,10 @@ impl From<Streams> for ContainerIOType {
 }
 
 impl ContainerIO {
-    const MAX_STDIO_STREAM_SIZE: usize = 16 * 1024 * 1024;
+    /// The most output of a pipe an exec collects while its runtime runs,
+    /// see [`ContainerIO::collect_stdio`], and the most an `exec_sync`
+    /// returns.
+    pub(crate) const MAX_STDIO_STREAM_SIZE: usize = 16 * 1024 * 1024;
 
     /// Create a new container IO instance.
     pub fn new(terminal: bool, logger: SharedContainerLog) -> Result<Self> {

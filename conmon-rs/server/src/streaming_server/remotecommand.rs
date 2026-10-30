@@ -8,7 +8,7 @@
 //! of a session the way its protocol needs it.
 
 use crate::streaming_server::{
-    idle::Activity,
+    idle::{Activity, STALL_TIMEOUT},
     web::{self, Message, WebSocket},
 };
 use anyhow::{Context, Result, anyhow};
@@ -21,7 +21,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::time::{self, Duration};
+use tokio::time::Instant;
 use tracing::debug;
 
 mod spdy;
@@ -43,10 +43,6 @@ pub const CLOSE_BYTE: u8 = 255;
 /// The status of a session which succeeded. The kubelet sends it as well,
 /// some clients take an empty error stream for a failure.
 const SUCCESS_STATUS: &[u8] = b"{\"metadata\":{},\"status\":\"Success\"}";
-
-/// How long the client gets to take the end of a session, its status and the
-/// close, before the server gives up on it.
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The most resize events a SPDY client may send without completing one.
 const MAX_RESIZE_BUFFER: usize = 4 * 1024;
@@ -149,6 +145,11 @@ pub struct Output {
     /// Whether a WebSocket gets closed for a message of the client which
     /// was too large.
     too_large: bool,
+
+    /// When the end of the session started, the status and the close share
+    /// the [`STALL_TIMEOUT`] from then on, a client which takes nothing does
+    /// not get it twice.
+    ending: Option<Instant>,
 }
 
 enum Transport {
@@ -159,6 +160,10 @@ enum Transport {
         /// Touched by every message with data which got sent, not by pings
         /// and the close.
         activity: Activity,
+
+        /// Touched whenever a part of what the server sends went out, see
+        /// [`web::ClientIo::written`].
+        written: Activity,
     },
     Spdy(SpdyOutput),
 }
@@ -168,11 +173,13 @@ impl Output {
         sender: SplitSink<WebSocket, Message>,
         framing: Framing,
         activity: Activity,
+        written: Activity,
     ) -> Self {
         let transport = Transport::WebSocket {
             sender,
             framing,
             activity,
+            written,
         };
         Self::new(transport, Arc::default())
     }
@@ -190,6 +197,7 @@ impl Output {
             failed: false,
             peer_closed,
             too_large: false,
+            ending: None,
         }
     }
 
@@ -246,12 +254,29 @@ impl Output {
         self.sent(result)
     }
 
-    /// Send the final status of the session, a client which does not take it
-    /// in time does not get it.
+    /// Send the final status of the session. Over SPDY it waits behind the
+    /// output queued before, a slow client gets it all the same, one which
+    /// stopped reading for [`STALL_TIMEOUT`] does not get it.
     pub async fn status(&mut self, status: &Status) -> Result<()> {
-        time::timeout(SHUTDOWN_TIMEOUT, self.send_status(status))
+        let ending = self.ending();
+        self.written()
+            .until_stalled(ending, STALL_TIMEOUT, self.send_status(status))
             .await
-            .unwrap_or_else(|_| Err(anyhow!("client did not take the status in time")))
+            .unwrap_or_else(|| Err(anyhow!("client stopped reading before the status")))
+    }
+
+    /// When the end of the session started, the first time this got
+    /// called.
+    fn ending(&mut self) -> Instant {
+        *self.ending.get_or_insert_with(Instant::now)
+    }
+
+    /// Touched whenever a part of what the server sends went out.
+    fn written(&self) -> Activity {
+        match &self.transport {
+            Transport::WebSocket { written, .. } => written.clone(),
+            Transport::Spdy(output) => output.connection.written(),
+        }
     }
 
     async fn send_status(&mut self, status: &Status) -> Result<()> {
@@ -287,10 +312,13 @@ impl Output {
 
     /// End the session: a WebSocket gets closed, the SPDY streams end and the
     /// writer flushes what is queued, shuts the connection down and ends it.
-    /// A client which does not read gets the connection ended after
-    /// [`SHUTDOWN_TIMEOUT`]. Whether the close went out, which the client of
+    /// A client which takes it slowly gets all of it, one which stopped
+    /// reading gets the connection ended after [`STALL_TIMEOUT`], counted
+    /// from the status on. Whether the close went out, which the client of
     /// a WebSocket answers.
     pub async fn close(&mut self) -> bool {
+        let ending = self.ending();
+        let written = self.written();
         let close = async {
             match &mut self.transport {
                 Transport::WebSocket { .. } => {
@@ -319,10 +347,11 @@ impl Output {
             }
             true
         };
-        let closed = time::timeout(SHUTDOWN_TIMEOUT, close)
+        let closed = written
+            .until_stalled(ending, STALL_TIMEOUT, close)
             .await
-            .unwrap_or_else(|_| {
-                debug!("Session did not flush in time");
+            .unwrap_or_else(|| {
+                debug!("Client stopped reading before the end of the session");
                 false
             });
         if let Transport::Spdy(output) = &self.transport {

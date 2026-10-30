@@ -136,9 +136,33 @@ async fn hanging_writers_get_aborted() {
         let _alive = alive_tx;
         std::future::pending::<()>().await;
     });
-    assert_eq!(join_or_abort(writer).await, None);
+    let start = time::Instant::now();
+    assert_eq!(join_or_abort(writer, &Activity::new()).await, None);
+    assert_eq!(start.elapsed(), STALL_TIMEOUT);
     // The task got dropped with its sender.
     assert!(alive_rx.await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_writers_get_waited_for() {
+    // A writer whose client takes a part every few seconds, which takes far
+    // longer than the timeout in total.
+    let written = Activity::new();
+    let writer = tokio::spawn({
+        let written = written.clone();
+        async move {
+            for _ in 0..10 {
+                time::sleep(STALL_TIMEOUT - Duration::from_secs(1)).await;
+                written.touch();
+            }
+        }
+    });
+    let start = time::Instant::now();
+    assert_eq!(join_or_abort(writer, &written).await, Some(()));
+    assert_eq!(
+        start.elapsed(),
+        10 * (STALL_TIMEOUT - Duration::from_secs(1))
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -146,21 +170,23 @@ async fn closes_which_did_not_go_out_get_no_answer() {
     let mut messages = futures::stream::pending::<Result<Message, Infallible>>();
     // A writer which hangs, which does not send its close.
     let start = time::Instant::now();
+    let written = Activity::new();
     finish(
         tokio::spawn(std::future::pending::<Option<()>>()),
+        &written,
         &mut messages,
     )
     .await;
-    assert_eq!(start.elapsed(), CLOSE_TIMEOUT);
+    assert_eq!(start.elapsed(), STALL_TIMEOUT);
     // One which did not get its close out.
     let start = time::Instant::now();
-    finish(tokio::spawn(async { None::<()> }), &mut messages).await;
+    finish(tokio::spawn(async { None::<()> }), &written, &mut messages).await;
     assert_eq!(start.elapsed(), Duration::ZERO);
 
     // A close which went out gets its answer, what comes before it gets
     // dropped.
     let start = time::Instant::now();
-    finish(tokio::spawn(async { Some(()) }), &mut messages).await;
+    finish(tokio::spawn(async { Some(()) }), &written, &mut messages).await;
     assert_eq!(start.elapsed(), CLOSE_TIMEOUT);
     let mut messages = futures::stream::iter([
         Ok::<_, Infallible>(Message::Binary(Bytes::from_static(b"late"))),
@@ -168,7 +194,7 @@ async fn closes_which_did_not_go_out_get_no_answer() {
     ])
     .chain(futures::stream::pending());
     let start = time::Instant::now();
-    finish(tokio::spawn(async { Some(()) }), &mut messages).await;
+    finish(tokio::spawn(async { Some(()) }), &written, &mut messages).await;
     assert_eq!(start.elapsed(), Duration::ZERO);
 }
 
@@ -237,5 +263,25 @@ async fn dropped_input_wakes_waiting_writes() -> anyhow::Result<()> {
     time::timeout(Duration::from_secs(5), writer).await???;
     let read = time::timeout(Duration::from_secs(5), client).await???;
     assert!(read.iter().all(|b| *b == 1));
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn writes_tell_that_the_client_takes_them() -> anyhow::Result<()> {
+    let (server, mut client) = tokio::io::duplex(1024);
+    let mut io = ClientIo::new(server);
+    let written = io.written();
+    time::sleep(Duration::from_secs(60)).await;
+    // Only what went out counts, not a write which waits for the client.
+    let writer = tokio::spawn(async move { io.write_all(&[1; 2048]).await });
+    time::sleep(Duration::from_secs(60)).await;
+    let start = time::Instant::now();
+    written.idle(Some(Duration::from_secs(10))).await;
+    assert_eq!(start.elapsed(), Duration::ZERO);
+    let mut read = [0; 2048];
+    client.read_exact(&mut read).await?;
+    writer.await??;
+    written.idle(Some(Duration::from_secs(10))).await;
+    assert_eq!(start.elapsed(), Duration::from_secs(10));
     Ok(())
 }
