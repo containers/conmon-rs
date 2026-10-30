@@ -141,8 +141,8 @@ impl Server {
     /// conmon-rs daemonizes and outlives the process that spawned it, so any
     /// descriptor it inherits stays open for the lifetime of the server. If
     /// the spawning process was itself started with extra descriptors open,
-    /// holding them can keep that process tree from ever finishing - a test
-    /// harness waiting for its own pipe to close, for example.
+    /// holding them can keep that process tree from ever finishing, for
+    /// example a test harness waiting for its own pipe to close.
     ///
     /// conmon does the same thing, see `close_all_fds_ge_than(3)` there. Any
     /// descriptor conmon-rs actually needs is either created after this point

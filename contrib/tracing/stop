@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# Global vars to be used
+# CONTAINER_RUNTIME and JAEGER_CTR.
 # shellcheck source=env
 source "$(dirname "${BASH_SOURCE[0]}")"/env
 

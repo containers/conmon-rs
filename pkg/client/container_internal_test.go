@@ -129,10 +129,14 @@ func TestExecTimeout(t *testing.T) {
 		want     uint64
 	}{
 		{"explicit timeout below deadline", time.Hour, 5, 5},
-		{"explicit timeout limited by deadline", 2500 * time.Millisecond, 3600, 2},
+		{"explicit timeout limited by deadline", 10500 * time.Millisecond, 3600, 9},
+		{"explicit timeout a second below deadline", 10500 * time.Millisecond, 9, 9},
+		{"explicit timeout at deadline", 10500 * time.Millisecond, 10, 9},
 		{"explicit timeout without deadline", 0, 7, 7},
 		{"no deadline", 0, 0, 0},
-		{"deadline rounded down", 2500 * time.Millisecond, 0, 2},
+		{"deadline rounded down minus a second", 10500 * time.Millisecond, 0, 9},
+		{"two seconds left", 2500 * time.Millisecond, 0, 1},
+		{"less than two seconds left", 1900 * time.Millisecond, 0, 1},
 		{"short deadline", 500 * time.Millisecond, 0, 1},
 		{"expired deadline", -time.Second, 0, 1},
 	} {

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -443,6 +444,64 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
+// registerSpecHooks registers the hooks of a Describe whose specs keep their
+// test runner in tr and their client in sut. They reset both before each
+// spec, check the resident set size of the server after it and clean up. The
+// reset keeps a spec which fails or skips before it created its server from
+// making the hooks look at the server of the previous spec.
+func registerSpecHooks(tr **testRunner, sut **client.ConmonClient) {
+	BeforeEach(func() {
+		*tr = nil
+		*sut = nil
+	})
+
+	JustAfterEach(func() {
+		expectRSSBelowCeiling(*sut)
+	})
+
+	AfterEach(func() {
+		cleanupSpec(*tr, *sut)
+	})
+}
+
+// expectRSSBelowCeiling checks the resident set size of the server of a
+// spec, if it got one, against maxRSSKB.
+func expectRSSBelowCeiling(sut *client.ConmonClient) {
+	if sut == nil {
+		return
+	}
+
+	pid := sut.PID()
+	Expect(pid).To(BeNumerically(">", 0))
+	rss := vmRSSGivenPID(pid)
+	// Named after the spec, so that a value can be attributed in the
+	// verbose output of a whole run.
+	GinkgoWriter.Printf(
+		"VmRSS for server is %d kB in %q\n",
+		rss,
+		CurrentSpecReport().FullText(),
+	)
+	Expect(rss).To(BeNumerically("<", maxRSSKB), "VmRSS of the server in kB")
+}
+
+// containerRunner returns a function which starts a server with a started
+// container which runs the process, for the specs whose hooks
+// registerSpecHooks registered with tr and sut. Both get set before the
+// steps which may fail, so that the hooks clean up what got created.
+func containerRunner(
+	tr **testRunner, sut **client.ConmonClient,
+) func(ctx context.Context, terminal bool, processArgs []string) {
+	//nolint:contextcheck // the helpers take no context, like in the specs
+	return func(ctx context.Context, terminal bool, processArgs []string) {
+		runner := newTestRunner()
+		*tr = runner
+		runner.createRuntimeConfigWithProcessArgs(terminal, processArgs, nil)
+		*sut = runner.configGivenEnv()
+		runner.createContainer(ctx, *sut, terminal)
+		runner.startContainer()
+	}
+}
+
 // cleanupSpec deletes the container, shuts the server down, or kills it if
 // it does not exit in time, closes the client and removes the temp dir of a
 // spec, whatever the spec got around to create.
@@ -631,21 +690,46 @@ func vmRSSGivenPID(pid uint32) uint32 {
 }
 
 // serverResources are the open file descriptors and the threads of the
-// server.
+// server, without the threads of its blocking pool.
 type serverResources struct {
 	fds, threads int
 }
 
-// resourcesOf counts the open file descriptors and the threads of a process.
+// blockingPoolThread is the name of the threads of the blocking pool of the
+// server, the default of tokio. An idle one exits only after 10 seconds, so
+// their number tells what the server did lately rather than what a spec
+// leaked. If the check counted them, one in the baseline which exits in the
+// meantime would hide a leaked thread of another kind, and a new one would
+// make the check wait for it to exit. A blocking task which never ends still
+// holds its file descriptors, which the check counts.
+const blockingPoolThread = "tokio-rt-worker"
+
+// resourcesOf counts the open file descriptors and the threads of a process,
+// except for the ones of the blocking pool.
 func resourcesOf(pid uint32) serverResources {
-	count := func(dir string) int {
-		entries, err := os.ReadDir(fmt.Sprintf("/proc/%d/%s", pid, dir))
+	fds, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
+	Expect(err).To(Succeed())
+
+	tasks, err := os.ReadDir(fmt.Sprintf("/proc/%d/task", pid))
+	Expect(err).To(Succeed())
+
+	threads := 0
+
+	for _, task := range tasks {
+		comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%s/comm", pid, task.Name()))
+		// A thread which exited in the meantime does not count.
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ESRCH) {
+			continue
+		}
+
 		Expect(err).To(Succeed())
 
-		return len(entries)
+		if strings.TrimSpace(string(comm)) != blockingPoolThread {
+			threads++
+		}
 	}
 
-	return serverResources{fds: count("fd"), threads: count("task")}
+	return serverResources{fds: len(fds), threads: threads}
 }
 
 // withoutDeadline returns a context which ends with ctx but has no deadline.
@@ -664,8 +748,7 @@ func withoutDeadline(ctx context.Context) context.Context {
 }
 
 // expectNoResourceLeak waits until the server holds no more file descriptors
-// and threads than before. The threads of the blocking pool of the server
-// linger for 10 seconds once they are idle, so that may take a while.
+// and threads than before, see resourcesOf for the threads it counts.
 func expectNoResourceLeak(pid uint32, before serverResources) {
 	Eventually(func(g Gomega) {
 		now := resourcesOf(pid)

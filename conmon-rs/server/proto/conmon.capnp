@@ -1,12 +1,26 @@
 @0xffaaf7385bc4adad;
 
+# The RPC interface of the conmon-rs server, see usage.md. A call which fails
+# carries a message of the server. These prefixes of it stay stable, so that
+# clients can tell the failures apart, other messages may change:
+#
+# - "container not found": the server does not know the container of the
+#   request, since v1.2.0. Older servers start the message with "child not
+#   available".
+# - "maximum number of in-flight requests exceeded": too many URLs of the
+#   streaming server wait for their client, since v1.2.0, see
+#   ServeExecContainer.
+#
+# The schema only grows, see CONTRIBUTING.md for the rules.
 interface Conmon {
     ###############################################
     # Version
     struct VersionRequest {
         # Also report the `cargoTree`.
         verbose @0 :Bool;
-        # Reserved, do not reuse the ordinal.
+        # Retired in v1.0.0, a `Data` field before. Its change to `Void` moved
+        # the pointer slots of the fields after it, which broke the wire
+        # format, see the compatibility section of usage.md.
         metadataOld @1 :Void;
         metadata @2 :Metadata;
     }
@@ -32,7 +46,10 @@ interface Conmon {
         # The dependency tree of the build, empty without `verbose` or for a
         # build with `CONMONRS_SKIP_CARGO_TREE`.
         cargoTree @8 :Text;
-        # Reserved, do not reuse the ordinal.
+        # Retired in v1.0.0, the `Data` field `metadata` before, which no
+        # server set. Its change to `Void` gave its pointer slot to
+        # `features`, which a client since v1.1.0 reads as empty from an
+        # older server.
         metadataOld @9 :Void;
         # The optional features this server supports, which the version
         # alone does not tell. Known values: `sdnotify`, the relay of
@@ -79,7 +96,9 @@ interface Conmon {
         # Arguments of the `create` command of the runtime, before the
         # container ID.
         commandArgs @9 :List(Text);
-        # Reserved, do not reuse the ordinal.
+        # Retired in v1.0.0, a `Data` field before. Its change to `Void` moved
+        # the pointer slots of the fields after it, which broke the wire
+        # format, see the compatibility section of usage.md.
         metadataOld @10 :Void;
         metadata @11 :Metadata;
         # Environment variables of the runtime, on top of the ones of the
@@ -178,7 +197,9 @@ interface Conmon {
         command @2 :List(Text);
         # Whether the command gets a terminal.
         terminal @3 :Bool;
-        # Reserved, do not reuse the ordinal.
+        # Retired in v1.0.0, a `Data` field before. Its change to `Void` moved
+        # the pointer slots of the fields after it, which broke the wire
+        # format, see the compatibility section of usage.md.
         metadataOld @4 :Void;
         metadata @5 :Metadata;
         # Environment variables of the runtime, on top of the ones of the
@@ -221,7 +242,9 @@ interface Conmon {
         # applies to the connections the server accepts afterwards, on any
         # attach socket of the container.
         stopAfterStdinEof @3 :Bool;
-        # Reserved, do not reuse the ordinal.
+        # Retired in v1.0.0, a `Data` field before. Its change to `Void` moved
+        # the pointer slots of the fields after it, which broke the wire
+        # format, see the compatibility section of usage.md.
         metadataOld @4 :Void;
         metadata @5 :Metadata;
     }
@@ -237,7 +260,9 @@ interface Conmon {
     # ReopenLog
     struct ReopenLogRequest {
         id @0 :Text;
-        # Reserved, do not reuse the ordinal.
+        # Retired in v1.0.0, a `Data` field before. Its change to `Void` moved
+        # the pointer slots of the fields after it, which broke the wire
+        # format, see the compatibility section of usage.md.
         metadataOld @1 :Void;
         metadata @2 :Metadata;
     }
@@ -255,7 +280,9 @@ interface Conmon {
         id @0 :Text; # container identifier
         width @1 :UInt16; # columns in characters
         height @2 :UInt16; # rows in characters
-        # Reserved, do not reuse the ordinal.
+        # Retired in v1.0.0, a `Data` field before. Its change to `Void` moved
+        # the pointer slots of the fields after it, which broke the wire
+        # format, see the compatibility section of usage.md.
         metadataOld @3 :Void;
         metadata @4 :Metadata;
     }
@@ -269,7 +296,9 @@ interface Conmon {
     ###############################################
     # CreateNamespaces
     struct CreateNamespacesRequest {
-        # Reserved, do not reuse the ordinal.
+        # Retired in v1.0.0, a `Data` field before. Its change to `Void` moved
+        # the pointer slots of the fields after it, which broke the wire
+        # format, see the compatibility section of usage.md.
         metadataOld @0 :Void;
         namespaces @1 :List(Namespace);
         uidMappings @2 :List(Text); # User ID mappings when unsharing the user namespace.
@@ -394,12 +423,9 @@ interface Conmon {
         # gets its end of file character once the stdin of the client ended,
         # like from Ctrl-D.
         stopAfterStdinEof @5 :Bool;
-        # How long a connection may go without a frame of the client and
-        # without data either way before the session fails, 0 disables the
-        # timeout. WebSocket pings and pongs, the pings of the server and the
-        # answers to them and other control frames of the server do not
-        # count. Stdin counts once the server reads it, stdin which backs up
-        # behind a container which does not read it stops that.
+        # Like the one of `ServeExecContainerRequest`, without anything to
+        # kill. Stdin which backs up behind a container which does not read
+        # it stops counting.
         idleTimeoutSec @6 :UInt64;
     }
 
@@ -418,11 +444,9 @@ interface Conmon {
         # The absolute path of the network namespace, other ones get rejected
         # since unreleased.
         netNsPath @1 :Text;
-        # How long a connection may go without a frame of the client and
-        # without data either way before it gets closed, 0 disables the
-        # timeout. WebSocket pings and pongs, the pings of the server and the
-        # answers to them and other control frames of the server do not
-        # count.
+        # Like the one of `ServeExecContainerRequest`, but per forwarded
+        # connection, which gets closed then. A stream which slowly takes its
+        # data keeps it active.
         idleTimeoutSec @2 :UInt64;
     }
 

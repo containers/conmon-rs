@@ -73,6 +73,30 @@ PRs which change the Cap'n Proto schema in
 the `capnp` of the nixpkgs in flake.lock through nix, `make update-proto
 CAPNP=capnp` uses a local one instead.
 
+Servers keep running across upgrades, so clients and servers of different
+releases talk to each other, see the compatibility section of
+[usage.md](usage.md#compatibility). The schema has to stay compatible on the
+wire:
+
+- Only add fields, methods and enumerants, each with the next free ordinal.
+- Never change the type or the ordinal of a field, and never remove one.
+  v1.0.0 changed the type of the `metadataOld` fields from `Data` to `Void`,
+  which moved the pointer slots of the fields after them and broke every
+  client and server of another major version.
+- Retire a field by renaming it, for example to `fooOld`, with its type
+  unchanged, and document that the server ignores it.
+- New behavior which a client has to know about before it relies on it gets
+  a feature string in
+  [version.rs](conmon-rs/server/src/version.rs) and a matching `Feature`
+  constant in [pkg/client](pkg/client/version.go), see the features section
+  of usage.md. An older server ignores new fields, so the client checks the
+  feature first.
+- Mark new limits and fields with "since unreleased" in the schema, the Go
+  documentation and usage.md, the release replaces it with the version.
+
+`make verify-schema-layout`, which CI runs, guards these rules: it fails if a
+change moves an existing field of the schema to another slot.
+
 The unit tests run as a regular user, and so do most integration tests. The
 OOM and namespace specs need elevated permissions for the cgroups and bind
 mounts and skip or fail otherwise. Like CI, build the server, download the Go

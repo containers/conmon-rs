@@ -323,8 +323,7 @@ func execRequestCases() []requestCase {
 	return []requestCase{
 		{
 			// The deadline of the context bounds the timeout of the exec,
-			// rounded down to at least a second, which stays 1 as long as the
-			// request gets built within 0.99 seconds.
+			// with less than two seconds left to one second.
 			name: "ExecSyncContainer",
 			call: func(ctx context.Context, c *ConmonClient) error {
 				ctx, cancel := context.WithTimeout(ctx, 1990*time.Millisecond)

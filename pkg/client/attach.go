@@ -42,7 +42,7 @@ type AttachStreams struct {
 	Stdout *Out
 
 	// Standard error stream, can be nil. It gets closed like Stdout, only
-	// once if it is the same as Stdout.
+	// once if it wraps the same writer as Stdout.
 	Stderr *Out
 }
 
@@ -81,9 +81,9 @@ type AttachConfig struct {
 	// so the attach returns on stdin EOF.
 	//
 	// The server applies the value of the latest attach call to all
-	// connections it accepts afterwards on the same socket, so all attaches
-	// of a container should use the same value, for example derived from
-	// its config.
+	// connections it accepts afterwards on any attach socket of the
+	// container, so all attaches of a container should use the same value,
+	// for example derived from its config.
 	StopAfterStdinEOF bool
 
 	// Whether the container supports stdin or not.
@@ -423,16 +423,24 @@ func (c *ConmonClient) redirectResponseToOutputStreams(
 	return nil
 }
 
-// closeOutputStreams closes stdout and stderr of the streams, a stream which
-// serves for both only once.
+// closeOutputStreams closes stdout and stderr of the streams, a writer which
+// serves for both only once, also if each stream wraps it in an Out of its
+// own.
 func closeOutputStreams(streams AttachStreams) {
 	if streams.Stdout != nil {
 		streams.Stdout.Close()
 	}
 
-	if streams.Stderr != nil && streams.Stderr != streams.Stdout {
-		streams.Stderr.Close()
+	if streams.Stderr == nil {
+		return
 	}
+
+	if streams.Stdout != nil && (streams.Stderr == streams.Stdout ||
+		sameWriter(streams.Stderr.WriteCloser, streams.Stdout.WriteCloser)) {
+		return
+	}
+
+	streams.Stderr.Close()
 }
 
 // handlePacket writes a packet of the attach connection to its stream. It

@@ -80,7 +80,7 @@ type RemoteFDs struct {
 	closed atomic.Bool
 }
 
-// NewRemoteFDs connects to the fd socket at `path`.
+// NewRemoteFDs connects to the fd socket at path.
 func NewRemoteFDs(path string) (*RemoteFDs, error) {
 	conn, err := dialLongSocket("unixpacket", path)
 	if err != nil {

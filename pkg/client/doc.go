@@ -40,7 +40,13 @@
 // runtime does not know has ExecExitCodeNotStarted. A configuration with an
 // unknown value of a type like CgroupManager fails without asking the server
 // with an error matching ErrInvalidValue, too many file descriptors for one
-// request of RemoteFDs with ErrTooManyFileDescriptors.
+// request of RemoteFDs with ErrTooManyFileDescriptors. ErrUnsupported, see
+// Features, also matches errors.ErrUnsupported.
+//
+// A call fails with an error matching ErrServerUnreachable if no server
+// listens on the socket when the client connects, and with
+// ErrServerDisconnected if the connection ended during the call, for example
+// because the server exited. The next call connects again in both cases.
 //
 // # Streaming
 //
