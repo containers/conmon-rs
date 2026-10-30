@@ -243,11 +243,7 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) (err error
 
 		conn, err = dialLongSocket("unixpacket", cfg.SocketPath)
 		if err != nil {
-			return fmt.Errorf(
-				"failed to connect to container's attach socket: %v: %w",
-				cfg.SocketPath,
-				err,
-			)
+			return fmt.Errorf("failed to connect to container's attach socket: %w", err)
 		}
 
 		defer func() {

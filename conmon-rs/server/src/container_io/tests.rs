@@ -551,16 +551,19 @@ async fn closed_channel_ends_the_output() -> Result<()> {
 
 #[tokio::test]
 async fn closed_stdin_ends_the_stdin_loop() -> Result<()> {
-    // The process exited or closed its stdin.
+    // The process exited or closed its stdin. Shutting down the socket
+    // fails the writes also while a process forked by a parallel test holds
+    // a duplicate of the other end until it execs.
     let (stdin, process) = tokio::net::UnixStream::pair()?;
-    drop(process);
+    process.into_std()?.shutdown(std::net::Shutdown::Both)?;
     let attach = SharedContainerAttach::default();
     let stdin_loop = task::spawn(ContainerIO::read_loop_stdin(
         stdin,
         attach.clone(),
         CancellationToken::new(),
     ));
-    attach.send_stdin(Bytes::from_static(b"late")).await;
+
+    time::timeout(WAIT, attach.send_stdin(Bytes::from_static(b"late"))).await?;
     time::timeout(WAIT, stdin_loop).await???;
 
     // The input which follows gets dropped.

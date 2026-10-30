@@ -4,7 +4,7 @@
 
 use crate::{
     async_fd,
-    container_io::{DRAIN_MAX_WAIT, Drain, Lag, Message, Pipe, with_scratch},
+    container_io::{DRAIN_MAX_WAIT, Drain, Lag, Message, Pipe, READ_BUFFER_SIZE, with_scratch},
     fs_util::{FileId, RemoveError},
     listener,
     mutex::lock,
@@ -471,9 +471,11 @@ impl Drop for ListenerCleanup {
     }
 }
 
-#[derive(Clone, Debug)]
 /// Attach handles the attach socket IO of a container.
 struct Attach;
+
+// The write loop sends each read of a pipe as one packet.
+const _: () = assert!(READ_BUFFER_SIZE <= Attach::PACKET_BUF_SIZE);
 
 impl Attach {
     /// The most data of an output packet, after its pipe byte. Like for
@@ -807,22 +809,19 @@ impl Attach {
                         Pipe::StdOut => 2,
                         Pipe::StdErr => 3,
                     };
+                    // A read of a pipe fits into one packet, see
+                    // `PACKET_BUF_SIZE`. Send the pipe header and the data as
+                    // one packet without copying the data into a separate
+                    // buffer.
+                    debug_assert!(buf.len() <= Self::PACKET_BUF_SIZE);
                     let header = [p];
-                    let len = buf.chunks(Self::PACKET_BUF_SIZE).len();
-                    for (idx, chunk) in buf.chunks(Self::PACKET_BUF_SIZE).enumerate() {
-                        // Send the pipe header and the chunk as one packet
-                        // without copying the chunk into a separate buffer.
-                        let packet = [IoSlice::new(&header), IoSlice::new(chunk)];
-                        match Self::send(&socket, &packet, hangup.as_mut(), &token, draining).await
-                        {
-                            Ok(true) => {
-                                debug!("Wrote {} packet {}/{} to client", pipe, idx + 1, len);
-                            }
-                            // The client is gone, so stop receiving output for
-                            // it as well.
-                            Ok(false) => return Ok(()),
-                            Err(e) => bail!("unable to write packet {}/{}: {:#}", idx + 1, len, e),
-                        }
+                    let packet = [IoSlice::new(&header), IoSlice::new(&buf)];
+                    match Self::send(&socket, &packet, hangup.as_mut(), &token, draining).await {
+                        Ok(true) => debug!("Wrote {} packet to client", pipe),
+                        // The client is gone, so stop receiving output for it
+                        // as well.
+                        Ok(false) => return Ok(()),
+                        Err(e) => bail!("unable to write packet: {e:#}"),
                     }
                 }
             }

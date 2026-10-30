@@ -36,6 +36,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # make verify-unreleased passes once the tag exists, so check the paths
+      # of it directly: a tag of a commit which still says "unreleased" would
+      # ship that in the sources.
+      - name: Check for unreleased markers
+        run: |
+          STATUS=0
+          git grep -in unreleased -- usage.md pkg/client conmon-rs/server/proto || STATUS=$?
+          if [[ $STATUS == 0 ]]; then
+            echo "::error::$TAG still says \"unreleased\" above. Tags cannot be moved, so release the next patch version from a commit without markers, see release.md."
+            exit 1
+          elif [[ $STATUS != 1 ]]; then
+            exit "$STATUS"
+          fi
       # Only a push to main builds and uploads the binaries of a commit, and
       # only of its head. Fail right away for any other commit instead of
       # waiting for binaries which never show up.

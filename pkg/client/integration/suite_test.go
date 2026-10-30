@@ -1081,7 +1081,7 @@ func (rr *RuntimeRunner) runCommand(args ...string) (string, error) {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("run command: %w", err)
+		return "", fmt.Errorf("run command: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 
 	return stdout.String(), nil

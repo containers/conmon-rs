@@ -304,8 +304,14 @@ impl TempFile {
 impl Drop for TempFile {
     fn drop(&mut self) {
         // A plain unlink does not need the runtime and cannot panic without one.
-        if let Err(e) = std::fs::remove_file(&self.0) {
-            debug!("Unable to remove temp file {}: {}", self.0.display(), e);
+        // The file may be gone already: the terminal listener removes its
+        // socket once it got the descriptor, and a runtime may never write a
+        // pidfile.
+        match std::fs::remove_file(&self.0) {
+            Err(e) if e.kind() != ErrorKind::NotFound => {
+                debug!("Unable to remove temp file {}: {}", self.0.display(), e);
+            }
+            _ => {}
         }
     }
 }
@@ -454,7 +460,8 @@ impl ContainerIO {
     }
 
     /// Resize the terminal if the container has one and return whether it
-    /// does.
+    /// does. One which the runtime did not connect yet gets the size once
+    /// it does, see [`TerminalResizer::resize`](crate::terminal::TerminalResizer::resize).
     pub fn try_resize(&self, width: u16, height: u16) -> Result<bool> {
         let Some(terminal) = &self.terminal else {
             return Ok(false);

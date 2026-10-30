@@ -215,6 +215,32 @@ impl CgroupV2 {
             }
         }
     }
+
+    /// Watch the memory events of the container and, if present, the ones of
+    /// the outer cgroup.
+    fn subscribe(&self) -> Result<Subscriptions> {
+        let watcher = SharedWatcher::get()?;
+        let (events_tx, rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
+        let subscription = watcher
+            .subscribe(&self.events.path, events_tx.clone())
+            .context("watch memory events file")?;
+
+        // The kills of siblings advance the baseline of the outer cgroup.
+        let mut pod_subscription = None;
+        if let Some((pod, _)) = &self.outer {
+            debug!("Also watching outer memory events: {}", pod.display());
+            match watcher.subscribe(pod, events_tx) {
+                Ok(subscription) => pod_subscription = Some(subscription),
+                Err(e) => debug!("Could not watch pod memory events: {e:#}"),
+            }
+        }
+
+        Ok(Subscriptions {
+            rx,
+            subscription,
+            _pod_subscription: pod_subscription,
+        })
+    }
 }
 
 /// A memory events file and the OOM counters seen in it so far.
@@ -304,10 +330,7 @@ impl OOMWatcher {
         let path = cgroup.events.path.to_str();
         debug!(path, "Setup cgroup v2 handling");
 
-        let mut subscriptions = match Self::subscribe(
-            &cgroup.events,
-            cgroup.outer.as_ref().map(|(path, _)| path.as_path()),
-        ) {
+        let mut subscriptions = match cgroup.subscribe() {
             Ok(subscriptions) => subscriptions,
             // The cgroup may be gone already. Still check for an OOM once the
             // process exited.
@@ -343,10 +366,7 @@ impl OOMWatcher {
                         }
                         restarts += 1;
                         warn!(path, "Watcher of the memory events stopped, watching again");
-                        match Self::subscribe(
-                            &cgroup.events,
-                            cgroup.outer.as_ref().map(|(path, _)| path.as_path()),
-                        ) {
+                        match cgroup.subscribe() {
                             Ok(new) => subscriptions = new,
                             Err(e) => {
                                 warn!(path, "Unable to watch memory events again, checking on exit only: {e:#}");
@@ -414,32 +434,6 @@ impl OOMWatcher {
     /// `memory.high`, the events of every container of a pod would be read
     /// up to a hundred times a second otherwise.
     const MIN_CHECK_INTERVAL: Duration = Duration::from_millis(100);
-
-    /// Watch the memory events of the container and, if present, the ones of
-    /// the outer cgroup.
-    fn subscribe(events: &MemoryEvents, pod_events: Option<&Path>) -> Result<Subscriptions> {
-        let watcher = SharedWatcher::get()?;
-        let (events_tx, rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
-        let subscription = watcher
-            .subscribe(&events.path, events_tx.clone())
-            .context("watch memory events file")?;
-
-        // The kills of siblings advance the baseline of the outer cgroup.
-        let mut pod_subscription = None;
-        if let Some(pod) = pod_events {
-            debug!("Also watching outer memory events: {}", pod.display());
-            match watcher.subscribe(pod, events_tx) {
-                Ok(subscription) => pod_subscription = Some(subscription),
-                Err(e) => debug!("Could not watch pod memory events: {e:#}"),
-            }
-        }
-
-        Ok(Subscriptions {
-            rx,
-            subscription,
-            _pod_subscription: pod_subscription,
-        })
-    }
 
     /// Read the current OOM counters of a memory events file to establish a
     /// baseline, so that only OOMs during this container's lifetime count.

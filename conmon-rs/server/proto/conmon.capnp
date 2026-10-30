@@ -84,7 +84,8 @@ interface Conmon {
         stdin @3 :Bool;
         # The files the server writes the exit code of the container to once
         # it exited, as decimal text, 128 plus the signal number if a signal
-        # killed it. Absolute paths.
+        # killed it, also for real-time signals since v1.2.2, which gave
+        # -1 before. Absolute paths.
         exitPaths @4 :List(Text);
         # The files the server creates empty if the container got OOM
         # killed, before it writes the exit files. Absolute paths.
@@ -127,7 +128,9 @@ interface Conmon {
         # `WATCHDOG=trigger`, `STATUS=`, `ERRNO=`, `BUSERROR=` and
         # `MONOTONIC_USEC=`. The caller mounts the `notify` directory into the
         # container and sets `NOTIFY_SOCKET` for its process, which the
-        # runtime does not see.
+        # runtime does not see. The value is an absolute path or an abstract
+        # socket address written as `@name`. Since v1.2.2, a relative path
+        # gets rejected.
         sdnotifySocket @16 :Text;
     }
 
@@ -218,7 +221,8 @@ interface Conmon {
 
     struct ExecSyncContainerResponse {
         # The exit code of the command, 128 plus the signal number if a
-        # signal killed it. -1 if the server could not tell how it ended, -2
+        # signal killed it, also for real-time signals since v1.2.2, which
+        # gave -1 before. -1 if the server could not tell how it ended, -2
         # if it could not be started, then `stderr` tells why, and -3 if it
         # timed out. A server without pidfd support also reports -3 if it
         # could not get the exit status, then without `timedOut`.

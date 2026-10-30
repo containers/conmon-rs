@@ -25,8 +25,7 @@ pub fn run() -> Result<()> {
     let mut config = Config::parse_args();
 
     if let Some(v) = config.version() {
-        Version::new(v == Verbosity::Full).print();
-        return Ok(());
+        return Version::new(v == Verbosity::Full).print();
     }
 
     if let Some(v) = config.version_json() {

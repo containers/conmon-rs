@@ -4,7 +4,7 @@
 use super::{Session, StreamingServer};
 use crate::{
     attach::SharedContainerAttach,
-    container_io::{ContainerIO, SharedContainerIO},
+    container_io::SharedContainerIO,
     streaming_server::{
         idle::Activity,
         remotecommand::{
@@ -83,7 +83,7 @@ pub(super) const PING_INTERVAL: Duration = if cfg!(test) {
 const STDIN_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The latest resize event of a client, older ones are replaced.
-type ResizeRx = watch::Receiver<Option<Bytes>>;
+pub(super) type ResizeRx = watch::Receiver<Option<Bytes>>;
 
 /// How the input of a client ended.
 enum InputEnd<I> {
@@ -364,8 +364,9 @@ impl StreamingServer {
                         // the process it started still gets registered, and
                         // torn down once the task finished. A client which
                         // sent too much fails the session meanwhile, it
-                        // does not wait for its status.
-                        let start = task::spawn(Self::start_exec(*s));
+                        // does not wait for its status. The terminal gets
+                        // the size of the client meanwhile.
+                        let start = task::spawn(Self::start_exec(*s, client.resize.clone()));
                         let started = select! {
                             started = start => started.context("join exec start")??,
                             () = too_large.cancelled() => bail!(MESSAGE_TOO_LARGE),
@@ -672,15 +673,21 @@ impl SessionInput {
         }
     }
 
-    /// Handle a resize event of the client, its JSON. Clients send them
-    /// regardless of a terminal, a broken one does not end the session.
+    /// Handle a resize event of the client, its JSON.
     pub(super) fn resize(&self, data: &[u8]) {
-        if let Err(e) = Self::try_resize(data, &self.io) {
+        Self::resize_with(data, |width, height| self.io.try_resize(width, height));
+    }
+
+    /// Handle a resize event of the client, its JSON, with `resize`, which
+    /// returns whether there is a terminal. Clients send them regardless of
+    /// a terminal, a broken one does not end the session.
+    pub(super) fn resize_with(data: &[u8], resize: impl FnOnce(u16, u16) -> Result<bool>) {
+        if let Err(e) = Self::try_resize(data, resize) {
             debug!("Ignoring resize event: {e:#}");
         }
     }
 
-    fn try_resize(data: &[u8], io: &ContainerIO) -> Result<()> {
+    fn try_resize(data: &[u8], resize: impl FnOnce(u16, u16) -> Result<bool>) -> Result<()> {
         let e = ResizeEvent::parse(data)?;
         trace!("Got resize message: {e:?}");
         // Like CRI-O, a terminal never gets a size without rows or columns,
@@ -689,7 +696,7 @@ impl SessionInput {
             debug!("Ignoring resize event without a size: {e:?}");
             return Ok(());
         }
-        if !io.try_resize(e.width, e.height)? {
+        if !resize(e.width, e.height)? {
             debug!("Ignoring resize event, container has no terminal");
         }
         Ok(())

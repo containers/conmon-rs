@@ -533,21 +533,25 @@ impl Config {
 }
 
 impl Config {
-    /// Parse a configuration from the arguments for a test. None if `CONMON_*`
-    /// variables are set, the flags also come from the environment, which
-    /// would change what the parsed configuration contains.
+    /// Parse a configuration from the arguments for a test. The `CONMON_*`
+    /// variables of the environment would change what the parsed
+    /// configuration contains, so they get ignored.
     #[cfg(test)]
-    pub(crate) fn parse_for_test<I, T>(args: I) -> Option<Self>
+    pub(crate) fn parse_for_test<I, T>(args: I) -> Self
     where
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
-        if std::env::vars_os().any(|(key, _)| key.to_string_lossy().starts_with(prefix!())) {
-            eprintln!("skipping, CONMON_* variables are set");
-            return None;
-        }
-        let args = std::iter::once("conmonrs".into()).chain(args.into_iter().map(Into::into));
-        Some(Self::try_parse_from(args).expect("parse args"))
+        use clap::{CommandFactory, FromArgMatches};
+        let without_env = |arg: clap::Arg| arg.env(None);
+        let matches = <Self as CommandFactory>::command()
+            .mut_args(without_env)
+            .mut_subcommands(|command| command.mut_args(without_env))
+            .try_get_matches_from(
+                std::iter::once("conmonrs".into()).chain(args.into_iter().map(Into::into)),
+            )
+            .expect("parse args");
+        Self::from_arg_matches(&matches).expect("parse args")
     }
 }
 

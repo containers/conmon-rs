@@ -75,7 +75,7 @@ func (c *ConmonClient) usableConn(ctx context.Context) (*rpcConn, proto.Conmon, 
 			err = fmt.Errorf("%w: %w", ErrServerUnreachable, err)
 		}
 
-		return nil, proto.Conmon{}, false, fmt.Errorf("dial long socket: %w", err)
+		return nil, proto.Conmon{}, false, err
 	}
 
 	c.conn = newRPCConn(ctx, socketConn, c.logger)
@@ -310,6 +310,17 @@ func (r *rpcConn) usable() bool {
 	}
 }
 
+// close closes the connection and releases its bootstrap capability. Calls
+// in progress, which hold references of their own, fail like on any closed
+// connection.
+func (r *rpcConn) close(logger logrus.FieldLogger) {
+	if err := r.conn.Close(); err != nil {
+		logger.WithError(err).Debug("Unable to close RPC connection")
+	}
+
+	r.client.Release()
+}
+
 // watchBootstrap marks the connection as broken if its bootstrap capability
 // fails. It returns once the bootstrap resolved, which a closed connection
 // makes it do as well.
@@ -369,13 +380,7 @@ func (c *ConmonClient) resetConn() {
 // closeConnLocked closes the connection, the caller has to hold connMu.
 func (c *ConmonClient) closeConnLocked() {
 	if c.conn != nil {
-		if err := c.conn.conn.Close(); err != nil {
-			c.logger.WithError(err).Debug("Unable to close RPC connection")
-		}
-
-		// The calls in progress hold references of their own, see client,
-		// they fail like on the closed connection.
-		c.conn.client.Release()
+		c.conn.close(c.logger)
 
 		// The features stay for SupportsFeature, they only belonged to
 		// the connection.
@@ -400,8 +405,20 @@ func DialLongSocket(network, path string) (*net.UnixConn, error) {
 	return dialLongSocket(network, path)
 }
 
-// dialLongSocket implements DialLongSocket.
+// dialLongSocket implements DialLongSocket. Its errors name the socket
+// path, the address of the dial is only the /proc/self/fd alias of it.
 func dialLongSocket(network, path string) (*net.UnixConn, error) {
+	conn, err := dialSocketInDir(network, path)
+	if err != nil {
+		return nil, fmt.Errorf("dial %s: %w", path, err)
+	}
+
+	return conn, nil
+}
+
+// dialSocketInDir dials the socket at path through the /proc/self/fd entry
+// of its parent directory, see DialLongSocket.
+func dialSocketInDir(network, path string) (*net.UnixConn, error) {
 	parent := filepath.Dir(path)
 
 	f, err := openDirPath(parent)
@@ -421,7 +438,7 @@ func dialLongSocket(network, path string) (*net.UnixConn, error) {
 		Name: socketPath, Net: network,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("dial unix socket: %w", err)
+		return nil, err //nolint:wrapcheck // wrapped by dialLongSocket
 	}
 
 	return conn, nil

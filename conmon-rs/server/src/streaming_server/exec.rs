@@ -2,7 +2,7 @@
 
 use super::{
     StreamingServer,
-    session::{ClientRx, InputEvent, SessionInput},
+    session::{ClientRx, InputEvent, ResizeRx, SessionInput},
 };
 use crate::conmon_capnp::conmon::CgroupManager;
 use crate::{
@@ -17,6 +17,7 @@ use crate::{
     streaming_server::remotecommand::{
         MESSAGE_TOO_LARGE, Operation, Output, STDERR_BYTE, STDOUT_BYTE, Status,
     },
+    terminal::{Terminal, TerminalResizer},
 };
 use anyhow::{Context, Result, bail};
 use async_channel::Receiver as IOReceiver;
@@ -24,7 +25,7 @@ use bytes::Bytes;
 use nix::sys::signal::Signal;
 use std::{
     collections::VecDeque,
-    future,
+    future::{self, Future},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -60,8 +61,9 @@ pub struct ExecSession {
 
 impl StreamingServer {
     /// Run the runtime of an exec session and register the process it
-    /// started.
-    pub(super) async fn start_exec(session: ExecSession) -> Result<StartedExec> {
+    /// started. A terminal gets the sizes of the client from `resize`
+    /// meanwhile.
+    pub(super) async fn start_exec(session: ExecSession, resize: ResizeRx) -> Result<StartedExec> {
         let mut container_io =
             ContainerIO::new(session.tty, ContainerLog::new()).context("create container IO")?;
         let pidfile = ContainerIO::temp_file(
@@ -85,25 +87,31 @@ impl StreamingServer {
         container_io
             .collect_stdio(session.stdout, session.stderr)
             .context("collect exec output")?;
+        let stdio = container_io
+            .stdio()
+            .context("retrieve stdout and stderr channels")?;
 
-        let res = session
-            .child_reaper
-            .create_child(
-                RuntimeCall {
-                    command_start: Some(args.command_start),
-                    stdin: session.stdin,
-                    ..RuntimeCall::new(
-                        session.server_config.runtime(),
-                        &args.args,
-                        pidfile.path(),
-                        // The process has no timeout, a runtime which hangs
-                        // still gets killed.
-                        Server::exec_runtime_deadline(None),
-                    )
-                },
-                &mut container_io,
-            )
-            .await;
+        // Clients send their size right away. The runtime connects the
+        // terminal before it starts the command, so applying the size while
+        // it runs gives the command its size from the start, usually, like
+        // with CRI-O, not only once the loop of the session runs.
+        let resizer = container_io.terminal().map(Terminal::resizer);
+        let create = session.child_reaper.create_child(
+            RuntimeCall {
+                command_start: Some(args.command_start),
+                stdin: session.stdin,
+                ..RuntimeCall::new(
+                    session.server_config.runtime(),
+                    &args.args,
+                    pidfile.path(),
+                    // The process has no timeout, a runtime which hangs
+                    // still gets killed.
+                    Server::exec_runtime_deadline(None),
+                )
+            },
+            &mut container_io,
+        );
+        let res = Self::resizing(create, resize, resizer).await;
         let started = match res {
             Ok(started) => started,
             Err(e) => {
@@ -124,15 +132,14 @@ impl StreamingServer {
             .child_reaper
             .watch_exec(session.container_id, started, None, container_io)
             .context("watch grandchild for pid")?;
-        let mut teardown = ExecTeardown {
-            stdio: None,
+        let teardown = ExecTeardown {
+            stdio,
             _stop_output: stop_output,
             attach: io.attach().clone(),
             token,
             process,
             kill: Arc::default(),
         };
-        teardown.stdio = Some(io.stdio().context("retrieve stdout and stderr channels")?);
         let early_stdio = io.take_early_stdio().await;
         Ok(StartedExec {
             io,
@@ -162,7 +169,7 @@ impl StreamingServer {
             stderr_enabled,
             teardown,
         } = started;
-        let (stdout_rx, stderr_rx) = teardown.stdio.clone().context("no stdio channels")?;
+        let (stdout_rx, stderr_rx) = teardown.stdio.clone();
         let mut input = SessionInput::new(io, teardown.attach.clone(), client, stdin_enabled);
 
         // Streams which are disabled or whose read loop signalled the end are
@@ -296,6 +303,34 @@ impl StreamingServer {
         }
     }
 
+    /// Run the runtime and give the terminal the sizes of the client
+    /// meanwhile, which it keeps until the runtime connected it, see
+    /// [`TerminalResizer::resize`]. The loop of the session takes over the
+    /// resizing once the runtime ran.
+    async fn resizing<F: Future>(
+        run: F,
+        mut resize: ResizeRx,
+        resizer: Option<TerminalResizer>,
+    ) -> F::Output {
+        let Some(resizer) = resizer else {
+            return run.await;
+        };
+        tokio::pin!(run);
+        loop {
+            tokio::select! {
+                output = &mut run => return output,
+                // A client which went away sends nothing anymore.
+                Ok(()) = resize.changed() => {
+                    if let Some(data) = resize.borrow_and_update().clone() {
+                        SessionInput::resize_with(&data, |width, height| {
+                            resizer.resize(width, height).map(|()| true)
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     /// Split the output collected while the runtime ran into frames, without
     /// copying it.
     fn early_frames(data: Vec<u8>) -> VecDeque<Bytes> {
@@ -350,7 +385,7 @@ pub(super) struct StartedExec {
 /// anymore.
 pub(super) struct ExecTeardown {
     /// The stdout and stderr channels of the process.
-    stdio: Option<(IOReceiver<IOMessage>, IOReceiver<IOMessage>)>,
+    stdio: (IOReceiver<IOMessage>, IOReceiver<IOMessage>),
     attach: SharedContainerAttach,
 
     /// Cancelled once the process exited.
@@ -377,10 +412,9 @@ impl Drop for ExecTeardown {
     fn drop(&mut self) {
         // Nothing forwards the output anymore, the read loops discard it
         // instead of waiting for this session.
-        if let Some((stdout_rx, stderr_rx)) = &self.stdio {
-            stdout_rx.close();
-            stderr_rx.close();
-        }
+        let (stdout_rx, stderr_rx) = &self.stdio;
+        stdout_rx.close();
+        stderr_rx.close();
 
         if self.token.is_cancelled() {
             return;

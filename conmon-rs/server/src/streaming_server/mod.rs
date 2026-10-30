@@ -73,8 +73,8 @@ const ADDR: &str = "127.0.0.1";
 /// connection serves one request, see [`MAX_CONNECTIONS`]. Far below the 30
 /// seconds of hyper, so that connections without a request cannot hold the
 /// server off for long: a local process which keeps all of them open delays
-/// the requests of others by up to this long, the backlog of the listener
-/// serves them in order.
+/// the requests of others by up to [`UPGRADE_TIMEOUT`], which bounds the
+/// whole connection, the backlog of the listener serves them in order.
 const HEADER_READ_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_secs(1)
 } else {

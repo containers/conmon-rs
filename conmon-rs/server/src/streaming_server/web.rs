@@ -372,7 +372,7 @@ where
 /// server, see [`join_or_abort`], then for the answer of the client, see
 /// [`await_close_answer`]. The writer returns its sink once its close went
 /// out, a client gets no time to answer a close it did not get.
-pub async fn finish<S, E, T>(writer: JoinHandle<Option<T>>, written: &Activity, messages: &mut S)
+async fn finish<S, E, T>(writer: JoinHandle<Option<T>>, written: &Activity, messages: &mut S)
 where
     S: Stream<Item = Result<Message, E>> + Unpin,
 {

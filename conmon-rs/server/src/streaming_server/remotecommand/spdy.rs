@@ -42,14 +42,11 @@ pub const SPDY_PROTOCOLS: [(&str, Version); 4] = [
 pub struct SpdyInput {
     stdin: Option<StreamReceiver>,
 
-    /// Whether the client closed stdin cleanly. The end of the connection is
-    /// a clean close then, which still forwards the stdin the client sent
-    /// before.
-    stdin_ended: bool,
-
-    /// Set once the client closed its stdin, so that the output, which fails
-    /// once the connection ended, does not end the session before the stdin
-    /// got forwarded, see [`Output`](super::Output).
+    /// Set once the client closed its stdin cleanly, so that the output,
+    /// which fails once the connection ended, does not end the session
+    /// before the stdin got forwarded, see [`Output`](super::Output). The
+    /// end of the connection is a clean close then, which still forwards the
+    /// stdin the client sent before.
     peer_closed: Arc<AtomicBool>,
     resize: Option<StreamReceiver>,
     resize_events: ResizeEvents,
@@ -188,7 +185,6 @@ impl ClientInput for SpdyInput {
                         .take()
                         .is_some_and(|s| s.is_reset() && !s.is_closed_by_client());
                     if !reset {
-                        self.stdin_ended = true;
                         self.peer_closed.store(true, Ordering::Release);
                         return Some(ClientEvent::Stdin(Stdin::Close));
                     }
@@ -197,7 +193,14 @@ impl ClientInput for SpdyInput {
                 SpdyEvent::Resize(None) => self.resize = None,
                 SpdyEvent::Stream(Some(stream)) => self.late_stream(stream),
                 SpdyEvent::Stream(None) => self.connection = None,
-                SpdyEvent::Done => return self.stdin_ended.then_some(ClientEvent::Closed),
+                // The session sets it as well, but only once the input ended
+                // with the close, so it tells whether stdin got closed.
+                SpdyEvent::Done => {
+                    return self
+                        .peer_closed
+                        .load(Ordering::Acquire)
+                        .then_some(ClientEvent::Closed);
+                }
             }
         }
     }
@@ -302,13 +305,15 @@ impl SpdyStreams {
                 }
                 () = &mut timeout => bail!("timed out waiting for client to create streams"),
             };
-            // Only accepted streams come, see [`Self::accept`].
+            // Only accepted streams come, see [`Self::accept`]. Another one
+            // gets reset like a second stream of a type.
             let slot = match StreamType::parse(stream.headers()) {
                 Ok(StreamType::Error) => &mut error,
                 Ok(StreamType::Stdin) => &mut stdin,
                 Ok(StreamType::Stdout) => &mut stdout,
                 Ok(StreamType::Stderr) => &mut stderr,
-                Ok(StreamType::Resize) | Err(_) => &mut resize,
+                Ok(StreamType::Resize) => &mut resize,
+                Err(_) => continue,
             };
             if slot.is_some() {
                 // Dropping it resets it.
@@ -348,7 +353,6 @@ impl SpdyStreams {
             connection: connection.handle(),
         };
         let input = SpdyInput {
-            stdin_ended: false,
             peer_closed,
             stdin,
             resize: receiver(self.resize).await,

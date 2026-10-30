@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use serde::Serialize;
+use std::io::{self, Write};
 
 /// The dependency tree of the build, written by the build script.
 const CARGO_TREE: &str = include_str!(concat!(env!("OUT_DIR"), "/cargo-tree.txt"));
@@ -135,36 +136,51 @@ impl Version {
         self.cargo_tree
     }
 
-    /// Print the version information to stdout.
-    pub fn print(&self) {
-        println!("version: {}", self.version());
-        println!(
-            "tag: {}",
-            if self.tag().is_empty() {
-                "none"
-            } else {
-                self.tag()
-            }
+    /// The version information as text, one field per line.
+    fn text(&self) -> String {
+        let tag = if self.tag().is_empty() {
+            "none"
+        } else {
+            self.tag()
+        };
+        let mut text = format!(
+            "version: {}\ntag: {tag}\ncommit: {}\nbuild: {}\ntarget: {}\n{}\n{}\nfeatures: {}\n",
+            self.version(),
+            self.commit(),
+            self.build_date(),
+            self.target(),
+            self.rust_version(),
+            self.cargo_version(),
+            self.features().join(", "),
         );
-        println!("commit: {}", self.commit());
-        println!("build: {}", self.build_date());
-        println!("target: {}", self.target());
-        println!("{}", self.rust_version());
-        println!("{}", self.cargo_version());
-        println!("features: {}", self.features().join(", "));
-
         if self.verbose() {
-            println!("\ncargo tree: {}", self.cargo_tree());
+            text.push_str(&format!("\ncargo tree: {}\n", self.cargo_tree()));
         }
+        text
+    }
+
+    /// Print the version information to stdout.
+    pub fn print(&self) -> Result<()> {
+        write_output(io::stdout().lock(), &self.text())
     }
 
     /// Print the version information as JSON to stdout.
     pub fn print_json(&self) -> Result<()> {
-        println!(
-            "{}",
-            serde_json::to_string(&self).context("serialize result")?
-        );
-        Ok(())
+        let mut json = serde_json::to_string(&self).context("serialize result")?;
+        json.push('\n');
+        write_output(io::stdout().lock(), &json)
+    }
+}
+
+/// Write the output of a command. A reader which is gone, like `head`, ends
+/// the output without an error, `println!` would panic and abort.
+fn write_output(mut writer: impl Write, text: &str) -> Result<()> {
+    match writer
+        .write_all(text.as_bytes())
+        .and_then(|()| writer.flush())
+    {
+        Err(e) if e.kind() != io::ErrorKind::BrokenPipe => Err(e).context("write output"),
+        _ => Ok(()),
     }
 }
 
@@ -183,7 +199,29 @@ mod tests {
         assert!(v.cargo_tree().is_empty());
         assert_eq!(Version::new(true).cargo_tree(), CARGO_TREE);
 
-        v.print();
+        let text = v.text();
+        assert!(text.starts_with(&format!("version: {}\n", v.version())));
+        assert!(text.ends_with(&format!("features: {}\n", v.features().join(", "))));
+        assert!(Version::new(true).text().contains("\ncargo tree: "));
+    }
+
+    /// A writer which fails every write with `kind`.
+    struct Failing(io::ErrorKind);
+
+    impl Write for Failing {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(self.0.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn output_to_a_closed_pipe_is_no_error() {
+        assert!(write_output(Failing(io::ErrorKind::BrokenPipe), "version").is_ok());
+        assert!(write_output(Failing(io::ErrorKind::PermissionDenied), "version").is_err());
     }
 
     /// The JSON keys are what the Go client reads, see pkg/client/version.go.
@@ -210,8 +248,7 @@ mod tests {
         }
         // The verbosity is a presentation flag, not version information.
         assert!(!object.contains_key("verbose"));
-
-        v.print_json()
+        Ok(())
     }
 
     /// The Go client matches the names, see the `Feature` constants in

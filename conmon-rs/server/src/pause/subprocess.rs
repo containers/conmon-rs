@@ -2,7 +2,7 @@
 //! and holds them.
 
 use super::{Namespace, Pause};
-use crate::{config::PauseArgs, process::wait_exit_pid};
+use crate::{config::PauseArgs, process::wait_child};
 use anyhow::{Context, Result, bail};
 use libc::pid_t;
 use nix::{
@@ -237,9 +237,11 @@ impl Pause {
     fn reap_children() {
         loop {
             // Also for the real-time signals, which nix does not know.
-            match wait_exit_pid(Id::All, WaitPidFlag::WNOHANG) {
+            match wait_child(Id::All, WaitPidFlag::WNOHANG) {
                 Ok(None) | Err(Errno::ECHILD) => return,
-                Ok(Some((pid, code))) => trace!("Reaped child {pid} with exit code {code}"),
+                Ok(Some((pid, exit))) => {
+                    trace!("Reaped child {pid} with exit code {}", exit.code());
+                }
                 Err(Errno::EINTR) => {}
                 Err(e) => {
                     warn!("Unable to reap children: {e:#}");
@@ -398,8 +400,10 @@ impl PauseParent<'_> {
         sock.write_all(Pause::MSG).context("notify about mounts")?;
 
         // The child exits right after the notification. Reap it here so that
-        // it does not linger as a zombie. The namespaces are already in place,
-        // so a failure is no reason to fail the whole setup.
+        // it does not linger as a zombie, and so that its exit made the init a
+        // child of the server, which checks that for the PID it reads. The
+        // namespaces are already in place, so a failure is no reason to fail
+        // the whole setup.
         if let Err(e) = waitpid(child, None) {
             warn!("Unable to wait for pause child {child}: {e:#}");
         }

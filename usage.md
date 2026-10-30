@@ -192,7 +192,11 @@ child replaces its stdin, stdout and stderr with `/dev/null` like a daemon, so
 neither the server nor the processes it starts write to the ones of the caller
 anymore. The server closes the other file descriptors it inherited, changes
 into `/`, acts as child subreaper for the containers and listens on
-`conmon.sock` in the runtime directory.
+`conmon.sock` in the runtime directory. Since v1.2.2, `conmon.sock` and the
+[fd socket](#file-descriptor-socket) get mode `0700` on bind like the attach
+sockets, instead of `0755` from the umask `022`, which the server sets itself.
+Connecting needs write access, so only their owner and root could connect
+before as well.
 
 The server adds arguments of its own to every runtime call for a container or
 an exec, before the arguments of the request: `--root=<RUNTIME_ROOT>`
@@ -348,6 +352,12 @@ a reset while its output backs up holds the end just as long, or until the
 kernel gives up resending to it, after 15 to 30 minutes with the default
 `tcp_retries2` of 15: there is no keepalive.
 
+Since v1.2.2, an exec process with a terminal gets the size the client
+sends while the runtime starts it, usually before the command runs, like
+with CRI-O. Before, the terminal got it only once the runtime finished, so a
+short command like `kubectl exec -it -- ls` saw a terminal without rows or
+columns.
+
 An exec process which writes more than 16 MiB to stdout or stderr while the
 runtime still starts it gets its output cut there. Since v1.2.2, the
 session then fails with an error status instead of reporting the exit code.
@@ -404,7 +414,7 @@ like `?port=80&port=443`, as CRI-O does.
 | URLs which wait for their client, per kind                     | 1000, see above                                                       |
 | Time until the token of an unused URL expires                  | 60 seconds, the first connection takes it                             |
 | WebSocket message or frame of the client                       | 1 MiB, 4 MiB for exec and attach since v1.2.2, more ends it           |
-| Stdin of a session which the process did not take yet          | About 9 MiB, on top of what a SPDY connection holds                   |
+| Stdin of a session which the process did not take yet          | About 9 MiB, 3 MiB before v1.2.2, plus what a SPDY connection holds   |
 | What the client sent on a SPDY connection which no stream took | About 4 MiB, plus the frame which waits to be placed                  |
 | What a forwarded connection sends while it gets established    | 1 MiB per connection, from a connect budget of 16 MiB per session     |
 | Streams of a SPDY connection                                   | 1024, which count until the server let go of them, also after a reset |
@@ -630,15 +640,15 @@ does not count.
 
 ## Troubleshooting
 
-| Symptom                                                                       | Cause                                                                                                                                                      |
-| ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| New pods fail, the server exits with `unexpected argument '--cgroup-manager'` | CRI-O v1.36 or older with a server of v1.0.0 or newer, see [Compatibility](#compatibility).                                                                |
-| CRI-O logs `Container monitor of ... does not support ...`                    | The server of the pod predates the feature, for example one kept across an upgrade, see [Upgrading](#upgrading).                                           |
-| A server refuses to start with `socket ... is in use by a running server`     | Another server serves the runtime directory, see below.                                                                                                    |
-| `client.New` fails with `ErrServerNotResponding`                              | A server accepts connections but does not answer, see below.                                                                                               |
-| `client.New` fails with `ErrServerExited`, the server has no logs             | The server log driver is `none`, the default of CRI-O. A crash leaves a core dump, since v1.2.2 a panic also leaves its message in the journal, see below. |
-| Container output is missing in the journal                                    | journald did not keep up, see below.                                                                                                                       |
-| An attach client misses output                                                | It fell behind the container output, which the server logs as a warning, see [Attach socket](#attach-socket).                                              |
+| Symptom                                                                       | Cause                                                                                                                                                                      |
+| ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| New pods fail, the server exits with `unexpected argument '--cgroup-manager'` | CRI-O v1.36 or older with a server of v1.0.0 or newer, see [Compatibility](#compatibility).                                                                                |
+| CRI-O logs `Container monitor of ... does not support ...`                    | The server of the pod predates the feature, for example one kept across an upgrade, see [Upgrading](#upgrading).                                                           |
+| A server refuses to start with `socket ... is in use by a running server`     | Another server serves the runtime directory, see below.                                                                                                                    |
+| `client.New` fails with `ErrServerNotResponding`                              | A server accepts connections but does not answer, see below.                                                                                                               |
+| `client.New` fails with `ErrServerExited`, the server has no logs             | The server log driver is `none`, the default of CRI-O. A crash leaves a core dump without symbols, since v1.2.2 a panic also leaves its message in the journal, see below. |
+| Container output is missing in the journal                                    | journald did not keep up, see below.                                                                                                                                       |
+| An attach client misses output                                                | It fell behind the container output, which the server logs as a warning, see [Attach socket](#attach-socket).                                                              |
 
 With the `systemd` server log driver, the default of `conmonrs`, the server's
 own logs go to the journal, since v1.2.1 with the `SYSLOG_IDENTIFIER`
@@ -667,9 +677,13 @@ The server never waits for the journal with its own entries, they get lost while
 journald does not keep up, for example while it restarts. The lines of container
 output which the journal does not take right away wait up to about two seconds
 together, the rest of what the server read gets dropped after that, which the
-server logs as a warning, once until the journal takes lines again. The log
-files of the `containerRuntimeInterface` and `json` drivers lose nothing this
-way.
+server logs as a warning, once until the journal takes lines again. Since
+v1.2.2, the following chunks do not wait then, what the journal does not
+take right away gets dropped for at least a second and after that as long as
+it takes nothing, so that a stalled journal does not slow down the container
+and its other logs, and one which does not keep up by about half at most. The
+log files of the `containerRuntimeInterface` and `json` drivers lose nothing
+this way.
 
 The server runs crun with `--log=journald:<container ID>`, so what crun logs
 goes to the journal, where `journalctl -t crun ID=<container ID>` shows it: its
@@ -693,11 +707,16 @@ server which exits after it forked, before it accepted connections, makes
 `client.New` fail with an error matching `client.ErrServerExited`, only the
 logs of a server log driver other than `none` tell why. The release builds
 abort on a panic and leave a core dump. The panic message goes to stderr,
-which is `/dev/null` unless the server log driver is `stdout`, since
-v1.2.2 with the other drivers to the journal as well
-(`journalctl -t conmonrs -p err`). On hosts with systemd-coredump,
+which is `/dev/null` unless the server log driver is `stdout`, since v1.2.2
+with the other drivers to the journal as well (`journalctl -t conmonrs -p err`).
+Since v1.2.2, a server which did not fork (`--skip-fork`) writes it only to
+the stderr it kept, with the default panic hook. On hosts with systemd-coredump,
 `coredumpctl list conmonrs` lists the crashes and `coredumpctl info <pid>`
-shows the backtrace.
+shows the stack of each. The release builds are stripped, and the static
+binaries have no unwind tables for the code of conmon-rs, so the backtrace has
+no symbols and may stop early: the panic message in the journal is the main
+clue. A usable backtrace needs a server built with
+`CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`.
 
 Only one server runs per runtime directory. A server refuses to start with
 `socket ... is in use by a running server` while another one serves

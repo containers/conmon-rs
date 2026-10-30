@@ -1,7 +1,7 @@
 use crate::{
     container_io::{Message as IOMessage, Pipe},
     streaming_server::{
-        AttachSession, StreamingServer,
+        StreamingServer,
         remotecommand::{CLOSE_BYTE, STDIN_BYTE, STDOUT_BYTE, STREAM_ERR_BYTE},
         session::{PENDING_STDIN_MAX_BYTES, PING_INTERVAL},
         spdy::testing::Frame,
@@ -463,15 +463,7 @@ async fn concurrent_attaches_share_the_container() -> Result<()> {
             let mut streams = vec![];
             for _ in 0..2 {
                 let url = server
-                    .attach_url(AttachSession {
-                        container_id: "id".into(),
-                        child: child.clone(),
-                        stdin: true,
-                        stdout: true,
-                        stderr: false,
-                        stop_after_stdin_eof: false,
-                        idle_timeout: None,
-                    })
+                    .attach_url(attach_config(child.clone(), true, false, None))
                     .await?;
                 let (response, stream) =
                     upgrade(&server, &url, "GET", &websocket_headers(PROTOCOL_V5)).await?;
