@@ -15,13 +15,13 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use port_forward::PortForward;
 use std::{
     convert::Infallible,
-    fmt::Debug,
+    io,
     path::PathBuf,
     sync::{Arc, Mutex, Weak},
 };
 use stream_protocol::ClientStr;
 use tokio::{
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     sync::{OnceCell, Semaphore},
     task,
     time::{self, Duration},
@@ -154,8 +154,8 @@ struct State {
     sweeping: bool,
 }
 
-#[derive(Debug)]
-/// A dedicated session for each provided functionality.
+/// A dedicated session for each provided functionality. Not `Debug`, the
+/// command of an exec may carry secrets.
 enum Session {
     Exec(Box<ExecSession>),
     Attach(AttachSession),
@@ -196,8 +196,8 @@ impl StreamingServer {
             let Ok(permit) = connections.clone().acquire_owned().await else {
                 return;
             };
-            let stream = match listener.accept().await {
-                Ok((stream, _)) => stream,
+            let stream = match Self::accept(&listener).await {
+                Ok(stream) => stream,
                 Err(e) => {
                     accept_errors.failed(&e).await;
                     continue;
@@ -224,6 +224,17 @@ impl StreamingServer {
                 }
             });
         }
+    }
+
+    /// Accept the next connection. Like the Go server of CRI-O without
+    /// Nagle's algorithm, so that small writes in a row, like the last output
+    /// and the status of a session, do not wait for a delayed ACK.
+    async fn accept(listener: &TcpListener) -> io::Result<TcpStream> {
+        let (stream, _) = listener.accept().await?;
+        if let Err(e) = stream.set_nodelay(true) {
+            debug!("Unable to disable Nagle's algorithm: {e}");
+        }
+        Ok(stream)
     }
 
     /// Drop the sessions whose client did not come in time, otherwise they
@@ -366,10 +377,7 @@ impl StreamingServer {
         path: &str,
         sessions: impl FnOnce(&mut State) -> &mut BoundedMap<RandomId, V>,
         session: V,
-    ) -> Result<String>
-    where
-        V: Debug,
-    {
+    ) -> Result<String> {
         let port = self.start_if_required().await?;
         let token = RandomId::new();
         let mut state = lock(&self.state);
@@ -460,7 +468,7 @@ impl Session {
     fn terminal(&self) -> bool {
         match self {
             Session::Exec(s) => s.tty,
-            Session::Attach(s) => s.child.io().terminal_eof().is_some(),
+            Session::Attach(s) => s.child.io().attach().is_terminal(),
         }
     }
 }

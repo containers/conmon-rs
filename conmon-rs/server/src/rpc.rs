@@ -168,10 +168,13 @@ impl Server {
     /// When the runtime of an exec with the `timeout` gets killed. A runtime
     /// which hangs must not keep its call in progress forever, which defers
     /// the reaping of orphans and delays the shutdown.
-    pub(crate) fn exec_runtime_deadline(timeout: Option<Instant>) -> Option<Instant> {
+    pub(crate) fn exec_runtime_deadline(timeout: Option<Instant>) -> Instant {
+        let timeout = timeout.unwrap_or_else(Instant::now);
+        // A timeout too far in the future to add the grace to is never
+        // reached either.
         timeout
-            .unwrap_or_else(Instant::now)
             .checked_add(Self::EXEC_RUNTIME_GRACE)
+            .unwrap_or(timeout)
     }
 
     /// How long the runtime of a create may take before it gets killed, well
@@ -318,7 +321,7 @@ impl conmon::Server for Server {
         );
         let leak_fds = additional_fds.split_off(additional_slots.len() as usize);
 
-        let runtime_deadline = Instant::now().checked_add(Self::CREATE_RUNTIME_TIMEOUT);
+        let runtime_deadline = Instant::now() + Self::CREATE_RUNTIME_TIMEOUT;
         Promise::from_future(
             async move {
                 // capnp-rpc drops this future once the client disconnects or
@@ -327,16 +330,15 @@ impl conmon::Server for Server {
                 // its own, otherwise nothing would watch the container.
                 let create = task::spawn_local(
                     async move {
-                        container_log.write().await.init().await?;
+                        container_log.lock().await.init().await?;
 
                         let (grandchild_pid, token, call) = match child_reaper
                             .create_child(
                                 RuntimeCall {
                                     stdin,
-                                    deadline: runtime_deadline,
                                     env_vars,
                                     additional_fds,
-                                    ..RuntimeCall::new(&runtime, &args, &pidfile)
+                                    ..RuntimeCall::new(&runtime, &args, &pidfile, runtime_deadline)
                                 },
                                 &mut container_io,
                             )
@@ -434,7 +436,7 @@ impl conmon::Server for Server {
             pidfile: pidfile.path(),
             cgroup_manager,
         };
-        let args = pry_err!(args.exec_sync_args(&command));
+        let args = pry_err!(args.exec_args(&command));
 
         Promise::from_future(
             async move {
@@ -455,9 +457,13 @@ impl conmon::Server for Server {
                             .create_child(
                                 RuntimeCall {
                                     command_start: Some(args.command_start),
-                                    deadline: runtime_deadline,
                                     env_vars,
-                                    ..RuntimeCall::new(&runtime, &args.args, pidfile.path())
+                                    ..RuntimeCall::new(
+                                        &runtime,
+                                        &args.args,
+                                        pidfile.path(),
+                                        runtime_deadline,
+                                    )
                                 },
                                 &mut container_io,
                             )
@@ -483,6 +489,8 @@ impl conmon::Server for Server {
                                 });
                             }
                         };
+                        // The runtime wrote the PID, the file served its purpose.
+                        drop(pidfile);
 
                         // A timeout which already passed kills it right away.
                         let WatchedExec {
@@ -597,7 +605,7 @@ impl conmon::Server for Server {
                 // A dropped call must not stop a reopen halfway, between the
                 // write of the old file and the open of the new one.
                 let reopen = task::spawn_local(
-                    async move { child.io().logger().write().await.reopen().await }
+                    async move { child.io().logger().lock().await.reopen().await }
                         .instrument(Span::current()),
                 );
                 task_result(reopen).await

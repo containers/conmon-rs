@@ -10,7 +10,7 @@ use crate::{
     process::{Process, child_pid, read_pid_file, wait_for_exit_code},
     runtime_args::LoggedArgs,
     tail::Tail,
-    util::{sleep_until, with_stderr},
+    util::with_stderr,
 };
 use anyhow::{Context, Result, format_err};
 use nix::{
@@ -131,8 +131,8 @@ pub struct RuntimeCall<'a> {
     /// Where the runtime writes the PID of the process it started.
     pub pidfile: &'a Path,
 
-    /// When a runtime which did not finish gets killed, never without one.
-    pub deadline: Option<Instant>,
+    /// When a runtime which did not finish gets killed.
+    pub deadline: Instant,
     pub env_vars: Vec<(String, String)>,
 
     /// Descriptors the runtime gets from 3 on, in this order.
@@ -140,15 +140,21 @@ pub struct RuntimeCall<'a> {
 }
 
 impl<'a> RuntimeCall<'a> {
-    /// A call without stdin, deadline, environment or descriptors.
-    pub fn new(runtime: &'a Path, args: &'a [String], pidfile: &'a Path) -> Self {
+    /// A call without stdin, environment or descriptors, whose runtime gets
+    /// killed at the `deadline`.
+    pub fn new(
+        runtime: &'a Path,
+        args: &'a [String],
+        pidfile: &'a Path,
+        deadline: Instant,
+    ) -> Self {
         Self {
             runtime,
             args,
             command_start: None,
             stdin: false,
             pidfile,
-            deadline: None,
+            deadline,
             env_vars: vec![],
             additional_fds: vec![],
         }
@@ -360,7 +366,7 @@ impl ChildReaper {
         container_io: &mut ContainerIO,
         stdin: bool,
         token: &CancellationToken,
-        deadline: Option<Instant>,
+        deadline: Instant,
     ) -> Result<(), RuntimeFailure> {
         if container_io.terminal().is_none() {
             let (stdin, stdout, stderr) =
@@ -376,7 +382,7 @@ impl ChildReaper {
                 res.context("wait for terminal socket connection")
                     .map_err(RuntimeFailure::new)
             }
-            () = sleep_until(deadline) => Err(RuntimeFailure::timed_out()),
+            () = time::sleep_until(deadline) => Err(RuntimeFailure::timed_out()),
             status = child.wait() => match status.context("wait for child") {
                 // The runtime succeeded, so it did connect and the descriptor
                 // is queued already.
@@ -400,18 +406,14 @@ impl ChildReaper {
     /// a runtime which failed.
     async fn wait_runtime(
         child: &mut Runtime,
-        deadline: Option<Instant>,
+        deadline: Instant,
     ) -> Result<ExitStatus, RuntimeFailure> {
-        if let Some(deadline) = deadline
-            && time::timeout_at(deadline, child.wait()).await.is_err()
-        {
-            return Err(RuntimeFailure::timed_out());
+        match time::timeout_at(deadline, child.wait()).await {
+            Ok(status) => status
+                .context("wait for runtime")
+                .map_err(RuntimeFailure::new),
+            Err(_) => Err(RuntimeFailure::timed_out()),
         }
-        child
-            .wait()
-            .await
-            .context("wait for runtime")
-            .map_err(RuntimeFailure::new)
     }
 
     /// Stop a runtime which failed before it exited: give it `grace` to exit
@@ -482,8 +484,9 @@ impl ChildReaper {
             return;
         }
 
-        // Only a child, the PID may have been reused otherwise.
-        if let Err(e) = Process::child(pid).signal(Signal::SIGKILL) {
+        // Only a child, the PID may have been reused otherwise. With its
+        // group, like on a timeout, so nothing it started survives.
+        if let Err(e) = Process::child(pid).signal_group(Signal::SIGKILL) {
             debug!("Not cleaning up PID {pid} of failed runtime call: {e}");
             return;
         }

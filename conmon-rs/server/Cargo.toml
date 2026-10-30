@@ -9,10 +9,6 @@ repository.workspace = true
 # Shipped as a binary, see the releases.
 publish = false
 
-[[bin]]
-name = "conmonrs"
-path = "src/main.rs"
-
 [dependencies]
 anyhow = { version = "1.0.104", default-features = false }
 async-channel = { version = "2.5.0", default-features = false, features = ["std"] }

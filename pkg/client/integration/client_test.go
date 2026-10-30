@@ -1862,6 +1862,51 @@ var _ = Describe("ConmonClient", func() {
 			Expect(pauseProcessRunning(podID)).To(BeTrue())
 		}, SpecTimeout(specTimeout))
 
+		It("should unmount namespaces which are held open", func(ctx SpecContext) {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+			sut = tr.configGivenEnv()
+
+			basePath := MustTempDir("ns-test-")
+			DeferCleanup(os.RemoveAll, basePath)
+
+			response, err := sut.CreateNamespaces(
+				ctx,
+				&client.CreateNamespacesConfig{
+					Namespaces: []client.Namespace{
+						client.NamespaceIPC,
+						client.NamespaceNet,
+						client.NamespacePID,
+						client.NamespaceUTS,
+					},
+					BasePath: basePath,
+					PodID:    uuid.New().String(),
+				},
+			)
+			Expect(err).To(Succeed())
+			Expect(response.Namespaces).To(HaveLen(4))
+
+			// The test holds the bind paths open, which makes a plain
+			// unmount fail with EBUSY, like a process which keeps a
+			// namespace file open.
+			for _, ns := range response.Namespaces {
+				expectNamespaceFile(ns.Path)
+
+				file, err := os.Open(ns.Path)
+				Expect(err).To(Succeed())
+				DeferCleanup(file.Close)
+			}
+
+			DeferCleanup(sut.Close)
+			Expect(sut.Shutdown()).To(Succeed())
+
+			sut = nil
+
+			for _, ns := range response.Namespaces {
+				Expect(ns.Path).NotTo(BeAnExistingFile())
+			}
+		}, SpecTimeout(specTimeout))
+
 		It("should reap orphans in the pod PID namespace", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
@@ -2134,6 +2179,26 @@ var _ = Describe("JournaldLogger", func() {
 				}
 			}, SpecTimeout(specTimeout))
 		}
+
+		It("should log the server with the systemd driver", func(ctx SpecContext) {
+			tr = newTestRunner()
+			tr.createRuntimeConfig(false)
+
+			// The default of the Go client, which the other specs replace.
+			sut = tr.configGivenEnvWith(func(cfg *client.ConmonServerConfig) {
+				cfg.LogDriver = client.LogDriverSystemd
+			})
+
+			pid := sut.PID()
+			Expect(pid).To(BeNumerically(">", 0))
+
+			// An older server with the same PID must not match.
+			journal := journalctl(
+				ctx, "--since", "-1min", "-t", "conmonrs", fmt.Sprintf("_PID=%d", pid),
+			)
+			Eventually(journal, 10*time.Second).
+				Should(ContainSubstring("Using systemd/journald logger"))
+		}, SpecTimeout(specTimeout))
 
 		It("should write the container name, tag and labels", func(ctx SpecContext) {
 			tr = newTestRunner()

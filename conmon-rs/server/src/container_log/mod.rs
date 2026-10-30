@@ -28,10 +28,10 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{sync::RwLock, task};
+use tokio::{sync::Mutex, task};
 use tracing::{debug, error, trace};
 
-pub type SharedContainerLog = Arc<RwLock<ContainerLog>>;
+pub type SharedContainerLog = Arc<Mutex<ContainerLog>>;
 
 /// A destination for the output of a container.
 ///
@@ -135,7 +135,7 @@ pub struct ContainerLog {
 impl ContainerLog {
     /// Create a new default SharedContainerLog.
     pub fn new() -> SharedContainerLog {
-        Arc::new(RwLock::new(Self::default()))
+        Arc::new(Mutex::new(Self::default()))
     }
 
     /// Check if this logger has any drivers configured.
@@ -168,7 +168,7 @@ impl ContainerLog {
             })
             .collect::<Result<Vec<_>>>()?;
         let buffers_lines = drivers.iter().any(Driver::buffers_lines);
-        Ok(Arc::new(RwLock::new(Self {
+        Ok(Arc::new(Mutex::new(Self {
             drivers,
             lines: LineBuffer::default(),
             buffers_lines,
@@ -232,16 +232,9 @@ impl ContainerLog {
         result
     }
 
-    /// The line of the pipe which waits for its ending, if any.
-    pub fn pending(&self, pipe: Pipe) -> Option<Pending> {
-        if !self.buffers_lines || !self.lines.has_pending(pipe) {
-            return None;
-        }
-        Some(if self.lines.continued(pipe) {
-            Pending::Continued
-        } else {
-            Pending::Started
-        })
+    /// Whether a line of the pipe waits for its ending.
+    pub fn has_pending(&self, pipe: Pipe) -> bool {
+        self.buffers_lines && self.lines.has_pending(pipe)
     }
 
     /// Write the line of the pipe which waits for its ending as a partial
@@ -275,17 +268,6 @@ impl ContainerLog {
         }
         result
     }
-}
-
-/// A line which waits for its ending after a write, see
-/// [`ContainerLog::pending`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Pending {
-    /// It started in the chunk written last.
-    Started,
-
-    /// It started in an earlier chunk, the one written last continued it.
-    Continued,
 }
 
 /// Split a chunk into its lines. Every line but the last ends with a newline,
@@ -373,10 +355,6 @@ impl Deref for Text<'_> {
 pub(crate) struct LineBuffer {
     stdout: BytesMut,
     stderr: BytesMut,
-
-    /// Per pipe, whether the last chunk continued the line which waited
-    /// for its ending before, see [`ContainerLog::pending`].
-    continued: [bool; 2],
 }
 
 impl LineBuffer {
@@ -399,12 +377,6 @@ impl LineBuffer {
         .is_empty()
     }
 
-    /// Whether the last chunk of the pipe continued the line which waited
-    /// for its ending before.
-    pub(crate) fn continued(&self, pipe: Pipe) -> bool {
-        self.continued[pipe as usize]
-    }
-
     /// Add a chunk and return the lines it completes. The whole lines of the
     /// chunk borrow it, only the end of a line which started in an earlier
     /// chunk and the start of one which continues in a later one get copied
@@ -414,11 +386,8 @@ impl LineBuffer {
         let mut ends = memchr::memchr_iter(b'\n', bytes).map(|end| end + 1);
         let mut start = 0;
         let tail = self.tail(pipe);
-        let mut continued = false;
         if !tail.is_empty() {
             let end = ends.next();
-            // Without a newline, the line which waited goes on.
-            continued = end.is_none();
             start = end.unwrap_or(bytes.len());
             tail.extend_from_slice(&bytes[..start]);
             if end.is_some() {
@@ -439,7 +408,6 @@ impl LineBuffer {
         }
         tail.extend_from_slice(&bytes[start..]);
         lines.extend(Self::cut_long(tail));
-        self.continued[pipe as usize] = continued;
         lines
     }
 
@@ -796,6 +764,28 @@ impl LogFile {
     pub(crate) async fn end_chunk(&mut self) -> Result<()> {
         self.rotation_failed = false;
         self.flush().await
+    }
+
+    /// Write a chunk of one entry per item, which `entry` appends to the
+    /// buffer, and end it. The entries after a failed one still get
+    /// written, the first error is returned.
+    pub(crate) async fn write_entries<T>(
+        &mut self,
+        items: impl IntoIterator<Item = T>,
+        mut entry: impl FnMut(&mut Vec<u8>, T) -> Result<()>,
+    ) -> Result<()> {
+        let mut res = Ok(());
+        for item in items {
+            let buf = self.buf();
+            let start = buf.len();
+            if let Err(e) = entry(buf, item) {
+                buf.truncate(start);
+                res = res.and(Err(e));
+                continue;
+            }
+            res = res.and(self.commit_entry(start).await);
+        }
+        res.and(self.end_chunk().await)
     }
 
     /// The size of the open file. A stat of an open file does not wait for

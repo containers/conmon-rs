@@ -260,3 +260,37 @@ fn writer_ignores_a_missing_journal() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// A panic reaches the journal as an error with its location, also with
+/// a message which spans several lines.
+#[test]
+fn panics_get_logged() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("socket");
+    let receiver = UnixDatagram::bind(&path)?;
+
+    log_panic_at(&path, Some("main"), &"panicked at src/a.rs:1:2:\nboom")?;
+    let (data, _) = receive(&receiver)?;
+    assert_eq!(
+        decode(&data),
+        [
+            ("PRIORITY".into(), b"3".to_vec()),
+            (
+                "MESSAGE".into(),
+                b"thread 'main' panicked at src/a.rs:1:2:\nboom".to_vec()
+            ),
+            ("SYSLOG_IDENTIFIER".into(), IDENTIFIER.into())
+        ]
+    );
+
+    log_panic_at(&path, None, &"panicked at src/a.rs:1:2:")?;
+    let (data, _) = receive(&receiver)?;
+    assert_eq!(
+        decode(&data)[1],
+        (
+            "MESSAGE".into(),
+            b"thread '<unnamed>' panicked at src/a.rs:1:2:".to_vec()
+        )
+    );
+    Ok(())
+}

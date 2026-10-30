@@ -1,6 +1,7 @@
 use super::{
     CLOSE_BYTE, ClientEvent, ClientInput, ExpectedStreams, Framing, Message, Output, RESIZE_BYTE,
-    SPDY_PROTOCOLS, STDIN_BYTE, STREAM_TYPE_RESIZE, SpdyStreams, Status, Stdin, spdy::ResizeEvents,
+    SPDY_PROTOCOLS, STDIN_BYTE, SpdyStreams, Status, Stdin,
+    spdy::{ResizeEvents, STREAM_TYPE_RESIZE},
     websocket::WEBSOCKET_PROTOCOLS,
 };
 use crate::streaming_server::{

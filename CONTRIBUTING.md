@@ -91,8 +91,9 @@ wire:
   constant in [pkg/client](pkg/client/version.go), see the features section
   of usage.md. An older server ignores new fields, so the client checks the
   feature first.
-- Mark new limits and fields with "since unreleased" in the schema, the Go
-  documentation and usage.md, the release replaces it with the version.
+- Mark new fields, limits and other behavior changes which users can see
+  with "since unreleased" in the schema, the Go documentation and usage.md,
+  the release replaces it with the version.
 
 `make verify-schema-layout`, which CI runs, guards these rules: it fails if a
 change moves an existing field of the schema to another slot.

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -454,8 +456,36 @@ func TestVersionBinary(t *testing.T) {
 
 	binary = writeTestBinary(t, `echo broken >&2; exit 1`)
 
-	if _, err := Version(binary); err == nil || !strings.Contains(err.Error(), "broken") {
+	if _, err := Version(binary); err == nil || !strings.HasSuffix(err.Error(), ": broken") {
 		t.Fatalf("got error %v, want one with the error output", err)
+	}
+}
+
+func TestVersionErrorOutput(t *testing.T) {
+	t.Parallel()
+
+	// A missing binary has no error output to add.
+	_, err := Version(filepath.Join(t.TempDir(), "conmonrs"))
+	if !errors.Is(err, fs.ErrNotExist) || strings.Contains(err.Error(), ": :") ||
+		strings.HasSuffix(err.Error(), ": ") {
+		t.Fatalf("got error %v, want one without error output", err)
+	}
+
+	// Only the end of a long error output, which has the error.
+	binary := writeTestBinary(t, `yes line | head -c 40000 >&2; echo last >&2; exit 1`)
+
+	_, err = Version(binary)
+	if err == nil {
+		t.Fatal("failing binary succeeded")
+	}
+
+	msg := err.Error()
+	if !strings.Contains(msg, ": ...") || !strings.HasSuffix(msg, "\nlast") ||
+		len(msg) > maxServerErrors+len(binary)+100 {
+		t.Fatalf(
+			"got %d bytes %.80q...%q, want the bounded end",
+			len(msg), msg, msg[max(len(msg)-20, 0):],
+		)
 	}
 }
 

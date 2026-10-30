@@ -97,7 +97,7 @@ async fn name_tag_and_labels_come_from_the_request() -> Result<()> {
     label.set_value("web");
 
     let log = ContainerLog::from_request("abc", drivers.into_reader())?;
-    let log = log.read().await;
+    let log = log.lock().await;
     let [Driver::Journald(logger)] = log.drivers.as_slice() else {
         bail!("no journald driver");
     };

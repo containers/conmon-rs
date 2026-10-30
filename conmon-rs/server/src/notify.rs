@@ -23,6 +23,7 @@ use std::{
     fs::{self, File, Metadata, Permissions},
     os::unix::{fs::PermissionsExt, io::AsRawFd, net::UnixDatagram as StdUnixDatagram},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
 };
 use tokio::{net::UnixDatagram, select, task};
 use tokio_util::sync::CancellationToken;
@@ -45,6 +46,11 @@ pub struct NotifySocket {
     /// there, so that only that one gets removed again.
     path: PathBuf,
     file: FileId,
+
+    /// Whether relaying the last message failed. The container controls how
+    /// many it sends, and while the host socket is gone they all fail, so
+    /// only the first failure after a relayed message logs a warning.
+    relay_failed: AtomicBool,
 }
 
 impl NotifySocket {
@@ -112,6 +118,7 @@ impl NotifySocket {
             _host_dir: host_dir,
             path,
             file: FileId::new(&metadata),
+            relay_failed: AtomicBool::new(false),
         })
     }
 
@@ -225,13 +232,11 @@ impl NotifySocket {
         let Some(message) = Self::check_message(message) else {
             return;
         };
-        if let Err(e) = self.connect_host_again() {
-            warn!("Unable to relay notify message: {e:#}");
-            return;
-        }
-        if let Err(e) = self.host.send(&message).await {
-            warn!("Unable to relay notify message: {e}");
-        }
+        let result = match self.connect_host_again() {
+            Ok(()) => self.host.send(&message).await.map(drop).context("send"),
+            Err(e) => Err(e),
+        };
+        self.relayed(result);
     }
 
     /// Relay without waiting for the host, drop the message if it is full.
@@ -240,11 +245,22 @@ impl NotifySocket {
             return;
         };
         let flags = MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL;
-        if let Err(e) = self
-            .connect_host_again()
-            .and_then(|()| send(self.host.as_raw_fd(), &message, flags).context("send"))
-        {
-            warn!("Unable to relay notify message: {e:#}");
+        self.relayed(
+            self.connect_host_again()
+                .and_then(|()| send(self.host.as_raw_fd(), &message, flags).context("send"))
+                .map(drop),
+        );
+    }
+
+    /// Log the failure to relay a message, as a warning only if the last one
+    /// got relayed, see [`NotifySocket::relay_failed`].
+    fn relayed(&self, result: Result<()>) {
+        match result {
+            Ok(()) => self.relay_failed.store(false, Ordering::Relaxed),
+            Err(e) if !self.relay_failed.swap(true, Ordering::Relaxed) => {
+                warn!("Unable to relay notify message: {e:#}");
+            }
+            Err(e) => debug!("Unable to relay notify message: {e:#}"),
         }
     }
 

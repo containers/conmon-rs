@@ -1,4 +1,8 @@
-use super::{spdy::ResizeEvents, status::ErrorMessage, *};
+use super::{
+    spdy::{MAX_RESIZE_BUFFER, ResizeEvents},
+    status::ErrorMessage,
+    *,
+};
 use crate::streaming_server::{
     spdy::{
         self, Connection,

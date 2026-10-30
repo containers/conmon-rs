@@ -30,7 +30,6 @@ impl<K, V> Debug for BoundedMap<K, V> {
 impl<K, V> BoundedMap<K, V>
 where
     K: Eq + Debug,
-    V: Debug,
 {
     /// Insert an element into the map, after removing the timed-out ones.
     /// Returns the new one back if the map is full. The keys are random

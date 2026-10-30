@@ -36,12 +36,13 @@ impl fmt::Debug for RandomId {
     }
 }
 
-/// Only exactly 32 hex digits, without a sign or other characters.
+/// Only exactly 32 lowercase hex digits, the way they get written, without
+/// a sign or other characters.
 impl FromStr for RandomId {
     type Err = InvalidRandomId;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.len() != Self::LEN || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if s.len() != Self::LEN || !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
             return Err(InvalidRandomId);
         }
         u128::from_str_radix(s, 16)
@@ -56,7 +57,7 @@ pub struct InvalidRandomId;
 
 impl fmt::Display for InvalidRandomId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "expected {} hex digits", RandomId::LEN)
+        write!(f, "expected {} lowercase hex digits", RandomId::LEN)
     }
 }
 
@@ -87,7 +88,7 @@ mod tests {
 
     #[test]
     fn only_hex_digits_parse() {
-        let valid = "0123456789abcdefABCDEF0123456789";
+        let valid = "0123456789abcdef0123456789abcdef";
         assert_eq!(valid.parse::<RandomId>().map(|_| ()), Ok(()));
         for invalid in [
             "",
@@ -95,6 +96,7 @@ mod tests {
             &format!("{valid}0"),
             "+123456789abcdef0123456789abcdef",
             "0123456789abcdef0123456789abcdeg",
+            "0123456789abcdef0123456789abcdeF",
             "01234567-89ab-cdef-0123-456789abcdef",
         ] {
             assert_eq!(

@@ -9,7 +9,7 @@ use crate::{
     config::{Config, LogDriver},
     fd_socket::FdSocket,
     fs_util, init,
-    journal::Journal,
+    journal::{self, Journal},
     listener,
     pause::Pause,
     streaming_server::StreamingServer,
@@ -436,6 +436,15 @@ impl Server {
     )]
     fn init_logging(&mut self) -> Result<()> {
         let level = LevelFilter::from(self.config().log_level());
+
+        // The default hook prints the message of a panic to stderr, which
+        // goes nowhere once forked with a driver other than stdout, see
+        // `Server::redirect_stdio`. Also with `none`, the default of CRI-O:
+        // a panic aborts the server, its containers lose their monitor, and
+        // the message is the only clue.
+        if self.config().log_driver() != LogDriver::Stdout {
+            journal::log_panics();
+        }
 
         #[cfg(feature = "tracing")]
         let telemetry_layer = if self.config().enable_tracing() {

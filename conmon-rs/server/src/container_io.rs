@@ -4,7 +4,7 @@
 
 use crate::{
     attach::{AttachOutput, SharedContainerAttach},
-    container_log::{Pending, SharedContainerLog},
+    container_log::SharedContainerLog,
     mutex::lock,
     random_id::RandomId,
     tail::Tail,
@@ -46,7 +46,7 @@ pub const STDIO_CHANNEL_SIZE: usize = 100;
 /// it, see [`with_scratch`], so an idle container holds no read buffer. 8 KiB
 /// halves the reads and log writes of 4 KiB for bulk output and keeps what a
 /// container holds after it in line with the log buffers, see
-/// `LogFile::FLUSH_SIZE`.
+/// `LogFile::BUF_CAPACITY`.
 pub(crate) const READ_BUFFER_SIZE: usize = 8 * 1024;
 
 thread_local! {
@@ -199,10 +199,16 @@ impl StdioSender {
         }
     }
 
+    /// Whether a consumer reads the channel, see
+    /// [`ContainerIO::consume_stdio`].
+    fn consumed(&self) -> bool {
+        self.consumed.load(Ordering::Acquire)
+    }
+
     /// Send a message, false if the channel got closed or all receivers are
     /// gone.
     async fn send(&self, message: Message) -> bool {
-        if self.consumed.load(Ordering::Acquire) {
+        if self.consumed() {
             self.tx.send(message).await.is_ok()
         } else {
             self.tx.force_send(message).is_ok()
@@ -345,9 +351,9 @@ impl StdioChannel {
         }
     }
 
-    /// Close the channel and drop what it buffers right away. The read loop
-    /// drops its sender on the next send, a quiet container would keep the
-    /// buffered chunks until then otherwise.
+    /// Close the channel and drop what it buffers right away, a quiet
+    /// container would keep the buffered chunks otherwise. The read loop
+    /// drops its sender once it notices, which frees the channel.
     fn close(&mut self) {
         self.tx = None;
         if let Some(rx) = self.rx.take() {
@@ -511,8 +517,8 @@ impl ContainerIO {
         let consumed = Arc::default();
         let stdout = StdioChannel::new(STDIO_CHANNEL_SIZE, &consumed);
         // The channel preallocates its capacity. The one of stderr carries
-        // nothing with a terminal and lives as long as the IO, an exec never
-        // closes it.
+        // nothing with a terminal. An exec keeps it as long as the IO, only
+        // its consumer closes it.
         let stderr = if terminal.is_some() {
             let mut stderr = StdioChannel::new(1, &consumed);
             stderr.tx = None;
@@ -875,14 +881,14 @@ impl ContainerIO {
     where
         T: AsyncRead + Unpin,
     {
-        let log_has_drivers = logger.read().await.has_drivers();
+        let log_has_drivers = logger.lock().await.has_drivers();
         let res =
             Self::read_pipe(reader, pipe, &logger, log_has_drivers, message_tx, &attach).await;
         if log_has_drivers {
             // The line which waits for its ending is on its way into the log
             // like a chunk, see `SharedContainerAttach::logging`.
             let _logging = attach.logging();
-            if let Err(e) = logger.write().await.finish(pipe).await {
+            if let Err(e) = logger.lock().await.finish(pipe).await {
                 error!("Unable to finish the log of {pipe}: {e:#}");
             }
         }
@@ -925,9 +931,20 @@ impl ContainerIO {
                 // The drivers decide whether they buffer lines at all.
                 () = sleep_until(flush_at) => {
                     let _logging = attach.logging();
-                    let res = logger.write().await.flush(pipe).await;
+                    let res = logger.lock().await.flush(pipe).await;
                     log_errors.check(pipe, res.context("flush paused log line"));
                     flush_at = None;
+                    continue;
+                }
+                // The sender keeps the buffer of a closed channel, see
+                // `ContainerIO::drop_stdio`, a pipe which stays quiet would
+                // never send to notice it. Only watched without a consumer,
+                // the exec which has one ends soon after it closed.
+                () = Self::closed(message_tx.as_ref()),
+                    if message_tx.as_ref().is_some_and(|tx| !tx.consumed()) =>
+                {
+                    trace!("Stdio channel closed, dropping sender");
+                    message_tx = None;
                     continue;
                 }
             };
@@ -953,16 +970,18 @@ impl ContainerIO {
                     // A failing driver drops the chunk, the output must keep
                     // flowing to the other drivers and the attach clients.
                     if log_has_drivers {
-                        let mut locked_logger = logger.write().await;
+                        let mut locked_logger = logger.lock().await;
                         let res = locked_logger.write(pipe, &data).await;
-                        let pending = locked_logger.pending(pipe);
+                        let pending = locked_logger.has_pending(pipe);
                         drop(locked_logger);
                         log_errors.check(pipe, res.context("write to log file"));
 
-                        flush_at = match (pending, flush_at) {
-                            (None, _) => None,
-                            (Some(Pending::Continued), Some(at)) => Some(at),
-                            (Some(_), _) => Some(Instant::now() + Self::IDLE_FLUSH),
+                        // A newline in the chunk ended the line which waited
+                        // before, the one waiting now started in this chunk.
+                        flush_at = match flush_at {
+                            _ if !pending => None,
+                            Some(at) if memchr::memchr(b'\n', &data).is_none() => Some(at),
+                            _ => Some(Instant::now() + Self::IDLE_FLUSH),
                         };
                     }
 
@@ -1003,6 +1022,14 @@ impl ContainerIO {
             })
         })
         .await
+    }
+
+    /// Complete once the stdio channel got closed, never without one.
+    async fn closed(message_tx: Option<&StdioSender>) {
+        match message_tx {
+            Some(tx) => tx.tx.closed().await,
+            None => future::pending().await,
+        }
     }
 
     /// Forward a message to the stdio channel, see [`StdioSender`]. If the

@@ -191,7 +191,7 @@ lint-typos: ## Check the spelling, typos of the version of CI has to be installe
 	typos --config .github/typos.toml
 
 .PHONY: verify
-verify: verify-dependencies verify-spec verify-vex verify-proto verify-schema-layout verify-prettier verify-deny lint-typos lint-workflows ## Run the checks of CI besides make lint and the tests.
+verify: verify-dependencies verify-spec verify-unreleased verify-vex verify-proto verify-schema-layout verify-prettier verify-deny lint-typos lint-workflows ## Run the checks of CI besides make lint and the tests.
 
 .PHONY: verify-dependencies
 verify-dependencies: .install.zeitgeist ## Verify the local dependencies.
@@ -258,6 +258,27 @@ verify-spec: ## Verify that the RPM spec version and cargo requirement match the
 	if [ "$$RUST_VERSION" != "$$SPEC_CARGO" ]; then \
 		echo "$(SPEC_FILE) requires cargo >= $$SPEC_CARGO, not the crate rust-version $$RUST_VERSION" ; \
 		exit 1 ; \
+	fi
+
+# Once the version bump PR raised the crate version, nothing may be
+# "unreleased" any more until the tag exists, see release.md. The tag lives in
+# the upstream repository, a fork may not have it. git ls-remote exits with 2
+# if the tag does not exist, and with another error if it cannot tell.
+.PHONY: verify-unreleased
+verify-unreleased: ## Verify that nothing is "unreleased" if the crate version has no tag yet.
+	VERSION=$$($(CRATE_VERSION)) || exit ; \
+	STATUS=0 && git ls-remote --exit-code --tags https://github.com/containers/conmon-rs.git "refs/tags/v$$VERSION" >/dev/null || STATUS=$$? ; \
+	if [ "$$STATUS" = 2 ]; then \
+		STATUS=0 && git grep -in unreleased -- usage.md pkg/client conmon-rs/server/proto || STATUS=$$? ; \
+		if [ "$$STATUS" = 0 ]; then \
+			echo "v$$VERSION has no tag yet: the version bump PR replaces \"unreleased\" above with $$VERSION, other PRs wait for the tag and rerun" ; \
+			exit 1 ; \
+		elif [ "$$STATUS" != 1 ]; then \
+			exit "$$STATUS" ; \
+		fi ; \
+	elif [ "$$STATUS" != 0 ]; then \
+		echo "Cannot check for the tag v$$VERSION" ; \
+		exit "$$STATUS" ; \
 	fi
 
 .PHONY: verify-vex

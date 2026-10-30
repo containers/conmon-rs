@@ -41,8 +41,7 @@ use tracing::debug;
 /// ran, like the largest reads of the pipes.
 const EARLY_FRAME_SIZE: usize = 32 * 1024;
 
-#[derive(Debug)]
-/// Required exec session data.
+/// Required exec session data. Not `Debug`, the command may carry secrets.
 pub struct ExecSession {
     pub child_reaper: Arc<ChildReaper>,
 
@@ -79,7 +78,7 @@ impl StreamingServer {
             cgroup_manager: session.cgroup_manager,
         };
         let args = args
-            .exec_sync_args(&session.command)
+            .exec_args(&session.command)
             .context("generate exec args")?;
 
         // Read while the runtime runs, see `ContainerIO::collect_stdio`.
@@ -93,10 +92,14 @@ impl StreamingServer {
                 RuntimeCall {
                     command_start: Some(args.command_start),
                     stdin: session.stdin,
-                    // The process has no timeout, a runtime which hangs
-                    // still gets killed.
-                    deadline: Server::exec_runtime_deadline(None),
-                    ..RuntimeCall::new(session.server_config.runtime(), &args.args, pidfile.path())
+                    ..RuntimeCall::new(
+                        session.server_config.runtime(),
+                        &args.args,
+                        pidfile.path(),
+                        // The process has no timeout, a runtime which hangs
+                        // still gets killed.
+                        Server::exec_runtime_deadline(None),
+                    )
                 },
                 &mut container_io,
             )

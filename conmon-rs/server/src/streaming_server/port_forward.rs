@@ -316,17 +316,21 @@ impl PortForward {
 
     /// Connect to the port in the network namespace of the pod. The pod may
     /// listen on either family, they get tried one after the other like CRI-O
-    /// does.
+    /// does. Nagle's algorithm is off like in Go, so that request frames
+    /// which get written one by one do not wait for a delayed ACK.
     async fn connect(namespace: &Namespace, port: u16) -> Result<TcpStream> {
         let mut errors = vec![];
         for (ip, socket) in namespace.sockets().await? {
             let result = match socket {
-                Ok(socket) => time::timeout(
-                    CONNECT_TIMEOUT,
-                    TcpSocket::from_std_stream(socket).connect((ip, port).into()),
-                )
-                .await
-                .unwrap_or_else(|_| Err(io::ErrorKind::TimedOut.into())),
+                Ok(socket) => {
+                    let socket = TcpSocket::from_std_stream(socket);
+                    if let Err(e) = socket.set_nodelay(true) {
+                        debug!("Unable to disable Nagle's algorithm: {e}");
+                    }
+                    time::timeout(CONNECT_TIMEOUT, socket.connect((ip, port).into()))
+                        .await
+                        .unwrap_or_else(|_| Err(io::ErrorKind::TimedOut.into()))
+                }
                 Err(e) => Err(e),
             };
             match result {

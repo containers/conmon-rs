@@ -94,8 +94,8 @@ struct Calls {
 
     /// Until when each call in progress may still claim a process, by its
     /// number: the deadline of its runtime and the
-    /// [`ChildReaper::CLAIM_MARGIN`]. None for a call without a deadline.
-    in_progress: BTreeMap<u64, Option<Instant>>,
+    /// [`ChildReaper::CLAIM_MARGIN`].
+    in_progress: BTreeMap<u64, Instant>,
 }
 
 impl Calls {
@@ -105,7 +105,7 @@ impl Calls {
     fn may_claim_before(&self, before: u64, now: Instant) -> bool {
         self.in_progress
             .range(..before)
-            .any(|(_, claim_by)| claim_by.is_none_or(|claim_by| now < claim_by))
+            .any(|(_, &claim_by)| now < claim_by)
     }
 }
 
@@ -171,14 +171,16 @@ impl ChildReaper {
     /// Start a runtime call whose runtime gets killed at the `deadline`,
     /// unless the server shuts down. The shutdown waits for the calls in
     /// progress, see [`ChildReaper::kill_grandchildren`].
-    fn begin_call(&self, deadline: Option<Instant>) -> Result<InFlight> {
+    fn begin_call(&self, deadline: Instant) -> Result<InFlight> {
         // Under the lock the shutdown takes its snapshot with, so that it
         // either sees this call or this call sees the shutdown.
         let _map = lock(&self.grandchildren);
         if self.shutting_down.load(Ordering::SeqCst) {
             bail!("server is shutting down")
         }
-        let claim_by = deadline.and_then(|deadline| deadline.checked_add(Self::CLAIM_MARGIN));
+        // A deadline too far in the future to add the margin to is never
+        // reached either.
+        let claim_by = deadline.checked_add(Self::CLAIM_MARGIN).unwrap_or(deadline);
         let mut seq = 0;
         self.in_flight.send_modify(|calls| {
             seq = calls.next;

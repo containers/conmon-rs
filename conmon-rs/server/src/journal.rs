@@ -11,14 +11,17 @@ use nix::{
     },
 };
 use std::{
+    fmt::Display,
     fs::File,
     io::{self, ErrorKind, Write},
     os::{
         fd::{AsRawFd, OwnedFd},
         unix::net::UnixDatagram,
     },
+    panic::{self, PanicHookInfo},
     path::Path,
     sync::OnceLock,
+    thread,
     time::{Duration, Instant},
 };
 use tracing::{Level, Metadata};
@@ -322,6 +325,28 @@ impl Journal {
             result => result,
         }
     }
+}
+
+/// Send the message of every panic to the journal before the default hook
+/// prints it. The release builds abort on a panic, and the forked server
+/// has `/dev/null` as its stderr unless it logs to stdout, so the message
+/// would get lost. It bypasses tracing, as its subscriber may be what
+/// panicked.
+pub fn log_panics() {
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info: &PanicHookInfo<'_>| {
+        // Nothing to report it to if this fails, the default hook follows.
+        let _ = log_panic_at(Path::new(SOCKET_PATH), thread::current().name(), info);
+        default_hook(info);
+    }));
+}
+
+/// Send the message of a panic to the journal socket at a path, with the
+/// name of its thread and the location the `Display` of the
+/// `PanicHookInfo` includes.
+fn log_panic_at(path: &Path, thread: Option<&str>, info: &dyn Display) -> io::Result<()> {
+    let message = format!("thread '{}' {info}", thread.unwrap_or("<unnamed>"));
+    Journal::error().send_at(path, message.as_bytes())
 }
 
 impl Write for Journal {

@@ -1,7 +1,7 @@
 //! Exec and attach over SPDY: the protocol versions, the streams of a
 //! session and the input of the client.
 
-use super::{ClientEvent, ClientInput, MAX_RESIZE_BUFFER, STREAM_TYPE_RESIZE, Stdin, Version};
+use super::{ClientEvent, ClientInput, Stdin, Version};
 use crate::streaming_server::{
     spdy::{Connection, ConnectionHandle, Headers, Stream, StreamReceiver, StreamSender},
     stream_protocol::{ClientStr, STREAM_CREATION_TIMEOUT, STREAM_TYPE_HEADER},
@@ -19,6 +19,11 @@ use std::{
 use tokio::{select, time};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
+
+/// The most resize events a SPDY client may send without completing one.
+pub(super) const MAX_RESIZE_BUFFER: usize = 4 * 1024;
+
+pub(super) const STREAM_TYPE_RESIZE: &str = "resize";
 
 /// The SPDY protocols, the kubelet and client-go prefer the first one.
 pub const SPDY_PROTOCOLS: [(&str, Version); 4] = [

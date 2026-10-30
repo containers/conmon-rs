@@ -189,7 +189,9 @@ type Tracing struct {
 	// Trace Context, so the caller has to register that propagator, for
 	// example with otel.SetTextMapPropagator(propagation.TraceContext{}).
 	// The default global propagator passes nothing, the spans of the server
-	// do not join the trace of the call then.
+	// do not join the trace of the call then. Server builds without the
+	// tracing feature ignore it, the static release binaries and the RPMs
+	// are such builds.
 	Enabled bool
 
 	// Endpoint is the gRPC tracing endpoint for OTLP.

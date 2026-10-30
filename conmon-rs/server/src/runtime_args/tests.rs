@@ -74,7 +74,7 @@ fn ids_which_look_like_options_are_rejected() {
             pidfile: Path::new("/pidfile"),
             cgroup_manager: CgroupManager::Cgroupfs,
         };
-        assert!(args.exec_sync_args(["true"]).is_err(), "{id}");
+        assert!(args.exec_args(["true"]).is_err(), "{id}");
         assert!(create(args).is_err(), "{id}");
     }
 }
@@ -150,11 +150,11 @@ fn default_args_crun_log_levels() {
 }
 
 #[test]
-fn exec_sync_args_without_terminal() {
+fn exec_args_without_terminal() {
     let Some(args) = runtime_args(
         &["--runtime", "/usr/bin/runc"],
         CgroupManager::Systemd,
-        |args| Ok(args.exec_sync_args(["sh", "-c", "true"])?.args),
+        |args| Ok(args.exec_args(["sh", "-c", "true"])?.args),
     ) else {
         return;
     };
@@ -184,7 +184,7 @@ async fn exec_and_create_args_with_terminal() {
             if let Some(terminal) = args.container_io.terminal() {
                 socket = Some(terminal.path().display().to_string());
             }
-            Ok(args.exec_sync_args(["true"])?.args)
+            Ok(args.exec_args(["true"])?.args)
         },
     ) else {
         return;
@@ -240,7 +240,7 @@ fn exec_commands_are_not_logged() {
     let Some(exec) = runtime_args(
         &["--runtime", "/usr/bin/runc"],
         CgroupManager::Systemd,
-        |args| args.exec_sync_args(["sh", "-c", "echo secret"]),
+        |args| args.exec_args(["sh", "-c", "echo secret"]),
     ) else {
         return;
     };

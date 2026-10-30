@@ -89,7 +89,15 @@ func VersionContext(ctx context.Context, binaryPath string) (res *ServerVersion,
 			return nil, ErrUnsupported
 		}
 
-		return nil, fmt.Errorf("run `%s %s`: %s: %w", binaryPath, arg, string(stderr), err)
+		// Bounded like the server errors of New, the end has the error. A
+		// binary which could not run at all wrote nothing.
+		output := errorTail(string(stderr), false)
+
+		if output != "" {
+			return nil, fmt.Errorf("run `%s %s`: %w: %s", binaryPath, arg, err, output)
+		}
+
+		return nil, fmt.Errorf("run `%s %s`: %w", binaryPath, arg, err)
 	}
 
 	if err := json.Unmarshal(data, &res); err != nil {
