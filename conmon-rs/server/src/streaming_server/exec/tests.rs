@@ -3,7 +3,7 @@ use crate::{
     child_reaper::ChildReaper,
     config::Config,
     conmon_capnp::conmon::CgroupManager,
-    streaming_server::{ADDR, ExecSession, StreamingServer, testing::*},
+    streaming_server::{ADDR, ExecSession, MAX_MESSAGE_SIZE, StreamingServer, testing::*},
 };
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -135,7 +135,7 @@ async fn too_large_messages_fail_slow_exec_starts() -> Result<()> {
     LocalSet::new()
         .run_until(async {
             let (_server, stream) = exec_websocket(config, None).await?;
-            let (mut reader, writer) = send_too_large(stream);
+            let (mut reader, writer) = send_too_large(stream, MAX_MESSAGE_SIZE);
 
             // The status and the close come without the runtime.
             let (opcode, status) =
@@ -164,7 +164,7 @@ async fn lost_exit_ends_the_session_and_kills_the_process() -> Result<()> {
     };
     let streams = SpdyStreams::wait(&mut connection, expected).await?;
     let (_input, output) = streams.into_parts(connection, Version::V4).await;
-    let mut output = Output::spdy(output);
+    let mut output = Output::spdy(output, None);
 
     let mut process = std::process::Command::new("sleep")
         .arg("60")

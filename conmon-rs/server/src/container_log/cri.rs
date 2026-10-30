@@ -23,7 +23,8 @@ impl CriLogger {
     /// Create a new file logger instance.
     pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> CriLogger {
         Self {
-            file: LogFile::new(path, Some(0o600), max_log_size),
+            // Created readable by the group as well, like by conmon.
+            file: LogFile::new(path, Some(0o640), max_log_size),
             timestamp: Timestamp::default(),
         }
     }

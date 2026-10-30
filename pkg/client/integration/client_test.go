@@ -46,17 +46,40 @@ var _ = Describe("ConmonClient", func() {
 
 	Describe("New", func() {
 		It("should restore from running server", func(ctx SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfig(false)
-			sut = tr.configGivenEnv()
+			runContainer(ctx, false, []string{"/busybox", "sleep", "60"})
+
 			sut2 := tr.configGivenEnv()
 			Expect(sut2.PID()).To(Equal(sut.PID()))
 
-			// Only the client goes away, the cleanup stops the server.
+			// The container of the server can be used through the new
+			// client.
+			result, err := sut2.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+				ID:      tr.ctrID,
+				Command: []string{"/busybox", "echo", "hello"},
+				Timeout: 10,
+			})
+			Expect(err).To(Succeed())
+			Expect(result.ExitCode).To(BeZero())
+			Expect(string(result.Stdout)).To(Equal("hello\n"))
+			Expect(sut2.ReopenLogContainer(ctx, &client.ReopenLogContainerConfig{
+				ID: tr.ctrID,
+			})).To(Succeed())
+
+			// Only the client goes away.
 			Expect(sut2.Close()).To(Succeed())
 
-			_, err := sut.Version(ctx, &client.VersionConfig{})
+			_, err = sut.Version(ctx, &client.VersionConfig{})
 			Expect(err).To(Succeed())
+
+			// Another one stops the server, which stops the container.
+			sut3 := tr.configGivenEnv()
+			DeferCleanup(sut3.Close)
+			DeferCleanup(sut.Close)
+			Expect(sut3.Shutdown()).To(Succeed())
+
+			sut = nil
+
+			tr.expectContainerStoppedOrGone()
 		}, SpecTimeout(specTimeout))
 
 		It("should start with an output writer which is no file", func(_ SpecContext) {
@@ -200,16 +223,7 @@ var _ = Describe("ConmonClient", func() {
 			Expect(filepath.Join(tr.tmpDir, "conmon.sock")).NotTo(BeAnExistingFile())
 			Expect(filepath.Join(tr.tmpDir, "conmon-fd.sock")).NotTo(BeAnExistingFile())
 
-			// The runtime reports the killed container as stopped, or
-			// not at all once it got deleted.
-			Eventually(func() bool {
-				stopped := tr.rr.RunCommandCheckOutput("stopped", "list") == nil
-				// Only a listing without the container counts, not a
-				// failed listing.
-				gone := errors.Is(tr.rr.RunCommandCheckOutput(tr.ctrID, "list"), errNoMatch)
-
-				return stopped || gone
-			}, time.Second*5).Should(BeTrue(), "container still created")
+			tr.expectContainerStoppedOrGone()
 		}
 
 		for _, terminal := range []bool{true, false} {
@@ -467,9 +481,11 @@ var _ = Describe("ConmonClient", func() {
 
 			It(testName("should reopen logs based on max size", terminal), func(ctx SpecContext) {
 				tr = newTestRunner()
+				// The last line has no newline, which a terminal may pass on
+				// in a read of its own, its entry would rotate the log again.
 				tr.createRuntimeConfigWithProcessArgs(
 					terminal,
-					[]string{"/busybox", "sh", "-c", "echo hello && echo world"},
+					[]string{"/busybox", "sh", "-c", "echo hello && echo -n world"},
 					nil,
 				)
 				sut = tr.configGivenEnv()
@@ -479,10 +495,10 @@ var _ = Describe("ConmonClient", func() {
 				tr.startContainer()
 
 				// The second line exceeds the size and rotates the log, so
-				// only it survives.
+				// only it survives, as a partial line.
 				Eventually(fileContents, 5*time.Second).
 					WithArguments(tr.logPath()).
-					Should(ContainSubstring("world"))
+					Should(ContainSubstring(" P world"))
 				Expect(fileContents(tr.logPath())).NotTo(ContainSubstring("hello"))
 			}, SpecTimeout(specTimeout))
 			It(testName("should respect global args", terminal), func(ctx SpecContext) {

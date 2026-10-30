@@ -106,14 +106,23 @@ const EXEC_PATH: &str = "exec";
 const ATTACH_PATH: &str = "attach";
 const PORT_FORWARD_PATH: &str = "portforward";
 
-/// The largest WebSocket message and frame a client may send. Clients send
-/// stdin, which kubectl reads in 32 KiB chunks and the attach sockets cap at
-/// 64 KiB per packet, and small resize events. The defaults of 64 MiB per
-/// message, or the 32 MiB of Kubernetes, would let a client make the server
-/// buffer that much per message. A client which sends more, like the Python
-/// client which sends all stdin of a write in one message, fails its session
-/// with a status and a close which tell why.
-const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+/// The largest WebSocket message and frame a client of exec or attach may
+/// send. Clients send stdin, which kubectl reads in 32 KiB chunks and the
+/// attach sockets cap at 64 KiB per packet, and small resize events. The
+/// Python client sends all stdin of a write in one message, 1 MiB at a time
+/// for `k8s_cp` of Ansible, a third more in base64. The defaults of 64 MiB
+/// per message, or the 32 MiB of Kubernetes, would let a client make the
+/// server buffer that much per message. A client which sends more fails its
+/// session with a status and a close which tell why.
+const MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+
+/// The largest WebSocket message and frame a client of port forwarding may
+/// send. A single message must not carry more than a connection takes while
+/// it gets established, the `CONNECT_BUFFER` of [`port_forward`], nor all
+/// that the ports of a WebSocket hold together, its `CHANNEL_BUFFER`. A
+/// client which sends more gets the WebSocket closed with a code which tells
+/// why.
+const PORT_FORWARD_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
 /// The error of a request for a URL while too many of its kind wait for
 /// their client. Clients match it, see `ErrTooManyRequests` of the Go client,

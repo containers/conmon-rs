@@ -1361,6 +1361,31 @@ func TestKillContext(t *testing.T) {
 	}
 }
 
+func TestWaitIntervalBacksOff(t *testing.T) {
+	t.Parallel()
+
+	// The checks start right after the signal and back off to the longest
+	// interval, which they keep.
+	interval := minWaitInterval
+	for _, want := range []time.Duration{
+		time.Millisecond,
+		2 * time.Millisecond,
+		4 * time.Millisecond,
+		8 * time.Millisecond,
+		16 * time.Millisecond,
+		32 * time.Millisecond,
+		64 * time.Millisecond,
+		100 * time.Millisecond,
+		100 * time.Millisecond,
+	} {
+		if interval != want {
+			t.Fatalf("got interval %v, want %v", interval, want)
+		}
+
+		interval = nextWaitInterval(interval)
+	}
+}
+
 func TestCloseDuringShutdownKeepsPidfd(t *testing.T) {
 	t.Parallel()
 

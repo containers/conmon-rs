@@ -2,7 +2,7 @@
 
 use crate::{
     streaming_server::{
-        ADDR, StreamingServer,
+        ADDR, PORT_FORWARD_MAX_MESSAGE_SIZE, StreamingServer,
         spdy::testing::{Client, Headers},
         testing::*,
     },
@@ -333,14 +333,14 @@ async fn port_forward_over_websocket_closes_on_too_large_messages() -> Result<()
             server_frame(&mut stream).await?;
             server_frame(&mut stream).await?;
             let _connection = accepted.await??;
-            let (reader, writer) = send_too_large(stream);
+            let (reader, writer) = send_too_large(stream, PORT_FORWARD_MAX_MESSAGE_SIZE);
             too_large_close(reader, writer).await?;
 
             // The tunnel, which carries SPDY.
             let (response, stream) =
                 port_forward_websocket(&server, "", "SPDY/3.1+portforward.k8s.io").await?;
             assert!(response.starts_with("http/1.1 101"), "{response}");
-            let (reader, writer) = send_too_large(stream);
+            let (reader, writer) = send_too_large(stream, PORT_FORWARD_MAX_MESSAGE_SIZE);
             too_large_close(reader, writer).await
         })
         .await
@@ -377,7 +377,7 @@ async fn port_forward_closes_on_too_large_messages_of_clients_which_do_not_read(
             // server waits for it, then writes all of its message
             // before it reads.
             time::sleep(Duration::from_secs(1)).await;
-            let (reader, writer) = send_too_large(stream);
+            let (reader, writer) = send_too_large(stream, PORT_FORWARD_MAX_MESSAGE_SIZE);
             let written = wait_for(|| writer.is_finished()).await;
             pod.abort();
             written.context("the server does not take the rest of the message")?;

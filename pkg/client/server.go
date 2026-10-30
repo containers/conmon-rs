@@ -891,18 +891,31 @@ func (c *ConmonClient) killServer(
 	return c.waitServerExited(ctx, server, timeout)
 }
 
+// The first and the longest interval between the checks of waitServerExited,
+// and how much the interval grows after each check.
+const (
+	minWaitInterval = time.Millisecond
+	maxWaitInterval = 100 * time.Millisecond
+	waitBackoff     = 2
+)
+
+// nextWaitInterval grows the interval between the checks of
+// waitServerExited, up to maxWaitInterval.
+func nextWaitInterval(interval time.Duration) time.Duration {
+	return min(waitBackoff*interval, maxWaitInterval)
+}
+
 // waitServerExited waits for the server to exit, up to the timeout or until
-// the context ends.
+// the context ends. A server mostly exits right after the signal, the checks
+// back off from there, so that stopping it does not take a whole interval.
 func (c *ConmonClient) waitServerExited(
 	ctx context.Context,
 	server *serverProcess,
 	timeout time.Duration,
 ) error {
-	const waitInterval = 100 * time.Millisecond
-
 	deadline := time.Now().Add(timeout)
 
-	for {
+	for interval := minWaitInterval; ; interval = nextWaitInterval(interval) {
 		// A zombie server, which nobody reaped yet, is gone as well.
 		if c.serverExited(server) {
 			c.serverGoneForGood(server)
@@ -917,7 +930,7 @@ func (c *ConmonClient) waitServerExited(
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("wait for server PID: %w", ctx.Err())
-		case <-time.After(waitInterval):
+		case <-time.After(interval):
 		}
 	}
 }

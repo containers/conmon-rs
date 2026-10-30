@@ -149,3 +149,32 @@ async fn init_failure() -> Result<()> {
     assert!(sut.init().await.is_err());
     Ok(())
 }
+
+#[tokio::test]
+async fn cri_log_is_readable_by_the_group() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    // The server runs with the umask 022, the tests with the one of the
+    // caller, which may take more.
+    let umask = std::fs::read_to_string("/proc/self/status")?
+        .lines()
+        .find_map(|line| line.strip_prefix("Umask:"))
+        .context("no umask")?
+        .trim()
+        .to_owned();
+    let expected = 0o640 & !u32::from_str_radix(&umask, 8)?;
+
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("log");
+    let mode = || -> Result<u32> { Ok(std::fs::metadata(&path)?.permissions().mode() & 0o777) };
+    let mut sut = CriLogger::new(&path, Some(entry("stdout", "F", "a").len()));
+    sut.freeze_timestamp(TIMESTAMP);
+    sut.init().await?;
+    assert_eq!(mode()?, expected);
+
+    // Also the file which replaces it on rotation.
+    sut.write_chunk(Pipe::StdOut, b"a\nb\n").await?;
+    assert_eq!(std::fs::read_to_string(&path)?, entry("stdout", "F", "b"));
+    assert_eq!(mode()?, expected);
+    Ok(())
+}

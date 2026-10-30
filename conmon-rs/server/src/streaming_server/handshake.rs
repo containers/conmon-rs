@@ -1,7 +1,7 @@
 //! The upgrade of a request to a WebSocket or to SPDY, by the protocols the
 //! client asks for.
 
-use super::{MAX_MESSAGE_SIZE, Session, State, StreamingServer};
+use super::{MAX_MESSAGE_SIZE, PORT_FORWARD_MAX_MESSAGE_SIZE, Session, State, StreamingServer};
 use crate::{
     random_id::RandomId,
     streaming_server::{
@@ -219,7 +219,7 @@ impl StreamingServer {
             return web::status(StatusCode::NOT_FOUND);
         };
         ws.protocol(subprotocol)
-            .max_message_size(MAX_MESSAGE_SIZE)
+            .max_message_size(PORT_FORWARD_MAX_MESSAGE_SIZE)
             .on_upgrade(move |socket| {
                 session
                     .serve_websocket(socket, protocol, ports)

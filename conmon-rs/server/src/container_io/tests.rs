@@ -38,9 +38,13 @@ fn data(message: Message) -> Bytes {
     }
 }
 
-/// Distinct output, so that a lost or reordered chunk is noticed.
+/// Distinct output, so that a lost or reordered chunk is noticed. Built
+/// from whole blocks, byte by byte takes long in emulated tests.
 fn pattern(len: usize) -> Vec<u8> {
-    (0..251).cycle().take(len).collect()
+    let block: Vec<u8> = (0..251).collect();
+    let mut pattern = block.repeat(len.div_ceil(block.len()));
+    pattern.truncate(len);
+    pattern
 }
 
 #[tokio::test]

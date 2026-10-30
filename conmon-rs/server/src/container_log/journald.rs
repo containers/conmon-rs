@@ -77,8 +77,9 @@ impl JournaldLogger {
     const MAX_LABEL_BYTES: usize = 64 * 1024;
 
     /// A logger with the fields conmon writes: the container ID, the name
-    /// and the tag if given, which is the syslog identifier as well, and the
-    /// labels.
+    /// and the tag if given, the syslog identifier and the labels. Like for
+    /// conmon, the syslog identifier is the tag, the name without one, and
+    /// the short container ID without both.
     pub fn new<'a>(
         id: &str,
         name: &str,
@@ -89,17 +90,18 @@ impl JournaldLogger {
         let mut fields = Entry::default();
         fields
             .field("CONTAINER_ID_FULL", id)
-            .field("CONTAINER_ID", short_id);
+            .field("CONTAINER_ID", &short_id);
         if !name.is_empty() {
             fields.field("CONTAINER_NAME", name);
         }
-        if tag.is_empty() {
-            fields.field("SYSLOG_IDENTIFIER", journal::IDENTIFIER);
-        } else {
-            fields
-                .field("CONTAINER_TAG", tag)
-                .field("SYSLOG_IDENTIFIER", tag);
+        if !tag.is_empty() {
+            fields.field("CONTAINER_TAG", tag);
         }
+        let identifier = [tag, name, &short_id]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .unwrap_or(journal::IDENTIFIER);
+        fields.field("SYSLOG_IDENTIFIER", identifier);
         let (mut count, mut bytes) = (0, 0);
         for (key, value) in labels {
             Self::validate_label(key)?;

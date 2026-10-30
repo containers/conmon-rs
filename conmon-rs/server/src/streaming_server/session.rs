@@ -1,7 +1,7 @@
 //! What exec and attach sessions share: the connection to the client, its
 //! input and the final status.
 
-use super::{MAX_MESSAGE_SIZE, Session, StreamingServer};
+use super::{Session, StreamingServer};
 use crate::{
     attach::SharedContainerAttach,
     container_io::SharedContainerIO,
@@ -47,8 +47,8 @@ use tracing::{debug, error, info, trace};
 /// How much stdin the read task holds while the container does not take it,
 /// on top of the stdin channel. The socket is still read meanwhile, so that
 /// resize events and the close do not wait behind it. The message which
-/// fills it comes on top.
-pub(super) const PENDING_STDIN_MAX_BYTES: usize = MAX_MESSAGE_SIZE;
+/// fills it comes on top, also when it is larger than all of it.
+pub(super) const PENDING_STDIN_MAX_BYTES: usize = 1024 * 1024;
 
 /// The largest part of stdin which goes towards the container at once, like
 /// the largest packets of the attach sockets. Larger stdin gets split without
@@ -195,7 +195,13 @@ impl StreamingServer {
         let written = socket.get_ref().written();
         let (sender, messages) = socket.split();
         let activity = Activity::new();
-        let mut output = Output::websocket(sender, framing, activity.clone(), written);
+        let mut output = Output::websocket(
+            sender,
+            framing,
+            activity.clone(),
+            written,
+            session.idle_timeout(),
+        );
         // A client which went away already ends the session in its loop,
         // which tears it down.
         if let Err(e) = output.announce(session.stdout(), session.stderr()).await {
@@ -240,7 +246,8 @@ impl StreamingServer {
             }
         };
         let (input, output) = streams.into_parts(connection, version).await;
-        Self::run_session(Output::spdy(output), input, session, activity).await;
+        let output = Output::spdy(output, session.idle_timeout());
+        Self::run_session(output, input, session, activity).await;
         info!("Closing SPDY connection");
     }
 
@@ -392,14 +399,19 @@ impl StreamingServer {
                 ),
             };
 
+            // The close tells clients why, also ones which do not read the
+            // status. Their session failed, its end does not wait for the
+            // idle timeout, see [`Output::close_too_large`].
+            if too_large.is_cancelled() {
+                sender.close_too_large();
+            }
             if let Some(status) = Self::final_status(result, status, operation)
                 && let Err(e) = sender.status(&status).await
             {
                 debug!("Unable to send the status: {e:#}");
             }
 
-            // The close tells clients why, also ones which do not read the
-            // status.
+            // Also for a message which came while the status went out.
             if too_large.is_cancelled() {
                 sender.close_too_large();
             }

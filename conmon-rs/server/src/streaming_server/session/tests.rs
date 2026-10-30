@@ -3,9 +3,10 @@ use crate::{
     container_io::{ContainerIO, Message as IOMessage, Pipe, SharedContainerIO},
     container_log::ContainerLog,
     streaming_server::{
-        AttachSession, StreamingServer,
+        AttachSession, MAX_MESSAGE_SIZE, StreamingServer,
+        idle::STALL_TIMEOUT,
         remotecommand::{
-            ClientEvent, MESSAGE_TOO_LARGE, STDIN_BYTE, STREAM_ERR_BYTE, Status, Stdin,
+            ClientEvent, MESSAGE_TOO_LARGE, STDIN_BYTE, STDOUT_BYTE, STREAM_ERR_BYTE, Status, Stdin,
         },
         session::PENDING_STDIN_MAX_BYTES,
         spdy::testing::{Client, Frame},
@@ -57,11 +58,36 @@ async fn stdin_before_close_reaches_the_container() -> Result<()> {
 }
 
 #[tokio::test]
+async fn messages_larger_than_the_pending_stdin_reach_the_container() -> Result<()> {
+    LocalSet::new()
+        .run_until(async {
+            let (io, _server, mut stream) = attach_session(true, false).await?;
+
+            // Like the Python client, which sends 1 MiB and the channel byte
+            // per message for `k8s_cp` of Ansible.
+            let mut message = vec![STDIN_BYTE];
+            message.resize(PENDING_STDIN_MAX_BYTES + 1, b'x');
+            stream.write_all(&client_frame(0x2, &message)).await?;
+
+            let attach = io.attach().await;
+            let mut stdin = 0;
+            while stdin < PENDING_STDIN_MAX_BYTES {
+                let data = time::timeout(Duration::from_secs(5), attach.read()).await??;
+                assert!(data.iter().all(|b| *b == b'x'));
+                stdin += data.len();
+            }
+            assert_eq!(stdin, PENDING_STDIN_MAX_BYTES);
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
 async fn messages_larger_than_the_limit_fail_the_session() -> Result<()> {
     LocalSet::new()
         .run_until(async {
             let (_io, _server, stream) = attach_session(true, false).await?;
-            let (mut reader, writer) = send_too_large(stream);
+            let (mut reader, writer) = send_too_large(stream, MAX_MESSAGE_SIZE);
 
             // The client learns why, from the status and the close.
             let (opcode, status) = server_frame(&mut reader).await?;
@@ -98,7 +124,7 @@ async fn too_large_messages_of_clients_which_do_not_read_fail_the_session() -> R
                 })
             };
             time::sleep(Duration::from_secs(1)).await;
-            let (mut reader, writer) = send_too_large(stream);
+            let (mut reader, writer) = send_too_large(stream, MAX_MESSAGE_SIZE);
             let written = wait_for(|| writer.is_finished()).await;
             output.abort();
             written.context("the server does not take the rest of the message")?;
@@ -122,6 +148,56 @@ async fn too_large_messages_of_clients_which_do_not_read_fail_the_session() -> R
             too_large_end(reader, writer).await
         })
         .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn too_large_sessions_end_without_the_idle_timeout() -> Result<()> {
+    let (client, server) = tokio::io::duplex(1024);
+    let mut connection =
+        Connection::serve(server, None, None, |h| SpdyStreams::accept(h, Version::V4));
+    let mut client = Client::new(client)?;
+    client.open(1, [("streamType", "error")].into()).await?;
+    client.open(3, [("streamType", "stdout")].into()).await?;
+    let expected = ExpectedStreams {
+        stdin: false,
+        stdout: true,
+        stderr: false,
+    };
+    let streams = SpdyStreams::wait(&mut connection, expected).await?;
+    let (_input, output) = streams.into_parts(connection, Version::V4).await;
+    let idle_timeout = Some(Duration::from_secs(3600));
+    let mut output = Output::spdy(output, idle_timeout);
+
+    // The client does not read, the output backs up.
+    let data = Bytes::from(vec![0; 32 * 1024]);
+    let backed_up = async { while output.data(STDOUT_BYTE, &data).await.is_ok() {} };
+    assert!(
+        time::timeout(Duration::from_secs(1), backed_up)
+            .await
+            .is_err()
+    );
+
+    // Then it sends a message which is too large, which fails the session.
+    let (_io, child, _token) = attach_child(false)?;
+    let session = Session::Attach(AttachSession {
+        container_id: "id".into(),
+        child,
+        stdin: false,
+        stdout: true,
+        stderr: false,
+        stop_after_stdin_eof: false,
+        idle_timeout,
+    });
+    let (client_rx, _senders) = ClientRx::idle();
+    client_rx.too_large.cancel();
+
+    // The status and the close do not wait for the idle timeout.
+    let start = time::Instant::now();
+    let output = StreamingServer::write_task(output, client_rx, session, Activity::new()).await?;
+    assert!(output.is_none());
+    assert_eq!(start.elapsed(), STALL_TIMEOUT);
+    drop(client);
+    Ok(())
 }
 
 #[tokio::test]
