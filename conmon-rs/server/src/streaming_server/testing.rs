@@ -6,7 +6,7 @@ use crate::{
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     streaming_server::{
-        ADDR, AttachSession, MAX_MESSAGE_SIZE, Session, StreamingServer, remotecommand::Version,
+        ADDR, AttachSession, Session, StreamingServer, remotecommand::Version,
         spdy::testing::Client, web::CloseCode,
     },
 };
@@ -33,20 +33,28 @@ pub(super) fn client_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
             frame.push(0x80 | 126);
             frame.extend_from_slice(&len.to_be_bytes());
         }
-        Err(_) => panic!("payload too large"),
+        Err(_) => {
+            frame.push(0x80 | 127);
+            let len = u64::try_from(payload.len()).expect("fits");
+            frame.extend_from_slice(&len.to_be_bytes());
+        }
     }
     frame.extend_from_slice(&mask);
     frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
     frame
 }
 
-/// Send a masked binary message which is larger than the server takes, in
-/// a task of its own, the server reads its rest only after its close went
-/// out. Returns the reading half of the connection and the task.
-pub(super) fn send_too_large(stream: TcpStream) -> (OwnedReadHalf, JoinHandle<io::Result<()>>) {
+/// Send a masked binary message which is one byte larger than the `limit`
+/// of the server, in a task of its own, the server reads its rest only after
+/// its close went out. Returns the reading half of the connection and the
+/// task.
+pub(super) fn send_too_large(
+    stream: TcpStream,
+    limit: usize,
+) -> (OwnedReadHalf, JoinHandle<io::Result<()>>) {
     let (reader, mut writer) = stream.into_split();
     let writer = tokio::spawn(async move {
-        let len = MAX_MESSAGE_SIZE + 1;
+        let len = limit + 1;
         let mut message = vec![0x82, 0x80 | 127];
         message.extend_from_slice(&u64::try_from(len).expect("fits").to_be_bytes());
         // A zero mask leaves the payload as it is.

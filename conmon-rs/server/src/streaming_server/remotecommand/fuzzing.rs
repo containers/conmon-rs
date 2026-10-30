@@ -139,7 +139,7 @@ pub fn spdy(input: &[u8]) {
                             ClientEvent::TooLarge => panic!("SPDY has no message size limit"),
                         }
                     }
-                    let mut output = Output::spdy(output);
+                    let mut output = Output::spdy(output, None);
                     let _ = output.status(&Status::Success).await;
                     output.close().await;
                 }

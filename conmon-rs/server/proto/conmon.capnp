@@ -145,7 +145,9 @@ interface Conmon {
         containerName @3 :Text;
 
         # The tag of the entries, written as CONTAINER_TAG and as
-        # SYSLOG_IDENTIFIER, which is "conmonrs" without one.
+        # SYSLOG_IDENTIFIER. Without a tag, servers since unreleased use the
+        # container name as the identifier, and the short container ID
+        # without both, like conmon, older ones "conmonrs".
         tag @4 :Text;
 
         # Additional fields of every entry. A key has to be a valid journal

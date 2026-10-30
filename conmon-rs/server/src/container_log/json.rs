@@ -35,7 +35,7 @@ pub struct JsonLogger {
 impl JsonLogger {
     pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> JsonLogger {
         Self {
-            // Created readable by the owner only, like the CRI log.
+            // Created readable by the owner only.
             file: LogFile::new(path, Some(0o600), max_log_size),
         }
     }

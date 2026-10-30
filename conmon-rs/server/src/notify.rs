@@ -258,8 +258,10 @@ impl NotifySocket {
     /// got cut off may miss its ready state or end in the middle of an
     /// assignment, drop it instead.
     fn check_message(message: &[u8]) -> Option<Vec<u8>> {
+        // The container may send any number of them, like the assignments
+        // below, only the debug log tells.
         if message.len() > Self::MAX_MESSAGE_SIZE {
-            warn!(
+            debug!(
                 "Dropping notify message exceeding {} bytes",
                 Self::MAX_MESSAGE_SIZE
             );

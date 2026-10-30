@@ -27,8 +27,9 @@ use tracing_subscriber::fmt::writer::MakeWriter;
 /// The datagram socket journald receives native protocol entries on.
 pub const SOCKET_PATH: &str = "/run/systemd/journal/socket";
 
-/// The SYSLOG_IDENTIFIER of the entries of the server, and of the containers
-/// without a tag, so that `journalctl -t conmonrs` finds them.
+/// The SYSLOG_IDENTIFIER of the entries of the server, so that
+/// `journalctl -t conmonrs` finds them, and of containers without a tag, a
+/// name and an ID.
 pub const IDENTIFIER: &str = "conmonrs";
 
 /// The syslog priorities used for the `PRIORITY` field.

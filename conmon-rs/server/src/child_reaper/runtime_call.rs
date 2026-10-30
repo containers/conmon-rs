@@ -19,7 +19,10 @@ use nix::{
 use std::{
     io,
     ops::{Deref, DerefMut},
-    os::fd::{OwnedFd, RawFd},
+    os::{
+        fd::{OwnedFd, RawFd},
+        unix::process::ExitStatusExt,
+    },
     path::Path,
     process::{ExitStatus, Stdio},
     sync::{Arc, Mutex},
@@ -316,8 +319,14 @@ impl ChildReaper {
             Some(Ok(pid)) => return Ok((pid, token, in_flight)),
             Some(Err(e)) => e,
             None => match status.code() {
-                Some(code) => format_err!("child command exited with: {code}"),
-                None => format_err!("child command exited with signal"),
+                Some(code) => format_err!("runtime exited with status {code}"),
+                // Without an exit code, a signal ended the runtime.
+                None => {
+                    let signal = status.signal().unwrap_or_default();
+                    let name = Signal::try_from(signal)
+                        .map_or_else(|_| signal.to_string(), |s| s.as_str().into());
+                    format_err!("runtime got killed by signal {name}")
+                }
             },
         };
         // Nothing registers the process, so the stdin loops have to be

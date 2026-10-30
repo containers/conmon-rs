@@ -47,8 +47,32 @@ fn short_ids_are_kept() -> Result<()> {
         [
             field("CONTAINER_ID_FULL", "abc"),
             field("CONTAINER_ID", "abc"),
-            field("SYSLOG_IDENTIFIER", "conmonrs"),
+            field("SYSLOG_IDENTIFIER", "abc"),
         ]
+    );
+    Ok(())
+}
+
+#[test]
+fn syslog_identifier_like_conmon() -> Result<()> {
+    let id = "0123456789abcdef";
+    let identifier = |name, tag| -> Result<_> {
+        let logger = JournaldLogger::new(id, name, tag, [])?;
+        let fields = decode(logger.shared.fields.as_bytes());
+        Ok(fields.last().cloned())
+    };
+    // The tag, then the name, as CRI-O passes it, then the short ID.
+    assert_eq!(
+        identifier("k8s_ctr", "tag")?,
+        Some(field("SYSLOG_IDENTIFIER", "tag"))
+    );
+    assert_eq!(
+        identifier("k8s_ctr", "")?,
+        Some(field("SYSLOG_IDENTIFIER", "k8s_ctr"))
+    );
+    assert_eq!(
+        identifier("", "")?,
+        Some(field("SYSLOG_IDENTIFIER", "0123456789ab"))
     );
     Ok(())
 }
@@ -160,7 +184,7 @@ async fn write_lines_sends_entries() -> Result<()> {
             field("MESSAGE", message),
             field("CONTAINER_ID_FULL", "0123456789abcdef"),
             field("CONTAINER_ID", "0123456789ab"),
-            field("SYSLOG_IDENTIFIER", "conmonrs"),
+            field("SYSLOG_IDENTIFIER", "0123456789ab"),
         ];
         if partial {
             fields.push(field("CONTAINER_PARTIAL_MESSAGE", "true"));

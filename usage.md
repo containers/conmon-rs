@@ -28,8 +28,17 @@ The `pod` runtime type is what selects conmon-rs. A `monitor_path` pointing to
 conmonrs with the default `oci` runtime type does not work, CRI-O expects conmon
 there and rejects the configuration.
 
-CRI-O should now use conmon-rs after a restart, which the CRI-O debug logs show
-when it creates a container:
+CRI-O should now use conmon-rs after a restart. Since v1.34, CRI-O logs the
+version of the binary of each runtime handler when it starts, since v1.38 and
+in the releases of the 1.37 branch after v1.37.2 with the
+[features](#features) as well:
+
+```text
+INFO[…] Runtime handler "crun" is using conmon-rs version: …, tag: …, \
+            commit: …, build: …, target: x86_64-unknown-linux-gnu, rustc …, cargo …
+```
+
+Older ones only show it in the debug logs when they create a container:
 
 ```text
 …
@@ -37,6 +46,17 @@ DEBU[…] Using conmonrs version: …, tag: …, commit: …, build: …, \
             target: x86_64-unknown-linux-gnu, rustc …, cargo …  file="oci/runtime_pod.go"
 …
 ```
+
+CRI-O serves exec, attach and port forwarding itself by default. Only with
+`stream_websockets = true` in the runtime handler, since v1.34, it hands exec
+and attach to the [streaming server](#streaming-server) of conmon-rs, the
+sections about it apply only then. CRI-O v1.38, `main` and the releases of the
+1.37 branch after v1.37.2 hand port forwarding to a binary with the
+`portforward` [feature](#features) as well, and turn `stream_websockets` off
+with a warning for a binary without the `streamingprotocols` feature. v1.34 to
+v1.37.2 only do that for a binary before v0.7.0, so leave it off there with a
+server before v1.2.0: those servers only speak `v5.channel.k8s.io`, while the
+kubelet talks SPDY to them.
 
 CRI-O versions since v1.25 support conmon-rs, the `main` branches of both
 projects are kept working together. Which server versions a CRI-O release
@@ -56,6 +76,14 @@ starts for it:
 CRI-O v1.37.2 and older start the servers with the environment of CRI-O and
 use no other `monitor_env` entries for them. The releases of the 1.37 branch
 after v1.37.2 pass them on as well.
+
+CRI-O always passes `--runtime`, `--runtime-dir`, `--runtime-root`,
+`--log-level` and `--log-driver`, which take precedence over their `CONMON_*`
+variables. Only the variables of the other flags take effect, in practice the
+tracing ones while the tracing of CRI-O is off. Do not set `CONMON_SKIP_FORK`,
+`CONMON_VERSION` or `CONMON_VERSION_JSON`: the clients up to v1.2.1, which
+every CRI-O release vendors, pass them on to the server, which then hangs or
+fails every pod.
 
 ## Compatibility
 
@@ -100,8 +128,8 @@ as empty.
 
 From v1.0.0 on, a newer client works with an older server: it checks the
 features of the server before it relies on them, and an older server ignores
-the fields it does not know, whose documentation tells since when the server
-uses them.
+the fields it does not know, the [features](#features) tell which of them a
+server uses.
 
 ## Upgrading
 
@@ -288,11 +316,18 @@ took the missing status for a success. After the close, the server reads and
 drops what the client still sends until it answered the WebSocket close or
 closed the SPDY connection, for up to 5 seconds, as closing a connection with
 unread input resets it, which may lose the end of the session. Port forwarding
-does the same.
+does the same. Exec and attach sessions with an idle timeout wait until the
+client took nothing for it if that is longer, so that a client which pauses
+the output, like a pager, does not lose the end. CRI-O v1.38, `main`
+and the releases of the 1.37 branch after v1.37.2 always pass one, its
+`stream_idle_timeout` of 4 hours by default. A client which vanished without
+a reset while its output backs up holds the end just as long, or until the
+kernel gives up resending to it, after 15 to 30 minutes with the default
+`tcp_retries2` of 15: there is no keepalive.
 
 An exec process which writes more than 16 MiB to stdout or stderr while the
-runtime still starts it gets its output cut there, the session then fails with
-an error status instead of the exit code since unreleased.
+runtime still starts it gets its output cut there. Since unreleased, the
+session then fails with an error status instead of reporting the exit code.
 
 Stdin counts towards the [idle timeout](#limits-and-timeouts) once the server
 reads it. Stdin which backs up behind a process which does not read it stops
@@ -335,8 +370,8 @@ endian `u16`. The session ends once all connections ended.
 | -------------------------------------------------------------- | --------------------------------------------------------------------- |
 | URLs which wait for their client, per kind                     | 1000, see above                                                       |
 | Time until the token of an unused URL expires                  | 60 seconds, the first connection takes it                             |
-| WebSocket message or frame of the client                       | 1 MiB, also for port forwarding, a larger one ends the connection     |
-| Stdin of a session which the process did not take yet          | About 3 MiB, on top of what a SPDY connection holds                   |
+| WebSocket message or frame of the client                       | 1 MiB, 4 MiB for exec and attach since unreleased, more ends it       |
+| Stdin of a session which the process did not take yet          | About 9 MiB, on top of what a SPDY connection holds                   |
 | What the client sent on a SPDY connection which no stream took | About 4 MiB, plus the frame which waits to be placed                  |
 | What a forwarded connection sends while it gets established    | 1 MiB per connection, from a connect budget of 16 MiB per session     |
 | Streams of a SPDY connection                                   | 1024, which count until the server let go of them, also after a reset |
@@ -346,7 +381,7 @@ endian `u16`. The session ends once all connections ended.
 | Time to send the request head, to get upgraded                 | 5 seconds, 10 seconds, see [Streaming security](#streaming-security)  |
 | Request head                                                   | 64 KiB since unreleased, a larger one gets a 431                      |
 | Exec output while the runtime starts the process               | 16 MiB per stream, the session fails above, see above                 |
-| End of a session the client takes nothing of                   | 60 seconds since unreleased, see above                                |
+| End of a session the client takes nothing of                   | 60 seconds or a longer exec or attach idle timeout, since unreleased  |
 | Idle connection                                                | The `idleTimeoutSec` of the request, see below                        |
 
 `idleTimeoutSec` ends a connection which got no frame of the client and no
@@ -481,21 +516,24 @@ it again.
 
 - `containerRuntimeInterface`: the CRI log format, one line per entry with an
   RFC 3339 timestamp in nanoseconds of when the server read the output, the
-  stream, a `P` (partial) or `F` (full) marker and the line.
+  stream, a `P` (partial) or `F` (full) marker and the line. Since unreleased,
+  the files it creates are readable by their group (mode `0640`) like with
+  conmon, before only by their owner.
 - `json`: one JSON object per line with `timestamp` (seconds since the epoch),
   `pipe` (`stdout` or `stderr`), `message` (the line without its ending) and
   `partial: true` when the line had no ending yet.
 - `journald`: one journal entry per line with the fields `CONTAINER_ID_FULL`,
-  `CONTAINER_ID` (the first 12 characters) and `SYSLOG_IDENTIFIER=conmonrs`,
-  at priority info for stdout and error for stderr, so that
+  `CONTAINER_ID` (the first 12 characters) and `SYSLOG_IDENTIFIER`, at
+  priority info for stdout and error for stderr, so that
   `journalctl CONTAINER_ID_FULL=<id>` or `CONTAINER_ID=<short id>` shows the
   output like with conmon. A line which had no ending yet carries
   `CONTAINER_PARTIAL_MESSAGE=true`. The maximum size does not apply. Like the
   options of conmon, `containerName` adds `CONTAINER_NAME`, `tag` adds
-  `CONTAINER_TAG` and replaces the `SYSLOG_IDENTIFIER`, and `labels` add
-  fields of their own, named like journal fields, see `labels` in the
-  schema for the rules and limits. journald drops entries with more than
-  1024 fields.
+  `CONTAINER_TAG`, and `labels` add fields of their own, named like journal
+  fields, see `labels` in the schema for the rules and limits. journald drops
+  entries with more than 1024 fields. Like for conmon, the `SYSLOG_IDENTIFIER`
+  is the `tag`, the `containerName` without one, and the short ID without
+  both, since unreleased. Before, it was `conmonrs` without a `tag`.
 
 The JSON and journald drivers collect whole lines across reads, so a line
 written in several pieces or a multi byte character split by a read still
@@ -535,10 +573,11 @@ by the same process:
 > journalctl CONTAINER_ID_FULL=<id>
 ```
 
-The first command shows the logs of the server together with the output of
-the containers which use the `journald` container log driver without a `tag`,
-the second one also the logs of older servers and the output of containers
-with a `tag`. The third one shows only the output of one container.
+The first command shows the logs of the server, before unreleased together
+with the output of the containers which use the `journald` container log
+driver without a `tag`, the second one also the logs of older servers and the
+output of all containers which use it. The third one shows only the output of
+one container.
 
 The server never waits for the journal with its own entries, they get lost while
 journald does not keep up, for example while it restarts. The lines of container

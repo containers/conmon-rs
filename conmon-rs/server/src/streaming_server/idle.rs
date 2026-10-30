@@ -91,9 +91,29 @@ impl Activity {
         timeout: Duration,
         run: impl Future<Output = T>,
     ) -> Option<T> {
+        self.until_stalled_or_idle(start, timeout, None, run).await
+    }
+
+    /// Like [`Self::until_stalled`], but not before the activity was not
+    /// touched for the idle timeout either. A client which pauses the output,
+    /// like a pager, keeps the end as long as it kept the rest of a session,
+    /// one which ended for its idle timeout gets only the `timeout`, like
+    /// with an idle timeout too large for the clock.
+    pub async fn until_stalled_or_idle<T>(
+        &self,
+        start: Instant,
+        timeout: Duration,
+        idle_timeout: Option<Duration>,
+        run: impl Future<Output = T>,
+    ) -> Option<T> {
+        let deadline = |last: Instant| {
+            let stalled = last.max(start).checked_add(timeout)?;
+            let idle = idle_timeout.and_then(|idle_timeout| last.checked_add(idle_timeout));
+            Some(idle.map_or(stalled, |idle| stalled.max(idle)))
+        };
         let stalled = async {
             loop {
-                let Some(deadline) = self.last().max(start).checked_add(timeout) else {
+                let Some(deadline) = deadline(self.last()) else {
                     return future::pending().await;
                 };
                 if Instant::now() >= deadline {
@@ -212,6 +232,65 @@ mod tests {
         };
         assert_eq!(activity.until_stalled(start, timeout, stalls).await, None);
         assert_eq!(start.elapsed(), Duration::from_secs(8));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalls_end_runs_after_the_idle_timeout() {
+        let activity = Activity::new();
+        let timeout = Duration::from_secs(5);
+        let idle_timeout = Some(Duration::from_secs(60));
+
+        // A client which got something 20 seconds ago, then paused, gets the
+        // rest of the idle timeout.
+        time::sleep(Duration::from_secs(20)).await;
+        let start = Instant::now();
+        let stalls = future::pending::<()>();
+        assert_eq!(
+            activity
+                .until_stalled_or_idle(start, timeout, idle_timeout, stalls)
+                .await,
+            None
+        );
+        assert_eq!(start.elapsed(), Duration::from_secs(40));
+
+        // One which got nothing for the idle timeout still gets the timeout.
+        let start = Instant::now();
+        let stalls = future::pending::<()>();
+        assert_eq!(
+            activity
+                .until_stalled_or_idle(start, timeout, idle_timeout, stalls)
+                .await,
+            None
+        );
+        assert_eq!(start.elapsed(), timeout);
+
+        // Each part which goes out gives it the idle timeout again.
+        activity.touch();
+        let start = Instant::now();
+        let progress = async {
+            for _ in 0..3 {
+                time::sleep(Duration::from_secs(50)).await;
+                activity.touch();
+            }
+        };
+        assert_eq!(
+            activity
+                .until_stalled_or_idle(start, timeout, idle_timeout, progress)
+                .await,
+            Some(())
+        );
+        assert_eq!(start.elapsed(), Duration::from_secs(150));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn huge_idle_timeouts_leave_the_stall_timeout() {
+        let activity = Activity::new();
+        let timeout = Duration::from_secs(5);
+        let start = Instant::now();
+        let stalls = future::pending::<()>();
+        let ended = activity.until_stalled_or_idle(start, timeout, Some(Duration::MAX), stalls);
+        assert_eq!(time::timeout(10 * timeout, ended).await, Ok(None));
+        assert_eq!(start.elapsed(), timeout);
     }
 
     #[tokio::test(start_paused = true)]

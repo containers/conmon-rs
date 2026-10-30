@@ -269,7 +269,7 @@ async fn late_resize_streams_survive_a_cancelled_next() -> Result<()> {
     )
     .await?;
     let (mut input, output) = streams.into_parts(connection, Version::V4).await;
-    let mut output = Output::spdy(output);
+    let mut output = Output::spdy(output, None);
 
     // The client does not read, the data queue of the connection fills.
     let data = Bytes::from(vec![0; 32 * 1024]);
@@ -415,7 +415,7 @@ async fn reset_output_after_the_stdin_close_fails_the_session() -> Result<()> {
     )
     .await?;
     let (_input, output) = streams.into_parts(connection, Version::V4).await;
-    let mut output = Output::spdy(output);
+    let mut output = Output::spdy(output, None);
     // Like after the stdin close of the client.
     output.peer_closed().store(true, Ordering::Release);
 
@@ -456,24 +456,65 @@ async fn closing_a_session_of_a_client_which_does_not_read_ends() -> Result<()> 
     )
     .await?;
     let (_input, output) = streams.into_parts(connection, Version::V4).await;
-    let mut output = Output::spdy(output);
+    let idle_timeout = 4 * STALL_TIMEOUT;
+    let mut output = Output::spdy(output, Some(idle_timeout));
 
-    // The client does not read, the output backs up.
+    // The client does not read, the output backs up until the session ends
+    // for its idle timeout.
     let data = Bytes::from(vec![0; 32 * 1024]);
     let backed_up = async { while output.data(STDOUT_BYTE, &data).await.is_ok() {} };
-    assert!(
-        time::timeout(Duration::from_secs(1), backed_up)
-            .await
-            .is_err()
-    );
+    assert!(time::timeout(idle_timeout, backed_up).await.is_err());
 
-    // The end of the session does not wait for the client forever, the
-    // status and the close share the timeout.
+    // The end of the session does not wait for the client forever, nor for
+    // the idle timeout once more, the status and the close share the
+    // timeout.
     let start = time::Instant::now();
     assert!(output.status(&Status::Success).await.is_err());
     assert!(!output.close().await);
     assert_eq!(start.elapsed(), STALL_TIMEOUT);
     drop(client);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn paused_clients_get_the_status_within_the_idle_timeout() -> Result<()> {
+    let (client, server) = duplex(1024);
+    let mut connection =
+        Connection::serve(server, None, None, |h| SpdyStreams::accept(h, Version::V4));
+    let mut client = Client::new(client)?;
+    client.open(1, [("streamType", "error")].into()).await?;
+    client.open(3, [("streamType", "stdout")].into()).await?;
+    let streams = SpdyStreams::wait(
+        &mut connection,
+        ExpectedStreams {
+            stdin: false,
+            stdout: true,
+            stderr: false,
+        },
+    )
+    .await?;
+    let (_input, output) = streams.into_parts(connection, Version::V4).await;
+    let mut output = Output::spdy(output, Some(4 * STALL_TIMEOUT));
+
+    // A client which pauses longer than the stall timeout, like the user of
+    // a pager, then reads all of it.
+    let reader = tokio::spawn(async move {
+        time::sleep(2 * STALL_TIMEOUT).await;
+        let mut read = vec![];
+        client.io().read_to_end(&mut read).await.map(|_| read)
+    });
+
+    let data = Bytes::from(vec![7; 32 * 1024]);
+    output.data(STDOUT_BYTE, &data).await?;
+    output.status(&Status::Success).await?;
+    assert!(output.close().await);
+    drop(output);
+
+    let frames = spdy::testing::frames(&reader.await??).await?;
+    assert!(frames.iter().any(|frame| matches!(
+        frame,
+        Frame::Data { stream_id: 1, data, .. } if data.as_ref() == SUCCESS_STATUS
+    )));
     Ok(())
 }
 
@@ -495,7 +536,7 @@ async fn slow_clients_get_all_output_and_the_status() -> Result<()> {
     )
     .await?;
     let (_input, output) = streams.into_parts(connection, Version::V4).await;
-    let mut output = Output::spdy(output);
+    let mut output = Output::spdy(output, None);
 
     // A client which takes 16 KiB per second, which reads all output only
     // long after the timeouts, but never stops.

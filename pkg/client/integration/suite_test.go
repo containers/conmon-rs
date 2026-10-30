@@ -418,6 +418,19 @@ func (tr *testRunner) startContainer() {
 	}, time.Second*10).Should(Succeed())
 }
 
+// expectContainerStoppedOrGone waits until the runtime reports the killed
+// container as stopped, or not at all once it got deleted.
+func (tr *testRunner) expectContainerStoppedOrGone() {
+	Eventually(func() bool {
+		stopped := tr.rr.RunCommandCheckOutput("stopped", "list") == nil
+		// Only a listing without the container counts, not a failed
+		// listing.
+		gone := errors.Is(tr.rr.RunCommandCheckOutput(tr.ctrID, "list"), errNoMatch)
+
+		return stopped || gone
+	}, 10*time.Second).Should(BeTrue(), "container still created")
+}
+
 // syncBuffer is a bytes.Buffer which can be read while another goroutine
 // still writes to it.
 type syncBuffer struct {

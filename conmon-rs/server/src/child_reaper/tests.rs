@@ -554,10 +554,30 @@ async fn runtime_output_with_terminal_does_not_block() -> Result<()> {
     };
     let res = time::timeout(Duration::from_secs(20), reaper.create_child(call, &mut io)).await?;
     let err = format!("{:#}", res.err().context("runtime failure expected")?);
-    assert!(err.contains("exited with: 1"), "{err}");
+    assert!(err.contains("runtime exited with status 1"), "{err}");
     assert!(err.trim_end().ends_with("the-error"));
     assert!(err.len() < 2 * RuntimeOutput::MAX_STDERR);
     assert!(start.elapsed() < Duration::from_secs(10));
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_killed_by_a_signal_names_it() -> Result<()> {
+    let reaper = ChildReaper::default();
+    let dir = tempfile::tempdir()?;
+    let mut io = ContainerIO::new(false, ContainerLog::new())?;
+    let pidfile = dir.path().join("pid");
+    let args = ["-c".into(), "kill -KILL $$".into()];
+    let call = RuntimeCall {
+        deadline: Some(Instant::now() + Duration::from_secs(10)),
+        ..RuntimeCall::new(Path::new("sh"), &args, &pidfile)
+    };
+    let res = time::timeout(Duration::from_secs(20), reaper.create_child(call, &mut io)).await?;
+    let err = format!("{:#}", res.err().context("runtime failure expected")?);
+    assert!(
+        err.contains("runtime got killed by signal SIGKILL"),
+        "{err}"
+    );
     Ok(())
 }
 

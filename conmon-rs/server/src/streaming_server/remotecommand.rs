@@ -21,7 +21,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::time::Instant;
+use tokio::time::{Duration, Instant};
 use tracing::debug;
 
 mod spdy;
@@ -150,6 +150,19 @@ pub struct Output {
     /// the [`STALL_TIMEOUT`] from then on, a client which takes nothing does
     /// not get it twice.
     ending: Option<Instant>,
+
+    /// The idle timeout of the session, which its end waits for as well:
+    /// a client which takes nothing, like one which pauses a pager, keeps
+    /// the end until it took nothing for the idle timeout, at least for the
+    /// [`STALL_TIMEOUT`], see [`Activity::until_stalled_or_idle`]. Without
+    /// one, the end waits for the [`STALL_TIMEOUT`] only. A client which
+    /// vanished without a reset while its output backs up holds the end as
+    /// long as well, or until the kernel gives up resending to it, 15 to 30
+    /// minutes with the default `tcp_retries2` of 15: there is no keepalive,
+    /// and nothing waits for the echoes of pings. None once the session
+    /// failed for a message of the client which was too large, see
+    /// [`Self::close_too_large`].
+    idle_timeout: Option<Duration>,
 }
 
 enum Transport {
@@ -169,11 +182,14 @@ enum Transport {
 }
 
 impl Output {
+    /// The output of a WebSocket session, whose end waits for the
+    /// `idle_timeout` of the session as well, see [`Self::idle_timeout`].
     pub fn websocket(
         sender: SplitSink<WebSocket, Message>,
         framing: Framing,
         activity: Activity,
         written: Activity,
+        idle_timeout: Option<Duration>,
     ) -> Self {
         let transport = Transport::WebSocket {
             sender,
@@ -181,30 +197,40 @@ impl Output {
             activity,
             written,
         };
-        Self::new(transport, Arc::default())
+        Self::new(transport, Arc::default(), idle_timeout)
     }
 
     /// The output of a SPDY session, which shares whether the client closed
-    /// its stdin with its input, see [`SpdyInput`](spdy::SpdyInput).
-    pub fn spdy(output: SpdyOutput) -> Self {
+    /// its stdin with its input, see [`SpdyInput`](spdy::SpdyInput), and
+    /// whose end waits for the `idle_timeout` of the session as well, see
+    /// [`Self::idle_timeout`].
+    pub fn spdy(output: SpdyOutput, idle_timeout: Option<Duration>) -> Self {
         let peer_closed = output.peer_closed.clone();
-        Self::new(Transport::Spdy(output), peer_closed)
+        Self::new(Transport::Spdy(output), peer_closed, idle_timeout)
     }
 
-    fn new(transport: Transport, peer_closed: Arc<AtomicBool>) -> Self {
+    fn new(
+        transport: Transport,
+        peer_closed: Arc<AtomicBool>,
+        idle_timeout: Option<Duration>,
+    ) -> Self {
         Self {
             transport,
             failed: false,
             peer_closed,
             too_large: false,
             ending: None,
+            idle_timeout,
         }
     }
 
     /// Close a WebSocket with the code for a message of the client which was
-    /// too large, which tells the client why the session failed.
+    /// too large, which tells the client why the session failed. The session
+    /// failed, its status and its close do not wait for the idle timeout,
+    /// only for the [`STALL_TIMEOUT`].
     pub fn close_too_large(&mut self) {
         self.too_large = true;
+        self.idle_timeout = None;
     }
 
     /// Set by the input once the client closed the connection cleanly.
@@ -256,11 +282,18 @@ impl Output {
 
     /// Send the final status of the session. Over SPDY it waits behind the
     /// output queued before, a slow client gets it all the same, one which
-    /// stopped reading for [`STALL_TIMEOUT`] does not get it.
+    /// stopped reading for [`STALL_TIMEOUT`] does not get it, see
+    /// [`Self::idle_timeout`].
     pub async fn status(&mut self, status: &Status) -> Result<()> {
         let ending = self.ending();
+        let idle_timeout = self.idle_timeout;
         self.written()
-            .until_stalled(ending, STALL_TIMEOUT, self.send_status(status))
+            .until_stalled_or_idle(
+                ending,
+                STALL_TIMEOUT,
+                idle_timeout,
+                self.send_status(status),
+            )
             .await
             .unwrap_or_else(|| Err(anyhow!("client stopped reading before the status")))
     }
@@ -314,11 +347,12 @@ impl Output {
     /// writer flushes what is queued, shuts the connection down and ends it.
     /// A client which takes it slowly gets all of it, one which stopped
     /// reading gets the connection ended after [`STALL_TIMEOUT`], counted
-    /// from the status on. Whether the close went out, which the client of
-    /// a WebSocket answers.
+    /// from the status on, see [`Self::idle_timeout`]. Whether the close
+    /// went out, which the client of a WebSocket answers.
     pub async fn close(&mut self) -> bool {
         let ending = self.ending();
         let written = self.written();
+        let idle_timeout = self.idle_timeout;
         let close = async {
             match &mut self.transport {
                 Transport::WebSocket { .. } => {
@@ -348,7 +382,7 @@ impl Output {
             true
         };
         let closed = written
-            .until_stalled(ending, STALL_TIMEOUT, close)
+            .until_stalled_or_idle(ending, STALL_TIMEOUT, idle_timeout, close)
             .await
             .unwrap_or_else(|| {
                 debug!("Client stopped reading before the end of the session");
