@@ -28,8 +28,8 @@ The `pod` runtime type is what selects conmon-rs. A `monitor_path` pointing to
 conmonrs with the default `oci` runtime type does not work, CRI-O expects conmon
 there and rejects the configuration.
 
-CRI-O should now use conmon-rs after a restart, which is being indicated by the
-debug logs when creating a container:
+CRI-O should now use conmon-rs after a restart, which the CRI-O debug logs show
+when it creates a container:
 
 ```text
 …
@@ -59,14 +59,30 @@ environment variable in parentheses:
 | `-v, --version [full]`            | `CONMON_VERSION`          |                         | Print the version, `full` includes the dependency tree.                            |
 | `-j, --version-json, --vj [full]` | `CONMON_VERSION_JSON`     |                         | Print the version as JSON.                                                         |
 
-When the server forks, the parent writes the child's PID to `pidfile` in the
-runtime directory and exits. The server listens on `conmon.sock` in the runtime
-directory, lowers its own OOM score to -1000, turns transparent huge pages off
-for itself, raises its soft limit of open files to the hard one and acts as
-child subreaper for the containers. The OCI runtime gets the OOM score, the
+Before it forks, the server sets its umask to 022 and removes `NOTIFY_SOCKET`
+from its environment, so that the runtime, the cleanup commands and the pause
+process do not get the sd_notify socket of the caller. It lowers its own OOM
+score to -1000, turns transparent huge pages off for itself and raises its soft
+limit of open files to the hard one. The OCI runtime gets the OOM score, the
 huge pages setting and the open files limits the server started with, so the
 container processes get the OOM score of the client unless it sets
 `process.oomScoreAdj` in the OCI configuration, like CRI-O does.
+
+When the server forks, the parent writes the child's PID to `pidfile` in the
+runtime directory and exits. With a log driver other than `stdout`, the child
+replaces its stdin, stdout and stderr with `/dev/null` like a daemon, so neither
+the server nor the processes it starts write to the ones of the caller anymore.
+The server closes the other file descriptors it inherited, changes into `/`,
+acts as child subreaper for the containers and listens on `conmon.sock` in the
+runtime directory.
+
+The server adds arguments of its own to every runtime call for a container or
+an exec, before the arguments of the request: `--root=<RUNTIME_ROOT>`
+for `--runtime-root`, and `--systemd-cgroup` for the `systemd` cgroup manager
+of the request. If the file name of the runtime is `crun`, it also adds
+`--log=journald:<container ID>`, and for the log levels `debug`, `warn` and
+`error` of the server `--log-level=debug`, `--log-level=warning` or
+`--log-level=error`, crun keeps its default for the other levels.
 
 On SIGTERM or SIGINT, the server kills the containers, stops the pause process
 and removes its sockets within 9.5 seconds, before `Shutdown` of the Go client
@@ -127,6 +143,18 @@ selecting the stream, `2` for stdout and `3` for stderr, followed by up to 8191
 bytes of data. A single `0` byte tells the client that the container output
 ended. This is the same protocol conmon speaks, so existing attach clients
 work unchanged.
+
+With `stopAfterStdinEof`, the server closes the container's stdin once the
+input of a client ended, the output is still forwarded until the container
+closes it. The stdin of a terminal is never closed. The value of the latest
+attach call of a container applies to the connections the server accepts
+afterwards on any of its attach sockets, so all attach calls of a container
+should agree on it, CRI-O derives it from the container configuration.
+
+The container output never waits for an attach client. A client which falls
+more than 100 reads of the output behind, of up to 8 KiB each, about 800 KiB,
+skips the oldest output, which the server logs as a warning. The same applies
+to the attach sessions of the streaming server.
 
 ### Streaming server
 
@@ -374,6 +402,11 @@ its logs on stdout and talk to its socket with a client:
 ```console
 > conmonrs --runtime /usr/bin/crun --runtime-dir /tmp/conmonrs --skip-fork -d stdout -l debug
 ```
+
+A server which fails before it forks, for example because the runtime does not
+exist, makes `client.New` fail with what the server wrote to stderr. With the
+`stdout` log driver, also when `CONMON_LOG_DRIVER` in the `Env` of the
+configuration selects it, the `Stderr` writer gets that output instead.
 
 Only one server runs per runtime directory. A server refuses to start with
 `socket ... is in use by a running server` while another one serves

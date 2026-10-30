@@ -43,3 +43,9 @@ func pidfdExited(*os.File) (bool, error) {
 func openDirPath(path string) (*os.File, error) {
 	return os.Open(path) //nolint:wrapcheck // wrapped by the caller
 }
+
+// serverErrorFile returns a file for the errors of the server launch, memfds
+// are only supported on Linux, see tempErrorFile.
+func serverErrorFile() (*os.File, error) {
+	return tempErrorFile()
+}

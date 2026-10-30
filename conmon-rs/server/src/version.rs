@@ -1,4 +1,4 @@
-//! Generic version information for conmon
+//! Version information of conmonrs, for `--version` and the `version` RPC.
 
 use anyhow::{Context, Result};
 use serde::Serialize;

@@ -1,3 +1,5 @@
+//! The processes the server monitors, containers and execs.
+
 use crate::container_io::SharedContainerIO;
 use nix::unistd::Pid;
 use std::path::PathBuf;

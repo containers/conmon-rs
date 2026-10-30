@@ -11,6 +11,7 @@ import (
 	"capnproto.org/go/capnp/v3"
 	"capnproto.org/go/capnp/v3/rpc"
 	"github.com/containers/conmon-rs/internal/proto"
+	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
@@ -20,7 +21,8 @@ import (
 // once its call is done. A connection which got unusable gets replaced by a
 // new one, which records the features of the server again. A connection
 // which gets reset during the call, like by Close or Shutdown, fails it as
-// disconnected, see ErrServerDisconnected.
+// disconnected, see ErrServerDisconnected. A dial without a server fails
+// with ErrServerUnreachable.
 func (c *ConmonClient) client(ctx context.Context) (proto.Conmon, error) {
 	_, rpcClient, err := c.clientConn(ctx)
 
@@ -69,10 +71,14 @@ func (c *ConmonClient) usableConn(ctx context.Context) (*rpcConn, proto.Conmon, 
 
 	socketConn, err := dialLongSocket("unix", c.socket())
 	if err != nil {
+		if serverMissing(err) {
+			err = fmt.Errorf("%w: %w", ErrServerUnreachable, err)
+		}
+
 		return nil, proto.Conmon{}, false, fmt.Errorf("dial long socket: %w", err)
 	}
 
-	c.conn = newRPCConn(ctx, socketConn)
+	c.conn = newRPCConn(ctx, socketConn, c.logger)
 
 	return c.conn, c.conn.client.AddRef(), true, nil
 }
@@ -232,12 +238,13 @@ type rpcConn struct {
 	broken atomic.Bool
 }
 
-// newRPCConn creates a connection on the socket.
-func newRPCConn(ctx context.Context, socket net.Conn) *rpcConn {
+// newRPCConn creates a connection on the socket. The RPC system logs its
+// errors, like a message of the server it cannot handle, to the logger.
+func newRPCConn(ctx context.Context, socket net.Conn, logger logrus.FieldLogger) *rpcConn {
 	r := &rpcConn{}
 	r.conn = rpc.NewConn(
 		rpc.NewStreamTransport(&watchedSocket{Conn: socket, broken: &r.broken}),
-		nil,
+		&rpc.Options{Logger: rpcLogger{logger: logger}},
 	)
 
 	// The bootstrap capability is shared by all later calls, the end of the
@@ -249,6 +256,43 @@ func newRPCConn(ctx context.Context, socket net.Conn) *rpcConn {
 	go r.watchBootstrap(ctx, bootstrap)
 
 	return r
+}
+
+// rpcLogger passes the logs of the RPC system to the logger of the client,
+// at debug level: the errors it logs also fail the calls they belong to, or
+// end the connection, which the next call replaces.
+type rpcLogger struct {
+	logger logrus.FieldLogger
+}
+
+func (l rpcLogger) Debug(message string, args ...any) { l.log("debug", message, args) }
+
+func (l rpcLogger) Info(message string, args ...any) { l.log("info", message, args) }
+
+func (l rpcLogger) Warn(message string, args ...any) { l.log("warn", message, args) }
+
+func (l rpcLogger) Error(message string, args ...any) { l.log("error", message, args) }
+
+// log logs the message with the key value pairs of the arguments as fields,
+// and the level of the RPC system.
+func (l rpcLogger) log(level, message string, args []any) {
+	fields := logrus.Fields{"rpcLevel": level}
+
+	for i := 0; i < len(args); i += 2 {
+		key, ok := args[i].(string)
+		if !ok {
+			key = fmt.Sprint(args[i])
+		}
+
+		var value any
+		if i+1 < len(args) {
+			value = args[i+1]
+		}
+
+		fields[key] = value
+	}
+
+	l.logger.WithFields(fields).Debug("RPC: " + message)
 }
 
 // usable reports whether the connection can still be used. It only reads

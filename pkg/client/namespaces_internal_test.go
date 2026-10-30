@@ -2,9 +2,13 @@ package client
 
 import (
 	"errors"
+	"fmt"
+	"maps"
 	"slices"
+	"strings"
 	"testing"
 
+	"capnproto.org/go/capnp/v3"
 	"github.com/containers/conmon-rs/internal/proto"
 	"go.podman.io/storage/pkg/idtools"
 )
@@ -98,4 +102,118 @@ func TestMappingsToSlice(t *testing.T) {
 	if got := mappingsToSlice(nil); len(got) != 0 {
 		t.Fatalf("got mappings %q without any", got)
 	}
+}
+
+// namespacesResponse returns a response of the server with the namespaces,
+// ordered by their values.
+func namespacesResponse(
+	t *testing.T, namespaces map[proto.Conmon_Namespace]string,
+) proto.Conmon_CreateNamespacesResponse {
+	t.Helper()
+
+	_, seg, err := capnp.NewMessage(capnp.SingleSegment(nil))
+	if err != nil {
+		t.Fatalf("new message: %v", err)
+	}
+
+	response, err := proto.NewRootConmon_CreateNamespacesResponse(seg)
+	if err != nil {
+		t.Fatalf("new response: %v", err)
+	}
+
+	list, err := response.NewNamespaces(int32(len(namespaces)))
+	if err != nil {
+		t.Fatalf("new namespaces: %v", err)
+	}
+
+	for i, typ := range slices.Sorted(maps.Keys(namespaces)) {
+		list.At(i).SetType(typ)
+
+		if err := list.At(i).SetPath(namespaces[typ]); err != nil {
+			t.Fatalf("set path: %v", err)
+		}
+	}
+
+	return response
+}
+
+func TestReadCreateNamespacesResponse(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		namespaces map[proto.Conmon_Namespace]string
+		want       []*NamespacesResponse
+		wantErr    error
+	}{
+		{
+			name: "none",
+			want: []*NamespacesResponse{},
+		},
+		{
+			name: "all",
+			namespaces: map[proto.Conmon_Namespace]string{
+				proto.Conmon_Namespace_ipc:  "/run/ipcns/id",
+				proto.Conmon_Namespace_pid:  "/run/pidns/id",
+				proto.Conmon_Namespace_net:  "/run/netns/id",
+				proto.Conmon_Namespace_user: "/run/userns/id",
+				proto.Conmon_Namespace_uts:  "/run/utsns/id",
+			},
+			want: []*NamespacesResponse{
+				// In the order of the values of the server, which differ
+				// from the ones of the client.
+				{Type: NamespaceIPC, Path: "/run/ipcns/id"},
+				{Type: NamespaceNet, Path: "/run/netns/id"},
+				{Type: NamespacePID, Path: "/run/pidns/id"},
+				{Type: NamespaceUser, Path: "/run/userns/id"},
+				{Type: NamespaceUTS, Path: "/run/utsns/id"},
+			},
+		},
+		{
+			// From a newer server.
+			name: "unknown namespace",
+			namespaces: map[proto.Conmon_Namespace]string{
+				proto.Conmon_Namespace_net: "/run/netns/id",
+				proto.Conmon_Namespace(42): "/run/newns/id",
+			},
+			wantErr: ErrInvalidValue,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := readCreateNamespacesResponse(namespacesResponse(t, tc.namespaces))
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("got error %v, want %v", err, tc.wantErr)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("read response: %v", err)
+			}
+
+			if !slices.EqualFunc(got.Namespaces, tc.want, func(a, b *NamespacesResponse) bool {
+				return *a == *b
+			}) {
+				t.Fatalf(
+					"got namespaces %s, want %s",
+					formatNamespaces(got.Namespaces),
+					formatNamespaces(tc.want),
+				)
+			}
+		})
+	}
+}
+
+// formatNamespaces formats the namespaces of a response for a failure.
+func formatNamespaces(namespaces []*NamespacesResponse) string {
+	formatted := make([]string, 0, len(namespaces))
+	for _, namespace := range namespaces {
+		formatted = append(formatted, fmt.Sprintf("%+v", *namespace))
+	}
+
+	return strings.Join(formatted, ", ")
 }

@@ -11,11 +11,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sirupsen/logrus"
 	"go.podman.io/common/pkg/detach"
+	"go.podman.io/common/pkg/resize"
 )
 
 // testOut is an output stream which records what got written and whether
@@ -452,4 +454,97 @@ func TestDetachStopsOutput(t *testing.T) {
 	if later, _ := stdout.state(); later != out {
 		t.Fatalf("output written after the attach returned: %q", later[len(out):])
 	}
+}
+
+// countingOut counts how often it got closed.
+type countingOut struct {
+	closes atomic.Int32
+}
+
+func (*countingOut) Write(b []byte) (int, error) { return len(b), nil }
+
+func (o *countingOut) Close() error {
+	o.closes.Add(1)
+
+	return nil
+}
+
+func TestCloseOutputStreams(t *testing.T) {
+	t.Parallel()
+
+	// None at all.
+	closeOutputStreams(AttachStreams{})
+
+	shared := &countingOut{}
+	out := &Out{shared}
+	closeOutputStreams(AttachStreams{Stdout: out, Stderr: out})
+
+	if got := shared.closes.Load(); got != 1 {
+		t.Fatalf("shared stream closed %d times, want once", got)
+	}
+
+	stdout, stderr := &countingOut{}, &countingOut{}
+	closeOutputStreams(AttachStreams{Stdout: &Out{stdout}, Stderr: &Out{stderr}})
+
+	if stdout.closes.Load() != 1 || stderr.closes.Load() != 1 {
+		t.Fatalf("got closes %d and %d, want one each", stdout.closes.Load(), stderr.closes.Load())
+	}
+
+	stderrOnly := &countingOut{}
+	closeOutputStreams(AttachStreams{Stderr: &Out{stderrOnly}})
+
+	if got := stderrOnly.closes.Load(); got != 1 {
+		t.Fatalf("stderr closed %d times, want once", got)
+	}
+}
+
+func TestForwardResizeEvents(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	requests, _ := serveRecording(t, dir)
+
+	c := newTestClient(t, dir, logrus.New())
+	t.Cleanup(func() { c.Close() })
+
+	// Without a channel nothing gets forwarded.
+	c.forwardResizeEvents(t.Context(), &AttachConfig{ID: "id"}, nil)
+
+	resizes := make(chan resize.TerminalSize, 3)
+
+	// Sizes without a width or height get skipped.
+	for _, size := range []resize.TerminalSize{
+		{Width: 0, Height: 24},
+		{Width: 80, Height: 0},
+		{Width: 80, Height: 24},
+	} {
+		resizes <- size
+	}
+
+	close(resizes)
+
+	// Returns once the channel got closed.
+	c.forwardResizeEvents(t.Context(), &AttachConfig{ID: "id", Resize: resizes}, nil)
+
+	want := request{
+		method: "SetWindowSizeContainer",
+		text:   `(id = "id", width = 80, height = 24, metadataOld = void, metadata = [])`,
+	}
+
+	if got := <-requests; got != want {
+		t.Fatalf("got request %v, want %v", got, want)
+	}
+
+	select {
+	case got := <-requests:
+		t.Fatalf("got another request %v", got)
+	default:
+	}
+
+	// Returns once the attach is done, without reading the channel.
+	done := make(chan struct{})
+	close(done)
+
+	pending := make(chan resize.TerminalSize)
+	c.forwardResizeEvents(t.Context(), &AttachConfig{ID: "id", Resize: pending}, done)
 }

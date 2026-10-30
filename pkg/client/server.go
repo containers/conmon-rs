@@ -120,6 +120,17 @@ func (c *ConmonClient) connectRunningServer(ctx context.Context) (bool, error) {
 			return false, nil
 		}
 
+		// The backlog of the socket is full, the server does not accept
+		// the connections it got.
+		if errors.Is(err, syscall.EAGAIN) {
+			return false, fmt.Errorf(
+				"%w: server on %s: %w",
+				ErrServerNotResponding,
+				c.socket(),
+				err,
+			)
+		}
+
 		return false, fmt.Errorf(
 			"dial server socket %s, not starting another server: %w",
 			c.socket(),
@@ -130,7 +141,7 @@ func (c *ConmonClient) connectRunningServer(ctx context.Context) (bool, error) {
 	// Known before the probe, which may not get an answer.
 	pid, pidErr := peerPID(socketConn)
 
-	conn := newRPCConn(ctx, socketConn)
+	conn := newRPCConn(ctx, socketConn, c.logger)
 
 	c.connMu.Lock()
 	c.closeConnLocked()
@@ -253,10 +264,13 @@ func (c *ConmonClient) startServer(
 		Setpgid: true,
 	}
 
-	// A nil environment inherits the one of the client process.
-	cmd.Env = config.Env
+	cmd.Env = serverEnv(config.Env)
 
-	if config.LogDriver == LogDriverStdout {
+	// The errors of the launch, like an invalid configuration, which the
+	// server reports on stderr before it forks.
+	var errFile *os.File
+
+	if serverLogDriver(config.LogDriver, cmd.Env) == LogDriverStdout {
 		release, err := c.setServerOutput(cmd, config)
 		if err != nil {
 			return fmt.Errorf("set server output: %w", err)
@@ -265,13 +279,121 @@ func (c *ConmonClient) startServer(
 		// The server inherits the files, the copies of the parent are not
 		// needed once it got launched.
 		defer release()
+	} else if file, fileErr := serverErrorFile(); fileErr != nil {
+		c.logger.WithError(fileErr).
+			Debug("Unable to create the server error file, discarding its errors")
+	} else {
+		// Only the launch writes to it, the forked server replaces its
+		// stdio with /dev/null right away, see Server::start in
+		// conmon-rs/server/src/server.rs. Older servers keep it as stderr
+		// until they exit, so it then also holds what they write there
+		// after the fork. The copy of the client is not needed after the
+		// launch.
+		defer file.Close()
+
+		errFile = file
+		cmd.Stderr = file
 	}
 
 	if err := cmd.Run(); err != nil {
+		if output := readServerErrors(errFile); output != "" {
+			return fmt.Errorf("run server command: %w: %s", err, output)
+		}
+
 		return fmt.Errorf("run server command: %w", err)
 	}
 
 	return nil
+}
+
+// serverLogDriver returns the log driver of the server launch: the one of
+// the configuration, or else the one CONMON_LOG_DRIVER of the environment
+// names, whose last entry is the one the command passes, or else the default
+// of the server.
+func serverLogDriver(driver LogDriver, env []string) LogDriver {
+	if driver != "" {
+		return driver
+	}
+
+	for _, entry := range slices.Backward(env) {
+		if value, ok := strings.CutPrefix(entry, "CONMON_LOG_DRIVER="); ok {
+			return LogDriver(value)
+		}
+	}
+
+	return LogDriverSystemd
+}
+
+// serverLaunchEnvDenied are the variables which make the server launch exit
+// without a server or never return: the server reads its flags from CONMON_
+// variables as well, see conmon-rs/server/src/config.rs.
+var serverLaunchEnvDenied = []string{"CONMON_VERSION", "CONMON_VERSION_JSON", "CONMON_SKIP_FORK"}
+
+// serverEnv returns the environment of the server launch: the one of the
+// configuration, or of the client process if nil, without the variables of
+// serverLaunchEnvDenied.
+func serverEnv(env []string) []string {
+	if env == nil {
+		env = os.Environ()
+	}
+
+	return slices.DeleteFunc(slices.Clone(env), func(entry string) bool {
+		name, _, _ := strings.Cut(entry, "=")
+
+		return slices.Contains(serverLaunchEnvDenied, name)
+	})
+}
+
+// tempErrorFile returns an unlinked temporary file for the errors of the
+// server launch. Unlike a pipe, the launch does not wait for the forked
+// server to close it.
+func tempErrorFile() (*os.File, error) {
+	file, err := os.CreateTemp("", "conmonrs-errors-")
+	if err != nil {
+		return nil, fmt.Errorf("create temporary file: %w", err)
+	}
+
+	if err := os.Remove(file.Name()); err != nil {
+		file.Close()
+
+		return nil, fmt.Errorf("remove temporary file: %w", err)
+	}
+
+	return file, nil
+}
+
+// maxServerErrors bounds how much of the server error file ends up in the
+// error of New.
+const maxServerErrors = 4096
+
+// readServerErrors returns the end of what the server wrote into the error
+// file, at most maxServerErrors bytes, empty if there is no file or nothing
+// could be read.
+func readServerErrors(file *os.File) string {
+	if file == nil {
+		return ""
+	}
+
+	info, err := file.Stat()
+	if err != nil {
+		return ""
+	}
+
+	offset := max(info.Size()-maxServerErrors, 0)
+	buf := make([]byte, info.Size()-offset)
+
+	// The server shares the file offset, which ReadAt does not use.
+	n, err := file.ReadAt(buf, offset)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return ""
+	}
+
+	output := strings.TrimSpace(string(buf[:n]))
+	if offset > 0 && output != "" {
+		output = "..." + output
+	}
+
+	return output
 }
 
 // setServerOutput sets the stdout and stderr of the server command. The
@@ -619,7 +741,7 @@ func (c *ConmonClient) pickUpReplacement(ctx context.Context) {
 		return
 	}
 
-	conn := newRPCConn(ctx, socketConn)
+	conn := newRPCConn(ctx, socketConn, c.logger)
 
 	defer func() {
 		if closeErr := conn.conn.Close(); closeErr != nil {

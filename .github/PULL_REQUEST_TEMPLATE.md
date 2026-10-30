@@ -11,7 +11,7 @@ ensuring that all your commits are signed with `git commit -s`.
 Here are some additional tips for you:
 
 - If this is your first time, please read our contributor guidelines:
-  https://git.k8s.io/community/contributors/guide#your-first-contribution and
+  https://git.k8s.io/community/contributors/guide/first-contribution.md and
   developer guide
   https://git.k8s.io/community/contributors/devel/development.md#development-guide
 - Please label this pull request according to what type of issue you are

@@ -1,3 +1,5 @@
+//! The logger which writes the container output to journald.
+
 use crate::{
     container_io::Pipe,
     container_log::{Line, Logger},

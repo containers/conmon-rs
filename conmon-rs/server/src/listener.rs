@@ -1,3 +1,6 @@
+//! Helpers for the listening sockets of the server: private sockets, socket
+//! paths of any length and the errors of the accept loops.
+
 use anyhow::{Context, Result};
 use nix::sys::{
     socket::{AddressFamily, SockFlag, SockType, socket},

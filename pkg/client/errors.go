@@ -71,8 +71,12 @@ var (
 	ErrShutdownTimeout = errors.New("timed out waiting for server PID to disappear")
 
 	// ErrServerExited gets matched by the error of New if the server it
-	// started exited before it accepted connections, for example for an
-	// invalid configuration. Its logs tell why.
+	// started exited after it forked into the background but before it
+	// accepted connections, for example because it crashed. Its logs tell
+	// why. A server which fails before it forks, like on an invalid
+	// configuration, makes New fail with the error of the launch instead.
+	// That error carries what the server wrote to stderr, unless the
+	// LogDriver is stdout, whose Stderr gets it then.
 	ErrServerExited = errors.New("server exited before accepting connections")
 
 	// ErrServerNotUp gets matched by the error of New if the server it
@@ -94,6 +98,14 @@ var (
 	// also to a server which replaced the exited one, after Close it fails
 	// with ErrClientClosed instead. Use errors.Is to check for it.
 	ErrServerDisconnected = errors.New("disconnected from the server")
+
+	// ErrServerUnreachable gets matched by the error of a method if no
+	// server listens on the socket of the ServerRunDir when the client
+	// connects, for example because the server exited: the socket does not
+	// exist, refuses the connection or is no stream socket. The next call
+	// connects again, also to a server which got started in the meantime.
+	// Use errors.Is to check for it.
+	ErrServerUnreachable = errors.New("no server listens on the socket")
 )
 
 // containerNotFoundMessages are how servers start the message for a container

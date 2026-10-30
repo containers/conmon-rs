@@ -584,14 +584,20 @@ func TestSetServerPID(t *testing.T) {
 	}
 }
 
-// pidFromFile waits for the PID file of a test server binary in dir.
-func pidFromFile(t *testing.T, dir string) int {
+// pidFromFile waits for the PID file of a test server binary in dir, the
+// one New reads unless another name is given.
+func pidFromFile(t *testing.T, dir string, name ...string) int {
 	t.Helper()
 
 	var pid int
 
+	file := filepath.Join(dir, pidFileName)
+	if len(name) > 0 {
+		file = filepath.Join(dir, name[0])
+	}
+
 	waitFor(t, "no PID file", func() bool {
-		data, err := os.ReadFile(filepath.Join(dir, pidFileName))
+		data, err := os.ReadFile(file)
 		if err != nil {
 			return false
 		}
@@ -621,10 +627,12 @@ func TestNewKillsServerWhichDoesNotComeUp(t *testing.T) {
 	dir := t.TempDir()
 
 	// A server which ignores SIGINT and never listens. The arguments are
-	// --runtime, the runtime, --runtime-dir and the run directory.
+	// --runtime, the runtime, --runtime-dir and the run directory. New
+	// removes the PID file once it failed, the test reads a copy.
 	binary := writeTestBinary(
 		t,
-		`(trap '' INT; exec sleep 60) </dev/null >/dev/null 2>&1 & printf %s $! >"$4/pidfile"`,
+		`(trap '' INT; exec sleep 60) </dev/null >/dev/null 2>&1 & `+
+			`printf %s $! >"$4/pidfile"; printf %s $! >"$4/pid"`,
 	)
 
 	const ctxTimeout = 500 * time.Millisecond
@@ -646,11 +654,15 @@ func TestNewKillsServerWhichDoesNotComeUp(t *testing.T) {
 		t.Fatalf("got error %v, want %v and %v", err, ErrServerNotUp, context.DeadlineExceeded)
 	}
 
-	pid := pidFromFile(t, dir)
+	pid := pidFromFile(t, dir, "pid")
 	killOnCleanup(t, pid)
 
 	if !processExited(uint32(pid)) {
 		t.Fatal("server still running")
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, pidFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("PID file not removed: %v", err)
 	}
 
 	// SIGINT did not end it, SIGKILL did after the cleanup wait, which
@@ -1460,5 +1472,392 @@ func TestConnectRunningServerIgnoresOtherSocketTypes(t *testing.T) {
 	connected, err := c.connectRunningServer(t.Context())
 	if err != nil || connected {
 		t.Fatalf("got connected %v, error %v, want no server", connected, err)
+	}
+}
+
+func TestNewRemovesStalePIDFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	// The process which a PID file left behind names, like one which got
+	// the PID of a server which is gone.
+	stale := exec.CommandContext(t.Context(), "sleep", "60")
+	if err := stale.Start(); err != nil {
+		t.Fatalf("start process: %v", err)
+	}
+
+	t.Cleanup(func() {
+		_ = stale.Process.Kill() //nolint:errcheck // best effort
+		_ = stale.Wait()         //nolint:errcheck // killed
+	})
+
+	pidFile := filepath.Join(dir, pidFileName)
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(stale.Process.Pid)), 0o600); err != nil {
+		t.Fatalf("write PID file: %v", err)
+	}
+
+	// A launch which exits without starting a server, like one which only
+	// prints the version.
+	binary := writeTestBinary(t, `exit 0`)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+
+	_, err := NewContext(ctx, &ConmonServerConfig{
+		ServerRunDir:     dir,
+		ConmonServerPath: binary,
+		Runtime:          "/does/not/exist",
+		ClientLogger:     logrus.New(),
+		timeouts:         shortTimeouts(),
+	})
+	if !errors.Is(err, ErrServerNotUp) {
+		t.Fatalf("got error %v, want %v", err, ErrServerNotUp)
+	}
+
+	// A signal would have ended it, it does not trap any.
+	if processExited(uint32(stale.Process.Pid)) {
+		t.Fatal("process of the stale PID file got signaled")
+	}
+
+	if _, err := os.Stat(pidFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("PID file not removed: %v", err)
+	}
+}
+
+func TestNewKeepsPIDFileOfServerNotStopped(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	// A launch which writes a PID file that names no process, so that New
+	// can neither wait for nor stop the server.
+	binary := writeTestBinary(t, `printf invalid >"$4/pidfile"`)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+
+	_, err := NewContext(ctx, &ConmonServerConfig{
+		ServerRunDir:     dir,
+		ConmonServerPath: binary,
+		Runtime:          "/does/not/exist",
+		ClientLogger:     logrus.New(),
+		timeouts:         shortTimeouts(),
+	})
+	if !errors.Is(err, ErrServerNotUp) {
+		t.Fatalf("got error %v, want %v", err, ErrServerNotUp)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, pidFileName))
+	if err != nil || string(got) != "invalid" {
+		t.Fatalf("got PID file %q, error %v, want it kept", got, err)
+	}
+}
+
+func TestNewDropsLaunchEnvironment(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	// Records the variables and fails, so that New returns right away.
+	binary := writeTestBinary(t, `printf 'version=%s json=%s fork=%s level=%s' `+
+		`"${CONMON_VERSION-unset}" "${CONMON_VERSION_JSON-unset}" `+
+		`"${CONMON_SKIP_FORK-unset}" "${CONMON_LOG_LEVEL-unset}" >"$4/env"; exit 1`)
+
+	_, err := New(&ConmonServerConfig{
+		ServerRunDir:     dir,
+		ConmonServerPath: binary,
+		Runtime:          "/does/not/exist",
+		ClientLogger:     logrus.New(),
+		Env: []string{
+			"CONMON_VERSION=full",
+			"CONMON_VERSION_JSON=full",
+			"CONMON_SKIP_FORK=1",
+			"CONMON_LOG_LEVEL=debug",
+		},
+	})
+	if err == nil {
+		t.Fatal("started a server which failed")
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "env"))
+	if err != nil {
+		t.Fatalf("read environment: %v", err)
+	}
+
+	if want := "version=unset json=unset fork=unset level=debug"; string(got) != want {
+		t.Fatalf("got environment %q, want %q", got, want)
+	}
+}
+
+func TestNewReportsServerErrors(t *testing.T) {
+	t.Parallel()
+
+	const message = "Error: validate config: --runtime '/does/not/exist' does not exist"
+
+	binary := writeTestBinary(t, `echo "`+message+`" >&2; exit 1`)
+
+	for _, tc := range []struct {
+		name   string
+		driver LogDriver
+		env    []string
+		// stdout tells that the server gets the Stderr of the config.
+		stdout bool
+	}{
+		{name: "default"},
+		{name: "none", driver: LogDriverNone},
+		{name: "systemd", driver: LogDriverSystemd},
+		{name: "stdout", driver: LogDriverStdout, stdout: true},
+		{name: "stdout of the environment", env: []string{"CONMON_LOG_DRIVER=stdout"}, stdout: true},
+		{
+			name:   "config over environment",
+			driver: LogDriverNone,
+			env:    []string{"CONMON_LOG_DRIVER=stdout"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			stderr, err := os.Create(filepath.Join(t.TempDir(), "stderr"))
+			if err != nil {
+				t.Fatalf("create stderr: %v", err)
+			}
+
+			defer stderr.Close()
+
+			_, err = New(&ConmonServerConfig{
+				ServerRunDir:     t.TempDir(),
+				ConmonServerPath: binary,
+				Runtime:          "/does/not/exist",
+				LogDriver:        tc.driver,
+				Env:              tc.env,
+				Stderr:           stderr,
+				ClientLogger:     logrus.New(),
+			})
+			if err == nil {
+				t.Fatal("started a server which failed")
+			}
+
+			// The stdout driver passes stderr to the writer instead.
+			stdout := tc.stdout
+			if strings.Contains(err.Error(), message) == stdout {
+				t.Fatalf("got error %q, want the message of the server: %v", err, !stdout)
+			}
+
+			written, err := os.ReadFile(stderr.Name())
+			if err != nil {
+				t.Fatalf("read stderr: %v", err)
+			}
+
+			if strings.Contains(string(written), message) != stdout {
+				t.Fatalf("got stderr %q, want the message of the server: %v", written, stdout)
+			}
+		})
+	}
+}
+
+func TestReadServerErrors(t *testing.T) {
+	t.Parallel()
+
+	if got := readServerErrors(nil); got != "" {
+		t.Fatalf("got %q without a file", got)
+	}
+
+	file, err := serverErrorFile()
+	if err != nil {
+		t.Fatalf("create error file: %v", err)
+	}
+
+	defer file.Close()
+
+	if got := readServerErrors(file); got != "" {
+		t.Fatalf("got %q from an empty file", got)
+	}
+
+	// Written like the server does, which moves the shared offset.
+	if _, err := file.WriteString("first\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if got := readServerErrors(file); got != "first" {
+		t.Fatalf("got %q, want %q", got, "first")
+	}
+
+	// Only the end of a long output, which has the error.
+	if _, err := file.WriteString(strings.Repeat("x", maxServerErrors) + "last\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got := readServerErrors(file)
+	if !strings.HasPrefix(got, "...") || !strings.HasSuffix(got, "last") ||
+		len(got) > maxServerErrors+len("...") {
+		t.Fatalf(
+			"got %d bytes %.20q...%q, want the bounded end",
+			len(got),
+			got,
+			got[max(len(got)-10, 0):],
+		)
+	}
+}
+
+func TestSetServerOutput(t *testing.T) {
+	t.Parallel()
+
+	c := &ConmonClient{logger: logrus.New()}
+
+	file, err := os.Create(filepath.Join(t.TempDir(), "output"))
+	if err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+
+	t.Cleanup(func() { file.Close() })
+
+	shared := make(chanWriter, 2)
+
+	for _, tc := range []struct {
+		name           string
+		stdout, stderr io.Writer
+		// wantStdout and wantStderr are the files the command gets, nil for
+		// a pipe.
+		wantStdout, wantStderr *os.File
+		// samePipe tells that both get the same pipe.
+		samePipe bool
+	}{
+		{
+			name:       "defaults",
+			wantStdout: os.Stdout,
+			wantStderr: os.Stderr,
+		},
+		{
+			name:       "files",
+			stdout:     file,
+			stderr:     file,
+			wantStdout: file,
+			wantStderr: file,
+		},
+		{
+			name:       "writer and file",
+			stdout:     make(chanWriter),
+			stderr:     file,
+			wantStderr: file,
+		},
+		{
+			name:     "same writer",
+			stdout:   shared,
+			stderr:   shared,
+			samePipe: true,
+		},
+		{
+			name:   "other writers",
+			stdout: make(chanWriter),
+			stderr: make(chanWriter),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cmd := exec.CommandContext(t.Context(), "true")
+
+			release, outputErr := c.setServerOutput(cmd, &ConmonServerConfig{
+				Stdout: tc.stdout,
+				Stderr: tc.stderr,
+			})
+			if outputErr != nil {
+				t.Fatalf("set server output: %v", outputErr)
+			}
+
+			defer release()
+
+			for _, out := range []struct {
+				name string
+				got  io.Writer
+				want *os.File
+			}{
+				{"stdout", cmd.Stdout, tc.wantStdout},
+				{"stderr", cmd.Stderr, tc.wantStderr},
+			} {
+				got, ok := out.got.(*os.File)
+				if !ok {
+					t.Fatalf("%s is no file: %T", out.name, out.got)
+				}
+
+				if out.want != nil && got != out.want {
+					t.Errorf("%s got %s, want %s", out.name, got.Name(), out.want.Name())
+				}
+
+				if out.want == nil && (got == os.Stdout || got == os.Stderr || got == file) {
+					t.Errorf("%s got %s, want a pipe", out.name, got.Name())
+				}
+			}
+
+			if pipes := tc.wantStdout == nil && tc.wantStderr == nil; pipes &&
+				(cmd.Stdout == cmd.Stderr) != tc.samePipe {
+				t.Errorf("got the same pipe %v, want %v", cmd.Stdout == cmd.Stderr, tc.samePipe)
+			}
+		})
+	}
+
+	// Both streams end up in the shared writer through the one pipe, in the
+	// order of the writes.
+	cmd := exec.CommandContext(t.Context(), "sh", "-c", "printf out; printf err >&2")
+
+	release, err := c.setServerOutput(cmd, &ConmonServerConfig{Stdout: shared, Stderr: shared})
+	if err != nil {
+		t.Fatalf("set server output: %v", err)
+	}
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run command: %v", err)
+	}
+
+	release()
+
+	// The copy may get both writes with one read.
+	const want = "outerr"
+
+	for got := ""; got != want; {
+		select {
+		case chunk := <-shared:
+			got += chunk
+			if !strings.HasPrefix(want, got) {
+				t.Fatalf("got output %q, want %q", got, want)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("got output %q, timed out waiting for %q", got, want)
+		}
+	}
+}
+
+func TestConnectRunningServerFullBacklog(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	// A socket which nothing accepts on, with the smallest backlog.
+	fd := bindTestSocket(t, dir)
+
+	if err := syscall.Listen(fd, 0); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	// Fill the backlog until a dial fails like the one of New does.
+	for range 64 {
+		conn, dialErr := dialLongSocket("unix", filepath.Join(dir, socketName))
+		if errors.Is(dialErr, syscall.EAGAIN) {
+			break
+		}
+
+		if dialErr != nil {
+			t.Fatalf("dial: %v", dialErr)
+		}
+
+		t.Cleanup(func() { conn.Close() })
+	}
+
+	c := newTestClient(t, dir, logrus.New())
+
+	connected, err := c.connectRunningServer(t.Context())
+	if connected || !errors.Is(err, ErrServerNotResponding) || !errors.Is(err, syscall.EAGAIN) {
+		t.Fatalf("got connected %v, error %v, want %v", connected, err, ErrServerNotResponding)
 	}
 }

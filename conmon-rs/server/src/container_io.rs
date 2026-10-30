@@ -1,3 +1,7 @@
+//! The stdio of the containers and execs, pipes or a terminal, which the
+//! server reads into the log drivers, the attach clients and the output of the
+//! execs.
+
 use crate::{
     attach::{AttachOutput, SharedContainerAttach},
     child::sleep_until,

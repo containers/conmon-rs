@@ -1,3 +1,6 @@
+//! The Cap'n Proto RPC interface of the server, one method for each call of
+//! `proto/conmon.capnp`.
+
 use crate::conmon_capnp::conmon;
 #[cfg(feature = "tracing")]
 use crate::telemetry::Telemetry;

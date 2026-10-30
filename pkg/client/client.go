@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"sync"
@@ -35,9 +36,10 @@ var (
 )
 
 // ErrServerNotResponding is returned by New if a server accepts connections
-// on the socket of the run directory but does not answer in time. New does
-// not start another server then, it would take over the sockets of the one
-// which runs and orphan its containers.
+// on the socket of the run directory but does not answer in time, or the
+// backlog of the socket is full. New does not start another server then, it
+// would take over the sockets of the one which runs and orphan its
+// containers.
 var ErrServerNotResponding = errors.New("server accepted the connection but did not respond")
 
 // ConmonClient is the main client structure of this package, see the package
@@ -140,6 +142,14 @@ type ConmonServerConfig struct {
 	// commands, so callers should pass a curated environment rather than
 	// their own. If nil, the server inherits the environment of the client
 	// process, an empty slice starts it without any.
+	//
+	// Variables named after a flag of the server with the CONMON_ prefix,
+	// like CONMON_LOG_LEVEL for --log-level, configure the server like the
+	// flag, unless the client passes that flag itself. CONMON_LOG_DRIVER
+	// set to "stdout" uses Stdout and Stderr like LogDriverStdout. The
+	// client drops CONMON_VERSION, CONMON_VERSION_JSON and CONMON_SKIP_FORK,
+	// with which the server would print its version or stay in the
+	// foreground instead of starting in the background.
 	Env []string
 
 	// timeouts replaces the default waits of the client for servers which do
@@ -188,7 +198,7 @@ type Tracing struct {
 	// do not join the trace of the call then.
 	Enabled bool
 
-	// Endpoint is the GRPC tracing endpoint for OTLP.
+	// Endpoint is the gRPC tracing endpoint for OTLP.
 	// Defaults to "http://127.0.0.1:4317"
 	Endpoint string
 
@@ -198,7 +208,8 @@ type Tracing struct {
 
 // Heaptrack is the structure for configuring the memory profiling.
 type Heaptrack struct {
-	// Enabled tells the server to run with heaptrack enabled.
+	// Enabled attaches heaptrack to a server which New starts, as a child of
+	// the client process.
 	Enabled bool
 
 	// BinaryPath is the path to the heaptrack binary. Can be empty to lookup
@@ -276,13 +287,18 @@ const serverProbeTimeout = 3 * time.Second
 // a few seconds. If a server which runs accepts the connection but does not
 // answer within a few seconds, New returns an error matching
 // ErrServerNotResponding which names the PID of the server. The caller may
-// kill that process to recover, the next New starts a new server then. If
+// kill that process to recover, the next New starts a new server then. A
+// socket whose backlog is full, of a server which does not accept the
+// connections, makes New return ErrServerNotResponding as well. If
 // dialing the socket fails otherwise, for example because of missing
 // permissions, New returns that error. In neither case it starts a second
 // server.
 //
 // If New started a server but fails afterwards, it stops the server again,
-// with SIGKILL if SIGINT does not end it within a few seconds.
+// with SIGKILL if SIGINT does not end it within a few seconds. New removes
+// the pidfile in the ServerRunDir, which the server launch writes, before
+// the launch and once it returns, but keeps it for a server which it could
+// not stop.
 func New(config *ConmonServerConfig) (*ConmonClient, error) {
 	return NewContext(context.Background(), config)
 }
@@ -295,7 +311,8 @@ func New(config *ConmonServerConfig) (*ConmonClient, error) {
 //
 // Concurrent calls for the same ServerRunDir are not supported: each one
 // may start a server, and the PID file of one may name the server of the
-// other, which the cleanup of a failing call then stops.
+// other, which the cleanup of a failing call then stops, or get removed by
+// the other before it got read.
 func NewContext(
 	ctx context.Context,
 	config *ConmonServerConfig,
@@ -338,6 +355,11 @@ func NewContext(
 		return cl, nil
 	}
 
+	// A PID file left behind, for example by a New which failed, would name
+	// a process which may not exist anymore, or another one which got its
+	// PID, if the launch does not write a new one.
+	cl.removePIDFile()
+
 	if err = cl.startServer(ctx, config); err != nil {
 		return nil, fmt.Errorf("start server: %w", err)
 	}
@@ -346,17 +368,7 @@ func NewContext(
 	// if we fail any of the next steps
 	defer func() {
 		if retErr != nil {
-			cl.resetConn()
-
-			stopErr := cl.stopServer(
-				context.WithoutCancel(ctx),
-				cl.currentServer(),
-				cl.serverTimeouts().cleanup,
-				true,
-			)
-			if stopErr != nil {
-				cl.logger.Errorf("Unable to shutdown server: %v", stopErr)
-			}
+			cl.stopFailedServer(context.WithoutCancel(ctx))
 		}
 	}()
 
@@ -410,12 +422,34 @@ func NewContext(
 		go cl.attachHeaptrack(context.WithoutCancel(ctx), heaptrack, resp.ProcessID)
 	}
 
-	// A file left behind gets overwritten by the next start.
-	if err := os.Remove(cl.pidFile()); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		cl.logger.WithError(err).Warn("Unable to remove server PID file")
-	}
+	cl.removePIDFile()
 
 	return cl, nil
+}
+
+// stopFailedServer stops the server which New started but failed to
+// connect to, and removes its PID file once it is gone.
+func (c *ConmonClient) stopFailedServer(ctx context.Context) {
+	c.resetConn()
+
+	err := c.stopServer(ctx, c.currentServer(), c.serverTimeouts().cleanup, true)
+	// The PID file of a server which may still run names it, until the next
+	// launch removes the file.
+	if err != nil {
+		c.logger.Errorf("Unable to shutdown server, keeping its PID file: %v", err)
+
+		return
+	}
+
+	c.removePIDFile()
+}
+
+// removePIDFile removes the PID file which the launch of the server writes,
+// once it is not needed anymore or before the next launch.
+func (c *ConmonClient) removePIDFile() {
+	if err := os.Remove(c.pidFile()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		c.logger.WithError(err).Warn("Unable to remove server PID file")
+	}
 }
 
 func (c *ConmonServerConfig) toClient() (*ConmonClient, error) {
@@ -427,8 +461,16 @@ func (c *ConmonServerConfig) toClient() (*ConmonClient, error) {
 		return nil, fmt.Errorf("%w: cgroup manager %d", ErrInvalidValue, c.CgroupManager)
 	}
 
+	// The server resolves a relative path when it starts, the client has to
+	// find the socket in the same place later, also after a change of its
+	// working directory.
+	runDir, err := filepath.Abs(c.ServerRunDir)
+	if err != nil {
+		return nil, fmt.Errorf("make RunDir absolute: %w", err)
+	}
+
 	const perm = 0o755
-	if err := os.MkdirAll(c.ServerRunDir, perm); err != nil {
+	if err := os.MkdirAll(runDir, perm); err != nil {
 		return nil, fmt.Errorf("%w: %w", errRunDirNotCreated, err)
 	}
 
@@ -455,7 +497,7 @@ func (c *ConmonServerConfig) toClient() (*ConmonClient, error) {
 	}
 
 	return &ConmonClient{
-		runDir:         c.ServerRunDir,
+		runDir:         runDir,
 		timeouts:       timeouts,
 		logger:         logger,
 		attachSessions: map[uint64]*attachSession{},
@@ -540,7 +582,9 @@ func (c *ConmonClient) toArgs(
 		return "", args, errRunDirUnspecified
 	}
 
-	args = append(args, "--runtime-dir", config.ServerRunDir)
+	// The absolute path of the client, which a later change of its working
+	// directory does not move.
+	args = append(args, "--runtime-dir", c.runDir)
 
 	if config.RuntimeRoot != "" {
 		args = append(args, "--runtime-root", config.RuntimeRoot)
