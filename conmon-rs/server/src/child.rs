@@ -27,11 +27,3 @@ pub struct Child {
     pub(crate) cleanup_cmd: Vec<String>,
     pub(crate) token: CancellationToken,
 }
-
-/// Sleep until the deadline, forever without one.
-pub(crate) async fn sleep_until(deadline: Option<Instant>) {
-    match deadline {
-        Some(deadline) => tokio::time::sleep_until(deadline).await,
-        None => std::future::pending().await,
-    }
-}

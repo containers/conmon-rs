@@ -256,11 +256,21 @@ impl ContainerLog {
 }
 
 /// Split a chunk into its lines. Every line but the last ends with a newline,
-/// the last one is partial if the chunk does not end with one.
+/// the last one is partial if the chunk does not end with one. An empty chunk
+/// has no lines.
 pub(crate) fn lines(bytes: &[u8]) -> impl Iterator<Item = (&[u8], bool)> {
-    bytes
-        .split_inclusive(|&b| b == b'\n')
-        .map(|line| (line, !line.ends_with(b"\n")))
+    let mut rest = bytes;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let (line, partial) = match memchr::memchr(b'\n', rest) {
+            Some(end) => (&rest[..=end], false),
+            None => (rest, true),
+        };
+        rest = &rest[line.len()..];
+        Some((line, partial))
+    })
 }
 
 /// Strip the line ending, which a terminal turns into "\r\n".

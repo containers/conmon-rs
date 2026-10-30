@@ -31,7 +31,7 @@ mod runtime_call;
 mod watcher;
 
 pub use runtime_call::RuntimeCall;
-pub(crate) use runtime_call::{RuntimeOutput, with_stderr};
+pub(crate) use runtime_call::RuntimeOutput;
 
 #[derive(Debug, Default)]
 pub struct ChildReaper {

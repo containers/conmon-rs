@@ -29,6 +29,14 @@ fn writer_drops_the_line_ending() {
 }
 
 #[test]
+fn early_errors_of_the_server_have_their_priority() {
+    assert_eq!(
+        Journal::error().entry(b"bind socket").as_bytes(),
+        b"PRIORITY=3\nMESSAGE=bind socket\nSYSLOG_IDENTIFIER=conmonrs\n"
+    );
+}
+
+#[test]
 fn extend_appends_encoded_fields() {
     let mut fields = Entry::default();
     fields.field("A", "1").field("B", "x\ny");

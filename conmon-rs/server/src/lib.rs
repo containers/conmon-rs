@@ -47,6 +47,9 @@ pub fn run() -> Result<()> {
 
     config.validate().context("validate config")?;
     config.make_absolute()?;
+    // Before the runtime directories get created, they would get the umask
+    // of the caller otherwise.
+    init::set_default_umask();
     config.prepare().context("prepare runtime directories")?;
 
     Server::new(config)
@@ -116,4 +119,5 @@ mod terminal;
 mod test_util;
 #[cfg(all(target_os = "linux", target_arch = "s390x", target_env = "musl"))]
 mod unwind;
+mod util;
 mod version;

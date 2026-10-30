@@ -8,7 +8,9 @@ default-members = ["conmon-rs/server"]
 # Tracked in dependencies.yaml together with rpm/conmon-rs.spec.
 version = "1.2.1"
 edition = "2024"
-# The oldest toolchain the locked dependencies support, checked by CI.
+# The oldest supported toolchain, which lint-msrv checks in CI. It may not be
+# lower than the highest rust-version of the locked dependencies, see
+# `cargo metadata`.
 rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/containers/conmon-rs"

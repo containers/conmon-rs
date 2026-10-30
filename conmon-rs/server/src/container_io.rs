@@ -4,13 +4,12 @@
 
 use crate::{
     attach::{AttachOutput, SharedContainerAttach},
-    child::sleep_until,
-    child_reaper::with_stderr,
     container_log::SharedContainerLog,
     random_id::RandomId,
     streams::Streams,
     tail::Tail,
     terminal::Terminal,
+    util::{sleep_until, with_stderr},
 };
 use anyhow::{Context, Result, bail};
 use async_channel::{Receiver, RecvError, Sender};
