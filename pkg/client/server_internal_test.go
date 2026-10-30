@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"capnproto.org/go/capnp/v3/exc"
 	"github.com/sirupsen/logrus"
@@ -1722,6 +1723,16 @@ func TestReadServerErrors(t *testing.T) {
 			got,
 			got[max(len(got)-10, 0):],
 		)
+	}
+}
+
+func TestErrorTailKeepsCharactersWhole(t *testing.T) {
+	t.Parallel()
+
+	// The cut falls into the first "ä", which takes two bytes.
+	got := errorTail(strings.Repeat("ä", maxServerErrors/2)+"!", false)
+	if !utf8.ValidString(got) || got != "..."+strings.Repeat("ä", maxServerErrors/2-1)+"!" {
+		t.Fatalf("got %d bytes %.20q..., want whole characters", len(got), got)
 	}
 }
 

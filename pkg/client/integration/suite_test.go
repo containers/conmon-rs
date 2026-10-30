@@ -3,6 +3,7 @@ package client_test
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -127,6 +128,10 @@ var _ = AfterSuite(func() {
 	cmd.Stdout = &stdout
 	Expect(cmd.Run()).To(Succeed())
 
+	// Without CONMON_BINARY the client runs the conmonrs of the PATH, an
+	// empty substring would match every line.
+	binary := cmp.Or(conmonPath, "conmonrs")
+
 	scanner := bufio.NewScanner(strings.NewReader(stdout.String()))
 	for scanner.Scan() {
 		text := scanner.Text()
@@ -134,7 +139,7 @@ var _ = AfterSuite(func() {
 			continue
 		}
 
-		Expect(text).NotTo(ContainSubstring(conmonPath))
+		Expect(text).NotTo(ContainSubstring(binary))
 	}
 })
 

@@ -2,7 +2,7 @@
 //! and holds them.
 
 use super::{Namespace, Pause};
-use crate::config::PauseArgs;
+use crate::{config::PauseArgs, process::wait_exit_pid};
 use anyhow::{Context, Result, bail};
 use libc::pid_t;
 use nix::{
@@ -11,7 +11,7 @@ use nix::{
     sys::{
         prctl,
         signal::{SigSet, Signal, kill},
-        wait::{WaitPidFlag, WaitStatus, waitpid},
+        wait::{Id, WaitPidFlag, waitpid},
     },
     unistd::{
         ForkResult, Gid, Pid, SysconfVar, Uid, dup2_stderr, fork, getpid, setresgid, setresuid,
@@ -236,9 +236,10 @@ impl Pause {
     /// Reap all exited children without blocking.
     fn reap_children() {
         loop {
-            match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::StillAlive) | Err(Errno::ECHILD) => return,
-                Ok(status) => trace!("Reaped child: {status:?}"),
+            // Also for the real-time signals, which nix does not know.
+            match wait_exit_pid(Id::All, WaitPidFlag::WNOHANG) {
+                Ok(None) | Err(Errno::ECHILD) => return,
+                Ok(Some((pid, code))) => trace!("Reaped child {pid} with exit code {code}"),
                 Err(Errno::EINTR) => {}
                 Err(e) => {
                     warn!("Unable to reap children: {e:#}");

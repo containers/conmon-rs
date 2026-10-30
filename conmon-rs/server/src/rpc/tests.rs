@@ -224,12 +224,12 @@ async fn exec_runtimes_always_get_a_deadline() {
     let timeout = now + Duration::from_secs(10);
     assert_eq!(
         Server::exec_runtime_deadline(Some(timeout)),
-        Some(timeout + Server::EXEC_RUNTIME_GRACE)
+        timeout + Server::EXEC_RUNTIME_GRACE
     );
     // Without a timeout of the process, the runtime still gets one.
     assert_eq!(
         Server::exec_runtime_deadline(None),
-        Some(now + Server::EXEC_RUNTIME_GRACE)
+        now + Server::EXEC_RUNTIME_GRACE
     );
 }
 

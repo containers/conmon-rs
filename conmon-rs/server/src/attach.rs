@@ -482,8 +482,12 @@ impl Attach {
     const PACKET_BUF_SIZE: usize = 8192;
 
     /// The maximum size of a stdin packet from an attach client, a larger one
-    /// gets truncated. The Go client writes at most 32 KiB at once.
-    const STDIN_PACKET_MAX_SIZE: usize = 64 * 1024;
+    /// gets truncated. The Go client writes at most 32 KiB at once, like
+    /// CRI-O does for conmon, plus the start of a detach key sequence which
+    /// it held back, a few bytes which the extra KiB leaves room for. The
+    /// scratch buffer of the thread keeps this size after the first stdin,
+    /// see [`with_scratch`].
+    const STDIN_PACKET_MAX_SIZE: usize = 33 * 1024;
 
     /// The packet indicating that we're done writing.
     const DONE_PACKET: &'static [u8; 1] = &[0];

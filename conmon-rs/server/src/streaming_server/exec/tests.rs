@@ -3,6 +3,7 @@ use crate::{
     child_reaper::ChildReaper,
     config::Config,
     conmon_capnp::conmon::CgroupManager,
+    container_log::ContainerLog,
     streaming_server::{ExecSession, MAX_MESSAGE_SIZE, StreamingServer, testing::*},
 };
 use anyhow::{Context, Result};
@@ -18,7 +19,7 @@ use crate::{
     },
 };
 use std::{
-    os::unix::{fs::PermissionsExt, process::CommandExt, process::ExitStatusExt},
+    os::unix::{process::CommandExt, process::ExitStatusExt},
     path::Path,
     sync::Arc,
 };
@@ -33,17 +34,15 @@ use tokio::{
 /// test.
 fn slow_runtime(dir: &Path, delay: &str) -> Result<Option<Config>> {
     let runtime = dir.join("runtime");
-    std::fs::write(
+    crate::test_util::write_script(
         &runtime,
-        format!(
-            "#!/bin/sh\n\
-             sleep {delay}\n\
+        &format!(
+            "sleep {delay}\n\
              for arg; do case $arg in --pid-file=*) pidfile=${{arg#--pid-file=}};; esac; done\n\
              sh -c 'echo started' &\n\
-             echo $! >\"$pidfile\"\n"
+             echo $! >\"$pidfile\""
         ),
     )?;
-    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755))?;
     Ok(Config::parse_for_test([
         "--runtime",
         runtime.to_str().context("runtime path")?,

@@ -9,9 +9,12 @@ files it lists, the `version` in the `[workspace.package]` section of
 "unreleased" with the version in [usage.md](usage.md), the Go documentation in
 [pkg/client](pkg/client) and the comments of
 [conmon-rs/server/proto/conmon.capnp](conmon-rs/server/proto/conmon.capnp).
-`make verify-dependencies verify-spec` has to pass, and
-`git grep -in unreleased -- usage.md pkg/client conmon-rs/server/proto` has to
-print nothing before tagging.
+`make verify-dependencies verify-spec verify-unreleased` has to pass. The
+latter fails as long as no tag of the crate version exists and
+`git grep -in unreleased -- usage.md pkg/client conmon-rs/server/proto` prints
+anything, so the ci workflow fails the PR if it misses one, and any other PR
+which adds one before the tag got pushed. Such a PR waits for the tag and
+reruns its checks.
 
 After that PR got merged, push an annotated tag for its merge commit with git:
 

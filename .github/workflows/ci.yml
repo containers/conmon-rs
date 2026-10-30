@@ -127,10 +127,10 @@ jobs:
         run: make lint-msrv
 
   # The checks which take seconds each, in one job instead of a runner each:
-  # the shell scripts, the workflows, the spelling, the formatting of prettier
-  # and the pinned versions of dependencies.yaml, the RPM spec and the VEX
-  # document. Like in lint-rust, every check runs even if an earlier one
-  # fails, and only on a complete setup.
+  # the shell scripts, the workflows, the spelling, the formatting of prettier,
+  # the pinned versions of dependencies.yaml and the RPM spec, the unreleased
+  # markers and the VEX document. Like in lint-rust, every check runs even if
+  # an earlier one fails, and only on a complete setup.
   lint-files:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -184,6 +184,11 @@ jobs:
       - name: Verify the RPM spec
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: make verify-spec
+      # From the version bump PR until its tag exists, nothing may say
+      # "unreleased" any more, see release.md.
+      - name: Verify the unreleased markers
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: make verify-unreleased
       - name: Verify the VEX document
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: make verify-vex
@@ -506,13 +511,15 @@ jobs:
         uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest
-      # Under qemu-user, the skipped test fails to find the reaped leader of a
-      # process group through the children of the test process.
+      # Under qemu-user, the first skipped test fails to find the reaped leader
+      # of a process group through the children of the test process. qemu-user
+      # keeps some real-time signals for itself and reports the exits by the
+      # others with other numbers.
       - name: Run the unit tests
         run: |
           if [[ -n $TARGET ]]; then
             cargo nextest run --locked --target "$TARGET" \
-              -E 'not test(=process::tests::signal_group_reaches_members_of_reaped_leader)'
+              -E 'not (test(=process::tests::signal_group_reaches_members_of_reaped_leader) | test(/real_time_signal_exits$/))'
           else
             cargo nextest run --locked
           fi
@@ -604,7 +611,9 @@ jobs:
   # fuzz/seeds and the corpus collected so far, which the daily runs of the
   # advisories workflow save. They fuzz main for half an hour, a run of main
   # here would only repeat the one of its pull request. Skipped jobs count as
-  # passed for a release, see .github/release-files.
+  # passed for a release, see .github/release-files. The jobs keep the default
+  # names of a matrix, like publish-cache and the test-fuzz jobs of the
+  # advisories workflow, which forks skip.
   test-fuzz:
     if: github.event_name == 'pull_request'
     needs: build-fuzz
@@ -614,7 +623,6 @@ jobs:
       fail-fast: false
       matrix:
         target: ${{ fromJSON(needs.build-fuzz.outputs.targets) }}
-    name: test-fuzz-${{ matrix.target }}
     env:
       TARGET: ${{ matrix.target }}
     steps:

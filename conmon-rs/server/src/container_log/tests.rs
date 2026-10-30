@@ -606,7 +606,7 @@ async fn failed_flush_drops_chunk() -> Result<()> {
 #[tokio::test]
 async fn drivers_share_the_output() -> Result<()> {
     let (cri, json, log) = test_helpers::container_log(true).await?;
-    let mut log = log.write().await;
+    let mut log = log.lock().await;
 
     log.write(Pipe::StdOut, b"a\nparti").await?;
     log.write(Pipe::StdOut, b"al\n").await?;
@@ -634,7 +634,7 @@ async fn drivers_share_the_output() -> Result<()> {
 #[tokio::test]
 async fn failing_driver_does_not_stop_the_others() -> Result<()> {
     let (cri, json, log) = test_helpers::container_log(false).await?;
-    let mut log = log.write().await;
+    let mut log = log.lock().await;
     // Only the JSON log gets opened, the CRI one fails every write.
     if let Driver::Json(json) = &mut log.drivers[1] {
         json.init().await?;
@@ -649,7 +649,7 @@ async fn failing_driver_does_not_stop_the_others() -> Result<()> {
 #[tokio::test]
 async fn reopen_reopens_all_drivers() -> Result<()> {
     let (cri, json, log) = test_helpers::container_log(true).await?;
-    let mut log = log.write().await;
+    let mut log = log.lock().await;
     log.write(Pipe::StdOut, b"before\n").await?;
 
     // The CRI log cannot be opened again.

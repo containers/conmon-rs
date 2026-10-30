@@ -366,6 +366,32 @@ async fn cgroup_v2_removed_leaf_without_pod_falls_back_to_parent() -> Result<()>
     Ok(())
 }
 
+/// A leaf without the memory controller has no memory events, which is
+/// not a removed leaf. Without outer counters a SIGKILL is no OOM then,
+/// with them a kill which they counted still is a possible one.
+#[test]
+fn cgroup_v2_leaf_without_memory_controller() -> Result<()> {
+    let check = |outer: bool, kill: bool| {
+        let root = tempfile::tempdir()?;
+        let parent = root.path().join("parent");
+        let leaf = parent.join("ctr");
+        std::fs::create_dir_all(&leaf)?;
+        if outer {
+            write_events(&parent, 0, 3)?;
+        }
+        let mut cgroup = CgroupV2::new(&leaf);
+        if kill {
+            write_events(&parent, 0, 4)?;
+        }
+        anyhow::Ok(cgroup.check_on_exit())
+    };
+
+    assert_eq!(check(false, false)?, OOMEvent::default());
+    assert_eq!(check(true, false)?, OOMEvent::default());
+    assert_eq!(check(true, true)?, OOMEvent::possible(true));
+    Ok(())
+}
+
 #[test]
 fn outliving_ancestors() {
     for (leaf, ancestor) in [

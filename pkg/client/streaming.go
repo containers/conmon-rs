@@ -10,8 +10,9 @@ import (
 
 // ServeExecContainerConfig is the configuration for calling the ServeExecContainer method.
 type ServeExecContainerConfig struct {
-	// ID is the container identifier. Servers since v1.2.1 fail the session
-	// for one which CreateContainerConfig.ID does not allow.
+	// ID is the container identifier. A request for a container which the
+	// server does not know fails with an error matching
+	// [ErrContainerNotFound].
 	ID string
 
 	// Command is the command to be run.
@@ -113,8 +114,7 @@ func (c *ConmonClient) ServeExecContainer(
 type ServeAttachContainerConfig struct {
 	// ID is the container identifier. A request for a container which the
 	// server does not know fails with an error matching
-	// [ErrContainerNotFound], unlike ServeExecContainer, whose runtime
-	// fails the session.
+	// [ErrContainerNotFound].
 	ID string
 
 	// Stdin indicates if stdin should be available or not.
@@ -131,7 +131,10 @@ type ServeAttachContainerConfig struct {
 	// v5.channel.k8s.io can signal, see ServeExecContainerConfig.Stdin. The
 	// output is then still forwarded until the container closes it. A
 	// terminal is never closed, it gets its end of file character instead
-	// once the client closed its stdin, like from Ctrl-D.
+	// once the client closed its stdin, like from Ctrl-D. A client which
+	// goes away without closing its stdin still closes the container stdin,
+	// unless it is a terminal. Without StopAfterStdinEOF and without a
+	// terminal, the end of the stdin of the client ends the session.
 	StopAfterStdinEOF bool
 
 	// CgroupManager can be used to select the cgroup manager.

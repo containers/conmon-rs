@@ -7,7 +7,7 @@ use crate::{
         Process, child_pid, children_by_scan, has_zombie, is_zombie, read_pid_file,
         wait_for_exit_code, zombie_children,
     },
-    test_util::wait_for_real,
+    test_util::{Guarded, wait_for_real},
 };
 use nix::sys::{
     signal::kill,
@@ -38,6 +38,11 @@ fn spawn_zombie(code: i32) -> Result<Pid> {
         std::thread::sleep(Duration::from_millis(10));
     }
     Ok(pid)
+}
+
+/// A deadline of a runtime call which the tests do not reach.
+fn distant_deadline() -> Instant {
+    Instant::now() + Duration::from_secs(600)
 }
 
 /// Set for the test process which runs the sweep test.
@@ -100,7 +105,7 @@ async fn sweep_in_own_process() -> Result<()> {
     // The process of a call in progress which exited before the call
     // claimed it, like an exec which ends before its runtime exited,
     // stays for the call, which gets its exit code.
-    let call = reaper.begin_call(None)?;
+    let call = reaper.begin_call(distant_deadline())?;
     let exec = spawn_zombie(3)?;
     reaper
         .sweep_orphans(&mut candidates, grace, max_defer)
@@ -114,7 +119,7 @@ async fn sweep_in_own_process() -> Result<()> {
 
     // A call which hangs keeps the sweep from reaping only up to the
     // bound.
-    let call = reaper.begin_call(None)?;
+    let call = reaper.begin_call(distant_deadline())?;
     let late = spawn_zombie(0)?;
     reaper
         .sweep_orphans(&mut candidates, grace, max_defer)
@@ -131,7 +136,7 @@ async fn sweep_in_own_process() -> Result<()> {
     let past = Instant::now()
         .checked_sub(ChildReaper::CLAIM_MARGIN + Duration::from_secs(1))
         .context("past deadline")?;
-    let call = reaper.begin_call(Some(past))?;
+    let call = reaper.begin_call(past)?;
     let past_its_deadline = spawn_zombie(0)?;
     reaper
         .sweep_orphans(&mut candidates, grace, max_defer)
@@ -142,14 +147,14 @@ async fn sweep_in_own_process() -> Result<()> {
     // Calls which started after the zombie was first seen cannot claim
     // it, they do not defer it, neither after the calls it was seen with
     // ended nor without any.
-    let call = reaper.begin_call(None)?;
+    let call = reaper.begin_call(distant_deadline())?;
     let first = spawn_zombie(0)?;
     reaper
         .sweep_orphans(&mut candidates, grace, max_defer)
         .await;
     assert!(is_zombie(first));
     drop(call);
-    let unrelated = reaper.begin_call(None)?;
+    let unrelated = reaper.begin_call(distant_deadline())?;
     reaper
         .sweep_orphans(&mut candidates, grace, max_defer)
         .await;
@@ -161,7 +166,7 @@ async fn sweep_in_own_process() -> Result<()> {
         .sweep_orphans(&mut candidates, Duration::from_secs(60), max_defer)
         .await;
     assert!(candidates.contains_key(&second));
-    let _in_progress = reaper.begin_call(None)?;
+    let _in_progress = reaper.begin_call(distant_deadline())?;
     reaper
         .sweep_orphans(&mut candidates, grace, max_defer)
         .await;
@@ -241,8 +246,19 @@ fn child(pid: Pid, timeout: Option<Instant>, exit_path: &Path, cleanup: &[&str])
 
 #[tokio::test(start_paused = true)]
 async fn watch_reports_exit_codes() -> Result<()> {
+    check_watch(&[("exit 3", 3), ("kill -9 $$", 137), ("exit 0", 0)]).await
+}
+
+/// Like conmon, also for the real-time signals nix does not know. On its own,
+/// qemu-user reports them with other numbers, see the test-unit-arch jobs.
+#[tokio::test(start_paused = true)]
+async fn watch_reports_real_time_signal_exits() -> Result<()> {
+    check_watch(&[("kill -34 $$", 162)]).await
+}
+
+async fn check_watch(cases: &[(&str, i32)]) -> Result<()> {
     let dir = tempfile::tempdir()?;
-    for (script, expected) in [("exit 3", 3), ("kill -9 $$", 137), ("exit 0", 0)] {
+    for &(script, expected) in cases {
         let exit_path = dir.path().join("exit");
         let sh = spawn_sh(script)?;
         let (_, reapable, exit) = ReapableChild::from_child(child(sh.pid, None, &exit_path, &[])?);
@@ -370,12 +386,42 @@ async fn failed_create_cleanup_spares_claimed_pid() -> Result<()> {
 }
 
 #[tokio::test]
+async fn failed_call_cleanup_kills_the_group() -> Result<()> {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    let reaper = ChildReaper::default();
+    let dir = tempfile::tempdir()?;
+    let pidfile = dir.path().join("pid");
+    // The process of a failed call, which gets reaped by the cleanup, and a
+    // worker it started in its group.
+    let pid = child_pid(
+        Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()?
+            .id(),
+    )?;
+    let _leader = Spawned {
+        pid,
+        process: Process::open(pid),
+    };
+    let mut worker = Guarded::spawn(Command::new("sleep").arg("60").process_group(pid.as_raw()))?;
+    std::fs::write(&pidfile, pid.to_string())?;
+
+    reaper.cleanup_failed_grandchild(&pidfile);
+    let worker_pid = child_pid(worker.0.id())?;
+    wait_for_real(|| is_zombie(worker_pid)).await;
+    assert_eq!(worker.0.wait()?.signal(), Some(Signal::SIGKILL as i32));
+    wait_for_real(|| is_gone(pid)).await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn registration_keeps_the_child_claimed() -> Result<()> {
     let reaper = ChildReaper::default();
     let dir = tempfile::tempdir()?;
     let sh = spawn_sh("exec sleep 60")?;
     // As `create_child` leaves it.
-    let mut call = reaper.begin_call(None)?;
+    let mut call = reaper.begin_call(distant_deadline())?;
     call.pending = Some(PendingPid::new(&reaper.pending, sh.pid));
     assert!(reaper.is_claimed(sh.pid));
 
@@ -412,7 +458,7 @@ async fn leaked_fds_stay_open_until_the_exit() -> Result<()> {
     let sh = spawn_sh("exec sleep 60")?;
     let (reader, writer) = pipe2(OFlag::O_NONBLOCK)?;
     let mut reader = std::fs::File::from(reader);
-    let call = reaper.begin_call(None)?;
+    let call = reaper.begin_call(distant_deadline())?;
     let child = child(sh.pid, None, &dir.path().join("exit"), &[])?;
     let mut exit_rx = reaper.watch_grandchild(child, vec![writer], call)?;
 
@@ -439,7 +485,10 @@ async fn abandoned_call_releases_its_process() -> Result<()> {
     let args = ["-c".into(), script];
     let mut io = ContainerIO::new(false, ContainerLog::new())?;
     let (pid, token, call) = reaper
-        .create_child(RuntimeCall::new(Path::new("sh"), &args, &pidfile), &mut io)
+        .create_child(
+            RuntimeCall::new(Path::new("sh"), &args, &pidfile, distant_deadline()),
+            &mut io,
+        )
         .await?;
     // Not a child of the tests, which are no subreaper.
     let process = Process::open(pid);
@@ -469,7 +518,10 @@ async fn runtime_without_stdin_gets_dev_null() -> Result<()> {
     let args = ["-c".into(), script];
     let mut io = ContainerIO::new(false, ContainerLog::new())?;
     let (_, token, _call) = reaper
-        .create_child(RuntimeCall::new(Path::new("sh"), &args, &pidfile), &mut io)
+        .create_child(
+            RuntimeCall::new(Path::new("sh"), &args, &pidfile, distant_deadline()),
+            &mut io,
+        )
         .await?;
     token.cancel();
     assert_eq!(std::fs::read_to_string(stdin)?.trim(), "/dev/null");
@@ -504,7 +556,7 @@ async fn registration_after_shutdown_kills_child() -> Result<()> {
     let args = ["x".into()];
     let res = reaper
         .create_child(
-            RuntimeCall::new(Path::new("true"), &args, &pidfile),
+            RuntimeCall::new(Path::new("true"), &args, &pidfile, distant_deadline()),
             &mut io,
         )
         .await;
@@ -524,10 +576,12 @@ async fn runtime_output_with_terminal_does_not_block() -> Result<()> {
     let start = Instant::now();
     let pidfile = dir.path().join("pid");
     let args = ["-c".into(), script.into()];
-    let call = RuntimeCall {
-        deadline: Some(Instant::now() + Duration::from_secs(10)),
-        ..RuntimeCall::new(Path::new("sh"), &args, &pidfile)
-    };
+    let call = RuntimeCall::new(
+        Path::new("sh"),
+        &args,
+        &pidfile,
+        Instant::now() + Duration::from_secs(10),
+    );
     let res = time::timeout(Duration::from_secs(20), reaper.create_child(call, &mut io)).await?;
     let err = format!("{:#}", res.err().context("runtime failure expected")?);
     assert!(err.contains("runtime exited with status 1"), "{err}");
@@ -544,10 +598,12 @@ async fn runtime_killed_by_a_signal_names_it() -> Result<()> {
     let mut io = ContainerIO::new(false, ContainerLog::new())?;
     let pidfile = dir.path().join("pid");
     let args = ["-c".into(), "kill -KILL $$".into()];
-    let call = RuntimeCall {
-        deadline: Some(Instant::now() + Duration::from_secs(10)),
-        ..RuntimeCall::new(Path::new("sh"), &args, &pidfile)
-    };
+    let call = RuntimeCall::new(
+        Path::new("sh"),
+        &args,
+        &pidfile,
+        Instant::now() + Duration::from_secs(10),
+    );
     let res = time::timeout(Duration::from_secs(20), reaper.create_child(call, &mut io)).await?;
     let err = format!("{:#}", res.err().context("runtime failure expected")?);
     assert!(
@@ -565,10 +621,12 @@ async fn hanging_runtime_gets_killed_at_its_deadline() -> Result<()> {
     let args = ["-c".into(), "exec sleep 60".into()];
     for terminal in [false, true] {
         let mut io = ContainerIO::new(terminal, ContainerLog::new())?;
-        let call = RuntimeCall {
-            deadline: Some(Instant::now() + Duration::from_millis(200)),
-            ..RuntimeCall::new(Path::new("sh"), &args, &pidfile)
-        };
+        let call = RuntimeCall::new(
+            Path::new("sh"),
+            &args,
+            &pidfile,
+            Instant::now() + Duration::from_millis(200),
+        );
         let start = Instant::now();
         let res =
             time::timeout(Duration::from_secs(20), reaper.create_child(call, &mut io)).await?;
@@ -596,10 +654,12 @@ async fn hanging_runtime_gets_killed_with_its_group() -> Result<()> {
         );
         let args = ["-c".into(), script];
         let mut io = ContainerIO::new(terminal, ContainerLog::new())?;
-        let call = RuntimeCall {
-            deadline: Some(Instant::now() + Duration::from_secs(1)),
-            ..RuntimeCall::new(Path::new("sh"), &args, &pidfile)
-        };
+        let call = RuntimeCall::new(
+            Path::new("sh"),
+            &args,
+            &pidfile,
+            Instant::now() + Duration::from_secs(1),
+        );
         // Its output does not wait for the helper either, which runs
         // for a minute.
         let res =
@@ -626,7 +686,7 @@ async fn stale_pid_file_does_not_get_cleaned_up() -> Result<()> {
 
     let mut io = ContainerIO::new(false, ContainerLog::new())?;
     let args = ["-c".into(), "exit 1".into()];
-    let call = RuntimeCall::new(Path::new("sh"), &args, &pidfile);
+    let call = RuntimeCall::new(Path::new("sh"), &args, &pidfile, distant_deadline());
     assert!(reaper.create_child(call, &mut io).await.is_err());
     assert!(!pidfile.exists());
     // A killed process takes a moment to exit, nothing tells that no kill
@@ -648,7 +708,7 @@ async fn dropped_runtime_gets_killed_with_its_group() -> Result<()> {
     );
     let args = ["-c".into(), script];
     let mut io = ContainerIO::new(false, ContainerLog::new())?;
-    let call = RuntimeCall::new(Path::new("sh"), &args, &pidfile);
+    let call = RuntimeCall::new(Path::new("sh"), &args, &pidfile, distant_deadline());
     // Like a call in progress which the shutdown drops.
     select! {
         _ = reaper.create_child(call, &mut io) => bail!("runtime finished"),
@@ -689,7 +749,7 @@ async fn deferral_ends_with_the_call_or_the_bound() -> Result<()> {
 
     // The runtime of an exec gets a minute, its process exits after
     // 29.5s and the runtime after 31s.
-    let exec = reaper.begin_call(Some(Instant::now() + Duration::from_secs(60)))?;
+    let exec = reaper.begin_call(Instant::now() + Duration::from_secs(60))?;
     time::advance(Duration::from_millis(29_500)).await;
     let zombie = first_seen(&reaper);
     time::advance(Duration::from_millis(1500)).await;
@@ -710,7 +770,7 @@ async fn deferral_ends_with_the_call_or_the_bound() -> Result<()> {
 
     // A create gets 10 minutes, the bound since the zombie was first
     // seen ends the deferral first, also late in the call.
-    let create = reaper.begin_call(Some(Instant::now() + Duration::from_secs(600)))?;
+    let create = reaper.begin_call(Instant::now() + Duration::from_secs(600))?;
     for after in [Duration::from_secs(1), Duration::from_secs(500)] {
         time::advance(after).await;
         let zombie = first_seen(&reaper);
@@ -722,9 +782,9 @@ async fn deferral_ends_with_the_call_or_the_bound() -> Result<()> {
 
     // An older call with a later deadline still claims, a call which
     // started after the zombie was first seen does not.
-    let exec = reaper.begin_call(Some(Instant::now() + Duration::from_secs(1)))?;
+    let exec = reaper.begin_call(Instant::now() + Duration::from_secs(1))?;
     let zombie = first_seen(&reaper);
-    let unrelated = reaper.begin_call(Some(Instant::now() + Duration::from_secs(60)))?;
+    let unrelated = reaper.begin_call(Instant::now() + Duration::from_secs(60))?;
     time::advance(Duration::from_secs(20)).await;
     assert!(reaper.defers(zombie, Instant::now(), max_defer));
     drop(create);
@@ -736,7 +796,7 @@ async fn deferral_ends_with_the_call_or_the_bound() -> Result<()> {
 #[tokio::test(start_paused = true)]
 async fn shutdown_waits_for_calls_in_progress() -> Result<()> {
     let reaper = Arc::new(ChildReaper::default());
-    let call = reaper.begin_call(None)?;
+    let call = reaper.begin_call(distant_deadline())?;
     let deadline = Instant::now() + Duration::from_secs(60);
     let shutdown = task::spawn({
         let reaper = reaper.clone();
@@ -745,7 +805,7 @@ async fn shutdown_waits_for_calls_in_progress() -> Result<()> {
     time::sleep(Duration::from_secs(1)).await;
     assert!(!shutdown.is_finished());
     // No new call starts meanwhile.
-    assert!(reaper.begin_call(None).is_err());
+    assert!(reaper.begin_call(distant_deadline()).is_err());
 
     drop(call);
     shutdown.await??;
@@ -757,7 +817,7 @@ async fn shutdown_waits_for_calls_in_progress() -> Result<()> {
         (Duration::from_secs(2), Duration::from_secs(2)),
     ] {
         let reaper = ChildReaper::default();
-        let _call = reaper.begin_call(None)?;
+        let _call = reaper.begin_call(distant_deadline())?;
         let start = Instant::now();
         let err = reaper
             .kill_grandchildren(start + deadline)
@@ -797,12 +857,12 @@ async fn shutdown_waits_for_the_watchers() -> Result<()> {
     let reaper = Arc::new(ChildReaper::default());
     let dir = tempfile::tempdir()?;
     let running = spawn_sh("exec sleep 60")?;
-    let call = reaper.begin_call(None)?;
+    let call = reaper.begin_call(distant_deadline())?;
     let registered = child(running.pid, None, &dir.path().join("exit"), &[])?;
     reaper.watch_grandchild(registered, vec![], call)?;
 
     // A call in progress registers its child after the snapshot.
-    let call = reaper.begin_call(None)?;
+    let call = reaper.begin_call(distant_deadline())?;
     let deadline = Instant::now() + Duration::from_secs(60);
     let shutdown = task::spawn({
         let reaper = reaper.clone();
@@ -878,6 +938,8 @@ async fn log_loop() -> Result<LogLoop> {
         attach.clone(),
         attach.output(),
     ));
+    // The loop looks up the drivers first, which a held log would block.
+    task::yield_now().await;
     Ok(LogLoop {
         writer,
         attach,
@@ -891,8 +953,8 @@ async fn log_loop() -> Result<LogLoop> {
 /// Make the log drivers hang until the guard gets dropped.
 async fn hold(
     logger: &crate::container_log::SharedContainerLog,
-) -> tokio::sync::OwnedRwLockReadGuard<ContainerLog> {
-    logger.clone().read_owned().await
+) -> tokio::sync::OwnedMutexGuard<ContainerLog> {
+    logger.clone().lock_owned().await
 }
 
 /// Wait until a read loop has output on its way into the log, failing
@@ -1007,7 +1069,7 @@ async fn slow_exec_consumers_get_all_output() -> Result<()> {
 
     // The process wrote its output and exited.
     let sh = spawn_sh("exit 0")?;
-    let call = reaper.begin_call(None)?;
+    let call = reaper.begin_call(distant_deadline())?;
     let mut child = child(sh.pid, None, &dir.path().join("exit"), &[])?;
     child.kind = ChildKind::Exec;
     child.exit_paths = vec![];
@@ -1079,7 +1141,7 @@ async fn spawns_with_changed_targets_get_retried_once() -> Result<()> {
         let mut io = ContainerIO::new(false, ContainerLog::new())?;
         let call = RuntimeCall {
             additional_fds: vec![passed.into()],
-            ..RuntimeCall::new(Path::new("sh"), &args, &pidfile)
+            ..RuntimeCall::new(Path::new("sh"), &args, &pidfile, distant_deadline())
         };
         let err = reaper.create_child(call, &mut io).await.unwrap_err();
         runtime_call::TARGET_CHANGES.with(|n| n.set(0));

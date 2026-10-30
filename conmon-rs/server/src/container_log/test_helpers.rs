@@ -6,7 +6,7 @@ use super::{
 use anyhow::Result;
 use std::{fs, sync::Arc};
 use tempfile::NamedTempFile;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 
 /// The timestamp of every entry a [`cri_logger`] writes.
 pub(crate) const TIMESTAMP: &str = "2026-10-20T12:00:00.123456789+02:00";
@@ -53,5 +53,5 @@ pub(crate) async fn container_log(
     if init {
         log.init().await?;
     }
-    Ok((cri_file, json_file, Arc::new(RwLock::new(log))))
+    Ok((cri_file, json_file, Arc::new(Mutex::new(log))))
 }

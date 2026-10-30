@@ -14,6 +14,10 @@ jobs:
   - job: copr_build
     trigger: pull_request
     enable_net: true
+    # The OpenScanHub scan after the build runs in a mock chroot without
+    # network, enable_net only applies to Copr, so cargo cannot fetch the
+    # crates and every scan fails.
+    osh_diff_scan_after_copr_build: false
     targets:
       - fedora-all-x86_64
       - fedora-all-aarch64

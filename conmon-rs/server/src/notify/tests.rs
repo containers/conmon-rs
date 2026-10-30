@@ -172,3 +172,51 @@ async fn bind_replaces_a_stale_socket_but_not_a_live_one() -> Result<()> {
     assert!(!path.exists());
     Ok(())
 }
+
+/// While the host socket is gone, only the first message which fails to
+/// get relayed logs a warning, until one gets relayed again.
+#[tokio::test]
+async fn relay_failures_warn_once() -> Result<()> {
+    use std::io::{Read, Seek};
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let bundle = tempdir()?;
+    let host_path = bundle.path().join("host.sock");
+    let host = StdUnixDatagram::bind(&host_path)?;
+    let sut = NotifySocket::bind(bundle.path(), host_path.to_str().context("path")?)?;
+
+    let mut log = tempfile::tempfile()?;
+    let _logs = tracing_subscriber::fmt()
+        .with_writer(log.try_clone()?)
+        .with_max_level(tracing::Level::DEBUG)
+        .finish()
+        .set_default();
+
+    // Remove the socket file too: a process which a parallel test forks may
+    // still hold the host socket until it execs, and the relay connects by
+    // path for every message.
+    drop(host);
+    fs::remove_file(&host_path)?;
+    sut.forward_now(b"STATUS=1");
+    sut.forward(b"STATUS=2").await;
+    let host = StdUnixDatagram::bind(&host_path)?;
+    sut.forward_now(b"STATUS=3");
+    let mut buf = [0; 16];
+    let len = host.recv(&mut buf)?;
+    assert_eq!(&buf[..len], b"STATUS=3");
+    drop(host);
+    fs::remove_file(&host_path)?;
+    sut.forward(b"STATUS=4").await;
+    sut.forward_now(b"STATUS=5");
+
+    log.rewind()?;
+    let mut output = String::new();
+    log.read_to_string(&mut output)?;
+    let warnings: Vec<_> = output
+        .lines()
+        .filter(|line| line.contains("Unable to relay notify message"))
+        .map(|line| line.contains("WARN"))
+        .collect();
+    assert_eq!(warnings, [true, false, true, false], "{output}");
+    Ok(())
+}

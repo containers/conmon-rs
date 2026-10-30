@@ -116,6 +116,15 @@ async fn forwards_a_connection() -> Result<()> {
 }
 
 #[tokio::test]
+async fn connections_send_without_delay() -> Result<()> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let port = listener.local_addr()?.port();
+    let connection = PortForward::connect(&Namespace::new(NETNS.into()), port).await?;
+    assert!(connection.nodelay()?);
+    Ok(())
+}
+
+#[tokio::test]
 async fn connections_fall_back_to_ipv6() -> Result<()> {
     // Only IPv6 listens on the port, the connection to IPv4 gets refused.
     // An IPv4 socket which does not listen holds the port, so that no

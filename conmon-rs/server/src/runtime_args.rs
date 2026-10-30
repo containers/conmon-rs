@@ -51,10 +51,10 @@ impl GenerateRuntimeArgs<'_> {
         Ok(args)
     }
 
-    /// Generate the OCI runtime CLI arguments from the provided parameters.
-    /// They are not logged here, the command may carry secrets, see
-    /// [`LoggedArgs`].
-    pub(crate) fn exec_sync_args(
+    /// Generate the OCI runtime CLI arguments of an exec, of an exec_sync or
+    /// a streaming one alike. They are not logged here, the command may carry
+    /// secrets, see [`LoggedArgs`].
+    pub(crate) fn exec_args(
         &self,
         command: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<ExecArgs> {

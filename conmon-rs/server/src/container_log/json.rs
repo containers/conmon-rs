@@ -53,30 +53,20 @@ impl Logger for JsonLogger {
             .unwrap_or_default()
             .as_secs();
 
-        // The first error, the lines after a failed one still get written.
-        let mut res = Ok(());
-        for line in lines {
-            let message = String::from_utf8_lossy(&line.text);
-            let log_entry = LogEntry {
-                timestamp,
-                pipe: pipe.as_str(),
-                message: &message,
-                partial: line.partial,
-            };
-
-            let buf = self.file.buf();
-            let start = buf.len();
-            if let Err(e) = serde_json::to_writer(&mut *buf, &log_entry) {
-                buf.truncate(start);
-                res = res.and(Err(e).context("serialize log entry"));
-                continue;
-            }
-            buf.push(b'\n');
-            res = res.and(self.file.commit_entry(start).await);
-        }
-
-        // Write the whole chunk at once instead of per line
-        res.and(self.file.end_chunk().await)
+        self.file
+            .write_entries(lines, |buf, line| {
+                let message = String::from_utf8_lossy(&line.text);
+                let log_entry = LogEntry {
+                    timestamp,
+                    pipe: pipe.as_str(),
+                    message: &message,
+                    partial: line.partial,
+                };
+                serde_json::to_writer(&mut *buf, &log_entry).context("serialize log entry")?;
+                buf.push(b'\n');
+                Ok(())
+            })
+            .await
     }
 }
 

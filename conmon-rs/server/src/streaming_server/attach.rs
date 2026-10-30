@@ -168,7 +168,8 @@ impl StreamingServer {
 
 /// Closes the container stdin when an attach session with stdin once ends
 /// while the container runs, also if the client went away without closing
-/// its stdin and the loop got aborted.
+/// its stdin and the loop got aborted. A terminal stays open, see
+/// [`SharedContainerAttach::close_container_stdin`].
 struct AttachTeardown {
     attach: SharedContainerAttach,
 
@@ -181,9 +182,8 @@ struct AttachTeardown {
 
 impl Drop for AttachTeardown {
     fn drop(&mut self) {
-        if self.close_stdin && !self.token.is_cancelled() {
-            debug!("Closing the container stdin after the end of the attach session");
-            self.attach.close_container_stdin();
+        if self.close_stdin && !self.token.is_cancelled() && self.attach.close_container_stdin() {
+            debug!("Closed the container stdin after the end of the attach session");
         }
     }
 }

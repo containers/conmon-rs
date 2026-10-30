@@ -326,7 +326,7 @@ async fn last_line_is_logged_before_the_output_ends() -> Result<()> {
     // The exit files get written once the output ended, the log must not
     // be busy with the last line anymore then.
     while time::timeout(WAIT, rx.recv()).await?? != Message::Done {}
-    assert!(logger.try_write().is_ok());
+    assert!(logger.try_lock().is_ok());
     assert!(test_helpers::read(&json)?.contains(r#""message":"no newline","partial":true"#));
     read_loop.await?
 }
@@ -420,6 +420,29 @@ async fn stopped_output_ends_read_while_pipe_is_held_open() -> Result<()> {
     assert!(attach.subscribe().1, "output did not end");
     // Its writes fail once nothing reads the pipe anymore.
     assert!(writer.write_all(b"more").await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn dropped_stdio_frees_the_channels_of_quiet_pipes() -> Result<()> {
+    let mut io = ContainerIO::new(false, ContainerLog::new())?;
+    let (mut stdout, stdout_reader) = duplex(1024);
+    let (_stderr, stderr_reader) = duplex(1024);
+    let output = io.attach.output();
+    io.spawn_read_loop(stdout_reader, Pipe::StdOut, output.clone());
+    io.spawn_read_loop(stderr_reader, Pipe::StdErr, output);
+    let (stdout_rx, stderr_rx) = io.stdio()?;
+    stdout.write_all(b"created").await?;
+    assert_eq!(data(stdout_rx.recv().await?), "created");
+
+    // The pipes stay open, but nothing gets written to them anymore.
+    io.drop_stdio();
+    time::timeout(WAIT, async {
+        while stdout_rx.sender_count() + stderr_rx.sender_count() > 0 {
+            task::yield_now().await;
+        }
+    })
+    .await?;
     Ok(())
 }
 

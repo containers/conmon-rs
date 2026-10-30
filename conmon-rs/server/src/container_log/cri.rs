@@ -118,23 +118,18 @@ impl Logger for CriLogger {
             Pipe::StdErr => b" stderr ",
         };
 
-        // The first error, the lines after a failed one still get written.
-        let mut res = Ok(());
-        for (line, partial) in lines(bytes) {
-            // Assemble the whole line into the chunk buffer
-            let buf = self.file.buf();
-            let start = buf.len();
-            buf.extend_from_slice(timestamp.as_bytes());
-            buf.extend_from_slice(pipe_tag);
-            buf.extend_from_slice(if partial { b"P " } else { b"F " });
-            buf.extend_from_slice(line);
-            if partial {
-                buf.push(b'\n');
-            }
-            res = res.and(self.file.commit_entry(start).await);
-        }
-
-        res.and(self.file.end_chunk().await)
+        self.file
+            .write_entries(lines(bytes), |buf, (line, partial)| {
+                buf.extend_from_slice(timestamp.as_bytes());
+                buf.extend_from_slice(pipe_tag);
+                buf.extend_from_slice(if partial { b"P " } else { b"F " });
+                buf.extend_from_slice(line);
+                if partial {
+                    buf.push(b'\n');
+                }
+                Ok(())
+            })
+            .await
     }
 }
 

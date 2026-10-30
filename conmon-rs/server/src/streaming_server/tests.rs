@@ -14,10 +14,19 @@ use anyhow::{Context, Result};
 use std::{io, path::PathBuf};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpListener, TcpStream},
     task::LocalSet,
     time::{self, Duration},
 };
+
+#[tokio::test]
+async fn accepted_connections_have_no_delay() -> Result<()> {
+    let listener = TcpListener::bind((ADDR, 0)).await?;
+    let client = TcpStream::connect(listener.local_addr()?);
+    let (accepted, _client) = tokio::try_join!(StreamingServer::accept(&listener), client)?;
+    assert!(accepted.nodelay()?);
+    Ok(())
+}
 
 #[tokio::test]
 async fn connections_without_a_request_get_closed() -> Result<()> {

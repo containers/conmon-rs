@@ -4,9 +4,10 @@ name: advisories
 # main and its binaries show up here, like newer versions of the tools of
 # dependencies.yaml.
 on:
-  # Off the full hour, which GitHub delays or drops under load.
+  # GitHub starts scheduled runs late, often by hours, so the run is set early
+  # to finish before the merges of the day. Off the full hour helps a little.
   schedule:
-    - cron: "17 6 * * *"
+    - cron: "17 2 * * *"
   workflow_dispatch: {}
 permissions:
   contents: read
@@ -188,7 +189,8 @@ jobs:
   # workflow only the ones of pull requests for two minutes, with the same
   # .github/run-fuzz. The targets are the ones of the latest passed ci run of
   # main, the corpus the one of the run before, which the run extends and
-  # saves.
+  # saves. The jobs keep the default names of a matrix, see test-fuzz of the
+  # ci workflow.
   list-fuzz-targets:
     if: github.repository == 'containers/conmon-rs'
     runs-on: ubuntu-latest
@@ -241,7 +243,6 @@ jobs:
       fail-fast: false
       matrix:
         target: ${{ fromJSON(needs.list-fuzz-targets.outputs.targets) }}
-    name: test-fuzz-${{ matrix.target }}
     env:
       TARGET: ${{ matrix.target }}
     steps:

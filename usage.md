@@ -35,7 +35,8 @@ in the releases of the 1.37 branch after v1.37.2 with the
 
 ```text
 INFO[…] Runtime handler "crun" is using conmon-rs version: …, tag: …, \
-            commit: …, build: …, target: x86_64-unknown-linux-gnu, rustc …, cargo …
+            commit: …, build: …, target: x86_64-unknown-linux-gnu, rustc …, cargo …, \
+            features: …
 ```
 
 Older ones only show it in the debug logs when they create a container:
@@ -74,7 +75,7 @@ starts for it:
 
 | Entry                          | Effect                                                                                                                                                                                                                                                  | Since CRI-O |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| `LOG_DRIVER=<driver>`          | The server log driver (`--log-driver`): `systemd`, `stdout` or `none`. Without it, CRI-O starts the servers with `none`, so they write no logs.                                                                                                         | v1.34       |
+| `LOG_DRIVER=<driver>`          | The server log driver (`--log-driver`): `systemd`, `stdout` or `none`. Without it, CRI-O starts the servers with `none`, so they write no logs (since unreleased, except for the message of a panic), see [Troubleshooting](#troubleshooting).          | v1.34       |
 | `HEAPTRACK_OUTPUT_PATH=<path>` | Profiles the memory of the servers with heaptrack, see [Troubleshooting](#troubleshooting).                                                                                                                                                             | v1.34       |
 | `HEAPTRACK_BINARY_PATH=<path>` | The heaptrack binary, also enables the profiling.                                                                                                                                                                                                       | v1.34       |
 | Any other `KEY=value`          | Part of the environment of the server, which passes it on to the runtime, its hooks and the cleanup commands, together with `CRI_O_EXTERNAL=1` and the `PATH` and `XDG_RUNTIME_DIR` of CRI-O. `CONMON_*` variables configure the server like its flags. | v1.38       |
@@ -199,7 +200,8 @@ for `--runtime-root`, and `--systemd-cgroup` for the `systemd` cgroup manager
 of the request. If the file name of the runtime is `crun`, it also adds
 `--log=journald:<container ID>`, and for the log levels `trace` and `debug`
 of the server `--log-level=debug`, for `warn` `--log-level=warning` and for
-`error` `--log-level=error`. crun keeps its default for `info` and `off`.
+`error` `--log-level=error`. crun keeps its default for `info` and `off`, and
+before unreleased for `trace` as well.
 
 On SIGTERM or SIGINT, the server kills the containers, stops the pause process
 and removes its sockets within 9.5 seconds, before `Shutdown` of the Go client
@@ -229,9 +231,10 @@ Each requested namespace is unshared and bind mounted to
 namespaces alive, except for a PID namespace, which dies with its init process.
 Only when `--pid` is requested a pause process stays behind, its PID is written
 to `$BASE_PATH/conmonrs/$POD_ID.pid`. The mounts and the pause process are
-removed when the server shuts down. The bind mounts get unmounted lazily
-(`MNT_DETACH`), a process which still holds one open keeps its namespace alive
-until it lets go of it.
+removed when the server shuts down. Since unreleased, the bind mounts get
+unmounted lazily (`MNT_DETACH`), a process which still holds one open keeps its
+namespace alive until it lets go of it. Before, a bind path which a process
+held open stayed mounted and its file stayed behind.
 
 ## Protocols
 
@@ -259,14 +262,15 @@ matches them with errors like `ErrContainerNotFound`.
 `attachContainer` makes the server listen on a `SOCK_SEQPACKET` UNIX socket at
 the requested path, which has to be absolute since unreleased. Packets from the
 client are the container's stdin, passed on as they are, NUL bytes included. A
-packet of more than 64 KiB gets truncated to its first 64 KiB. The Go client
-sends one read of its stdin per packet, at most 32 KiB plus the start of a
-detach key sequence which it held back. The client's input ends when it shuts
-down the write side of its connection. Packets to the client start with one byte
-selecting the stream, `2` for stdout and `3` for stderr, followed by up to 8192
-bytes of data. A single `0` byte tells the client that the container output
-ended. This is the same protocol conmon speaks, so existing attach clients
-work unchanged.
+packet of more than 33 KiB (64 KiB before unreleased) gets truncated to its
+first 33 KiB. The Go client sends one read of its stdin per packet, at most
+32 KiB plus the start of a detach key sequence which it held back. The client's
+input ends when it shuts down the write side of its connection. Packets to the
+client start with one byte selecting the stream, `2` for stdout and `3` for
+stderr, followed by up to 8192 bytes of data, since unreleased. Before, a
+packet had at most 8191 bytes of data, which split every full read of 8 KiB in
+two. A single `0` byte tells the client that the container output ended. This
+is the same protocol conmon speaks, so existing attach clients work unchanged.
 
 With `stopAfterStdinEof`, the server closes the container's stdin once the
 input of a client ended, the output is still forwarded until the container
@@ -316,12 +320,16 @@ start), the end of the stdin stream closes stdin. The end of the stdin of the
 client, over SPDY or over WebSocket with `v5.channel.k8s.io` (the versions
 before have no close signal), closes the stdin of an exec process, and the one
 of an attached container with `stopAfterStdinEof`. A terminal is never closed,
-it gets its end of file character instead, like from Ctrl-D. The server keeps
-its side of the stdin stream open until the session ends, except for
-`channel.k8s.io`, like the kubelet. Streams for stdout or stderr which come
-after the start end right away. The server supports `v4.channel.k8s.io`, `v3`,
-`v2` and `channel.k8s.io`, the order of the client decides. From v4 on, the
-final status is JSON, before only a failure is reported as text.
+it gets its end of file character instead, like from Ctrl-D. Without a terminal
+and without `stopAfterStdinEof`, the end of the stdin of the client ends an
+attach session. With `stopAfterStdinEof`, a client which goes away without
+closing its stdin still closes the stdin of the container, unless it is a
+terminal. The server keeps its side of the stdin stream open until the session
+ends, except for `channel.k8s.io`, like the kubelet. Streams for stdout or
+stderr which come after the start end right away. The server supports
+`v4.channel.k8s.io`, `v3`, `v2` and `channel.k8s.io`, the order of the client
+decides. From v4 on, the final status is JSON, before only a failure is
+reported as text.
 
 Since unreleased, a client which takes the end of a session slowly, the
 output queued for it, the status and the close, gets all of it, only one which
@@ -472,7 +480,9 @@ about 16 MiB at most.
 The logs show only the first 8 hex digits of a token, which tell the sessions
 apart but are not enough to use one. Responses never name the token: a request
 for a token which is unknown, used or expired gets a bare 404, one whose token
-is not 32 hex digits a 400 `Invalid URL`.
+is not 32 lowercase hex digits a 400 `Invalid URL`. Since unreleased, uppercase
+hex digits get the 400 as well, before they matched the token like lowercase
+ones.
 
 ### File descriptor socket
 
@@ -494,8 +504,8 @@ documentation of [fd_socket.rs](conmon-rs/server/src/fd_socket.rs).
 ## Features
 
 Beyond its version, `version` reports the optional features of a server,
-which clients check before they rely on them. `conmonrs --version` and
-`--version-json` print them as well:
+which clients check before they rely on them. `conmonrs --version-json` prints
+them as well, and so does `conmonrs --version` since unreleased:
 
 | Feature              | Since  | What the server does                                                                                                        |
 | -------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------- |
@@ -601,7 +611,13 @@ leaf is gone at the exit, a kill in that cgroup which the leaf did not account
 for, together with an exit by `SIGKILL` (status 137), counts as an OOM, which
 may also be the one of another container in it. Without such a cgroup, or if
 its counters cannot be read, an exit by `SIGKILL` with the leaf gone counts as
-an OOM as well.
+an OOM as well. Before unreleased, the server watched the parent of the leaf
+instead of that ancestor, the container scope which the systemd cgroup manager
+removes along with the leaf, so that any exit by `SIGKILL` with the leaf gone
+counted as an OOM. Since unreleased, a leaf without the memory controller,
+which has no `memory.events`, is not gone: a kill counted by the cgroup above
+it may be an OOM the same way, but without such a cgroup, or if its counters
+cannot be read, nothing counts as one.
 
 With cgroup v1, the server registers an eventfd for `memory.oom_control`
 through `cgroup.event_control` like conmon, and confirms an event with the
@@ -614,25 +630,26 @@ does not count.
 
 ## Troubleshooting
 
-| Symptom                                                                       | Cause                                                                                                            |
-| ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| New pods fail, the server exits with `unexpected argument '--cgroup-manager'` | CRI-O v1.36 or older with a server of v1.0.0 or newer, see [Compatibility](#compatibility).                      |
-| CRI-O logs `Container monitor of ... does not support ...`                    | The server of the pod predates the feature, for example one kept across an upgrade, see [Upgrading](#upgrading). |
-| A server refuses to start with `socket ... is in use by a running server`     | Another server serves the runtime directory, see below.                                                          |
-| `client.New` fails with `ErrServerNotResponding`                              | A server accepts connections but does not answer, see below.                                                     |
-| `client.New` fails with `ErrServerExited`, the server has no logs             | The server log driver is `none`, the default of CRI-O. A crash leaves a core dump, see below.                    |
-| Container output is missing in the journal                                    | journald did not keep up, see below.                                                                             |
-| An attach client misses output                                                | It fell behind the container output, which the server logs as a warning, see [Attach socket](#attach-socket).    |
+| Symptom                                                                       | Cause                                                                                                                                                          |
+| ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| New pods fail, the server exits with `unexpected argument '--cgroup-manager'` | CRI-O v1.36 or older with a server of v1.0.0 or newer, see [Compatibility](#compatibility).                                                                    |
+| CRI-O logs `Container monitor of ... does not support ...`                    | The server of the pod predates the feature, for example one kept across an upgrade, see [Upgrading](#upgrading).                                               |
+| A server refuses to start with `socket ... is in use by a running server`     | Another server serves the runtime directory, see below.                                                                                                        |
+| `client.New` fails with `ErrServerNotResponding`                              | A server accepts connections but does not answer, see below.                                                                                                   |
+| `client.New` fails with `ErrServerExited`, the server has no logs             | The server log driver is `none`, the default of CRI-O. A crash leaves a core dump, since unreleased a panic also leaves its message in the journal, see below. |
+| Container output is missing in the journal                                    | journald did not keep up, see below.                                                                                                                           |
+| An attach client misses output                                                | It fell behind the container output, which the server logs as a warning, see [Attach socket](#attach-socket).                                                  |
 
 With the `systemd` server log driver, the default of `conmonrs`, the server's
 own logs go to the journal, since v1.2.1 with the `SYSLOG_IDENTIFIER`
 `conmonrs`, before only under its process name (`_COMM=conmonrs`). CRI-O
 passes its `log_level` on to the servers, but since v1.34 starts them with the
 server log driver `none`, unless the `monitor_env` of the runtime handler
-contains `LOG_DRIVER=systemd`. A server with `none` writes no logs at all, the
-forked server has `/dev/null` as its stdin, stdout and stderr. The container
-output only goes to the journal with the `journald` container log driver, sent
-by the same process:
+contains `LOG_DRIVER=systemd`. A server with `none` writes no logs, the forked
+server has `/dev/null` as its stdin, stdout and stderr. Only the message of a
+panic still goes to the journal, since unreleased. The container output only
+goes to the journal with the `journald` container log driver, sent by the same
+process:
 
 ```console
 > journalctl -t conmonrs
@@ -657,8 +674,9 @@ way.
 The server runs crun with `--log=journald:<container ID>`, so what crun logs
 goes to the journal, where `journalctl -t crun ID=<container ID>` shows it: its
 errors, at the server log levels `warn`, `debug` and `trace` its warnings and
-at `debug` and `trace` its debug messages. crun copies its errors to its stderr
-as well, which ends up in the error of the failed call.
+at `debug` and `trace` its debug messages, at `trace` since unreleased, before
+only its errors. crun copies its errors to its stderr as well, which ends up in
+the error of the failed call.
 
 To see what the server does without an engine, run it in the foreground with
 its logs on stdout and talk to its socket with a client:
@@ -674,10 +692,12 @@ configuration selects it, the `Stderr` writer gets that output instead. A
 server which exits after it forked, before it accepted connections, makes
 `client.New` fail with an error matching `client.ErrServerExited`, only the
 logs of a server log driver other than `none` tell why. The release builds
-abort on a panic and leave a core dump, the panic message goes to stderr, which
-is `/dev/null` unless the server log driver is `stdout`. On hosts with
-systemd-coredump, `coredumpctl list conmonrs` lists the crashes and
-`coredumpctl info <pid>` shows the backtrace.
+abort on a panic and leave a core dump. The panic message goes to stderr,
+which is `/dev/null` unless the server log driver is `stdout`, since
+unreleased with the other drivers to the journal as well
+(`journalctl -t conmonrs -p err`). On hosts with systemd-coredump,
+`coredumpctl list conmonrs` lists the crashes and `coredumpctl info <pid>`
+shows the backtrace.
 
 Only one server runs per runtime directory. A server refuses to start with
 `socket ... is in use by a running server` while another one serves

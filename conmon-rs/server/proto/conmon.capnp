@@ -384,7 +384,8 @@ interface Conmon {
     # requests exceeded".
     struct ServeExecContainerRequest {
         metadata @0 :Metadata; # Standard metadata to carry.
-        # The session fails for an ID which `CreateContainerRequest` rejects.
+        # The ID of the container. The call fails with a message starting
+        # with "container not found" for one the server does not know.
         id @1 :Text;
         # The command and its arguments, which the runtime runs in the
         # container once the client connected.

@@ -45,11 +45,6 @@ pub const CLOSE_BYTE: u8 = 255;
 /// some clients take an empty error stream for a failure.
 const SUCCESS_STATUS: &[u8] = b"{\"metadata\":{},\"status\":\"Success\"}";
 
-/// The most resize events a SPDY client may send without completing one.
-const MAX_RESIZE_BUFFER: usize = 4 * 1024;
-
-const STREAM_TYPE_RESIZE: &str = "resize";
-
 /// A version of the protocols, which decides how a session reports its
 /// status and whether the client resizes terminals.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

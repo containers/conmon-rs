@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sirupsen/logrus"
 )
@@ -388,8 +389,29 @@ func readServerErrors(file *os.File) string {
 		return ""
 	}
 
-	output := strings.TrimSpace(string(buf[:n]))
-	if offset > 0 && output != "" {
+	return errorTail(string(buf[:n]), offset > 0)
+}
+
+// errorTail returns the trimmed end of an error output, at most
+// maxServerErrors bytes of it. A "..." in front tells that it got cut, here
+// or by the caller, which sets cut then. A cut drops what it left of a split
+// character.
+func errorTail(output string, cut bool) string {
+	output = strings.TrimSpace(output)
+	if len(output) > maxServerErrors {
+		output = output[len(output)-maxServerErrors:]
+		cut = true
+	}
+
+	if cut {
+		for i := 0; i < utf8.UTFMax-1 && output != "" && !utf8.RuneStart(output[0]); i++ {
+			output = output[1:]
+		}
+
+		output = strings.TrimSpace(output)
+	}
+
+	if cut && output != "" {
 		output = "..." + output
 	}
 

@@ -3,10 +3,10 @@
 use super::{Candidate, ChildReaper};
 use crate::{
     mutex::lock,
-    process::{has_zombie, reap_guard, zombie_children},
+    process::{has_zombie, reap_guard, wait_exit, zombie_children},
 };
 use nix::{
-    sys::wait::{WaitPidFlag, waitpid},
+    sys::wait::{Id, WaitPidFlag},
     unistd::Pid,
 };
 use std::{
@@ -151,10 +151,11 @@ impl ChildReaper {
                 continue;
             }
             let reaping = reap_guard();
-            let status = waitpid(pid, Some(WaitPidFlag::WNOHANG));
+            let code = wait_exit(Id::Pid(pid), WaitPidFlag::WNOHANG);
             drop(reaping);
-            match status {
-                Ok(status) => debug!("Reaped orphaned child {pid}: {status:?}"),
+            match code {
+                Ok(Some(code)) => debug!("Reaped orphaned child {pid}: exit code {code}"),
+                Ok(None) => debug!("Orphaned child {pid} still runs"),
                 Err(e) => debug!("Unable to reap orphaned child {pid}: {e}"),
             }
             candidates.remove(&pid);

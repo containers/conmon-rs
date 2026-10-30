@@ -39,7 +39,8 @@ pub struct OOMWatcher;
 pub struct OOMEvent {
     pub oom: bool,
 
-    /// The cgroup of the process got removed, which hides whether an OOM
+    /// The cgroup of the process has no memory events, because it got
+    /// removed or has no memory controller, which hides whether an OOM
     /// happened, but there is a hint which may also stem from a sibling:
     /// with cgroup v1, an event before the removal, with cgroup v2, a new
     /// OOM kill of an outer cgroup or none to tell. So it only counts for a

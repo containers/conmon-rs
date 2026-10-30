@@ -26,8 +26,8 @@ crun. CI runs the integration tests on cgroup v2 only.
 
 - [usage.md](usage.md): configuring CRI-O, the compatibility between CRI-O
   and server versions, upgrades, the command line, the `pause` subcommand, the
-  protocols between the server and its clients, the features, logging,
-  troubleshooting, tracing and the use on Red Hat OpenShift.
+  protocols between the server and its clients, the features, logging, OOM
+  reporting, troubleshooting, tracing and the use on Red Hat OpenShift.
 - [release.md](release.md): how to cut a release.
 - [SECURITY.md](SECURITY.md): how to report a security issue.
 - [Rust docs](https://containers.github.io/conmon-rs/conmonrs/index.html) of
@@ -255,7 +255,7 @@ and runs the Cap'n Proto RPC on the same thread, and blocking work like file
 I/O goes to a small bounded pool. With cgroup v2, all containers of a pod
 share one inotify instance for OOM detection, with cgroup v1 every container
 gets an eventfd on its `memory.oom_control`. The read loops of all containers
-share one scratch buffer of the runtime thread, 8 KiB, or 64 KiB once an
+share one scratch buffer of the runtime thread, 8 KiB, or 33 KiB once an
 attach client sent stdin, so an idle container holds no read buffer. Per
 container, the server keeps an 8 KiB buffer per log
 file once the container wrote output, the channels for exec output and a few

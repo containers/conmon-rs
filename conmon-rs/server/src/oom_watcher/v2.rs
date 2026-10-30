@@ -171,7 +171,15 @@ impl CgroupV2 {
 
     /// Check for an OOM a last time once the process exited. If the leaf is
     /// gone, a kill of the outer cgroup since tells that it may have been
-    /// one, and so does an outer cgroup which is gone as well.
+    /// one, and so does an outer cgroup which is gone as well. A leaf which
+    /// exists without memory events has no memory controller, its kills
+    /// count in the outer cgroup, but without outer counters nothing tells
+    /// of an OOM.
+    ///
+    /// For such a leaf, the outer counters include the kills of siblings
+    /// over the whole life of the leaf, the baseline only advances while the
+    /// leaf has memory events, so an OOM of a sibling may still read as one
+    /// of this container for an exit with 137.
     fn check_on_exit(&mut self) -> OOMEvent {
         debug!("Last resort check for OOM");
         if self.check(false) {
@@ -180,21 +188,30 @@ impl CgroupV2 {
         if !OOMWatcher::file_not_found(&self.events.path) {
             return OOMEvent::default();
         }
+        let leaf_gone = self
+            .events
+            .path
+            .parent()
+            .is_none_or(OOMWatcher::file_not_found);
         let Some((path, baseline)) = &self.outer else {
-            debug!("Leaf cgroup gone without outer counters");
-            return OOMEvent::possible(true);
+            debug!(
+                leaf_gone,
+                "Leaf cgroup without memory events or outer counters"
+            );
+            return OOMEvent::possible(leaf_gone);
         };
         match OOMWatcher::read_oom_counters(path) {
             Ok(counters) => {
                 debug!(
-                    "Leaf cgroup gone, OOM counters of {}: {counters:?} since {baseline:?}",
+                    leaf_gone,
+                    "No leaf memory events, OOM counters of {}: {counters:?} since {baseline:?}",
                     path.display(),
                 );
                 OOMEvent::possible(counters.increased_since(baseline))
             }
             Err(e) => {
-                debug!("Unable to read outer OOM counters: {e:#}");
-                OOMEvent::possible(true)
+                debug!(leaf_gone, "Unable to read outer OOM counters: {e:#}");
+                OOMEvent::possible(leaf_gone)
             }
         }
     }

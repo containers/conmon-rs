@@ -179,3 +179,104 @@ async fn wait_for_reaped_process_is_unknown() -> Result<()> {
     assert_eq!(code, EXIT_CODE_UNKNOWN);
     Ok(())
 }
+
+/// Spawn a shell running `script` which is never waited for by the standard
+/// library, the tests reap it themselves.
+fn spawn_unwaited(script: &str) -> Result<Pid> {
+    let child = std::process::Command::new("sh")
+        .args(["-c", script])
+        .spawn()?;
+    let pid = child_pid(child.id())?;
+    std::mem::forget(child);
+    Ok(pid)
+}
+
+/// The first real-time signal of glibc, which nix does not know. The tests of
+/// its exits run on their own: qemu-user, which keeps some real-time signals
+/// for itself, reports them with other numbers, see the test-unit-arch jobs.
+const RT_SIGNAL: i32 = 34;
+
+#[test]
+fn wait_exit_reports_exit_codes() -> Result<()> {
+    check_wait_exit(&[("exit 3", 3), ("kill -9 $$", 128 + Signal::SIGKILL as i32)])
+}
+
+#[test]
+fn wait_exit_reports_real_time_signal_exits() -> Result<()> {
+    check_wait_exit(&[(&format!("kill -{RT_SIGNAL} $$"), 128 + RT_SIGNAL)])
+}
+
+fn check_wait_exit(cases: &[(&str, i32)]) -> Result<()> {
+    for &(script, expected) in cases {
+        let pid = spawn_unwaited(script)?;
+        // Without reaping it, which happens afterwards.
+        assert_eq!(
+            wait_exit(Id::Pid(pid), WaitPidFlag::WNOWAIT),
+            Ok(Some(expected)),
+            "{script}"
+        );
+        assert!(is_zombie(pid), "{script}");
+        assert_eq!(peek_exit(Id::Pid(pid)), Ok(Some(expected)), "{script}");
+        assert_eq!(
+            wait_exit(Id::Pid(pid), WaitPidFlag::WNOHANG),
+            Ok(Some(expected)),
+            "{script}"
+        );
+        assert_eq!(peek_exit(Id::Pid(pid)), Err(Errno::ECHILD), "{script}");
+    }
+    Ok(())
+}
+
+#[test]
+fn wait_exit_reports_running_child() -> Result<()> {
+    let mut child = Guarded::spawn(std::process::Command::new("sleep").arg("60"))?;
+    let pid = child_pid(child.0.id())?;
+    assert_eq!(wait_exit(Id::Pid(pid), WaitPidFlag::WNOHANG), Ok(None));
+    assert_eq!(peek_exit(Id::Pid(pid)), Ok(None));
+    child.0.kill()?;
+    child.0.wait()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn wait_on_thread_reports_exit_codes() -> Result<()> {
+    check_wait_on_thread(&[
+        ("exit 3", 3),
+        ("kill -9 $$", 128 + Signal::SIGKILL as i32),
+        // Killed while the thread waits for it.
+        ("exec sleep 60", 128 + Signal::SIGKILL as i32),
+    ])
+    .await
+}
+
+#[tokio::test]
+async fn wait_on_thread_reports_real_time_signal_exits() -> Result<()> {
+    check_wait_on_thread(&[(&format!("kill -{RT_SIGNAL} $$"), 128 + RT_SIGNAL)]).await
+}
+
+async fn check_wait_on_thread(cases: &[(&str, i32)]) -> Result<()> {
+    for &(script, expected) in cases {
+        let pid = spawn_unwaited(script)?;
+        let process = Process::open(pid);
+        let wait = task::spawn(wait_for_exit_code_on_thread(pid));
+        if script.contains("sleep") {
+            process.signal(Signal::SIGKILL)?;
+        }
+        let code = time::timeout(Duration::from_secs(5), wait).await??;
+        assert_eq!(code, expected, "{script}");
+        // It got reaped.
+        assert_eq!(peek_exit(Id::Pid(pid)), Err(Errno::ECHILD), "{script}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn wait_on_thread_for_reaped_process_fails() -> Result<()> {
+    let mut reaped = std::process::Command::new("true").spawn()?;
+    let pid = child_pid(reaped.id())?;
+    reaped.wait()?;
+    let code = time::timeout(Duration::from_secs(5), wait_for_exit_code_on_thread(pid)).await?;
+    // The same value as a timeout, for compatibility.
+    assert_eq!(code, EXIT_CODE_WAIT_FAILED);
+    Ok(())
+}
