@@ -163,11 +163,9 @@ impl StreamSender {
     }
 
     /// Reset the stream, both sides end. The data queued for the stream
-    /// before goes out first.
-    pub fn reset(&mut self) {
-        if self.closed && self.reset.is_cancelled() {
-            return;
-        }
+    /// before goes out first. Users reset a stream by dropping it without
+    /// closing it, the tests also directly.
+    pub(super) fn reset(&mut self) {
         self.closed = true;
         if !self.reset.is_cancelled() && self.queued.reset() {
             self.shared.queue_reset(self.id);

@@ -14,6 +14,7 @@ use nix::{
     unistd::Pid,
 };
 use std::{
+    ffi::OsStr,
     fmt, fs,
     os::fd::{AsFd, AsRawFd},
     path::{self, Path, PathBuf},
@@ -167,8 +168,8 @@ impl Config {
     }
 
     /// The logging level.
-    pub fn log_level(&self) -> &LogLevel {
-        &self.log_level
+    pub fn log_level(&self) -> LogLevel {
+        self.log_level
     }
 
     /// The logging driver.
@@ -179,6 +180,12 @@ impl Config {
     /// Binary path of the OCI runtime.
     pub fn runtime(&self) -> &Path {
         &self.runtime
+    }
+
+    /// Whether the runtime is crun, which gets arguments of its own, see
+    /// `GenerateRuntimeArgs::default_args`.
+    pub fn runtime_is_crun(&self) -> bool {
+        self.runtime.file_name() == Some(OsStr::new("crun"))
     }
 
     /// Path of the directory for conmonrs to hold files at runtime.
@@ -388,6 +395,16 @@ impl Config {
             .is_empty()
         {
             bail!("{} flag not set", RUNTIME_DIR_FLAG)
+        }
+
+        // The file name tells whether the runtime is crun, a path like "/"
+        // would only fail every runtime call later.
+        if self.runtime().file_name().is_none() {
+            bail!(
+                "{} '{}' has no file name",
+                RUNTIME_FLAG,
+                self.runtime().display()
+            )
         }
 
         if !self.runtime().exists() {

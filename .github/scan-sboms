@@ -45,7 +45,14 @@ grype() {
 }
 
 # One update of the database for all SBOMs, the scans do not check for one.
+# A workflow caches the database under a key which names its build, the
+# db-key output of the step, which only changes with a newer database.
 grype db update >&2
+BUILT=$(grype db status -o json | jq -er .built)
+echo "Vulnerability database built $BUILT" >&2
+if [[ -n ${GITHUB_OUTPUT:-} ]]; then
+    echo "db-key=grype-db-${BUILT//:/-}" >>"$GITHUB_OUTPUT"
+fi
 
 # A table of the matches or the ignored matches of a grype report, the VEX
 # column has the status of the statement which applies.

@@ -7,12 +7,13 @@ use crate::telemetry::Telemetry;
 use crate::{
     capnp_util,
     child::{Child, ChildKind},
-    child_reaper::{EXIT_CODE_NOT_STARTED, EXIT_CODE_TIMED_OUT, ExitChannelData, RuntimeCall},
+    child_reaper::{
+        EXIT_CODE_NOT_STARTED, EXIT_CODE_TIMED_OUT, ExitChannelData, RuntimeCall, WatchedExec,
+    },
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     notify::NotifySocket,
     pause::Pause,
-    process::Process,
     random_id::RandomId,
     runtime_args::GenerateRuntimeArgs,
     server::Server,
@@ -33,7 +34,7 @@ use std::{
 };
 use tokio::{
     select,
-    sync::{RwLock, broadcast, oneshot},
+    sync::{broadcast, oneshot},
     task::{self, JoinHandle},
     time::Instant,
 };
@@ -52,8 +53,9 @@ macro_rules! capnp_err {
     };
 }
 
-/// The result of a call which runs in a task of its own, a panic of the task
-/// fails the call like an error of it.
+/// The result of a call which runs in a task of its own. A task which
+/// panicked fails the call like an error, but only where panics unwind, like
+/// in the tests: release builds abort on a panic.
 async fn task_result<T>(task: JoinHandle<anyhow::Result<T>>) -> Result<T, Error> {
     capnp_err!(capnp_err!(task.await)?)
 }
@@ -95,33 +97,14 @@ macro_rules! enter_request {
     };
 }
 
-/// capnp_text_list takes text_list as an input and outputs list of text.
-macro_rules! capnp_text_list {
-    ($x:expr_2021) => {
-        pry!(pry!($x).iter().collect::<Result<Vec<_>, _>>())
-    };
-}
-
-macro_rules! capnp_vec_str {
-    ($x:expr_2021) => {
-        pry!(
-            capnp_text_list!($x)
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Result<Vec<_>, _>>()
-        )
-    };
-}
-
-macro_rules! capnp_vec_path {
-    ($x:expr_2021) => {
-        pry!(
-            capnp_text_list!($x)
-                .iter()
-                .map(|s| s.to_str().map(|x| PathBuf::from(x)))
-                .collect::<Result<Vec<_>, _>>()
-        )
-    };
+/// Read a text list of a request, like into strings or paths.
+fn text_list<'a, T: From<&'a str>>(
+    list: capnp::Result<capnp::text_list::Reader<'a>>,
+) -> capnp::Result<Vec<T>> {
+    list?
+        .iter()
+        .map(|text| Ok(text?.to_str()?.into()))
+        .collect()
 }
 
 /// The result of an exec_sync.
@@ -167,8 +150,7 @@ impl Server {
             res.context("receive the exit of the exec")
         };
         // Reads until the output ended or the drain after the exit gave up,
-        // under the write lock of the IO, the read loops get stopped only
-        // after that.
+        // the read loops get stopped only after that.
         let ((stdout, stderr), exit_data) = tokio::try_join!(io.read_all(token), exit)?;
         Ok(ExecSyncOutput {
             stdout,
@@ -205,19 +187,9 @@ impl Server {
     /// Start the streaming server if required and return the URL of the
     /// session.
     async fn streaming_url(
-        streaming_server: &RwLock<StreamingServer>,
+        server: &StreamingServer,
         request: StreamingRequest,
     ) -> Result<String, Error> {
-        capnp_err!(
-            streaming_server
-                .write()
-                .await
-                .start_if_required()
-                .await
-                .context("start streaming server")
-        )?;
-
-        let server = streaming_server.read().await;
         // Without a context: clients match the start of the message, like the
         // one of too many waiting sessions, see `ErrTooManyRequests` of the Go
         // client.
@@ -290,7 +262,7 @@ impl conmon::Server for Server {
 
         enter_request!(req, "create_container", id.as_str());
 
-        let cleanup_cmd: Vec<String> = capnp_vec_str!(req.get_cleanup_cmd());
+        let cleanup_cmd: Vec<String> = pry!(text_list(req.get_cleanup_cmd()));
 
         debug!("Got a create container request");
 
@@ -305,8 +277,8 @@ impl conmon::Server for Server {
         debug!("PID file is {}", pidfile.display());
 
         let child_reaper = self.reaper().clone();
-        let global_args = capnp_vec_str!(req.get_global_args());
-        let command_args = capnp_vec_str!(req.get_command_args());
+        let global_args: Vec<String> = pry!(text_list(req.get_global_args()));
+        let command_args: Vec<String> = pry!(text_list(req.get_command_args()));
         let cgroup_manager = pry!(req.get_cgroup_manager());
         let args = GenerateRuntimeArgs {
             config: self.config(),
@@ -318,8 +290,8 @@ impl conmon::Server for Server {
         let args = pry_err!(args.create_args(bundle_path, &global_args, &command_args));
         let stdin = req.get_stdin();
         let runtime = self.config().runtime().to_path_buf();
-        let exit_paths = capnp_vec_path!(req.get_exit_paths());
-        let oom_exit_paths = capnp_vec_path!(req.get_oom_exit_paths());
+        let exit_paths: Vec<PathBuf> = pry!(text_list(req.get_exit_paths()));
+        let oom_exit_paths: Vec<PathBuf> = pry!(text_list(req.get_oom_exit_paths()));
         for path in exit_paths.iter().chain(&oom_exit_paths) {
             pry_err!(capnp_util::check_absolute("exit path", path));
         }
@@ -451,7 +423,7 @@ impl conmon::Server for Server {
         let logger = ContainerLog::new();
         let mut container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger));
 
-        let command = capnp_vec_str!(req.get_command());
+        let command: Vec<String> = pry!(text_list(req.get_command()));
         let env_vars = pry!(req.get_env_vars().and_then(capnp_util::into_map));
         let cgroup_manager = pry!(req.get_cgroup_manager());
 
@@ -482,16 +454,17 @@ impl conmon::Server for Server {
                         let res = child_reaper
                             .create_child(
                                 RuntimeCall {
+                                    command_start: Some(args.command_start),
                                     deadline: runtime_deadline,
                                     env_vars,
-                                    ..RuntimeCall::new(&runtime, &args, pidfile.path())
+                                    ..RuntimeCall::new(&runtime, &args.args, pidfile.path())
                                 },
                                 &mut container_io,
                             )
                             .await;
                         let _ = started_tx.send(());
-                        let (grandchild_pid, token, call) = match res {
-                            Ok(res) => res,
+                        let started = match res {
+                            Ok(started) => started,
                             Err(e) => {
                                 let timed_out =
                                     time_to_timeout.is_some_and(|t| Instant::now() >= t);
@@ -511,28 +484,22 @@ impl conmon::Server for Server {
                             }
                         };
 
-                        // register grandchild with server, a timeout which
-                        // already passed kills it right away
-                        let io = SharedContainerIO::new(container_io);
-                        // Not reaped before the registration below, so the
-                        // PID is still its own.
-                        let process = Process::open(grandchild_pid);
-                        let child = Child {
-                            id: id.into(),
-                            kind: ChildKind::Exec,
-                            pid: grandchild_pid,
-                            exit_paths: vec![],
-                            oom_exit_paths: vec![],
-                            timeout: time_to_timeout,
-                            io: io.clone(),
-                            cleanup_cmd: vec![],
-                            token: token.clone(),
-                        };
-                        let _stop_output = io.attach().await.stop_output_on_exit(token.clone());
-                        let exit_rx = child_reaper.watch_grandchild(child, vec![], call)?;
+                        // A timeout which already passed kills it right away.
+                        let WatchedExec {
+                            io,
+                            token,
+                            process,
+                            exit_rx,
+                            stop_output: _stop_output,
+                        } = child_reaper.watch_exec(
+                            id.into(),
+                            started,
+                            time_to_timeout,
+                            container_io,
+                        )?;
                         Self::exec_sync_output(&io, &token, exit_rx, || {
                             if let Err(e) = process.signal_group(Signal::SIGKILL) {
-                                debug!("Not killing exec process {grandchild_pid}: {e}");
+                                debug!("Not killing exec process {}: {e}", process.pid());
                             }
                         })
                         .await
@@ -579,13 +546,13 @@ impl conmon::Server for Server {
         _: conmon::AttachContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
-        let id = pry_err!(pry_err!(req.get_id()).to_str());
+        let id = pry!(pry!(req.get_id()).to_str());
 
         enter_request!(req, "attach_container", id);
 
         debug!("Got an attach container request");
 
-        let exec_session_id = pry_err!(pry_err!(req.get_exec_session_id()).to_str());
+        let exec_session_id = pry!(pry!(req.get_exec_session_id()).to_str());
         if !exec_session_id.is_empty() {
             debug!("Using exec session id {}", exec_session_id);
         }
@@ -600,7 +567,7 @@ impl conmon::Server for Server {
 
         Promise::from_future(
             async move {
-                capnp_err!(child.io().attach().await.add(
+                capnp_err!(child.io().attach().add(
                     &socket_path,
                     child.token().clone(),
                     stop_after_stdin_eof
@@ -617,7 +584,7 @@ impl conmon::Server for Server {
         _: conmon::ReopenLogContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
-        let id = pry_err!(pry_err!(req.get_id()).to_str());
+        let id = pry!(pry!(req.get_id()).to_str());
 
         enter_request!(req, "reopen_log_container", id);
 
@@ -630,7 +597,7 @@ impl conmon::Server for Server {
                 // A dropped call must not stop a reopen halfway, between the
                 // write of the old file and the open of the new one.
                 let reopen = task::spawn_local(
-                    async move { child.io().logger().await.write().await.reopen().await }
+                    async move { child.io().logger().write().await.reopen().await }
                         .instrument(Span::current()),
                 );
                 task_result(reopen).await
@@ -646,7 +613,7 @@ impl conmon::Server for Server {
         _: conmon::SetWindowSizeContainerResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
-        let id = pry_err!(pry_err!(req.get_id()).to_str());
+        let id = pry!(pry!(req.get_id()).to_str());
 
         enter_request!(req, "set_window_size_container", id);
 
@@ -657,7 +624,7 @@ impl conmon::Server for Server {
         let height = req.get_height();
 
         Promise::from_future(
-            async move { capnp_err!(child.io().resize(width, height).await) }
+            async move { capnp_err!(child.io().resize(width, height)) }
                 .instrument(debug_span!("promise")),
         )
     }
@@ -669,7 +636,7 @@ impl conmon::Server for Server {
         mut results: conmon::CreateNamespacesResults,
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
-        let pod_id = pry_err!(pry_err!(req.get_pod_id()).to_str());
+        let pod_id = pry!(pry!(req.get_pod_id()).to_str());
 
         enter_request!(req, "create_namespaces", pod_id);
 
@@ -678,8 +645,8 @@ impl conmon::Server for Server {
         let base_path = pry!(pry!(req.get_base_path()).to_string());
         let pod_id = pod_id.to_owned();
         let namespaces = pry_err!(Pause::parse_namespaces(pry!(req.get_namespaces())));
-        let uid_mappings = capnp_vec_str!(req.get_uid_mappings());
-        let gid_mappings = capnp_vec_str!(req.get_gid_mappings());
+        let uid_mappings = pry!(text_list(req.get_uid_mappings()));
+        let gid_mappings = pry!(text_list(req.get_gid_mappings()));
 
         Promise::from_future(
             async move {
@@ -743,7 +710,7 @@ impl conmon::Server for Server {
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
 
-        let id = pry_err!(pry_err!(req.get_id()).to_string());
+        let id = pry!(pry!(req.get_id()).to_string());
 
         enter_request!(req, "serve_exec_container", id.as_str());
 
@@ -752,7 +719,7 @@ impl conmon::Server for Server {
         // Validate that the container actually exists
         pry_err!(self.reaper().get(&id));
 
-        let command = capnp_vec_str!(req.get_command());
+        let command: Vec<String> = pry!(text_list(req.get_command()));
         let (tty, stdin, stdout, stderr) = (
             req.get_tty(),
             req.get_stdin(),
@@ -799,7 +766,7 @@ impl conmon::Server for Server {
     ) -> Promise<(), capnp::Error> {
         let req = pry!(pry!(params.get()).get_request());
 
-        let id = pry_err!(pry_err!(req.get_id()).to_str());
+        let id = pry!(pry!(req.get_id()).to_str());
 
         enter_request!(req, "serve_attach_container", id);
 
@@ -847,11 +814,8 @@ impl conmon::Server for Server {
 
         debug!("Got a serve port forward container request");
 
-        let netns_path = pry_err!(pry_err!(req.get_net_ns_path()).to_str());
-        if netns_path.is_empty() {
-            return Promise::err(Error::failed("network namespace path is empty".into()));
-        }
-        let netns_path = PathBuf::from(netns_path);
+        // An empty one is not absolute either.
+        let netns_path = PathBuf::from(pry!(pry!(req.get_net_ns_path()).to_str()));
         pry_err!(capnp_util::check_absolute(
             "network namespace path",
             &netns_path

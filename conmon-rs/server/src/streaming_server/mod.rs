@@ -1,7 +1,7 @@
 //! The streaming server of exec, attach and port forward sessions: the URLs
 //! with their one time tokens and the HTTP server their clients connect to.
 
-use crate::{listener, random_id::RandomId};
+use crate::{listener, mutex::lock, random_id::RandomId};
 use anyhow::{Context, Result, bail};
 use bounded_map::BoundedMap;
 use hyper::{
@@ -17,12 +17,12 @@ use std::{
     convert::Infallible,
     fmt::Debug,
     path::PathBuf,
-    sync::{Arc, Weak},
+    sync::{Arc, Mutex, Weak},
 };
 use stream_protocol::ClientStr;
 use tokio::{
     net::TcpListener,
-    sync::{RwLock, Semaphore},
+    sync::{OnceCell, Semaphore},
     task,
     time::{self, Duration},
 };
@@ -136,13 +136,14 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Debug, Default)]
 /// The main streaming server structure of this module.
 pub struct StreamingServer {
-    running: bool,
-    port: u16,
-    state: Arc<RwLock<State>>,
+    /// The port the server listens on, once it got started for the first
+    /// session.
+    port: OnceCell<u16>,
+    state: Arc<Mutex<State>>,
 }
 
 /// State handled by the streaming server, the sessions waiting for their
-/// client by token.
+/// client by token. Never locked across an await.
 #[derive(Debug, Default)]
 struct State {
     sessions: BoundedMap<RandomId, Session>,
@@ -161,32 +162,34 @@ enum Session {
 }
 
 impl StreamingServer {
-    /// Start the streaming server if not already running.
-    pub async fn start_if_required(&mut self) -> Result<()> {
-        if self.running {
-            return Ok(());
-        }
+    /// Start the streaming server if not already running and return its
+    /// port.
+    async fn start_if_required(&self) -> Result<u16> {
+        let port = self.port.get_or_try_init(|| async {
+            let listener = TcpListener::bind(ADDR.to_string() + ":0")
+                .await
+                .context("bind streaming server")?;
 
-        let listener = TcpListener::bind(ADDR.to_string() + ":0")
-            .await
-            .context("bind streaming server")?;
+            let local_addr = listener
+                .local_addr()
+                .context("get listeners local address")?;
 
-        let local_addr = listener
-            .local_addr()
-            .context("get listeners local address")?;
+            info!("Starting streaming server on {local_addr}");
+            task::spawn_local(Self::serve(listener, self.state.clone()));
+            Ok::<_, anyhow::Error>(local_addr.port())
+        });
+        port.await.copied().context("start streaming server")
+    }
 
-        self.port = local_addr.port();
-
-        info!("Starting streaming server on {local_addr}");
-        task::spawn_local(Self::serve(listener, self.state.clone()));
-        self.running = true;
-
-        Ok(())
+    /// The port of the started server.
+    #[cfg(test)]
+    fn port(&self) -> u16 {
+        *self.port.get().expect("streaming server started")
     }
 
     /// Serve the main streaming server, every connection in a task of its
     /// own, at most [`MAX_CONNECTIONS`] at once, each for one request.
-    async fn serve(listener: TcpListener, state: Arc<RwLock<State>>) {
+    async fn serve(listener: TcpListener, state: Arc<Mutex<State>>) {
         let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         let mut accept_errors = listener::AcceptErrors::default();
         loop {
@@ -205,8 +208,8 @@ impl StreamingServer {
                 // Until the connection ended or got upgraded.
                 let _permit = permit;
                 let service = service_fn(move |request| {
-                    let state = state.clone();
-                    async move { Ok::<_, Infallible>(Self::route(request, state).await) }
+                    let response = Self::route(request, &state);
+                    async move { Ok::<_, Infallible>(response) }
                 });
                 let connection = http1::Builder::new()
                     .timer(TokioTimer::new())
@@ -226,13 +229,13 @@ impl StreamingServer {
     /// Drop the sessions whose client did not come in time, otherwise they
     /// would stay until the next request. The task ends once no session
     /// waits or the server is gone, so that an idle server does not wake up.
-    async fn sweep(state: Weak<RwLock<State>>) {
+    async fn sweep(state: Weak<Mutex<State>>) {
         loop {
             time::sleep(SWEEP_INTERVAL).await;
             let Some(state) = state.upgrade() else {
                 return;
             };
-            let mut state = state.write().await;
+            let mut state = lock(&state);
             state.sessions.sweep();
             state.port_forwards.sweep();
             if state.sessions.is_empty() && state.port_forwards.is_empty() {
@@ -242,20 +245,15 @@ impl StreamingServer {
         }
     }
 
-    /// Return the URL for a specific path and token.
-    fn url_for(&self, p: &str, token: &RandomId) -> String {
-        format!("http://{ADDR}:{0}/{p}/{token}", self.port)
-    }
-
     /// Route a request and log it with the status of its response.
-    async fn route(request: Request<Incoming>, state: Arc<RwLock<State>>) -> Response {
+    fn route(request: Request<Incoming>, state: &Mutex<State>) -> Response {
         let logged = tracing::enabled!(Level::DEBUG).then(|| {
             (
                 request.method().clone(),
                 Self::logged_path(request.uri().path()),
             )
         });
-        let mut response = Self::dispatch(request, state).await;
+        let mut response = Self::dispatch(request, state);
         if let Some((method, path)) = logged {
             debug!("{method} {path}: {}", response.status());
         }
@@ -286,7 +284,7 @@ impl StreamingServer {
 
     /// Hand a request to the handler of its path, `/<kind>/<token>`. Like a
     /// GET, a HEAD gets handled, the response has no body then.
-    async fn dispatch(request: Request<Incoming>, state: Arc<RwLock<State>>) -> Response {
+    fn dispatch(request: Request<Incoming>, state: &Mutex<State>) -> Response {
         let Some((kind, token)) = request
             .uri()
             .path()
@@ -317,56 +315,64 @@ impl StreamingServer {
             Err(e) => return web::text(StatusCode::BAD_REQUEST, format!("Invalid URL: {e}")),
         };
         if kind == PORT_FORWARD_PATH {
-            Self::handle_port_forward(token, state, request).await
+            Self::handle_port_forward(token, state, request)
         } else {
-            Self::handle(kind, token, state, request).await
+            Self::handle(kind, token, state, request)
         }
     }
 
-    /// Returns the URL used for the provided exec session.
+    /// Start the server if required and return the URL of the exec session.
     pub async fn exec_url(&self, session: ExecSession) -> Result<String> {
-        let token = self
-            .wait_for_client(|state| &mut state.sessions, Session::Exec(session.into()))
-            .await?;
-        Ok(self.url_for(EXEC_PATH, &token))
+        self.wait_for_client(
+            EXEC_PATH,
+            |state| &mut state.sessions,
+            Session::Exec(session.into()),
+        )
+        .await
     }
 
-    /// Returns the URL used for the provided attach session.
+    /// Start the server if required and return the URL of the attach
+    /// session.
     pub async fn attach_url(&self, session: AttachSession) -> Result<String> {
-        let token = self
-            .wait_for_client(|state| &mut state.sessions, Session::Attach(session))
-            .await?;
-        Ok(self.url_for(ATTACH_PATH, &token))
+        self.wait_for_client(
+            ATTACH_PATH,
+            |state| &mut state.sessions,
+            Session::Attach(session),
+        )
+        .await
     }
 
-    /// Returns the URL used for forwarding ports into the network namespace.
+    /// Start the server if required and return the URL for forwarding ports
+    /// into the network namespace.
     pub async fn port_forward_url(
         &self,
         netns_path: PathBuf,
         idle_timeout: Option<Duration>,
     ) -> Result<String> {
-        let token = self
-            .wait_for_client(
-                |state| &mut state.port_forwards,
-                PortForward::new(netns_path, idle_timeout),
-            )
-            .await?;
-        Ok(self.url_for(PORT_FORWARD_PATH, &token))
+        self.wait_for_client(
+            PORT_FORWARD_PATH,
+            |state| &mut state.port_forwards,
+            PortForward::new(netns_path, idle_timeout),
+        )
+        .await
     }
 
-    /// Keep a session in its map until its client takes it, return its
-    /// token. Too many sessions which wait for their client fail a new one,
-    /// like for the kubelet, instead of dropping one whose client would come.
+    /// Start the server if required and keep a session in its map until its
+    /// client takes it, return its URL under `path`. Too many sessions which
+    /// wait for their client fail a new one, like for the kubelet, instead
+    /// of dropping one whose client would come.
     async fn wait_for_client<V>(
         &self,
+        path: &str,
         sessions: impl FnOnce(&mut State) -> &mut BoundedMap<RandomId, V>,
         session: V,
-    ) -> Result<RandomId>
+    ) -> Result<String>
     where
         V: Debug,
     {
+        let port = self.start_if_required().await?;
         let token = RandomId::new();
-        let mut state = self.state.write().await;
+        let mut state = lock(&self.state);
         if sessions(&mut state).insert(token, session).is_err() {
             bail!(TOO_MANY_REQUESTS);
         }
@@ -374,13 +380,13 @@ impl StreamingServer {
             state.sweeping = true;
             task::spawn(Self::sweep(Arc::downgrade(&self.state)));
         }
-        Ok(token)
+        Ok(format!("http://{ADDR}:{port}/{path}/{token}"))
     }
 
     /// Take the exec or attach session of a valid request. Requests which get
     /// rejected before leave the token, so that the client can retry.
-    async fn take_session(state: &RwLock<State>, token: RandomId) -> Option<Session> {
-        let Some(session) = state.write().await.sessions.remove(&token) else {
+    fn take_session(state: &Mutex<State>, token: RandomId) -> Option<Session> {
+        let Some(session) = lock(state).sessions.remove(&token) else {
             debug!("Session got taken by another request or expired");
             return None;
         };
@@ -397,8 +403,8 @@ impl StreamingServer {
     /// Take the session of a valid request. Requests which get rejected
     /// before leave the token, so that the client can retry. Another request
     /// may have taken it meanwhile.
-    async fn take_port_forward(state: &RwLock<State>, token: RandomId) -> Option<PortForward> {
-        let session = state.write().await.port_forwards.remove(&token);
+    fn take_port_forward(state: &Mutex<State>, token: RandomId) -> Option<PortForward> {
+        let session = lock(state).port_forwards.remove(&token);
         if session.is_none() {
             debug!("Port forward session got taken by another request or expired");
         }
@@ -451,10 +457,10 @@ impl Session {
     }
 
     /// Whether the process of the session has a terminal.
-    async fn terminal(&self) -> bool {
+    fn terminal(&self) -> bool {
         match self {
             Session::Exec(s) => s.tty,
-            Session::Attach(s) => s.child.io().terminal_eof().await.is_some(),
+            Session::Attach(s) => s.child.io().terminal_eof().is_some(),
         }
     }
 }

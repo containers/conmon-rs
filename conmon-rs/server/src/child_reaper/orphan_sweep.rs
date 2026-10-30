@@ -102,7 +102,9 @@ impl ChildReaper {
         max_defer: Duration,
     ) {
         // Most children get reaped by their owners right away, without a
-        // zombie left the scan is not needed.
+        // zombie left the scan is not needed. The SIGCHLD of an exit wakes
+        // this task together with the owner, which gets to reap it first.
+        task::yield_now().await;
         if !has_zombie() {
             candidates.clear();
             return;

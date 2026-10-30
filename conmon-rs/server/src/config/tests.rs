@@ -151,6 +151,13 @@ fn validate_reports_each_check() {
     };
     assert_eq!(error(&not_utf8), "--runtime does not parse as string");
 
+    // It exists, but tells nothing about the runtime.
+    let no_file_name = Config {
+        runtime: "/".into(),
+        ..valid.clone()
+    };
+    assert_eq!(error(&no_file_name), "--runtime '/' has no file name");
+
     let missing_runtime = Config {
         runtime: dir.path().join("missing"),
         ..valid.clone()

@@ -143,7 +143,7 @@ pub fn spdy(input: &[u8]) {
                     let _ = output.status(&Status::Success).await;
                     output.close().await;
                 }
-                Err(_) => connection.abort(),
+                Err(_) => connection.handle().abort(),
             }
             client.await.expect("client task");
         };

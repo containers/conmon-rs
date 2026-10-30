@@ -381,6 +381,46 @@ where
     }
 }
 
+/// How a WebSocket session ended, which decides what its end waits for, see
+/// [`end`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum End {
+    /// The client sent a message larger than the server takes, which it
+    /// cannot answer the close for, see [`drain`].
+    TooLarge,
+
+    /// The client closed the WebSocket or went away.
+    Gone,
+
+    /// The server ended the session, the client answers its close, see
+    /// [`finish`].
+    Done,
+}
+
+/// End a WebSocket session once its `writer`, which sends the close of the
+/// server, got the rest out, see [`join_or_abort`]. What comes after depends
+/// on how it ended, see [`End`].
+pub async fn end<T>(
+    writer: JoinHandle<Option<SplitSink<WebSocketStream<ClientIo<T>>, Message>>>,
+    written: &Activity,
+    mut messages: SplitStream<WebSocketStream<ClientIo<T>>>,
+    end: End,
+) where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    match end {
+        End::TooLarge => {
+            if let Some(Some(sink)) = join_or_abort(writer, written).await {
+                drain(sink, messages).await;
+            }
+        }
+        End::Gone => {
+            join_or_abort(writer, written).await;
+        }
+        End::Done => finish(writer, written, &mut messages).await,
+    }
+}
+
 /// A response of the streaming server.
 pub type Response = hyper::Response<Body>;
 

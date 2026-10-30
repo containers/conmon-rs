@@ -32,7 +32,7 @@ allow = [
 # are listed below.
 multiple-versions = "deny"
 skip = [
-    { crate = "syn@2", reason = "proc macros only, not part of the binary" },
+    { crate = "syn@2", reason = "only with the tracing feature, through proc macros of its dependencies" },
     { crate = "getrandom@0.3", reason = "only with the tracing feature, through opentelemetry_sdk" },
     { crate = "rand@0.9", reason = "only with the tracing feature, through opentelemetry_sdk" },
     { crate = "rand_core@0.9", reason = "only with the tracing feature, through opentelemetry_sdk" },

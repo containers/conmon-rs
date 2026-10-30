@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"errors"
-	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -28,26 +27,14 @@ func TestLogDriverTypes(t *testing.T) {
 	}
 
 	labels := map[string]string{"POD": "web"}
-
-	logDrivers, err := logDriversToProto([]ContainerLogDriver{
+	logDrivers := []ContainerLogDriver{
 		{Type: LogDriverTypeJournald, ContainerName: "name", Tag: "tag", Labels: labels},
 		{Type: LogDriverTypeJSONLogger, Path: "log", MaxSize: 1},
-	})
-	if err != nil {
-		t.Fatalf("convert log drivers: %v", err)
 	}
 
-	want := []protoLogDriver{
-		{
-			typ:           proto.Conmon_LogDriver_Type_journald,
-			containerName: "name",
-			tag:           "tag",
-			labels:        labels,
-		},
-		{typ: proto.Conmon_LogDriver_Type_json, path: "log", maxSize: 1},
-	}
-	if !reflect.DeepEqual(logDrivers, want) {
-		t.Errorf("got log drivers %+v, want %+v", logDrivers, want)
+	types, err := validateLogDrivers(logDrivers)
+	if err != nil {
+		t.Fatalf("validate log drivers: %v", err)
 	}
 
 	// The request carries the fields of the journald driver.
@@ -61,7 +48,7 @@ func TestLogDriverTypes(t *testing.T) {
 		t.Fatalf("new request: %v", err)
 	}
 
-	err = initLogDrivers(&req, logDrivers)
+	err = initLogDrivers(&req, logDrivers, types)
 	if err != nil {
 		t.Fatalf("init log drivers: %v", err)
 	}
@@ -69,6 +56,18 @@ func TestLogDriverTypes(t *testing.T) {
 	list, err := req.LogDrivers()
 	if err != nil {
 		t.Fatalf("log drivers: %v", err)
+	}
+
+	if list.Len() != 2 || list.At(0).Type() != proto.Conmon_LogDriver_Type_journald {
+		t.Fatalf("got %d log drivers, the first of type %v", list.Len(), list.At(0).Type())
+	}
+
+	json := list.At(1)
+
+	path, err := json.Path()
+	if err != nil || json.Type() != proto.Conmon_LogDriver_Type_json ||
+		path != "log" || json.MaxSize() != 1 {
+		t.Errorf("got JSON driver %v, %q, %d, %v", json.Type(), path, json.MaxSize(), err)
 	}
 
 	journald := list.At(0)
@@ -96,7 +95,7 @@ func TestLogDriverTypes(t *testing.T) {
 		t.Errorf("got name, tag and label %q, want %q", got, want)
 	}
 
-	if _, err := logDriversToProto([]ContainerLogDriver{
+	if _, err := validateLogDrivers([]ContainerLogDriver{
 		{Type: LogDriverTypeJournald}, {Type: LogDriverType(42)},
 	}); !errors.Is(err, ErrInvalidValue) {
 		t.Errorf("unknown type: got %v, want %v", err, ErrInvalidValue)

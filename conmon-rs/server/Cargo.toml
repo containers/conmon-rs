@@ -32,7 +32,6 @@ nix = { version = "0.31.3", default-features = false, features = ["event", "fs",
 opentelemetry = { version = "0.33.1", default-features = false, optional = true }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "trace"], optional = true }
-opentelemetry-semantic-conventions = { version = "0.33.1", default-features = false, features = ["semconv_experimental"], optional = true }
 percent-encoding = { version = "2.3.2", default-features = false, features = ["alloc"] }
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
@@ -51,7 +50,6 @@ tracing = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
     "dep:opentelemetry-otlp",
-    "dep:opentelemetry-semantic-conventions",
     "dep:tracing-opentelemetry",
     "nix/hostname",
 ]
@@ -65,9 +63,7 @@ time = { version = "0.3.55", default-features = false, features = ["parsing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
 [build-dependencies]
-capnp = { workspace = true }
 capnpc = { workspace = true }
-time = { version = "0.3.55", default-features = false, features = ["formatting", "macros"] }
 
 [lints]
 workspace = true

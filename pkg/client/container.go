@@ -172,7 +172,7 @@ func (c *ConmonClient) CreateContainer(
 		return nil, err
 	}
 
-	logDrivers, err := logDriversToProto(cfg.LogDrivers)
+	driverTypes, err := validateLogDrivers(cfg.LogDrivers)
 	if err != nil {
 		return nil, err
 	}
@@ -181,6 +181,7 @@ func (c *ConmonClient) CreateContainer(
 	// Checked after the configuration, which needs no server, the request
 	// goes to the checked server.
 	var rpcClient proto.Conmon
+
 	if cfg.SdNotifySocket != "" {
 		rpcClient, err = c.requireServerFeature(ctx, FeatureSdNotify, "sd_notify socket")
 	} else if rpcClient, err = c.client(ctx); err != nil {
@@ -214,7 +215,7 @@ func (c *ConmonClient) CreateContainer(
 				return fmt.Errorf("convert oom exit paths string slice to text list: %w", err)
 			}
 
-			if err := initLogDrivers(&req, logDrivers); err != nil {
+			if err := initLogDrivers(&req, cfg.LogDrivers, driverTypes); err != nil {
 				return fmt.Errorf("init log drivers: %w", err)
 			}
 
@@ -430,20 +431,11 @@ var logDriverTypes = enumTable[LogDriverType, proto.Conmon_LogDriver_Type]{
 	{LogDriverTypeJournald, proto.Conmon_LogDriver_Type_journald},
 }
 
-// protoLogDriver is a log driver with its type converted for a request.
-type protoLogDriver struct {
-	typ           proto.Conmon_LogDriver_Type
-	path          string
-	maxSize       uint64
-	containerName string
-	tag           string
-	labels        map[string]string
-}
-
-// logDriversToProto converts the log drivers for a request, before it gets
-// built.
-func logDriversToProto(logDrivers []ContainerLogDriver) ([]protoLogDriver, error) {
-	res := make([]protoLogDriver, 0, len(logDrivers))
+// validateLogDrivers checks the types of the log drivers before the request
+// gets built, a validation error must not tear down the RPC connection, and
+// returns their protocol values.
+func validateLogDrivers(logDrivers []ContainerLogDriver) ([]proto.Conmon_LogDriver_Type, error) {
+	types := make([]proto.Conmon_LogDriver_Type, 0, len(logDrivers))
 
 	for _, logDriver := range logDrivers {
 		typ, err := logDriverTypes.toProto(logDriver.Type)
@@ -451,20 +443,18 @@ func logDriversToProto(logDrivers []ContainerLogDriver) ([]protoLogDriver, error
 			return nil, fmt.Errorf("log driver type: %w", err)
 		}
 
-		res = append(res, protoLogDriver{
-			typ:           typ,
-			path:          logDriver.Path,
-			maxSize:       logDriver.MaxSize,
-			containerName: logDriver.ContainerName,
-			tag:           logDriver.Tag,
-			labels:        logDriver.Labels,
-		})
+		types = append(types, typ)
 	}
 
-	return res, nil
+	return types, nil
 }
 
-func initLogDrivers(req *proto.Conmon_CreateContainerRequest, logDrivers []protoLogDriver) error {
+// initLogDrivers sets the log drivers with the types which
+// validateLogDrivers returned for them.
+func initLogDrivers(
+	req *proto.Conmon_CreateContainerRequest, logDrivers []ContainerLogDriver,
+	types []proto.Conmon_LogDriver_Type,
+) error {
 	newLogDrivers, err := req.NewLogDrivers(int32(len(logDrivers)))
 	if err != nil {
 		return fmt.Errorf("create log drivers: %w", err)
@@ -472,23 +462,23 @@ func initLogDrivers(req *proto.Conmon_CreateContainerRequest, logDrivers []proto
 
 	for i, logDriver := range logDrivers {
 		n := newLogDrivers.At(i)
-		n.SetType(logDriver.typ)
+		n.SetType(types[i])
 
-		if err := n.SetPath(logDriver.path); err != nil {
+		if err := n.SetPath(logDriver.Path); err != nil {
 			return fmt.Errorf("set log driver path: %w", err)
 		}
 
-		n.SetMaxSize(logDriver.maxSize)
+		n.SetMaxSize(logDriver.MaxSize)
 
-		if err := n.SetContainerName(logDriver.containerName); err != nil {
+		if err := n.SetContainerName(logDriver.ContainerName); err != nil {
 			return fmt.Errorf("set log driver container name: %w", err)
 		}
 
-		if err := n.SetTag(logDriver.tag); err != nil {
+		if err := n.SetTag(logDriver.Tag); err != nil {
 			return fmt.Errorf("set log driver tag: %w", err)
 		}
 
-		if err := stringStringMapToMapEntryList(logDriver.labels, n.NewLabels); err != nil {
+		if err := stringStringMapToMapEntryList(logDriver.Labels, n.NewLabels); err != nil {
 			return fmt.Errorf("set log driver labels: %w", err)
 		}
 	}

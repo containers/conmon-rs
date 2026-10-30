@@ -10,7 +10,8 @@ version = "1.2.1"
 edition = "2024"
 # The oldest supported toolchain, which lint-msrv checks in CI. It may not be
 # lower than the highest rust-version of the locked dependencies, see
-# `cargo metadata`.
+# `cargo metadata`. rpm/conmon-rs.spec requires it of cargo, see make
+# verify-spec.
 rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/containers/conmon-rs"

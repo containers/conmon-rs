@@ -1,6 +1,10 @@
 package client
 
-import "github.com/containers/conmon-rs/internal/proto"
+import (
+	"strconv"
+
+	"github.com/containers/conmon-rs/internal/proto"
+)
 
 // LogLevel is the enum for all available server log levels. Each level
 // includes the messages of the levels after it, trace logs everything.
@@ -45,7 +49,7 @@ const (
 
 // CgroupManager is the enum for all available cgroup managers. The zero value
 // is CgroupManagerSystemd.
-type CgroupManager proto.Conmon_CgroupManager
+type CgroupManager uint16
 
 const (
 	// CgroupManagerSystemd specifies to use systemd to create and manage
@@ -62,6 +66,21 @@ const (
 	// [CreateContainerConfig.CgroupManager].
 	CgroupManagerPerCommand CgroupManager = CgroupManager(0xffff)
 )
+
+// String returns the name of the cgroup manager, "systemd", "cgroupfs" or
+// "per command", and CgroupManager(<number>) for an unknown value.
+func (m CgroupManager) String() string {
+	switch m {
+	case CgroupManagerSystemd:
+		return "systemd"
+	case CgroupManagerCgroupfs:
+		return "cgroupfs"
+	case CgroupManagerPerCommand:
+		return "per command"
+	default:
+		return "CgroupManager(" + strconv.FormatUint(uint64(m), 10) + ")"
+	}
+}
 
 // Namespace is the enum for all available namespaces.
 type Namespace int

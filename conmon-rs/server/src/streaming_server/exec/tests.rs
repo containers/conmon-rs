@@ -3,7 +3,7 @@ use crate::{
     child_reaper::ChildReaper,
     config::Config,
     conmon_capnp::conmon::CgroupManager,
-    streaming_server::{ADDR, ExecSession, MAX_MESSAGE_SIZE, StreamingServer, testing::*},
+    streaming_server::{ExecSession, MAX_MESSAGE_SIZE, StreamingServer, testing::*},
 };
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -23,7 +23,6 @@ use std::{
     sync::Arc,
 };
 use tokio::{
-    io::AsyncWriteExt,
     net::TcpStream,
     task::LocalSet,
     time::{self, Duration},
@@ -58,8 +57,7 @@ async fn exec_websocket(
     config: Config,
     idle_timeout: Option<Duration>,
 ) -> Result<(StreamingServer, TcpStream)> {
-    let mut server = StreamingServer::default();
-    server.start_if_required().await?;
+    let server = StreamingServer::default();
     let url = server
         .exec_url(ExecSession {
             child_reaper: Arc::new(ChildReaper::default()),
@@ -74,22 +72,7 @@ async fn exec_websocket(
             idle_timeout,
         })
         .await?;
-    let path = url
-        .strip_prefix(&format!("http://{ADDR}:{}", server.port))
-        .context("url")?;
-    let mut stream = TcpStream::connect((ADDR, server.port)).await?;
-    stream
-        .write_all(
-            format!(
-                "GET {path} HTTP/1.1\r\nHost: {ADDR}\r\nUpgrade: websocket\r\n\
-                 Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
-                 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-                 Sec-WebSocket-Protocol: {PROTOCOL_V5}\r\n\r\n"
-            )
-            .as_bytes(),
-        )
-        .await?;
-    let response = response_head(&mut stream).await?;
+    let (response, stream) = upgrade(&server, &url, "GET", &websocket_headers(PROTOCOL_V5)).await?;
     assert!(response.starts_with("http/1.1 101"), "{response}");
     Ok((server, stream))
 }
@@ -173,11 +156,11 @@ async fn lost_exit_ends_the_session_and_kills_the_process() -> Result<()> {
     let io = SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?);
     // Like a watcher which got aborted before it sent the exit.
     let exit_rx = broadcast::channel(1).1;
-    let attach = io.attach().await;
+    let attach = io.attach().clone();
     let stopped = attach.output_stopped().clone();
     let token = CancellationToken::new();
     let teardown = ExecTeardown {
-        stdio: Some(io.stdio().await?),
+        stdio: Some(io.stdio()?),
         _stop_output: attach.stop_output_on_exit(token.clone()),
         attach,
         token,
@@ -208,6 +191,51 @@ async fn lost_exit_ends_the_session_and_kills_the_process() -> Result<()> {
     assert_eq!(exit.signal(), Some(Signal::SIGKILL as i32));
     // Nothing waits for the read loops, which a lost exit never stops.
     assert!(stopped.is_cancelled());
+    Ok(())
+}
+
+/// Drop the teardown of a running process without the kill, like after the
+/// client went away, and return the process and the attach of its IO.
+fn tear_down_without_kill(tty: bool) -> Result<(std::process::Child, SharedContainerAttach)> {
+    let process = std::process::Command::new("sleep")
+        .arg("60")
+        .process_group(0)
+        .spawn()?;
+    let io = SharedContainerIO::new(ContainerIO::new(tty, ContainerLog::new())?);
+    let attach = io.attach().clone();
+    let token = CancellationToken::new();
+    drop(ExecTeardown {
+        stdio: Some(io.stdio()?),
+        _stop_output: attach.stop_output_on_exit(token.clone()),
+        attach: attach.clone(),
+        token,
+        process: Process::open(child_pid(process.id())?),
+        kill: Arc::default(),
+    });
+    Ok((process, attach))
+}
+
+#[tokio::test]
+async fn client_gone_closes_stdin_and_stops_the_output() -> Result<()> {
+    let (mut process, attach) = tear_down_without_kill(false)?;
+    assert!(attach.stdin_closed().is_cancelled());
+    // The writes of the process fail, it does not run on with its output
+    // discarded.
+    assert!(attach.output_stopped().is_cancelled());
+    process.kill()?;
+    process.wait()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn client_gone_hangs_up_the_terminal_and_keeps_reading() -> Result<()> {
+    let (mut process, attach) = tear_down_without_kill(true)?;
+    assert!(!attach.stdin_closed().is_cancelled());
+    // A process which ignores the hang-up must not block on a full
+    // terminal, its output gets read until the exit.
+    assert!(!attach.output_stopped().is_cancelled());
+    let exit = tokio::task::spawn_blocking(move || process.wait()).await??;
+    assert_eq!(exit.signal(), Some(Signal::SIGHUP as i32));
     Ok(())
 }
 

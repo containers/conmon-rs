@@ -3,11 +3,12 @@
 
 use super::{ChildReaper, InFlight, PendingPid};
 use crate::{
-    container_io::{ContainerIO, ContainerIOType},
+    container_io::ContainerIO,
     fd_mapping::{self, CommandFdExt, FdMapping},
     fs_util, init,
     mutex::lock,
     process::{Process, child_pid, read_pid_file, wait_for_exit_code},
+    runtime_args::LoggedArgs,
     tail::Tail,
     util::{sleep_until, with_stderr},
 };
@@ -120,6 +121,10 @@ pub struct RuntimeCall<'a> {
     pub runtime: &'a Path,
     pub args: &'a [String],
 
+    /// Where the command of an exec starts in `args`, which does not get
+    /// logged, see [`LoggedArgs`].
+    pub command_start: Option<usize>,
+
     /// Whether the process gets a stdin pipe.
     pub stdin: bool,
 
@@ -140,6 +145,7 @@ impl<'a> RuntimeCall<'a> {
         Self {
             runtime,
             args,
+            command_start: None,
             stdin: false,
             pidfile,
             deadline: None,
@@ -256,6 +262,7 @@ impl ChildReaper {
         let RuntimeCall {
             runtime,
             args,
+            command_start,
             stdin,
             pidfile,
             deadline: runtime_deadline,
@@ -267,7 +274,14 @@ impl ChildReaper {
         // same bundle earlier, would name a process which the cleanup of a
         // failed call kills, see `cleanup_failed_grandchild`.
         fs_util::remove_file(pidfile).context("remove stale PID file")?;
-        debug!("Running: {:?} {:?}", runtime, args);
+        debug!(
+            "Running: {:?} {:?}",
+            runtime,
+            LoggedArgs {
+                args,
+                command_start
+            }
+        );
         let child = Self::spawn_runtime(runtime, args, stdin, &env_vars, additional_fds);
         let mut child = Runtime(child.context("spawn child process")?);
 
@@ -284,7 +298,9 @@ impl ChildReaper {
         // with the one of the process. With a terminal, the runtime has pipes
         // of its own. They get read while waiting for it, a runtime which
         // writes more than they hold, like with debug logging, would block.
-        let output = matches!(container_io.typ(), ContainerIOType::Terminal(_))
+        let output = container_io
+            .terminal()
+            .is_some()
             .then(|| RuntimeOutput::spawn(child.stdout.take(), child.stderr.take()));
 
         let connected =
@@ -346,41 +362,36 @@ impl ChildReaper {
         token: &CancellationToken,
         deadline: Option<Instant>,
     ) -> Result<(), RuntimeFailure> {
-        match container_io.typ_mut() {
-            ContainerIOType::Terminal(terminal) => {
-                // The runtime connects to the console socket before it exits.
-                // If it fails before that, waiting for the connection alone
-                // would hang this call forever.
-                select! {
-                    res = terminal.wait_connected(stdin, token.clone()) => {
-                        res.context("wait for terminal socket connection")
-                            .map_err(RuntimeFailure::new)
-                    }
-                    () = sleep_until(deadline) => Err(RuntimeFailure::timed_out()),
-                    status = child.wait() => match status.context("wait for child") {
-                        // The runtime succeeded, so it did connect and the
-                        // descriptor is queued already.
-                        Ok(status) if status.success() => time::timeout(
-                            Self::RUNTIME_GRACE,
-                            terminal.wait_connected(stdin, token.clone()),
-                        )
-                        .await
-                        .context("runtime exited without connecting the terminal")
-                        .and_then(|res| res.context("wait for terminal socket connection"))
-                        .map_err(RuntimeFailure::new),
-                        // A failure is reported later together with its output.
-                        Ok(_) => Ok(()),
-                        Err(e) => Err(RuntimeFailure::new(e)),
-                    },
-                }
+        if container_io.terminal().is_none() {
+            let (stdin, stdout, stderr) =
+                (child.stdin.take(), child.stdout.take(), child.stderr.take());
+            container_io.connect_streams(stdin, stdout, stderr, token.clone());
+            return Ok(());
+        }
+        // The runtime connects to the console socket before it exits. If it
+        // fails before that, waiting for the connection alone would hang
+        // this call forever.
+        select! {
+            res = container_io.connect_terminal(stdin, token.clone()) => {
+                res.context("wait for terminal socket connection")
+                    .map_err(RuntimeFailure::new)
             }
-            ContainerIOType::Streams(streams) => {
-                let stdout = child.stdout.take();
-                let stderr = child.stderr.take();
-                let stdin = child.stdin.take();
-                streams.handle_stdio_receive(stdin, stdout, stderr, token.clone());
-                Ok(())
-            }
+            () = sleep_until(deadline) => Err(RuntimeFailure::timed_out()),
+            status = child.wait() => match status.context("wait for child") {
+                // The runtime succeeded, so it did connect and the descriptor
+                // is queued already.
+                Ok(status) if status.success() => time::timeout(
+                    Self::RUNTIME_GRACE,
+                    container_io.connect_terminal(stdin, token.clone()),
+                )
+                .await
+                .context("runtime exited without connecting the terminal")
+                .and_then(|res| res.context("wait for terminal socket connection"))
+                .map_err(RuntimeFailure::new),
+                // A failure is reported later together with its output.
+                Ok(_) => Ok(()),
+                Err(e) => Err(RuntimeFailure::new(e)),
+            },
         }
     }
 
@@ -417,11 +428,9 @@ impl ChildReaper {
             // runc init which did not set up the container yet, which would
             // be left running otherwise. A container init which started a
             // session of its own syncs with its runtime over a socket, and
-            // fails once that closes. The runtime was not reaped yet, so the
-            // ID of the group is still its own.
-            if let Ok(pid) = child_pid(child.id())
-                && let Err(e) = killpg(pid, Signal::SIGKILL)
-            {
+            // fails once that closes. The runtime itself gets killed as well,
+            // it may have moved to another group.
+            if let Err(e) = child.kill_group() {
                 debug!("Unable to kill process group of runtime: {e}");
             }
             if let Err(e) = child.start_kill() {
@@ -479,7 +488,7 @@ impl ChildReaper {
             return;
         }
         debug!("Cleaning up PID {pid} of failed runtime call");
-        task::spawn(wait_for_exit_code(CancellationToken::new(), pid));
+        task::spawn(wait_for_exit_code(pid));
     }
 }
 
@@ -532,12 +541,21 @@ impl DerefMut for Runtime {
     }
 }
 
+impl Runtime {
+    /// Kill the process group of the runtime, which it leads, see
+    /// `spawn_command`. Nothing once it got reaped, the ID of the group may
+    /// belong to another one then, the runtime has no ID anymore.
+    fn kill_group(&self) -> nix::Result<()> {
+        let Ok(pid) = child_pid(self.0.id()) else {
+            return Ok(());
+        };
+        killpg(pid, Signal::SIGKILL)
+    }
+}
+
 impl Drop for Runtime {
     fn drop(&mut self) {
-        // No ID once it got reaped.
-        if let Ok(pid) = child_pid(self.0.id())
-            && let Err(e) = killpg(pid, Signal::SIGKILL)
-        {
+        if let Err(e) = self.kill_group() {
             debug!("Unable to kill process group of dropped runtime: {e}");
         }
     }

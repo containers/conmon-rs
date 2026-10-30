@@ -30,7 +30,6 @@ fn full_channel_ends_with_a_lost_event() {
     let (tx, mut rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
     let event = WatchEvent {
         path: Some(Path::new("/memory.events").into()),
-        removed: false,
     };
     for _ in 0..2 * WATCH_EVENT_CHANNEL_SIZE {
         Watches::deliver(&tx, &event);
@@ -64,29 +63,21 @@ async fn shared_watcher_dispatches_by_path() -> Result<()> {
 
     let event = wait_for_event(&mut rx1).await?;
     assert_eq!(event.path.as_deref(), Some(first.path()));
-    assert!(!event.removed);
     assert!(rx2.try_recv().is_err());
 
     Ok(())
 }
 
 #[tokio::test]
-async fn shared_watcher_reports_removals() -> Result<()> {
+async fn shared_watcher_ends_watches_on_removal() -> Result<()> {
     let file = NamedTempFile::new()?;
     let watcher = SharedWatcher::get()?;
     let (tx, mut rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
     let _sub = watcher.subscribe(file.path(), tx)?;
 
-    let path = file.path().to_path_buf();
+    // Without an event, like for the files of a removed cgroup.
     file.close()?;
-    // The link count changes first.
-    loop {
-        let event = wait_for_event(&mut rx).await?;
-        assert_eq!(event.path.as_deref(), Some(path.as_path()));
-        if event.removed {
-            break;
-        }
-    }
+    assert_eq!(timeout(Duration::from_secs(5), rx.recv()).await?, None);
     // The kernel dropped the watch, the descriptor is forgotten.
     wait_for(|| lock(&watcher.watches).0.is_empty())
         .await
@@ -119,8 +110,9 @@ fn watches_keep_events_of_recreated_files_apart() -> Result<()> {
         );
     }
 
-    // The removal of the old file comes after the new one got watched.
-    for mask in [AddWatchFlags::IN_DELETE_SELF, AddWatchFlags::IN_IGNORED] {
+    // A change and the removal of the old file come after the new one got
+    // watched.
+    for mask in [AddWatchFlags::IN_MODIFY, AddWatchFlags::IN_IGNORED] {
         watches.dispatch(&InotifyEvent {
             wd: old,
             mask,
@@ -128,7 +120,7 @@ fn watches_keep_events_of_recreated_files_apart() -> Result<()> {
             name: None,
         });
     }
-    assert!(old_rx.try_recv()?.removed);
+    assert_eq!(old_rx.try_recv()?.path.as_deref(), Some(path.as_path()));
     assert!(new_rx.try_recv().is_err());
     assert!(!watches.0.contains_key(&old));
     assert!(watches.0.contains_key(&new));
@@ -166,7 +158,6 @@ fn lost_events_reach_every_subscriber() -> Result<()> {
     for (_, rx) in &mut receivers {
         let event = rx.try_recv()?;
         assert_eq!(event.path, None);
-        assert!(!event.removed);
     }
     assert_eq!(watches.0.len(), 2);
     Ok(())

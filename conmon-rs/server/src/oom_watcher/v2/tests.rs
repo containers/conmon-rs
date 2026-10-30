@@ -56,15 +56,10 @@ async fn outer_kills_seen(leaf: &Path, oom_kill: u64) -> Result<()> {
     wait_progress(leaf, |p| p.outer.is_some_and(|c| c.oom_kill == oom_kill)).await
 }
 
-#[tokio::test]
-async fn cgroup_v2_removal_by_cgroupfs_is_no_oom() -> Result<()> {
-    let root = tempfile::tempdir()?;
-    let [_, pod, scope, leaf] = fake_pod(root.path(), false)?;
-    let (token, task) = watch_v2(&leaf);
-    baselines_taken(&leaf).await?;
-
-    // cgroupfs ends the watches of the files of a removed cgroup with
-    // IN_IGNORED only, there is no event of the file itself.
+/// Remove `cgroup`, which holds the leaf, like cgroupfs: it ends the watch
+/// of the memory events of the leaf with IN_IGNORED only, there is no event
+/// of the file itself.
+async fn remove_cgroup(leaf: &Path, cgroup: &Path) -> Result<()> {
     let watcher = SharedWatcher::get()?;
     let events = leaf.join("memory.events");
     watcher.remove_watch(&events)?;
@@ -74,7 +69,18 @@ async fn cgroup_v2_removal_by_cgroupfs_is_no_oom() -> Result<()> {
         }
     })
     .await?;
-    std::fs::remove_dir_all(&scope)?;
+    std::fs::remove_dir_all(cgroup)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cgroup_v2_removal_by_cgroupfs_is_no_oom() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let [_, pod, scope, leaf] = fake_pod(root.path(), false)?;
+    let (token, task) = watch_v2(&leaf);
+    baselines_taken(&leaf).await?;
+
+    remove_cgroup(&leaf, &scope).await?;
     assert!(!task.is_finished());
 
     // The pod is still watched, a kill there after the removal may have
@@ -243,11 +249,8 @@ async fn removed_scope(
         write_events(&pod, 0, 4)?;
         outer_kills_seen(&leaf, 4).await?;
     }
-    std::fs::remove_dir_all(&scope)?;
+    remove_cgroup(&leaf, &scope).await?;
     after_removal(&qos, &pod)?;
-    // Waiting for the exit, not taken for an OOM on its own.
-    wait_progress(&leaf, |p| p.ended).await?;
-    assert!(!task.is_finished());
 
     token.cancel();
     Ok(timeout(Duration::from_secs(5), task).await??)
@@ -313,15 +316,23 @@ async fn cgroup_v2_is_not_compared_above_the_pod() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cgroup_v2_removed_leaf_without_pod_falls_back_to_parent() -> Result<()> {
-    // A cgroup parent not created by the kubelet.
-    let run = async |sibling_kill: bool, kill: bool, remove_parent: bool| -> Result<OOMEvent> {
+    // A cgroup parent not created by the kubelet, like the one of critest.
+    // With crun, the leaf is below the scope of the container, which
+    // systemd removes along with it.
+    let run = async |crun: bool, sibling_kill: bool, kill: bool, remove_parent: bool| {
         let root = tempfile::tempdir()?;
-        let parent = root.path().join("custom.slice");
-        let leaf = parent.join("ctr.scope");
+        let parent = root.path().join("pod_123-456.slice");
+        let scope = parent.join("crio-ctr.scope");
+        let leaf = if crun {
+            scope.join("container")
+        } else {
+            scope.clone()
+        };
         std::fs::create_dir_all(&leaf)?;
-        std::fs::create_dir(parent.join("sibling.scope"))?;
-        write_events(&parent, 0, 3)?;
-        write_events(&leaf, 0, 3)?;
+        std::fs::create_dir(parent.join("crio-sibling.scope"))?;
+        for dir in [&parent, &scope, &leaf] {
+            write_events(dir, 0, 3)?;
+        }
         let (token, task) = watch_v2(&leaf);
         baselines_taken(&leaf).await?;
 
@@ -329,7 +340,7 @@ async fn cgroup_v2_removed_leaf_without_pod_falls_back_to_parent() -> Result<()>
             write_events(&parent, 0, 4)?;
             outer_kills_seen(&leaf, 4).await?;
         }
-        std::fs::remove_dir_all(&leaf)?;
+        std::fs::remove_dir_all(&scope)?;
         if kill {
             write_events(&parent, 0, 5)?;
         }
@@ -337,14 +348,36 @@ async fn cgroup_v2_removed_leaf_without_pod_falls_back_to_parent() -> Result<()>
             std::fs::remove_dir_all(&parent)?;
         }
         token.cancel();
-        Ok(timeout(Duration::from_secs(5), task).await??)
+        anyhow::Ok(timeout(Duration::from_secs(5), task).await??)
     };
 
-    assert_eq!(run(false, true, false).await?, OOMEvent::possible(true));
-    assert_eq!(run(false, false, false).await?, OOMEvent::default());
-    assert_eq!(run(true, false, false).await?, OOMEvent::default());
-    assert_eq!(run(false, false, true).await?, OOMEvent::possible(true));
+    for crun in [false, true] {
+        assert_eq!(
+            run(crun, false, true, false).await?,
+            OOMEvent::possible(true)
+        );
+        assert_eq!(run(crun, false, false, false).await?, OOMEvent::default());
+        assert_eq!(run(crun, true, false, false).await?, OOMEvent::default());
+        assert_eq!(
+            run(crun, false, false, true).await?,
+            OOMEvent::possible(true)
+        );
+    }
     Ok(())
+}
+
+#[test]
+fn outliving_ancestors() {
+    for (leaf, ancestor) in [
+        ("/pod.slice/crio-ctr.scope", "/pod.slice"),
+        ("/pod.slice/crio-ctr.scope/container", "/pod.slice"),
+        ("/kubepods/pod12ab/crio-ctr", "/kubepods/pod12ab"),
+    ] {
+        assert_eq!(
+            CgroupV2::outliving_ancestor(Path::new(leaf)),
+            Some(Path::new(ancestor))
+        );
+    }
 }
 
 #[test]

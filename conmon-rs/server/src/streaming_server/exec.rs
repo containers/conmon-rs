@@ -7,8 +7,7 @@ use super::{
 use crate::conmon_capnp::conmon::CgroupManager;
 use crate::{
     attach::{SharedContainerAttach, StopOutput},
-    child::{Child, ChildKind},
-    child_reaper::{ChildReaper, ExitChannelData, RuntimeCall},
+    child_reaper::{ChildReaper, ExitChannelData, RuntimeCall, WatchedExec},
     config::Config,
     container_io::{ContainerIO, Drain, EarlyStdio, Message as IOMessage, SharedContainerIO},
     container_log::ContainerLog,
@@ -79,10 +78,9 @@ impl StreamingServer {
             pidfile: pidfile.path(),
             cgroup_manager: session.cgroup_manager,
         };
-        let mut args = args
-            .exec_sync_args_without_command()
-            .context("exec sync args without command")?;
-        args.extend(session.command);
+        let args = args
+            .exec_sync_args(&session.command)
+            .context("generate exec args")?;
 
         // Read while the runtime runs, see `ContainerIO::collect_stdio`.
         container_io
@@ -93,17 +91,18 @@ impl StreamingServer {
             .child_reaper
             .create_child(
                 RuntimeCall {
+                    command_start: Some(args.command_start),
                     stdin: session.stdin,
                     // The process has no timeout, a runtime which hangs
                     // still gets killed.
                     deadline: Server::exec_runtime_deadline(None),
-                    ..RuntimeCall::new(session.server_config.runtime(), &args, pidfile.path())
+                    ..RuntimeCall::new(session.server_config.runtime(), &args.args, pidfile.path())
                 },
                 &mut container_io,
             )
             .await;
-        let (grandchild_pid, token, call) = match res {
-            Ok(res) => res,
+        let started = match res {
+            Ok(started) => started,
             Err(e) => {
                 let e = container_io.runtime_error(e).await;
                 return Err(e.context("create new child process"));
@@ -111,50 +110,27 @@ impl StreamingServer {
         };
         // The runtime wrote the PID, the file served its purpose.
         drop(pidfile);
-        // Not reaped before the registration below, so the PID is still its
-        // own.
-        let process = Process::open(grandchild_pid);
-        let early_stdio = container_io.take_early_stdio().await;
 
-        let io = SharedContainerIO::new(container_io);
-        let child = Child {
-            id: session.container_id,
-            kind: ChildKind::Exec,
-            pid: grandchild_pid,
-            exit_paths: vec![],
-            oom_exit_paths: vec![],
-            timeout: None,
-            io: io.clone(),
-            cleanup_cmd: vec![],
-            token: token.clone(),
-        };
-        // Also if the registration fails, its watcher reports the exit.
-        let attach = io.attach().await;
-        let stop_output = attach.stop_output_on_exit(token.clone());
-        let exit_rx = match session.child_reaper.watch_grandchild(child, vec![], call) {
-            Ok(exit_rx) => exit_rx,
-            Err(e) => {
-                // No session ends the process then, nothing may wait for it.
-                if let Err(e) = process.signal_group(Signal::SIGKILL) {
-                    debug!("Not killing exec process {grandchild_pid}, it is gone: {e}");
-                }
-                return Err(e.context("watch grandchild for pid"));
-            }
-        };
-
+        let WatchedExec {
+            io,
+            token,
+            process,
+            exit_rx,
+            stop_output,
+        } = session
+            .child_reaper
+            .watch_exec(session.container_id, started, None, container_io)
+            .context("watch grandchild for pid")?;
         let mut teardown = ExecTeardown {
             stdio: None,
             _stop_output: stop_output,
-            attach,
+            attach: io.attach().clone(),
             token,
             process,
             kill: Arc::default(),
         };
-        teardown.stdio = Some(
-            io.stdio()
-                .await
-                .context("retrieve stdout and stderr channels")?,
-        );
+        teardown.stdio = Some(io.stdio().context("retrieve stdout and stderr channels")?);
+        let early_stdio = io.take_early_stdio().await;
         Ok(StartedExec {
             io,
             early_stdio,
@@ -253,11 +229,11 @@ impl StreamingServer {
                 },
 
                 event = input.next() => match event {
-                    InputEvent::Resize(data) => input.resize(&data).await,
+                    InputEvent::Resize(data) => input.resize(&data),
                     InputEvent::Ping => sender.ping().await?,
                     // Close the process stdin as well and keep forwarding the
                     // output until it exits.
-                    InputEvent::StdinClosed => input.close_container_stdin().await,
+                    InputEvent::StdinClosed => input.close_container_stdin(),
                     // The client closed the connection, everything it sent
                     // reached the process.
                     InputEvent::Ended => break,
@@ -367,7 +343,8 @@ pub(super) struct StartedExec {
 /// client sent a message which is too large, or if the session hit the idle
 /// timeout or lost the exit. Only the last two kill the process, see
 /// [`ExecTeardown::kill`], the others close its stdin or hang up its
-/// terminal.
+/// terminal. All but the hang-up stop the output, which nothing takes
+/// anymore.
 pub(super) struct ExecTeardown {
     /// The stdout and stderr channels of the process.
     stdio: Option<(IOReceiver<IOMessage>, IOReceiver<IOMessage>)>,
@@ -383,7 +360,9 @@ pub(super) struct ExecTeardown {
     /// Set once the session ended with the idle timeout or lost the exit,
     /// which kills the process, like the reaper kills one after its timeout.
     /// Without a session the process would run on with nothing waiting for
-    /// it.
+    /// it. Otherwise it gets the end of its stdin and its output pipes
+    /// closed, or the hang-up of its terminal, like a process started by the
+    /// client itself once the client went away.
     pub(super) kill: Arc<AtomicBool>,
 
     /// Stops the read loops once the session took the output, after the
@@ -412,13 +391,20 @@ impl Drop for ExecTeardown {
             // A lost exit never cancels the token, which `StopOutput` waits
             // for.
             self.attach.stop_output();
-            return;
-        }
-        // Without a client the process would wait for stdin forever. Close
-        // it, like the end of the session would for a process started by the
-        // client itself. A terminal cannot be closed without ending its
-        // output, hang it up instead, like a closed connection does.
-        if !self.attach.close_container_stdin() {
+        } else if self.attach.close_container_stdin() {
+            // Without a client the process would wait for stdin forever.
+            // Close it, like the end of the session would for a process
+            // started by the client itself. Nothing takes the output
+            // anymore either, the read loops stop and close the pipes, so
+            // that the writes of a process like `tail -f`, which never reads
+            // stdin, fail.
+            self.attach.stop_output();
+        } else {
+            // A terminal cannot be closed without ending its output, hang it
+            // up instead, like a closed connection does. The stdin loop
+            // keeps its master open, so its output keeps getting read until
+            // the exit: a process which ignores the hang-up would block on
+            // a full terminal otherwise.
             self.hang_up();
         }
     }

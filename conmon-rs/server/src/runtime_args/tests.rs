@@ -3,21 +3,21 @@ use crate::container_log::ContainerLog;
 
 /// Build the arguments with a configuration from `flags`, None if the
 /// environment would change it.
-fn runtime_args<F>(flags: &[&str], cgroup_manager: CgroupManager, f: F) -> Option<Vec<String>>
+fn runtime_args<T, F>(flags: &[&str], cgroup_manager: CgroupManager, f: F) -> Option<T>
 where
-    F: FnOnce(GenerateRuntimeArgs) -> Result<Vec<String>>,
+    F: FnOnce(GenerateRuntimeArgs) -> Result<T>,
 {
     runtime_args_with_io(flags, cgroup_manager, false, f)
 }
 
-fn runtime_args_with_io<F>(
+fn runtime_args_with_io<T, F>(
     flags: &[&str],
     cgroup_manager: CgroupManager,
     terminal: bool,
     f: F,
-) -> Option<Vec<String>>
+) -> Option<T>
 where
-    F: FnOnce(GenerateRuntimeArgs) -> Result<Vec<String>>,
+    F: FnOnce(GenerateRuntimeArgs) -> Result<T>,
 {
     let config = Config::parse_for_test(flags.iter().copied())?;
     let container_io =
@@ -116,10 +116,10 @@ fn create_args_for_crun_with_root_and_systemd() {
 
 #[test]
 fn default_args_crun_log_levels() {
-    // crun takes debug, warning and error, the other levels keep its
-    // default.
+    // crun takes debug, warning and error, trace gets debug as the most
+    // verbose one, the other levels keep its default.
     for (level, expected) in [
-        ("trace", None),
+        ("trace", Some("--log-level=debug")),
         ("debug", Some("--log-level=debug")),
         ("info", None),
         ("warn", Some("--log-level=warning")),
@@ -129,7 +129,7 @@ fn default_args_crun_log_levels() {
         let Some(args) = runtime_args(
             &["--runtime", "/usr/bin/crun", "--log-level", level],
             CgroupManager::Cgroupfs,
-            |args| args.default_args(),
+            |args| Ok(args.default_args()),
         ) else {
             return;
         };
@@ -142,7 +142,7 @@ fn default_args_crun_log_levels() {
     let Some(args) = runtime_args(
         &["--runtime", "/usr/bin/runc", "--log-level", "debug"],
         CgroupManager::Cgroupfs,
-        |args| args.default_args(),
+        |args| Ok(args.default_args()),
     ) else {
         return;
     };
@@ -154,7 +154,7 @@ fn exec_sync_args_without_terminal() {
     let Some(args) = runtime_args(
         &["--runtime", "/usr/bin/runc"],
         CgroupManager::Systemd,
-        |args| args.exec_sync_args(["sh", "-c", "true"]),
+        |args| Ok(args.exec_sync_args(["sh", "-c", "true"])?.args),
     ) else {
         return;
     };
@@ -181,10 +181,10 @@ async fn exec_and_create_args_with_terminal() {
         CgroupManager::Cgroupfs,
         true,
         |args| {
-            if let ContainerIOType::Terminal(terminal) = args.container_io.typ() {
+            if let Some(terminal) = args.container_io.terminal() {
                 socket = Some(terminal.path().display().to_string());
             }
-            args.exec_sync_args(["true"])
+            Ok(args.exec_sync_args(["true"])?.args)
         },
     ) else {
         return;
@@ -209,7 +209,7 @@ async fn exec_and_create_args_with_terminal() {
         CgroupManager::Cgroupfs,
         true,
         |args| {
-            if let ContainerIOType::Terminal(terminal) = args.container_io.typ() {
+            if let Some(terminal) = args.container_io.terminal() {
                 socket = Some(terminal.path().display().to_string());
             }
             create(args)
@@ -233,4 +233,31 @@ async fn exec_and_create_args_with_terminal() {
             "id"
         ]
     );
+}
+
+#[test]
+fn exec_commands_are_not_logged() {
+    let Some(exec) = runtime_args(
+        &["--runtime", "/usr/bin/runc"],
+        CgroupManager::Systemd,
+        |args| args.exec_sync_args(["sh", "-c", "echo secret"]),
+    ) else {
+        return;
+    };
+    let logged = LoggedArgs {
+        args: &exec.args,
+        command_start: Some(exec.command_start),
+    };
+    assert_eq!(
+        format!("{logged:?}"),
+        r#"["--systemd-cgroup", "exec", "-d", "--pid-file=/pidfile", "id"] with 3 command args"#
+    );
+
+    // Other calls get logged in full.
+    let create = ["create", "--bundle", "/bundle", "id"].map(String::from);
+    let logged = LoggedArgs {
+        args: &create,
+        command_start: None,
+    };
+    assert_eq!(format!("{logged:?}"), format!("{create:?}"));
 }

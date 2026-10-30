@@ -92,13 +92,14 @@ body:
     attributes:
       label: Server logs
       description: |
-        The logs of the conmonrs process of the pod, ideally with `--log-level debug`, which CRI-O passes to the servers of pods it starts while it runs with `log_level = "debug"`. Since v1.34, CRI-O only lets them log to the journal with `LOG_DRIVER=systemd` in the `monitor_env` of the runtime handler. See the troubleshooting section of usage.md for how to find them.
+        The logs of the conmonrs process of the pod, ideally with `--log-level debug`, which CRI-O passes to the servers of pods it starts while it runs with `log_level = "debug"`. Since v1.34, CRI-O only lets them log to the journal with `LOG_DRIVER=systemd` in the `monitor_env` of the runtime handler. See the troubleshooting section of usage.md for how to find them. Since v1.2.1 `journalctl -t conmonrs` shows the server logs. In v1.2.1 it also shows the output of `journald` containers without a tag. Older servers only log under `_COMM=conmonrs`, which also has the output of all containers which use that driver. Redact container output and anything else sensitive before you paste the logs, the issue is public.
       value: |
         <details>
 
         ```console
-        $ journalctl _COMM=conmonrs + SYSLOG_IDENTIFIER=conmonrs
-        # paste output here
+        $ journalctl -t conmonrs
+        # servers before v1.2.1: journalctl _COMM=conmonrs
+        # paste output here, with container output redacted
         ```
 
         </details>

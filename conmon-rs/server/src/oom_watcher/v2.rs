@@ -14,6 +14,15 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
+/// Tell the tests how far the watch of a leaf got, see `tests::Progress`.
+/// Nothing outside of them.
+macro_rules! progress {
+    ($leaf:expr, |$p:ident| $update:expr) => {
+        #[cfg(test)]
+        tests::progress($leaf).send_modify(|$p| $update);
+    };
+}
+
 /// The OOM related counters of a memory events file.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct OomCounters {
@@ -54,10 +63,10 @@ struct CgroupV2 {
     events: MemoryEvents,
 
     /// The hierarchical memory events of the pod cgroup, which outlives a
-    /// leaf the systemd cgroup manager removes, or of the parent without
-    /// one, and the OOM counters which the leaf does not account for. They
-    /// advance while the leaf exists, so that only kills after its removal
-    /// stay ambiguous.
+    /// leaf the systemd cgroup manager removes, or without one of the
+    /// nearest ancestor which is no scope, and the OOM counters which the
+    /// leaf does not account for. They advance while the leaf exists, so
+    /// that only kills after its removal stay ambiguous.
     outer: Option<(PathBuf, OomCounters)>,
 }
 
@@ -69,7 +78,7 @@ impl CgroupV2 {
 
     fn new(leaf: &Path) -> Self {
         let outer = Self::pod_cgroup(leaf)
-            .or_else(|| leaf.parent())
+            .or_else(|| Self::outliving_ancestor(leaf))
             .and_then(|outer| {
                 let path = outer.join("memory.events");
                 match OOMWatcher::read_oom_counters(&path) {
@@ -110,6 +119,15 @@ impl CgroupV2 {
                     .and_then(|name| name.to_str())
                     .is_some_and(Self::is_pod_cgroup_name)
             })
+    }
+
+    /// The nearest ancestor which systemd does not remove together with the
+    /// leaf: the parent, unless the leaf is the one crun creates below the
+    /// scope of the container (`<parent>/crio-<id>.scope/container`).
+    fn outliving_ancestor(leaf: &Path) -> Option<&Path> {
+        leaf.ancestors()
+            .skip(1)
+            .find(|ancestor| ancestor.extension() != Some("scope".as_ref()))
     }
 
     /// Whether the name is the one the kubelet gives to a pod cgroup, like
@@ -261,8 +279,8 @@ impl OOMWatcher {
     /// container once its processes exited. Then the hierarchical `oom_kill`
     /// counter of the nearest ancestor which outlives it tells whether a kill
     /// happened meanwhile, see [`OOMEvent::possible_oom`]. A removal is no OOM
-    /// on its own. cgroupfs reports it with `IN_IGNORED` only, which the
-    /// watcher drops, the remove event shows up for other file systems.
+    /// on its own. cgroupfs reports it with `IN_IGNORED` only, which ends the
+    /// watch without an event.
     async fn watch_cgroup_v2(token: &CancellationToken, leaf: &Path) -> OOMEvent {
         let mut cgroup = CgroupV2::new(leaf);
 
@@ -282,8 +300,7 @@ impl OOMWatcher {
                 return cgroup.check_on_exit();
             }
         };
-        #[cfg(test)]
-        tests::progress(leaf).send_modify(|p| p.subscribed += 1);
+        progress!(leaf, |p| p.subscribed += 1);
 
         let mut restarts = 0;
         let mut next_check = Instant::now();
@@ -319,8 +336,7 @@ impl OOMWatcher {
                                 break;
                             }
                         }
-                        #[cfg(test)]
-                        tests::progress(leaf).send_modify(|p| p.subscribed += 1);
+                        progress!(leaf, |p| p.subscribed += 1);
                         // The changes while nothing got watched, like the
                         // kills of siblings, refresh the baselines.
                         if cgroup.check(true) {
@@ -343,27 +359,19 @@ impl OOMWatcher {
                         }
                         () = time::sleep_until(next_check) => {}
                     }
-                    let (mut removed, mut outer) = (event.removed, cgroup.is_outer_event(&event));
+                    let mut outer = cgroup.is_outer_event(&event);
                     while let Ok(event) = subscriptions.rx.try_recv() {
-                        removed |= event.removed;
                         outer |= cgroup.is_outer_event(&event);
                     }
 
-                    // Also with a removal among them, the counters of a leaf
-                    // which is still there tell an OOM for sure.
                     next_check = Instant::now() + Self::MIN_CHECK_INTERVAL;
                     let oom = cgroup.check(outer);
-                    #[cfg(test)]
-                    tests::progress(leaf).send_modify(|p| {
+                    progress!(leaf, |p| {
                         p.handled += 1;
                         p.outer = cgroup.outer.as_ref().map(|(_, counters)| *counters);
                     });
                     if oom {
                         return OOMEvent::new(true);
-                    }
-                    if removed {
-                        debug!("Got remove event, checking once the process exited");
-                        break;
                     }
                     if Self::file_not_found(&cgroup.events.path) {
                         debug!("Memory events file gone, checking once the process exited");
@@ -375,8 +383,7 @@ impl OOMWatcher {
         }
 
         drop(subscriptions);
-        #[cfg(test)]
-        tests::progress(leaf).send_modify(|p| p.ended = true);
+        progress!(leaf, |p| p.ended = true);
         token.cancelled().await;
         cgroup.check_on_exit()
     }

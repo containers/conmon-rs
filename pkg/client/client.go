@@ -35,13 +35,6 @@ var (
 	errRunDirNotCreated   = errors.New("could not create RunDir")
 )
 
-// ErrServerNotResponding is returned by New if a server accepts connections
-// on the socket of the run directory but does not answer in time, or the
-// backlog of the socket is full. New does not start another server then, it
-// would take over the sockets of the one which runs and orphan its
-// containers.
-var ErrServerNotResponding = errors.New("server accepted the connection but did not respond")
-
 // ConmonClient is the main client structure of this package, see the package
 // documentation.
 type ConmonClient struct {
@@ -86,7 +79,8 @@ type ConmonServerConfig struct {
 	// ClientLogger.
 	ClientFieldLogger logrus.Ext1FieldLogger
 
-	// ConmonServerPath is the binary path to the conmon server.
+	// ConmonServerPath is the binary path to the conmon server. If empty,
+	// conmonrs gets looked up in $PATH.
 	ConmonServerPath string
 
 	// LogLevel of the server to be used, see the LogLevel constants.
@@ -458,7 +452,7 @@ func (c *ConmonServerConfig) toClient() (*ConmonClient, error) {
 	}
 
 	if !validCgroupManager(c.CgroupManager, true) {
-		return nil, fmt.Errorf("%w: cgroup manager %d", ErrInvalidValue, c.CgroupManager)
+		return nil, fmt.Errorf("%w: cgroup manager %v", ErrInvalidValue, c.CgroupManager)
 	}
 
 	// The server resolves a relative path when it starts, the client has to
@@ -566,25 +560,19 @@ func (c *ConmonClient) toArgs(
 	if entrypoint == "" {
 		path, err := exec.LookPath(binaryName)
 		if err != nil {
-			return "", args, fmt.Errorf("finding path: %w", err)
+			return "", nil, fmt.Errorf("finding path: %w", err)
 		}
 
 		entrypoint = path
 	}
 
 	if config.Runtime == "" {
-		return "", args, errRuntimeUnspecified
-	}
-
-	args = append(args, "--runtime", config.Runtime)
-
-	if config.ServerRunDir == "" {
-		return "", args, errRunDirUnspecified
+		return "", nil, errRuntimeUnspecified
 	}
 
 	// The absolute path of the client, which a later change of its working
-	// directory does not move.
-	args = append(args, "--runtime-dir", c.runDir)
+	// directory does not move. toClient rejected an empty ServerRunDir.
+	args = append(args, "--runtime", config.Runtime, "--runtime-dir", c.runDir)
 
 	if config.RuntimeRoot != "" {
 		args = append(args, "--runtime-root", config.RuntimeRoot)
@@ -592,7 +580,7 @@ func (c *ConmonClient) toArgs(
 
 	if config.LogLevel != "" {
 		if err := validateLogLevel(config.LogLevel); err != nil {
-			return "", args, fmt.Errorf("validate log level: %w", err)
+			return "", nil, fmt.Errorf("validate log level: %w", err)
 		}
 
 		args = append(args, "--log-level", string(config.LogLevel))
@@ -600,7 +588,7 @@ func (c *ConmonClient) toArgs(
 
 	if config.LogDriver != "" {
 		if err := validateLogDriver(config.LogDriver); err != nil {
-			return "", args, fmt.Errorf("validate log driver: %w", err)
+			return "", nil, fmt.Errorf("validate log driver: %w", err)
 		}
 
 		args = append(args, "--log-driver", string(config.LogDriver))
@@ -663,7 +651,7 @@ func (c *ConmonClient) validateCgroupManager(cfg CgroupManager) error {
 	}
 
 	if !validCgroupManager(cfg, false) {
-		return fmt.Errorf("%w: cgroup manager %d", ErrInvalidValue, cfg)
+		return fmt.Errorf("%w: cgroup manager %v", ErrInvalidValue, cfg)
 	}
 
 	return nil

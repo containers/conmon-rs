@@ -42,11 +42,26 @@ trait Logger {
     /// Whether the driver takes whole lines instead of raw chunks.
     const BUFFERS_LINES: bool;
 
-    /// Prepare the logger, for example open its file.
-    async fn init(&mut self) -> Result<()>;
+    /// The log file of the driver, none for one which writes elsewhere.
+    fn file(&mut self) -> Option<&mut LogFile> {
+        None
+    }
 
-    /// Start over, for example with a new file for log rotation.
-    async fn reopen(&mut self) -> Result<()>;
+    /// Prepare the logger, open its file.
+    async fn init(&mut self) -> Result<()> {
+        match self.file() {
+            Some(file) => file.open().await,
+            None => Ok(()),
+        }
+    }
+
+    /// Start over with a new file for log rotation.
+    async fn reopen(&mut self) -> Result<()> {
+        match self.file() {
+            Some(file) => file.reopen().await,
+            None => Ok(()),
+        }
+    }
 
     /// Write a raw chunk of output of the given pipe.
     async fn write_chunk(&mut self, _: Pipe, _: &[u8]) -> Result<()> {
@@ -217,9 +232,16 @@ impl ContainerLog {
         result
     }
 
-    /// Whether a line of the pipe waits for its ending.
-    pub fn has_pending(&self, pipe: Pipe) -> bool {
-        self.buffers_lines && self.lines.has_pending(pipe)
+    /// The line of the pipe which waits for its ending, if any.
+    pub fn pending(&self, pipe: Pipe) -> Option<Pending> {
+        if !self.buffers_lines || !self.lines.has_pending(pipe) {
+            return None;
+        }
+        Some(if self.lines.continued(pipe) {
+            Pending::Continued
+        } else {
+            Pending::Started
+        })
     }
 
     /// Write the line of the pipe which waits for its ending as a partial
@@ -255,20 +277,31 @@ impl ContainerLog {
     }
 }
 
+/// A line which waits for its ending after a write, see
+/// [`ContainerLog::pending`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pending {
+    /// It started in the chunk written last.
+    Started,
+
+    /// It started in an earlier chunk, the one written last continued it.
+    Continued,
+}
+
 /// Split a chunk into its lines. Every line but the last ends with a newline,
 /// the last one is partial if the chunk does not end with one. An empty chunk
 /// has no lines.
 pub(crate) fn lines(bytes: &[u8]) -> impl Iterator<Item = (&[u8], bool)> {
-    let mut rest = bytes;
+    let mut ends = memchr::memchr_iter(b'\n', bytes);
+    let mut start = 0;
     std::iter::from_fn(move || {
-        if rest.is_empty() {
-            return None;
-        }
-        let (line, partial) = match memchr::memchr(b'\n', rest) {
-            Some(end) => (&rest[..=end], false),
-            None => (rest, true),
+        let (end, partial) = match ends.next() {
+            Some(end) => (end + 1, false),
+            None if start < bytes.len() => (bytes.len(), true),
+            None => return None,
         };
-        rest = &rest[line.len()..];
+        let line = &bytes[start..end];
+        start = end;
         Some((line, partial))
     })
 }
@@ -340,6 +373,10 @@ impl Deref for Text<'_> {
 pub(crate) struct LineBuffer {
     stdout: BytesMut,
     stderr: BytesMut,
+
+    /// Per pipe, whether the last chunk continued the line which waited
+    /// for its ending before, see [`ContainerLog::pending`].
+    continued: [bool; 2],
 }
 
 impl LineBuffer {
@@ -362,20 +399,29 @@ impl LineBuffer {
         .is_empty()
     }
 
+    /// Whether the last chunk of the pipe continued the line which waited
+    /// for its ending before.
+    pub(crate) fn continued(&self, pipe: Pipe) -> bool {
+        self.continued[pipe as usize]
+    }
+
     /// Add a chunk and return the lines it completes. The whole lines of the
     /// chunk borrow it, only the end of a line which started in an earlier
     /// chunk and the start of one which continues in a later one get copied
     /// into the buffer of the pipe.
     pub(crate) fn push<'a>(&mut self, pipe: Pipe, bytes: &'a [u8]) -> Vec<Line<'a>> {
-        let tail = self.tail(pipe);
         let mut lines = vec![];
-        let mut rest = bytes;
+        let mut ends = memchr::memchr_iter(b'\n', bytes).map(|end| end + 1);
+        let mut start = 0;
+        let tail = self.tail(pipe);
+        let mut continued = false;
         if !tail.is_empty() {
-            let end = memchr::memchr(b'\n', rest).map_or(rest.len(), |end| end + 1);
-            let (end_of_line, after) = rest.split_at(end);
-            tail.extend_from_slice(end_of_line);
-            rest = after;
-            if tail.ends_with(b"\n") {
+            let end = ends.next();
+            // Without a newline, the line which waited goes on.
+            continued = end.is_none();
+            start = end.unwrap_or(bytes.len());
+            tail.extend_from_slice(&bytes[..start]);
+            if end.is_some() {
                 let line = tail.split().freeze();
                 lines.push(Line {
                     text: Text::Buffered(line.slice(..strip_line_ending(&line).len())),
@@ -384,16 +430,16 @@ impl LineBuffer {
             }
         }
 
-        while let Some(end) = memchr::memchr(b'\n', rest) {
-            let (line, after) = rest.split_at(end + 1);
+        for end in ends {
             lines.push(Line {
-                text: Text::Chunk(strip_line_ending(line)),
+                text: Text::Chunk(strip_line_ending(&bytes[start..end])),
                 partial: false,
             });
-            rest = after;
+            start = end;
         }
-        tail.extend_from_slice(rest);
+        tail.extend_from_slice(&bytes[start..]);
         lines.extend(Self::cut_long(tail));
+        self.continued[pipe as usize] = continued;
         lines
     }
 
@@ -486,12 +532,12 @@ impl LineBuffer {
 /// [`LogFile::commit_entry`] and write the buffer with a single call per read
 /// chunk, see [`LogFile::end_chunk`], or per [`LogFile::FLUSH_SIZE`] of
 /// entries for chunks of short lines.
-/// The writes and the opens run on the blocking pool, so writeback
-/// throttling, a slow disk or replacing a huge log only stalls this log and
-/// not the thread which drives every container of the pod and the RPCs. The
-/// buffer moves to the blocking task and back, unlike an async file, which
-/// copies every write into a buffer of its own that keeps the size of the
-/// largest one.
+/// The writes, the opens and closing a replaced file run on the blocking
+/// pool, so writeback throttling, a slow disk or replacing a huge log only
+/// stalls this log and not the thread which drives every container of the
+/// pod and the RPCs. The buffer moves to the blocking task and back, unlike
+/// an async file, which copies every write into a buffer of its own that
+/// keeps the size of the largest one.
 #[derive(Debug)]
 pub(crate) struct LogFile {
     path: PathBuf,
@@ -552,10 +598,6 @@ impl LogFile {
         }
     }
 
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// The buffer to append the entries of a chunk to. A container which
     /// never writes output does not need one.
     pub(crate) fn buf(&mut self) -> &mut Vec<u8> {
@@ -574,6 +616,7 @@ impl LogFile {
     /// which a crashed server left behind gets removed, the kubelet would
     /// never clean it up.
     pub(crate) async fn open(&mut self) -> Result<()> {
+        debug!("Open log file {}", self.path.display());
         let options = self.open_options(false);
         let path = self.path.clone();
         let (file, torn) = task::spawn_blocking(move || {
@@ -626,24 +669,44 @@ impl LogFile {
         let options = self.open_options(true);
         let path = self.path.clone();
         let tmp = Self::tmp_path(&path);
-        let file = task::spawn_blocking(move || -> Result<File> {
-            let file = options
-                .open(&tmp)
-                .with_context(|| format!("open log file path '{}'", tmp.display()))?;
-            if let Err(e) = fs::rename(&tmp, &path) {
-                if let Err(e) = fs::remove_file(&tmp) {
-                    debug!("Unable to remove {}: {e}", tmp.display());
-                }
-                return Err(e).with_context(|| format!("rename log file to '{}'", path.display()));
+        // The old file goes along, a failed replacement keeps it. Closing it
+        // once replaced frees the blocks of a file which got unlinked, which
+        // takes long for a huge log.
+        let old = self.file.take();
+        let res = task::spawn_blocking(move || match Self::create_at(&options, &tmp, &path) {
+            Ok(file) => {
+                drop(old);
+                Ok(file)
             }
-            Ok(file)
+            Err(e) => Err((e, old)),
         })
         .await
-        .context("join log file replace")??;
-        self.file = Some(Arc::new(file));
+        .context("join log file replace")?;
+        match res {
+            Ok(file) => self.file = Some(Arc::new(file)),
+            Err((e, old)) => {
+                self.file = old;
+                return Err(e);
+            }
+        }
         self.bytes_written = 0;
         self.torn = false;
         Ok(())
+    }
+
+    /// Create a new file at `tmp` and rename it to `path`, see
+    /// [`LogFile::replace`].
+    fn create_at(options: &OpenOptions, tmp: &Path, path: &Path) -> Result<File> {
+        let file = options
+            .open(tmp)
+            .with_context(|| format!("open log file path '{}'", tmp.display()))?;
+        if let Err(e) = fs::rename(tmp, path) {
+            if let Err(e) = fs::remove_file(tmp) {
+                debug!("Unable to remove {}: {e}", tmp.display());
+            }
+            return Err(e).with_context(|| format!("rename log file to '{}'", path.display()));
+        }
+        Ok(file)
     }
 
     /// The writes append, so that they land at the end also after the file

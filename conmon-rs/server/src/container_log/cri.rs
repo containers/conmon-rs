@@ -7,7 +7,6 @@ use crate::{
 use anyhow::{Context, Result};
 use std::{fmt::Write, path::Path};
 use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
-use tracing::debug;
 
 #[derive(Debug)]
 /// The main structure used for container log handling.
@@ -107,17 +106,8 @@ impl Logger for CriLogger {
     /// Partial lines are written right away with the `P` marker.
     const BUFFERS_LINES: bool = false;
 
-    async fn init(&mut self) -> Result<()> {
-        debug!(
-            "Initializing CRI logger in path {}",
-            self.file.path().display()
-        );
-        self.file.open().await
-    }
-
-    async fn reopen(&mut self) -> Result<()> {
-        debug!("Reopen container log {}", self.file.path().display());
-        self.file.reopen().await
+    fn file(&mut self) -> Option<&mut LogFile> {
+        Some(&mut self.file)
     }
 
     async fn write_chunk(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {

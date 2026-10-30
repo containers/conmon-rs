@@ -76,45 +76,46 @@ jobs:
           mkdir -p .build/sboms
           cd .build/sboms
           ../../.github/release-files sboms "$COMMIT"
-      # The only job which saves the vulnerability database, one of about
-      # 500 MB a day, the prune-caches job deletes the ones of the days
-      # before, so that they do not push the build caches out. The ci
-      # workflow only restores it.
-      - name: Date
-        id: date
-        run: echo "date=$(date -u +%F)" >>"$GITHUB_OUTPUT"
+      # The vulnerability database, one of about 500 MB which grype builds
+      # about once a day. Its key names the build, see .github/scan-sboms.
+      # This job and the verify-vulnerabilities job of the ci workflow on main
+      # save it once grype updated it, the prune-caches job deletes the older
+      # ones, so that they do not push the build caches out.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: grype-db
         with:
           path: .build/grype-db
-          key: grype-db-${{ steps.date.outputs.date }}
+          key: grype-db-
           restore-keys: grype-db-
       - name: Scan
+        id: scan
         env:
           CONTAINER_RUNTIME: docker
         run: |
           SBOMS=(.build/sboms/*.spdx.json)
           make scan SBOMS="${SBOMS[*]}"
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: ${{ !cancelled() && steps.grype-db.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && steps.scan.outputs.db-key && steps.scan.outputs.db-key != steps.grype-db.outputs.cache-matched-key }}
         with:
           path: .build/grype-db
-          key: grype-db-${{ steps.date.outputs.date }}
+          key: ${{ steps.scan.outputs.db-key }}
 
   # Deletes the caches of main which a newer one of the same kind replaced,
   # once the jobs here which save caches are done, also if they failed. Every
-  # run of main and of this workflow saves a corpus per fuzz target, and a
-  # change of a lock file starts new Rust and Go caches, which would push the
-  # current ones out of the 10 GB of the repository. It keeps the newest entry
-  # by creation time of the vulnerability database, of the corpus of each fuzz
-  # target and of each Rust and Go cache key without the hash of the lock
-  # files, which the restore keys of the jobs find. An entry saved while it
-  # runs is newer than the listed ones and stays. Every other entry stays: the
-  # caches of pull requests cannot replace the ones of main, and like the ones
-  # of a toolchain or image which no job uses any more, or of the keys which
-  # rarely change, they expire after a week without access. The only job which
-  # deletes caches, so the only one with write access to them, it runs no code
-  # of the checkout.
+  # run of this workflow saves a corpus per fuzz target, a newer
+  # vulnerability database gets saved as well, and a change of a lock file, a
+  # toolchain or the Go version starts new Rust, Go and ginkgo caches, which
+  # would push the current ones out of the 10 GB of the repository. It keeps
+  # the newest entry by creation time of the vulnerability database, of the
+  # corpus of each fuzz target and of each Rust, Go and ginkgo cache key
+  # without its hashes and Go version: the jobs only restore the entries of
+  # their current toolchain and Go version, which the newest one has. An
+  # entry saved while it runs is newer than the listed ones and stays. Every
+  # other entry stays: the caches of pull requests cannot replace the ones of
+  # main, and like the ones of an image which no job uses any more, or of the
+  # keys which rarely change, they expire after a week without access. The
+  # only job which deletes caches, so the only one with write access to them,
+  # it runs no code of the checkout.
   prune-caches:
     needs:
       - verify-vulnerabilities
@@ -137,8 +138,9 @@ jobs:
               map(.kind = (.key |
                 if test("^fuzz-corpus-.+-[0-9]+-[0-9]+$") then sub("-[0-9]+-[0-9]+$"; "")
                 elif test("^grype-db-") then "grype-db"
-                elif test("^v0-rust-.+-[0-9a-f]{8}$") then sub("-[0-9a-f]{8}$"; "")
-                elif test("^setup-go-.+-[0-9a-f]{64}$") then sub("-[0-9a-f]{64}$"; "")
+                elif test("^v0-rust-.+-[0-9a-f]{8}-[0-9a-f]{8}$") then sub("-[0-9a-f]{8}-[0-9a-f]{8}$"; "")
+                elif test("^setup-go-.+-go-[^-]+-[0-9a-f]{64}$") then sub("-go-[^-]+-[0-9a-f]{64}$"; "")
+                elif test("^ginkgo-.+-[0-9a-f]{64}$") then sub("(-go[^-]+)?-[0-9a-f]{64}$"; "")
                 else null end)) |
               map(select(.kind)) | group_by(.kind)[] |
               sort_by(.createdAt[:19], .id)[:-1][] |
@@ -183,9 +185,10 @@ jobs:
         run: make verify-digests
 
   # Fuzzes every target for half an hour, the test-fuzz jobs of the ci
-  # workflow only for two minutes, with the same .github/run-fuzz. The targets
-  # are the ones of the latest passed ci run of main, the corpus the one of
-  # main, which the run extends.
+  # workflow only the ones of pull requests for two minutes, with the same
+  # .github/run-fuzz. The targets are the ones of the latest passed ci run of
+  # main, the corpus the one of the run before, which the run extends and
+  # saves.
   list-fuzz-targets:
     if: github.repository == 'containers/conmon-rs'
     runs-on: ubuntu-latest

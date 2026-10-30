@@ -538,7 +538,11 @@ async fn closing_flushes_before_the_idle_timeout() -> Result<()> {
             },
         ]
     );
-    time::timeout(Duration::from_secs(1), connection.done().cancelled()).await?;
+    time::timeout(
+        Duration::from_secs(1),
+        connection.handle().done().cancelled(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -547,7 +551,11 @@ async fn ended_connections_read_the_client_until_it_closed() -> Result<()> {
     let (mut client, mut connection) = connect(accept_data, None)?;
     connection.handle().close();
     assert_eq!(client.frame().await?, None);
-    time::timeout(Duration::from_secs(1), connection.done().cancelled()).await?;
+    time::timeout(
+        Duration::from_secs(1),
+        connection.handle().done().cancelled(),
+    )
+    .await?;
     let accepted = time::timeout(Duration::from_secs(1), connection.accept()).await?;
     assert!(accepted.is_none());
 
@@ -581,9 +589,13 @@ async fn closing_a_stuck_connection_ends_with_the_idle_timeout() -> Result<()> {
         tokio::spawn(async move { while stream.send(Bytes::from(vec![0; 1024])).await.is_ok() {} });
     time::sleep(Duration::from_secs(1)).await;
     connection.handle().close();
-    assert!(!connection.done().is_cancelled());
+    assert!(!connection.handle().done().is_cancelled());
 
-    time::timeout(Duration::from_secs(120), connection.done().cancelled()).await?;
+    time::timeout(
+        Duration::from_secs(120),
+        connection.handle().done().cancelled(),
+    )
+    .await?;
     time::timeout(Duration::from_secs(5), send).await??;
     assert!(connection.accept().await.is_none());
     Ok(())

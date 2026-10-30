@@ -4,45 +4,73 @@
 
 use crate::{
     attach::{AttachOutput, SharedContainerAttach},
-    container_log::SharedContainerLog,
+    container_log::{Pending, SharedContainerLog},
+    mutex::lock,
     random_id::RandomId,
-    streams::Streams,
     tail::Tail,
     terminal::Terminal,
     util::{sleep_until, with_stderr},
 };
 use anyhow::{Context, Result, bail};
 use async_channel::{Receiver, RecvError, Sender};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use nix::errno::Errno;
 use std::{
-    fmt,
+    cell::RefCell,
+    fmt, future,
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    task::{Poll, ready},
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
+    process::{ChildStderr, ChildStdin, ChildStdout},
     select,
-    sync::{RwLock, broadcast},
+    sync::broadcast,
     task::{self, JoinHandle},
     time::{self, Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{Instrument, debug, debug_span, error, info, trace, warn};
 
 /// How many read chunks the stdio and terminal channels buffer per pipe.
 pub const STDIO_CHANNEL_SIZE: usize = 100;
 
-/// Buffer size for reading container I/O streams. Every read loop keeps one
-/// buffer of this size, so an idle container holds it once per pipe. 8 KiB
+/// The most a read of a container I/O stream takes at once. The read loops
+/// read into the scratch buffer of their thread and copy each chunk out of
+/// it, see [`with_scratch`], so an idle container holds no read buffer. 8 KiB
 /// halves the reads and log writes of 4 KiB for bulk output and keeps what a
 /// container holds after it in line with the log buffers, see
-/// `LogFile::FLUSH_SIZE`. Small reads get copied out of it and do not pin
-/// it, see [`ContainerIO::read_pipe`].
+/// `LogFile::FLUSH_SIZE`.
 pub(crate) const READ_BUFFER_SIZE: usize = 8 * 1024;
+
+thread_local! {
+    /// See [`with_scratch`].
+    static SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Run `f` on a buffer of `len` bytes which the thread keeps for all reads
+/// which copy what they got out of it right away. The read loops of all
+/// containers and attach clients share it, instead of keeping a buffer each
+/// while they wait. It grows to the largest `len` asked for and holds what
+/// the last use left in it.
+pub(crate) fn with_scratch<R>(len: usize, f: impl FnOnce(&mut [u8]) -> R) -> R {
+    SCRATCH.with(|scratch| match scratch.try_borrow_mut() {
+        Ok(mut scratch) => {
+            if scratch.len() < len {
+                scratch.resize(len, 0);
+            }
+            f(&mut scratch[..len])
+        }
+        // Only if `f` used it again, which none of the reads does.
+        Err(_) => f(&mut vec![0; len]),
+    })
+}
 
 /// Upper bound for waiting on the next output after the process exited. The
 /// read loops may still be draining the pipes when the exit is observed, they
@@ -51,8 +79,8 @@ pub(crate) const READ_BUFFER_SIZE: usize = 8 * 1024;
 pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Upper bound for the messages forwarded per drain after the process exited.
-/// The output written before the exit is at most what the channels (100
-/// messages) and the pipe buffers hold. With the default pipe-max-size of
+/// The output written before the exit is at most what the channels (up to
+/// 128 messages) and the pipe buffers hold. With the default pipe-max-size of
 /// 1 MiB in 8 KiB reads, that is 128 messages per pipe, and small writes
 /// read one by one do not fill a pipe of that size either, so this is well
 /// above. It is a heuristic though, a process with CAP_SYS_RESOURCE can grow
@@ -119,24 +147,27 @@ impl Drain {
     }
 
     /// The next message of the attach output with [`Drain::recv`]. A
-    /// receiver which fell behind skips messages, which gets logged, as a
-    /// warning for the receiver of a client. None once the output ended or
-    /// the drain gave up.
+    /// receiver which fell behind skips messages, which gets logged, for
+    /// the receiver of a client with its [`Lag`], the one it kept before
+    /// the exit. None once the output ended or the drain gave up.
     pub(crate) async fn recv_output(
         &mut self,
         rx: &mut broadcast::Receiver<Message>,
-        client: bool,
+        mut lag: Option<&mut Lag>,
     ) -> Option<Message> {
         loop {
             match self.recv(rx.recv()).await? {
                 Ok(Message::Done) | Err(broadcast::error::RecvError::Closed) => return None,
-                Ok(message) => return Some(message),
-                Err(broadcast::error::RecvError::Lagged(n)) if client => {
-                    warn!("Attach client too slow, skipped {n} messages");
+                Ok(message) => {
+                    if let Some(lag) = lag.as_deref_mut() {
+                        lag.received(rx);
+                    }
+                    return Some(message);
                 }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    debug!("Skipped {n} attach output messages");
-                }
+                Err(broadcast::error::RecvError::Lagged(n)) => match lag.as_deref_mut() {
+                    Some(lag) => lag.skipped(n),
+                    None => debug!("Skipped {n} attach output messages"),
+                },
             }
         }
     }
@@ -212,63 +243,47 @@ impl LogErrors {
     }
 }
 
-/// A shared container IO abstraction.
-#[derive(Debug, Clone)]
-pub struct SharedContainerIO(Arc<RwLock<ContainerIO>>);
+/// Logs an attach client which falls behind the output once until it
+/// caught up again, like [`LogErrors`]. A client which stays too slow skips
+/// messages again every time the channel filled up, which would log a
+/// warning for every one of its capacity of messages otherwise.
+#[derive(Debug, Default)]
+pub(crate) struct Lag {
+    /// The messages skipped since the client fell behind, none while it
+    /// keeps up.
+    skipped: Option<u64>,
+}
 
-impl SharedContainerIO {
-    /// Create a new SharedContainerIO instance from the provided ContainerIO.
-    pub fn new(io: ContainerIO) -> Self {
-        Self(Arc::new(RwLock::new(io)))
-    }
-
-    /// Read the output of an exec, see [`ContainerIO::read_all`].
-    pub async fn read_all(&self, exited: &CancellationToken) -> Result<(Vec<u8>, Vec<u8>)> {
-        self.0.write().await.read_all(exited).await
-    }
-
-    /// Resize the shared container IO to the provided width and height.
-    /// Errors in case of no terminal containers.
-    pub async fn resize(&self, width: u16, height: u16) -> Result<()> {
-        if !self.try_resize(width, height).await? {
-            bail!("container has no terminal")
-        }
-        Ok(())
-    }
-
-    /// Resize the terminal if the container has one and return whether it
-    /// does.
-    pub async fn try_resize(&self, width: u16, height: u16) -> Result<bool> {
-        match self.0.read().await.typ() {
-            ContainerIOType::Terminal(t) => t.resize(width, height).context("resize terminal")?,
-            ContainerIOType::Streams(_) => return Ok(false),
-        }
-        Ok(true)
-    }
-
-    /// The end of file character of the terminal, none without one.
-    pub async fn terminal_eof(&self) -> Option<u8> {
-        match self.0.read().await.typ() {
-            ContainerIOType::Terminal(t) => Some(t.eof_char()),
-            ContainerIOType::Streams(_) => None,
+impl Lag {
+    /// The client skipped `n` messages.
+    pub(crate) fn skipped(&mut self, n: u64) {
+        match &mut self.skipped {
+            Some(skipped) => {
+                *skipped = skipped.saturating_add(n);
+                debug!("Attach client still too slow, skipped {skipped} messages so far");
+            }
+            None => {
+                self.skipped = Some(n);
+                warn!("Attach client too slow, skipped {n} messages, more until it catches up");
+            }
         }
     }
 
-    /// Retrieve the underlying SharedContainerLog instance.
-    pub async fn logger(&self) -> SharedContainerLog {
-        self.0.read().await.logger().clone()
-    }
-
-    /// Retrieve the underlying SharedContainerAttach instance.
-    pub async fn attach(&self) -> SharedContainerAttach {
-        self.0.read().await.attach().clone()
-    }
-
-    /// Retrieve the underlying stdout and stderr channels.
-    pub async fn stdio(&self) -> Result<(Receiver<Message>, Receiver<Message>)> {
-        self.0.read().await.stdio()
+    /// The client received a message from `rx`. It caught up once nothing
+    /// is queued for it anymore.
+    pub(crate) fn received<T>(&mut self, rx: &broadcast::Receiver<T>) {
+        if self.skipped.is_some()
+            && rx.is_empty()
+            && let Some(skipped) = self.skipped.take()
+        {
+            debug!("Attach client caught up after skipping {skipped} messages");
+        }
     }
 }
+
+/// A container IO shared by its users, like the watcher, the attach
+/// endpoints and the consumer of the output of an exec.
+pub type SharedContainerIO = Arc<ContainerIO>;
 
 /// A file path which gets removed on drop.
 #[derive(Debug)]
@@ -291,13 +306,55 @@ impl Drop for TempFile {
 
 #[derive(Debug)]
 pub struct ContainerIO {
-    typ: ContainerIOType,
+    /// None for a process with pipes.
+    terminal: Option<Terminal>,
     logger: SharedContainerLog,
     attach: SharedContainerAttach,
 
+    /// The stdio channels, see [`StdioSender`]. A terminal merges stderr
+    /// into stdout, its stderr channel ends right away.
+    stdout: StdioChannel,
+    stderr: StdioChannel,
+
+    /// Whether a consumer reads the stdio channels, see [`StdioSender`].
+    consumed: Arc<AtomicBool>,
+
     /// Collects the output of an exec while its runtime runs, see
-    /// [`ContainerIO::collect_stdio`].
-    collector: Option<StdioCollector>,
+    /// [`ContainerIO::collect_stdio`]. Taken by the consumer of the output,
+    /// which shares the IO with others already.
+    collector: Mutex<Option<StdioCollector>>,
+}
+
+/// A stdio channel of a pipe, see [`StdioSender`].
+#[derive(Debug)]
+struct StdioChannel {
+    /// Until the channel got closed, consumers read clones of it.
+    rx: Option<Receiver<Message>>,
+
+    /// Until the read loop of the pipe took it, once the process got
+    /// connected.
+    tx: Option<StdioSender>,
+}
+
+impl StdioChannel {
+    fn new(capacity: usize, consumed: &Arc<AtomicBool>) -> Self {
+        let (tx, rx) = async_channel::bounded(capacity);
+        Self {
+            rx: Some(rx),
+            tx: Some(StdioSender::new(tx, consumed)),
+        }
+    }
+
+    /// Close the channel and drop what it buffers right away. The read loop
+    /// drops its sender on the next send, a quiet container would keep the
+    /// buffered chunks until then otherwise.
+    fn close(&mut self) {
+        self.tx = None;
+        if let Some(rx) = self.rx.take() {
+            rx.close();
+            while rx.try_recv().is_ok() {}
+        }
+    }
 }
 
 /// The output which an exec wrote while its runtime ran, per pipe.
@@ -371,11 +428,9 @@ impl Drop for StdioCollector {
 }
 
 impl ContainerIO {
-    pub fn typ(&self) -> &ContainerIOType {
-        &self.typ
-    }
-    pub fn typ_mut(&mut self) -> &mut ContainerIOType {
-        &mut self.typ
+    /// The terminal of the process, none with pipes.
+    pub fn terminal(&self) -> Option<&Terminal> {
+        self.terminal.as_ref()
     }
     pub fn logger(&self) -> &SharedContainerLog {
         &self.logger
@@ -383,13 +438,29 @@ impl ContainerIO {
     pub fn attach(&self) -> &SharedContainerAttach {
         &self.attach
     }
-}
 
-#[derive(Debug)]
-/// A generic abstraction over various container input-output types
-pub enum ContainerIOType {
-    Terminal(Terminal),
-    Streams(Streams),
+    /// Resize the terminal. Errors in case of no terminal containers.
+    pub fn resize(&self, width: u16, height: u16) -> Result<()> {
+        if !self.try_resize(width, height)? {
+            bail!("container has no terminal")
+        }
+        Ok(())
+    }
+
+    /// Resize the terminal if the container has one and return whether it
+    /// does.
+    pub fn try_resize(&self, width: u16, height: u16) -> Result<bool> {
+        let Some(terminal) = &self.terminal else {
+            return Ok(false);
+        };
+        terminal.resize(width, height).context("resize terminal")?;
+        Ok(true)
+    }
+
+    /// The end of file character of the terminal, none without one.
+    pub fn terminal_eof(&self) -> Option<u8> {
+        self.terminal.as_ref().map(Terminal::eof_char)
+    }
 }
 
 /// A message to be sent through the ContainerIO.
@@ -425,18 +496,6 @@ impl fmt::Display for Pipe {
     }
 }
 
-impl From<Terminal> for ContainerIOType {
-    fn from(c: Terminal) -> Self {
-        Self::Terminal(c)
-    }
-}
-
-impl From<Streams> for ContainerIOType {
-    fn from(i: Streams) -> Self {
-        Self::Streams(i)
-    }
-}
-
 impl ContainerIO {
     /// The most output of a pipe an exec collects while its runtime runs,
     /// see [`ContainerIO::collect_stdio`], and the most an `exec_sync`
@@ -445,21 +504,30 @@ impl ContainerIO {
 
     /// Create a new container IO instance.
     pub fn new(terminal: bool, logger: SharedContainerLog) -> Result<Self> {
-        let logger_clone = logger.clone();
-        let attach = SharedContainerAttach::new(terminal);
-        let attach_clone = attach.clone();
-        let typ = if terminal {
-            Terminal::new(logger_clone, attach_clone)
-                .context("create new terminal")?
-                .into()
+        let terminal = terminal
+            .then(Terminal::new)
+            .transpose()
+            .context("create new terminal")?;
+        let consumed = Arc::default();
+        let stdout = StdioChannel::new(STDIO_CHANNEL_SIZE, &consumed);
+        // The channel preallocates its capacity. The one of stderr carries
+        // nothing with a terminal and lives as long as the IO, an exec never
+        // closes it.
+        let stderr = if terminal.is_some() {
+            let mut stderr = StdioChannel::new(1, &consumed);
+            stderr.tx = None;
+            stderr
         } else {
-            Streams::new(logger_clone, attach_clone).into()
+            StdioChannel::new(STDIO_CHANNEL_SIZE, &consumed)
         };
         Ok(Self {
-            typ,
+            attach: SharedContainerAttach::new(terminal.is_some()),
+            terminal,
             logger,
-            attach,
-            collector: None,
+            stdout,
+            stderr,
+            consumed,
+            collector: Mutex::default(),
         })
     }
 
@@ -483,16 +551,15 @@ impl ContainerIO {
     ///
     /// Fails if the channels have been dropped via [`ContainerIO::drop_stdio`].
     pub fn stdio(&self) -> Result<(Receiver<Message>, Receiver<Message>)> {
-        match self.typ() {
-            ContainerIOType::Terminal(t) => {
-                if let Some(message_rx) = t.message_rx() {
-                    let (_, fake_rx) = async_channel::bounded(1);
-                    Ok((message_rx.clone(), fake_rx))
-                } else {
-                    bail!("stdio channel not available")
-                }
-            }
-            ContainerIOType::Streams(s) => s.stdio(),
+        let (stdout, stderr) = self.receivers()?;
+        Ok((stdout.clone(), stderr.clone()))
+    }
+
+    /// The stdout and stderr receivers, see [`ContainerIO::stdio`].
+    fn receivers(&self) -> Result<(&Receiver<Message>, &Receiver<Message>)> {
+        match (&self.stdout.rx, &self.stderr.rx) {
+            (Some(stdout), Some(stderr)) => Ok((stdout, stderr)),
+            _ => bail!("stdio channels have been dropped"),
         }
     }
 
@@ -503,22 +570,10 @@ impl ContainerIO {
     /// output, and for reporting the runtime's stderr if a create fails. Once
     /// a container is created nothing consumes them anymore, attach sessions
     /// use the attach broadcast, so they get dropped, see
-    /// [`ContainerIO::close_stdio`].
+    /// [`StdioChannel::close`].
     pub fn drop_stdio(&mut self) {
-        match self.typ_mut() {
-            ContainerIOType::Terminal(t) => Self::close_stdio(t.message_rx_mut().take()),
-            ContainerIOType::Streams(s) => s.drop_stdio(),
-        }
-    }
-
-    /// Close a stdio channel and drop what it buffers right away. The read
-    /// loop drops its sender on the next send, a quiet container would keep
-    /// the buffered chunks until then otherwise.
-    pub fn close_stdio(rx: Option<Receiver<Message>>) {
-        if let Some(rx) = rx {
-            rx.close();
-            while rx.try_recv().is_ok() {}
-        }
+        self.stdout.close();
+        self.stderr.close();
     }
 
     /// Read the output of an exec from now on, until it gets taken with
@@ -530,7 +585,7 @@ impl ContainerIO {
     /// pipe and drop what follows.
     ///
     /// The output of a pipe which is not of interest gets read and dropped.
-    pub fn collect_stdio(&mut self, stdout_enabled: bool, stderr_enabled: bool) -> Result<()> {
+    pub fn collect_stdio(&self, stdout_enabled: bool, stderr_enabled: bool) -> Result<()> {
         let (stdout, stderr) = self.stdio()?;
         self.consume_stdio();
         let stop = CancellationToken::new();
@@ -544,7 +599,7 @@ impl ContainerIO {
                 EarlyStdio { stdout, stderr }
             }
         };
-        self.collector = Some(StdioCollector {
+        *lock(&self.collector) = Some(StdioCollector {
             stop,
             task: task::spawn(collect),
         });
@@ -580,8 +635,8 @@ impl ContainerIO {
 
     /// The output collected since [`ContainerIO::collect_stdio`], empty
     /// without that.
-    pub async fn take_early_stdio(&mut self) -> EarlyStdio {
-        let Some(mut collector) = self.collector.take() else {
+    pub async fn take_early_stdio(&self) -> EarlyStdio {
+        let Some(mut collector) = lock(&self.collector).take() else {
             return EarlyStdio::default();
         };
         collector.stop.cancel();
@@ -594,10 +649,7 @@ impl ContainerIO {
     /// Apply backpressure to the read loops from now on, see
     /// [`StdioSender`].
     pub fn consume_stdio(&self) {
-        match self.typ() {
-            ContainerIOType::Terminal(t) => t.consume_stdio(),
-            ContainerIOType::Streams(s) => s.consume_stdio(),
-        }
+        self.consumed.store(true, Ordering::Release);
     }
 
     /// Attach the stderr output of a runtime which failed to its error. With
@@ -605,9 +657,9 @@ impl ContainerIO {
     /// afterwards, a process which the runtime left behind, like a daemon of
     /// the process it started, may keep the pipes open, see
     /// [`SharedContainerAttach::stop_output`].
-    pub async fn runtime_error(&mut self, e: anyhow::Error) -> anyhow::Error {
-        let stderr = match self.typ() {
-            ContainerIOType::Streams(_) => {
+    pub async fn runtime_error(&self, e: anyhow::Error) -> anyhow::Error {
+        let stderr = match self.terminal {
+            None => {
                 // The runtime exited, only its remaining output is of
                 // interest. Its error is at the end, also of output which
                 // exceeded the size limit.
@@ -627,7 +679,7 @@ impl ContainerIO {
                     }
                 }
             }
-            ContainerIOType::Terminal(_) => vec![],
+            Some(_) => vec![],
         };
         self.attach.stop_output();
         with_stderr(e, &stderr)
@@ -641,7 +693,7 @@ impl ContainerIO {
     /// an exec cancels `exited` also when it kills the process at its
     /// timeout, and a deadline which raced that one would end the output of
     /// a process which exited right at it.
-    pub async fn read_all(&mut self, exited: &CancellationToken) -> Result<(Vec<u8>, Vec<u8>)> {
+    pub async fn read_all(&self, exited: &CancellationToken) -> Result<(Vec<u8>, Vec<u8>)> {
         self.consume_stdio();
         let early = self.take_early_stdio().await;
         self.read_all_with_early(exited, early).await
@@ -650,27 +702,15 @@ impl ContainerIO {
     /// Read the output after the one collected before, see
     /// [`ContainerIO::read_all`].
     async fn read_all_with_early(
-        &mut self,
+        &self,
         exited: &CancellationToken,
         early: EarlyStdio,
     ) -> Result<(Vec<u8>, Vec<u8>)> {
-        match self.typ_mut() {
-            ContainerIOType::Terminal(t) => {
-                if let Some(message_rx) = t.message_rx_mut() {
-                    let stdout = Self::read_stream(exited, message_rx, early.stdout).await;
-                    Ok((stdout, vec![]))
-                } else {
-                    bail!("read_all called before message_rx was registered");
-                }
-            }
-            ContainerIOType::Streams(s) => {
-                let (stdout_rx, stderr_rx) = s.stdio_mut()?;
-                Ok(tokio::join!(
-                    Self::read_stream(exited, stdout_rx, early.stdout),
-                    Self::read_stream(exited, stderr_rx, early.stderr),
-                ))
-            }
-        }
+        let (stdout, stderr) = self.receivers()?;
+        Ok(tokio::join!(
+            Self::read_stream(exited, stdout, early.stdout),
+            Self::read_stream(exited, stderr, early.stderr),
+        ))
     }
 
     /// Read a stream, after the `early` output collected before.
@@ -727,6 +767,97 @@ impl ContainerIO {
         }
     }
 
+    /// Read the pipes of the runtime, which the process it starts shares.
+    pub fn connect_streams(
+        &mut self,
+        stdin: Option<ChildStdin>,
+        stdout: Option<ChildStdout>,
+        stderr: Option<ChildStderr>,
+        token: CancellationToken,
+    ) {
+        debug!("Start reading from IO streams");
+        // Shared by both read loops, the output ends once the last one ended.
+        let output = self.attach.output();
+        self.spawn_stdin_loop(stdin, token);
+        if let Some(stdout) = stdout {
+            self.spawn_read_loop(stdout, Pipe::StdOut, output.clone());
+        }
+        if let Some(stderr) = stderr {
+            self.spawn_read_loop(stderr, Pipe::StdErr, output);
+        }
+    }
+
+    /// Wait until the runtime connected the terminal and read it. A wait
+    /// which gets dropped leaves the connection for the next one.
+    pub async fn connect_terminal(&mut self, stdin: bool, token: CancellationToken) -> Result<()> {
+        let terminal = self
+            .terminal
+            .as_mut()
+            .context("container has no terminal")?;
+        let tty = match terminal.connect().await {
+            Ok(tty) => tty,
+            Err(e) => {
+                // Nothing will ever read the stdin, so attach clients must
+                // not wait for it.
+                self.attach.close_stdin();
+                return Err(e);
+            }
+        };
+        let output = self.attach.output();
+        self.spawn_read_loop(tty.clone(), Pipe::StdOut, output);
+        self.spawn_stdin_loop(stdin.then_some(tty), token);
+        Ok(())
+    }
+
+    /// Spawn the [`ContainerIO::read_loop`] of a pipe, which takes the
+    /// sender of its stdio channel.
+    fn spawn_read_loop<T>(&mut self, reader: T, pipe: Pipe, output: Arc<AttachOutput>)
+    where
+        T: AsyncRead + Unpin + Send + 'static,
+    {
+        let channel = match pipe {
+            Pipe::StdOut => &mut self.stdout,
+            Pipe::StdErr => &mut self.stderr,
+        };
+        let read_loop = Self::read_loop(
+            reader,
+            pipe,
+            self.logger.clone(),
+            channel.tx.take(),
+            self.attach.clone(),
+            output,
+        );
+        task::spawn(
+            async move {
+                if let Err(e) = read_loop.await {
+                    error!("Read loop of {pipe} failed: {e:#}");
+                }
+            }
+            .instrument(debug_span!("read_loop", %pipe)),
+        );
+    }
+
+    /// Spawn the [`ContainerIO::read_loop_stdin`] of the process. Without a
+    /// stdin, attach clients must not wait for one which nothing ever reads.
+    fn spawn_stdin_loop<T>(&self, writer: Option<T>, token: CancellationToken)
+    where
+        T: AsyncWrite + Unpin + Send + 'static,
+    {
+        let Some(writer) = writer else {
+            self.attach.close_stdin();
+            return;
+        };
+        let attach = self.attach.clone();
+        task::spawn(
+            async move {
+                if let Err(e) = Self::read_loop_stdin(writer, attach, token).await {
+                    error!("Stdin read loop failure: {e:#}");
+                }
+            }
+            .instrument(debug_span!("read_loop_stdin")),
+        );
+    }
+
     /// How long a line without its ending waits before it is written as a
     /// partial one, so that prompts and progress output show up in the logs.
     const IDLE_FLUSH: Duration = Duration::from_millis(500);
@@ -772,7 +903,6 @@ impl ContainerIO {
     where
         T: AsyncRead + Unpin,
     {
-        let mut buf = BytesMut::with_capacity(READ_BUFFER_SIZE);
         let mut log_errors = LogErrors::default();
         let stopped = attach.output_stopped().clone();
 
@@ -783,12 +913,6 @@ impl ContainerIO {
         let mut flush_at = None;
 
         loop {
-            // A large chunk gets split off below and shares the allocation
-            // with the consumers, a full buffer is needed for the next read.
-            // `read_buf` would only add a few bytes, which splits writes the
-            // process made at once.
-            buf.reserve(READ_BUFFER_SIZE);
-
             // Once stopped, nothing gets read anymore, also if more is there.
             let read = select! {
                 biased;
@@ -797,7 +921,7 @@ impl ContainerIO {
                     Self::forward(&mut message_tx, Message::Done).await;
                     return Ok(());
                 }
-                read = reader.read_buf(&mut buf) => read,
+                read = Self::read_chunk(&mut reader) => read,
                 // The drivers decide whether they buffer lines at all.
                 () = sleep_until(flush_at) => {
                     let _logging = attach.logging();
@@ -809,7 +933,7 @@ impl ContainerIO {
             };
 
             match read {
-                Ok(0) => {
+                Ok(data) if data.is_empty() => {
                     debug!("Nothing more to read");
 
                     Self::forward(&mut message_tx, Message::Done).await;
@@ -817,8 +941,8 @@ impl ContainerIO {
                     return Ok(());
                 }
 
-                Ok(n) => {
-                    trace!("Read {} bytes", n);
+                Ok(data) => {
+                    trace!("Read {} bytes", data.len());
 
                     // Until it got broadcast below, the output is on its way,
                     // see `SharedContainerAttach::logging`.
@@ -830,40 +954,20 @@ impl ContainerIO {
                     // flowing to the other drivers and the attach clients.
                     if log_has_drivers {
                         let mut locked_logger = logger.write().await;
-                        let res = locked_logger.write(pipe, &buf).await;
-                        let pending = locked_logger.has_pending(pipe);
+                        let res = locked_logger.write(pipe, &data).await;
+                        let pending = locked_logger.pending(pipe);
                         drop(locked_logger);
                         log_errors.check(pipe, res.context("write to log file"));
 
-                        // A newline in the chunk ended the line which waited
-                        // before, the one waiting now started in this chunk.
-                        flush_at = match flush_at {
-                            _ if !pending => None,
-                            Some(at) if memchr::memchr(b'\n', &buf).is_none() => Some(at),
-                            _ => Some(Instant::now() + Self::IDLE_FLUSH),
+                        flush_at = match (pending, flush_at) {
+                            (None, _) => None,
+                            (Some(Pending::Continued), Some(at)) => Some(at),
+                            (Some(_), _) => Some(Instant::now() + Self::IDLE_FLUSH),
                         };
                     }
 
-                    // Only the attach clients and the stdio channel take the
-                    // chunk along, the buffer gets reused otherwise.
-                    let attached = attach.has_readers();
-                    if !attached && message_tx.is_none() {
-                        buf.clear();
-                        continue;
-                    }
-
-                    // A small chunk gets copied, so that it does not keep the
-                    // whole buffer alive while it is queued and the buffer can
-                    // be reused. A large one is split off without a copy.
-                    let data = if n < READ_BUFFER_SIZE / 2 {
-                        let data = Bytes::copy_from_slice(&buf);
-                        buf.clear();
-                        data
-                    } else {
-                        buf.split().freeze()
-                    };
-
                     // Bytes::clone() is just a refcount increment, no data copy
+                    let attached = attach.has_readers();
                     if attached {
                         attach.write(Message::Data(data.clone(), pipe));
                     }
@@ -872,19 +976,33 @@ impl ContainerIO {
                     Self::forward(&mut message_tx, Message::Data(data, pipe)).await;
                 }
 
-                Err(e) => match Errno::from_raw(e.raw_os_error().context("get OS error")?) {
-                    Errno::EIO => {
-                        debug!("Stopping read loop");
-                        Self::forward(&mut message_tx, Message::Done).await;
+                // A terminal reports that the process closed it with EIO.
+                Err(e) if e.raw_os_error() == Some(Errno::EIO as i32) => {
+                    debug!("Stopping read loop");
+                    Self::forward(&mut message_tx, Message::Done).await;
 
-                        return Ok(());
-                    }
-                    Errno::EBADF => bail!(e),
-                    Errno::EAGAIN => {}
-                    _ => return Err(e).context("read from container file descriptor"),
-                },
+                    return Ok(());
+                }
+                Err(e) => return Err(e).context("read from container file descriptor"),
             }
         }
+    }
+
+    /// Read a chunk of up to [`READ_BUFFER_SIZE`] into the scratch buffer of
+    /// the thread, see [`with_scratch`], and copy it out. Empty once the
+    /// output ended.
+    async fn read_chunk<T>(reader: &mut T) -> io::Result<Bytes>
+    where
+        T: AsyncRead + Unpin,
+    {
+        future::poll_fn(|cx| {
+            with_scratch(READ_BUFFER_SIZE, |scratch| {
+                let mut buf = ReadBuf::new(scratch);
+                ready!(Pin::new(&mut *reader).poll_read(cx, &mut buf))?;
+                Poll::Ready(Ok(Bytes::copy_from_slice(buf.filled())))
+            })
+        })
+        .await
     }
 
     /// Forward a message to the stdio channel, see [`StdioSender`]. If the
@@ -929,7 +1047,9 @@ impl ContainerIO {
             select! {
                 res = attach.read() => {
                     let data = res.context("read from stdin attach endpoints")?;
-                    Self::handle_stdin_data(&data, &mut writer).await?;
+                    if !Self::handle_stdin_data(&data, &mut writer).await? {
+                        return Ok(());
+                    }
                 }
                 () = stdin_closed.cancelled() => break,
             }
@@ -939,18 +1059,30 @@ impl ContainerIO {
         // the cancellation, so write everything that was sent before.
         attach.close_stdin();
         while let Ok(data) = attach.try_read() {
-            Self::handle_stdin_data(&data, &mut writer).await?;
+            if !Self::handle_stdin_data(&data, &mut writer).await? {
+                break;
+            }
         }
         Ok(())
     }
 
-    async fn handle_stdin_data(data: &[u8], mut writer: impl AsyncWrite + Unpin) -> Result<()> {
+    /// Write attach input to the stdin of the process, false once that got
+    /// closed. The process exited or closed its stdin, which a pipe reports
+    /// as EPIPE and a terminal as EIO, which ends the stdin like its EOF.
+    async fn handle_stdin_data(data: &[u8], mut writer: impl AsyncWrite + Unpin) -> Result<bool> {
         debug!("Got {} attach bytes", data.len());
 
-        writer
-            .write_all(data)
-            .await
-            .context("write attach stdin to stream")
+        match writer.write_all(data).await {
+            Ok(()) => Ok(true),
+            Err(e)
+                if e.kind() == ErrorKind::BrokenPipe
+                    || e.raw_os_error() == Some(Errno::EIO as i32) =>
+            {
+                debug!("Stopping stdin, the process closed it: {e}");
+                Ok(false)
+            }
+            Err(e) => Err(e).context("write attach stdin to stream"),
+        }
     }
 }
 

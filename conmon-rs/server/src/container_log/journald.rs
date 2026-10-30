@@ -202,7 +202,9 @@ impl JournaldLogger {
                  until it takes them again: {e}"
             ),
             Some(e) => debug!("Unable to write {failed} lines to the journal: {e}"),
-            None if handled > 0 && shared.failing.swap(false, Ordering::Relaxed) => {
+            // Only once the whole chunk went out, not some lines before the
+            // journal stalled again.
+            None if handled == lines.len() && shared.failing.swap(false, Ordering::Relaxed) => {
                 info!("The journal takes lines again");
             }
             None => {}
@@ -219,16 +221,6 @@ const CHUNK_TIMEOUT: Duration = Duration::from_secs(1);
 
 impl Logger for JournaldLogger {
     const BUFFERS_LINES: bool = true;
-
-    async fn init(&mut self) -> Result<()> {
-        debug!("Initializing journald logger");
-        Ok(())
-    }
-
-    async fn reopen(&mut self) -> Result<()> {
-        debug!("Reopen journald log");
-        Ok(())
-    }
 
     /// A journal which keeps up takes the lines right away. The ones it does
     /// not take are sent from a single blocking task, which waits for it a

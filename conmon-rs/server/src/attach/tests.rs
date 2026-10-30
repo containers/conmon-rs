@@ -213,14 +213,39 @@ async fn write_loop_stops_on_broken_pipe() -> Result<()> {
     bail!("write loop did not stop")
 }
 
-/// Receive a packet of the attach protocol.
+/// Receive a packet of the attach protocol, which fits what CRI-O and the
+/// Go client read.
 async fn recv_packet(client: &UnixSeqpacket) -> Result<Vec<u8>> {
-    let mut buf = vec![0; Attach::PACKET_BUF_SIZE];
+    let mut buf = vec![0; 2 * Attach::PACKET_BUF_SIZE];
     let n = timeout(Duration::from_secs(5), client.recv(&mut buf))
         .await??
         .bytes_read();
+    assert!(n <= Attach::PACKET_BUF_SIZE + 1, "packet of {n} bytes");
     buf.truncate(n);
     Ok(buf)
+}
+
+#[tokio::test]
+async fn write_loop_sends_full_reads_in_one_packet() -> Result<()> {
+    let attach = SharedContainerAttach::default();
+    let (server, client) = seqpacket_pair()?;
+    let (rx, _) = attach.subscribe();
+    let _write_loop = task::spawn(Attach::write_loop(
+        server,
+        rx,
+        false,
+        CancellationToken::new(),
+    ));
+
+    // A full read of a pipe, a larger chunk gets split.
+    let full = vec![b'a'; Attach::PACKET_BUF_SIZE];
+    attach.write(Message::Data(Bytes::from(full.clone()), Pipe::StdOut));
+    assert_eq!(recv_packet(&client).await?, [b"\x02", &full[..]].concat());
+    let larger = [&full[..], b"b"].concat();
+    attach.write(Message::Data(Bytes::from(larger), Pipe::StdErr));
+    assert_eq!(recv_packet(&client).await?, [b"\x03", &full[..]].concat());
+    assert_eq!(recv_packet(&client).await?, b"\x03b");
+    Ok(())
 }
 
 #[tokio::test]
@@ -281,7 +306,7 @@ async fn write_loop_gives_up_on_stuck_client_after_exit() -> Result<()> {
     let write_loop = task::spawn(Attach::write_loop(server, rx, false, token.clone()));
 
     // A client which does not read, until its socket takes no more.
-    let data = Bytes::from(vec![0; Attach::PACKET_BUF_SIZE - 1]);
+    let data = Bytes::from(vec![0; Attach::PACKET_BUF_SIZE]);
     for _ in 0..OUTPUT_CHANNEL_SIZE {
         attach.write(Message::Data(data.clone(), Pipe::StdOut));
         task::yield_now().await;

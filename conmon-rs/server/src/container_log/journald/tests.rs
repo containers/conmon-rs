@@ -292,3 +292,24 @@ async fn send_failures_are_not_fatal() -> Result<()> {
     assert_eq!(received(&socket)?.len(), 1);
     Ok(())
 }
+
+/// A journal which takes some lines of a chunk is not back yet.
+#[test]
+fn partly_sent_chunks_keep_failing() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("socket");
+    let socket = UnixDatagram::bind(&path)?;
+    let error = journal::tests::fill(Wait::Never, &path);
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    // Room for a single entry.
+    socket.recv(&mut [0; 4096])?;
+
+    let logger = JournaldLogger::with_socket("test", &path);
+    logger.shared.failing.store(true, Ordering::Relaxed);
+    let mut buffer = LineBuffer::default();
+    let lines = buffer.push(Pipe::StdOut, b"one\ntwo\n");
+    let handled = JournaldLogger::send(&logger.shared, Pipe::StdOut, &lines, Wait::Never);
+    assert_eq!(handled, 1);
+    assert!(logger.shared.failing.load(Ordering::Relaxed));
+    Ok(())
+}

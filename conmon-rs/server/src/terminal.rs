@@ -2,9 +2,7 @@
 
 use crate::{
     async_fd::{self, Fd},
-    attach::SharedContainerAttach,
-    container_io::{ContainerIO, Message, Pipe, STDIO_CHANNEL_SIZE, StdioSender, TempFile},
-    container_log::SharedContainerLog,
+    container_io::{ContainerIO, TempFile},
     listener,
 };
 use anyhow::{Context as _, Result};
@@ -18,17 +16,14 @@ use nix::{
     },
 };
 use std::{
-    io::{self, IoSliceMut, Write},
+    io::{self, IoSliceMut, Read, Write},
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
         unix::{io::RawFd, net::UnixListener as StdUnixListener},
     },
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{
-        Arc, Weak,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Weak},
     task::{Context, Poll, ready},
 };
 use tokio::{
@@ -39,7 +34,6 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     task,
 };
-use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error};
 
 #[derive(Debug)]
@@ -48,34 +42,14 @@ pub struct Terminal {
     path: TempFile,
     connected_rx: Receiver<OwnedFd>,
 
-    /// The output channel. It exists before the runtime connects, so that
-    /// the output of an exec can be consumed while its runtime runs. The
-    /// sender moves into the read loop on the connection.
-    message_rx: Option<async_channel::Receiver<Message>>,
-    message_tx: Option<StdioSender>,
+    /// The terminal once connected, as long as the loops which read and
+    /// write it keep it open.
     tty: Option<Weak<TerminalFd>>,
-    logger: SharedContainerLog,
-    attach: SharedContainerAttach,
-
-    /// Whether a consumer reads the message channel, see [`StdioSender`].
-    consumed: Arc<AtomicBool>,
 }
 
 impl Terminal {
     pub fn path(&self) -> &Path {
         self.path.path()
-    }
-    pub fn message_rx(&self) -> Option<&async_channel::Receiver<Message>> {
-        self.message_rx.as_ref()
-    }
-    pub fn message_rx_mut(&mut self) -> &mut Option<async_channel::Receiver<Message>> {
-        &mut self.message_rx
-    }
-    fn tty(&self) -> &Option<Weak<TerminalFd>> {
-        &self.tty
-    }
-    fn set_tty(&mut self, val: Option<Weak<TerminalFd>>) {
-        self.tty = val;
     }
 }
 
@@ -85,15 +59,9 @@ struct Config {
     connected_tx: Sender<OwnedFd>,
 }
 
-impl Config {
-    fn path(&self) -> &PathBuf {
-        &self.path
-    }
-}
-
 impl Terminal {
     /// Setup a new terminal instance.
-    pub fn new(logger: SharedContainerLog, attach: SharedContainerAttach) -> Result<Self> {
+    pub fn new() -> Result<Self> {
         debug!("Creating new terminal");
         // The guard removes the socket again, also if the setup below fails.
         // In the temporary directory, not the runtime directory of the server:
@@ -114,7 +82,8 @@ impl Terminal {
         })
         .context("bind terminal socket")?;
 
-        let (connected_tx, connected_rx) = mpsc::channel(10);
+        // It carries the single descriptor of the terminal.
+        let (connected_tx, connected_rx) = mpsc::channel(1);
         let config = Config {
             path: path.to_path_buf(),
             connected_tx,
@@ -129,37 +98,17 @@ impl Terminal {
             .instrument(debug_span!("listen")),
         );
 
-        let consumed = Arc::default();
-        let (message_tx, message_rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
         Ok(Self {
             path: temp_file,
             connected_rx,
-            message_rx: Some(message_rx),
-            message_tx: Some(StdioSender::new(message_tx, &consumed)),
             tty: None,
-            logger,
-            attach,
-            consumed,
         })
     }
 
-    /// Make the read loop wait for the consumer of the message channel.
-    pub fn consume_stdio(&self) {
-        self.consumed.store(true, Ordering::Release);
-    }
-
-    /// Waits for the socket client to be connected.
-    pub async fn wait_connected(&mut self, stdin: bool, token: CancellationToken) -> Result<()> {
-        let res = self.connect(stdin, token).await;
-        if res.is_err() {
-            // Nothing will ever read the stdin, so attach clients must not
-            // wait for it.
-            self.attach.close_stdin();
-        }
-        res
-    }
-
-    async fn connect(&mut self, stdin: bool, token: CancellationToken) -> Result<()> {
+    /// Wait for the runtime to hand over the terminal, for the loops which
+    /// read and write it, see [`ContainerIO::connect_terminal`]. A wait which
+    /// gets dropped leaves the descriptor queued for the next one.
+    pub async fn connect(&mut self) -> Result<TerminalIo> {
         debug!("Waiting for terminal socket connection");
         let fd = self
             .connected_rx
@@ -167,61 +116,20 @@ impl Terminal {
             .await
             .context("receive connected channel")?;
         let fd = Arc::new(TerminalFd::new(fd)?);
-        self.set_tty(Arc::downgrade(&fd).into());
+        self.tty = Some(Arc::downgrade(&fd));
 
         debug!("Changing terminal settings");
         let mut term = termios::tcgetattr(&fd)?;
         term.output_flags |= OutputFlags::ONLCR;
         termios::tcsetattr(&fd, SetArg::TCSANOW, &term)?;
-
-        let attach_clone = self.attach.clone();
-        let output = attach_clone.output();
-        let logger_clone = self.logger.clone();
-        let message_tx = self.message_tx.take();
-
-        task::spawn({
-            let fd = fd.clone();
-            async move {
-                if let Err(e) = ContainerIO::read_loop(
-                    &*fd,
-                    Pipe::StdOut,
-                    logger_clone,
-                    message_tx,
-                    attach_clone,
-                    output,
-                )
-                .await
-                {
-                    error!("Stdout read loop failure: {e:#}");
-                }
-                Ok::<_, anyhow::Error>(())
-            }
-            .instrument(debug_span!("read_loop"))
-        });
-
-        if stdin {
-            let attach_clone = self.attach.clone();
-            task::spawn(
-                async move {
-                    if let Err(e) = ContainerIO::read_loop_stdin(&*fd, attach_clone, token).await {
-                        error!("Stdin read loop failure: {e:#}");
-                    }
-                }
-                .instrument(debug_span!("read_loop_stdin")),
-            );
-        } else {
-            // Attach clients must not wait for a stdin nothing ever reads.
-            self.attach.close_stdin();
-        }
-
-        Ok(())
+        Ok(TerminalIo(fd))
     }
 
     /// The end of file character of the terminal, ^D unless the process
     /// changed it.
     pub fn eof_char(&self) -> u8 {
         const DEFAULT: u8 = 0x04;
-        let Some(tty) = self.tty().as_ref().and_then(Weak::upgrade) else {
+        let Some(tty) = self.tty.as_ref().and_then(Weak::upgrade) else {
             return DEFAULT;
         };
         match termios::tcgetattr(&*tty) {
@@ -243,7 +151,7 @@ impl Terminal {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        let tty = self.tty().as_ref().and_then(Weak::upgrade);
+        let tty = self.tty.as_ref().and_then(Weak::upgrade);
         let tty = tty.context("terminal not connected")?;
         // SAFETY: TIOCSWINSZ reads a `winsize` from the pointer, which points
         // to a live local of exactly that type, and the descriptor is kept
@@ -290,7 +198,7 @@ impl Terminal {
 
         // Allow only one single connection. Failing to clean up must not
         // drop the terminal, which the runtime handed over already.
-        let path = config.path();
+        let path = &config.path;
         debug!("Removing socket path {}", path.display());
         if let Err(e) = fs::remove_file(path).await {
             debug!("Unable to remove terminal socket: {e}");
@@ -375,37 +283,21 @@ impl AsFd for TerminalFd {
     }
 }
 
-impl AsyncRead for &TerminalFd {
-    #[expect(unsafe_code, reason = "reading into uninitialized memory")]
+/// The terminal for the loops which read and write it, which keep it open.
+#[derive(Clone, Debug)]
+pub struct TerminalIo(Arc<TerminalFd>);
+
+impl AsyncRead for TerminalIo {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context,
         buf: &mut ReadBuf,
     ) -> Poll<io::Result<()>> {
         loop {
-            let mut guard = ready!(self.0.poll_read_ready(cx))?;
-            // Read into the uninitialized part directly, initializing it first
-            // would zero the whole buffer on every read.
-            // SAFETY: the slice is only handed to read(2), which writes to it
-            // and never reads from it, nothing de-initializes it.
-            let unfilled = unsafe { buf.unfilled_mut() };
-            match guard.try_io(|inner| {
-                // SAFETY: the pointer and length describe the writable slice
-                // above, which outlives the call.
-                let n = unsafe {
-                    libc::read(
-                        inner.as_raw_fd(),
-                        unfilled.as_mut_ptr().cast(),
-                        unfilled.len(),
-                    )
-                };
-                usize::try_from(n).map_err(|_| io::Error::last_os_error())
-            }) {
-                Ok(n) => {
-                    let n = n?;
-                    // SAFETY: read(2) initialized the first `n` bytes.
-                    unsafe { buf.assume_init(n) };
-                    buf.advance(n);
+            let mut guard = ready!(self.0.0.poll_read_ready(cx))?;
+            match guard.try_io(|inner| (&**inner.get_ref()).read(buf.initialize_unfilled())) {
+                Ok(result) => {
+                    buf.advance(result?);
                     break Poll::Ready(Ok(()));
                 }
                 Err(_would_block) => {}
@@ -414,10 +306,10 @@ impl AsyncRead for &TerminalFd {
     }
 }
 
-impl AsyncWrite for &TerminalFd {
+impl AsyncWrite for TerminalIo {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context, buf: &[u8]) -> Poll<io::Result<usize>> {
         loop {
-            let mut guard = ready!(self.0.poll_write_ready(cx))?;
+            let mut guard = ready!(self.0.0.poll_write_ready(cx))?;
             match guard.try_io(|inner| (&**inner.get_ref()).write(buf)) {
                 Ok(result) => break Poll::Ready(result),
                 Err(_would_block) => {}

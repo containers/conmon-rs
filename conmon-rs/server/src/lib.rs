@@ -110,7 +110,6 @@ mod runtime_args;
 mod server;
 mod single_flight;
 mod streaming_server;
-mod streams;
 mod tail;
 #[cfg(feature = "tracing")]
 mod telemetry;

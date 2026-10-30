@@ -17,7 +17,7 @@ type ServerVersion struct {
 	// The current version.
 	Version string `json:"version"`
 
-	// The tag of the build, empty if not available.
+	// The tag of the build, see VersionResponse.Tag.
 	Tag string `json:"tag"`
 
 	// The git commit SHA of the build.
@@ -35,7 +35,9 @@ type ServerVersion struct {
 	// The used Cargo version.
 	CargoVersion string `json:"cargo_version"` //nolint:tagliatelle // Rust's serde will use that format.
 
-	// The cargo dependency tree, only available in verbose output.
+	// The cargo dependency tree. Always empty here, Version and
+	// VersionContext do not ask for it. Use ConmonClient.Version with
+	// Verbose.
 	CargoTree string `json:"cargo_tree"` //nolint:tagliatelle // Rust's serde will use that format.
 
 	// The optional features the server supports, see the Feature constants
@@ -111,7 +113,11 @@ type VersionResponse struct {
 	// Version is the actual version string of the server.
 	Version string
 
-	// Tag is the git tag of the server, empty if no tag is available.
+	// Tag is the BUILD_TAG of the build or else what
+	// `git describe --tags --always --dirty` told, like
+	// v1.2.1-44-gb172f5bd. It is empty for the static binaries and the
+	// Copr RPMs, releases included, whose builds pass no tag. Use Version
+	// and Commit to identify a build.
 	Tag string
 
 	// Commit is git commit SHA of the build.

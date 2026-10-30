@@ -58,7 +58,7 @@ type Out struct {
 	io.WriteCloser
 }
 
-// AttachConfig is the configuration for running the Attach method.
+// AttachConfig is the configuration for running the AttachContainer method.
 type AttachConfig struct {
 	// ID of the container.
 	ID string
@@ -354,13 +354,32 @@ func (c *ConmonClient) setupStdioChannels(
 			// A closed stdin does not end the attach, the output does.
 			// One which the client closed, for example on Shutdown, can
 			// return any error then, like os.ErrClosed for an *os.File.
-			if !session.stdinClosed.Load() && !errors.Is(err, io.ErrClosedPipe) {
+			if !session.stdinClosed.Load() && !stdinConnClosed(err) {
 				stdinDone <- err
 			}
 		}()
 	}
 
 	return receiveStdoutError, stdinDone
+}
+
+// stdinConnClosed reports whether the copy of stdin failed because the
+// stream or the connection got closed. The server closes the attach
+// connection once the container exited, a write to it fails with EPIPE or
+// ECONNRESET then, while the output may still be in flight. Its result ends
+// the attach, not the stdin copy. Only writes count, the copy returns the
+// errors of reading the stdin of the caller as they are, which may be a
+// connection as well.
+func stdinConnClosed(err error) bool {
+	if errors.Is(err, io.ErrClosedPipe) {
+		return true
+	}
+
+	var opErr *net.OpError
+
+	return errors.As(err, &opErr) && opErr.Op == "write" &&
+		(errors.Is(opErr, net.ErrClosed) || errors.Is(opErr, syscall.EPIPE) ||
+			errors.Is(opErr, syscall.ECONNRESET))
 }
 
 func (c *ConmonClient) redirectResponseToOutputStreams(

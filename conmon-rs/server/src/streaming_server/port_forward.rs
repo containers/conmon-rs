@@ -40,6 +40,7 @@ use tokio::{
     sync::mpsc,
     time::{self, Duration},
 };
+use tracing::debug;
 
 mod channels;
 mod namespace;
@@ -88,7 +89,8 @@ const CONNECT_BUDGET: u32 = 16 * 1024 * 1024;
 const READ_BUFFER: usize = 32 * 1024;
 
 /// How long the client gets to close its side of a connection after the
-/// container closed its side, like CRI-O waits.
+/// container closed its side, and the container to send the rest of its
+/// output after writing to it failed, like CRI-O waits.
 const CLOSE_GRACE_PERIOD: Duration = Duration::from_secs(1);
 
 /// The WebSocket subprotocol of SPDY tunneled through a WebSocket.
@@ -295,6 +297,21 @@ impl PortForward {
             }
         }
         Ok(())
+    }
+
+    /// End a connection whose writes to the pod failed with `e`. The pod may
+    /// have answered before it closed the connection, like a server which
+    /// rejects an upload early, so the `downstream` copy gets up to
+    /// [`CLOSE_GRACE_PERIOD`] to forward that, like CRI-O waits for the other
+    /// direction.
+    async fn upstream_failed(
+        e: anyhow::Error,
+        downstream: impl Future<Output = Result<()>>,
+    ) -> Result<()> {
+        if time::timeout(CLOSE_GRACE_PERIOD, downstream).await.is_err() {
+            debug!("The pod did not close its side of the connection");
+        }
+        Err(e)
     }
 
     /// Connect to the port in the network namespace of the pod. The pod may

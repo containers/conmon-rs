@@ -3,7 +3,6 @@ use crate::{
     attach::SharedContainerAttach,
     container_io::{ContainerIO, DRAIN_MAX_LOG_WAIT, DRAIN_MAX_WAIT, DRAIN_TIMEOUT, Message},
     container_log::ContainerLog,
-    oom_watcher::OOMEvent,
     process::{
         Process, child_pid, children_by_scan, has_zombie, is_zombie, read_pid_file,
         wait_for_exit_code, zombie_children,
@@ -17,7 +16,10 @@ use nix::sys::{
 use std::path::Path;
 use std::process::Command;
 use tokio::io::AsyncWriteExt;
-use tokio::{select, task};
+use tokio::{
+    select,
+    task::{self, JoinHandle},
+};
 
 /// Spawn a child which exits right away with `code` and is never waited
 /// for.
@@ -107,8 +109,7 @@ async fn sweep_in_own_process() -> Result<()> {
         .sweep_orphans(&mut candidates, grace, max_defer)
         .await;
     assert!(is_zombie(exec));
-    let token = CancellationToken::new();
-    assert_eq!(wait_for_exit_code(token.clone(), exec).await, 3);
+    assert_eq!(wait_for_exit_code(exec).await, 3);
     drop(call);
 
     // A call which hangs keeps the sweep from reaping only up to the
@@ -244,8 +245,8 @@ async fn watch_reports_exit_codes() -> Result<()> {
     for (script, expected) in [("exit 3", 3), ("kill -9 $$", 137), ("exit 0", 0)] {
         let exit_path = dir.path().join("exit");
         let sh = spawn_sh(script)?;
-        let (_, mut reapable) = ReapableChild::from_child(child(sh.pid, None, &exit_path, &[])?);
-        let mut exit_rx = reapable.watch(|| {});
+        let (_, reapable, exit) = ReapableChild::from_child(child(sh.pid, None, &exit_path, &[])?);
+        let mut exit_rx = reapable.watch(exit, || {});
 
         let exit = exit_rx.recv().await?;
         assert_eq!(exit.exit_code, expected, "{script}");
@@ -335,9 +336,9 @@ async fn watch_kills_on_timeout() -> Result<()> {
     let sh = spawn_sh("exec sleep 60")?;
     let pid = sh.pid;
     let timeout = Instant::now() + Duration::from_secs(1);
-    let (_, mut reapable) =
+    let (_, reapable, exit) =
         ReapableChild::from_child(child(pid, Some(timeout), &exit_path, &cleanup)?);
-    let mut exit_rx = reapable.watch(|| {});
+    let mut exit_rx = reapable.watch(exit, || {});
 
     let exit = exit_rx.recv().await?;
     assert_eq!(exit.exit_code, EXIT_CODE_TIMED_OUT);
@@ -508,31 +509,6 @@ async fn registration_after_shutdown_kills_child() -> Result<()> {
         )
         .await;
     assert!(res.is_err());
-    Ok(())
-}
-
-#[tokio::test(start_paused = true)]
-async fn late_oom_result_after_timeout_counts() -> Result<()> {
-    let dir = tempfile::tempdir()?;
-    let oom_path = dir.path().join("oom");
-    let paths = [oom_path.clone()];
-
-    // The watcher still confirms an event while the timeout passes.
-    let confirming = async {
-        time::sleep(Duration::from_secs(1)).await;
-        Some(OOMEvent::possible(true))
-    };
-    assert!(ReapableChild::late_oom(confirming, 137, &paths).await);
-    assert!(oom_path.exists());
-
-    // A normal exit is none, and no result at all either.
-    std::fs::remove_file(&oom_path)?;
-    let possible = async { Some(OOMEvent::possible(true)) };
-    assert!(!ReapableChild::late_oom(possible, 0, &paths).await);
-    let start = Instant::now();
-    assert!(!ReapableChild::late_oom(std::future::pending(), 137, &paths).await);
-    assert_eq!(start.elapsed(), ReapableChild::OOM_RESULT_WAIT);
-    assert!(!oom_path.exists());
     Ok(())
 }
 
@@ -799,12 +775,10 @@ async fn shutdown_does_not_wait_forever_for_a_watcher() -> Result<()> {
     let reaper = ChildReaper::default();
     let dir = tempfile::tempdir()?;
     let sh = spawn_sh("exec sleep 60")?;
-    let (id, mut stuck) =
+    // Registered without a watcher, like a child whose watcher never ends
+    // because the process is stuck in the kernel.
+    let (id, stuck, _) =
         ReapableChild::from_child(child(sh.pid, None, &dir.path().join("exit"), &[])?);
-    // Like the watcher of a process stuck in the kernel.
-    stuck.task = Some(Arc::new(Mutex::new(Some(task::spawn(
-        std::future::pending(),
-    )))));
     lock(&reaper.grandchildren).insert(id, vec![stuck]);
 
     let start = Instant::now();
@@ -815,6 +789,33 @@ async fn shutdown_does_not_wait_forever_for_a_watcher() -> Result<()> {
         .map(|e| format!("{e:#}"));
     assert_eq!(err, Some(format!("PIDs [{}] did not exit", sh.pid)));
     assert_eq!(start.elapsed(), Duration::from_secs(8));
+    Ok(())
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_the_watchers() -> Result<()> {
+    let reaper = Arc::new(ChildReaper::default());
+    let dir = tempfile::tempdir()?;
+    let running = spawn_sh("exec sleep 60")?;
+    let call = reaper.begin_call(None)?;
+    let registered = child(running.pid, None, &dir.path().join("exit"), &[])?;
+    reaper.watch_grandchild(registered, vec![], call)?;
+
+    // A call in progress registers its child after the snapshot.
+    let call = reaper.begin_call(None)?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let shutdown = task::spawn({
+        let reaper = reaper.clone();
+        async move { reaper.kill_grandchildren(deadline).await }
+    });
+    wait_for_real(|| is_gone(running.pid)).await;
+    let late = spawn_sh("exec sleep 60")?;
+    let registered = child(late.pid, None, &dir.path().join("late"), &[])?;
+    assert!(reaper.watch_grandchild(registered, vec![], call).is_err());
+
+    time::timeout(Duration::from_secs(20), shutdown).await???;
+    assert!(is_gone(late.pid));
+    assert!(lock(&reaper.grandchildren).is_empty());
     Ok(())
 }
 
@@ -987,7 +988,7 @@ async fn slow_exec_consumers_get_all_output() -> Result<()> {
     let reaper = ChildReaper::default();
     let dir = tempfile::tempdir()?;
     let io = SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?);
-    let attach = io.attach().await;
+    let attach = io.attach().clone();
     let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
     let sender = StdioSender::new(tx, &Arc::new(AtomicBool::new(true)));
     let (mut writer, reader) = tokio::io::duplex(64 * 1024);

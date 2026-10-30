@@ -2,10 +2,11 @@
 //! k8s.io/cri-streaming serves them for CRI-O otherwise.
 //!
 //! Clients speak them over WebSocket, `v5.channel.k8s.io` and the versions
-//! before it, or over SPDY, which the kubelet uses towards the runtime also
-//! for clients which connected with a WebSocket. Each transport turns the
-//! input of the client into [`ClientEvent`]s, and [`Output`] sends the output
-//! of a session the way its protocol needs it.
+//! before it, or over SPDY. The kubelet proxies them unchanged, but the API
+//! server translates `v5.channel.k8s.io` to SPDY, which kubectl arrives with
+//! then. Each transport turns the input of the client into [`ClientEvent`]s,
+//! and [`Output`] sends the output of a session the way its protocol needs
+//! it.
 
 use crate::streaming_server::{
     idle::{Activity, STALL_TIMEOUT},

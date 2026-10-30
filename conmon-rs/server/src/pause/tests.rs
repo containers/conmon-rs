@@ -164,3 +164,28 @@ fn pause_pid_paths_of_pods_differ() {
         Path::new("/var/run/netns/a.v1")
     );
 }
+
+/// Needs root to bind a namespace and passes without, so it only runs
+/// locally, like with `unshare -rm cargo test -p conmonrs
+/// busy_namespace_bind_gets_detached`. The unit tests of CI run without root.
+#[test]
+fn busy_namespace_bind_gets_detached() -> Result<()> {
+    if !nix::unistd::geteuid().is_root() {
+        return Ok(());
+    }
+    let dir = tempfile::tempdir()?;
+    let (namespace, pod) = (Namespace::Uts, "pod");
+    let path = namespace.path(dir.path(), pod);
+    namespace.bind(dir.path(), pod, nix::unistd::getpid())?;
+    // A plain unmount fails while the bind is open.
+    let busy = File::open(&path)?;
+    namespace.umount(dir.path(), pod)?;
+    assert!(!path.exists());
+    drop(busy);
+
+    // A bind path which never got mounted, like after a failed setup.
+    File::create(&path)?;
+    namespace.umount(dir.path(), pod)?;
+    assert!(!path.exists());
+    Ok(())
+}

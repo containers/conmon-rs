@@ -20,6 +20,10 @@ with pkgs; rustPlatform.buildRustPackage {
     ];
   RUSTFLAGS = [
     "-Ctarget-feature=+crt-static"
+    # With panic = "abort" and the symbols stripped, the unwind tables of the
+    # crates would only serve backtraces without symbols. The ones of the
+    # prebuilt standard library stay. The tests do not build here.
+    "-Cforce-unwind-tables=no"
   ] ++ lib.optionals stdenv.hostPlatform.isPower64 [
     # Rust links static PIE on ppc64le, but the glibc of nixpkgs has no
     # rcrt1.o there.

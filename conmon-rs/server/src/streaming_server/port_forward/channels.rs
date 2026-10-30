@@ -15,7 +15,7 @@ use anyhow::{Context, Result, ensure};
 use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use percent_encoding::percent_decode_str;
-use std::sync::Arc;
+use std::{pin::pin, sync::Arc};
 use tokio::{net::TcpStream, select, sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
@@ -151,7 +151,7 @@ impl PortForward {
         }
         drop(output_tx);
 
-        let mut client_gone = false;
+        let mut end = web::End::Done;
         loop {
             select! {
                 // Nothing gets dispatched after the idle timeout, and the
@@ -179,11 +179,11 @@ impl PortForward {
                             // It may still be busy writing the rest, which
                             // holds up the close for it.
                             discard.discard();
-                            client_gone = true;
+                            end = web::End::TooLarge;
                             break;
                         }
                         Some(Ok(Message::Close(_)) | Err(_)) | None => {
-                            client_gone = true;
+                            end = web::End::Gone;
                             break;
                         }
                     };
@@ -206,15 +206,7 @@ impl PortForward {
         while forwards.join_next().await.is_some() {}
         // Like the error of a port which failed before its input came, the
         // client has to get what the server sent before.
-        if too_large.is_cancelled() {
-            if let Some(Some(sink)) = web::join_or_abort(writer, &written).await {
-                web::drain(sink, messages).await;
-            }
-        } else if client_gone {
-            web::join_or_abort(writer, &written).await;
-        } else {
-            web::finish(writer, &written, &mut messages).await;
-        }
+        web::end(writer, &written, messages, end).await;
     }
 
     /// Hand a message of the client to the connection of its channel. Only
@@ -276,7 +268,8 @@ impl PortForward {
     }
 
     /// Copy between the channels of a port and its connection in the pod,
-    /// until the pod closed the connection or the client went away. The
+    /// until the pod closed the connection, writing to it failed, see
+    /// [`Self::upstream_failed`], or the client went away. The
     /// protocol has no way to close a channel, the input after the pod closed
     /// the connection does not matter.
     async fn copy_channel(
@@ -299,9 +292,13 @@ impl PortForward {
             anyhow::Ok(())
         };
 
+        let mut downstream = pin!(downstream);
         select! {
-            result = downstream => result,
-            result = upstream => result,
+            result = &mut downstream => result,
+            result = upstream => match result {
+                Ok(()) => Ok(()),
+                Err(e) => Self::upstream_failed(e, downstream).await,
+            },
         }
     }
 }

@@ -10,17 +10,22 @@ use nix::unistd::gethostname;
 use opentelemetry::{KeyValue, global, propagation::Extractor};
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 use opentelemetry_sdk::{Resource, propagation::TraceContextPropagator, trace::SdkTracerProvider};
-use opentelemetry_semantic_conventions::resource::{HOST_NAME, PROCESS_PID};
 use std::{collections::HashMap, process};
 use tracing::Span;
 use tracing_opentelemetry::{OpenTelemetrySpanExt, SetParentError};
+
+// The resource attributes of the OpenTelemetry semantic conventions which
+// the spans carry.
+const HOST_NAME: &str = "host.name";
+const PROCESS_PID: &str = "process.pid";
 
 /// The main structure of this module.
 pub struct Telemetry;
 
 impl Telemetry {
-    /// Return the telemetry layer if tracing is enabled.
-    pub fn layer(endpoint: &str) -> Result<SdkTracerProvider> {
+    /// Build the tracer provider which exports the spans to the OTLP
+    /// endpoint.
+    pub fn tracer_provider(endpoint: &str) -> Result<SdkTracerProvider> {
         global::set_text_map_propagator(TraceContextPropagator::new());
 
         let exporter = SpanExporter::builder()

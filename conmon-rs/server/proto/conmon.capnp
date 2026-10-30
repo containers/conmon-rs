@@ -31,7 +31,9 @@ interface Conmon {
         # The version of the crate.
         version @1 :Text;
         # The tag of the build, `BUILD_TAG` or else what
-        # `git describe --tags --always --dirty` tells, empty without either.
+        # `git describe --tags --always --dirty` tells, empty without either,
+        # like for the static binaries and the Copr RPMs, whose builds pass no
+        # tag.
         tag @2 :Text;
         # The git commit of the build.
         commit @3 :Text;
@@ -87,6 +89,8 @@ interface Conmon {
         # The files the server creates empty if the container got OOM
         # killed, before it writes the exit files. Absolute paths.
         oomExitPaths @5 :List(Text);
+        # Where the output of the container goes, every driver gets all of
+        # it, see the logging section of usage.md.
         logDrivers @6 :List(LogDriver);
         # The command the server starts once the container exited and the
         # exit files got written, without waiting for it.
@@ -231,6 +235,8 @@ interface Conmon {
     ###############################################
     # Attach
     struct AttachRequest {
+        # The ID of the container. The call fails with a message starting
+        # with "container not found" for one the server does not know.
         id @0 :Text;
         # The absolute path of the `SOCK_SEQPACKET` socket the server listens
         # on for the attach clients of the container until it exited, see
@@ -261,6 +267,8 @@ interface Conmon {
     ###############################################
     # ReopenLog
     struct ReopenLogRequest {
+        # The ID of the container. The call fails with a message starting
+        # with "container not found" for one the server does not know.
         id @0 :Text;
         # Retired in v1.0.0, a `Data` field before. Its change to `Void` moved
         # the pointer slots of the fields after it, which broke the wire
@@ -415,9 +423,15 @@ interface Conmon {
     # ServeAttachContainer
     struct ServeAttachContainerRequest {
         metadata @0 :Metadata; # Standard metadata to carry.
+        # The ID of the container. The call fails with a message starting
+        # with "container not found" for one the server does not know.
         id @1 :Text;
+        # Whether the client sends the stdin of the container.
         stdin @2 :Bool;
+        # Whether the client gets the stdout of the container.
         stdout @3 :Bool;
+        # Whether the client gets the stderr of the container, a terminal has
+        # none.
         stderr @4 :Bool;
         # With `stdin`, close the container's stdin once the stdin of the
         # client ended, or the session ended otherwise, the output is still

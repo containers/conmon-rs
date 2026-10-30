@@ -155,25 +155,33 @@ impl PortForward {
             let _ = to_server.shutdown().await;
         };
 
-        let sink = {
+        // The sink once the SPDY connection ended first, none if the client
+        // ended the tunnel.
+        let server_done = {
             let mut from_client = pin!(from_client);
-            let closed_first = select! {
+            select! {
                 () = &mut from_client => None,
-                sink = &mut to_client => Some(sink.ok().flatten()),
-            };
-            match closed_first {
-                None => web::join_or_abort(to_client, &written).await.flatten(),
-                // The SPDY connection ended, the client answers the close.
-                Some(Some(sink)) => {
-                    let _ = time::timeout(web::CLOSE_TIMEOUT, from_client).await;
+                sink = &mut to_client => {
+                    let sink = sink.ok().flatten();
+                    // The client answers the close. It still gets read for
+                    // that, a message which is too large ends the wait.
+                    if sink.is_some() {
+                        let _ = time::timeout(web::CLOSE_TIMEOUT, from_client).await;
+                    }
                     Some(sink)
                 }
-                Some(None) => None,
             }
         };
-        // A client which sent a message which was too large cannot answer.
-        if let Some(sink) = sink.filter(|_| too_large.is_cancelled()) {
-            web::drain(sink, messages).await;
+        let end = if too_large.is_cancelled() {
+            web::End::TooLarge
+        } else {
+            web::End::Gone
+        };
+        match server_done {
+            None => web::end(to_client, &written, messages, end).await,
+            // A client which sent a message which was too large cannot answer.
+            Some(Some(sink)) if end == web::End::TooLarge => web::drain(sink, messages).await,
+            Some(_) => {}
         }
     }
 }

@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use bytes::{Bytes, BytesMut};
 use serde::de::IgnoredAny;
 use std::{
-    future,
+    future::{self, Future},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -31,7 +31,9 @@ pub const SPDY_PROTOCOLS: [(&str, Version); 4] = [
 /// The input of a SPDY client: the stdin stream, whose end closes stdin, and
 /// the resize stream, which carries consecutive JSON objects. Clients open a
 /// resize stream only with a terminal, which the server does not know for an
-/// attach, so it may also come after the session started.
+/// attach, so it may also come after the session started. Both get read
+/// together: once the stdin which the process does not read fills
+/// `PENDING_STDIN_MAX_BYTES` of the session, the resizes wait as well.
 pub struct SpdyInput {
     stdin: Option<StreamReceiver>,
 
@@ -63,35 +65,33 @@ enum SpdyEvent {
     Done,
 }
 
+/// The output of `f` for the value, pending without one, like for a stream
+/// which ended.
+async fn or_pending<T, F>(value: Option<T>, f: impl FnOnce(T) -> F) -> F::Output
+where
+    F: Future,
+{
+    match value {
+        Some(value) => f(value).await,
+        None => future::pending().await,
+    }
+}
+
 impl SpdyInput {
-    async fn recv(receiver: Option<&mut StreamReceiver>) -> Option<Bytes> {
-        match receiver {
-            Some(receiver) => receiver.recv().await,
-            None => future::pending().await,
-        }
-    }
-
-    async fn accept(connection: Option<&mut Connection>) -> Option<Stream> {
-        match connection {
-            Some(connection) => connection.accept().await,
-            None => future::pending().await,
-        }
-    }
-
     /// Take a stream which comes after the start: the resize stream, and
     /// output streams the session does not use, which end right away, like
     /// stderr which clients open for a terminal without asking for one.
     /// Others get reset. Nothing gets awaited, the caller may cancel
     /// [`ClientInput::next`].
     fn late_stream(&mut self, stream: Stream) {
-        match stream.headers().get(STREAM_TYPE_HEADER) {
-            Some(STREAM_TYPE_RESIZE) if self.resize.is_none() => {
+        match StreamType::parse(stream.headers()) {
+            Ok(StreamType::Resize) if self.resize.is_none() => {
                 let (receiver, sender) = stream.split();
-                tokio::spawn(close_sending_side(sender, "a stream"));
+                tokio::spawn(close_sending_side(sender));
                 self.resize = Some(receiver);
             }
-            Some("stdout" | "stderr") => {
-                tokio::spawn(close_sending_side(stream.split().1, "a stream"));
+            Ok(StreamType::Stdout | StreamType::Stderr) => {
+                tokio::spawn(close_sending_side(stream.split().1));
             }
             _ => debug!("Rejecting a stream opened after the start of the session"),
         }
@@ -164,9 +164,9 @@ impl ClientInput for SpdyInput {
             // go before stdin, which a busy client keeps ready.
             let event = select! {
                 biased;
-                data = Self::recv(self.resize.as_mut()) => SpdyEvent::Resize(data),
-                data = Self::recv(self.stdin.as_mut()) => SpdyEvent::Stdin(data),
-                stream = Self::accept(self.connection.as_mut()) => SpdyEvent::Stream(stream),
+                data = or_pending(self.resize.as_mut(), StreamReceiver::recv) => SpdyEvent::Resize(data),
+                data = or_pending(self.stdin.as_mut(), StreamReceiver::recv) => SpdyEvent::Stdin(data),
+                stream = or_pending(self.connection.as_mut(), Connection::accept) => SpdyEvent::Stream(stream),
                 () = self.done.cancelled() => SpdyEvent::Done,
             };
             match event {
@@ -202,16 +202,39 @@ impl ClientInput for SpdyInput {
 /// need.
 async fn receiver(stream: Option<Stream>) -> Option<StreamReceiver> {
     let (receiver, sender) = stream?.split();
-    close_sending_side(sender, "a stream").await;
+    close_sending_side(sender).await;
     Some(receiver)
 }
 
-/// Close the sending side of a stream, `what` names it in the log. A late
-/// stream gets it in a task of its own, without waiting for the queue of the
-/// connection.
-async fn close_sending_side(mut sender: StreamSender, what: &str) {
+/// Close the sending side of a stream. A late stream gets it in a task of
+/// its own, without waiting for the queue of the connection.
+async fn close_sending_side(mut sender: StreamSender) {
     if let Err(e) = sender.close().await {
-        debug!("Unable to close the sending side of {what}: {e:#}");
+        debug!("Unable to close the sending side of a stream: {e:#}");
+    }
+}
+
+/// The type of a stream of a session, by its header.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum StreamType {
+    Error,
+    Stdin,
+    Stdout,
+    Stderr,
+    Resize,
+}
+
+impl StreamType {
+    fn parse(headers: &Headers) -> Result<Self> {
+        match headers.get(STREAM_TYPE_HEADER) {
+            Some("error") => Ok(Self::Error),
+            Some("stdin") => Ok(Self::Stdin),
+            Some("stdout") => Ok(Self::Stdout),
+            Some("stderr") => Ok(Self::Stderr),
+            Some(STREAM_TYPE_RESIZE) => Ok(Self::Resize),
+            Some(typ) => bail!("unexpected stream type {:?}", ClientStr(typ)),
+            None => bail!("{STREAM_TYPE_HEADER:?} header is required"),
+        }
     }
 }
 
@@ -237,11 +260,11 @@ pub struct SpdyStreams {
 impl SpdyStreams {
     /// Whether the client may open a stream, by its headers.
     pub fn accept(headers: &Headers, version: Version) -> Result<()> {
-        match headers.get(STREAM_TYPE_HEADER) {
-            Some("error" | "stdin" | "stdout" | "stderr") => Ok(()),
-            Some(STREAM_TYPE_RESIZE) if version.spdy_resize() => Ok(()),
-            Some(typ) => bail!("unexpected stream type {:?}", ClientStr(typ)),
-            None => bail!("{STREAM_TYPE_HEADER:?} header is required"),
+        match StreamType::parse(headers)? {
+            StreamType::Resize if !version.spdy_resize() => {
+                bail!("unexpected stream type {STREAM_TYPE_RESIZE:?}")
+            }
+            _ => Ok(()),
         }
     }
 
@@ -274,12 +297,13 @@ impl SpdyStreams {
                 }
                 () = &mut timeout => bail!("timed out waiting for client to create streams"),
             };
-            let slot = match stream.headers().get(STREAM_TYPE_HEADER) {
-                Some("error") => &mut error,
-                Some("stdin") => &mut stdin,
-                Some("stdout") => &mut stdout,
-                Some("stderr") => &mut stderr,
-                _ => &mut resize,
+            // Only accepted streams come, see [`Self::accept`].
+            let slot = match StreamType::parse(stream.headers()) {
+                Ok(StreamType::Error) => &mut error,
+                Ok(StreamType::Stdin) => &mut stdin,
+                Ok(StreamType::Stdout) => &mut stdout,
+                Ok(StreamType::Stderr) => &mut stderr,
+                Ok(StreamType::Resize) | Err(_) => &mut resize,
             };
             if slot.is_some() {
                 // Dropping it resets it.
@@ -301,7 +325,7 @@ impl SpdyStreams {
     ) -> (SpdyInput, SpdyOutput) {
         let (stdin, stdin_sender) = match self.stdin.map(Stream::split) {
             Some((receiver, sender)) if version == Version::V1 => {
-                close_sending_side(sender, "stdin").await;
+                close_sending_side(sender).await;
                 (Some(receiver), None)
             }
             Some((receiver, sender)) => (Some(receiver), Some(sender)),
@@ -324,7 +348,7 @@ impl SpdyStreams {
             stdin,
             resize: receiver(self.resize).await,
             resize_events: ResizeEvents::default(),
-            done: connection.done(),
+            done: connection.handle().done(),
             connection: Some(connection),
         };
         (input, output)
