@@ -64,11 +64,15 @@ the publish ones passed in its latest attempt, so a commit whose tests or
 checks failed, like the vulnerability scans, does not get released. That
 includes the test-unit-arch jobs, which the `latest-main.txt` marker does not
 wait for and a timing sensitive test can fail, under qemu above all, so rerun
-a failed one of them as well. Wait for the ci run of the merge commit to pass
-before pushing the tag. If it fails anyway, "Re-run failed jobs" of the ci run
-and then rerun the release workflow. A failure which a rerun cannot fix needs a
-new version bump PR for the next patch version once the cause is fixed: the tag
-cannot move to another commit, and the crate version has to match the tag.
+a failed one of them as well. A test-critest job which fails to download and
+verify the CRI-O bundle hit an upload of cri-o/packaging, rerun it as well.
+A failing test-critest-crio-1.37 job means that the server broke the older
+client of that CRI-O release instead, which needs a fix. Wait for the ci run
+of the merge commit to pass before pushing the tag. If it fails anyway, "Re-run
+failed jobs" of the ci run and then rerun the release workflow. A failure which
+a rerun cannot fix needs a new version bump PR for the next patch version once
+the cause is fixed: the tag cannot move to another commit, and the crate
+version has to match the tag.
 
 Use only "Re-run failed jobs" for a ci run on main, never "Re-run all jobs".
 The latter builds the binaries again, and if they do not have the same bits,

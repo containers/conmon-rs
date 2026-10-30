@@ -95,18 +95,19 @@ dependencies:
       - path: contrib/tracing/start
         match: JAEGER_IMG=
 
-  # The commit of the script which installs CRI-O for critest, see
-  # .github/setup. It runs as root, so a bump needs a look at its changes.
-  - name: cri-o-packaging
-    version: 4196859aba59fa6dbe0e2b0e0b1a8f66ede832cd
-    scheme: random
+  # The CRI-O release of the test-critest-crio-1.37 jobs, the latest patch
+  # release of the oldest minor which vendors a v1 client of conmon-rs. Check
+  # that its bundle exists before a bump, with
+  # `curl -I https://storage.googleapis.com/cri-o/artifacts/cri-o.amd64.vX.Y.Z.tar.gz`.
+  - name: cri-o-1.37
+    version: 1.37.2
     upstream:
       flavour: github
-      url: cri-o/packaging
-      branch: main
+      url: cri-o/cri-o
+      constraints: < 1.38.0
     refPaths:
-      - path: .github/setup
-        match: PACKAGING_COMMIT=
+      - path: .github/workflows/ci.yml
+        match: "crio: v"
 
   - name: cri-tools
     version: 1.37.0

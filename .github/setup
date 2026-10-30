@@ -2,14 +2,31 @@
 set -euox pipefail
 
 main() {
+    trap on_exit EXIT
     prepare_system
 
     install_critest
     install_crio
+    start_crio
 }
 
+# Only over HTTPS, redirects included.
 curl_retry() {
-    curl -sSfL --retry 5 --retry-delay 3 "$@"
+    curl -sSfL --proto =https --retry 5 --retry-delay 3 "$@"
+}
+
+# Write the journal for the Upload logs step of the job if the setup fails,
+# the Run critest step which writes it otherwise does not run then. Print
+# the end of the CRI-O log as well, like when it fails to start.
+on_exit() {
+    local rc=$?
+    if ((rc != 0)); then
+        # The log belongs to the runner user, which uploads it.
+        # shellcheck disable=SC2024
+        sudo journalctl --no-pager >journal.log || true
+        sudo journalctl -u crio.service --no-pager | tail -n 200 || true
+    fi
+    exit "$rc"
 }
 
 prepare_system() {
@@ -40,21 +57,78 @@ prepare_system() {
     sudo systemctl restart systemd-journald
 }
 
+# The bundles of CRI-O, which the obs workflow of cri-o/packaging builds and
+# signs. They get verified like the get script of cri-o/packaging does, which
+# cannot bypass the cache, see download_crio.
+CRIO_BUCKET=https://storage.googleapis.com/cri-o
+CRIO_REF=refs/heads/main
+CRIO_IDENTITY=https://github.com/cri-o/packaging/.github/workflows/obs.yml@$CRIO_REF
+
+# Download the bundle of version $1 to the directory $2, verify its signature
+# and unpack it. The obs workflow uploads the bundle of the latest main commit
+# again, which replaces the tarball and its signature one after the other, and
+# the bucket serves them with an hour of max-age. A cached signature fails the
+# verification of a newer tarball with "invalid signature when validating ASN.1
+# encoded signature". The query bypasses the cache, a Cache-Control request
+# header does not. Every command has to be checked: the caller runs this as a
+# condition, where set -e does not apply.
+download_crio() {
+    local version=$1 dir=$2
+    local tarball=cri-o.$ARCH.$version.tar.gz query
+    query="?ts=$(date +%s%N)"
+    curl_retry "$CRIO_BUCKET/artifacts/$tarball$query" -o "$dir/$tarball" &&
+        curl_retry "$CRIO_BUCKET/artifacts/$tarball.bundle$query" -o "$dir/$tarball.bundle" &&
+        cosign verify-blob "$dir/$tarball" \
+            --bundle "$dir/$tarball.bundle" \
+            --certificate-identity "$CRIO_IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-repository cri-o/packaging \
+            --certificate-github-workflow-ref "$CRIO_REF" &&
+        tar xzf "$dir/$tarball" -C "$dir"
+}
+
+# Install the bundle of $CRIO_VERSION, a release tag like v1.37.2, or of the
+# latest main commit.
 install_crio() {
-    # Pinned to a commit, the script runs as root, see dependencies.yaml. It
-    # has to verify the signatures of the bundle with the cosign of the job,
-    # which sudo would drop from the PATH. Root only gets the directory of
-    # cosign in front of the standard PATH, not the user writable ones of
-    # the runner.
-    PACKAGING_COMMIT=4196859aba59fa6dbe0e2b0e0b1a8f66ede832cd
-    local cosign
-    cosign=$(command -v cosign) || {
+    command -v cosign >/dev/null || {
         echo "::error::cosign is required to verify the CRI-O bundle" >&2
         exit 1
     }
-    curl_retry "https://raw.githubusercontent.com/cri-o/packaging/$PACKAGING_COMMIT/get" |
-        sudo env PATH="${cosign%/*}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" bash -s -- -v
+    ARCH=$(dpkg --print-architecture)
+    local version=${CRIO_VERSION:-} dir attempt
+    if [[ -z $version ]]; then
+        version=$(curl_retry "$CRIO_BUCKET/latest-bundle-main.txt?ts=$(date +%s%N)")
+    fi
+    # The version becomes part of the URLs and paths of the downloads. Fail
+    # right away on anything but a tag or a commit, like an empty marker,
+    # instead of retrying downloads which cannot exist.
+    if [[ ! $version =~ ^(v[0-9]+\.[0-9]+\.[0-9]+|[0-9a-f]{40})$ ]]; then
+        echo "::error::Invalid CRI-O version: $version" >&2
+        exit 1
+    fi
 
+    # A later attempt waits out an upload which is still running.
+    for attempt in 1 2 3; do
+        dir=$(mktemp -d)
+        if download_crio "$version" "$dir"; then
+            break
+        fi
+        rm -rf "$dir"
+        if ((attempt == 3)); then
+            echo "::error::Unable to download and verify the CRI-O bundle of $version. cri-o/packaging may be uploading it again, which replaces the tarball and its signature one after the other. Rerun the job in a few minutes." >&2
+            exit 1
+        fi
+        sleep $((attempt * 60))
+    done
+
+    # The signature covers the install script of the bundle as well. It runs
+    # with bash because the one of the releases lacks the ! of its shebang.
+    (cd "$dir/cri-o" && sudo bash ./install)
+    rm -rf "$dir"
+}
+
+# Configure and start the installed CRI-O with the binary under test.
+start_crio() {
     cat <<EOT | sudo tee /etc/crio/crio.conf.d/10-crun.conf
 [crio.runtime]
 log_level = "debug"
@@ -77,8 +151,8 @@ EOT
     sudo mv /etc/cni/net.d/10-crio-bridge.conflist.disabled \
         /etc/cni/net.d/10-crio-bridge.conflist
 
-    # CRI-O checks the version of the monitor when it starts and serves exec
-    # and attach itself for one older than v1.2.0, like the one of the
+    # CRI-O main checks the version of the monitor when it starts and serves
+    # exec and attach itself for one older than v1.2.0, like the one of the
     # bundle. The binary under test has to be in place before.
     if [[ -n ${CONMONRS_BINARY:-} ]]; then
         sudo install -m 0755 "$CONMONRS_BINARY" /usr/libexec/crio/conmonrs
@@ -86,7 +160,7 @@ EOT
 
     sudo systemctl enable --now crio.service
 
-    # CRI-O turns stream_websockets off for a conmon-rs which lacks the
+    # CRI-O main turns stream_websockets off for a conmon-rs which lacks the
     # streamingprotocols feature and serves the sessions itself, which
     # critest only reports as failed exec and attach specs.
     if sudo journalctl -u crio.service --no-pager |
@@ -100,6 +174,14 @@ EOT
     # writes more.
     sudo crio status config | grep 'default_runtime = "crun"' >/dev/null
     sudo crio status config | grep 'runtime_type = "pod"' >/dev/null
+
+    {
+        echo "### CRI-O and conmon-rs"
+        echo '```'
+        sudo crio version
+        sudo /usr/libexec/crio/conmonrs --version
+        echo '```'
+    } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
 }
 
 install_critest() {
