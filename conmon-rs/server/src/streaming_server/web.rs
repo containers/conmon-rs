@@ -3,6 +3,7 @@
 //! checks the request like RFC 6455 says, a request which does not pass gets
 //! a plain text response which tells what is missing.
 
+use crate::streaming_server::idle::{Activity, STALL_TIMEOUT};
 use bytes::Bytes;
 use futures::{
     sink::{Sink, SinkExt},
@@ -30,7 +31,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     task::JoinHandle,
-    time::{self, Duration},
+    time::{self, Duration, Instant},
 };
 use tokio_tungstenite::{
     WebSocketStream,
@@ -50,8 +51,8 @@ pub use tokio_tungstenite::tungstenite::{
 /// A WebSocket of a client, after the upgrade of its request.
 pub type WebSocket = WebSocketStream<ClientIo<TokioIo<Upgraded>>>;
 
-/// How long a client gets to take the end of a WebSocket, the close of the
-/// server and what is queued before it.
+/// How long a client gets to answer the close of the server, and to end the
+/// connection after a message which was too large, see [`drain`].
 pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The most a client may still send after the close for a message which was
@@ -143,6 +144,9 @@ pub struct ClientIo<T> {
 
     /// Whether the client ended its side of the connection.
     ended: bool,
+
+    /// Touched whenever a part of what the server sends went out.
+    written: Activity,
 }
 
 #[derive(Debug, Default)]
@@ -186,7 +190,14 @@ impl<T> ClientIo<T> {
             discard: Arc::default(),
             left: DRAIN_LIMIT,
             ended: false,
+            written: Activity::new(),
         }
+    }
+
+    /// Touched whenever a part of what the server sends went out, which
+    /// tells that the client still takes it, see [`Activity::until_stalled`].
+    pub fn written(&self) -> Activity {
+        self.written.clone()
     }
 
     /// Drops the input of the connection.
@@ -274,14 +285,25 @@ impl<T: AsyncRead + Unpin> AsyncRead for ClientIo<T> {
     }
 }
 
+impl<T> ClientIo<T> {
+    /// Touch [`ClientIo::written`] for a write which wrote something.
+    fn wrote(&self, poll: Poll<io::Result<usize>>) -> Poll<io::Result<usize>> {
+        if matches!(poll, Poll::Ready(Ok(1..))) {
+            self.written.touch();
+        }
+        poll
+    }
+}
+
 impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ClientIo<T> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        self.get_mut()
-            .poll_writing(cx, |io, cx| io.poll_write(cx, buf))
+        let this = self.get_mut();
+        let poll = this.poll_writing(cx, |io, cx| io.poll_write(cx, buf));
+        this.wrote(poll)
     }
 
     fn poll_write_vectored(
@@ -289,8 +311,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ClientIo<T> {
         cx: &mut Context<'_>,
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        self.get_mut()
-            .poll_writing(cx, |io, cx| io.poll_write_vectored(cx, bufs))
+        let this = self.get_mut();
+        let poll = this.poll_writing(cx, |io, cx| io.poll_write_vectored(cx, bufs));
+        this.wrote(poll)
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -307,11 +330,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ClientIo<T> {
 }
 
 /// Wait for the task which writes to a WebSocket and closes it, abort it
-/// after [`CLOSE_TIMEOUT`]. Dropping its handle would leave it running, a
-/// writer to a client which does not read would hold the connection. The
-/// output of the writer, `None` if it did not end in time.
-pub async fn join_or_abort<T>(mut writer: JoinHandle<T>) -> Option<T> {
-    if let Ok(output) = time::timeout(CLOSE_TIMEOUT, &mut writer).await {
+/// once the client did not take anything for [`STALL_TIMEOUT`], see
+/// [`ClientIo::written`]. A slow client still gets what is queued.
+/// Dropping its handle would leave it running, a writer to a client which
+/// does not read would hold the connection. The output of the writer, `None`
+/// if it did not end.
+pub async fn join_or_abort<T>(mut writer: JoinHandle<T>, written: &Activity) -> Option<T> {
+    if let Some(output) = written
+        .until_stalled(Instant::now(), STALL_TIMEOUT, &mut writer)
+        .await
+    {
         output.ok()
     } else {
         writer.abort();
@@ -344,11 +372,11 @@ where
 /// server, see [`join_or_abort`], then for the answer of the client, see
 /// [`await_close_answer`]. The writer returns its sink once its close went
 /// out, a client gets no time to answer a close it did not get.
-pub async fn finish<S, E, T>(writer: JoinHandle<Option<T>>, messages: &mut S)
+pub async fn finish<S, E, T>(writer: JoinHandle<Option<T>>, written: &Activity, messages: &mut S)
 where
     S: Stream<Item = Result<Message, E>> + Unpin,
 {
-    if let Some(Some(_)) = join_or_abort(writer).await {
+    if let Some(Some(_)) = join_or_abort(writer, written).await {
         await_close_answer(messages).await;
     }
 }

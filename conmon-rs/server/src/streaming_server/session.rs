@@ -192,9 +192,10 @@ impl StreamingServer {
     /// Handle a single websocket connection.
     pub(super) async fn handle_websocket(socket: WebSocket, session: Session, framing: Framing) {
         let discard = socket.get_ref().discarder();
+        let written = socket.get_ref().written();
         let (sender, messages) = socket.split();
         let activity = Activity::new();
-        let mut output = Output::websocket(sender, framing, activity.clone());
+        let mut output = Output::websocket(sender, framing, activity.clone(), written);
         // A client which went away already ends the session in its loop,
         // which tears it down.
         if let Err(e) = output.announce(session.stdout(), session.stderr()).await {
@@ -310,13 +311,14 @@ impl StreamingServer {
                     // the close, which tells why, and what it still sends
                     // gets drained, so that they do not get lost. A client
                     // still busy with the rest of its message reads them only
-                    // once it got rid of it, see [`web::Discard`].
+                    // once it got rid of it, see [`web::Discard`]. The loop
+                    // of the session ends right away, the status and the
+                    // close end once the client stopped reading, see
+                    // [`Output::close`].
                     Ok(InputEnd::TooLarge(input)) => {
                         info!("Client sent a message larger than the limit");
-                        match time::timeout(web::CLOSE_TIMEOUT, &mut send_task).await {
-                            Ok(Ok(Some(output))) => input.drain(output).await,
-                            Ok(_) => {}
-                            Err(_) => debug!("Session did not end after the failure, stopping it"),
+                        if let Ok(Some(output)) = (&mut send_task).await {
+                            input.drain(output).await;
                         }
                     }
                     Ok(InputEnd::Gone) => info!("Client connection ended"),

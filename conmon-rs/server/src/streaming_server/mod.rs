@@ -94,6 +94,14 @@ const UPGRADE_TIMEOUT: Duration = HEADER_READ_TIMEOUT.saturating_mul(2);
 /// and a local process which holds connections look the same.
 const MAX_CONNECTIONS: usize = if cfg!(test) { 8 } else { 256 };
 
+/// The most a connection buffers of the head of its request, the request
+/// line and the headers, see [`MAX_CONNECTIONS`]. A longer one gets a 431
+/// response. hyper takes about 400 KiB otherwise, which lets local processes
+/// make the server hold about 100 MiB without a token. The kubelet sends
+/// the headers of the client and its own, a few KiB, Go servers take up to
+/// 1 MiB by default, nginx 32 KiB.
+const MAX_HEADER_BUF_SIZE: usize = 64 * 1024;
+
 const EXEC_PATH: &str = "exec";
 const ATTACH_PATH: &str = "attach";
 const PORT_FORWARD_PATH: &str = "portforward";
@@ -194,6 +202,7 @@ impl StreamingServer {
                 let connection = http1::Builder::new()
                     .timer(TokioTimer::new())
                     .header_read_timeout(HEADER_READ_TIMEOUT)
+                    .max_buf_size(MAX_HEADER_BUF_SIZE)
                     .serve_connection(TokioIo::new(stream), service)
                     .with_upgrades();
                 match time::timeout(UPGRADE_TIMEOUT, connection).await {

@@ -188,12 +188,18 @@ session ends, except for `channel.k8s.io`, like the kubelet.
 Streams for stdout or stderr which come after the start end right away. The
 server supports `v4.channel.k8s.io`, `v3`, `v2` and `channel.k8s.io`, the order
 of the client decides. From v4 on, the final status is JSON, before only a
-failure is reported as text. A client which does not take the end of a session
-within a few seconds gets its connection closed. The server then reads and
-drops what the client still sends until it answered the WebSocket close or
-closed the SPDY connection, for up to 5 seconds, as closing a connection with
-unread input resets it, which may lose the end of the session. Port forwarding
-does the same. With `idleTimeoutSec`, a session whose connection got no frame of
+failure is reported as text. Since unreleased, a client which takes the end of a
+session slowly, the output queued for it, the status and the close, gets all of
+it, only one which takes nothing of it for 60 seconds gets its connection
+closed. Before, a client which did not take all of it within a few seconds lost
+the rest, and client-go took the missing status for a success. After the close,
+the server reads and drops what the client still sends until it answered the
+WebSocket close or closed the SPDY connection, for up to 5 seconds, as closing a
+connection with unread input resets it, which may lose the end of the session.
+Port forwarding does the same. An exec process which writes more than 16 MiB to
+stdout or stderr while the runtime still starts it gets its output cut there,
+the session then fails with an error status instead of the exit code since
+unreleased. With `idleTimeoutSec`, a session whose connection got no frame of
 the client and no data either way for that long fails with an error status, an
 exec process gets killed then. The time the runtime takes to start an exec,
 WebSocket pings and pongs (like the heartbeat of client-go), the pings of the
@@ -300,7 +306,9 @@ single request, it has 5 seconds to send the head of the request and 10 seconds
 until it got upgraded, otherwise the server closes it. A local process which
 holds all of these connections open delays the requests of others by up to 5
 seconds, as it has to send a request head within that time, but cannot use up
-the file descriptors of the server.
+the file descriptors of the server. Since unreleased, the head of a request may
+take at most 64 KiB, a larger one gets a 431, so that these connections hold
+about 16 MiB at most.
 
 The logs show only the first 8 hex digits of a token, which tell the sessions
 apart but are not enough to use one. Responses never name the token: a request

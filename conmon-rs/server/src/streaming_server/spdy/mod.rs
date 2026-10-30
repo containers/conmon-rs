@@ -21,7 +21,7 @@ use crate::{
     mutex::lock,
     streaming_server::{
         budget::{Budget, Held},
-        idle::Activity,
+        idle::{Activity, STALL_TIMEOUT},
     },
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -31,7 +31,7 @@ use frame::{Encoder, Frame, GOAWAY_OK, STATUS_CANCEL};
 use reader::Reader;
 use std::{
     collections::HashMap,
-    mem,
+    io, mem,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
@@ -42,7 +42,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, WriteHalf},
     select,
     sync::{Notify, mpsc},
-    time::{self, Duration},
+    time::{self, Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
@@ -79,7 +79,8 @@ pub(crate) const MAX_STREAMS: usize = 1024;
 /// How many bytes the writer collects before writing them to the connection.
 const WRITE_BUFFER: usize = 64 * 1024;
 
-/// How long the last frames may take to go out once the connection ends.
+/// How long the client may take to close the connection once the server
+/// ended it, see [`Reader::drain`].
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How often the server pings the client, like the kubelet does. A client
@@ -128,6 +129,7 @@ impl Connection {
             closing: CancellationToken::new(),
             done: CancellationToken::new(),
             activity: Activity::new(),
+            written: Activity::new(),
             last_stream_id: AtomicU32::new(0),
             live_streams: AtomicUsize::new(0),
         });
@@ -278,7 +280,9 @@ impl Connection {
                 if !buf.is_empty() {
                     select! {
                         biased;
-                        result = writer.write_all(&buf) => result.context("write frames")?,
+                        result = Self::write_buf(&mut writer, &buf, &shared.written) => {
+                            result.context("write frames")?;
+                        }
                         // A client which does not read anymore must not keep
                         // the connection open.
                         () = shared.done.cancelled() => return Ok(()),
@@ -306,12 +310,18 @@ impl Connection {
             while let Ok(data) = data_rx.try_recv() {
                 Self::encode_data(&mut encoder, &data, &mut buf)?;
             }
-            time::timeout(SHUTDOWN_TIMEOUT, async {
-                writer.write_all(&buf).await.context("write frames")?;
-                writer.shutdown().await.context("shut down connection")
-            })
-            .await
-            .context("shut down connection")?
+            // A slow client still gets them, only one which does not take
+            // anything anymore gets cut off.
+            shared
+                .written
+                .until_stalled(Instant::now(), STALL_TIMEOUT, async {
+                    Self::write_buf(&mut writer, &buf, &shared.written)
+                        .await
+                        .context("write frames")?;
+                    writer.shutdown().await.context("shut down connection")
+                })
+                .await
+                .context("client did not take the last frames")?
         }
         .await;
 
@@ -319,6 +329,25 @@ impl Connection {
             debug!("SPDY connection ended: {e:#}");
         }
         shared.done.cancel();
+    }
+
+    /// Write all of `buf`, `written` gets touched by every part which went
+    /// out, so that the end of the connection waits for a client which takes
+    /// the frames slowly, see [`ConnectionHandle::written`].
+    async fn write_buf<W>(writer: &mut W, buf: &[u8], written: &Activity) -> io::Result<()>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        let mut rest = buf;
+        while !rest.is_empty() {
+            let n = writer.write(rest).await?;
+            if n == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            written.touch();
+            rest = &rest[n..];
+        }
+        Ok(())
     }
 
     /// Encode a data frame, followed by the reset of its stream if it was the
@@ -400,6 +429,13 @@ impl ConnectionHandle {
     pub fn done(&self) -> CancellationToken {
         self.0.done.clone()
     }
+
+    /// Touched whenever a part of the frames of the server went out, which
+    /// tells that the client still takes them, see
+    /// [`Activity::until_stalled`].
+    pub fn written(&self) -> Activity {
+        self.0.written.clone()
+    }
 }
 
 /// What the reader, the writer and the streams of a connection share.
@@ -426,6 +462,10 @@ struct Shared {
 
     /// When the last frame got read or written, for the idle timeout.
     activity: Activity,
+
+    /// When a part of the frames of the server went out the last time, see
+    /// [`ConnectionHandle::written`].
+    written: Activity,
 
     /// The last stream the client opened, for the GOAWAY.
     last_stream_id: AtomicU32,

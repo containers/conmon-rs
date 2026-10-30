@@ -1,12 +1,15 @@
 use super::{spdy::ResizeEvents, status::ErrorMessage, *};
 use crate::streaming_server::{
     spdy::{
-        Connection,
+        self, Connection,
         testing::{Client, Frame},
     },
     stream_protocol::first_supported,
 };
-use tokio::io::duplex;
+use tokio::{
+    io::{AsyncReadExt, duplex},
+    time::{self, Duration},
+};
 
 #[test]
 fn websocket_protocols_get_negotiated() {
@@ -464,12 +467,88 @@ async fn closing_a_session_of_a_client_which_does_not_read_ends() -> Result<()> 
             .is_err()
     );
 
-    // The end of the session does not wait for the client forever.
-    time::timeout(3 * SHUTDOWN_TIMEOUT, async {
-        assert!(output.status(&Status::Success).await.is_err());
-        assert!(!output.close().await);
-    })
-    .await?;
+    // The end of the session does not wait for the client forever, the
+    // status and the close share the timeout.
+    let start = time::Instant::now();
+    assert!(output.status(&Status::Success).await.is_err());
+    assert!(!output.close().await);
+    assert_eq!(start.elapsed(), STALL_TIMEOUT);
     drop(client);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_clients_get_all_output_and_the_status() -> Result<()> {
+    let (client, server) = duplex(64 * 1024);
+    let mut connection =
+        Connection::serve(server, None, None, |h| SpdyStreams::accept(h, Version::V4));
+    let mut client = Client::new(client)?;
+    client.open(1, [("streamType", "error")].into()).await?;
+    client.open(3, [("streamType", "stdout")].into()).await?;
+    let streams = SpdyStreams::wait(
+        &mut connection,
+        ExpectedStreams {
+            stdin: false,
+            stdout: true,
+            stderr: false,
+        },
+    )
+    .await?;
+    let (_input, output) = streams.into_parts(connection, Version::V4).await;
+    let mut output = Output::spdy(output);
+
+    // A client which takes 16 KiB per second, which reads all output only
+    // long after the timeouts, but never stops.
+    let reader = tokio::spawn(async move {
+        let mut read = vec![];
+        let mut buf = vec![0; 16 * 1024];
+        loop {
+            match client.io().read(&mut buf).await {
+                Ok(0) | Err(_) => return read,
+                Ok(n) => read.extend_from_slice(&buf[..n]),
+            }
+            time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+
+    // The process writes 1 MiB and exits.
+    let data = Bytes::from(vec![7; 8 * 1024]);
+    for _ in 0..128 {
+        output.data(STDOUT_BYTE, &data).await?;
+    }
+    let start = time::Instant::now();
+    output.status(&Status::Success).await?;
+    assert!(output.close().await);
+    assert!(start.elapsed() > 2 * STALL_TIMEOUT);
+    drop(output);
+
+    let frames = spdy::testing::frames(&reader.await?).await?;
+    let stdout: usize = frames
+        .iter()
+        .map(|frame| match frame {
+            Frame::Data {
+                stream_id: 3, data, ..
+            } => data.len(),
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(stdout, 128 * data.len());
+    let status = frames.iter().find_map(|frame| match frame {
+        Frame::Data {
+            stream_id: 1, data, ..
+        } if !data.is_empty() => Some(data.clone()),
+        _ => None,
+    });
+    assert_eq!(status.as_deref(), Some(SUCCESS_STATUS));
+    // Both streams got closed.
+    for id in [1, 3] {
+        assert!(
+            frames.iter().any(|frame| matches!(
+                frame,
+                Frame::Data { stream_id, fin: true, .. } if *stream_id == id
+            )),
+            "stream {id} not closed"
+        );
+    }
     Ok(())
 }

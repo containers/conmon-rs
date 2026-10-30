@@ -86,6 +86,7 @@ impl PortForward {
     /// of them ended, the client went away or the WebSocket was idle.
     pub(super) async fn serve_channels(self, socket: WebSocket, ports: Vec<u16>, base64: bool) {
         let discard = socket.get_ref().discarder();
+        let written = socket.get_ref().written();
         let (mut sink, mut messages) = socket.split();
         let (output_tx, mut output_rx) = mpsc::channel(OUTPUT_QUEUE);
         let activity = Activity::new();
@@ -206,13 +207,13 @@ impl PortForward {
         // Like the error of a port which failed before its input came, the
         // client has to get what the server sent before.
         if too_large.is_cancelled() {
-            if let Some(Some(sink)) = web::join_or_abort(writer).await {
+            if let Some(Some(sink)) = web::join_or_abort(writer, &written).await {
                 web::drain(sink, messages).await;
             }
         } else if client_gone {
-            web::join_or_abort(writer).await;
+            web::join_or_abort(writer, &written).await;
         } else {
-            web::finish(writer, &mut messages).await;
+            web::finish(writer, &written, &mut messages).await;
         }
     }
 

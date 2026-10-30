@@ -1,8 +1,8 @@
 use crate::{
     random_id::RandomId,
     streaming_server::{
-        ADDR, HEADER_READ_TIMEOUT, MAX_CONNECTIONS, SWEEP_INTERVAL, StreamingServer,
-        TOO_MANY_REQUESTS, UPGRADE_TIMEOUT,
+        ADDR, HEADER_READ_TIMEOUT, MAX_CONNECTIONS, MAX_HEADER_BUF_SIZE, SWEEP_INTERVAL,
+        StreamingServer, TOO_MANY_REQUESTS, UPGRADE_TIMEOUT,
         bounded_map::DEFAULT_CAPACITY,
         remotecommand::STDIN_BYTE,
         testing::{attach_session, client_frame, response_head},
@@ -120,6 +120,40 @@ async fn clients_which_do_not_read_get_one_response() -> Result<()> {
             for writer in writers {
                 writer.abort();
             }
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
+async fn request_heads_are_bounded() -> Result<()> {
+    LocalSet::new()
+        .run_until(async {
+            let mut server = StreamingServer::default();
+            server.start_if_required().await?;
+            let request = |padding: usize| {
+                format!(
+                    "GET /x HTTP/1.1\r\nHost: {ADDR}\r\nX-Padding: {}\r\n\r\n",
+                    "a".repeat(padding)
+                )
+            };
+            let respond = async |request: String| -> Result<String> {
+                let mut stream = TcpStream::connect((ADDR, server.port)).await?;
+                // A server which rejects the head early may close the
+                // connection before all of it went out.
+                let _ = stream.write_all(request.as_bytes()).await;
+                time::timeout(HEADER_READ_TIMEOUT, response_head(&mut stream))
+                    .await
+                    .context("no response")?
+            };
+
+            // Large heads of real clients still get served.
+            let response = respond(request(MAX_HEADER_BUF_SIZE / 2)).await?;
+            assert!(response.starts_with("http/1.1 404"), "{response}");
+
+            // Larger ones do not get buffered.
+            let response = respond(request(2 * MAX_HEADER_BUF_SIZE)).await?;
+            assert!(response.starts_with("http/1.1 431"), "{response}");
             Ok(())
         })
         .await

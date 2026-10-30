@@ -7,6 +7,16 @@ use tokio::{
     time::{self, Duration},
 };
 
+/// The frames of what a client read from the server.
+pub async fn frames(mut data: &[u8]) -> Result<Vec<Frame>> {
+    let mut decoder = Decoder::default();
+    let mut frames = vec![];
+    while let Some(frame) = decoder.read(&mut data).await? {
+        frames.push(frame);
+    }
+    Ok(frames)
+}
+
 /// The client side of a connection.
 pub struct Client<T = DuplexStream> {
     io: T,
