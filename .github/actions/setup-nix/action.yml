@@ -2,7 +2,9 @@ name: setup-nix
 description: >-
   Installs the pinned release of nix. A stalled download from the binary
   caches fails after half a minute, nix retries it, instead of hanging for the
-  five minutes of the default.
+  five minutes of the default. A substitute which still fails, like when
+  cachix answers a resumed download with HTTP 416, gets built locally instead
+  of failing the build.
 runs:
   using: composite
   steps:
@@ -12,3 +14,4 @@ runs:
         extra_nix_config: |
           connect-timeout = 10
           stalled-download-timeout = 30
+          fallback = true

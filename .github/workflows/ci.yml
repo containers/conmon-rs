@@ -61,6 +61,9 @@ jobs:
           cache: false
       - uses: ./.github/actions/setup-nix
       - run: make verify-proto
+      # Older clients and servers have to keep working with this one, which
+      # needs every field to keep its slot, see .github/verify-schema-layout.
+      - run: make verify-schema-layout
 
   lint-go:
     runs-on: ubuntu-latest
@@ -783,6 +786,10 @@ jobs:
   # Runs critest against CRI-O with the static binary. With stream_websockets,
   # CRI-O hands exec and attach to the streaming server of conmon-rs, which
   # critest reaches directly over WebSocket. Port forwarding stays with CRI-O.
+  # The jobs with a crio tag run that release of CRI-O instead of main, whose
+  # vendored client is older than the server under test. Like the others,
+  # they hold back the marker and the releases: their CRI-O is pinned, so a
+  # failure comes from conmon-rs, which would break the older client.
   test-critest:
     needs: build-static-amd64
     runs-on: ubuntu-24.04
@@ -790,9 +797,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        websockets: [false, true]
-    name: test-critest${{ matrix.websockets && '-websockets' || '' }}
+        include:
+          - name: test-critest
+            websockets: false
+          - name: test-critest-websockets
+            websockets: true
+          # CRI-O 1.37 vendors a v1.0 client, which serves exec and attach
+          # with stream_websockets as well, with requests that lack the fields
+          # of newer clients. The releases up to 1.36 vendor a v0.7 client,
+          # which passes the --cgroup-manager that v1 rejects, so they cannot
+          # run a v1 server at all.
+          - name: test-critest-crio-1.37
+            crio: v1.37.2
+            websockets: false
+          - name: test-critest-crio-1.37-websockets
+            crio: v1.37.2
+            websockets: true
+    name: ${{ matrix.name }}
     env:
+      CRIO_VERSION: ${{ matrix.crio }}
       STREAM_WEBSOCKETS: ${{ matrix.websockets }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -869,7 +892,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ !cancelled() }}
         with:
-          name: test-critest${{ matrix.websockets && '-websockets' || '' }}-logs
+          name: ${{ matrix.name }}-logs
           path: |
             journal.log
             critest-report.json

@@ -190,7 +190,7 @@ lint-typos: ## Check the spelling, typos of the version of CI has to be installe
 	typos --config .github/typos.toml
 
 .PHONY: verify
-verify: verify-dependencies verify-spec verify-vex verify-proto verify-prettier verify-deny lint-typos lint-workflows ## Run the checks of CI besides make lint and the tests.
+verify: verify-dependencies verify-spec verify-vex verify-proto verify-schema-layout verify-prettier verify-deny lint-typos lint-workflows ## Run the checks of CI besides make lint and the tests.
 
 .PHONY: verify-dependencies
 verify-dependencies: .install.zeitgeist ## Verify the local dependencies.
@@ -224,6 +224,21 @@ verify-proto: update-proto ## Verify that the generated Go code matches the Cap'
 		git diff internal/proto ; \
 		exit 1 ; \
 	fi
+
+# The layout of the schema, with the slot of every field. Changing it breaks
+# the wire compatibility, see .github/verify-schema-layout, which only allows
+# renames and additions. Run make update-schema-layout to commit those, or a
+# deliberate break, which needs a new major version.
+SCHEMA_LAYOUT := $(PROTO_PATH)/conmon.capnp.layout
+
+.PHONY: schema-layout
+schema-layout:
+	mkdir -p $(BUILD_DIR)
+	$(CAPNP) compile -ocapnp $(PROTO_PATH)/conmon.capnp >$(BUILD_DIR)/conmon.capnp.layout
+
+.PHONY: verify-schema-layout
+verify-schema-layout: schema-layout ## Verify that the Cap'n Proto schema keeps the layout of its fields.
+	.github/verify-schema-layout $(SCHEMA_LAYOUT) $(BUILD_DIR)/conmon.capnp.layout
 
 .PHONY: verify-deny
 verify-deny: ## Check the dependencies with cargo-deny, which has to be installed.
@@ -372,6 +387,10 @@ update-proto: internal/proto/conmon.capnp ## Update the Cap'n Proto protocol.
 	$(CAPNP) compile \
 		-I$(shell go env GOMODCACHE)/capnproto.org/go/capnp/v3@$(GO_CAPNP_VERSION)/std \
 		-o$(abspath $(GOTOOLS_BINDIR))/capnpc-go internal/proto/conmon.capnp
+
+.PHONY: update-schema-layout
+update-schema-layout: schema-layout ## Update the committed layout of the Cap'n Proto schema.
+	.github/verify-schema-layout --update $(SCHEMA_LAYOUT) $(BUILD_DIR)/conmon.capnp.layout
 
 .PHONY: create-release-packages
 create-release-packages: verify-spec ## Create the release tarballs.
