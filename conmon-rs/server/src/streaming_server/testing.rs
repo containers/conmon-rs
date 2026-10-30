@@ -113,15 +113,12 @@ pub(super) async fn attach_session_with(
     let (io, child, _) = attach_child(terminal)?;
     let server = StreamingServer::default();
     let url = server
-        .attach_url(AttachSession {
-            container_id: "id".into(),
+        .attach_url(attach_config(
             child,
             stdin,
-            stdout: true,
-            stderr: false,
             stop_after_stdin_eof,
             idle_timeout,
-        })
+        ))
         .await?;
     let (response, stream) = upgrade(&server, &url, "GET", &websocket_headers(PROTOCOL_V5)).await?;
     assert!(response.starts_with("http/1.1 101"), "{response}");
@@ -261,8 +258,9 @@ pub(super) async fn spdy_attach_version(
     let (io, child, _token) = attach_child(terminal)?;
     let server = StreamingServer::default();
     let url = server
-        .attach_url(spdy_attach_config(
+        .attach_url(attach_config(
             child,
+            true,
             stop_after_stdin_eof,
             idle_timeout,
         ))
@@ -294,8 +292,9 @@ pub(super) async fn spdy_attach_duplex(
 ) -> Result<(SharedContainerIO, Client<DuplexStream>)> {
     let (io, child, _token) = attach_child(false)?;
     let (client, server) = duplex(capacity);
-    let session = Session::Attach(spdy_attach_config(
+    let session = Session::Attach(attach_config(
         child,
+        true,
         stop_after_stdin_eof,
         idle_timeout,
     ));
@@ -304,16 +303,17 @@ pub(super) async fn spdy_attach_duplex(
     Ok((io, client))
 }
 
-/// An attach session of the child with stdin and stdout.
-fn spdy_attach_config(
+/// An attach session of the child with stdout and maybe stdin.
+pub(super) fn attach_config(
     child: ReapableChild,
+    stdin: bool,
     stop_after_stdin_eof: bool,
     idle_timeout: Option<Duration>,
 ) -> AttachSession {
     AttachSession {
         container_id: "id".into(),
         child,
-        stdin: true,
+        stdin,
         stdout: true,
         stderr: false,
         stop_after_stdin_eof,
@@ -360,15 +360,7 @@ pub(super) async fn websocket_attach_with(
     let (io, child, token) = attach_child(false)?;
     let server = StreamingServer::default();
     let url = server
-        .attach_url(AttachSession {
-            container_id: "id".into(),
-            child,
-            stdin: true,
-            stdout: true,
-            stderr: false,
-            stop_after_stdin_eof,
-            idle_timeout: None,
-        })
+        .attach_url(attach_config(child, true, stop_after_stdin_eof, None))
         .await?;
     let (response, stream) = upgrade(&server, &url, "GET", &websocket_headers(protocol)).await?;
     Ok((io, server, stream, token, response))

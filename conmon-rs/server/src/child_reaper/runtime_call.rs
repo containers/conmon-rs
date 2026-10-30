@@ -7,7 +7,7 @@ use crate::{
     fd_mapping::{self, CommandFdExt, FdMapping},
     fs_util, init,
     mutex::lock,
-    process::{Process, child_pid, read_pid_file, wait_for_exit_code},
+    process::{Process, child_pid, read_pid_file, signal_name, wait_for_exit_code},
     runtime_args::LoggedArgs,
     tail::Tail,
     util::with_stderr,
@@ -345,9 +345,7 @@ impl ChildReaper {
                 // Without an exit code, a signal ended the runtime.
                 None => {
                     let signal = status.signal().unwrap_or_default();
-                    let name = Signal::try_from(signal)
-                        .map_or_else(|_| signal.to_string(), |s| s.as_str().into());
-                    format_err!("runtime got killed by signal {name}")
+                    format_err!("runtime got killed by signal {}", signal_name(signal))
                 }
             },
         };

@@ -71,7 +71,7 @@ type RemoteFDs struct {
 func NewRemoteFDs(path string) (*RemoteFDs, error) {
 	conn, err := dialLongSocket("unixpacket", path)
 	if err != nil {
-		return nil, fmt.Errorf("dial long socket: %w", err)
+		return nil, err
 	}
 
 	return &RemoteFDs{

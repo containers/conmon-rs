@@ -44,7 +44,10 @@
 
 use crate::{attach::input_ended, listener, mutex::lock};
 use anyhow::{Result, bail};
-use nix::sys::resource::{Resource, getrlimit};
+use nix::sys::{
+    resource::{Resource, getrlimit},
+    socket::SockType,
+};
 use std::{
     collections::{HashMap, HashSet, hash_map},
     io::{IoSliceMut, Write},
@@ -211,7 +214,9 @@ impl Server {
     fn start(path: PathBuf, fd_socket: Arc<FdSocket>) -> Result<Self> {
         let server = Self { path };
 
-        let mut listener = listener::bind_long_path(&server.path, UnixSeqpacketListener::bind)?;
+        let mut listener = listener::bind_long_path(&server.path, |path| {
+            UnixSeqpacketListener::try_from(listener::listen_private(&path, SockType::SeqPacket)?)
+        })?;
         // After the server raised its open files limit at startup.
         let limits = Limits::of_server();
 

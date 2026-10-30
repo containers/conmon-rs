@@ -201,6 +201,23 @@ impl Process {
         Self { pid, pidfd }
     }
 
+    /// Like [`Process::open`] for a PID which was not checked to belong to
+    /// an unreaped child yet, like the one of a PID file: the orphan sweep
+    /// may have reaped it already, and another process reused its PID. None
+    /// then, a [`Process::child`] for it would only fail its signals unless
+    /// the PID got reused by another child of the server, and a wait for it
+    /// could take the exit status of that child.
+    pub fn open_child(pid: Pid) -> Option<Self> {
+        let _guard = mutex::read(&REAP_LOCK);
+        match peek_exit(Id::Pid(pid)) {
+            Ok(_) => Some(Self::open(pid)),
+            Err(e) => {
+                debug!("PID {pid} is no unreaped child: {e}");
+                None
+            }
+        }
+    }
+
     /// Refer to a child by its PID alone, which gets checked to still belong
     /// to an unreaped child of the server before every signal.
     pub fn child(pid: Pid) -> Self {
@@ -343,33 +360,18 @@ pub(crate) const EXIT_CODE_WAIT_FAILED: i32 = -3;
 /// `EINVAL` for a child killed by a real-time signal, which it does not
 /// know, after the kernel reaped it already.
 pub fn wait_exit(id: Id<'_>, flags: WaitPidFlag) -> nix::Result<Option<i32>> {
-    Ok(wait_exit_pid(id, flags)?.map(|(_, code)| code))
+    Ok(wait_child(id, flags)?.map(|(_, exit)| exit.code()))
 }
 
-/// Like [`wait_exit`], along with the PID of the child.
-pub fn wait_exit_pid(id: Id<'_>, flags: WaitPidFlag) -> nix::Result<Option<(Pid, i32)>> {
-    Ok(wait_child(id, flags)?.map(|(pid, exit)| (pid, exit.code())))
-}
-
-/// Like [`wait_exit`], and log the exit. Only the waits for a single
-/// process do, the sweeps log their own line.
-fn wait_exit_logged(id: Id<'_>, flags: WaitPidFlag) -> nix::Result<Option<i32>> {
-    let exit = wait_child(id, flags)?.map(|(_, exit)| exit);
-    match exit {
-        Some(ChildExit::Exited(code)) => debug!("Exited {code}"),
-        Some(ChildExit::Signaled(sig)) => {
-            let name =
-                Signal::try_from(sig).map_or_else(|_| sig.to_string(), |s| s.as_str().into());
-            debug!("Signaled: {name}");
-        }
-        Some(ChildExit::Unknown) | None => {}
-    }
-    Ok(exit.map(ChildExit::code))
+/// The name of a signal, or its number if nix does not know it, like the
+/// real-time signals.
+pub(crate) fn signal_name(signal: i32) -> String {
+    Signal::try_from(signal).map_or_else(|_| signal.to_string(), |s| s.as_str().into())
 }
 
 /// How a child exited, see [`wait_child`].
 #[derive(Clone, Copy)]
-enum ChildExit {
+pub(crate) enum ChildExit {
     Exited(i32),
     Signaled(i32),
     Unknown,
@@ -377,19 +379,29 @@ enum ChildExit {
 
 impl ChildExit {
     /// The exit code, the one of a signal like a shell reports it.
-    fn code(self) -> i32 {
+    pub(crate) fn code(self) -> i32 {
         match self {
             Self::Exited(code) => code,
             Self::Signaled(sig) => sig + 128,
             Self::Unknown => EXIT_CODE_UNKNOWN,
         }
     }
+
+    /// Log the exit. Only the waits for a single process do, the sweeps
+    /// log their own line.
+    fn log(self) {
+        match self {
+            Self::Exited(code) => debug!("Exited {code}"),
+            Self::Signaled(sig) => debug!("Signaled: {}", signal_name(sig)),
+            Self::Unknown => {}
+        }
+    }
 }
 
 /// The waitid(2) behind [`wait_exit`], which also reports real-time
-/// signals.
+/// signals, along with the PID of the child.
 #[expect(unsafe_code, reason = "nix does not convert real-time signals")]
-fn wait_child(id: Id<'_>, flags: WaitPidFlag) -> nix::Result<Option<(Pid, ChildExit)>> {
+pub(crate) fn wait_child(id: Id<'_>, flags: WaitPidFlag) -> nix::Result<Option<(Pid, ChildExit)>> {
     let (idtype, id) = match id {
         Id::All => (libc::P_ALL, 0),
         Id::Pid(pid) => (libc::P_PID, pid.as_raw().cast_unsigned()),
@@ -508,13 +520,16 @@ async fn try_pidfd_wait(pid: Pid) -> Option<i32> {
     // Kernels before 5.4 only know the PID, they fail with EINVAL.
     let reaping = reap_guard();
     let pidfd = Id::PIDFd(async_fd.get_ref().as_fd());
-    let code = match wait_exit_logged(pidfd, WaitPidFlag::WNOHANG) {
-        Err(Errno::EINVAL) => wait_exit_logged(Id::Pid(pid), WaitPidFlag::WNOHANG),
-        code => code,
+    let exit = match wait_child(pidfd, WaitPidFlag::WNOHANG) {
+        Err(Errno::EINVAL) => wait_child(Id::Pid(pid), WaitPidFlag::WNOHANG),
+        exit => exit,
     };
     drop(reaping);
-    match code {
-        Ok(Some(code)) => Some(code),
+    match exit {
+        Ok(Some((_, exit))) => {
+            exit.log();
+            Some(exit.code())
+        }
         Ok(None) => {
             debug!("Unexpected wait status after pidfd readable");
             Some(EXIT_CODE_UNKNOWN)
@@ -548,10 +563,13 @@ fn wait_for_exit_code_blocking(pid: Pid) -> i32 {
             }
         }
         let reaping = reap_guard();
-        let code = wait_exit_logged(Id::Pid(pid), WaitPidFlag::WNOHANG);
+        let exit = wait_child(Id::Pid(pid), WaitPidFlag::WNOHANG);
         drop(reaping);
-        match code {
-            Ok(Some(code)) => return code,
+        match exit {
+            Ok(Some((_, exit))) => {
+                exit.log();
+                return exit.code();
+            }
             Ok(None) => {}
             Err(Errno::EINTR) => debug!("Failed to wait for pid on EINTR, retrying"),
             Err(err) => {

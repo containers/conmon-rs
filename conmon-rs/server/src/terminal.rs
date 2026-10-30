@@ -4,6 +4,7 @@ use crate::{
     async_fd::{self, Fd},
     container_io::{ContainerIO, TempFile},
     listener,
+    mutex::lock,
 };
 use anyhow::{Context as _, Result};
 use libc::{TIOCSWINSZ, winsize};
@@ -23,7 +24,7 @@ use std::{
     },
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Weak},
+    sync::{Arc, Mutex, Weak},
     task::{Context, Poll, ready},
 };
 use tokio::{
@@ -41,15 +42,111 @@ pub struct Terminal {
     /// The socket the runtime connects to, removed with the terminal.
     path: TempFile,
     connected_rx: Receiver<OwnedFd>,
-
-    /// The terminal once connected, as long as the loops which read and
-    /// write it keep it open.
-    tty: Option<Weak<TerminalFd>>,
+    resizer: TerminalResizer,
 }
 
 impl Terminal {
     pub fn path(&self) -> &Path {
         self.path.path()
+    }
+
+    /// Resizes the terminal also while something else holds it, like the
+    /// runtime call which waits for the connection.
+    pub fn resizer(&self) -> TerminalResizer {
+        self.resizer.clone()
+    }
+
+    /// The terminal while it is connected and open.
+    fn tty(&self) -> Option<Arc<TerminalFd>> {
+        match &*lock(&self.resizer.0) {
+            Tty::Pending(_) => None,
+            Tty::Connected(tty) => tty.upgrade(),
+        }
+    }
+}
+
+/// The state of a terminal, which a resize may come for before the runtime
+/// connected it.
+#[derive(Debug)]
+enum Tty {
+    /// Not connected yet, with the latest width and height requested
+    /// meanwhile, which the terminal gets once it is.
+    Pending(Option<(u16, u16)>),
+
+    /// The terminal once connected, as long as the loops which read and
+    /// write it keep it open.
+    Connected(Weak<TerminalFd>),
+}
+
+/// Resizes a [`Terminal`], see [`TerminalResizer::resize`].
+#[derive(Clone, Debug)]
+pub struct TerminalResizer(Arc<Mutex<Tty>>);
+
+impl Default for TerminalResizer {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(Tty::Pending(None))))
+    }
+}
+
+impl TerminalResizer {
+    /// Resize the terminal width and height. Clients send their size right
+    /// away, a terminal which the runtime did not connect yet gets it once
+    /// it does, before the process usually started, see
+    /// [`Terminal::connect`].
+    pub fn resize(&self, width: u16, height: u16) -> Result<()> {
+        debug!("Resizing terminal to width {} and height {}", width, height);
+        let mut tty = lock(&self.0);
+        match &*tty {
+            Tty::Pending(_) => {
+                debug!("Terminal not connected yet, resizing it once it is");
+                *tty = Tty::Pending(Some((width, height)));
+                Ok(())
+            }
+            Tty::Connected(fd) => {
+                let fd = fd.upgrade().context("terminal closed")?;
+                Self::set_size(&fd, width, height)
+            }
+        }
+    }
+
+    /// Take the connected terminal and give it the size requested before.
+    /// Under the lock, so that a resize which comes meanwhile is not lost.
+    fn connect(&self, fd: &Arc<TerminalFd>) {
+        let mut tty = lock(&self.0);
+        if let Tty::Pending(Some((width, height))) = *tty {
+            debug!("Resizing terminal to width {width} and height {height} requested before");
+            // Not worth failing the process for, a later resize may fix it.
+            if let Err(e) = Self::set_size(fd, width, height) {
+                debug!("Unable to resize the terminal: {e:#}");
+            }
+        }
+        *tty = Tty::Connected(Arc::downgrade(fd));
+    }
+
+    #[expect(unsafe_code, reason = "the TIOCSWINSZ ioctl")]
+    fn set_size(fd: &TerminalFd, width: u16, height: u16) -> Result<()> {
+        let ws = winsize {
+            ws_row: height,
+            ws_col: width,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: TIOCSWINSZ reads a `winsize` from the pointer, which points
+        // to a live local of exactly that type, and the descriptor is kept
+        // open by the borrow for the duration of the call.
+        match unsafe { libc::ioctl(fd.as_raw_fd(), TIOCSWINSZ, &ws) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error().into()),
+        }
+    }
+
+    /// The size requested before the terminal got connected.
+    #[cfg(test)]
+    pub(crate) fn pending(&self) -> Option<(u16, u16)> {
+        match &*lock(&self.0) {
+            Tty::Pending(size) => *size,
+            Tty::Connected(_) => None,
+        }
     }
 }
 
@@ -101,13 +198,15 @@ impl Terminal {
         Ok(Self {
             path: temp_file,
             connected_rx,
-            tty: None,
+            resizer: TerminalResizer::default(),
         })
     }
 
     /// Wait for the runtime to hand over the terminal, for the loops which
     /// read and write it, see [`ContainerIO::connect_terminal`]. A wait which
-    /// gets dropped leaves the descriptor queued for the next one.
+    /// gets dropped leaves the descriptor queued for the next one. The
+    /// terminal gets the size requested before, see
+    /// [`TerminalResizer::resize`].
     pub async fn connect(&mut self) -> Result<TerminalIo> {
         debug!("Waiting for terminal socket connection");
         let fd = self
@@ -116,12 +215,12 @@ impl Terminal {
             .await
             .context("receive connected channel")?;
         let fd = Arc::new(TerminalFd::new(fd)?);
-        self.tty = Some(Arc::downgrade(&fd));
 
         debug!("Changing terminal settings");
         let mut term = termios::tcgetattr(&fd)?;
         term.output_flags |= OutputFlags::ONLCR;
         termios::tcsetattr(&fd, SetArg::TCSANOW, &term)?;
+        self.resizer.connect(&fd);
         Ok(TerminalIo(fd))
     }
 
@@ -129,7 +228,7 @@ impl Terminal {
     /// changed it.
     pub fn eof_char(&self) -> u8 {
         const DEFAULT: u8 = 0x04;
-        let Some(tty) = self.tty.as_ref().and_then(Weak::upgrade) else {
+        let Some(tty) = self.tty() else {
             return DEFAULT;
         };
         match termios::tcgetattr(&*tty) {
@@ -141,25 +240,9 @@ impl Terminal {
         }
     }
 
-    /// Resize the terminal width and height.
-    #[expect(unsafe_code, reason = "the TIOCSWINSZ ioctl")]
+    /// Resize the terminal width and height, see [`TerminalResizer::resize`].
     pub fn resize(&self, width: u16, height: u16) -> Result<()> {
-        debug!("Resizing terminal to width {} and height {}", width, height);
-        let ws = winsize {
-            ws_row: height,
-            ws_col: width,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        let tty = self.tty.as_ref().and_then(Weak::upgrade);
-        let tty = tty.context("terminal not connected")?;
-        // SAFETY: TIOCSWINSZ reads a `winsize` from the pointer, which points
-        // to a live local of exactly that type, and the descriptor is kept
-        // open by the `Arc` for the duration of the call.
-        match unsafe { libc::ioctl(tty.as_raw_fd(), TIOCSWINSZ, &ws) } {
-            0 => Ok(()),
-            _ => Err(io::Error::last_os_error().into()),
-        }
+        self.resizer.resize(width, height)
     }
 
     /// Accept the connection of the runtime and receive the terminal from it.
@@ -185,16 +268,23 @@ impl Terminal {
     }
 
     async fn handle_fd_receive(mut stream: UnixStream, config: Config) -> Result<()> {
-        let fd = match stream
+        let fd = stream
             .async_io(Interest::READABLE, || Self::recv_fd(stream.as_fd()))
             .await
-        {
-            Ok(fd) => fd,
-            Err(e) => {
-                error!("Unable to receive data: {}", e);
-                return Err(e.into());
-            }
-        };
+            .context("receive terminal descriptor")?;
+
+        // Hand the terminal over before cleaning up, so that a size which
+        // waits for it gets applied sooner.
+        let sent = async {
+            let fd = fd.context("got no file descriptor")?;
+            debug!("Received terminal file descriptor");
+            config
+                .connected_tx
+                .send(fd)
+                .await
+                .context("send connected channel")
+        }
+        .await;
 
         // Allow only one single connection. Failing to clean up must not
         // drop the terminal, which the runtime handed over already.
@@ -208,14 +298,7 @@ impl Terminal {
             debug!("Unable to shut down terminal socket stream: {e}");
         }
 
-        let fd = fd.context("got no file descriptor")?;
-        debug!("Received terminal file descriptor");
-        config
-            .connected_tx
-            .send(fd)
-            .await
-            .context("send connected channel")?;
-
+        sent?;
         debug!("Shutting down listener task");
         Ok(())
     }

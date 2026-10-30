@@ -4,13 +4,14 @@ use crate::{
     container_io::Pipe,
     container_log::{Line, Logger},
     journal::{self, Entry, Priority, Wait},
+    mutex::lock,
 };
 use anyhow::{Context, Result, bail};
 use std::{
     io::{self, ErrorKind},
     path::Path,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -34,12 +35,36 @@ struct Shared {
     /// Whether the last send failed, so that a journal which is unavailable
     /// gets reported once and not for every chunk of output.
     failing: AtomicBool,
+    /// When the lines which last waited for the journal did not go out in
+    /// time. The following chunks drop what the journal does not take right
+    /// away instead of waiting as well, for at least another
+    /// `CHUNK_TIMEOUT` and after that as long as it takes nothing, like a
+    /// stalled one. Waiting for every chunk would slow down the reading of
+    /// the output to about one per `CHUNK_TIMEOUT`, which the other log
+    /// drivers and the container, blocked on a full pipe, would wait for.
+    /// This way a journal which does not keep up holds it back by about half
+    /// at most, and one which stalled not at all.
+    timed_out: Mutex<Option<Instant>>,
     /// A temporary socket instead of the one of journald.
     #[cfg(test)]
     socket: Option<std::path::PathBuf>,
 }
 
 impl Shared {
+    /// Whether the lines which the journal did not take right away get
+    /// dropped instead of waiting for it, after `sent` lines went out
+    /// without waiting, see [`Shared::timed_out`].
+    fn skip_wait(&self, sent: usize) -> bool {
+        let mut timed_out = lock(&self.timed_out);
+        match *timed_out {
+            Some(at) if sent == 0 || at.elapsed() < CHUNK_TIMEOUT => true,
+            _ => {
+                *timed_out = None;
+                false
+            }
+        }
+    }
+
     fn socket(&self) -> &Path {
         #[cfg(test)]
         if let Some(socket) = &self.socket {
@@ -120,6 +145,7 @@ impl JournaldLogger {
             shared: Arc::new(Shared {
                 fields,
                 failing: AtomicBool::new(false),
+                timed_out: Mutex::new(None),
                 #[cfg(test)]
                 socket: None,
             }),
@@ -171,6 +197,7 @@ impl JournaldLogger {
                 && Instant::now() >= deadline
             {
                 failed += lines.len() - i;
+                *lock(&shared.timed_out) = Some(Instant::now());
                 last_error = Some(io::Error::new(
                     ErrorKind::TimedOut,
                     format!("journal did not take the chunk within {CHUNK_TIMEOUT:?}"),
@@ -188,8 +215,12 @@ impl JournaldLogger {
                 handled = i;
                 break;
             }
-            let rest = journal::unavailable(&e) || e.kind() == ErrorKind::TimedOut;
+            let timed_out = e.kind() == ErrorKind::TimedOut;
+            let rest = timed_out || journal::unavailable(&e);
             last_error = Some(e);
+            if timed_out {
+                *lock(&shared.timed_out) = Some(Instant::now());
+            }
             if rest {
                 failed += lines.len() - i;
                 break;
@@ -224,13 +255,22 @@ impl Logger for JournaldLogger {
 
     /// A journal which keeps up takes the lines right away. The ones it does
     /// not take are sent from a single blocking task, which waits for it a
-    /// bounded time, instead of one per line. The lines which borrow the
-    /// chunk get copied for it, the others share their buffer.
+    /// bounded time, instead of one per line, unless the last wait timed
+    /// out, see [`Shared::timed_out`]. The lines which borrow the chunk get
+    /// copied for it, the others share their buffer.
     async fn write_lines(&mut self, pipe: Pipe, lines: &[Line<'_>]) -> Result<()> {
         let sent = Self::send(&self.shared, pipe, lines, Wait::Never);
         let Some(rest) = lines.get(sent..).filter(|rest| !rest.is_empty()) else {
             return Ok(());
         };
+        if self.shared.skip_wait(sent) {
+            // The timeout got logged already, see `Shared::failing`.
+            debug!(
+                "Unable to write {} lines to the journal: it did not take the last ones in time",
+                rest.len()
+            );
+            return Ok(());
+        }
         let shared = self.shared.clone();
         let rest: Vec<_> = rest.iter().cloned().map(Line::into_owned).collect();
         // From when a thread of the blocking pool took it, a busy pool must

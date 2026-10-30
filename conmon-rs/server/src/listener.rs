@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use nix::sys::{
-    socket::{AddressFamily, SockFlag, SockType, socket},
+    socket::{AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, listen, socket},
     stat::{Mode, fchmod},
 };
 use std::{
@@ -88,6 +88,15 @@ pub fn private_socket(typ: SockType) -> io::Result<OwnedFd> {
     Ok(fd)
 }
 
+/// Listen on a socket at `path` which only its owner can connect to, see
+/// [`private_socket`].
+pub fn listen_private(path: &Path, typ: SockType) -> io::Result<OwnedFd> {
+    let fd = private_socket(typ)?;
+    bind(fd.as_raw_fd(), &UnixAddr::new(path)?)?;
+    listen(&fd, Backlog::MAXCONN)?;
+    Ok(fd)
+}
+
 /// Bind a listener with `bind` at a socket path whatever its length, see
 /// [`shorten_path`]. The parent directory gets created if it does not exist.
 pub fn bind_long_path<L>(path: &Path, bind: impl FnOnce(PathBuf) -> io::Result<L>) -> Result<L> {
@@ -147,7 +156,6 @@ fn split_socket_path(path: &Path) -> Result<(&Path, &OsStr)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nix::sys::socket::{UnixAddr, bind};
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
 
@@ -193,6 +201,18 @@ mod tests {
 
         // A path in use fails.
         assert!(bind_long_path(&path, UnixListener::bind).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn listen_private_binds_private_listeners() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("socket");
+        let fd = bind_long_path(&path, |path| listen_private(&path, SockType::Stream))?;
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o077, 0);
+        let listener = UnixListener::from_std(fd.into())?;
+        let _client = tokio::net::UnixStream::connect(&path).await?;
+        listener.accept().await?;
         Ok(())
     }
 

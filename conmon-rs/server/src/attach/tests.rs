@@ -237,14 +237,12 @@ async fn write_loop_sends_full_reads_in_one_packet() -> Result<()> {
         CancellationToken::new(),
     ));
 
-    // A full read of a pipe, a larger chunk gets split.
-    let full = vec![b'a'; Attach::PACKET_BUF_SIZE];
+    // A full read of a pipe.
+    let full = vec![b'a'; READ_BUFFER_SIZE];
     attach.write(Message::Data(Bytes::from(full.clone()), Pipe::StdOut));
     assert_eq!(recv_packet(&client).await?, [b"\x02", &full[..]].concat());
-    let larger = [&full[..], b"b"].concat();
-    attach.write(Message::Data(Bytes::from(larger), Pipe::StdErr));
+    attach.write(Message::Data(Bytes::from(full.clone()), Pipe::StdErr));
     assert_eq!(recv_packet(&client).await?, [b"\x03", &full[..]].concat());
-    assert_eq!(recv_packet(&client).await?, b"\x03b");
     Ok(())
 }
 

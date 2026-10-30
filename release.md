@@ -6,15 +6,20 @@ files it lists, the `version` in the `[workspace.package]` section of
 [Cargo.toml](Cargo.toml) and the `Version` in
 [rpm/conmon-rs.spec](rpm/conmon-rs.spec). The PR also runs
 `cargo update --workspace` to update [Cargo.lock](Cargo.lock) and replaces
-"unreleased" with the version in [usage.md](usage.md), the Go documentation in
+"unreleased" with `vX.Y.Z`, with the `v` like all markers of released
+versions, in [usage.md](usage.md), the Go documentation in
 [pkg/client](pkg/client) and the comments of
 [conmon-rs/server/proto/conmon.capnp](conmon-rs/server/proto/conmon.capnp).
-`make verify-dependencies verify-spec verify-unreleased` has to pass. The
-latter fails as long as no tag of the crate version exists and
+It then runs `make prettier`, as some markers sit in padded tables of
+[usage.md](usage.md).
+`make verify-dependencies verify-spec verify-prettier verify-unreleased` has
+to pass. The latter fails as long as no tag of the crate version exists and
 `git grep -in unreleased -- usage.md pkg/client conmon-rs/server/proto` prints
 anything, so the ci workflow fails the PR if it misses one, and any other PR
 which adds one before the tag got pushed. Such a PR waits for the tag and
-reruns its checks.
+reruns its checks. The release workflow refuses a tag whose sources still have
+markers. Tags cannot be moved, so the next patch version gets released from a
+commit without them then.
 
 After that PR got merged, push an annotated tag for its merge commit with git:
 
@@ -113,6 +118,13 @@ update the package, run in an environment with access to it:
 > git push
 > rhpkg build
 ```
+
+`spectool -g` downloads the `Source0` of the spec, the automatic GitHub
+archive `conmon-rs-X.Y.Z.tar.gz` with the top directory `conmon-rs-X.Y.Z`,
+not the tarball of the release, `conmonrs-vX.Y.Z.tar.gz` with the prefix
+`conmonrs-vX.Y.Z/`. Both have the same content, but their names, prefixes and
+checksums differ, so the checksums of the release do not verify the archive
+which `rhpkg new-sources` uploads.
 
 ## Vulnerabilities and VEX statements
 

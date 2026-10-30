@@ -30,8 +30,9 @@ type CreateContainerConfig struct {
 	// ExitPaths is a slice of paths to write the exit statuses. Each file
 	// gets the exit code of the container as decimal text once it exited,
 	// 128 plus the number of the signal which killed it, like a shell
-	// reports it. The paths have to be absolute, servers since v1.2.1
-	// reject other ones.
+	// reports it, also for real-time signals since v1.2.2, which gave
+	// -1 before. The paths have to be absolute, servers since v1.2.1 reject
+	// other ones.
 	ExitPaths []string
 
 	// OOMExitPaths is a slice of files that should be created if the given
@@ -78,9 +79,11 @@ type CreateContainerConfig struct {
 	LeakFDs []RemoteFD
 
 	// SdNotifySocket is the path of the host sd_notify socket, usually the
-	// NOTIFY_SOCKET of systemd. If set, the server binds
-	// <BundlePath>/notify/notify.sock before it runs the runtime and relays
-	// the messages sent there to the host socket until the container exits.
+	// NOTIFY_SOCKET of systemd: an absolute path, or @name for an abstract
+	// socket. Since v1.2.2, a relative path gets rejected. If set, the
+	// server binds <BundlePath>/notify/notify.sock before it runs the
+	// runtime and relays the messages sent there to the host socket until
+	// the container exits.
 	// Like conmon, it only passes the assignments which tell the state of a
 	// service, like READY=1 or WATCHDOG=1, the sdnotifySocket field of
 	// conmon.capnp in the repository lists them. The caller mounts the
@@ -302,7 +305,8 @@ type ExecSyncConfig struct {
 // ExecContainerResult is the result for calling the ExecSyncContainer method.
 type ExecContainerResult struct {
 	// ExitCode specifies the returned exit status, 128 plus the number of
-	// the signal which killed the command, like a shell reports it. It is
+	// the signal which killed the command, like a shell reports it, also
+	// for real-time signals since v1.2.2, which gave -1 before. It is
 	// ExecExitCodeNotStarted if the server could not start the command,
 	// ExecExitCodeTimedOut if it timed out, and -1 if the server could not
 	// tell how the command ended.

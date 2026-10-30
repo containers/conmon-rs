@@ -53,6 +53,11 @@ fn dead_pause_process_is_noticed() -> Result<()> {
     };
     assert!(pause(None).is_alive());
 
+    // An init which the orphan sweep reaped before it was opened.
+    let reaped = pause(None);
+    reaped.exited.store(true, Ordering::SeqCst);
+    assert!(!reaped.is_alive());
+
     let mut child = Guarded::spawn(StdCommand::new("sleep").arg("60"))?;
     let running = pause(Some(Process::open(child_pid(child.0.id())?)));
     assert!(running.is_alive());

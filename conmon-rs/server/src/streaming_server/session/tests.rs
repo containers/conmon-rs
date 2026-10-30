@@ -179,15 +179,7 @@ async fn too_large_sessions_end_without_the_idle_timeout() -> Result<()> {
 
     // Then it sends a message which is too large, which fails the session.
     let (_io, child, _token) = attach_child(false)?;
-    let session = Session::Attach(AttachSession {
-        container_id: "id".into(),
-        child,
-        stdin: false,
-        stdout: true,
-        stderr: false,
-        stop_after_stdin_eof: false,
-        idle_timeout,
-    });
+    let session = Session::Attach(attach_config(child, false, false, idle_timeout));
     let (client_rx, _senders) = ClientRx::idle();
     client_rx.too_large.cancel();
 
@@ -382,10 +374,11 @@ async fn idle_timeouts_of_stuck_websocket_sessions_send_one_status() -> Result<(
 #[tokio::test]
 async fn resize_without_terminal_is_ignored() -> Result<()> {
     let io = SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?);
-    SessionInput::try_resize(br#"{"Width":80,"Height":24}"#, &io)?;
+    let resize = |width, height| io.try_resize(width, height);
+    SessionInput::try_resize(br#"{"Width":80,"Height":24}"#, resize)?;
 
     // Garbage is still an error.
-    assert!(SessionInput::try_resize(b"x", &io).is_err());
+    assert!(SessionInput::try_resize(b"x", resize).is_err());
     Ok(())
 }
 
@@ -423,18 +416,22 @@ fn resize_events_match_fields_like_go() -> Result<()> {
 
 #[tokio::test]
 async fn resize_events_without_a_size_are_ignored() -> Result<()> {
-    // A terminal which the runtime did not connect fails every resize
-    // which reaches it.
+    // A terminal which the runtime did not connect keeps the size which
+    // reaches it for the connection.
     let (io, _child, _token) = attach_child(true)?;
-    assert!(SessionInput::try_resize(br#"{"width":80,"height":24}"#, &io).is_err());
+    let resize = |width, height| io.try_resize(width, height);
+    let pending = || io.terminal().and_then(|t| t.resizer().pending());
     for json in [
         r#"{"width":0,"height":0}"#,
         r#"{"width":100}"#,
         "{}",
         "null",
     ] {
-        SessionInput::try_resize(json.as_bytes(), &io)?;
+        SessionInput::try_resize(json.as_bytes(), resize)?;
     }
+    assert_eq!(pending(), None);
+    SessionInput::try_resize(br#"{"width":80,"height":24}"#, resize)?;
+    assert_eq!(pending(), Some((80, 24)));
     Ok(())
 }
 

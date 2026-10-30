@@ -7,8 +7,10 @@ use nix::{
     fcntl::{FcntlArg, SealFlag, fcntl},
     sys::{
         memfd::{MFdFlags, memfd_create},
+        prctl,
         socket::{ControlMessage, MsgFlags, UnixAddr, sendmsg, setsockopt, sockopt},
     },
+    unistd::{Pid, getpid, gettid},
 };
 use std::{
     fmt::Display,
@@ -21,7 +23,6 @@ use std::{
     panic::{self, PanicHookInfo},
     path::Path,
     sync::OnceLock,
-    thread,
     time::{Duration, Instant},
 };
 use tracing::{Level, Metadata};
@@ -336,17 +337,51 @@ pub fn log_panics() {
     let default_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info: &PanicHookInfo<'_>| {
         // Nothing to report it to if this fails, the default hook follows.
-        let _ = log_panic_at(Path::new(SOCKET_PATH), thread::current().name(), info);
+        let _ = log_panic_at(
+            Path::new(SOCKET_PATH),
+            thread_name().as_deref(),
+            gettid(),
+            info,
+        );
         default_hook(info);
     }));
 }
 
+/// The name of the calling thread, without `thread::current`, which panics
+/// once the local data of the thread is gone, like in a destructor of it
+/// while the thread exits. A panic in the hook aborts without any message.
+/// The kernel keeps the names of the named threads, at most 15 bytes of
+/// them, the others have the one of the thread which started them. The
+/// main thread has the name of the process there, it gets `main` like
+/// from the default hook.
+fn thread_name() -> Option<String> {
+    if gettid() == getpid() {
+        return Some("main".into());
+    }
+    let name = prctl::get_name().ok()?;
+    Some(name.to_string_lossy().into_owned())
+}
+
 /// Send the message of a panic to the journal socket at a path, with the
-/// name of its thread and the location the `Display` of the
-/// `PanicHookInfo` includes.
-fn log_panic_at(path: &Path, thread: Option<&str>, info: &dyn Display) -> io::Result<()> {
-    let message = format!("thread '{}' {info}", thread.unwrap_or("<unnamed>"));
-    Journal::error().send_at(path, message.as_bytes())
+/// name and the ID of its thread like the default hook, and the location
+/// the `Display` of the `PanicHookInfo` includes. The process aborts right
+/// after, so the message waits for a journal which does not take it right
+/// away, on a socket of its own, as the send buffer of the server logs may
+/// be full. Without one, like at the limit of open files, which may be
+/// what panicked, it goes to the socket of the server logs without
+/// waiting.
+fn log_panic_at(path: &Path, thread: Option<&str>, id: Pid, info: &dyn Display) -> io::Result<()> {
+    let message = format!("thread '{}' ({id}) {info}", thread.unwrap_or("<unnamed>"));
+    let wait = Wait::Bounded(Instant::now() + SEND_TIMEOUT);
+    match new_socket(wait) {
+        Ok(socket) => send_on(
+            &socket,
+            wait,
+            path,
+            &Journal::error().entry(message.as_bytes()),
+        ),
+        Err(_) => Journal::error().send_at(path, message.as_bytes()),
+    }
 }
 
 impl Write for Journal {

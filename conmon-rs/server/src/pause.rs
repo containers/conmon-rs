@@ -2,6 +2,7 @@
 //! pod shares, bind mounted below the base path so that they outlive it.
 
 use crate::{
+    capnp_util,
     child_reaper::RuntimeOutput,
     conmon_capnp::conmon,
     process::{Process, child_pid, read_pid_file, wait_for_exit_code},
@@ -164,11 +165,10 @@ impl Pause {
     }
 
     /// Whether the pause process holding the PID namespace still runs, true
-    /// without one. An init which exited but was not reaped yet does not.
+    /// without one. An init which exited but was not reaped yet does not,
+    /// neither does one which got reaped before it could be opened.
     fn is_alive(&self) -> bool {
-        self.process
-            .as_ref()
-            .is_none_or(|process| !self.exited.load(Ordering::SeqCst) && process.is_running())
+        !self.exited.load(Ordering::SeqCst) && self.process.as_ref().is_none_or(Process::is_running)
     }
 
     /// How long before the deadline of the shutdown it kills the pause
@@ -196,9 +196,7 @@ impl Pause {
     /// file name, and a relative base path would depend on the working
     /// directory of the server.
     fn validate_location(base_path: &Path, pod_id: &str) -> Result<()> {
-        if !base_path.is_absolute() {
-            bail!("base path {} is not absolute", base_path.display())
-        }
+        capnp_util::check_absolute("base path", base_path)?;
         if pod_id.is_empty() {
             bail!("no pod ID provided")
         }
@@ -457,9 +455,19 @@ impl Pause {
             };
             info!("Pause PID is: {pid}");
             // Before the reaper may take the exit status, the PID is only
-            // reliable until then.
-            pause.process = Some(Process::open(pid));
-            Self::spawn_reaper(pid, pause.exited.clone());
+            // reliable until then. The orphan sweep may have taken it
+            // already if the init died right after the setup, the instance
+            // is not alive then and the PID may belong to another child.
+            // This relies on the pause process having waited for its child,
+            // whose exit makes the init a child of the server. If that wait
+            // failed, the init may still be a grandchild and counts as gone.
+            if let Some(process) = Process::open_child(pid) {
+                pause.process = Some(process);
+                Self::spawn_reaper(pid, pause.exited.clone());
+            } else {
+                warn!("Pause PID {pid} exited already, the PID namespace is gone");
+                pause.exited.store(true, Ordering::SeqCst);
+            }
         } else {
             info!("No PID namespace requested, pause process exited after binding");
         }

@@ -37,7 +37,8 @@ const (
 type LogDriver string
 
 const (
-	// LogDriverNone disables logging.
+	// LogDriverNone disables logging. Since v1.2.2, the message of a
+	// panic still goes to the journal.
 	LogDriverNone LogDriver = "none"
 
 	// LogDriverStdout is the log driver printing to stdio.

@@ -42,13 +42,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span, debug, debug_span, error};
 
 macro_rules! pry_err {
-    ($x:expr_2021) => {
+    ($x:expr) => {
         pry!(capnp_err!($x))
     };
 }
 
 macro_rules! capnp_err {
-    ($x:expr_2021) => {
+    ($x:expr) => {
         $x.map_err(|e| Error::failed(format!("{e:#}")))
     };
 }
@@ -82,7 +82,7 @@ fn set_parent_context(
 /// Enter the root span of a request for the rest of the handler, with the
 /// parent context the client sent.
 macro_rules! enter_request {
-    ($req:expr_2021, $name:literal $(, $container_id:expr_2021)?) => {
+    ($req:expr, $name:literal $(, $container_id:expr)?) => {
         let span = debug_span!(
             $name,
             $(container_id = $container_id,)?
@@ -306,6 +306,14 @@ impl conmon::Server for Server {
         let notify_socket = if sdnotify_socket.is_empty() {
             None
         } else {
+            // A relative path would resolve against the root directory the
+            // server changed into, an abstract address has no path.
+            if !sdnotify_socket.starts_with('@') {
+                pry_err!(capnp_util::check_absolute(
+                    "sdnotify socket",
+                    Path::new(sdnotify_socket)
+                ));
+            }
             Some(pry_err!(NotifySocket::bind(bundle_path, sdnotify_socket)))
         };
 

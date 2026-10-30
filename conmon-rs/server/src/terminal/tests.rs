@@ -21,8 +21,24 @@ async fn send_fd(stream: &UnixStream, data: &[u8], fd: BorrowedFd<'_>) -> Result
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
+/// The width and height of a terminal.
 #[expect(unsafe_code, reason = "the TIOCGWINSZ ioctl")]
+fn size(fd: BorrowedFd<'_>) -> Result<(u16, u16)> {
+    let mut size = winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCGWINSZ writes a `winsize` to the pointer, which points
+    // to a live local of exactly that type.
+    match unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCGWINSZ, &mut size) } {
+        0 => Ok((size.ws_col, size.ws_row)),
+        _ => Err(io::Error::last_os_error().into()),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn new_success() -> Result<()> {
     let mut sut = Terminal::new()?;
     assert!(sut.path().exists());
@@ -34,34 +50,57 @@ async fn new_success() -> Result<()> {
 
     let res = pty::openpty(None, None)?;
 
-    let stream = UnixStream::connect(sut.path()).await?;
+    let mut stream = UnixStream::connect(sut.path()).await?;
     send_fd(&stream, b"test", res.master.as_fd()).await?;
 
     let _io = sut.connect().await?;
+    // The listener removes the socket after handing over the terminal,
+    // before it shuts down the stream, and resets it once dropped, as it
+    // did not read the data.
+    match tokio::io::AsyncReadExt::read(&mut stream, &mut [0; 1]).await {
+        Ok(0) => {}
+        Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {}
+        res => anyhow::bail!("stream did not end: {res:?}"),
+    }
     assert!(!sut.path().exists());
 
     // The received terminal does not leak into children.
-    let tty = sut.tty.as_ref().and_then(Weak::upgrade).context("no tty")?;
+    let tty = sut.tty().context("no tty")?;
     let flags = FdFlag::from_bits_truncate(fcntl::fcntl(&*tty, FcntlArg::F_GETFD)?);
     assert!(flags.contains(FdFlag::FD_CLOEXEC));
 
     sut.resize(120, 40)?;
-    let mut size = winsize {
-        ws_row: 0,
-        ws_col: 0,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    // SAFETY: TIOCGWINSZ writes a `winsize` to the pointer, which points
-    // to a live local of exactly that type.
-    let ret = unsafe { libc::ioctl(res.slave.as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
-    assert_eq!(ret, 0);
-    assert_eq!((size.ws_col, size.ws_row), (120, 40));
+    assert_eq!(size(res.slave.as_fd())?, (120, 40));
 
     // Write to the slave
     let mut file: std::fs::File = res.slave.into();
     file.write_all(b"test")?;
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn size_before_the_connection_gets_applied() -> Result<()> {
+    let mut sut = Terminal::new()?;
+    // Like a client sending its size while the runtime starts the process,
+    // through a handle taken before, the latest size wins.
+    let resizer = sut.resizer();
+    resizer.resize(80, 24)?;
+    resizer.resize(132, 50)?;
+    assert_eq!(sut.resizer.pending(), Some((132, 50)));
+
+    let res = pty::openpty(None, None)?;
+    assert_eq!(size(res.slave.as_fd())?, (0, 0));
+    let stream = UnixStream::connect(sut.path()).await?;
+    send_fd(&stream, b"x", res.master.as_fd()).await?;
+    let io = sut.connect().await?;
+    assert_eq!(size(res.slave.as_fd())?, (132, 50));
+
+    // Later resizes go to the terminal right away, until it is closed.
+    resizer.resize(100, 30)?;
+    assert_eq!(size(res.slave.as_fd())?, (100, 30));
+    drop(io);
+    assert!(resizer.resize(100, 30).is_err());
     Ok(())
 }
 

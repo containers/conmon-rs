@@ -124,19 +124,10 @@ func (c *ConmonClient) connectRunningServer(ctx context.Context) (bool, error) {
 		// The backlog of the socket is full, the server does not accept
 		// the connections it got.
 		if errors.Is(err, syscall.EAGAIN) {
-			return false, fmt.Errorf(
-				"%w: server on %s: %w",
-				ErrServerNotResponding,
-				c.socket(),
-				err,
-			)
+			return false, fmt.Errorf("%w: %w", ErrServerNotResponding, err)
 		}
 
-		return false, fmt.Errorf(
-			"dial server socket %s, not starting another server: %w",
-			c.socket(),
-			err,
-		)
+		return false, fmt.Errorf("not starting another server: %w", err)
 	}
 
 	// Known before the probe, which may not get an answer.
@@ -760,13 +751,7 @@ func (c *ConmonClient) pickUpReplacement(ctx context.Context) {
 
 	conn := newRPCConn(ctx, socketConn, c.logger)
 
-	defer func() {
-		if closeErr := conn.conn.Close(); closeErr != nil {
-			c.logger.WithError(closeErr).Debug("Unable to close RPC connection")
-		}
-
-		conn.client.Release()
-	}()
+	defer conn.close(c.logger)
 
 	// The recorded server exited, an answering one replaced it, also one
 	// which got the same PID, which the new pidfd tells apart.

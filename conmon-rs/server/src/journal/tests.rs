@@ -1,4 +1,5 @@
 use super::{testing::decode, *};
+use nix::sys::stat::{self, Mode, SFlag};
 
 #[test]
 fn priorities_follow_the_level() {
@@ -250,7 +251,10 @@ fn writer_ignores_a_missing_journal() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let missing = dir.path().join("missing");
     let stale = dir.path().join("stale");
-    drop(UnixDatagram::bind(&stale)?);
+    // A socket inode which was never bound, like the one of a journald
+    // which exited. No descriptor of it exists, which a child forked by a
+    // parallel test could hold.
+    stat::mknod(&stale, SFlag::S_IFSOCK, Mode::S_IRUSR | Mode::S_IWUSR, 0)?;
 
     let entry = Entry::new(Priority::Info, "lost");
     for path in [&missing, &stale] {
@@ -261,15 +265,16 @@ fn writer_ignores_a_missing_journal() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A panic reaches the journal as an error with its location, also with
-/// a message which spans several lines.
+/// A panic reaches the journal as an error with its thread and location,
+/// also with a message which spans several lines.
 #[test]
 fn panics_get_logged() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("socket");
     let receiver = UnixDatagram::bind(&path)?;
+    let id = Pid::from_raw(42);
 
-    log_panic_at(&path, Some("main"), &"panicked at src/a.rs:1:2:\nboom")?;
+    log_panic_at(&path, Some("main"), id, &"panicked at src/a.rs:1:2:\nboom")?;
     let (data, _) = receive(&receiver)?;
     assert_eq!(
         decode(&data),
@@ -277,20 +282,62 @@ fn panics_get_logged() -> anyhow::Result<()> {
             ("PRIORITY".into(), b"3".to_vec()),
             (
                 "MESSAGE".into(),
-                b"thread 'main' panicked at src/a.rs:1:2:\nboom".to_vec()
+                b"thread 'main' (42) panicked at src/a.rs:1:2:\nboom".to_vec()
             ),
             ("SYSLOG_IDENTIFIER".into(), IDENTIFIER.into())
         ]
     );
 
-    log_panic_at(&path, None, &"panicked at src/a.rs:1:2:")?;
+    log_panic_at(&path, None, id, &"panicked at src/a.rs:1:2:")?;
     let (data, _) = receive(&receiver)?;
     assert_eq!(
         decode(&data)[1],
         (
             "MESSAGE".into(),
-            b"thread '<unnamed>' panicked at src/a.rs:1:2:".to_vec()
+            b"thread '<unnamed>' (42) panicked at src/a.rs:1:2:".to_vec()
         )
+    );
+    Ok(())
+}
+
+/// The thread name comes from the kernel, which keeps the start of it.
+#[test]
+fn panics_name_their_thread() -> anyhow::Result<()> {
+    let name = std::thread::Builder::new()
+        .name("a-long-thread-name".into())
+        .spawn(thread_name)?
+        .join()
+        .map_err(|_| anyhow::anyhow!("thread panicked"))?;
+    assert_eq!(name.as_deref(), Some("a-long-thread-n"));
+    Ok(())
+}
+
+/// The message of a panic waits for a journal which does not take it
+/// right away, the process aborts after it.
+#[test]
+fn panics_wait_for_a_busy_journal() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("socket");
+    let receiver = UnixDatagram::bind(&path)?;
+    let error = fill(Wait::Never, &path);
+    assert_eq!(error.kind(), ErrorKind::WouldBlock);
+
+    // The journal catches up a little later.
+    let reader = std::thread::spawn(move || -> anyhow::Result<bool> {
+        std::thread::sleep(Duration::from_millis(100));
+        receiver.set_read_timeout(Some(Duration::from_secs(5)))?;
+        loop {
+            let (data, _) = receive(&receiver)?;
+            if decode(&data)[1].1.ends_with(b"late") {
+                return Ok(true);
+            }
+        }
+    });
+    log_panic_at(&path, None, gettid(), &"late")?;
+    assert!(
+        reader
+            .join()
+            .map_err(|_| anyhow::anyhow!("reader panicked"))??
     );
     Ok(())
 }

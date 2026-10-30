@@ -8,10 +8,7 @@ use tokio::{process::Command, task::LocalSet, time};
 
 #[tokio::test]
 async fn too_many_streaming_sessions_fail_with_the_bare_message() -> anyhow::Result<()> {
-    let Some(config) = Config::parse_for_test::<_, &str>([]) else {
-        return Ok(());
-    };
-    let config = Arc::new(config);
+    let config = Arc::new(Config::parse_for_test::<_, &str>([]));
     let (_, child, _) = ReapableChild::from_child(Child {
         id: "id".into(),
         kind: ChildKind::Container,
@@ -96,9 +93,7 @@ async fn failure<T>(response: impl Future<Output = capnp::Result<T>>) -> String 
 
 #[tokio::test]
 async fn requests_get_validated() -> anyhow::Result<()> {
-    let Some(config) = Config::parse_for_test::<_, &str>([]) else {
-        return Ok(());
-    };
+    let config = Config::parse_for_test::<_, &str>([]);
     // A local capability, the requests need no socket.
     let client: conmon::Client = capnp_rpc::new_client(Server::with_config(config));
 
@@ -121,6 +116,16 @@ async fn requests_get_validated() -> anyhow::Result<()> {
     assert_eq!(
         failure(create("--help", "/bundle", "/exit")).await,
         r#"invalid container ID "--help""#
+    );
+
+    let mut request = client.create_container_request();
+    let mut req = request.get().init_request();
+    req.set_id("id");
+    req.set_bundle_path("/bundle");
+    req.set_sdnotify_socket("notify.sock");
+    assert_eq!(
+        failure(request.send().promise).await,
+        r#"sdnotify socket "notify.sock" is not absolute"#
     );
 
     let mut request = client.attach_container_request();
@@ -151,18 +156,16 @@ async fn requests_get_validated() -> anyhow::Result<()> {
 
 /// Run an exec through the RPC with a runtime which runs `script`, with
 /// a timeout of a second.
-async fn exec_sync_with_runtime(script: &str) -> anyhow::Result<Option<ExecSyncOutput>> {
+async fn exec_sync_with_runtime(script: &str) -> anyhow::Result<ExecSyncOutput> {
     let dir = tempfile::tempdir()?;
     let runtime = dir.path().join("runtime");
     crate::test_util::write_script(&runtime, script)?;
-    let Some(config) = Config::parse_for_test([
+    let config = Config::parse_for_test([
         "--runtime",
         runtime.to_str().context("runtime")?,
         "--runtime-dir",
         dir.path().to_str().context("runtime dir")?,
-    ]) else {
-        return Ok(None);
-    };
+    ]);
 
     let client: conmon::Client = capnp_rpc::new_client(Server::with_config(config));
     let mut request = client.exec_sync_container_request();
@@ -172,12 +175,12 @@ async fn exec_sync_with_runtime(script: &str) -> anyhow::Result<Option<ExecSyncO
     req.init_command(1).set(0, "true");
     let reply = request.send().promise.await?;
     let resp = reply.get()?.get_response()?;
-    Ok(Some(ExecSyncOutput {
+    Ok(ExecSyncOutput {
         stdout: resp.get_stdout()?.to_vec(),
         stderr: resp.get_stderr()?.to_vec(),
         exit_code: resp.get_exit_code(),
         timed_out: resp.get_timed_out(),
-    }))
+    })
 }
 
 #[tokio::test]
@@ -185,18 +188,14 @@ async fn exec_sync_reports_runtimes_which_do_not_start_the_process() -> anyhow::
     LocalSet::new()
         .run_until(async {
             // The runtime fails, its stderr tells why.
-            let Some(failed) = exec_sync_with_runtime("echo boom >&2; exit 1").await? else {
-                return Ok(());
-            };
+            let failed = exec_sync_with_runtime("echo boom >&2; exit 1").await?;
             assert_eq!(failed.exit_code, EXIT_CODE_NOT_STARTED);
             assert!(!failed.timed_out);
             let stderr = String::from_utf8_lossy(&failed.stderr);
             assert!(stderr.contains("boom"), "{stderr}");
 
             // The runtime hangs beyond the timeout of the exec.
-            let hung = exec_sync_with_runtime("exec sleep 60")
-                .await?
-                .context("output")?;
+            let hung = exec_sync_with_runtime("exec sleep 60").await?;
             assert_eq!(hung.exit_code, EXIT_CODE_TIMED_OUT);
             assert!(hung.timed_out);
             let stderr = String::from_utf8_lossy(&hung.stderr);

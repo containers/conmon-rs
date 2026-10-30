@@ -171,14 +171,12 @@ async fn backend_failures_get_logged() -> Result<()> {
         .with_target(false)
         .set_default();
     let dir = tempfile::tempdir()?;
-    let Some(config) = Config::parse_for_test([
+    let config = Config::parse_for_test([
         "--runtime",
         "/bin/true",
         "--runtime-dir",
         dir.path().to_str().context("runtime dir")?,
-    ]) else {
-        return Ok(());
-    };
+    ]);
     // Taken, like by another server.
     std::fs::create_dir(config.socket())?;
     let (_shutdown_tx, shutdown_rx) = oneshot::channel();

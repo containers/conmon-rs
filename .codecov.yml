@@ -1,10 +1,14 @@
 ---
 codecov:
   # Report once all CI jobs finished, with the unit and the integration
-  # uploads in, also when a job failed.
+  # uploads in. wait_for_ci alone does not hold the status back until the
+  # second upload is in. The integration job uploads also when its tests
+  # failed, failing unit tests upload nothing, which leaves the PR without a
+  # coverage status and comment.
   require_ci_to_pass: false
   notify:
     wait_for_ci: true
+    after_n_builds: 2
 
 coverage:
   precision: 2
@@ -25,6 +29,7 @@ coverage:
 # instead of an older result.
 
 comment:
+  after_n_builds: 2
   layout: "header, diff"
   behavior: default
   require_changes: false

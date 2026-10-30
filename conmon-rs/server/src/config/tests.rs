@@ -7,15 +7,11 @@ use std::{
 };
 
 fn config(args: &[&str]) -> Config {
-    Config::parse_for_test(args.iter().copied()).expect("environment checked")
+    Config::parse_for_test(args.iter().copied())
 }
 
 #[test]
 fn validate_requires_the_runtime_flags() {
-    if Config::parse_for_test::<_, &str>([]).is_none() {
-        return;
-    }
-
     let dir = tempfile::tempdir().expect("tempdir");
     let runtime = dir.path().join("runtime");
     std::fs::write(&runtime, "").expect("write runtime");
@@ -51,16 +47,14 @@ fn validate_requires_the_runtime_flags() {
 
 #[test]
 fn paths_get_absolute() -> Result<()> {
-    let Some(mut config) = Config::parse_for_test([
+    let mut config = Config::parse_for_test([
         "--runtime",
         "bin/runc",
         "--runtime-dir",
         "run",
         "--runtime-root",
         "/root",
-    ]) else {
-        return Ok(());
-    };
+    ]);
     config.make_absolute()?;
     let cwd = std::env::current_dir()?;
     assert_eq!(config.runtime(), cwd.join("bin/runc"));
@@ -73,9 +67,7 @@ fn paths_get_absolute() -> Result<()> {
 async fn prepare_keeps_the_sockets_of_a_running_server() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let runtime_dir = dir.path().to_str().context("utf8 path")?;
-    let Some(config) = Config::parse_for_test(["--runtime-dir", runtime_dir]) else {
-        return Ok(());
-    };
+    let config = Config::parse_for_test(["--runtime-dir", runtime_dir]);
 
     // Left behind by a server which is gone. A process which a parallel
     // test forks may hold it until it execs.
@@ -113,9 +105,7 @@ async fn prepare_keeps_the_sockets_of_a_running_server() -> Result<()> {
 
 #[test]
 fn validate_reports_each_check() {
-    let Some(base) = Config::parse_for_test::<_, &str>([]) else {
-        return;
-    };
+    let base = Config::parse_for_test::<_, &str>([]);
     let dir = tempfile::tempdir().expect("tempdir");
     let runtime = dir.path().join("runtime");
     std::fs::write(&runtime, "").expect("write runtime");

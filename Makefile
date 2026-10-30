@@ -263,7 +263,9 @@ verify-spec: ## Verify that the RPM spec version and cargo requirement match the
 # Once the version bump PR raised the crate version, nothing may be
 # "unreleased" any more until the tag exists, see release.md. The tag lives in
 # the upstream repository, a fork may not have it. git ls-remote exits with 2
-# if the tag does not exist, and with another error if it cannot tell.
+# if the tag does not exist, and with another error if it cannot tell, like
+# without network. That fails in CI, where GitHub sets CI, and only warns
+# locally so that make verify works offline.
 .PHONY: verify-unreleased
 verify-unreleased: ## Verify that nothing is "unreleased" if the crate version has no tag yet.
 	VERSION=$$($(CRATE_VERSION)) || exit ; \
@@ -271,12 +273,16 @@ verify-unreleased: ## Verify that nothing is "unreleased" if the crate version h
 	if [ "$$STATUS" = 2 ]; then \
 		STATUS=0 && git grep -in unreleased -- usage.md pkg/client conmon-rs/server/proto || STATUS=$$? ; \
 		if [ "$$STATUS" = 0 ]; then \
-			echo "v$$VERSION has no tag yet: the version bump PR replaces \"unreleased\" above with $$VERSION, other PRs wait for the tag and rerun" ; \
+			echo "v$$VERSION has no tag yet: the version bump PR replaces \"unreleased\" above with v$$VERSION and runs make prettier, other PRs wait for the tag and rerun" ; \
 			exit 1 ; \
 		elif [ "$$STATUS" != 1 ]; then \
 			exit "$$STATUS" ; \
 		fi ; \
 	elif [ "$$STATUS" != 0 ]; then \
+		if [ -z "$$CI" ]; then \
+			echo "Warning: cannot check for the tag v$$VERSION, skipping the check outside of CI" ; \
+			exit 0 ; \
+		fi ; \
 		echo "Cannot check for the tag v$$VERSION" ; \
 		exit "$$STATUS" ; \
 	fi

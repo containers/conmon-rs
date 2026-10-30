@@ -343,6 +343,12 @@ func TestCallWithoutServerMatchesErrServerUnreachable(t *testing.T) {
 	if !errors.Is(err, ErrServerUnreachable) || !errors.Is(err, syscall.ECONNREFUSED) {
 		t.Fatalf("got error %v, want %v and %v", err, ErrServerUnreachable, syscall.ECONNREFUSED)
 	}
+
+	// The dial goes through a /proc/self/fd alias of the directory, the
+	// error has to name the socket itself.
+	if !strings.Contains(err.Error(), "dial "+c.socket()+": ") {
+		t.Fatalf("got error %v, want it to name socket %s", err, c.socket())
+	}
 }
 
 func TestRPCLogger(t *testing.T) {

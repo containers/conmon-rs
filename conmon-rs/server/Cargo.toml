@@ -12,8 +12,8 @@ publish = false
 [dependencies]
 anyhow = { version = "1.0.104", default-features = false }
 async-channel = { version = "2.5.0", default-features = false, features = ["std"] }
-bytes = { workspace = true }
-capnp = { workspace = true }
+bytes = { version = "1.12.1", default-features = false }
+capnp = { version = "0.27.2", default-features = false }
 capnp-rpc = { version = "0.27.1", default-features = false }
 clap = { version = "4.6.7", default-features = false, features = ["derive", "env", "error-context", "help", "std", "usage"] }
 data-encoding = { version = "2.11.1", default-features = false, features = ["alloc"] }
@@ -31,7 +31,7 @@ opentelemetry-otlp = { version = "0.33.1", default-features = false, features = 
 percent-encoding = { version = "2.3.2", default-features = false, features = ["alloc"] }
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+tokio = { version = "1.54.1", default-features = false, features = ["fs", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 tokio-seqpacket = { version = "0.9.1", default-features = false }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 tokio-util = { version = "0.7.20", default-features = false, features = ["compat", "time"] }
@@ -56,10 +56,10 @@ fuzzing = ["tokio/test-util"]
 [dev-dependencies]
 tempfile = { version = "3.27.0", default-features = false }
 time = { version = "0.3.55", default-features = false, features = ["parsing"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "test-util"] }
 
 [build-dependencies]
-capnpc = { workspace = true }
+capnpc = { version = "0.27.0", default-features = false }
 
 [lints]
 workspace = true

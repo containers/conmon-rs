@@ -30,9 +30,8 @@ use tokio::{
 };
 
 /// A runtime which takes `delay` to start the process, which then
-/// writes its output, and its config, none without the config of a
-/// test.
-fn slow_runtime(dir: &Path, delay: &str) -> Result<Option<Config>> {
+/// writes its output, and its config.
+fn slow_runtime(dir: &Path, delay: &str) -> Result<Config> {
     let runtime = dir.join("runtime");
     crate::test_util::write_script(
         &runtime,
@@ -80,9 +79,7 @@ async fn exec_websocket(
 async fn slow_exec_starts_are_no_idleness() -> Result<()> {
     // The runtime takes longer than the idle timeout.
     let dir = tempfile::tempdir()?;
-    let Some(config) = slow_runtime(dir.path(), "1")? else {
-        return Ok(());
-    };
+    let config = slow_runtime(dir.path(), "1")?;
 
     LocalSet::new()
         .run_until(async {
@@ -110,9 +107,7 @@ async fn slow_exec_starts_are_no_idleness() -> Result<()> {
 async fn too_large_messages_fail_slow_exec_starts() -> Result<()> {
     // The runtime takes longer than the session waits for its end.
     let dir = tempfile::tempdir()?;
-    let Some(config) = slow_runtime(dir.path(), "4")? else {
-        return Ok(());
-    };
+    let config = slow_runtime(dir.path(), "4")?;
 
     LocalSet::new()
         .run_until(async {
@@ -159,7 +154,7 @@ async fn lost_exit_ends_the_session_and_kills_the_process() -> Result<()> {
     let stopped = attach.output_stopped().clone();
     let token = CancellationToken::new();
     let teardown = ExecTeardown {
-        stdio: Some(io.stdio()?),
+        stdio: io.stdio()?,
         _stop_output: attach.stop_output_on_exit(token.clone()),
         attach,
         token,
@@ -204,7 +199,7 @@ fn tear_down_without_kill(tty: bool) -> Result<(std::process::Child, SharedConta
     let attach = io.attach().clone();
     let token = CancellationToken::new();
     drop(ExecTeardown {
-        stdio: Some(io.stdio()?),
+        stdio: io.stdio()?,
         _stop_output: attach.stop_output_on_exit(token.clone()),
         attach: attach.clone(),
         token,
@@ -269,4 +264,35 @@ fn early_output_gets_split_into_frames() {
     );
     assert_eq!(frames.iter().flatten().copied().collect::<Vec<_>>(), data);
     assert!(StreamingServer::early_frames(vec![]).is_empty());
+}
+
+#[tokio::test]
+async fn terminal_gets_sizes_while_the_runtime_runs() -> Result<()> {
+    let terminal = crate::terminal::Terminal::new()?;
+    let resizer = terminal.resizer();
+    let (resize_tx, resize_rx) = tokio::sync::watch::channel(None);
+    // The runtime and the resizing share the task, a yield of the runtime
+    // lets the resizing take what changed.
+    let settle = || async {
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+    };
+    let run = async {
+        // Clients send a size without rows or columns before they know
+        // theirs.
+        resize_tx.send_replace(Some(Bytes::from_static(br#"{"Width":0,"Height":0}"#)));
+        settle().await;
+        assert_eq!(resizer.pending(), None);
+        resize_tx.send_replace(Some(Bytes::from_static(br#"{"Width":80,"Height":24}"#)));
+        settle().await;
+        assert_eq!(resizer.pending(), Some((80, 24)));
+        // A client which went away ends the resizing, not the runtime.
+        drop(resize_tx);
+        settle().await;
+        anyhow::Ok(1)
+    };
+    let output = StreamingServer::resizing(run, resize_rx, Some(terminal.resizer())).await?;
+    assert_eq!(output, 1);
+    Ok(())
 }

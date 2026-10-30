@@ -26,6 +26,7 @@ use nix::{
     sys::{
         prctl,
         signal::{Signal, kill},
+        socket::SockType,
         stat::Mode,
     },
     unistd::{ForkResult, Pid, chdir, dup2_stderr, dup2_stdin, dup2_stdout, fork},
@@ -234,6 +235,15 @@ impl Server {
                 ForkResult::Parent { child, .. } => self.exit_parent(child),
                 ForkResult::Child => self.redirect_stdio().map_err(|e| self.log_early(e))?,
             }
+            // The default hook prints the message of a panic to stderr,
+            // which goes nowhere now with a driver other than stdout. Also
+            // with `none`, the default of CRI-O: a panic aborts the server,
+            // its containers lose their monitor, and the message is the only
+            // clue. Without the fork, stderr is kept, under a systemd unit
+            // it is the journal already.
+            if self.config().log_driver() != LogDriver::Stdout {
+                journal::log_panics();
+            }
         }
 
         // Deliberately outside the `skip_fork` check above: the server outlives
@@ -436,15 +446,6 @@ impl Server {
     )]
     fn init_logging(&mut self) -> Result<()> {
         let level = LevelFilter::from(self.config().log_level());
-
-        // The default hook prints the message of a panic to stderr, which
-        // goes nowhere once forked with a driver other than stdout, see
-        // `Server::redirect_stdio`. Also with `none`, the default of CRI-O:
-        // a panic aborts the server, its containers lose their monitor, and
-        // the message is the only clue.
-        if self.config().log_driver() != LogDriver::Stdout {
-            journal::log_panics();
-        }
 
         #[cfg(feature = "tracing")]
         let telemetry_layer = if self.config().enable_tracing() {
@@ -685,8 +686,11 @@ impl Server {
         mut shutdown_rx: oneshot::Receiver<Result<()>>,
     ) -> Result<Result<()>> {
         let socket = self.config().socket();
-        let listener = listener::bind_long_path(&socket, UnixListener::bind)
-            .context(format!("bind socket {}", socket.display()))?;
+        let listener = listener::bind_long_path(&socket, |path| {
+            let fd = listener::listen_private(&path, SockType::Stream)?;
+            UnixListener::from_std(fd.into())
+        })
+        .context(format!("bind socket {}", socket.display()))?;
         let client: conmon::Client = capnp_rpc::new_client(self);
         let mut accept_errors = listener::AcceptErrors::default();
 

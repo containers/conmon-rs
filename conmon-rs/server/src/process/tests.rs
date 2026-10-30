@@ -170,6 +170,21 @@ fn process_signal_skips_reaped_child() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn open_child_checks_the_pid() -> Result<()> {
+    let mut child = Guarded::spawn(std::process::Command::new("sleep").arg("60"))?;
+    let pid = child_pid(child.0.id())?;
+    let process = Process::open_child(pid).context("open running child")?;
+    assert!(process.pidfd.is_some());
+    assert!(process.is_running());
+    child.0.kill()?;
+    child.0.wait()?;
+
+    // The PID may belong to another process by now, it is not opened.
+    assert!(Process::open_child(pid).is_none());
+    Ok(())
+}
+
 #[tokio::test]
 async fn wait_for_reaped_process_is_unknown() -> Result<()> {
     let mut reaped = std::process::Command::new("true").spawn()?;
