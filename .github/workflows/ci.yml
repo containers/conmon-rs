@@ -495,6 +495,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.target }}
+          cache: false
       - name: Install the cross toolchain and qemu
         if: matrix.target
         env:
@@ -659,19 +660,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Shares the caches with test-integration-coverage on amd64, which runs
-      # on the same image.
-      - uses: ./.github/actions/setup-go
-        id: go
-      # The tests run as root and keep their files per user ID.
-      - name: Restore Testfiles Cache
-        id: test-files
-        if: env.ARCH == 'amd64'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            /tmp/conmon-test-images-0
-          key: integration-test-files-${{ runner.os }}-${{ hashFiles('pkg/client/integration/files_test.go') }}
       # The busybox of the tests only runs on x86, the other architectures
       # use the static one of the nixpkgs of flake.lock, which behaves the same.
       - uses: ./.github/actions/setup-nix
@@ -694,71 +682,18 @@ jobs:
           grep -H . /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/hugepages-*/enabled || true
           file .build/static/conmonrs
           .build/static/conmonrs --version
-      - run: .github/install-crun
-      # The tests run as root, whose PATH has to find the same Go.
-      - name: Link Go into /usr/bin
-        run: sudo ln -f -s "$(go env GOROOT)"/bin/* /usr/bin/
-      # The tests run as root, the modules and ginkgo get downloaded as the
-      # runner user before, so that the caches hold them on a miss.
-      - name: Download Go modules
-        run: |
-          go mod download
-          go -C pkg/client/integration mod download
-      - uses: ./.github/actions/setup-ginkgo
-        with:
-          save: ${{ env.SAVE_CACHE }}
-      # The output names the failed plain Go tests, which the report of the
-      # specs does not, see .github/report-flakes.
+      # The tests only download their files on x86, the job of amd64 saves
+      # them for test-integration-coverage as well.
       - name: Integration tests
-        shell: bash
-        run: |
-          mkdir -p .build/report
-          # sudo sets HOME to the one of root, which would leave the Go
-          # caches unused, and sudo-rs, as on ubuntu-26.04, ignores -E, so
-          # env sets what has to reach the tests on every runner, including
-          # the busybox of the other architectures.
-          sudo -E env \
-            GOMODCACHE="$(go env GOMODCACHE)" \
-            GOTOOLCHAIN="$(go env GOTOOLCHAIN)" \
-            GOCACHE="$(go env GOCACHE)" \
-            BUSYBOX_BINARY="${BUSYBOX_BINARY:-}" \
-            make integration \
-            RUNTIME_PATH=/usr/bin/crun \
-            CONMON_BINARY=.build/static/conmonrs \
-            MAX_RSS_KB="$MAX_RSS_KB" \
-            MAX_RSS_GROWTH_KB="$MAX_RSS_GROWTH_KB" \
-            TEST_FLAGS="--flake-attempts 3 --output-dir .build/report --json-report report.json" 2>&1 |
-            tee .build/report/output.log
-      - name: Report flaky specs and failed tests
-        if: ${{ !cancelled() }}
-        run: .github/report-flakes .build/report/report.json .build/report/output.log
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: ${{ !cancelled() }}
+        uses: ./.github/actions/run-integration
         with:
-          name: test-integration-${{ env.ARCH }}-report
-          path: .build/report/report.json
-      # The files the tests downloaded on a miss, also if they failed, but not
-      # the directory alone, which a failed download leaves behind.
-      - name: Check the test files
-        id: test-files-complete
-        if: ${{ !cancelled() && env.ARCH == 'amd64' }}
-        run: |
-          if [[ -f /tmp/conmon-test-images-0/busybox ]]; then
-            echo "complete=true" >>"$GITHUB_OUTPUT"
-          fi
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: ${{ !cancelled() && env.ARCH == 'amd64' && env.SAVE_CACHE == 'true' && steps.test-files.outputs.cache-hit != 'true' && steps.test-files-complete.outputs.complete == 'true' }}
-        with:
-          path: |
-            /tmp/conmon-test-images-0
-          key: ${{ steps.test-files.outputs.cache-primary-key }}
-      # The tests write into the caches as root, the action saves them as the
-      # runner user.
-      - uses: ./.github/actions/save-go
-        if: env.SAVE_CACHE == 'true' && steps.go.outputs.cache-hit != 'true'
-        with:
-          key: ${{ steps.go.outputs.key }}
-          paths: ${{ steps.go.outputs.paths }}
+          conmon-binary: .build/static/conmonrs
+          max-rss-kb: ${{ env.MAX_RSS_KB }}
+          max-rss-growth-kb: ${{ env.MAX_RSS_GROWTH_KB }}
+          report-name: test-integration-${{ env.ARCH }}-report
+          restore-test-files: ${{ env.ARCH == 'amd64' }}
+          save-test-files: ${{ env.ARCH == 'amd64' && env.SAVE_CACHE == 'true' }}
+          save-cache: ${{ env.SAVE_CACHE }}
 
   # The same suite on a native arm64 runner, the build-static jobs only run the
   # other architectures once under emulation.
@@ -786,15 +721,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-go
-        id: go
-      # Saved by the test-integration-amd64 job.
-      - name: Restore Testfiles Cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            /tmp/conmon-test-images-0
-          key: integration-test-files-${{ runner.os }}-${{ hashFiles('pkg/client/integration/files_test.go') }}
       - uses: ./.github/actions/setup-rust
         with:
           toolchain: ${{ env.RUST_VERSION }}
@@ -804,60 +730,40 @@ jobs:
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-llvm-cov
-      - run: .github/install-crun
-      # The tests run as root, whose PATH has to find the same Go.
-      - name: Link Go into /usr/bin
-        run: sudo ln -f -s "$(go env GOROOT)"/bin/* /usr/bin/
       # The environment makes the build instrumented and every server process
-      # write its profile on exit.
+      # write its profile on exit. The processes of the user namespace specs
+      # have no permission on the target directory, which the runner user
+      # owns, so the profiles of the tests go to a directory which everyone
+      # can write, the report moves them.
       - name: Build instrumented server
+        id: build
         run: |
           cargo llvm-cov show-env --sh > "$RUNNER_TEMP/llvm-cov.env"
           source "$RUNNER_TEMP/llvm-cov.env"
           cargo llvm-cov clean --workspace
           cargo build --locked
           mkdir -m 1777 "$PROFILE_DIR"
-      # The tests run as root, the modules and ginkgo get downloaded as the
-      # runner user before, so that the caches hold them on a miss.
-      - name: Download Go modules
-        run: |
-          go mod download
-          go -C pkg/client/integration mod download
-      - uses: ./.github/actions/setup-ginkgo
-        with:
-          save: ${{ env.SAVE_CACHE }}
+          echo "profile-file=$PROFILE_DIR/${LLVM_PROFILE_FILE##*/}" >>"$GITHUB_OUTPUT"
       # The memory budget does not apply to an instrumented debug build. A
       # failure only costs the coverage, the job stays green and uploads what
       # got covered, which shows as a drop of the coverage. A failing job would
-      # fail the check, even if allowed to.
+      # fail the check, even if allowed to. The test files are the ones the
+      # test-integration-amd64 job saved.
       - name: Integration tests
         id: integration
-        continue-on-error: true
-        shell: bash
-        run: |
-          source "$RUNNER_TEMP/llvm-cov.env"
-          mkdir -p .build/report
-          # sudo sets HOME to the one of root, which would leave the Go
-          # caches unused, and sudo-rs, as on ubuntu-26.04, ignores -E, so
-          # env sets what has to reach the tests on every runner, including
-          # the profile path of the instrumented server. The processes of the
-          # user namespace specs have no permission on the target directory,
-          # which the runner user owns, so the profiles go to a directory
-          # which everyone can write, the report moves them.
-          sudo -E env \
-            GOMODCACHE="$(go env GOMODCACHE)" \
-            GOTOOLCHAIN="$(go env GOTOOLCHAIN)" \
-            GOCACHE="$(go env GOCACHE)" \
-            LLVM_PROFILE_FILE="$PROFILE_DIR/${LLVM_PROFILE_FILE##*/}" \
-            make integration \
-            RUNTIME_PATH=/usr/bin/crun \
-            CONMON_BINARY=target/debug/conmonrs \
-            MAX_RSS_KB=1048576 \
-            TEST_FLAGS="--flake-attempts 3 --output-dir .build/report --json-report report.json --cover --coverpkg github.com/containers/conmon-rs/pkg/client --coverprofile go-coverage.out" 2>&1 |
-            tee .build/report/output.log
+        uses: ./.github/actions/run-integration
+        with:
+          conmon-binary: target/debug/conmonrs
+          max-rss-kb: 1048576
+          test-flags: --cover --coverpkg github.com/containers/conmon-rs/pkg/client --coverprofile go-coverage.out
+          test-env: LLVM_PROFILE_FILE=${{ steps.build.outputs.profile-file }}
+          report-name: test-integration-coverage-report
+          allow-failure: true
+          restore-test-files: true
+          save-cache: ${{ env.SAVE_CACHE }}
       # Keep a failure visible, the job stays green.
       - name: Report failed integration tests
-        if: steps.integration.outcome == 'failure'
+        if: steps.integration.outputs.outcome == 'failure'
         run: |
           echo "::warning::The integration tests of the coverage build failed, the coverage is partial"
           echo ":warning: The integration tests of the coverage build failed, the coverage is partial." >>"$GITHUB_STEP_SUMMARY"
@@ -873,21 +779,6 @@ jobs:
           files: lcov.info,.build/report/go-coverage.out
           flags: integration
           token: ${{ secrets.CODECOV_TOKEN }}
-      - name: Report flaky specs and failed tests
-        if: ${{ !cancelled() }}
-        run: .github/report-flakes .build/report/report.json .build/report/output.log
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: ${{ !cancelled() }}
-        with:
-          name: test-integration-coverage-report
-          path: .build/report/report.json
-      # The tests write into the caches as root, the action saves them as the
-      # runner user.
-      - uses: ./.github/actions/save-go
-        if: env.SAVE_CACHE == 'true' && steps.go.outputs.cache-hit != 'true'
-        with:
-          key: ${{ steps.go.outputs.key }}
-          paths: ${{ steps.go.outputs.paths }}
 
   # Runs critest against CRI-O with the static binary. With stream_websockets,
   # CRI-O hands exec and attach to the streaming server of conmon-rs, which
@@ -922,6 +813,8 @@ jobs:
         with:
           cosign-release: v3.1.4
       - run: .github/setup
+        env:
+          CONMONRS_BINARY: .build/static/conmonrs
       # critest runs the parallel specs with ginkgo, which has no binaries.
       - uses: ./.github/actions/setup-ginkgo
         with:
@@ -934,9 +827,6 @@ jobs:
         shell: bash
         run: |
           set -euox pipefail
-
-          sudo cp .build/static/conmonrs /usr/libexec/crio/conmonrs
-          sudo chmod +x /usr/libexec/crio/conmonrs
 
           FLAGS=()
           if [[ $STREAM_WEBSOCKETS == true ]]; then
@@ -988,6 +878,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
+      fail-fast: false
       matrix:
         cosign: [true, false]
     name: test-get-script-${{ matrix.cosign && 'cosign' || 'checksum' }}
@@ -1023,8 +914,10 @@ jobs:
   # jobs, it does not wait for the scans and the fuzzing: CRI-O CI installs
   # the binaries of the marker, which a new advisory or a crash the fuzzing
   # finds in older code must not hold back. Neither for the coverage, whose
-  # integration tests may fail, nor for the s390x unit tests, which a test
-  # that is too slow under qemu fails.
+  # integration tests may fail, nor for the unit tests of the other
+  # architectures, the test-unit-arch jobs of arm64, ppc64le and s390x, which
+  # a timing sensitive test fails more often, under qemu above all. A release
+  # waits for them, see release.md.
   publish-marker:
     runs-on: ubuntu-latest
     timeout-minutes: 10

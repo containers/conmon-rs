@@ -77,6 +77,13 @@ EOT
     sudo mv /etc/cni/net.d/10-crio-bridge.conflist.disabled \
         /etc/cni/net.d/10-crio-bridge.conflist
 
+    # CRI-O checks the version of the monitor when it starts and serves exec
+    # and attach itself for one older than v1.2.0, like the one of the
+    # bundle. The binary under test has to be in place before.
+    if [[ -n ${CONMONRS_BINARY:-} ]]; then
+        sudo install -m 0755 "$CONMONRS_BINARY" /usr/libexec/crio/conmonrs
+    fi
+
     sudo systemctl enable --now crio.service
 
     # Validate if the correct config is being loaded. grep -q would stop

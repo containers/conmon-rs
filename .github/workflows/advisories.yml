@@ -59,8 +59,6 @@ jobs:
     permissions:
       attestations: read # verifies the SBOMs
       contents: read
-    outputs:
-      saved: ${{ steps.saved.outputs.key }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,8 +77,8 @@ jobs:
           cd .build/sboms
           ../../.github/release-files sboms "$COMMIT"
       # The only job which saves the vulnerability database, one of about
-      # 500 MB a day, the delete-grype-databases job deletes the ones of the
-      # days before, so that they do not push the build caches out. The ci
+      # 500 MB a day, the prune-caches job deletes the ones of the days
+      # before, so that they do not push the build caches out. The ci
       # workflow only restores it.
       - name: Date
         id: date
@@ -98,49 +96,67 @@ jobs:
           SBOMS=(.build/sboms/*.spdx.json)
           make scan SBOMS="${SBOMS[*]}"
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: save
         if: ${{ !cancelled() && steps.grype-db.outputs.cache-hit != 'true' }}
         with:
           path: .build/grype-db
           key: grype-db-${{ steps.date.outputs.date }}
-      # The save only warns if the path is missing or another run saves the
-      # same key, the cleanup checks that the cache has the key.
-      - name: Saved database
-        id: saved
-        if: ${{ !cancelled() && steps.save.outcome == 'success' }}
-        env:
-          KEY: grype-db-${{ steps.date.outputs.date }}
-        run: |
-          if [[ -d .build/grype-db ]]; then
-            echo "key=$KEY" >>"$GITHUB_OUTPUT"
-          fi
 
-  # Deletes the databases of the days before, once the cache has the one of
-  # the day, also if the scan failed. The only job which deletes caches, so
-  # the only one with write access to them, it runs no code of the checkout.
-  delete-grype-databases:
-    needs: verify-vulnerabilities
-    if: ${{ !cancelled() && needs.verify-vulnerabilities.outputs.saved != '' }}
+  # Deletes the caches of main which a newer one of the same kind replaced,
+  # once the jobs here which save caches are done, also if they failed. Every
+  # run of main and of this workflow saves a corpus per fuzz target, and a
+  # change of a lock file starts new Rust and Go caches, which would push the
+  # current ones out of the 10 GB of the repository. It keeps the newest entry
+  # by creation time of the vulnerability database, of the corpus of each fuzz
+  # target and of each Rust and Go cache key without the hash of the lock
+  # files, which the restore keys of the jobs find. An entry saved while it
+  # runs is newer than the listed ones and stays. Every other entry stays: the
+  # caches of pull requests cannot replace the ones of main, and like the ones
+  # of a toolchain or image which no job uses any more, or of the keys which
+  # rarely change, they expire after a week without access. The only job which
+  # deletes caches, so the only one with write access to them, it runs no code
+  # of the checkout.
+  prune-caches:
+    needs:
+      - verify-vulnerabilities
+      - test-fuzz
+    if: ${{ !cancelled() && github.repository == 'containers/conmon-rs' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      actions: write # deletes the databases of the days before
+      actions: write # deletes the caches
     steps:
-      - name: Delete older databases
+      # The newest entries come first, so that a list which the limit cuts
+      # short still has the newest one of each kind. An entry which the quota
+      # of the repository evicted in between is gone already.
+      - name: Delete the replaced caches
         env:
           GH_TOKEN: ${{ github.token }}
-          KEEP: ${{ needs.verify-vulnerabilities.outputs.saved }}
         run: |
-          if ! gh cache list --repo "$GITHUB_REPOSITORY" --key "$KEEP" --json key --jq '.[].key' | grep -qxF "$KEEP"; then
-            echo "::warning::The cache has no $KEEP, keeping the older databases"
+          DELETE=$(gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main \
+            --sort created_at --order desc --limit 1000 --json id,key,createdAt --jq '
+              map(.kind = (.key |
+                if test("^fuzz-corpus-.+-[0-9]+-[0-9]+$") then sub("-[0-9]+-[0-9]+$"; "")
+                elif test("^grype-db-") then "grype-db"
+                elif test("^v0-rust-.+-[0-9a-f]{8}$") then sub("-[0-9a-f]{8}$"; "")
+                elif test("^setup-go-.+-[0-9a-f]{64}$") then sub("-[0-9a-f]{64}$"; "")
+                else null end)) |
+              map(select(.kind)) | group_by(.kind)[] |
+              sort_by(.createdAt[:19], .id)[:-1][] |
+              "\(.id) \(.key)"')
+          if [[ -z $DELETE ]]; then
+            echo "No replaced caches"
             exit 0
           fi
-          gh cache list --repo "$GITHUB_REPOSITORY" --key grype-db- --limit 100 --json key --jq '.[].key' |
-            while read -r KEY; do
-              if [[ $KEY != "$KEEP" ]]; then
-                gh cache delete "$KEY" --repo "$GITHUB_REPOSITORY"
+          while read -r ID KEY; do
+            echo "Deleting $KEY"
+            if ! OUTPUT=$(gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$ID" 2>&1); then
+              if [[ $OUTPUT != *"(HTTP 404)"* ]]; then
+                echo "::error::Unable to delete $KEY: $OUTPUT"
+                exit 1
               fi
-            done
+              echo "$KEY is gone already"
+            fi
+          done <<<"$DELETE"
 
   # Warns about newer upstream releases of the tools of dependencies.yaml, and
   # fails for an image whose tag has another digest than the pinned one: a
