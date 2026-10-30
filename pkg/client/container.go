@@ -111,7 +111,7 @@ type ContainerLogDriver struct {
 
 	// Tag is written as CONTAINER_TAG and SYSLOG_IDENTIFIER by
 	// LogDriverTypeJournald, like the log tag of conmon. Without one, servers
-	// since unreleased use the ContainerName as the identifier, and the short
+	// since v1.2.2 use the ContainerName as the identifier, and the short
 	// container ID without both, like conmon, older ones "conmonrs". Servers
 	// without FeatureJournaldFields ignore it.
 	Tag string

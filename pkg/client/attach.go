@@ -63,7 +63,7 @@ type AttachConfig struct {
 	// ID of the container.
 	ID string
 
-	// Absolute path of the attach socket. Servers since unreleased reject
+	// Absolute path of the attach socket. Servers since v1.2.2 reject
 	// other ones.
 	SocketPath string
 

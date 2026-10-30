@@ -206,7 +206,7 @@ func (c *ConmonClient) ServeAttachContainer(
 // like ?port=80&port=443.
 type ServePortForwardContainerConfig struct {
 	// NetNsPath is the absolute path to the network namespace of the
-	// container. Servers since unreleased reject other ones.
+	// container. Servers since v1.2.2 reject other ones.
 	NetNsPath string
 
 	// IdleTimeout closes a connection which was idle for this long, like
