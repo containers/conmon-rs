@@ -140,6 +140,10 @@ pub(super) struct SharedWatcher {
     /// a new watcher then.
     failed: Arc<AtomicBool>,
 
+    /// Set once a subscriber gave up watching after the reader stopped, see
+    /// [`Subscription::give_up`].
+    given_up: AtomicBool,
+
     /// The task which reads the events, it ends with the watcher.
     reader: JoinHandle<()>,
 
@@ -221,6 +225,7 @@ impl SharedWatcher {
             inotify,
             watches,
             failed,
+            given_up: AtomicBool::new(false),
             reader,
             next_id: AtomicU64::new(0),
         })
@@ -247,7 +252,9 @@ impl SharedWatcher {
                 Ok(events) => events,
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => {
-                    error!("Unable to read watch events, checking on exit only: {e}");
+                    error!(
+                        "Unable to read watch events, watching again on a new instance a few times at most: {e}"
+                    );
                     break;
                 }
             };
@@ -265,7 +272,9 @@ impl SharedWatcher {
             registered = match async_fd::register(inotify, Interest::READABLE) {
                 Ok(registered) => registered,
                 Err(e) => {
-                    error!("Unable to register inotify instance, checking on exit only: {e}");
+                    error!(
+                        "Unable to register inotify instance, watching again on a new one a few times at most: {e}"
+                    );
                     break;
                 }
             };
@@ -371,6 +380,13 @@ impl Subscription {
     /// Whether the reader of the watcher stopped, which ended the watch.
     pub(super) fn watcher_failed(&self) -> bool {
         self.watcher.failed.load(Ordering::Acquire)
+    }
+
+    /// Give up watching after the reader of the watcher stopped. Only the
+    /// first subscriber of the watcher which does gets true, so that a
+    /// failure gets one warning instead of one per container.
+    pub(super) fn give_up(&self) -> bool {
+        !self.watcher.given_up.swap(true, Ordering::Relaxed)
     }
 }
 

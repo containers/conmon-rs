@@ -876,7 +876,17 @@ jobs:
           # The log belongs to the runner user, which uploads it.
           # shellcheck disable=SC2024
           sudo journalctl --no-pager >journal.log
-          test $TEST_RC -ne 0 && cat journal.log
+          # Without the logs of the conmon-rs servers, which have the debug
+          # level of CRI-O and would about double it. The uploaded journal
+          # keeps them, their warnings and errors follow.
+          if [[ $TEST_RC -ne 0 ]]; then
+            grep -vF ' conmonrs[' journal.log || true
+          fi
+
+          # critest does not show the failures of the conmon-rs servers.
+          echo "::group::conmon-rs warnings and errors"
+          sudo journalctl -t conmonrs -p warning --no-pager || true
+          echo "::endgroup::"
 
           # CRI-O logs these only if conmon-rs served the sessions.
           if [[ $STREAM_WEBSOCKETS == true ]]; then

@@ -58,11 +58,13 @@ through the GitHub API, which needs [`jq`](https://jqlang.org):
 
 The script verifies the sigstore signature of the binary if the local system
 has [`cosign`](https://github.com/sigstore/cosign) available in its `$PATH`.
-The signature has to come from the ci workflow run of exactly that commit on
-`main`. Without cosign, the script only checks the SHA-256 checksum, the one of
-`sha256sums.txt` for a release and the one in the bucket otherwise, which only
-shows that the download is complete. It fails if no checksum got published,
-like for old commits and the releases before v1.1.0, unless `-k` is given.
+That needs cosign v2.4.2 or newer, older versions cannot read the bundles of the
+signatures and fail. The signature has to come from the ci workflow run of
+exactly that commit on `main`. Without cosign, the script only checks the
+SHA-256 checksum, the one of `sha256sums.txt` for a release and the one in the
+bucket otherwise, which only shows that the download is complete. It fails if no
+checksum got published, like for old commits and the releases before v1.1.0,
+unless `-k` is given.
 
 Without `-t` and `-l`, the script checks with the GitHub API that the latest
 commit of the bucket is on `main`, and warns if it is more than a day older than
@@ -341,9 +343,10 @@ with the `rust-version` toolchain of rustup, `make unit` runs the Rust unit
 tests, `make unit-go` the ones of the Go client and `make integration` runs
 the Go integration suite against the release binary (`RUNTIME_PATH` selects
 the OCI runtime, the suite needs root for the namespace and OOM specs). `make
-verify` runs the remaining checks, like prettier, cargo-deny, typos (both have
-to be installed), actionlint and zizmor, some of them in containers. `make
-help` lists the rest. Contributions follow [CONTRIBUTING.md](./CONTRIBUTING.md).
+verify` runs the remaining checks, like prettier, cargo-deny, typos (cargo-deny
+and typos have to be installed), actionlint and zizmor, some of them in
+containers. `make help` lists the rest. Contributions follow
+[CONTRIBUTING.md](./CONTRIBUTING.md).
 
 The [fuzz](./fuzz) directory holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)
 targets for what clients and containers send: the streaming protocols (SPDY

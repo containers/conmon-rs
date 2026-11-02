@@ -85,10 +85,11 @@ const WRITE_BUFFER: usize = 64 * 1024;
 /// ended it, see [`Reader::drain`].
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How often the server pings the client, like the kubelet does. A client
-/// which went away shows up as a failed write, also while the reader waits
-/// for a stream which does not take its data and misses the end of the
-/// connection.
+/// How often the server pings the client. The kubelet sends no pings, but
+/// client-go pings the server as often, see `PingPeriod` of its SPDY
+/// transport. A client which went away shows up as a failed write, also
+/// while the reader waits for a stream which does not take its data and
+/// misses the end of the connection.
 pub const PING_INTERVAL: Duration = Duration::from_secs(5);
 
 /// A connection a client upgraded to SPDY/3.1.

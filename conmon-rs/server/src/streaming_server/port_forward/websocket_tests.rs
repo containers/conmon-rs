@@ -232,6 +232,36 @@ async fn port_forward_over_websocket_waits_for_the_close_answer() -> Result<()> 
 }
 
 #[tokio::test]
+async fn port_forward_over_websocket_answers_the_close_of_the_client() -> Result<()> {
+    LocalSet::new()
+        .run_until(async {
+            let server = StreamingServer::default();
+            let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
+            let port = listener.local_addr()?.port();
+            let (response, mut stream) =
+                port_forward_websocket(&server, &format!("?port={port}"), "").await?;
+            assert!(response.starts_with("http/1.1 101"), "{response}");
+            server_frame(&mut stream).await?;
+            server_frame(&mut stream).await?;
+            close_first(&mut stream).await
+        })
+        .await
+}
+
+#[tokio::test]
+async fn port_forward_over_websocket_tunnel_answers_the_close_of_the_client() -> Result<()> {
+    LocalSet::new()
+        .run_until(async {
+            let server = StreamingServer::default();
+            let (response, mut stream) =
+                port_forward_websocket(&server, "", "SPDY/3.1+portforward.k8s.io").await?;
+            assert!(response.starts_with("http/1.1 101"), "{response}");
+            close_first(&mut stream).await
+        })
+        .await
+}
+
+#[tokio::test]
 async fn port_forward_over_websocket_pings_do_not_keep_sessions_active() -> Result<()> {
     LocalSet::new()
         .run_until(async {

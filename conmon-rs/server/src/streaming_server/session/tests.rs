@@ -256,6 +256,50 @@ async fn stdin_before_close_waits_for_stalled_containers_in_bounds() -> Result<(
     Ok(())
 }
 
+/// A client which closes after stdin which the container does not take gets
+/// the answer to its close right away, also when the session gets stopped
+/// after [`STDIN_FLUSH_TIMEOUT`] then.
+#[tokio::test]
+async fn closes_after_stdin_stalled_containers_get_answered() -> Result<()> {
+    LocalSet::new()
+        .run_until(async {
+            let (_io, _server, mut stream) = attach_session(true, false).await?;
+            // Like for the SPDY sessions above, the server still reads the
+            // close.
+            let mut stdin = vec![STDIN_BYTE];
+            stdin.resize(32 * 1024 + 1, b'x');
+            let mut frames = vec![];
+            for _ in 0..40 {
+                frames.extend(client_frame(0x2, &stdin));
+            }
+            let normal = u16::from(CloseCode::Normal).to_be_bytes();
+            frames.extend(client_frame(0x8, &normal));
+            stream.write_all(&frames).await?;
+
+            // Before the flush gives up, generous for emulated test runs.
+            // Pings of the server may come first.
+            let answer = time::timeout(STDIN_FLUSH_TIMEOUT * 4 / 5, async {
+                loop {
+                    let frame = server_frame(&mut stream).await?;
+                    if frame.0 != 0x9 {
+                        return anyhow::Ok(frame);
+                    }
+                }
+            })
+            .await??;
+            assert_eq!(answer, (0x8, normal.to_vec()));
+            let mut byte = [0];
+            let end = time::timeout(
+                STDIN_FLUSH_TIMEOUT + Duration::from_secs(5),
+                stream.read(&mut byte),
+            )
+            .await??;
+            assert_eq!(end, 0);
+            Ok(())
+        })
+        .await
+}
+
 #[tokio::test(start_paused = true)]
 async fn too_large_sessions_end_without_the_idle_timeout() -> Result<()> {
     let idle_timeout = Some(Duration::from_secs(3600));

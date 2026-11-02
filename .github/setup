@@ -53,7 +53,11 @@ prepare_system() {
         echo "containers:100000:65536" | sudo tee -a /etc/subgid
     fi
 
-    printf "RateLimitInterval=0\nRateLimitBurst=0\n" | sudo tee /etc/systemd/journald.conf
+    # Keep every entry of CRI-O and the conmon-rs servers. journald ignores
+    # the options outside of a [Journal] section.
+    sudo mkdir -p /etc/systemd/journald.conf.d
+    printf "[Journal]\nRateLimitIntervalSec=0\nRateLimitBurst=0\n" |
+        sudo tee /etc/systemd/journald.conf.d/90-ratelimit.conf
     sudo systemctl restart systemd-journald
 }
 
@@ -138,6 +142,9 @@ default_runtime = "crun"
 runtime_path = "/usr/libexec/crio/crun"
 runtime_type = "pod"
 monitor_path = "/usr/libexec/crio/conmonrs"
+# CRI-O starts the servers with the log driver none otherwise, which leaves
+# no logs of them in the journal. CRI-O adds its own PATH to the list.
+monitor_env = ["LOG_DRIVER=systemd"]
 # Exec and attach through the streaming server of conmon-rs, which critest
 # only reaches over WebSocket. crio status config does not show it.
 stream_websockets = ${STREAM_WEBSOCKETS:-false}
@@ -174,6 +181,7 @@ EOT
     # writes more.
     sudo crio status config | grep 'default_runtime = "crun"' >/dev/null
     sudo crio status config | grep 'runtime_type = "pod"' >/dev/null
+    sudo crio status config | grep -F '"LOG_DRIVER=systemd"' >/dev/null
 
     {
         echo "### CRI-O and conmon-rs"

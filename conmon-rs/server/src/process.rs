@@ -19,8 +19,9 @@ use std::{
     path::Path,
     sync::{Arc, LazyLock, Mutex, RwLock, RwLockWriteGuard},
     thread,
+    time::Duration,
 };
-use tokio::{io::Interest, sync::oneshot, task};
+use tokio::{io::Interest, sync::oneshot, task, time};
 use tracing::{debug, error};
 
 /// Read a PID file like the runtimes write it, the number may be followed by
@@ -489,6 +490,13 @@ fn spawn_waitpid_thread<F: FnOnce() + Send + 'static>(f: F) {
     }
 }
 
+/// The bounds of the delay between the waits for an exited process which is
+/// not waitable yet, unless its pidfd wakes the wait up earlier, see
+/// [`try_pidfd_wait`]. The waits go on as long as its tracer does not wait
+/// for it, like for a process stuck in the kernel.
+const PIDFD_RETRY_MIN: Duration = Duration::from_millis(10);
+const PIDFD_RETRY_MAX: Duration = Duration::from_secs(1);
+
 /// Try to use pidfd_open + async polling. Returns None if pidfd is unavailable.
 async fn try_pidfd_wait(pid: Pid) -> Option<i32> {
     // The readiness comes from epoll and the wait uses WNOHANG, so the
@@ -511,27 +519,51 @@ async fn try_pidfd_wait(pid: Pid) -> Option<i32> {
         }
     };
 
-    if async_fd.readable().await.is_err() {
-        return None;
-    }
+    let mut ready = match async_fd.readable().await {
+        Ok(ready) => Some(ready),
+        Err(_) => return None,
+    };
 
     // Through the pidfd, which refers to this process only: once the
     // orphan sweep took it, its PID may belong to another child already.
-    // Kernels before 5.4 only know the PID, they fail with EINVAL.
-    let reaping = reap_guard();
-    let pidfd = Id::PIDFd(async_fd.get_ref().as_fd());
-    let exit = match wait_child(pidfd, WaitPidFlag::WNOHANG) {
-        Err(Errno::EINVAL) => wait_child(Id::Pid(pid), WaitPidFlag::WNOHANG),
-        exit => exit,
+    // Kernels before 5.4 only know the PID, they fail with EINVAL. They get
+    // one wait only, a retry could take the exit of that other child.
+    let mut backoff = PIDFD_RETRY_MIN;
+    let exit = loop {
+        let reaping = reap_guard();
+        let pidfd = Id::PIDFd(async_fd.get_ref().as_fd());
+        match wait_child(pidfd, WaitPidFlag::WNOHANG) {
+            Err(Errno::EINVAL) => break wait_child(Id::Pid(pid), WaitPidFlag::WNOHANG),
+            // The pidfd of a traced process gets readable once it exited,
+            // but its parent can only wait for it after the tracer did.
+            Ok(None) => {}
+            exit => break exit,
+        }
+        drop(reaping);
+        if backoff == PIDFD_RETRY_MIN {
+            debug!("PID {pid} is not waitable yet, retrying until its tracer waited");
+        }
+        // The pidfd stays readable, but the kernel wakes it up again once
+        // the tracer waited for the process or detached from it, when it
+        // notifies the parent. The edge triggered registration reports that
+        // wakeup, unless it came before the readiness got cleared, which
+        // keeps it then. The timer covers a kernel which does not.
+        if let Some(mut ready) = ready.take() {
+            ready.clear_ready();
+        }
+        ready = time::timeout(backoff, async_fd.readable())
+            .await
+            .ok()
+            .and_then(Result::ok);
+        backoff = (backoff * 2).min(PIDFD_RETRY_MAX);
     };
-    drop(reaping);
     match exit {
         Ok(Some((_, exit))) => {
             exit.log();
             Some(exit.code())
         }
         Ok(None) => {
-            debug!("Unexpected wait status after pidfd readable");
+            debug!("PID {pid} is not waitable yet, not retrying by its PID");
             Some(EXIT_CODE_UNKNOWN)
         }
         // The orphan sweep may have taken it meanwhile.

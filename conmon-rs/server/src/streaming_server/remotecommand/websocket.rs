@@ -167,6 +167,10 @@ pub struct WebSocketInput {
     /// heartbeat. CRI-O does not count them either.
     pub activity: Activity,
 
+    /// Touched whenever a part of what the server sends went out, see
+    /// [`web::ClientIo::written`].
+    pub written: Activity,
+
     /// Drops the input of a client which sent a message larger than the
     /// server takes, see [`web::Discard`].
     pub discard: web::Discard,
@@ -194,6 +198,10 @@ impl ClientInput for WebSocketInput {
                 _ => return None,
             }
         }
+    }
+
+    async fn answer_close(&mut self) {
+        web::answer_close(&mut self.messages, &self.written).await;
     }
 
     async fn drain(self, output: Output) {

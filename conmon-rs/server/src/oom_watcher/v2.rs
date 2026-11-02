@@ -7,6 +7,7 @@ use super::{
 use anyhow::{Context, Result, bail};
 use nix::{errno::Errno, unistd::Pid};
 use std::{
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -162,7 +163,7 @@ impl CgroupV2 {
             return true;
         }
         if let (Some(counters), Some((_, baseline))) = (outer, self.outer.as_mut())
-            && !OOMWatcher::file_not_found(&self.events.path)
+            && !self.events.gone
         {
             *baseline = counters;
         }
@@ -185,7 +186,7 @@ impl CgroupV2 {
         if self.check(false) {
             return OOMEvent::new(true);
         }
-        if !OOMWatcher::file_not_found(&self.events.path) {
+        if !self.events.gone {
             return OOMEvent::default();
         }
         let leaf_gone = self
@@ -254,13 +255,20 @@ impl CgroupV2 {
 struct MemoryEvents {
     path: PathBuf,
     last: OomCounters,
+
+    /// Whether the last check found the file missing.
+    gone: bool,
 }
 
 impl MemoryEvents {
     /// Track `path`, starting from its current counters.
     fn new(path: PathBuf) -> Self {
         let last = OOMWatcher::initial_oom_counters(&path);
-        Self { path, last }
+        Self {
+            path,
+            last,
+            gone: false,
+        }
     }
 
     /// Whether the counters increased since the last OOM found.
@@ -268,7 +276,9 @@ impl MemoryEvents {
     /// The cgroupfs read does not block, so it runs inline instead of adding a
     /// blocking task to every exit of a container or exec.
     fn check(&mut self) -> bool {
-        match OOMWatcher::check_for_oom(&self.path, self.last) {
+        let result = OOMWatcher::check_for_oom(&self.path, self.last);
+        self.gone = result.as_ref().is_err_and(OOMWatcher::is_not_found);
+        match result {
             Ok((counters, true)) => {
                 debug!("Found OOM in {}, count {counters:?}", self.path.display());
                 self.last = counters;
@@ -370,12 +380,22 @@ impl OOMWatcher {
                         // All watches ended, their files got removed, or the
                         // watcher stopped reading events.
                         let path = cgroup.events.path.to_str();
-                        if !subscriptions.watcher_failed() || restarts >= Self::MAX_WATCHER_RESTARTS {
+                        if !subscriptions.watcher_failed() {
                             debug!(path, "Watches ended, checking once the process exited");
                             break;
                         }
+                        if restarts >= Self::MAX_WATCHER_RESTARTS {
+                            let message = "Watcher of the memory events stopped again, checking on exit only";
+                            if subscriptions.subscription.give_up() {
+                                warn!(path, restarts, "{message}");
+                            } else {
+                                debug!(path, restarts, "{message}");
+                            }
+                            break;
+                        }
                         restarts += 1;
-                        warn!(path, "Watcher of the memory events stopped, watching again");
+                        // The reader logged why already, once for all watchers.
+                        debug!(path, "Watcher of the memory events stopped, watching again");
                         match cgroup.subscribe() {
                             Ok(new) => subscriptions = new,
                             Err(e) => {
@@ -410,7 +430,7 @@ impl OOMWatcher {
                     if oom {
                         return OOMEvent::new(true);
                     }
-                    if Self::file_not_found(&cgroup.events.path) {
+                    if cgroup.events.gone {
                         debug!("Memory events file gone, checking once the process exited");
                         break;
                     }
@@ -434,18 +454,22 @@ impl OOMWatcher {
     /// running out of inotify instances or watches, get a warning, only the
     /// first one until a watch works again, see [`WATCH_FAILING`].
     fn watch_failed(message: &str, e: &anyhow::Error) {
-        if Self::is_not_found(e) {
-            debug!("{message}: {e:#}");
-        } else if !WATCH_FAILING.swap(true, Ordering::Relaxed) {
+        if !Self::is_not_found(e) && !WATCH_FAILING.swap(true, Ordering::Relaxed) {
             warn!("{message}: {e:#}");
         } else {
             debug!("{message}: {e:#}");
         }
     }
 
-    /// Whether watching failed because the file does not exist.
+    /// Whether watching or reading failed because the file does not exist.
+    /// cgroupfs fails with `ENODEV` instead for a file whose cgroup got
+    /// removed while it got opened or read.
     fn is_not_found(e: &anyhow::Error) -> bool {
-        e.root_cause().downcast_ref::<Errno>() == Some(&Errno::ENOENT)
+        let cause = e.root_cause();
+        cause.downcast_ref::<Errno>() == Some(&Errno::ENOENT)
+            || cause.downcast_ref::<io::Error>().is_some_and(|e| {
+                e.kind() == ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENODEV)
+            })
     }
 
     /// Read the current OOM counters of a memory events file to establish a

@@ -113,6 +113,11 @@ pub trait ClientInput: Send + 'static {
     /// close.
     fn next(&mut self) -> impl Future<Output = Option<ClientEvent>> + Send;
 
+    /// Answer the clean close of the client, see [`web::answer_close`].
+    fn answer_close(&mut self) -> impl Future<Output = ()> + Send {
+        future::ready(())
+    }
+
     /// End the connection once `output` closed it after
     /// [`ClientEvent::TooLarge`], see [`web::drain`].
     fn drain(self, output: Output) -> impl Future<Output = ()> + Send
@@ -356,6 +361,13 @@ impl Output {
                         debug!("Unable to send close message: {e:#}");
                         return false;
                     }
+                    // The client closed first, its close gets the answer
+                    // instead, if its read did not write it yet.
+                    if self.closed()
+                        && let Transport::WebSocket { sender, .. } = &mut self.transport
+                    {
+                        web::write_close_answer(sender).await;
+                    }
                 }
                 Transport::Spdy(output) => {
                     for stream in [
@@ -403,7 +415,12 @@ impl Output {
             return Ok(());
         };
         let data = !matches!(message, Message::Ping(_) | Message::Close(_));
-        let result = sender.send(message).await.map_err(anyhow::Error::from);
+        let result = sender.send(message).await;
+        // The input did not tell about the close yet.
+        if result.as_ref().is_err_and(web::is_closed_by_client) {
+            self.peer_closed.store(true, Ordering::Release);
+        }
+        let result = result.map_err(anyhow::Error::from);
         if result.is_ok() && data {
             activity.touch();
         }

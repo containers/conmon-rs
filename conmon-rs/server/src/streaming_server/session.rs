@@ -207,7 +207,7 @@ impl StreamingServer {
             sender,
             framing,
             activity.clone(),
-            written,
+            written.clone(),
             session.idle_timeout(),
         );
         // A client which went away already ends the session in its loop,
@@ -219,6 +219,7 @@ impl StreamingServer {
             messages,
             framing,
             activity: activity.clone(),
+            written,
             discard,
         };
         Self::run_session(output, input, session, activity).await;
@@ -555,7 +556,8 @@ impl StreamingServer {
             // the container takes it, a container which does not read it
             // must not delay the end of the session for long. A client which
             // went away or failed the session gets nothing forwarded
-            // anymore.
+            // anymore. The client gets the answer to its close meanwhile,
+            // also when the session gets stopped after.
             if end == Some(EventEnd::Closed) {
                 stdin_taken.touch();
                 let flush = async {
@@ -565,11 +567,9 @@ impl StreamingServer {
                         }
                     }
                 };
-                if stdin_taken
-                    .until_stalled(time::Instant::now(), STDIN_FLUSH_TIMEOUT, flush)
-                    .await
-                    .is_none()
-                {
+                let flush =
+                    stdin_taken.until_stalled(time::Instant::now(), STDIN_FLUSH_TIMEOUT, flush);
+                if tokio::join!(flush, input.answer_close()).0.is_none() {
                     debug!("Dropping stdin the container did not take after the close");
                 }
             }

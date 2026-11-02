@@ -182,7 +182,12 @@ impl PortForward {
                             end = web::End::TooLarge;
                             break;
                         }
-                        Some(Ok(Message::Close(_)) | Err(_)) | None => {
+                        Some(Ok(Message::Close(_))) => {
+                            web::answer_close(&mut messages, &written).await;
+                            end = web::End::Gone;
+                            break;
+                        }
+                        Some(Err(_)) | None => {
                             end = web::End::Gone;
                             break;
                         }

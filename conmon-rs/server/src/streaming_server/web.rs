@@ -36,7 +36,7 @@ use tokio::{
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{
-        error::CapacityError,
+        error::{CapacityError, ProtocolError},
         handshake::derive_accept_key,
         protocol::{Role, WebSocketConfig},
     },
@@ -90,6 +90,43 @@ where
         .await
         .is_ok()
         .then_some(sink)
+}
+
+/// Answer the close of a client, which a read of `messages` just returned.
+/// Tungstenite queues the answer, but writes it only with a later read or
+/// flush, and every send after the close fails without writing anything.
+/// The next read writes it, after what got queued before, and ends the
+/// stream. Without it the client sees the connection end without a close
+/// handshake. A slow client still gets it, one which takes nothing for
+/// [`STALL_TIMEOUT`] does not, see [`ClientIo::written`].
+pub async fn answer_close<S, E>(messages: &mut S, written: &Activity)
+where
+    S: Stream<Item = Result<Message, E>> + Unpin,
+{
+    if written
+        .until_stalled(Instant::now(), STALL_TIMEOUT, messages.next())
+        .await
+        .is_none()
+    {
+        debug!("Client did not take the answer to its close");
+    }
+}
+
+/// Write the answer to the close of a client after a send failed for it,
+/// if the read could not, see [`answer_close`].
+pub async fn write_close_answer<S>(sink: &mut S)
+where
+    S: Sink<Message, Error = Error> + Unpin,
+{
+    if let Err(e) = sink.flush().await {
+        debug!("Unable to answer the close of the client: {e}");
+    }
+}
+
+/// Whether a send failed after a close, which is the one of the client
+/// while the server did not close yet, see [`answer_close`].
+pub fn is_closed_by_client(e: &Error) -> bool {
+    matches!(e, Error::Protocol(ProtocolError::SendAfterClosing))
 }
 
 /// Whether a read failed for a message larger than the server takes. The
