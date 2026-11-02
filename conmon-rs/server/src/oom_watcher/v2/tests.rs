@@ -392,6 +392,23 @@ fn cgroup_v2_leaf_without_memory_controller() -> Result<()> {
     Ok(())
 }
 
+/// Only a missing file is an expected failure to watch, running out of
+/// inotify instances or watches is not.
+#[tokio::test]
+async fn watch_failures_of_missing_files() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (tx, _rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
+    let Err(e) = SharedWatcher::get()?.subscribe(&root.path().join("memory.events"), tx) else {
+        bail!("watched a missing file");
+    };
+    assert!(OOMWatcher::is_not_found(&e));
+    for errno in [Errno::EMFILE, Errno::ENOSPC] {
+        let e = anyhow::Error::new(errno).context("watch memory.events");
+        assert!(!OOMWatcher::is_not_found(&e));
+    }
+    Ok(())
+}
+
 #[test]
 fn outliving_ancestors() {
     for (leaf, ancestor) in [

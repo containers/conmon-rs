@@ -663,6 +663,25 @@ async fn reopen_reopens_all_drivers() -> Result<()> {
 }
 
 #[tokio::test]
+async fn sync_skips_files_which_cannot_be_synced() -> Result<()> {
+    // Nothing got opened, there is nothing to sync.
+    let (_cri, _json, log) = test_helpers::container_log(false).await?;
+    ContainerLog::sync(&log).await?;
+
+    // A device takes no sync, the other files still get synced.
+    let (_cri, json, log) = test_helpers::container_log(false).await?;
+    {
+        let mut log = log.lock().await;
+        log.drivers[0] = Driver::Cri(cri::CriLogger::new("/dev/null", None));
+        log.init().await?;
+        log.write(Pipe::StdOut, b"line\n").await?;
+    }
+    ContainerLog::sync(&log).await?;
+    assert!(test_helpers::read(&json)?.contains(r#""message":"line""#));
+    Ok(())
+}
+
+#[tokio::test]
 async fn open_does_not_follow_symlinks() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let target = dir.path().join("target");

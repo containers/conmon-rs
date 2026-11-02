@@ -115,6 +115,23 @@ struct ExecSyncOutput {
     timed_out: bool,
 }
 
+impl ExecSyncOutput {
+    /// The most output an exec_sync returns, stdout and stderr together,
+    /// like conmon. The response has to fit into the 16 MiB gRPC messages of
+    /// CRI-O and the kubelet, which also carry the framing.
+    const MAX_SIZE: usize = ContainerIO::MAX_STDIO_STREAM_SIZE - 64 * 1024;
+
+    /// Cut the output to [`ExecSyncOutput::MAX_SIZE`]. Each stream keeps up
+    /// to half of it, and more of what the other one leaves, so that a large
+    /// output of one does not drop the few lines of the other, like an error
+    /// on stderr.
+    fn cap(stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) {
+        let half = Self::MAX_SIZE / 2;
+        stdout.truncate(half.max(Self::MAX_SIZE.saturating_sub(stderr.len())));
+        stderr.truncate(Self::MAX_SIZE - stdout.len());
+    }
+}
+
 impl Server {
     /// The deadline of an exec_sync, none without a timeout or if it does not
     /// fit, which is no timeout either.
@@ -151,7 +168,8 @@ impl Server {
         };
         // Reads until the output ended or the drain after the exit gave up,
         // the read loops get stopped only after that.
-        let ((stdout, stderr), exit_data) = tokio::try_join!(io.read_all(token), exit)?;
+        let ((mut stdout, mut stderr), exit_data) = tokio::try_join!(io.read_all(token), exit)?;
+        ExecSyncOutput::cap(&mut stdout, &mut stderr);
         Ok(ExecSyncOutput {
             stdout,
             stderr,

@@ -5,6 +5,7 @@ use crate::{
     attach::SharedContainerAttach,
     child::{Child, ChildKind},
     container_io::{DRAIN_MAX_LOG_WAIT, Drain, Message},
+    container_log::{ContainerLog, SharedContainerLog},
     init,
     oom_watcher::{OOMEvent, OOMWatcher},
     process,
@@ -102,26 +103,36 @@ impl ReapableChild {
 
     /// Wait for the output like [`ReapableChild::wait_for_output`], then
     /// stop the read loops and wait for them to end, which writes the lines
-    /// still waiting for their ending into the log. Nothing reaches the log
-    /// after the exit file this way. A log write which hangs must not hold
-    /// the exit file back, all of it takes [`DRAIN_MAX_LOG_WAIT`] at most.
-    pub(super) async fn finish_output(attach: SharedContainerAttach) {
+    /// still waiting for their ending into the log, and sync the log to
+    /// disk. Nothing reaches the log after the exit file this way. A log
+    /// write or sync which hangs must not hold the exit file back, all of it
+    /// takes [`DRAIN_MAX_LOG_WAIT`] at most.
+    pub(super) async fn finish_output(attach: SharedContainerAttach, logger: &SharedContainerLog) {
         let deadline = Instant::now() + DRAIN_MAX_LOG_WAIT;
         Self::wait_for_output(attach.clone(), deadline).await;
         attach.stop_output();
         let (mut rx, ended) = attach.subscribe();
-        // Without read loops, the output never ends.
-        if ended || !attach.has_output() {
-            return;
+        if !ended {
+            // Without read loops, the output never ends and nothing got
+            // logged.
+            if !attach.has_output() {
+                return;
+            }
+            let end = async {
+                while !matches!(
+                    rx.recv().await,
+                    Ok(Message::Done) | Err(broadcast::error::RecvError::Closed)
+                ) {}
+            };
+            if time::timeout_at(deadline, end).await.is_err() {
+                warn!("Read loops did not end in time, not waiting for them");
+                return;
+            }
         }
-        let end = async {
-            while !matches!(
-                rx.recv().await,
-                Ok(Message::Done) | Err(broadcast::error::RecvError::Closed)
-            ) {}
-        };
-        if time::timeout_at(deadline, end).await.is_err() {
-            warn!("Read loops did not end in time, not waiting for them");
+        match time::timeout_at(deadline, ContainerLog::sync(logger)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!("Unable to sync the log: {e:#}"),
+            Err(_) => warn!("Log did not sync in time, not waiting for it"),
         }
     }
 
@@ -229,7 +240,7 @@ impl ReapableChild {
                 // them, see `stop_output`. The output of an exec gets stopped
                 // by its consumer, see `StopOutput`.
                 if kind == ChildKind::Container {
-                    Self::finish_output(io.attach().clone()).await;
+                    Self::finish_output(io.attach().clone(), io.logger()).await;
                 }
 
                 let exit_channel_data = ExitChannelData {

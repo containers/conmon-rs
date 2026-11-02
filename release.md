@@ -44,8 +44,8 @@ provenance, SBOMs and VEX documents to it, for example
 `https://github.com/containers/conmon-rs/releases/download/vX.Y.Z/conmonrs-vX.Y.Z.tar.gz`,
 and publishes it only then, so a published release always has all files and
 can be immutable. Edit the release notes afterwards. A release only becomes
-the latest one if no other release has a higher version, so a patch release of
-an older minor does not. A rerun continues with the draft, and leaves a
+the latest one if no other release has a higher version, so a late rerun of an
+older tag does not take it over. A rerun continues with the draft, and leaves a
 published release alone if it has all files.
 
 Its build-sources workflow builds the tarball and the checksums in a job
@@ -67,7 +67,9 @@ The release fails right away otherwise, and for commits from before the builds
 got attested or before the VEX document
 [vex/conmonrs.openvex.json](vex/conmonrs.openvex.json) existed. Those binaries
 got built before the tag existed, the version and commit identify them and
-their tag stays empty.
+their tag stays empty. As only commits of main have such a ci run, releases
+only come from main and there are no release branches: once main moved on to
+the next minor version, the previous one gets no more patch releases.
 
 The release waits for that ci run and fails unless all of its jobs besides
 the publish ones passed in its latest attempt, so a commit whose tests or

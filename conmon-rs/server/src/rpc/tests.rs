@@ -304,3 +304,48 @@ async fn exec_sync_output_kills_the_process_of_a_lost_watcher() -> anyhow::Resul
     time::timeout(Duration::from_secs(10), child.wait()).await??;
     Ok(())
 }
+
+#[test]
+fn exec_sync_output_is_capped_in_total() {
+    let max = ExecSyncOutput::MAX_SIZE;
+    let half = max / 2;
+    for (stdout, stderr, expected) in [
+        (10, 20, (10, 20)),
+        (max - 10, 20, (max - 20, 20)),
+        (20, max + 10, (20, max - 20)),
+        (max + 10, max + 10, (half, max - half)),
+        (half + 10, max, (half, max - half)),
+        (0, max + 10, (0, max)),
+    ] {
+        let (mut stdout, mut stderr) = (vec![1; stdout], vec![2; stderr]);
+        ExecSyncOutput::cap(&mut stdout, &mut stderr);
+        assert_eq!((stdout.len(), stderr.len()), expected);
+    }
+}
+
+#[tokio::test]
+async fn exec_sync_output_of_both_pipes_fits_a_response() -> anyhow::Result<()> {
+    // More than the limit on each pipe.
+    let (io, mut child, token) =
+        exec_io("head -c 17000000 /dev/zero; head -c 17000000 /dev/zero >&2")?;
+    let (exit_tx, exit_rx) = broadcast::channel(1);
+    let watcher = async {
+        child.wait().await?;
+        token.cancel();
+        exit_tx.send(ExitChannelData {
+            exit_code: 0,
+            timed_out: false,
+        })?;
+        anyhow::Ok(())
+    };
+    let (output, watched) = tokio::join!(
+        Server::exec_sync_output(&io, &token, exit_rx, || {}),
+        watcher
+    );
+    watched?;
+    let output = output?;
+    let half = ExecSyncOutput::MAX_SIZE / 2;
+    assert_eq!(output.stdout.len(), half);
+    assert_eq!(output.stderr.len(), ExecSyncOutput::MAX_SIZE - half);
+    Ok(())
+}

@@ -1028,7 +1028,7 @@ async fn nothing_gets_logged_after_the_output_finished() -> Result<()> {
 
     // A process left behind keeps the pipe open, the line waits for its
     // ending. It gets written once the read loop ended.
-    ReapableChild::finish_output(l.attach.clone()).await;
+    ReapableChild::finish_output(l.attach.clone(), &l.logger).await;
     (&mut l.task).await??;
     let read = || crate::container_log::test_helpers::read(&l.json);
     assert!(read()?.contains(r#""message":"no newline","partial":true"#));
@@ -1100,12 +1100,32 @@ async fn finished_output_is_bounded_with_a_hanging_log() -> Result<()> {
     wait_logging(&l.attach).await?;
 
     let start = Instant::now();
-    ReapableChild::finish_output(l.attach.clone()).await;
+    ReapableChild::finish_output(l.attach.clone(), &l.logger).await;
     assert_eq!(start.elapsed(), DRAIN_MAX_LOG_WAIT);
 
     drop(held);
     drop(l.writer);
     l.task.await?
+}
+
+#[tokio::test(start_paused = true)]
+async fn finished_output_syncs_the_log_bounded() -> Result<()> {
+    let mut l = log_loop().await?;
+    l.writer.write_all(b"last\n").await?;
+    drop(l.writer);
+    l.task.await??;
+
+    // The read loop ended, the log syncs without waiting for the output.
+    let start = Instant::now();
+    ReapableChild::finish_output(l.attach.clone(), &l.logger).await;
+    assert_eq!(start.elapsed(), Duration::ZERO);
+
+    // A log which does not get to sync does not hold the exit back either.
+    let held = hold(&l.logger).await;
+    ReapableChild::finish_output(l.attach, &l.logger).await;
+    assert_eq!(start.elapsed(), DRAIN_MAX_LOG_WAIT);
+    drop(held);
+    Ok(())
 }
 
 #[tokio::test(start_paused = true)]

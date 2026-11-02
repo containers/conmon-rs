@@ -1009,9 +1009,9 @@ func generateRuntimeConfigWithProcessArgs(
 	g.SetProcessCwd("/")
 	g.SetProcessTerminal(terminal)
 	g.SetProcessArgs(processArgs)
-	// conmonrs runs with an OOM score of -1000 and the runtime inherits it.
-	// Without an explicit value the container would be unkillable and hit
-	// allocation errors instead of the OOM killer, like CRI-O always sets one.
+	// CRI-O always sets an OOM score adjustment. Without one the container
+	// keeps the score of the tests, which could be too low for the OOM
+	// killer to pick it.
 	g.SetProcessOOMScoreAdj(0)
 	g.SetRootPath(rootfs)
 

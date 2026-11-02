@@ -423,6 +423,69 @@ async fn stopped_output_ends_read_while_pipe_is_held_open() -> Result<()> {
     Ok(())
 }
 
+/// Wait until an attach client got the `expected` output, which a terminal
+/// may hand out in several reads.
+async fn wait_output(rx: &mut broadcast::Receiver<Message>, expected: &str) -> Result<()> {
+    let mut output = Vec::new();
+    while !output.ends_with(expected.as_bytes()) {
+        match time::timeout(WAIT, rx.recv()).await?? {
+            Message::Data(data, _) => output.extend_from_slice(&data),
+            Message::Done => bail!("output ended after {output:?}"),
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_output_continues_once_the_slave_got_reopened() -> Result<()> {
+    use std::{
+        io::Write,
+        os::{
+            fd::{AsFd, AsRawFd},
+            unix::fs::OpenOptionsExt,
+        },
+    };
+
+    let (_cri, json, logger) = test_helpers::container_log(true).await?;
+    let mut io = ContainerIO::new(true, logger)?;
+    let (mut rx, _) = io.attach().subscribe();
+    let pty = nix::pty::openpty(None, None)?;
+    let name = std::fs::read_link(format!("/proc/self/fd/{}", pty.slave.as_raw_fd()))?;
+    let socket = io.terminal().context("no terminal")?.path();
+    let stream = tokio::net::UnixStream::connect(socket).await?;
+    crate::terminal::tests::send_fd(&stream, b"x", pty.master.as_fd()).await?;
+    let exited = CancellationToken::new();
+    io.connect_terminal(false, exited.clone()).await?;
+    drop(pty.master);
+
+    let mut slave = std::fs::File::from(pty.slave);
+    slave.write_all(b"first\n")?;
+    wait_output(&mut rx, "first\r\n").await?;
+
+    // Like an init system which closes the console and opens it again, the
+    // output does not end meanwhile.
+    drop(slave);
+    time::sleep(DRAIN_TIMEOUT).await;
+    assert!(matches!(
+        rx.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty)
+    ));
+    let mut slave = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOCTTY)
+        .open(&name)?;
+    slave.write_all(b"second\n")?;
+    wait_output(&mut rx, "second\r\n").await?;
+
+    // The process exits.
+    drop(slave);
+    exited.cancel();
+    assert_eq!(time::timeout(WAIT, rx.recv()).await??, Message::Done);
+    let log = test_helpers::read(&json)?;
+    assert!(log.contains("first") && log.contains("second"), "{log}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn dropped_stdio_frees_the_channels_of_quiet_pipes() -> Result<()> {
     let mut io = ContainerIO::new(false, ContainerLog::new())?;

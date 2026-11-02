@@ -10,6 +10,7 @@ use anyhow::{Context as _, Result};
 use libc::{TIOCSWINSZ, winsize};
 use nix::{
     cmsg_space,
+    errno::Errno,
     fcntl::{self, FcntlArg, OFlag},
     sys::{
         socket::{self, Backlog, ControlMessageOwned, MsgFlags, SockType, UnixAddr},
@@ -370,6 +371,29 @@ impl AsFd for TerminalFd {
 #[derive(Clone, Debug)]
 pub struct TerminalIo(Arc<TerminalFd>);
 
+impl TerminalIo {
+    /// Open the other end of the terminal, in the devpts instance of the
+    /// container, which keeps the terminal from hanging up while it is open.
+    #[expect(unsafe_code, reason = "the TIOCGPTPEER ioctl")]
+    pub fn open_peer(&self) -> nix::Result<OwnedFd> {
+        // SAFETY: TIOCGPTPEER takes the flags of the new descriptor as an
+        // integer and returns it or a negative error, it does not touch any
+        // memory of ours, and the descriptor is kept open by the borrow for
+        // the duration of the call.
+        let fd = unsafe {
+            libc::ioctl(
+                self.0.as_raw_fd(),
+                libc::TIOCGPTPEER,
+                libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+            )
+        };
+        let fd = Errno::result(fd)?;
+        // SAFETY: the descriptor was just returned by the kernel and is not
+        // owned by anything else.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
 impl AsyncRead for TerminalIo {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -410,4 +434,4 @@ impl AsyncWrite for TerminalIo {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

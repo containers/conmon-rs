@@ -5,12 +5,12 @@ use super::{
     inotify::{SharedWatcher, Subscription, WatchEvent},
 };
 use anyhow::{Context, Result, bail};
-use nix::unistd::Pid;
-use std::path::{Path, PathBuf};
-use tokio::{
-    sync::mpsc::{Receiver, channel},
-    time::{self, Duration, Instant},
+use nix::{errno::Errno, unistd::Pid};
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
 };
+use tokio::sync::mpsc::{Receiver, channel};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
@@ -227,12 +227,19 @@ impl CgroupV2 {
 
         // The kills of siblings advance the baseline of the outer cgroup.
         let mut pod_subscription = None;
+        let mut pod_failed = false;
         if let Some((pod, _)) = &self.outer {
             debug!("Also watching outer memory events: {}", pod.display());
             match watcher.subscribe(pod, events_tx) {
                 Ok(subscription) => pod_subscription = Some(subscription),
-                Err(e) => debug!("Could not watch pod memory events: {e:#}"),
+                Err(e) => {
+                    pod_failed = !OOMWatcher::is_not_found(&e);
+                    OOMWatcher::watch_failed("Could not watch pod memory events", &e);
+                }
             }
+        }
+        if !pod_failed {
+            WATCH_FAILING.store(false, Ordering::Relaxed);
         }
 
         Ok(Subscriptions {
@@ -292,6 +299,10 @@ impl Subscriptions {
     }
 }
 
+/// Whether the last attempt to watch memory events failed for another reason
+/// than a missing file, which got a warning already.
+static WATCH_FAILING: AtomicBool = AtomicBool::new(false);
+
 impl OOMWatcher {
     pub(super) async fn oom_handling_cgroup_v2(
         token: &CancellationToken,
@@ -335,7 +346,7 @@ impl OOMWatcher {
             // The cgroup may be gone already. Still check for an OOM once the
             // process exited.
             Err(e) => {
-                debug!("Unable to watch memory events, checking on exit only: {e:#}");
+                Self::watch_failed("Unable to watch memory events, checking on exit only", &e);
                 token.cancelled().await;
                 return cgroup.check_on_exit();
             }
@@ -343,7 +354,6 @@ impl OOMWatcher {
         progress!(leaf, |p| p.subscribed += 1);
 
         let mut restarts = 0;
-        let mut next_check = Instant::now();
         loop {
             tokio::select! {
                 // Memory events may change all the time, for example while
@@ -369,7 +379,7 @@ impl OOMWatcher {
                         match cgroup.subscribe() {
                             Ok(new) => subscriptions = new,
                             Err(e) => {
-                                warn!(path, "Unable to watch memory events again, checking on exit only: {e:#}");
+                                Self::watch_failed("Unable to watch memory events again, checking on exit only", &e);
                                 break;
                             }
                         }
@@ -383,25 +393,15 @@ impl OOMWatcher {
                     };
                     debug!("Got OOM file event: {:?}", event);
 
-                    // The kernel notifies a change of the memory events of
-                    // a cgroup up to every 10 ms, and one of the hierarchical
-                    // ones of every ancestor. The counters get read at most
-                    // every `MIN_CHECK_INTERVAL`, for all events which came
-                    // meanwhile.
-                    tokio::select! {
-                        biased;
-                        () = token.cancelled() => {
-                            debug!("Loop cancelled");
-                            return cgroup.check_on_exit();
-                        }
-                        () = time::sleep_until(next_check) => {}
-                    }
+                    // The shared watcher dispatches the events which came
+                    // meanwhile at once, at most every
+                    // `MIN_DISPATCH_INTERVAL`, so that the counters get read
+                    // once for all of them.
                     let mut outer = cgroup.is_outer_event(&event);
                     while let Ok(event) = subscriptions.rx.try_recv() {
                         outer |= cgroup.is_outer_event(&event);
                     }
 
-                    next_check = Instant::now() + Self::MIN_CHECK_INTERVAL;
                     let oom = cgroup.check(outer);
                     progress!(leaf, |p| {
                         p.handled += 1;
@@ -429,11 +429,24 @@ impl OOMWatcher {
     /// watcher, after the reader of the events failed.
     const MAX_WATCHER_RESTARTS: u32 = 3;
 
-    /// How often a cgroup v2 watcher reads the counters at most, see
-    /// [`OOMWatcher::watch_cgroup_v2`]. Under memory pressure, like with
-    /// `memory.high`, the events of every container of a pod would be read
-    /// up to a hundred times a second otherwise.
-    const MIN_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+    /// Log a failure to watch memory events. A file which is gone, like the
+    /// one of a cgroup which got removed already, is expected. Others, like
+    /// running out of inotify instances or watches, get a warning, only the
+    /// first one until a watch works again, see [`WATCH_FAILING`].
+    fn watch_failed(message: &str, e: &anyhow::Error) {
+        if Self::is_not_found(e) {
+            debug!("{message}: {e:#}");
+        } else if !WATCH_FAILING.swap(true, Ordering::Relaxed) {
+            warn!("{message}: {e:#}");
+        } else {
+            debug!("{message}: {e:#}");
+        }
+    }
+
+    /// Whether watching failed because the file does not exist.
+    fn is_not_found(e: &anyhow::Error) -> bool {
+        e.root_cause().downcast_ref::<Errno>() == Some(&Errno::ENOENT)
+    }
 
     /// Read the current OOM counters of a memory events file to establish a
     /// baseline, so that only OOMs during this container's lifetime count.

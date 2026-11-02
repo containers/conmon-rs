@@ -4,7 +4,7 @@ use nix::{fcntl::FdFlag, pty, sys::socket::ControlMessage};
 use std::{io::IoSlice, os::unix::fs::PermissionsExt, time::Duration};
 
 /// Send the terminal descriptor with some data, like a runtime does.
-async fn send_fd(stream: &UnixStream, data: &[u8], fd: BorrowedFd<'_>) -> Result<()> {
+pub(crate) async fn send_fd(stream: &UnixStream, data: &[u8], fd: BorrowedFd<'_>) -> Result<()> {
     let fds = [fd.as_raw_fd()];
     stream
         .async_io(Interest::WRITABLE, || {

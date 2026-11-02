@@ -5,14 +5,16 @@ use super::{
     websocket::WEBSOCKET_PROTOCOLS,
 };
 use crate::streaming_server::{
-    spdy::{Connection, Headers, fuzzing::client_frames},
+    spdy::{
+        Connection, Headers,
+        fuzzing::{client_frames, spawn_client},
+    },
     stream_protocol::{STREAM_CREATION_TIMEOUT, STREAM_TYPE_HEADER},
 };
 use bytes::Bytes;
 use serde::de::IgnoredAny;
 use tokio::{
-    io::{self, AsyncWriteExt},
-    runtime, task,
+    runtime,
     time::{self, Duration},
 };
 
@@ -111,17 +113,8 @@ pub fn spdy(input: &[u8]) {
         .build()
         .expect("runtime");
     runtime.block_on(async {
-        let (client, server) = io::duplex(64 * 1024);
-        let (mut from_server, mut to_server) = io::split(client);
-        let client = task::spawn(async move {
-            let write = async {
-                let _ = to_server.write_all(&frames).await;
-                time::sleep(STREAM_CREATION_TIMEOUT + Duration::from_secs(1)).await;
-                let _ = to_server.shutdown().await;
-            };
-            let mut sink = io::sink();
-            let _ = tokio::join!(write, io::copy(&mut from_server, &mut sink));
-        });
+        let linger = STREAM_CREATION_TIMEOUT + Duration::from_secs(1);
+        let (server, client) = spawn_client(frames, linger);
         let served = async {
             let mut connection = Connection::serve(server, None, None, move |headers| {
                 SpdyStreams::accept(headers, version)

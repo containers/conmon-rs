@@ -5,6 +5,7 @@
 use crate::{
     attach::{AttachOutput, SharedContainerAttach},
     container_log::SharedContainerLog,
+    fs_util,
     mutex::lock,
     random_id::RandomId,
     tail::Tail,
@@ -98,9 +99,11 @@ pub(crate) const DRAIN_MAX_WAIT: Duration = Duration::from_secs(1);
 /// Upper bound for the time the exit files wait for the log drivers to take
 /// the output after the process exited, which does not count as a pause of
 /// the output, see `SharedContainerAttach::logging`, and for the read loops
-/// to end once stopped, see `ReapableChild::finish_output`. A journal which
-/// stalls takes up to two seconds per chunk, a pipe full of them must not
-/// keep the exit from being reported for minutes.
+/// to end once stopped and the log to sync, see
+/// `ReapableChild::finish_output`. A log driver which is slow, like a
+/// journal which takes only part of every chunk in time, or which hangs,
+/// like a log file on a stuck disk, must not keep the exit from being
+/// reported for minutes.
 pub(crate) const DRAIN_MAX_LOG_WAIT: Duration = Duration::from_secs(5);
 
 /// Bounds forwarding the output after the process exited.
@@ -307,11 +310,8 @@ impl Drop for TempFile {
         // The file may be gone already: the terminal listener removes its
         // socket once it got the descriptor, and a runtime may never write a
         // pidfile.
-        match std::fs::remove_file(&self.0) {
-            Err(e) if e.kind() != ErrorKind::NotFound => {
-                debug!("Unable to remove temp file {}: {}", self.0.display(), e);
-            }
-            _ => {}
+        if let Err(e) = fs_util::remove_file(&self.0) {
+            debug!("Unable to remove temp file {}: {}", self.0.display(), e);
         }
     }
 }
@@ -512,7 +512,7 @@ impl fmt::Display for Pipe {
 impl ContainerIO {
     /// The most output of a pipe an exec collects while its runtime runs,
     /// see [`ContainerIO::collect_stdio`], and the most an `exec_sync`
-    /// returns.
+    /// reads of each pipe.
     pub(crate) const MAX_STDIO_STREAM_SIZE: usize = 16 * 1024 * 1024;
 
     /// Create a new container IO instance.
@@ -816,6 +816,20 @@ impl ContainerIO {
                 return Err(e);
             }
         };
+        // A terminal reports EIO once no process has it open, which ends its
+        // output. The server keeps it open itself until the exit, so that a
+        // process may close and open it again, like an init system or a getty
+        // does, and its output ends at the exit like before.
+        match tty.open_peer() {
+            Ok(peer) => {
+                let exited = token.clone();
+                task::spawn(async move {
+                    exited.cancelled().await;
+                    drop(peer);
+                });
+            }
+            Err(e) => debug!("Unable to keep the terminal open until the exit: {e}"),
+        }
         let output = self.attach.output();
         self.spawn_read_loop(tty.clone(), Pipe::StdOut, output);
         self.spawn_stdin_loop(stdin.then_some(tty), token);

@@ -108,7 +108,7 @@ const PORT_FORWARD_PATH: &str = "portforward";
 
 /// The largest WebSocket message and frame a client of exec or attach may
 /// send. Clients send stdin, which kubectl reads in 32 KiB chunks and the
-/// attach sockets cap at 64 KiB per packet, and small resize events. The
+/// attach sockets take in packets of up to 33 KiB, and small resize events. The
 /// Python client sends all stdin of a write in one message, 1 MiB at a time
 /// for `k8s_cp` of Ansible, a third more in base64. The defaults of 64 MiB
 /// per message, or the 32 MiB of Kubernetes, would let a client make the

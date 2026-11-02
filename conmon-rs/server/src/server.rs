@@ -214,7 +214,7 @@ impl Server {
     /// (tokio's default allows 512), each with its own stack. Work which
     /// blocks for an unbounded time, like waiting for a process, must run on
     /// a dedicated thread instead, otherwise it can starve the pool.
-    const MAX_BLOCKING_THREADS: usize = 16;
+    pub(crate) const MAX_BLOCKING_THREADS: usize = 16;
 
     /// Stack size of the threads of the blocking pool, which only run short
     /// file and socket operations. The shutdown of the tracer, which exports

@@ -5,6 +5,7 @@ use crate::{
     capnp_util,
     child_reaper::RuntimeOutput,
     conmon_capnp::conmon,
+    fs_util,
     process::{Process, child_pid, read_pid_file, wait_for_exit_code},
     single_flight::{SingleFlight, Stop, stop_blocking},
     util::with_stderr,
@@ -326,7 +327,7 @@ impl Pause {
         }
 
         let pause_pid_path = Self::pause_pid_path(base_path, pod_id);
-        if let Err(e) = fs::remove_file(&pause_pid_path) {
+        if let Err(e) = fs_util::remove_file(&pause_pid_path) {
             debug!(
                 "Unable to remove pause PID path {}: {:#}",
                 pause_pid_path.display(),
