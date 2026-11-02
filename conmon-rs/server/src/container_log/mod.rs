@@ -15,6 +15,7 @@ use crate::{
     container_log::journald::JournaldLogger,
     container_log::json::JsonLogger,
     fs_util,
+    server::Server,
 };
 use anyhow::{Context, Result};
 use bytes::{Bytes, BytesMut};
@@ -28,7 +29,10 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{sync::Mutex, task};
+use tokio::{
+    sync::{Mutex, Semaphore},
+    task,
+};
 use tracing::{debug, error, trace};
 
 pub type SharedContainerLog = Arc<Mutex<ContainerLog>>;
@@ -101,6 +105,10 @@ impl Driver {
             Driver::Json(_) => JsonLogger::BUFFERS_LINES,
             Driver::Journald(_) => JournaldLogger::BUFFERS_LINES,
         }
+    }
+
+    fn file(&mut self) -> Option<&mut LogFile> {
+        dispatch!(self, logger => logger.file())
     }
 
     async fn init(&mut self) -> Result<()> {
@@ -249,6 +257,47 @@ impl ContainerLog {
     pub async fn finish(&mut self, pipe: Pipe) -> Result<()> {
         let lines = self.lines.finish(pipe);
         self.write_lines(pipe, &lines).await
+    }
+
+    /// Sync the data of the log files to disk, like conmon does once the
+    /// container exited. The log is not locked while the files sync, they
+    /// get synced even if one fails, the first error is returned. A file
+    /// which cannot be synced, like a device, has nothing to sync. Only a
+    /// few logs sync at a time, syncs which hang on a stuck disk keep a
+    /// quarter of the threads of the blocking pool at most, see
+    /// [`Server::MAX_BLOCKING_THREADS`]. Tests, which share the static, do
+    /// not wait for each other.
+    pub async fn sync(log: &SharedContainerLog) -> Result<()> {
+        const PERMITS: usize = if cfg!(test) {
+            Semaphore::MAX_PERMITS
+        } else {
+            Server::MAX_BLOCKING_THREADS / 4
+        };
+        static SYNC: Semaphore = Semaphore::const_new(PERMITS);
+        let files: Vec<_> = log
+            .lock()
+            .await
+            .drivers
+            .iter_mut()
+            .filter_map(|driver| driver.file()?.file.clone())
+            .collect();
+        if files.is_empty() {
+            return Ok(());
+        }
+        let permit = SYNC.acquire().await.context("wait for log sync")?;
+        task::spawn_blocking(move || {
+            let _permit = permit;
+            files
+                .iter()
+                .map(|file| match file.sync_data() {
+                    Err(e) if e.raw_os_error() == Some(libc::EINVAL) => Ok(()),
+                    res => res,
+                })
+                .fold(Ok(()), io::Result::and)
+        })
+        .await
+        .context("join log sync")?
+        .context("sync log file")
     }
 
     /// Hand the lines to every driver which takes them. All of them get the
@@ -871,7 +920,8 @@ impl LogFile {
     /// replaced, like by the rotation.
     ///
     /// The file is not synced to disk: an fsync of a large log can take long
-    /// and the data sits in the page cache either way.
+    /// and the data sits in the page cache either way. Only the exit of the
+    /// container syncs the log, see [`ContainerLog::sync`].
     ///
     /// A failed flush dropped the buffer already, failing the reopen would
     /// not bring it back but stop the rotation of the kubelet, which moves

@@ -38,7 +38,8 @@ fn fuzz_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz")
 }
 
-/// Every target in `fuzz/fuzz_targets` has its entry point here.
+/// Every target in `fuzz/fuzz_targets` has its entry point here and a binary
+/// in the manifest.
 #[test]
 fn all_targets_get_tested() {
     let mut names: Vec<_> = fs::read_dir(fuzz_dir().join("fuzz_targets"))
@@ -53,6 +54,16 @@ fn all_targets_get_tested() {
         .collect();
     names.sort();
     assert_eq!(names, TARGETS.map(|(name, _)| name));
+
+    // cargo fuzz builds only the targets with a binary in the manifest.
+    let manifest = fs::read_to_string(fuzz_dir().join("Cargo.toml")).expect("fuzz manifest");
+    for (name, _) in TARGETS {
+        let bin = format!("[[bin]]\nname = \"{name}\"\npath = \"fuzz_targets/{name}.rs\"\n");
+        assert!(
+            manifest.contains(&bin),
+            "{name} has no binary in the manifest"
+        );
+    }
 }
 
 /// Every target takes its seeds and short inputs, which the fuzzer tries

@@ -93,6 +93,15 @@ tracing ones while the tracing of CRI-O is off, and only with a build with the
 every CRI-O release vendors, pass them on to the server, which then hangs or
 fails every pod.
 
+Some CRI-O options do not reach the server. CRI-O passes `no_pivot` only to
+conmon, the server creates the containers without `--no-pivot`. The
+`platform_runtime_paths` of a runtime handler only apply to some of the runtime
+calls which CRI-O makes itself, like update and checkpoint: the server runs the
+`runtime_path` of the handler for the containers it creates and the commands
+it executes in them. Restoring a checkpoint does not work with a `pod` runtime
+handler, CRI-O runs the `monitor_path` binary with the arguments of conmon for
+it, which conmon-rs rejects.
+
 ## Compatibility
 
 A CRI-O release vendors one version of the Go client, which needs a server
@@ -256,6 +265,13 @@ killed and its call fails: for `createContainer` after 10 minutes, for an exec
 only starts the exec process. Each runtime runs in a process group of its own,
 which gets killed with it, so the helpers it started do not stay behind.
 
+Since unreleased, `execSyncContainer` returns at most 16 MiB less 64 KiB of
+output, stdout and stderr together, like conmon, so that the response fits
+into the 16 MiB gRPC messages of CRI-O and the kubelet. Each stream keeps up
+to half of it and more of what the other one leaves, so a large stdout does
+not drop a short error on stderr. Output beyond the limit gets dropped without
+notice. Before, stdout and stderr took up to 16 MiB each.
+
 A call which fails carries a message of the server. Only the prefixes which
 the comment of the `Conmon` interface in the schema lists stay stable, like
 `container not found` for a container the server does not know, the Go client
@@ -374,6 +390,16 @@ the server from reading the client, which may then go idle, like a spdystream
 connection whose reader waits. Empty stdin messages do not count towards the
 stdin limit of a session.
 
+Since unreleased, the stdin which a client sent right before a clean close (the
+WebSocket close, or the end of a SPDY connection after its stdin) reaches the
+process as long as the process keeps taking it. Only a process which takes none
+of it for 5 seconds lets the session end without the rest, counted from the
+close, or from the start of an exec process which the runtime started within
+that time. Before, the process got about a second after the close and the rest
+got dropped, which cut off the uploads of clients which close right after their
+last write, like the Python client or `k8s_cp` of Ansible, once the process
+took less than about 1 MiB per second.
+
 #### Port forwarding
 
 Port forwarding speaks the Kubernetes `portforward.k8s.io` protocol over
@@ -425,6 +451,7 @@ like `?port=80&port=443`, as CRI-O does.
 | Request head                                                   | 64 KiB since v1.2.2, a larger one gets a 431                          |
 | Exec output while the runtime starts the process               | 16 MiB per stream, the session fails above, see above                 |
 | End of a session the client takes nothing of                   | 60 seconds or a longer exec or attach idle timeout, since v1.2.2      |
+| Stdin before a clean close which the process takes none of     | 5 seconds since unreleased, about a second before                     |
 | Idle connection                                                | The `idleTimeoutSec` of the request, see below                        |
 
 `idleTimeoutSec` ends a connection which got no frame of the client and no
@@ -588,11 +615,22 @@ ends up as one entry. Like the `P` marker of the CRI log, a partial entry is
 a line which had no ending yet: it grew beyond 16 KiB, the output paused for
 half a second, or the output ended without one.
 
-The server never syncs the log files to disk, also not on a rotation or once
-the container exited, the entries sit in the page cache like other writes.
-conmon syncs them then unless it runs with `--no-sync-log`. CRI-O (since
-v1.31) rejects its `no_sync_log` option for a `pod` runtime handler, conmon-rs
-never syncs the container logs either way.
+Since unreleased, the server keeps a terminal open itself until the process
+exited, so its output ends at the exit, not once no process has it open. A
+process which closes the terminal and opens it again, like an init system or a
+getty, keeps its output in the log and for attach clients. This takes Linux
+4.13 or later (`TIOCGPTPEER`), on older kernels the output still ends once no
+process has the terminal open. Before, the output ended once the terminal got
+closed the first time, and without stdin the server closed it as well.
+
+The server does not sync the log files to disk on a rotation, the entries sit
+in the page cache like other writes. Since unreleased, it syncs the CRI and
+JSON logs once the container exited and its output ended, before it writes
+the exit files, like conmon without `--no-sync-log`. CRI-O (since v1.31)
+rejects its `no_sync_log` option for a `pod` runtime handler, so the sync
+cannot be turned off. The exit files wait up to 5 seconds for the log drivers
+to take the last output and for the sync, a slower disk does not hold them
+back longer. Before, the server never synced the container logs.
 
 The server's own logs go to the server log driver. Running with
 `--log-level debug` prints every RPC and I/O decision and is the first thing to
@@ -628,6 +666,14 @@ counted as an OOM. Since v1.2.2, a leaf without the memory controller,
 which has no `memory.events`, is not gone: a kill counted by the cgroup above
 it may be an OOM the same way, but without such a cgroup, or if its counters
 cannot be read, nothing counts as one.
+
+The server watches the memory events of all containers through a single
+inotify instance, and reads the counters at most every 100 ms under memory
+pressure. If it cannot watch them, it checks the counters only once the
+process exited. Since unreleased, it logs a warning when that happens for
+another reason than a cgroup which is gone already, like a used up
+`fs.inotify.max_user_instances` or `fs.inotify.max_user_watches`, once until
+a watch works again.
 
 With cgroup v1, the server registers an eventfd for `memory.oom_control`
 through `cgroup.event_control` like conmon, and confirms an event with the

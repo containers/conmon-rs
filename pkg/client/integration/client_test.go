@@ -519,6 +519,28 @@ var _ = Describe("ConmonClient", func() {
 			}, SpecTimeout(specTimeout))
 		}
 
+		It("should keep the output of a terminal which got opened again", func(ctx SpecContext) {
+			// Like an init system which closes the console and opens it
+			// again, the output must not end meanwhile.
+			tr = newTestRunner()
+			tr.createRuntimeConfigWithProcessArgs(true, []string{
+				"/busybox", "sh", "-c",
+				"echo first; exec </dev/null >/dev/null 2>&1; " +
+					"/busybox sleep 1; echo second >/dev/console",
+			}, nil)
+			sut = tr.configGivenEnv()
+			tr.createContainer(ctx, sut, true)
+			tr.startContainer()
+
+			Eventually(fileContents, 10*time.Second).
+				WithArguments(tr.exitPath()).
+				Should(Equal("0"))
+			Expect(fileContents(tr.logPath())).To(And(
+				ContainSubstring("first"),
+				ContainSubstring("second"),
+			))
+		}, SpecTimeout(specTimeout))
+
 		// sendPipe sends the write end of a new pipe to the fd socket of the
 		// server and closes it, so that only the server holds it then. It
 		// returns the read end and the slot of the write end. The fd socket
@@ -823,9 +845,9 @@ var _ = Describe("ConmonClient", func() {
 		It("should cut an output beyond the limit", func(ctx SpecContext) {
 			runContainer(ctx, false, []string{"/busybox", "sleep", "600"})
 
-			// The server keeps less than 16 MiB per stream, stops
-			// collecting it there and drops the rest, so the process still
-			// runs to its end.
+			// The server keeps less than 16 MiB of both streams together,
+			// stops collecting a stream there and drops the rest, so the
+			// process still runs to its end.
 			const limit = 16 << 20
 
 			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
@@ -992,6 +1014,50 @@ var _ = Describe("ConmonClient", func() {
 			Expect(err).To(Succeed())
 			Expect(result.ExitCode).To(BeEquivalentTo(0))
 			Expect(string(result.Stdout)).To(MatchRegexp(`THP_enabled:\s+1`))
+		}, SpecTimeout(specTimeout))
+
+		It("should not pass its OOM score adjustment on", func(ctx SpecContext) {
+			oomScoreAdj := func(pid string) string {
+				score, err := os.ReadFile("/proc/" + pid + "/oom_score_adj")
+				Expect(err).To(Succeed())
+
+				return strings.TrimSpace(string(score))
+			}
+			own := oomScoreAdj("self")
+
+			tr = newTestRunner()
+			tr.createRuntimeConfigWithProcessArgs(
+				false,
+				[]string{"/busybox", "sleep", "10"},
+				func(g generate.Generator) {
+					// Without a value of its own the container keeps the
+					// one of the runtime.
+					g.Config.Process.OOMScoreAdj = nil
+				},
+			)
+			sut = tr.configGivenEnv()
+			resp, err := sut.CreateContainer(ctx, tr.defaultConfig(false))
+			Expect(err).To(Succeed())
+			tr.startContainer()
+
+			// The server protects itself only. Rootless, it lacks the
+			// privileges for that and keeps the score of the tests.
+			server := "-1000"
+			if unshare.IsRootless() {
+				server = own
+			}
+
+			Expect(oomScoreAdj(strconv.FormatUint(uint64(sut.PID()), 10))).To(Equal(server))
+			Expect(oomScoreAdj(strconv.FormatUint(uint64(resp.PID), 10))).To(Equal(own))
+
+			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+				ID:      tr.ctrID,
+				Command: []string{"/busybox", "cat", "/proc/self/oom_score_adj"},
+				Timeout: 10,
+			})
+			Expect(err).To(Succeed())
+			Expect(result.ExitCode).To(BeEquivalentTo(0))
+			Expect(strings.TrimSpace(string(result.Stdout))).To(Equal(own))
 		}, SpecTimeout(specTimeout))
 
 		for _, terminal := range []bool{true, false} {
@@ -1674,7 +1740,7 @@ var _ = Describe("ConmonClient", func() {
 				ctx,
 				&client.CreateNamespacesConfig{},
 			)
-			Expect(err).NotTo(Succeed())
+			Expect(err).To(MatchError(ContainSubstring("no pod ID provided")))
 			Expect(response).To(BeNil())
 		}, SpecTimeout(specTimeout))
 
@@ -1979,18 +2045,18 @@ var _ = Describe("ConmonClient", func() {
 			otherPod := cfg
 			otherPod.PodID = uuid.New().String()
 			_, err = sut.CreateNamespaces(ctx, &otherPod)
-			Expect(err).NotTo(Succeed())
+			Expect(err).To(MatchError(ContainSubstring("cannot serve pod " + otherPod.PodID)))
 
 			otherNamespaces := cfg
 			otherNamespaces.Namespaces = []client.Namespace{client.NamespaceNet}
 			_, err = sut.CreateNamespaces(ctx, &otherNamespaces)
-			Expect(err).NotTo(Succeed())
+			Expect(err).To(MatchError(ContainSubstring("created with namespaces")))
 
 			otherBasePath := cfg
 			otherBasePath.BasePath = MustTempDir("ns-test-")
 			DeferCleanup(os.RemoveAll, otherBasePath.BasePath)
 			_, err = sut.CreateNamespaces(ctx, &otherBasePath)
-			Expect(err).NotTo(Succeed())
+			Expect(err).To(MatchError(ContainSubstring("created with base path")))
 		}, SpecTimeout(specTimeout))
 
 		It("should create the namespaces once for concurrent calls", func(ctx SpecContext) {

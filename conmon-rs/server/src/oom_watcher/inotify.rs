@@ -6,7 +6,10 @@ use crate::{
     mutex::lock,
 };
 use anyhow::{Context, Result};
-use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify, InotifyEvent, WatchDescriptor};
+use nix::{
+    errno::Errno,
+    sys::inotify::{AddWatchFlags, InitFlags, Inotify, InotifyEvent, WatchDescriptor},
+};
 use std::{
     collections::HashMap,
     io,
@@ -21,6 +24,7 @@ use tokio::{
     runtime::Handle,
     sync::mpsc::Sender,
     task::{self, JoinHandle},
+    time::{self, Duration},
 };
 use tracing::{error, trace};
 
@@ -41,6 +45,18 @@ impl WatchEvent {
 /// with `IN_MODIFY` and the removal of a cgroup with `IN_IGNORED` only,
 /// which every watch gets anyway.
 const WATCH_FLAGS: AddWatchFlags = AddWatchFlags::IN_MODIFY;
+
+/// How often the events get dispatched at most. The kernel notifies a change
+/// of the memory events of a cgroup up to every 10 ms, and one of the
+/// hierarchical ones of every ancestor, which alternate in the queue, so
+/// that inotify does not merge them. Under memory pressure, like at
+/// `memory.high` or `memory.max`, a single container would wake the server
+/// up to a hundred times a second otherwise, and every one of its watchers
+/// would read its counters as often. The queue of the kernel holds 16384
+/// events by default, which takes more than 1600 watched files changing in
+/// one interval, far more than the containers of a pod. An overflow gets
+/// dispatched to every watcher, see [`Watches::dispatch`].
+const MIN_DISPATCH_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The watches by descriptor. A watch belongs to a file rather than to its
 /// path: a file which got recreated gets a watch of its own, and the events
@@ -114,7 +130,7 @@ impl Watches {
 /// subscribers of their path. Adding and removing a watch does not block, the
 /// subscribers do that right away.
 pub(super) struct SharedWatcher {
-    inotify: Arc<AsyncFd<Fd<Inotify>>>,
+    inotify: Arc<Inotify>,
 
     /// The subscribers and the watches. The reader of the events takes this
     /// lock as well, it never waits while holding it.
@@ -191,13 +207,13 @@ impl SharedWatcher {
     fn new() -> Result<Self> {
         let inotify = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC)
             .context("create inotify instance")?;
-        let inotify =
-            async_fd::register(inotify, Interest::READABLE).context("register inotify instance")?;
         let inotify = Arc::new(inotify);
+        let registered = async_fd::register(inotify.clone(), Interest::READABLE)
+            .context("register inotify instance")?;
         let watches = Arc::<Mutex<Watches>>::default();
         let failed = Arc::<AtomicBool>::default();
         let reader = task::spawn(Self::read_events(
-            inotify.clone(),
+            registered,
             watches.clone(),
             failed.clone(),
         ));
@@ -212,16 +228,20 @@ impl SharedWatcher {
 
     /// Read the events of the kernel and dispatch them, until the watcher
     /// got dropped or reading failed.
+    ///
+    /// After a dispatch, the events which come meanwhile get dispatched
+    /// together once [`MIN_DISPATCH_INTERVAL`] passed. The instance gets
+    /// deregistered until then: tokio registers it edge triggered, and
+    /// every new event would wake the runtime while it stays registered,
+    /// even if nothing reads it.
     async fn read_events(
-        inotify: Arc<AsyncFd<Fd<Inotify>>>,
+        mut registered: AsyncFd<Fd<Arc<Inotify>>>,
         watches: Arc<Mutex<Watches>>,
         failed: Arc<AtomicBool>,
     ) {
         loop {
-            let events = match inotify
-                .async_io(Interest::READABLE, |fd| {
-                    fd.read_events().map_err(io::Error::from)
-                })
+            let events = match registered
+                .async_io(Interest::READABLE, |fd| Self::read_queued(fd))
                 .await
             {
                 Ok(events) => events,
@@ -231,12 +251,43 @@ impl SharedWatcher {
                     break;
                 }
             };
-            let mut watches = lock(&watches);
-            for event in &events {
-                watches.dispatch(event);
+            {
+                let mut watches = lock(&watches);
+                for event in &events {
+                    watches.dispatch(event);
+                }
             }
+
+            let inotify = Arc::clone(registered.get_ref());
+            drop(registered);
+            time::sleep(MIN_DISPATCH_INTERVAL).await;
+            // Events which are queued already get reported right away.
+            registered = match async_fd::register(inotify, Interest::READABLE) {
+                Ok(registered) => registered,
+                Err(e) => {
+                    error!("Unable to register inotify instance, checking on exit only: {e}");
+                    break;
+                }
+            };
         }
         Self::stopped(&watches, &failed);
+    }
+
+    /// Read all queued events, which a single read takes up to 4 KiB of.
+    /// Fails with `WouldBlock` only if there is none.
+    fn read_queued(inotify: &Inotify) -> io::Result<Vec<InotifyEvent>> {
+        let mut events = inotify.read_events()?;
+        loop {
+            match inotify.read_events() {
+                Ok(more) => events.extend(more),
+                Err(Errno::EAGAIN) => return Ok(events),
+                // Recurs with the next read, after the dispatch of these.
+                Err(e) => {
+                    trace!("Unable to read more watch events: {e}");
+                    return Ok(events);
+                }
+            }
+        }
     }
 
     /// The reader stopped. The next subscription gets a new watcher. The
@@ -264,7 +315,6 @@ impl SharedWatcher {
         // already, the subscriber joins its watch then.
         let wd = self
             .inotify
-            .get_ref()
             .add_watch(path, WATCH_FLAGS)
             .with_context(|| format!("watch {}", path.display()))?;
         watches
@@ -297,7 +347,7 @@ impl SharedWatcher {
         let Some(watch) = watches.0.remove(&wd) else {
             return;
         };
-        if let Err(e) = self.inotify.get_ref().rm_watch(wd) {
+        if let Err(e) = self.inotify.rm_watch(wd) {
             // The watch is gone already if the cgroup got removed.
             trace!("Unable to unwatch {}: {:#}", watch.path.display(), e);
         }
@@ -341,7 +391,7 @@ impl SharedWatcher {
             .find(|(_, watch)| *watch.path == *path)
             .map(|(wd, _)| *wd)
             .context("not watched")?;
-        Ok(self.inotify.get_ref().rm_watch(wd)?)
+        Ok(self.inotify.rm_watch(wd)?)
     }
 
     /// Whether the file is watched.

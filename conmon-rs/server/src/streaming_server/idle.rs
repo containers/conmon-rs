@@ -40,7 +40,8 @@ impl Activity {
         *lock(&self.0) = Instant::now();
     }
 
-    fn last(&self) -> Instant {
+    /// When the connection was active the last time.
+    pub(super) fn last(&self) -> Instant {
         *lock(&self.0)
     }
 

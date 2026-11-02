@@ -442,7 +442,7 @@ pub async fn wait_for_exit_code(pid: Pid) -> i32 {
     if let Some(code) = try_pidfd_wait(pid).await {
         return code;
     }
-    debug!("pidfd not available, falling back to blocking waitpid");
+    debug!("Pidfd not available, falling back to blocking waitpid");
     wait_for_exit_code_on_thread(pid).await
 }
 
@@ -454,7 +454,7 @@ async fn wait_for_exit_code_on_thread(pid: Pid) -> i32 {
         let _ = tx.send(wait_for_exit_code_blocking(pid));
     });
     rx.await.unwrap_or_else(|_| {
-        error!("waitpid thread exited without a result");
+        error!("Waitpid thread exited without a result");
         EXIT_CODE_WAIT_FAILED
     })
 }
@@ -540,7 +540,7 @@ async fn try_pidfd_wait(pid: Pid) -> Option<i32> {
             Some(EXIT_CODE_UNKNOWN)
         }
         Err(e) => {
-            error!("waitid after pidfd readable failed: {e:#}");
+            error!("Waitid after pidfd readable failed: {e:#}");
             Some(EXIT_CODE_UNKNOWN)
         }
     }

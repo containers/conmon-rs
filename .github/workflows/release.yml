@@ -64,10 +64,11 @@ jobs:
       # of a patch release start at the previous patch of its minor. A rerun
       # continues with the draft, which gh finds by its tag as well, and
       # leaves a published release alone if it has all files. A release only
-      # becomes the latest one if no other release has a higher version,
-      # unlike a patch release of an older minor. build-sources rejects tags
-      # other than vX.Y.Z. A failing command only fails the step outside of a
-      # pipe or a process substitution.
+      # becomes the latest one if no other release has a higher version, so a
+      # late rerun of an older tag does not take it over. Releases only come
+      # from main, see release.md. build-sources rejects tags other than
+      # vX.Y.Z. A failing command only fails the step outside of a pipe or a
+      # process substitution.
       - name: Release
         working-directory: release
         run: |

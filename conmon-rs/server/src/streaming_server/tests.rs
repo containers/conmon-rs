@@ -169,6 +169,57 @@ async fn request_heads_are_bounded() -> Result<()> {
         .await
 }
 
+#[tokio::test]
+async fn requests_get_routed_by_path_and_method() -> Result<()> {
+    LocalSet::new()
+        .run_until(async {
+            let server = StreamingServer::default();
+            server.start_if_required().await?;
+            let respond = async |method: &str, path: &str| -> Result<String> {
+                let mut stream = TcpStream::connect((ADDR, server.port())).await?;
+                let request = format!("{method} {path} HTTP/1.1\r\nHost: {ADDR}\r\n\r\n");
+                stream.write_all(request.as_bytes()).await?;
+                time::timeout(HEADER_READ_TIMEOUT, response_head(&mut stream))
+                    .await
+                    .context("no response")?
+            };
+            let token = RandomId::new().to_string();
+
+            // Paths without a kind and a token of one, also for methods
+            // which no path takes.
+            for path in [
+                "/".to_owned(),
+                "/exec".to_owned(),
+                "/exec/".to_owned(),
+                format!("/other/{token}"),
+                format!("/attach/{token}/x"),
+            ] {
+                for method in ["GET", "PUT"] {
+                    let response = respond(method, &path).await?;
+                    assert!(response.starts_with("http/1.1 404"), "{path}: {response}");
+                }
+            }
+
+            // Other methods on the path of a session.
+            let response = respond("PUT", &format!("/exec/{token}")).await?;
+            assert!(response.starts_with("http/1.1 405"), "{response}");
+            assert!(
+                response.contains("\r\nallow: get,head,post\r\n"),
+                "{response}"
+            );
+
+            // A token which is none.
+            let response = respond("GET", "/portforward/x").await?;
+            assert!(response.starts_with("http/1.1 400"), "{response}");
+
+            // A token of no session.
+            let response = respond("POST", &format!("/exec/{token}")).await?;
+            assert!(response.starts_with("http/1.1 404"), "{response}");
+            Ok(())
+        })
+        .await
+}
+
 #[tokio::test(start_paused = true)]
 async fn sessions_wait_for_their_client_in_bounds() -> Result<()> {
     LocalSet::new()

@@ -19,9 +19,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 
 use nix::sys::socket::{setsockopt, sockopt};
-use std::ops::ControlFlow;
+use std::{collections::VecDeque, ops::ControlFlow};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWriteExt, DuplexStream},
     sync::watch,
     task::LocalSet,
     time::{self, Duration},
@@ -150,8 +150,9 @@ async fn too_large_messages_of_clients_which_do_not_read_fail_the_session() -> R
         .await
 }
 
-#[tokio::test(start_paused = true)]
-async fn too_large_sessions_end_without_the_idle_timeout() -> Result<()> {
+/// The output of a SPDY session with stdout over a small connection in
+/// memory, and its client, which reads only when told to.
+async fn spdy_output(idle_timeout: Option<Duration>) -> Result<(Output, Client<DuplexStream>)> {
     let (client, server) = tokio::io::duplex(1024);
     let mut connection =
         Connection::serve(server, None, None, |h| SpdyStreams::accept(h, Version::V4));
@@ -165,8 +166,100 @@ async fn too_large_sessions_end_without_the_idle_timeout() -> Result<()> {
     };
     let streams = SpdyStreams::wait(&mut connection, expected).await?;
     let (_input, output) = streams.into_parts(connection, Version::V4).await;
+    Ok((Output::spdy(output, idle_timeout), client))
+}
+
+/// A client which sends the events, then waits.
+struct Events(VecDeque<ClientEvent>);
+
+impl ClientInput for Events {
+    async fn next(&mut self) -> Option<ClientEvent> {
+        match self.0.pop_front() {
+            Some(event) => Some(event),
+            None => std::future::pending().await,
+        }
+    }
+}
+
+/// Stdin in messages of 32 KiB, each of its own byte, and a clean close.
+fn stdin_and_close(messages: u8) -> (Events, Vec<u8>) {
+    let stdin: Vec<_> = (0..messages).map(|i| vec![i; 32 * 1024]).collect();
+    let events = stdin
+        .iter()
+        .map(|data| ClientEvent::Stdin(Stdin::Data(Bytes::from(data.clone()))))
+        .chain([ClientEvent::Closed])
+        .collect();
+    (Events(events), stdin.concat())
+}
+
+/// A client which closes right after its last stdin, like the Python client
+/// with `k8s_cp` of Ansible, while the container takes it slowly: all of it
+/// reaches the container, the end of the session waits for it.
+#[tokio::test(start_paused = true)]
+async fn stdin_before_close_reaches_slow_containers() -> Result<()> {
+    let (io, child, _token) = attach_child(false)?;
+    let session = Session::Attach(attach_config(child, true, false, None));
+    let (output, _client) = spdy_output(None).await?;
+    let (input, expected) = stdin_and_close(64);
+
+    // Far more than the server holds, the container takes a part well
+    // within the timeout, but all of it only long after.
+    let attach = io.attach().clone();
+    let reader = tokio::spawn(async move {
+        let mut stdin = vec![];
+        loop {
+            time::sleep(STDIN_FLUSH_TIMEOUT / 10).await;
+            match time::timeout(STDIN_FLUSH_TIMEOUT, attach.read()).await {
+                Ok(data) => stdin.extend_from_slice(&data?),
+                Err(_) => return anyhow::Ok(stdin),
+            }
+        }
+    });
+    StreamingServer::run_session(output, input, session, Activity::new()).await;
+    let stdin = reader.await??;
+    assert!(
+        stdin == expected,
+        "got {} of {} bytes",
+        stdin.len(),
+        expected.len()
+    );
+    Ok(())
+}
+
+/// A container which stops taking stdin after a clean close of the client
+/// holds up the end of the session for [`STDIN_FLUSH_TIMEOUT`] after it took
+/// the last part.
+#[tokio::test(start_paused = true)]
+async fn stdin_before_close_waits_for_stalled_containers_in_bounds() -> Result<()> {
+    let (io, child, _token) = attach_child(false)?;
+    let session = Session::Attach(attach_config(child, true, false, None));
+    let (output, _client) = spdy_output(None).await?;
+    // More than the channels towards the container hold, less than the
+    // pending stdin, so that the server reads the close.
+    let (input, _) = stdin_and_close(40);
+
+    let attach = io.attach().clone();
+    let reader = tokio::spawn(async move {
+        for _ in 0..2 {
+            time::sleep(Duration::from_secs(3)).await;
+            attach.read().await?;
+        }
+        anyhow::Ok(())
+    });
+    let start = time::Instant::now();
+    StreamingServer::run_session(output, input, session, Activity::new()).await;
+    assert_eq!(
+        start.elapsed(),
+        Duration::from_secs(6) + STDIN_FLUSH_TIMEOUT
+    );
+    reader.await??;
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn too_large_sessions_end_without_the_idle_timeout() -> Result<()> {
     let idle_timeout = Some(Duration::from_secs(3600));
-    let mut output = Output::spdy(output, idle_timeout);
+    let (mut output, client) = spdy_output(idle_timeout).await?;
 
     // The client does not read, the output backs up.
     let data = Bytes::from(vec![0; 32 * 1024]);

@@ -5,7 +5,7 @@ use super::{
 use crate::{
     mutex::lock,
     streaming_server::{
-        spdy::fuzzing::client_frames,
+        spdy::fuzzing::{client_frames, spawn_client},
         stream_protocol::{STREAM_CREATION_TIMEOUT, STREAM_TYPE_HEADER},
     },
 };
@@ -15,8 +15,8 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::{
-    io::{self, AsyncRead, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf},
-    runtime, select, task,
+    io::{self, AsyncRead, AsyncWrite, DuplexStream, ReadBuf},
+    runtime, select,
     time::{self, Duration, Instant},
 };
 
@@ -127,20 +127,11 @@ pub fn spdy(input: &[u8]) {
         .build()
         .expect("runtime");
     runtime.block_on(async {
-        let (client, server) = io::duplex(64 * 1024);
-        let (mut from_server, mut to_server) = io::split(client);
-        let client = task::spawn(async move {
-            // The connection stays open until the requests whose second
-            // stream did not come expired, the streams of a connection
-            // which ended count as reset.
-            let write = async {
-                let _ = to_server.write_all(&frames).await;
-                time::sleep(STREAM_CREATION_TIMEOUT + Duration::from_secs(1)).await;
-                let _ = to_server.shutdown().await;
-            };
-            let mut sink = io::sink();
-            let _ = tokio::join!(write, io::copy(&mut from_server, &mut sink));
-        });
+        // The connection stays open until the requests whose second
+        // stream did not come expired, the streams of a connection which
+        // ended count as reset.
+        let linger = STREAM_CREATION_TIMEOUT + Duration::from_secs(1);
+        let (server, client) = spawn_client(frames, linger);
         let session = PortForward {
             netns_path: "/proc/self/ns/none".into(),
             idle_timeout: None,

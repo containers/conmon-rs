@@ -6,8 +6,9 @@ use super::{
 use anyhow::bail;
 use bytes::{Bytes, BytesMut};
 use tokio::{
-    io::AsyncWriteExt,
-    runtime, task,
+    io::{self, AsyncWriteExt, DuplexStream},
+    runtime,
+    task::{self, JoinHandle},
     time::{self, Duration},
 };
 
@@ -65,6 +66,25 @@ pub(crate) fn client_frames(
     buf
 }
 
+/// A client in a task of its own on a connection in memory, whose server
+/// side it returns. It sends the frames, waits for `linger`, then closes
+/// the connection. It reads while it writes, a server which answers more
+/// than the connection holds would wait for it otherwise.
+pub(crate) fn spawn_client(frames: BytesMut, linger: Duration) -> (DuplexStream, JoinHandle<()>) {
+    let (client, server) = io::duplex(64 * 1024);
+    let (mut from_server, mut to_server) = io::split(client);
+    let client = task::spawn(async move {
+        let write = async {
+            let _ = to_server.write_all(&frames).await;
+            time::sleep(linger).await;
+            let _ = to_server.shutdown().await;
+        };
+        let mut sink = io::sink();
+        let _ = tokio::join!(write, io::copy(&mut from_server, &mut sink));
+    });
+    (server, client)
+}
+
 /// Serve a connection to a client which sends the frames the input
 /// describes, then closes the connection. The streams the server
 /// accepts take their data, answer, close or get dropped. The connection
@@ -82,23 +102,12 @@ pub fn connection(input: &[u8]) {
         .build()
         .expect("runtime");
     runtime.block_on(async {
-        let (client, server) = tokio::io::duplex(64 * 1024);
-        let (mut from_server, mut to_server) = tokio::io::split(client);
+        let (server, client) = spawn_client(frames, Duration::ZERO);
         let mut connection = Connection::serve(server, None, None, |headers| {
             match headers.get("streamType") {
                 Some("data" | "error") => Ok(()),
                 _ => bail!("unexpected stream type"),
             }
-        });
-        // The client reads while it writes, a server which answers more
-        // than the pipe holds would wait for it otherwise.
-        let client = task::spawn(async move {
-            let write = async {
-                let _ = to_server.write_all(&frames).await;
-                let _ = to_server.shutdown().await;
-            };
-            let mut sink = tokio::io::sink();
-            let _ = tokio::join!(write, tokio::io::copy(&mut from_server, &mut sink));
         });
         let served = async {
             let mut streams = vec![];

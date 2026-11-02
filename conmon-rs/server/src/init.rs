@@ -3,7 +3,7 @@
 //! runtime calls and cleanup commands the OOM score, huge pages setting and
 //! open files limits the server started with.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result};
 use nix::{
     errno::Errno,
     fcntl::{OFlag, open},
@@ -46,7 +46,7 @@ fn set_oom_score_at(path: &Path, score: &str) -> Result<()> {
             eprintln!("Missing sufficient privileges to adjust OOM score");
             Ok(())
         }
-        Err(e) => bail!("adjusting OOM score {e}"),
+        Err(e) => Err(e).context("adjust OOM score"),
     }
 }
 

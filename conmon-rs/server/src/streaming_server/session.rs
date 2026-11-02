@@ -50,10 +50,9 @@ use tracing::{debug, error, info, trace};
 /// fills it comes on top, also when it is larger than all of it.
 pub(super) const PENDING_STDIN_MAX_BYTES: usize = 1024 * 1024;
 
-/// The largest part of stdin which goes towards the container at once, like
-/// the largest packets of the attach sockets. Larger stdin gets split without
-/// copying it, so that the channels on the way, which count entries, hold at
-/// most this much per entry.
+/// The largest part of stdin which goes towards the container at once.
+/// Larger stdin gets split without copying it, so that the channels on the
+/// way, which count entries, hold at most this much per entry.
 const STDIN_CHUNK_SIZE: usize = 64 * 1024;
 
 /// Stdin smaller than this gets merged with the stdin before it while it
@@ -78,9 +77,11 @@ pub(super) const PING_INTERVAL: Duration = if cfg!(test) {
     spdy::PING_INTERVAL
 };
 
-/// How long stdin which the client sent right before closing may take to
-/// reach the container.
-const STDIN_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long the stdin which the client sent right before closing may wait for
+/// the container to take a part of it, see [`ClientRx::stdin_taken`]. A slow
+/// container gets all of it, only one which stopped reading its stdin holds
+/// up the end of the session this long.
+const STDIN_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The latest resize event of a client, older ones are replaced.
 pub(super) type ResizeRx = watch::Receiver<Option<Bytes>>;
@@ -114,6 +115,12 @@ pub(super) struct ClientRx {
     /// Cancelled once the client sent a message larger than the server
     /// takes, which fails the session.
     too_large: CancellationToken,
+
+    /// Touched whenever the container took a part of the stdin, at the clean
+    /// close of the client and once an exec process started. The stdin
+    /// before the close gets forwarded until the container did not take any
+    /// of it for [`STDIN_FLUSH_TIMEOUT`].
+    stdin_taken: Activity,
 }
 
 #[cfg(test)]
@@ -127,6 +134,7 @@ impl ClientRx {
             stdin,
             resize,
             too_large: CancellationToken::new(),
+            stdin_taken: Activity::new(),
         };
         (client, (stdin_tx, resize_tx))
     }
@@ -267,14 +275,23 @@ impl StreamingServer {
         // size matters.
         let (resize_tx, resize_rx) = watch::channel(None);
         let too_large = CancellationToken::new();
+        let stdin_taken = Activity::new();
         let client = ClientRx {
             stdin: stdin_rx,
             resize: resize_rx,
             too_large: too_large.clone(),
+            stdin_taken: stdin_taken.clone(),
         };
 
         let mut send_task = Self::write_task(output, client, session, activity.clone());
-        let mut recv_task = Self::read_task(input, stdin_tx, resize_tx, peer_closed, too_large);
+        let mut recv_task = Self::read_task(
+            input,
+            stdin_tx,
+            resize_tx,
+            peer_closed,
+            too_large,
+            stdin_taken.clone(),
+        );
 
         tokio::select! {
             rv_a = (&mut send_task) => {
@@ -307,10 +324,16 @@ impl StreamingServer {
             rv_b = (&mut recv_task) => {
                 match rv_b {
                     // After a clean close the session forwards the stdin which
-                    // the client sent before, for a short time.
+                    // the client sent before, while the container takes it.
+                    // The read task forwarded it since the close already, the
+                    // wait goes on from the last part the container took.
                     Ok(InputEnd::Closed) => {
                         info!("Client closed the connection cleanly, or after its stdin ended");
-                        if time::timeout(STDIN_FLUSH_TIMEOUT, &mut send_task).await.is_err() {
+                        if stdin_taken
+                            .until_stalled(stdin_taken.last(), STDIN_FLUSH_TIMEOUT, &mut send_task)
+                            .await
+                            .is_none()
+                        {
                             debug!("Session did not end after the close, stopping it");
                         }
                     }
@@ -372,8 +395,10 @@ impl StreamingServer {
                             () = too_large.cancelled() => bail!(MESSAGE_TOO_LARGE),
                         };
                         // The client waited for the runtime, which is no
-                        // idleness of its own.
+                        // idleness of its own, and the stdin it sent before
+                        // a close waited for the process to start.
                         activity.touch();
+                        client.stdin_taken.touch();
                         let kill = started.teardown.kill.clone();
                         let exec = Self::exec_loop(started, &mut sender, client, &mut status);
                         let exec = Self::until_too_large(exec, &too_large);
@@ -491,6 +516,7 @@ impl StreamingServer {
         resize_tx: watch::Sender<Option<Bytes>>,
         peer_closed: Arc<AtomicBool>,
         too_large: CancellationToken,
+        stdin_taken: Activity,
     ) -> JoinHandle<InputEnd<I>>
     where
         I: ClientInput,
@@ -525,11 +551,13 @@ impl StreamingServer {
             }
 
             // Stdin sent right before a clean close, like the close of the
-            // stream itself, still has to reach the container. Only for a
-            // short time, a container which does not read it must not delay
-            // the end of the session. A client which went away or failed the
-            // session gets nothing forwarded anymore.
+            // stream itself, still has to reach the container. Only while
+            // the container takes it, a container which does not read it
+            // must not delay the end of the session for long. A client which
+            // went away or failed the session gets nothing forwarded
+            // anymore.
             if end == Some(EventEnd::Closed) {
+                stdin_taken.touch();
                 let flush = async {
                     while !pending.is_empty() {
                         if stdin_tx.send(pending.pop()).await.is_err() {
@@ -537,7 +565,11 @@ impl StreamingServer {
                         }
                     }
                 };
-                if time::timeout(STDIN_FLUSH_TIMEOUT, flush).await.is_err() {
+                if stdin_taken
+                    .until_stalled(time::Instant::now(), STDIN_FLUSH_TIMEOUT, flush)
+                    .await
+                    .is_none()
+                {
                     debug!("Dropping stdin the container did not take after the close");
                 }
             }
@@ -642,6 +674,7 @@ impl SessionInput {
                 // the output meanwhile.
                 () = self.attach.send_stdin(self.pending.clone().unwrap_or_default()), if self.pending.is_some() => {
                     self.pending = None;
+                    self.client.stdin_taken.touch();
                 }
                 _ = self.ping.tick(), if self.pending.is_some() => return InputEvent::Ping,
                 stdin = self.client.stdin.recv(), if self.pending.is_none() => match stdin {

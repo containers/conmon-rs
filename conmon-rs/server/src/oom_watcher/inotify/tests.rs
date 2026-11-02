@@ -5,7 +5,7 @@ use std::io::Write;
 use tempfile::NamedTempFile;
 use tokio::{
     sync::mpsc::{Receiver, channel},
-    time::{Duration, timeout},
+    time::{Duration, Instant, timeout},
 };
 
 async fn wait_for_event(rx: &mut Receiver<WatchEvent>) -> Result<WatchEvent> {
@@ -65,6 +65,65 @@ async fn shared_watcher_dispatches_by_path() -> Result<()> {
     assert_eq!(event.path.as_deref(), Some(first.path()));
     assert!(rx2.try_recv().is_err());
 
+    Ok(())
+}
+
+/// After a dispatch, the events which come meanwhile get dispatched
+/// together once the interval passed.
+#[tokio::test(start_paused = true)]
+async fn shared_watcher_dispatches_at_most_every_interval() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let [a, b] = ["a", "b"].map(|name| dir.path().join(name));
+    let watcher = SharedWatcher::get()?;
+    let (tx, mut rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
+    let mut subs = vec![];
+    for path in [&a, &b] {
+        std::fs::write(path, "")?;
+        subs.push(watcher.subscribe(path, tx.clone())?);
+    }
+
+    // The first event gets dispatched right away.
+    let start = Instant::now();
+    std::fs::write(&a, "oom 1\n")?;
+    wait_for_event(&mut rx).await?;
+    assert_eq!(start.elapsed(), Duration::ZERO);
+
+    for path in [&a, &b, &a] {
+        std::fs::write(path, "oom 1\n")?;
+    }
+    let mut paths = vec![wait_for_event(&mut rx).await?.path];
+    assert!(start.elapsed() >= MIN_DISPATCH_INTERVAL);
+    assert!(start.elapsed() < 2 * MIN_DISPATCH_INTERVAL);
+    while let Ok(event) = rx.try_recv() {
+        paths.push(event.path);
+    }
+    for path in [&a, &b] {
+        assert!(paths.contains(&Some(path.as_path().into())), "{paths:?}");
+    }
+    Ok(())
+}
+
+/// A dispatch takes all queued events, more than a single read does.
+#[test]
+fn read_queued_takes_all_events() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let inotify = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC)?;
+    let paths = ["a", "b"].map(|name| dir.path().join(name));
+    for path in &paths {
+        std::fs::write(path, "")?;
+        inotify.add_watch(path, WATCH_FLAGS)?;
+    }
+    // Alternating, so that the kernel does not merge them, 16 bytes each.
+    for i in 0..600 {
+        std::fs::write(&paths[i % 2], "oom 1\n")?;
+    }
+    assert_eq!(SharedWatcher::read_queued(&inotify)?.len(), 600);
+    assert_eq!(
+        SharedWatcher::read_queued(&inotify)
+            .map(|events| events.len())
+            .map_err(|e| e.kind()),
+        Err(ErrorKind::WouldBlock)
+    );
     Ok(())
 }
 
@@ -172,7 +231,7 @@ async fn shared_watcher_ends_watches_on_ignored() -> Result<()> {
 
     // cgroupfs only sends IN_IGNORED for the files of a removed cgroup,
     // like removing the watch does.
-    watcher.inotify.get_ref().rm_watch(sub.wd)?;
+    watcher.inotify.rm_watch(sub.wd)?;
     assert_eq!(timeout(Duration::from_secs(5), rx.recv()).await?, None);
     assert!(lock(&watcher.watches).0.is_empty());
     drop(sub);
