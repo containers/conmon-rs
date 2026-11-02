@@ -251,14 +251,20 @@ verify_signature() {
         ;;
     esac
     echo "Expecting the signature of the $workflow workflow"
-    cosign verify-blob "conmonrs.$ARCH" \
+    if ! cosign verify-blob "conmonrs.$ARCH" \
         --certificate-identity "https://github.com/$SLUG/.github/workflows/$workflow@$GIT_REF" \
         --certificate-oidc-issuer https://token.actions.githubusercontent.com \
         --certificate-github-workflow-name ci \
         --certificate-github-workflow-repository "$SLUG" \
         --certificate-github-workflow-ref "$GIT_REF" \
         --certificate-github-workflow-sha "$COMMIT" \
-        --bundle "conmonrs.$ARCH.bundle"
+        --bundle "conmonrs.$ARCH.bundle"; then
+        # Older versions cannot read the bundles and fail with an unrelated
+        # error.
+        echo "Unable to verify the signature, which needs cosign v2.4.2 or newer, found:"
+        cosign version 2>&1 | grep GitVersion || true
+        exit 1
+    fi
 }
 
 # A checksum only shows that the download is complete, not who built it.

@@ -9,6 +9,7 @@ use crate::{
     },
     test_util::{Guarded, wait_for_real},
 };
+use futures::FutureExt;
 use nix::sys::{
     signal::kill,
     wait::{WaitStatus, waitpid},
@@ -850,6 +851,61 @@ async fn shutdown_does_not_wait_forever_for_a_watcher() -> Result<()> {
     assert_eq!(err, Some(format!("PIDs [{}] did not exit", sh.pid)));
     assert_eq!(start.elapsed(), Duration::from_secs(8));
     Ok(())
+}
+
+#[tokio::test]
+async fn terminate_signals_the_containers_only() -> Result<()> {
+    let reaper = ChildReaper::default();
+    let dir = tempfile::tempdir()?;
+    let container = spawn_sh("exec sleep 60")?;
+    let registered = child(container.pid, None, &dir.path().join("container"), &[])?;
+    reaper.watch_grandchild(registered, vec![], InFlight::default())?;
+    let exec = spawn_sh("exec sleep 60")?;
+    let registered = Child {
+        kind: ChildKind::Exec,
+        ..child(exec.pid, None, &dir.path().join("exec"), &[])?
+    };
+    reaper.watch_grandchild(registered, vec![], InFlight::default())?;
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut terminate = pin!(reaper.terminate_containers(deadline));
+    // Signals on the first poll, the watchers did not run yet.
+    assert!((&mut terminate).now_or_never().is_none());
+    // A container registered later gets neither signalled nor waited for.
+    let late = spawn_sh("exec sleep 60")?;
+    let registered = Child {
+        id: "late".into(),
+        ..child(late.pid, None, &dir.path().join("late"), &[])?
+    };
+    reaper.watch_grandchild(registered, vec![], InFlight::default())?;
+    time::timeout(Duration::from_secs(20), terminate).await?;
+
+    let terminated = 128 + Signal::SIGTERM as i32;
+    let code = std::fs::read_to_string(dir.path().join("container"))?;
+    assert_eq!(code, terminated.to_string());
+    assert!(exec.process.is_running());
+    assert!(late.process.is_running());
+    reaper.kill_grandchildren(deadline).await
+}
+
+#[tokio::test]
+async fn terminate_waits_until_the_deadline() -> Result<()> {
+    let reaper = ChildReaper::default();
+    let dir = tempfile::tempdir()?;
+    // Like the init of a PID namespace without a handler for SIGTERM, once
+    // it ignores it.
+    let ignoring = spawn_sh("trap '' TERM; exec sleep 60")?;
+    let comm = format!("/proc/{}/comm", ignoring.pid);
+    wait_for_real(|| std::fs::read_to_string(&comm).is_ok_and(|c| c == "sleep\n")).await;
+    let registered = child(ignoring.pid, None, &dir.path().join("container"), &[])?;
+    reaper.watch_grandchild(registered, vec![], InFlight::default())?;
+
+    let start = Instant::now();
+    let grace = Duration::from_millis(300);
+    reaper.terminate_containers(start + grace).await;
+    assert!(start.elapsed() >= grace);
+    assert!(ignoring.process.is_running());
+    reaper.kill_grandchildren(start + grace * 100).await
 }
 
 #[tokio::test]

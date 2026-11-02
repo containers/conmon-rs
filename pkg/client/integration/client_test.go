@@ -213,7 +213,8 @@ var _ = Describe("ConmonClient", func() {
 		}
 
 		// expectServerGone checks that the server is gone and removed its
-		// files.
+		// files. Its shutdown takes up to 9.5 seconds, after SIGTERM
+		// including up to 5 for the containers to exit on it.
 		expectServerGone := func(pid uint32) {
 			Eventually(func() error {
 				return syscall.Kill(int(pid), 0)

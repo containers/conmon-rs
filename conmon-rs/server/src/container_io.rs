@@ -819,7 +819,7 @@ impl ContainerIO {
         // A terminal reports EIO once no process has it open, which ends its
         // output. The server keeps it open itself until the exit, so that a
         // process may close and open it again, like an init system or a getty
-        // does, and its output ends at the exit like before.
+        // does. Its output ends once the server drops it at the exit.
         match tty.open_peer() {
             Ok(peer) => {
                 let exited = token.clone();
@@ -1016,7 +1016,9 @@ impl ContainerIO {
                     Self::forward(&mut message_tx, Message::Data(data, pipe)).await;
                 }
 
-                // A terminal reports that the process closed it with EIO.
+                // A terminal reports EIO once nothing has it open: at the
+                // exit, or once the process closed it if the server could not
+                // keep it open, see `connect_terminal`.
                 Err(e) if e.raw_os_error() == Some(Errno::EIO as i32) => {
                     debug!("Stopping read loop");
                     Self::forward(&mut message_tx, Message::Done).await;
@@ -1115,8 +1117,11 @@ impl ContainerIO {
     }
 
     /// Write attach input to the stdin of the process, false once that got
-    /// closed. The process exited or closed its stdin, which a pipe reports
-    /// as EPIPE and a terminal as EIO, which ends the stdin like its EOF.
+    /// closed, which ends the stdin like its EOF. A pipe reports EPIPE once
+    /// the process exited or closed its stdin. A terminal reports EIO only
+    /// once nothing has it open, see `connect_terminal`, otherwise its writes
+    /// block once its buffer is full, until the exit ends the stdin, see
+    /// `read_loop_stdin`.
     async fn handle_stdin_data(data: &[u8], mut writer: impl AsyncWrite + Unpin) -> Result<bool> {
         debug!("Got {} attach bytes", data.len());
 

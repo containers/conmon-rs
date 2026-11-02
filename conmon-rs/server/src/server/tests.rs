@@ -119,6 +119,7 @@ async fn unfinished_shutdown_is_logged_and_ends_the_server_with_it() -> Result<(
         Arc::new(ChildReaper::default()),
         &socket,
         &fd_socket,
+        start + Server::CLEANUP_TIMEOUT,
         |_| std::future::pending(),
     )
     .await;

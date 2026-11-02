@@ -686,25 +686,15 @@ impl LogFile {
         let options = self.open_options(true);
         let path = self.path.clone();
         let tmp = Self::tmp_path(&path);
-        // The old file goes along, a failed replacement keeps it. Closing it
-        // once replaced frees the blocks of a file which got unlinked, which
-        // takes long for a huge log.
-        let old = self.file.take();
-        let res = task::spawn_blocking(move || match Self::create_at(&options, &tmp, &path) {
-            Ok(file) => {
-                drop(old);
-                Ok(file)
-            }
-            Err(e) => Err((e, old)),
-        })
-        .await
-        .context("join log file replace")?;
-        match res {
-            Ok(file) => self.file = Some(Arc::new(file)),
-            Err((e, old)) => {
-                self.file = old;
-                return Err(e);
-            }
+        let file = task::spawn_blocking(move || Self::create_at(&options, &tmp, &path))
+            .await
+            .context("join log file replace")??;
+        // Closing the old file frees the blocks of a file which got unlinked,
+        // which takes long for a huge log. Not awaited, so that the log does
+        // not stay locked meanwhile. A sync which still holds it closes it
+        // on its own blocking thread.
+        if let Some(old) = self.file.replace(Arc::new(file)).and_then(Arc::into_inner) {
+            task::spawn_blocking(move || drop(old));
         }
         self.bytes_written = 0;
         self.torn = false;

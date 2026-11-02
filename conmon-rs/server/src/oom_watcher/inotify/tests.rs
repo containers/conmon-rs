@@ -256,6 +256,24 @@ async fn stopped_watchers_get_replaced() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn giving_up_gets_logged_once_per_watcher() -> Result<()> {
+    let file = NamedTempFile::new()?;
+    let watcher = SharedWatcher::get()?;
+    let (tx, _rx) = channel(WATCH_EVENT_CHANNEL_SIZE);
+    let first = watcher.subscribe(file.path(), tx.clone())?;
+    let second = watcher.subscribe(file.path(), tx.clone())?;
+    watcher.stop();
+
+    assert!(first.give_up());
+    assert!(!second.give_up());
+    // The failure of the next watcher gets its own warning.
+    let next = SharedWatcher::get()?;
+    assert!(!Arc::ptr_eq(&next, &watcher));
+    assert!(next.subscribe(file.path(), tx)?.give_up());
+    Ok(())
+}
+
 /// The way the server keeps its single watcher, which the other tests
 /// take from a slot per runtime.
 #[tokio::test]

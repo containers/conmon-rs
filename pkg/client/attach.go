@@ -674,7 +674,8 @@ type SetWindowSizeContainerConfig struct {
 // SetWindowSizeContainer can be used to change the window size of a running
 // container. It fails for a container without a terminal, with
 // ErrMissingConfig for a nil config and with ErrTerminalSizeNil for a config
-// without a Size.
+// without a Size. Since v1.2.2, a size which comes before the runtime
+// connected the terminal gets applied once it does.
 func (c *ConmonClient) SetWindowSizeContainer(
 	ctx context.Context,
 	cfg *SetWindowSizeContainerConfig,

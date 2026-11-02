@@ -1,6 +1,9 @@
 use super::*;
 use crate::test_util::Guarded;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::{
+    os::unix::process::{CommandExt, ExitStatusExt},
+    process::Stdio,
+};
 use tokio::time::{self, Duration};
 
 #[test]
@@ -192,6 +195,65 @@ async fn wait_for_reaped_process_is_unknown() -> Result<()> {
     reaped.wait()?;
     let code = time::timeout(Duration::from_secs(5), wait_for_exit_code(pid)).await?;
     assert_eq!(code, EXIT_CODE_UNKNOWN);
+    Ok(())
+}
+
+#[tokio::test]
+#[expect(unsafe_code, reason = "pre_exec hooks")]
+async fn wait_for_traced_process_waits_for_the_tracer() -> Result<()> {
+    // Exits once its stdin closes. It lets any process trace it, for the
+    // Yama setting which allows tracing descendants only.
+    let mut traced = std::process::Command::new("sh");
+    traced.args(["-c", "read _; exit 7"]).stdin(Stdio::piped());
+    // SAFETY: the hook only makes a system call, which does not allocate.
+    unsafe {
+        traced.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PTRACER, libc::PR_SET_PTRACER_ANY, 0, 0, 0);
+            Ok(())
+        });
+    }
+    let mut traced = traced.spawn()?;
+    let stdin = traced.stdin.take();
+    let pid = child_pid(traced.id())?;
+    std::mem::forget(traced);
+
+    // Attaches before it runs, detaches from its tracee only when exiting,
+    // between the waits after the exit at 1.27 and 2.27 seconds.
+    let mut tracer = std::process::Command::new("sleep");
+    tracer.arg("1.5");
+    // SAFETY: the hook only makes a system call, which does not allocate
+    // and gets no memory of ours.
+    unsafe {
+        tracer.pre_exec(move || {
+            let null = std::ptr::null_mut::<libc::c_void>();
+            if libc::ptrace(libc::PTRACE_SEIZE, pid.as_raw(), null, null) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let tracer = Guarded::spawn(&mut tracer);
+    drop(stdin);
+    // qemu-user does not implement ptrace, see the test-unit-arch jobs.
+    if let Err(e) = &tracer
+        && matches!(
+            e.downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::raw_os_error),
+            Some(libc::EPERM | libc::ENOSYS)
+        )
+    {
+        eprintln!("Skipping, tracing is not available: {e}");
+        wait_for_exit_code(pid).await;
+        return Ok(());
+    }
+    let _tracer = tracer?;
+
+    let start = time::Instant::now();
+    let code = time::timeout(Duration::from_secs(5), wait_for_exit_code(pid)).await?;
+    assert_eq!(code, 7);
+    // Woken up by the kernel once the tracer exited.
+    let elapsed = start.elapsed();
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
     Ok(())
 }
 

@@ -800,7 +800,7 @@ impl Attach {
                     match Self::send(&socket, &packet, hangup.as_mut(), &token, draining).await {
                         Ok(true) => debug!("Wrote done packet to client"),
                         Ok(false) => {}
-                        Err(e) => bail!("unable to write done packet: {e:#}"),
+                        Err(e) => return Err(e).context("write done packet"),
                     }
                     return Ok(());
                 }
@@ -821,7 +821,7 @@ impl Attach {
                         // The client is gone, so stop receiving output for it
                         // as well.
                         Ok(false) => return Ok(()),
-                        Err(e) => bail!("unable to write packet: {e:#}"),
+                        Err(e) => return Err(e).context("write packet"),
                     }
                 }
             }

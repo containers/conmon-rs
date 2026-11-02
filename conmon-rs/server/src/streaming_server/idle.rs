@@ -25,8 +25,9 @@ pub const STALL_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_secs(60)
 };
 
-/// When a connection was active the last time, by what the client sent or
-/// got. Clones share the time.
+/// When something last made progress, like a connection by what its client
+/// sent or got, or a container which took the stdin of a session. Clones
+/// share the time.
 #[derive(Clone, Debug)]
 pub struct Activity(Arc<Mutex<Instant>>);
 
@@ -35,12 +36,12 @@ impl Activity {
         Self(Arc::new(Mutex::new(Instant::now())))
     }
 
-    /// The connection is active now.
+    /// Something made progress now.
     pub fn touch(&self) {
         *lock(&self.0) = Instant::now();
     }
 
-    /// When the connection was active the last time.
+    /// When something last made progress.
     pub(super) fn last(&self) -> Instant {
         *lock(&self.0)
     }

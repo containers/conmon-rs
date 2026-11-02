@@ -85,7 +85,8 @@ interface Conmon {
         # The files the server writes the exit code of the container to once
         # it exited, as decimal text, 128 plus the signal number if a signal
         # killed it, also for real-time signals since v1.2.2, which gave
-        # -1 before. Absolute paths.
+        # -1 before. Since unreleased, also a traced process, like one under
+        # strace, gets its exit code instead of -1. Absolute paths.
         exitPaths @4 :List(Text);
         # The files the server creates empty if the container got OOM
         # killed, before it writes the exit files. Absolute paths.
@@ -94,9 +95,15 @@ interface Conmon {
         # it, see the logging section of usage.md.
         logDrivers @6 :List(LogDriver);
         # The command the server starts once the container exited and the
-        # exit files got written, without waiting for it.
+        # exit files got written, without waiting for it. The server runs in
+        # `/`, so a relative path with a slash resolves against it, a bare
+        # name through the `PATH` of the server.
         cleanupCmd @7 :List(Text);
-        # Arguments of the runtime before the `create` command.
+        # Arguments of the runtime before the `create` command. They only
+        # apply to the `create` call, not to the `exec` ones of
+        # `execSyncContainer` and `serveExecContainer`. The root of the
+        # runtime belongs in the `--runtime-root` of the server, which
+        # applies to every call.
         globalArgs @8 :List(Text);
         # Arguments of the `create` command of the runtime, before the
         # container ID.
@@ -222,11 +229,17 @@ interface Conmon {
     struct ExecSyncContainerResponse {
         # The exit code of the command, 128 plus the signal number if a
         # signal killed it, also for real-time signals since v1.2.2, which
-        # gave -1 before. -1 if the server could not tell how it ended, -2
-        # if it could not be started, then `stderr` tells why, and -3 if it
-        # timed out. A server without pidfd support also reports -3 if it
-        # could not get the exit status, then without `timedOut`.
+        # gave -1 before. Since unreleased, also a traced process, like one
+        # under strace, gets its exit code instead of -1. -1 if the server
+        # could not tell how it ended, -2 if it could not be started, then
+        # `stderr` tells why, and -3 if it timed out. A server without pidfd
+        # support also reports -3 if it could not get the exit status, then
+        # without `timedOut`.
         exitCode @0 :Int32;
+        # The output of the command. Since unreleased, stdout and stderr
+        # together hold at most 16 MiB less 64 KiB. Each keeps up to half of
+        # it, and more if the other one leaves room, the rest gets dropped,
+        # see usage.md. Before, each took up to 16 MiB.
         stdout @1 :Data;
         stderr @2 :Data;
         timedOut @3 :Bool;
@@ -291,7 +304,10 @@ interface Conmon {
     ###############################################
     # SetWindowSize
     struct SetWindowSizeRequest {
-        id @0 :Text; # container identifier
+        # The ID of the container. The call fails with a message starting
+        # with "container not found" for one the server does not know, and
+        # with another one for a container without a terminal.
+        id @0 :Text;
         width @1 :UInt16; # columns in characters
         height @2 :UInt16; # rows in characters
         # Retired in v1.0.0, a `Data` field before. Its change to `Void` moved
@@ -304,7 +320,9 @@ interface Conmon {
     struct SetWindowSizeResponse {
     }
 
-    # Set the size of the terminal of a running container.
+    # Set the size of the terminal of a running container. Since v1.2.2, a
+    # size which comes before the runtime connected the terminal gets
+    # applied once it does.
     setWindowSizeContainer @5 (request: SetWindowSizeRequest) -> (response: SetWindowSizeResponse);
 
     ###############################################

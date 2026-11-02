@@ -361,6 +361,33 @@ async fn tunnels_end_with_clients_which_do_not_read() -> Result<()> {
     Ok(())
 }
 
+/// The close of the client gets its answer right away, also while the SPDY
+/// connection does not end, which gets the tunnel stopped once nothing went
+/// out for the [`STALL_TIMEOUT`](crate::streaming_server::idle::STALL_TIMEOUT).
+#[tokio::test(start_paused = true)]
+async fn tunnels_answer_the_close_of_the_client_while_spdy_hangs() -> Result<()> {
+    let (server, client) = tokio::io::duplex(64 * 1024);
+    let (socket, mut client) = tokio::join!(
+        WebSocketStream::from_raw_socket(web::ClientIo::new(server), Role::Server, None),
+        WebSocketStream::from_raw_socket(client, Role::Client, None),
+    );
+    let (_spdy, connection) = tokio::io::duplex(TUNNEL_BUFFER);
+    let tunnel = tokio::spawn(PortForward::tunnel(socket, connection));
+
+    client.close(None).await?;
+    let answer = time::timeout(Duration::from_secs(1), client.next())
+        .await
+        .context("no answer")?;
+    assert!(
+        matches!(answer, Some(Ok(Message::Close(None)))),
+        "{answer:?}"
+    );
+    time::timeout(Duration::from_secs(120), tunnel)
+        .await
+        .context("the tunnel hangs")??;
+    Ok(())
+}
+
 #[tokio::test]
 async fn failures_get_reported_on_the_error_stream() -> Result<()> {
     let (_socket, port) = closed_port()?;

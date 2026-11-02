@@ -148,7 +148,11 @@ impl PortForward {
                         discard.discard();
                         break;
                     }
-                    Ok(Message::Close(_)) | Err(_) => break,
+                    Ok(Message::Close(_)) => {
+                        web::answer_close(&mut messages, &written).await;
+                        break;
+                    }
+                    Err(_) => break,
                 }
             }
             // Ends the SPDY connection, which ends the output as well.

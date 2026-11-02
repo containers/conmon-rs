@@ -217,11 +217,17 @@ of the server `--log-level=debug`, for `warn` `--log-level=warning` and for
 before v1.2.2 for `trace` as well.
 
 On SIGTERM or SIGINT, the server kills the containers, stops the pause process
-and removes its sockets within 9.5 seconds, before `Shutdown` of the Go client
-gives up after 10 with `ErrShutdownTimeout`. If any of that fails or does not
-finish in time, the server logs it as an error and exits with status 1. A
-server which cannot listen for these signals does the same cleanup right away
-and exits with status 1.
+and removes its sockets within 9.5 seconds, before `Shutdown` of the Go client,
+which sends SIGINT, gives up after 10 with `ErrShutdownTimeout`. If any of that
+fails or does not finish in time, the server logs it as an error and exits with
+status 1. A server which cannot listen for these signals does the same cleanup
+right away and exits with status 1. Since unreleased, the server first forwards
+a SIGTERM to the containers, like conmon, and gives them up to 5 of the 9.5
+seconds to exit on it with their own exit codes before it kills them. Another
+SIGTERM or a SIGINT meanwhile kills them right away. Exec processes and
+containers created meanwhile do not get the SIGTERM. A container which ignores
+it, like the init of a PID namespace without a handler for it, delays the
+shutdown by the full 5 seconds.
 
 ### The `pause` subcommand
 
@@ -367,6 +373,12 @@ and the releases of the 1.37 branch after v1.37.2 always pass one, its
 a reset while its output backs up holds the end just as long, or until the
 kernel gives up resending to it, after 15 to 30 minutes with the default
 `tcp_retries2` of 15: there is no keepalive.
+
+Since unreleased, a WebSocket client which closes first, also one of port
+forwarding, gets the close of the server in answer as soon as the server read
+it, also while the stdin before it still goes to the process. Before, the
+connection ended without it, which browsers report as code 1006 and which kept
+the Python Kubernetes client waiting for up to 3 seconds in `close()`.
 
 Since v1.2.2, an exec process with a terminal gets the size the client
 sends while the runtime starts it, usually before the command runs, like
@@ -701,11 +713,10 @@ own logs go to the journal, since v1.2.1 with the `SYSLOG_IDENTIFIER`
 `conmonrs`, before only under its process name (`_COMM=conmonrs`). CRI-O
 passes its `log_level` on to the servers, but since v1.34 starts them with the
 server log driver `none`, unless the `monitor_env` of the runtime handler
-contains `LOG_DRIVER=systemd`. A server with `none` writes no logs, the forked
-server has `/dev/null` as its stdin, stdout and stderr. Only the message of a
-panic still goes to the journal, since v1.2.2. The container output only
-goes to the journal with the `journald` container log driver, sent by the same
-process:
+contains `LOG_DRIVER=systemd`. A server with `none` writes no logs (since
+v1.2.2, except for the message of a panic), the forked server has `/dev/null`
+as its stdin, stdout and stderr. The container output only goes to the journal
+with the `journald` container log driver, sent by the same process:
 
 ```console
 > journalctl -t conmonrs

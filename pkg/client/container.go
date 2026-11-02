@@ -31,8 +31,9 @@ type CreateContainerConfig struct {
 	// gets the exit code of the container as decimal text once it exited,
 	// 128 plus the number of the signal which killed it, like a shell
 	// reports it, also for real-time signals since v1.2.2, which gave
-	// -1 before. The paths have to be absolute, servers since v1.2.1 reject
-	// other ones.
+	// -1 before. Since unreleased, also a traced process, like one under
+	// strace, gets its exit code instead of -1. The paths have to be
+	// absolute, servers since v1.2.1 reject other ones.
 	ExitPaths []string
 
 	// OOMExitPaths is a slice of files that should be created if the given
@@ -46,11 +47,15 @@ type CreateContainerConfig struct {
 
 	// CleanupCmd is the command that will be executed once the container
 	// exited and its exit files got written. The server does not wait for
-	// it.
+	// it. The server runs in /, so a relative path with a slash resolves
+	// against it, a bare name through the PATH of the server.
 	CleanupCmd []string
 
-	// GlobalArgs are the additional arguments passed to the create runtime call
-	// before the command. e.g: crun --runtime-arg create
+	// GlobalArgs are the additional arguments passed to the create runtime
+	// call before the command, e.g. crun --runtime-arg create. They only
+	// apply to the create call, not to the exec ones of ExecSyncContainer
+	// and ServeExecContainer. The root of the runtime belongs in
+	// [ConmonServerConfig.RuntimeRoot], which applies to every call.
 	GlobalArgs []string
 
 	// CommandArgs are the additional arguments passed to the create runtime call
@@ -306,16 +311,20 @@ type ExecSyncConfig struct {
 type ExecContainerResult struct {
 	// ExitCode specifies the returned exit status, 128 plus the number of
 	// the signal which killed the command, like a shell reports it, also
-	// for real-time signals since v1.2.2, which gave -1 before. It is
-	// ExecExitCodeNotStarted if the server could not start the command,
-	// ExecExitCodeTimedOut if it timed out, and -1 if the server could not
-	// tell how the command ended.
+	// for real-time signals since v1.2.2, which gave -1 before. Since
+	// unreleased, also a traced process, like one under strace, gets its
+	// exit code instead of -1. It is ExecExitCodeNotStarted if the server
+	// could not start the command, ExecExitCodeTimedOut if it timed out,
+	// and -1 if the server could not tell how the command ended.
 	ExitCode int32
 
-	// Stdout contains the stdout stream result.
+	// Stdout contains the stdout stream result. Since unreleased, Stdout
+	// and Stderr together hold at most 16 MiB less 64 KiB. Each keeps up to
+	// half of it, and more if the other one leaves room, the rest gets
+	// dropped. Before, each took up to 16 MiB.
 	Stdout []byte
 
-	// Stderr contains the stderr stream result.
+	// Stderr contains the stderr stream result, limited like Stdout.
 	Stderr []byte
 
 	// TimedOut is true if the command timed out.

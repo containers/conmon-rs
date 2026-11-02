@@ -7,6 +7,7 @@ use crate::telemetry::Telemetry;
 use crate::{
     child_reaper::ChildReaper,
     config::{Config, LogDriver},
+    container_io::DRAIN_MAX_WAIT,
     fd_socket::FdSocket,
     fs_util, init,
     journal::{self, Journal},
@@ -69,12 +70,21 @@ const _: () = assert!(Server::SHUTDOWN_TIMEOUT.as_nanos() < CLIENT_STOP_TIMEOUT.
 
 // The cleanup gets what the tracer and the runtime leave of the shutdown.
 // That leaves the grandchildren and a running initialization of the pause
-// instance time after what the pause shutdown and the sockets take.
+// instance time after what the pause shutdown and the sockets take, also
+// after the grace of the containers on SIGTERM, which leaves the killed ones
+// time to drain their output.
 const _: () = assert!(
     Server::CLEANUP_TIMEOUT.as_nanos()
-        > Server::SOCKET_REMOVAL_TIMEOUT.as_nanos()
+        > Server::TERMINATE_GRACE.as_nanos()
+            + Server::SOCKET_REMOVAL_TIMEOUT.as_nanos()
             + Pause::KILL_WAIT.as_nanos()
             + Pause::STOP_WAIT.as_nanos()
+);
+const _: () = assert!(
+    Server::CLEANUP_TIMEOUT.as_nanos()
+        > Server::TERMINATE_GRACE.as_nanos()
+            + Server::SOCKET_REMOVAL_TIMEOUT.as_nanos()
+            + DRAIN_MAX_WAIT.as_nanos()
 );
 
 #[derive(Debug)]
@@ -213,7 +223,9 @@ impl Server {
     /// of container exits or log reopens spawns a thread per operation
     /// (tokio's default allows 512), each with its own stack. Work which
     /// blocks for an unbounded time, like waiting for a process, must run on
-    /// a dedicated thread instead, otherwise it can starve the pool.
+    /// a dedicated thread instead, or be capped, like
+    /// [`ContainerLog::sync`](crate::container_log::ContainerLog::sync),
+    /// otherwise it can starve the pool.
     pub(crate) const MAX_BLOCKING_THREADS: usize = 16;
 
     /// Stack size of the threads of the blocking pool, which only run short
@@ -401,8 +413,9 @@ impl Server {
     }
 
     /// How long the shutdown may take from the signal on, below the
-    /// [`CLIENT_STOP_TIMEOUT`] of the clients. Every part of the shutdown
-    /// gets its time from it.
+    /// [`CLIENT_STOP_TIMEOUT`] of the clients, which send SIGINT. After
+    /// SIGTERM, the [`Server::TERMINATE_GRACE`] is part of it. Every part of
+    /// the shutdown gets its time from it.
     const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(9500);
 
     /// How long the tracer may take to export the remaining spans, at the
@@ -555,12 +568,16 @@ impl Server {
         fd_socket: T,
         shutdown_tx: oneshot::Sender<Result<()>>,
     ) {
-        let signalled = Self::wait_for_signal(signals).await;
-        if let Err(e) = &signalled {
-            error!("Unable to wait for a signal, shutting down: {e:#}");
-        }
-        let shutdown = Self::shutdown(reaper, socket, fd_socket, Pause::shutdown).await;
-        let result = Self::all_ok([signalled, shutdown]);
+        let signalled = Self::wait_for_signal(signals, &reaper).await;
+        let deadline = match &signalled {
+            Ok(deadline) => *deadline,
+            Err(e) => {
+                error!("Unable to wait for a signal, shutting down: {e:#}");
+                Instant::now() + Self::CLEANUP_TIMEOUT
+            }
+        };
+        let shutdown = Self::shutdown(reaper, socket, fd_socket, deadline, Pause::shutdown).await;
+        let result = Self::all_ok([signalled.map(drop), shutdown]);
         // The backend returns it, the server exits non-zero on a failure.
         debug!("Sending shutdown message");
         if shutdown_tx.send(result).is_err() {
@@ -576,32 +593,61 @@ impl Server {
         ])
     }
 
-    /// Wait for SIGTERM or SIGINT, see [`Server::listen_for_signals`].
-    async fn wait_for_signal(signals: Result<[SignalStream; 2]>) -> Result<()> {
+    /// Wait for SIGTERM or SIGINT, see [`Server::listen_for_signals`], and
+    /// return the deadline of the cleanup, counted from the signal. On
+    /// SIGTERM, the containers get the [`Server::TERMINATE_GRACE`] of it to
+    /// exit on it first, unless another SIGTERM or a SIGINT asks for the
+    /// shutdown meanwhile.
+    async fn wait_for_signal(
+        signals: Result<[SignalStream; 2]>,
+        reaper: &ChildReaper,
+    ) -> Result<Instant> {
         let [mut sigterm, mut sigint] = signals?;
 
-        tokio::select! {
+        let terminated = tokio::select! {
             _ = sigterm.recv() => {
                 info!("Received SIGTERM");
+                true
             }
             _ = sigint.recv() => {
                 info!("Received SIGINT");
+                false
+            }
+        };
+        let start = Instant::now();
+        if terminated {
+            tokio::select! {
+                () = reaper.terminate_containers(start + Self::TERMINATE_GRACE) => {}
+                _ = sigterm.recv() => {
+                    info!("Received another SIGTERM, not waiting for the containers");
+                }
+                _ = sigint.recv() => {
+                    info!("Received SIGINT, not waiting for the containers");
+                }
             }
         }
-        Ok(())
+        Ok(start + Self::CLEANUP_TIMEOUT)
     }
 
-    /// Clean up and stop the pause instance through `pause` within the
-    /// [`Server::CLEANUP_TIMEOUT`], and report what did not finish.
+    /// How long the containers may take to exit on SIGTERM before they get
+    /// killed, as part of the [`Server::CLEANUP_TIMEOUT`], so that SIGTERM
+    /// does not make the shutdown take longer. Those which exited wrote
+    /// their exit files by then. The rest of the cleanup kills the others,
+    /// whose watchers then drain their output within [`DRAIN_MAX_WAIT`],
+    /// unless a log driver is stuck.
+    const TERMINATE_GRACE: Duration = Duration::from_secs(5);
+
+    /// Clean up and stop the pause instance through `pause` until the
+    /// `deadline`, and report what did not finish.
     async fn shutdown<T: AsRef<Path>, F: Future<Output = Result<()>>>(
         reaper: Arc<ChildReaper>,
         socket: T,
         fd_socket: T,
+        deadline: Instant,
         pause: impl FnOnce(Instant) -> F,
     ) -> Result<()> {
         // The pause shutdown may wait for a running initialization, the
         // containers must not wait for that.
-        let deadline = Instant::now() + Self::CLEANUP_TIMEOUT;
         let (cleaned, paused) = tokio::join!(
             Self::cleanup(reaper, socket, fd_socket, deadline),
             Self::until(deadline, pause(deadline)),

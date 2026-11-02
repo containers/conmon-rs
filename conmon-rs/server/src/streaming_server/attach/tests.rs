@@ -572,6 +572,18 @@ async fn websocket_attach_waits_for_the_close_answer() -> Result<()> {
 }
 
 #[tokio::test]
+async fn websocket_attach_answers_the_close_of_the_client() -> Result<()> {
+    LocalSet::new()
+        .run_until(async {
+            let (_io, _server, mut stream, _token, response) =
+                websocket_attach(PROTOCOL_V5).await?;
+            assert!(response.starts_with("http/1.1 101"), "{response}");
+            close_first(&mut stream).await
+        })
+        .await
+}
+
+#[tokio::test]
 async fn v1_websocket_attach() -> Result<()> {
     LocalSet::new()
         .run_until(async {

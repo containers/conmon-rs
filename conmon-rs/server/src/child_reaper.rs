@@ -9,7 +9,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use nix::{errno::Errno, sys::signal::Signal, unistd::Pid};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     os::fd::OwnedFd,
     pin::pin,
     str,
@@ -312,6 +312,30 @@ impl ChildReaper {
         }
     }
 
+    /// Forward SIGTERM to the containers like conmon, to their PIDs only,
+    /// and wait for their watchers until the `deadline`. Containers
+    /// registered meanwhile get neither, the shutdown kills them and what is
+    /// left afterwards.
+    pub async fn terminate_containers(&self, deadline: Instant) {
+        let containers: HashSet<_> = lock(&self.grandchildren)
+            .values()
+            .flatten()
+            .filter(|gc| gc.kind == ChildKind::Container)
+            .inspect(|gc| {
+                if let Err(e) = Process::child(gc.pid).signal(Signal::SIGTERM) {
+                    debug!(pid = %gc.pid, "Not signalling container, it is gone: {e}");
+                }
+            })
+            .map(|gc| gc.seq)
+            .collect();
+        debug!("Sent SIGTERM to {} containers", containers.len());
+        let signalled = |gc: &ReapableChild| containers.contains(&gc.seq);
+        let left = self.wait_for_watchers(deadline, signalled).await;
+        if !left.is_empty() {
+            debug!("Containers {left:?} did not exit on SIGTERM");
+        }
+    }
+
     /// Kill every grandchild and wait for their watchers and the runtime
     /// calls in progress until the `deadline` of the shutdown. A process
     /// which does not exit on SIGKILL, like one stuck in the kernel, must not
@@ -352,7 +376,7 @@ impl ChildReaper {
         .await
         .is_ok();
         // Also the watchers of the children which the calls registered.
-        let left = self.wait_for_watchers(deadline).await;
+        let left = self.wait_for_watchers(deadline, |_| true).await;
 
         match (left.is_empty(), calls_ended) {
             (true, true) => {
@@ -369,10 +393,14 @@ impl ChildReaper {
     /// within its deadline.
     const IN_FLIGHT_WAIT: Duration = Duration::from_secs(5);
 
-    /// Wait until the watchers of all grandchildren ended, every watcher
-    /// forgets its child at its end. Return the PIDs of the children left at
-    /// the deadline.
-    async fn wait_for_watchers(&self, deadline: Instant) -> Vec<i32> {
+    /// Wait until the watchers of all grandchildren which match the `filter`
+    /// ended, every watcher forgets its child at its end. Return the PIDs of
+    /// the children left at the deadline.
+    async fn wait_for_watchers(
+        &self,
+        deadline: Instant,
+        filter: impl Fn(&ReapableChild) -> bool,
+    ) -> Vec<i32> {
         loop {
             // Enabled before the check, so that no end gets missed.
             let mut forgotten = pin!(self.forgotten.notified());
@@ -380,6 +408,7 @@ impl ChildReaper {
             let mut left: Vec<_> = lock(&self.grandchildren)
                 .values()
                 .flatten()
+                .filter(|gc| filter(gc))
                 .map(|gc| gc.pid.as_raw())
                 .collect();
             if left.is_empty() || Instant::now() >= deadline {

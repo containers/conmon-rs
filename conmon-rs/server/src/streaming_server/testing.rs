@@ -165,6 +165,24 @@ pub(super) async fn answer_close(stream: &mut TcpStream) -> Result<()> {
     Ok(())
 }
 
+/// Close the WebSocket first, the server answers with its close, after the
+/// frames it sent before, and ends the connection without a reset.
+pub(super) async fn close_first(stream: &mut TcpStream) -> Result<()> {
+    let normal = u16::from(CloseCode::Normal).to_be_bytes();
+    stream.write_all(&client_frame(0x8, &normal)).await?;
+    loop {
+        let (opcode, payload) = server_frame(stream).await?;
+        if opcode == 0x8 {
+            assert_eq!(payload, normal);
+            break;
+        }
+    }
+    let mut byte = [0];
+    let end = time::timeout(Duration::from_secs(5), stream.read(&mut byte)).await??;
+    assert_eq!(end, 0);
+    Ok(())
+}
+
 /// A container and its child, the token ends the container.
 pub(super) fn attach_child(
     terminal: bool,

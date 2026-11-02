@@ -409,6 +409,29 @@ async fn watch_failures_of_missing_files() -> Result<()> {
     Ok(())
 }
 
+/// Only a check which failed to find the file tells that it is gone, one
+/// which failed to read the counters does not.
+#[test]
+fn memory_events_gone_on_missing_file() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut events = MemoryEvents::new(root.path().join("memory.events"));
+    assert!(!events.check());
+    assert!(events.gone);
+
+    std::fs::write(&events.path, "low 0\n")?;
+    assert!(!events.check());
+    assert!(!events.gone);
+
+    write_events(root.path(), 0, 1)?;
+    assert!(events.check());
+    assert!(!events.gone);
+
+    // Also a read after the cgroup got removed.
+    let removed = anyhow::Error::from(io::Error::from_raw_os_error(libc::ENODEV));
+    assert!(OOMWatcher::is_not_found(&removed.context("read")));
+    Ok(())
+}
+
 #[test]
 fn outliving_ancestors() {
     for (leaf, ancestor) in [
