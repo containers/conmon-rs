@@ -86,10 +86,22 @@ $ make lint unit unit-go
 ```
 
 Changes to Markdown, YAML or JSON files have to pass prettier, which `make
-prettier` applies and `make verify-prettier` checks, both in a container. `make
-verify` runs the other checks of CI as well, like cargo-deny, typos (cargo-deny
-and typos have to be installed), actionlint and zizmor, some of them in
-containers.
+prettier` applies and `make verify-prettier` checks, both in a container. The
+links of the Markdown files to other files of the repository and their anchors
+have to resolve, which `make lint-links` checks with lychee. `make verify` runs
+the other checks of CI as well, like cargo-deny, typos, lychee (which have to
+be installed), actionlint and zizmor, some of them in containers.
+
+The Go client has to stay compatible with the latest release within its major
+version, see [release.md](release.md). `make verify-go-api`, which `make
+verify` runs as well, compares its API with the one of the latest release tag
+with gorelease and fails for incompatible changes, like a removed exported
+function. It checks the committed changes, uncommitted ones are left out.
+
+For a PR which only changes Markdown files and the documents in [docs](docs),
+CI only runs the checks of the files, like prettier, typos and the links. It
+skips the fuzzing of a PR which does not change the Rust sources, see the
+`changes` job of [ci.yml](.github/workflows/ci.yml).
 
 The unit tests run as a regular user, and so do most integration tests. The
 OOM and namespace specs need elevated permissions for the cgroups and bind
