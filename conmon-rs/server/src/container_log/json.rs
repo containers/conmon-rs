@@ -8,7 +8,8 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use std::{path::Path, time::SystemTime};
 
-/// A single line of output as JSON. The schema is documented in usage.md.
+/// A single line of output as JSON. The schema is documented in
+/// docs/logging.md.
 #[derive(Serialize)]
 struct LogEntry<'a> {
     /// Seconds since the Unix epoch.

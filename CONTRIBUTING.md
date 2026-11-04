@@ -7,6 +7,7 @@ processes that we follow.
 
 - [Reporting Issues](#reporting-issues)
 - [Submitting Pull Requests](#submitting-pull-requests)
+- [Fuzzing](#fuzzing)
 - [Communications](#communications)
 - [Security](#security)
 - [Code of Conduct](#code-of-conduct)
@@ -55,6 +56,28 @@ separate from the rest of the PRs. But, squashing down to just one commit is ok
 too since in the end the entire PR will be reviewed anyway. When in doubt,
 squash.
 
+PRs that fix issues should include a reference like `Fixes #XXXX` in the PR
+description, as the PR template asks, so that GitHub closes the referenced
+issue when the PR is merged.
+
+Most PRs will be reviewed by the [OWNERS](OWNERS).
+
+### Building and testing
+
+Building the server needs the Cap'n Proto compiler and a Rust toolchain, see
+[docs/install.md](docs/install.md#build-from-source). The tests of the Go
+client and the integration suite need the Go version of [go.mod](./go.mod).
+The integration suite is a module of its own in
+[pkg/client/integration](./pkg/client/integration), so that its dependencies
+do not become requirements of the client. The dependencies of the client
+follow CRI-O main, the modules only the suite needs follow the latest
+releases.
+
+The [Makefile](./Makefile) has targets for most of what CI runs: `make` builds
+the server, `make lint` runs rustfmt, clippy, rustdoc, golangci-lint and
+shellcheck (which has to be installed) and `make lint-msrv` checks the sources
+with the `rust-version` toolchain of rustup. `make help` lists the rest.
+
 Format your changes with `make fmt`, then check them with the linters and the
 unit tests of the server and the Go client:
 
@@ -64,39 +87,9 @@ $ make lint unit unit-go
 
 Changes to Markdown, YAML or JSON files have to pass prettier, which `make
 prettier` applies and `make verify-prettier` checks, both in a container. `make
-verify` runs the other checks of CI as well.
-
-PRs which change the Cap'n Proto schema in
-[conmon-rs/server/proto/conmon.capnp](conmon-rs/server/proto/conmon.capnp) run
-`make update-proto` and commit the regenerated Go code in
-[internal/proto](internal/proto), CI checks that it matches. The target runs
-the `capnp` of the nixpkgs in flake.lock through nix, `make update-proto
-CAPNP=capnp` uses a local one instead.
-
-Servers keep running across upgrades, so clients and servers of different
-releases talk to each other, see the compatibility section of
-[usage.md](usage.md#compatibility). The schema has to stay compatible on the
-wire:
-
-- Only add fields, methods and enumerants, each with the next free ordinal.
-- Never change the type or the ordinal of a field, and never remove one.
-  v1.0.0 changed the type of the `metadataOld` fields from `Data` to `Void`,
-  which moved the pointer slots of the fields after them and broke every
-  client and server of another major version.
-- Retire a field by renaming it, for example to `fooOld`, with its type
-  unchanged, and document that the server ignores it.
-- New behavior which a client has to know about before it relies on it gets
-  a feature string in
-  [version.rs](conmon-rs/server/src/version.rs) and a matching `Feature`
-  constant in [pkg/client](pkg/client/version.go), see the features section
-  of usage.md. An older server ignores new fields, so the client checks the
-  feature first.
-- Mark new fields, limits and other behavior changes which users can see
-  with "since unreleased" in the schema, the Go documentation and usage.md,
-  the release replaces it with the version.
-
-`make verify-schema-layout`, which CI runs, guards these rules: it fails if a
-change moves an existing field of the schema to another slot.
+verify` runs the other checks of CI as well, like cargo-deny, typos (cargo-deny
+and typos have to be installed), actionlint and zizmor, some of them in
+containers.
 
 The unit tests run as a regular user, and so do most integration tests. The
 OOM and namespace specs need elevated permissions for the cgroups and bind
@@ -118,6 +111,7 @@ $ sudo env PATH="$PATH" GOENV="$(go env GOENV)" GOMODCACHE="$(go env GOMODCACHE)
 `make unit` runs the Rust unit tests with and without the `tracing` feature,
 `make unit-go` the unit tests of the Go client, which need no server.
 
+`RUNTIME_PATH` selects the OCI runtime of the integration suite.
 `CONMON_BINARY` selects the server to test, which the target builds
 otherwise, for example the static build of `make release-static`:
 
@@ -131,11 +125,39 @@ the flake supports x86_64 and aarch64 Linux hosts. `nix build .#amd64`,
 `.#arm64`, `.#ppc64le` or `.#s390x` builds the binary of an architecture into
 `result/bin/conmonrs`, cross compiled on the other ones, like CI does.
 
-PRs that fix issues should include a reference like `Fixes #XXXX` in the PR
-description, as the PR template asks, so that GitHub closes the referenced
-issue when the PR is merged.
+### Changing the schema
 
-Most PRs will be reviewed by the [OWNERS](OWNERS).
+PRs which change the Cap'n Proto schema in
+[conmon-rs/server/proto/conmon.capnp](conmon-rs/server/proto/conmon.capnp) run
+`make update-proto` and commit the regenerated Go code in
+[internal/proto](internal/proto), CI checks that it matches. The target runs
+the `capnp` of the nixpkgs in flake.lock through nix, `make update-proto
+CAPNP=capnp` uses a local one instead.
+
+Servers keep running across upgrades, so clients and servers of different
+releases talk to each other, see the compatibility section of
+[docs/cri-o.md](docs/cri-o.md#compatibility). The schema has to stay
+compatible on the wire:
+
+- Only add fields, methods and enumerants, each with the next free ordinal.
+- Never change the type or the ordinal of a field, and never remove one.
+  v1.0.0 changed the type of the `metadataOld` fields from `Data` to `Void`,
+  which moved the pointer slots of the fields after them and broke every
+  client and server of another major version.
+- Retire a field by renaming it, for example to `fooOld`, with its type
+  unchanged, and document that the server ignores it.
+- New behavior which a client has to know about before it relies on it gets
+  a feature string in
+  [version.rs](conmon-rs/server/src/version.rs) and a matching `Feature`
+  constant in [pkg/client](pkg/client/version.go), see the features section
+  of [docs/protocols.md](docs/protocols.md#features). An older server ignores
+  new fields, so the client checks the feature first.
+- Mark new fields, limits and other behavior changes which users can see
+  with "since unreleased" in the schema, the Go documentation and the
+  documents in [docs](docs), the release replaces it with the version.
+
+`make verify-schema-layout`, which CI runs, guards these rules: it fails if a
+change moves an existing field of the schema to another slot.
 
 ### Sign your PRs
 
@@ -190,6 +212,34 @@ Use your real name (sorry, no pseudonyms or anonymous contributions.)
 
 If you set your `user.name` and `user.email` git configs, you can sign your
 commit automatically with `git commit -s`.
+
+## Fuzzing
+
+The [fuzz](./fuzz) directory holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)
+targets for what clients and containers send: the streaming protocols (SPDY
+frames, header blocks and connections, WebSocket messages, resize events,
+upgrade headers and port forward queries, the setup of exec, attach and port
+forward sessions and their pending stdin), the container output as log lines,
+the notify messages and the process stat files with their command names, and
+for the journal entries the server writes.
+`cargo fuzz list` lists them, each file in
+[fuzz/fuzz_targets](./fuzz/fuzz_targets) tells what its target covers. They
+need a nightly toolchain, for example `cargo +nightly fuzz run spdy_frames`, CI
+pins the one of `FUZZ_TOOLCHAIN` in
+[ci.yml](.github/workflows/ci.yml). [fuzz/seeds](./fuzz/seeds) holds a few
+valid inputs per target to start from, pass the directory after the corpus,
+which libFuzzer does not create:
+
+```console
+$ mkdir -p fuzz/corpus/spdy_frames
+$ cargo +nightly fuzz run spdy_frames fuzz/corpus/spdy_frames fuzz/seeds/spdy_frames
+```
+
+cargo-fuzz builds with the release profile of the server, which strips the
+symbols and builds slowly. CI overrides it with
+`CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
+CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_OPT_LEVEL=3
+CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16`, which helps local runs as well.
 
 ## Communications
 

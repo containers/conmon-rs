@@ -56,7 +56,7 @@ end
 
 %files
 %license LICENSE
-%doc README.md usage.md
+%doc README.md docs
 %{_bindir}/%{bin_name}
 
 %changelog

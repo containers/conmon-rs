@@ -1,8 +1,9 @@
 @0xffaaf7385bc4adad;
 
-# The RPC interface of the conmon-rs server, see usage.md. A call which fails
-# carries a message of the server. These prefixes of it stay stable, so that
-# clients can tell the failures apart, other messages may change:
+# The RPC interface of the conmon-rs server, see docs/protocols.md. A call
+# which fails carries a message of the server. These prefixes of it stay
+# stable, so that clients can tell the failures apart, other messages may
+# change:
 #
 # - "container not found": the server does not know the container of the
 #   request, since v1.2.0. Older servers start the message with "child not
@@ -20,7 +21,7 @@ interface Conmon {
         verbose @0 :Bool;
         # Retired in v1.0.0, a `Data` field before. Its change to `Void` moved
         # the pointer slots of the fields after it, which broke the wire
-        # format, see the compatibility section of usage.md.
+        # format, see the compatibility section of docs/cri-o.md.
         metadataOld @1 :Void;
         metadata @2 :Metadata;
     }
@@ -92,7 +93,7 @@ interface Conmon {
         # killed, before it writes the exit files. Absolute paths.
         oomExitPaths @5 :List(Text);
         # Where the output of the container goes, every driver gets all of
-        # it, see the logging section of usage.md.
+        # it, see docs/logging.md.
         logDrivers @6 :List(LogDriver);
         # The command the server starts once the container exited and the
         # exit files got written, without waiting for it. The server runs in
@@ -110,7 +111,7 @@ interface Conmon {
         commandArgs @9 :List(Text);
         # Retired in v1.0.0, a `Data` field before. Its change to `Void` moved
         # the pointer slots of the fields after it, which broke the wire
-        # format, see the compatibility section of usage.md.
+        # format, see the compatibility section of docs/cri-o.md.
         metadataOld @10 :Void;
         metadata @11 :Metadata;
         # Environment variables of the runtime, on top of the ones of the
@@ -215,7 +216,7 @@ interface Conmon {
         terminal @3 :Bool;
         # Retired in v1.0.0, a `Data` field before. Its change to `Void` moved
         # the pointer slots of the fields after it, which broke the wire
-        # format, see the compatibility section of usage.md.
+        # format, see the compatibility section of docs/cri-o.md.
         metadataOld @4 :Void;
         metadata @5 :Metadata;
         # Environment variables of the runtime, on top of the ones of the
@@ -239,7 +240,7 @@ interface Conmon {
         # The output of the command. Since unreleased, stdout and stderr
         # together hold at most 16 MiB less 64 KiB. Each keeps up to half of
         # it, and more if the other one leaves room, the rest gets dropped,
-        # see usage.md. Before, each took up to 16 MiB.
+        # see docs/protocols.md. Before, each took up to 16 MiB.
         stdout @1 :Data;
         stderr @2 :Data;
         timedOut @3 :Bool;
@@ -257,7 +258,7 @@ interface Conmon {
         id @0 :Text;
         # The absolute path of the `SOCK_SEQPACKET` socket the server listens
         # on for the attach clients of the container until it exited, see
-        # usage.md. Other paths get rejected since v1.2.2.
+        # docs/protocols.md. Other paths get rejected since v1.2.2.
         socketPath @1 :Text;
         # Deprecated, only logged, attach sessions are per container.
         execSessionId @2 :Text;
@@ -269,7 +270,7 @@ interface Conmon {
         stopAfterStdinEof @3 :Bool;
         # Retired in v1.0.0, a `Data` field before. Its change to `Void` moved
         # the pointer slots of the fields after it, which broke the wire
-        # format, see the compatibility section of usage.md.
+        # format, see the compatibility section of docs/cri-o.md.
         metadataOld @4 :Void;
         metadata @5 :Metadata;
     }
@@ -278,7 +279,7 @@ interface Conmon {
     }
 
     # Listen for attach clients of a running container on `socketPath`, see
-    # usage.md. The call returns once the server listens.
+    # docs/protocols.md. The call returns once the server listens.
     attachContainer @3 (request: AttachRequest) -> (response: AttachResponse);
 
     ###############################################
@@ -289,7 +290,7 @@ interface Conmon {
         id @0 :Text;
         # Retired in v1.0.0, a `Data` field before. Its change to `Void` moved
         # the pointer slots of the fields after it, which broke the wire
-        # format, see the compatibility section of usage.md.
+        # format, see the compatibility section of docs/cri-o.md.
         metadataOld @1 :Void;
         metadata @2 :Metadata;
     }
@@ -312,7 +313,7 @@ interface Conmon {
         height @2 :UInt16; # rows in characters
         # Retired in v1.0.0, a `Data` field before. Its change to `Void` moved
         # the pointer slots of the fields after it, which broke the wire
-        # format, see the compatibility section of usage.md.
+        # format, see the compatibility section of docs/cri-o.md.
         metadataOld @3 :Void;
         metadata @4 :Metadata;
     }
@@ -330,7 +331,7 @@ interface Conmon {
     struct CreateNamespacesRequest {
         # Retired in v1.0.0, a `Data` field before. Its change to `Void` moved
         # the pointer slots of the fields after it, which broke the wire
-        # format, see the compatibility section of usage.md.
+        # format, see the compatibility section of docs/cri-o.md.
         metadataOld @0 :Void;
         namespaces @1 :List(Namespace);
         uidMappings @2 :List(Text); # User ID mappings when unsharing the user namespace.
@@ -365,7 +366,7 @@ interface Conmon {
     }
 
     # Create the namespaces of a pod with `conmonrs pause` and bind mount them
-    # below `basePath`, see usage.md.
+    # below `basePath`, see docs/server.md.
     createNamespaces @6 (request: CreateNamespacesRequest) -> (response: CreateNamespacesResponse);
 
     ###############################################
@@ -379,7 +380,8 @@ interface Conmon {
     }
 
     # Listen on the fd socket, whose file descriptors `createContainer`
-    # references by slot, see usage.md. Further calls return the same path.
+    # references by slot, see docs/protocols.md. Further calls return the same
+    # path.
     startFdSocket @7 (request: StartFdSocketRequest) -> (response: StartFdSocketResponse);
 
     ###############################################
@@ -400,10 +402,10 @@ interface Conmon {
     # serveExecContainer, serveAttachContainer and servePortForwardContainer
     # return the URL of a session on the streaming server of the process,
     # which gets started with the first such request. Each URL is good for a
-    # single connection within 60 seconds, see usage.md. While 1000 URLs of
-    # the kind (exec and attach, port forward) wait for their client, a
-    # request fails with an error starting with "maximum number of in-flight
-    # requests exceeded".
+    # single connection within 60 seconds, see docs/protocols.md. While 1000
+    # URLs of the kind (exec and attach, port forward) wait for their client,
+    # a request fails with an error starting with "maximum number of
+    # in-flight requests exceeded".
     struct ServeExecContainerRequest {
         metadata @0 :Metadata; # Standard metadata to carry.
         # The ID of the container. The call fails with a message starting

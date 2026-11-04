@@ -271,7 +271,7 @@ verify-unreleased: ## Verify that nothing is "unreleased" if the crate version h
 	VERSION=$$($(CRATE_VERSION)) || exit ; \
 	STATUS=0 && git ls-remote --exit-code --tags https://github.com/containers/conmon-rs.git "refs/tags/v$$VERSION" >/dev/null || STATUS=$$? ; \
 	if [ "$$STATUS" = 2 ]; then \
-		STATUS=0 && git grep -in unreleased -- usage.md pkg/client conmon-rs/server/proto || STATUS=$$? ; \
+		STATUS=0 && git grep -in unreleased -- docs pkg/client conmon-rs/server/proto || STATUS=$$? ; \
 		if [ "$$STATUS" = 0 ]; then \
 			echo "v$$VERSION has no tag yet: the version bump PR replaces \"unreleased\" above with v$$VERSION and runs make prettier, other PRs wait for the tag and rerun" ; \
 			exit 1 ; \

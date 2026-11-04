@@ -5,8 +5,9 @@ name: publish-static
 #
 # The build runs in a job without access to the OIDC token, this workflow runs
 # no build steps, not even a checkout, and is the only one which can sign.
-# Consumers verify it as the signer workflow, see the README, which makes the
-# provenance SLSA Build L3 like the generic generator of slsa-github-generator.
+# Consumers verify it as the signer workflow (see docs/install.md), which
+# makes the provenance SLSA Build L3 like the generic generator of
+# slsa-github-generator.
 on:
   workflow_call:
     inputs:
