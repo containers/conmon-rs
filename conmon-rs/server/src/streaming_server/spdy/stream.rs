@@ -16,7 +16,7 @@ use tokio::{select, sync::mpsc};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 /// A stream the client opened and the server accepted.
-pub struct Stream {
+pub(crate) struct Stream {
     pub(super) headers: Headers,
     pub(super) receiver: StreamReceiver,
     pub(super) sender: StreamSender,
@@ -24,47 +24,47 @@ pub struct Stream {
 
 impl Stream {
     /// The headers the client opened the stream with.
-    pub fn headers(&self) -> &Headers {
+    pub(crate) fn headers(&self) -> &Headers {
         &self.headers
     }
 
     /// The ID of the stream.
-    pub fn id(&self) -> u32 {
+    pub(crate) fn id(&self) -> u32 {
         self.sender.id
     }
 
     /// Whether the stream got reset or the connection ended.
-    pub fn is_reset(&self) -> bool {
+    pub(crate) fn is_reset(&self) -> bool {
         self.receiver.is_reset()
     }
 
     /// Resolves once the stream got reset or the connection ended, also
     /// after the stream got dropped.
-    pub fn reset_watch(&self) -> WaitForCancellationFutureOwned {
+    pub(crate) fn reset_watch(&self) -> WaitForCancellationFutureOwned {
         self.receiver.reset.clone().cancelled_owned()
     }
 
     /// Split the stream into the data of the client and the sending side,
     /// to use both at the same time.
-    pub fn split(self) -> (StreamReceiver, StreamSender) {
+    pub(crate) fn split(self) -> (StreamReceiver, StreamSender) {
         (self.receiver, self.sender)
     }
 
     /// Send data, see [`StreamSender::send`].
     #[cfg(test)]
-    pub async fn send(&mut self, data: Bytes) -> Result<()> {
+    pub(crate) async fn send(&mut self, data: Bytes) -> Result<()> {
         self.sender.send(data).await
     }
 
     /// Close the sending side, see [`StreamSender::close`].
     #[cfg(test)]
-    pub async fn close(&mut self) -> Result<()> {
+    pub(crate) async fn close(&mut self) -> Result<()> {
         self.sender.close().await
     }
 }
 
 /// The data the client sends on a stream.
-pub struct StreamReceiver {
+pub(crate) struct StreamReceiver {
     pub(super) data: mpsc::Receiver<Held>,
     pub(super) reset: CancellationToken,
     pub(super) remote_closed: Arc<AtomicBool>,
@@ -74,31 +74,31 @@ pub struct StreamReceiver {
 impl StreamReceiver {
     /// The next data, `None` once the client closed its side, the stream got
     /// reset or the connection ended.
-    pub async fn recv(&mut self) -> Option<Bytes> {
+    pub(crate) async fn recv(&mut self) -> Option<Bytes> {
         self.data.recv().await.map(Held::into_bytes)
     }
 
     /// The next data like [`Self::recv`], which still counts against the
     /// budget of the connection while it is held.
-    pub async fn recv_held(&mut self) -> Option<Held> {
+    pub(crate) async fn recv_held(&mut self) -> Option<Held> {
         self.data.recv().await
     }
 
     /// Whether the stream got reset or the connection ended.
-    pub fn is_reset(&self) -> bool {
+    pub(crate) fn is_reset(&self) -> bool {
         self.reset.is_cancelled()
     }
 
     /// Whether the client closed its side, also if the stream got reset or
     /// the connection ended afterwards.
-    pub fn is_closed_by_client(&self) -> bool {
+    pub(crate) fn is_closed_by_client(&self) -> bool {
         self.remote_closed.load(Ordering::Acquire)
     }
 }
 
 /// The sending side of a stream. Dropping it without closing it resets the
 /// stream.
-pub struct StreamSender {
+pub(crate) struct StreamSender {
     pub(super) id: u32,
     pub(super) shared: Arc<Shared>,
     pub(super) reset: CancellationToken,
@@ -117,7 +117,7 @@ impl StreamSender {
         clippy::needless_pass_by_ref_mut,
         reason = "one send at a time keeps the frames in order"
     )]
-    pub async fn send(&mut self, data: Bytes) -> Result<()> {
+    pub(crate) async fn send(&mut self, data: Bytes) -> Result<()> {
         if self.closed {
             bail!("SPDY stream {} is closed", self.id);
         }
@@ -152,7 +152,7 @@ impl StreamSender {
 
     /// Close the sending side after the data sent before. A close which got
     /// cancelled leaves the stream to its drop, which resets it.
-    pub async fn close(&mut self) -> Result<()> {
+    pub(crate) async fn close(&mut self) -> Result<()> {
         if self.closed {
             return Ok(());
         }
@@ -174,12 +174,12 @@ impl StreamSender {
     }
 
     /// Resolves once the client reset the stream or the connection ended.
-    pub async fn reset_by_peer(&self) {
+    pub(crate) async fn reset_by_peer(&self) {
         self.reset.cancelled().await;
     }
 
     /// Whether the stream got reset or the connection ended.
-    pub fn is_reset(&self) -> bool {
+    pub(crate) fn is_reset(&self) -> bool {
         self.reset.is_cancelled()
     }
 }

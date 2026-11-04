@@ -52,10 +52,13 @@ pub(super) struct Namespace {
 }
 
 impl Namespace {
+    /// The network namespace at `path`, whose thread lingers for
+    /// [`SOCKET_THREAD_LINGER`].
     pub(super) fn new(path: PathBuf) -> Arc<Self> {
         Self::with_linger(path, SOCKET_THREAD_LINGER)
     }
 
+    /// The network namespace at `path`, whose thread lingers for `linger`.
     pub(super) fn with_linger(path: PathBuf, linger: Duration) -> Arc<Self> {
         Arc::new(Self {
             path,
@@ -69,6 +72,8 @@ impl Namespace {
         })
     }
 
+    /// New sockets in the namespace from its thread, which gets started if it
+    /// ended.
     pub(super) async fn sockets(&self) -> Result<Sockets> {
         // A thread which ended before it took the request gets replaced
         // once.

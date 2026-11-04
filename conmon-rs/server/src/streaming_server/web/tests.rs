@@ -132,7 +132,7 @@ fn header_tokens_are_found_in_all_values() {
 #[tokio::test(start_paused = true)]
 async fn hanging_writers_get_aborted() {
     let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
-    let writer = tokio::spawn(async move {
+    let writer = task::spawn(async move {
         let _alive = alive_tx;
         std::future::pending::<()>().await;
     });
@@ -148,7 +148,7 @@ async fn slow_writers_get_waited_for() {
     // A writer whose client takes a part every few seconds, which takes far
     // longer than the timeout in total.
     let written = Activity::new();
-    let writer = tokio::spawn({
+    let writer = task::spawn({
         let written = written.clone();
         async move {
             for _ in 0..10 {
@@ -172,7 +172,7 @@ async fn closes_which_did_not_go_out_get_no_answer() {
     let start = time::Instant::now();
     let written = Activity::new();
     finish(
-        tokio::spawn(std::future::pending::<Option<()>>()),
+        task::spawn(std::future::pending::<Option<()>>()),
         &written,
         &mut messages,
     )
@@ -180,13 +180,13 @@ async fn closes_which_did_not_go_out_get_no_answer() {
     assert_eq!(start.elapsed(), STALL_TIMEOUT);
     // One which did not get its close out.
     let start = time::Instant::now();
-    finish(tokio::spawn(async { None::<()> }), &written, &mut messages).await;
+    finish(task::spawn(async { None::<()> }), &written, &mut messages).await;
     assert_eq!(start.elapsed(), Duration::ZERO);
 
     // A close which went out gets its answer, what comes before it gets
     // dropped.
     let start = time::Instant::now();
-    finish(tokio::spawn(async { Some(()) }), &written, &mut messages).await;
+    finish(task::spawn(async { Some(()) }), &written, &mut messages).await;
     assert_eq!(start.elapsed(), CLOSE_TIMEOUT);
     let mut messages = futures::stream::iter([
         Ok::<_, Infallible>(Message::Binary(Bytes::from_static(b"late"))),
@@ -194,7 +194,7 @@ async fn closes_which_did_not_go_out_get_no_answer() {
     ])
     .chain(futures::stream::pending());
     let start = time::Instant::now();
-    finish(tokio::spawn(async { Some(()) }), &written, &mut messages).await;
+    finish(task::spawn(async { Some(()) }), &written, &mut messages).await;
     assert_eq!(start.elapsed(), Duration::ZERO);
 }
 
@@ -220,7 +220,7 @@ async fn drains_have_a_budget_of_their_own() -> anyhow::Result<()> {
 
     // The client still sends after the close, more than is left of the
     // first budget, then ends its side.
-    let client = tokio::spawn(async move {
+    let client = task::spawn(async move {
         client.write_all(&[0; 4096]).await?;
         time::sleep(Duration::from_millis(50)).await;
         client.write_all(&[0; 4096]).await?;
@@ -242,7 +242,7 @@ async fn dropped_input_wakes_waiting_writes() -> anyhow::Result<()> {
     let (server, mut client) = tokio::io::duplex(1024);
     let mut io = ClientIo::new(server);
     let discard = io.discarder();
-    let writer = tokio::spawn(async move {
+    let writer = task::spawn(async move {
         io.write_all(&[1; 64 * 1024]).await?;
         io.flush().await
     });
@@ -250,7 +250,7 @@ async fn dropped_input_wakes_waiting_writes() -> anyhow::Result<()> {
     assert!(!writer.is_finished());
 
     // The client writes before it reads, which the server does not read.
-    let client = tokio::spawn(async move {
+    let client = task::spawn(async move {
         client.write_all(&[0; 64 * 1024]).await?;
         let mut read = vec![0; 64 * 1024];
         client.read_exact(&mut read).await?;
@@ -273,7 +273,7 @@ async fn writes_tell_that_the_client_takes_them() -> anyhow::Result<()> {
     let written = io.written();
     time::sleep(Duration::from_secs(60)).await;
     // Only what went out counts, not a write which waits for the client.
-    let writer = tokio::spawn(async move { io.write_all(&[1; 2048]).await });
+    let writer = task::spawn(async move { io.write_all(&[1; 2048]).await });
     time::sleep(Duration::from_secs(60)).await;
     let start = time::Instant::now();
     written.idle(Some(Duration::from_secs(10))).await;

@@ -61,7 +61,7 @@ const OUTPUT_CHANNEL_SIZE: usize = 128;
 
 #[derive(Clone, Debug)]
 /// A shared container attach abstraction.
-pub struct SharedContainerAttach {
+pub(crate) struct SharedContainerAttach {
     // A bounded channel instead of a broadcast, so that a slow container stdin
     // applies backpressure to the attach clients instead of dropping input.
     read_half_rx: crate::channel::Receiver<Bytes>,
@@ -143,7 +143,7 @@ impl Default for SharedContainerAttach {
 impl SharedContainerAttach {
     /// Create a new shared container attach instance for a container with or
     /// without a terminal.
-    pub fn new(terminal: bool) -> Self {
+    pub(crate) fn new(terminal: bool) -> Self {
         let (read_half_tx, read_half_rx) = crate::channel::bounded(STDIN_CHANNEL_SIZE);
         Self {
             read_half_rx,
@@ -159,7 +159,7 @@ impl SharedContainerAttach {
 
     /// Add a new attach endpoint to this shared container attach instance. The
     /// `token` of the container stops it on exit.
-    pub fn add<T>(
+    pub(crate) fn add<T>(
         &self,
         socket_path: T,
         token: CancellationToken,
@@ -178,7 +178,7 @@ impl SharedContainerAttach {
     }
 
     /// Read from all attach endpoints standard input and return the first result.
-    pub async fn read(&self) -> Result<Bytes> {
+    pub(crate) async fn read(&self) -> Result<Bytes> {
         self.read_half_rx
             .recv()
             .await
@@ -186,7 +186,7 @@ impl SharedContainerAttach {
     }
 
     /// Try to read from all attach endpoints standard input and return the first result.
-    pub fn try_read(&self) -> Result<Bytes> {
+    pub(crate) fn try_read(&self) -> Result<Bytes> {
         self.read_half_rx
             .try_recv()
             .context("try to receive attach message")
@@ -194,7 +194,7 @@ impl SharedContainerAttach {
 
     /// Send data to the container stdin. This waits while the container does
     /// not keep up, and drops the data once nothing reads the stdin anymore.
-    pub async fn send_stdin(&self, data: Bytes) {
+    pub(crate) async fn send_stdin(&self, data: Bytes) {
         if self.read_half_tx.send(data).await.is_err() {
             trace!("Dropping attach stdin because the container stdin is closed");
         }
@@ -202,13 +202,13 @@ impl SharedContainerAttach {
 
     /// Close the stdin channel once nothing reads it anymore, so that senders
     /// stop waiting for it. Queued data can still be read.
-    pub fn close_stdin(&self) {
+    pub(crate) fn close_stdin(&self) {
         self.read_half_rx.close();
     }
 
     /// Write a buffer to all attach endpoints. Sending fails only if the last
     /// client went away meanwhile, which is no reason to stop the output.
-    pub fn write(&self, m: Message) {
+    pub(crate) fn write(&self, m: Message) {
         let sent = self.output.tx.get().is_some_and(|tx| tx.send(m).is_ok());
         if !sent {
             trace!("No attach clients left for the output");
@@ -219,7 +219,7 @@ impl SharedContainerAttach {
     /// and all of its clones got dropped. The attach endpoints get the done
     /// message only then, otherwise the done of one pipe could cut off the
     /// remaining output of another one.
-    pub fn output(&self) -> Arc<AttachOutput> {
+    pub(crate) fn output(&self) -> Arc<AttachOutput> {
         self.output.registered.store(true, Ordering::SeqCst);
         Arc::new(AttachOutput {
             output: self.output.clone(),
@@ -227,7 +227,7 @@ impl SharedContainerAttach {
     }
 
     /// Whether the container has a terminal.
-    pub fn is_terminal(&self) -> bool {
+    pub(crate) fn is_terminal(&self) -> bool {
         self.terminal
     }
 
@@ -237,13 +237,13 @@ impl SharedContainerAttach {
     /// going forever otherwise, and writing to the log after the exit file
     /// told that it is complete. Closing them lets its writes fail, like
     /// once conmon exited.
-    pub fn stop_output(&self) {
+    pub(crate) fn stop_output(&self) {
         self.output_stopped.cancel();
     }
 
     /// Stop the output once the consumer of an exec is done with it and the
     /// process exited, see [`StopOutput`].
-    pub fn stop_output_on_exit(&self, exited: CancellationToken) -> StopOutput {
+    pub(crate) fn stop_output_on_exit(&self, exited: CancellationToken) -> StopOutput {
         StopOutput {
             attach: self.clone(),
             exited,
@@ -251,17 +251,17 @@ impl SharedContainerAttach {
     }
 
     /// Whether an output got registered, which read loops did then.
-    pub fn has_output(&self) -> bool {
+    pub(crate) fn has_output(&self) -> bool {
         self.output.registered.load(Ordering::SeqCst)
     }
 
     /// The token cancelled by [`SharedContainerAttach::stop_output`].
-    pub fn output_stopped(&self) -> &CancellationToken {
+    pub(crate) fn output_stopped(&self) -> &CancellationToken {
         &self.output_stopped
     }
 
     /// The token cancelled once an attach client closed the container stdin.
-    pub fn stdin_closed(&self) -> &CancellationToken {
+    pub(crate) fn stdin_closed(&self) -> &CancellationToken {
         &self.stdin_closed
     }
 
@@ -269,7 +269,7 @@ impl SharedContainerAttach {
     /// that, the container token also drives the exit and OOM handling. A
     /// terminal cannot be closed without ending its output, so it stays open
     /// and this returns false.
-    pub fn close_container_stdin(&self) -> bool {
+    pub(crate) fn close_container_stdin(&self) -> bool {
         if !self.terminal {
             self.stdin_closed.cancel();
         }
@@ -301,7 +301,7 @@ impl SharedContainerAttach {
     }
 
     /// Check if there are any active attach readers.
-    pub fn has_readers(&self) -> bool {
+    pub(crate) fn has_readers(&self) -> bool {
         self.receiver_count() > 0
     }
 
@@ -313,7 +313,7 @@ impl SharedContainerAttach {
     /// returned flag is true if the output already ended, then the done
     /// message may have been sent before subscribing and the receiver only
     /// gets what is still queued.
-    pub fn subscribe(&self) -> (Receiver<Message>, bool) {
+    pub(crate) fn subscribe(&self) -> (Receiver<Message>, bool) {
         let rx = self
             .output
             .tx
@@ -332,18 +332,18 @@ impl SharedContainerAttach {
     /// the returned guard gets dropped once the output got broadcast. A slow
     /// log driver delays the output, which is no pause of it, see
     /// [`SharedContainerAttach::wait_logged`].
-    pub fn logging(&self) -> Logging<'_> {
+    pub(crate) fn logging(&self) -> Logging<'_> {
         self.output.logging.fetch_add(1, Ordering::SeqCst);
         Logging(&self.output)
     }
 
     /// Whether a read loop has output on its way into the log.
-    pub fn is_logging(&self) -> bool {
+    pub(crate) fn is_logging(&self) -> bool {
         self.output.logging.load(Ordering::SeqCst) > 0
     }
 
     /// Wait until no read loop has output on its way into the log.
-    pub async fn wait_logged(&self) {
+    pub(crate) async fn wait_logged(&self) {
         loop {
             let notified = self.output.logged.notified();
             let mut notified = pin!(notified);
@@ -364,7 +364,7 @@ impl SharedContainerAttach {
 /// slow one blocks the read loops, which a stop after a pause of the output
 /// would cut off with data left in the pipes. A consumer which went away
 /// before the exit takes nothing anymore, the output stops with the exit.
-pub struct StopOutput {
+pub(crate) struct StopOutput {
     attach: SharedContainerAttach,
     exited: CancellationToken,
 }
@@ -392,7 +392,7 @@ impl Drop for StopOutput {
 }
 
 /// Output on its way into the log, see [`SharedContainerAttach::logging`].
-pub struct Logging<'a>(&'a OutputState);
+pub(crate) struct Logging<'a>(&'a OutputState);
 
 impl Drop for Logging<'_> {
     fn drop(&mut self) {
@@ -404,7 +404,7 @@ impl Drop for Logging<'_> {
 
 #[derive(Debug)]
 /// The container output registered by `SharedContainerAttach::output`.
-pub struct AttachOutput {
+pub(crate) struct AttachOutput {
     output: Arc<OutputState>,
 }
 

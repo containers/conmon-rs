@@ -286,7 +286,7 @@ impl StreamingServer {
 
 /// The entry points of the fuzz targets.
 #[cfg(any(test, feature = "fuzzing"))]
-pub mod fuzzing;
+pub(super) mod fuzzing;
 
 #[cfg(test)]
 mod tests;

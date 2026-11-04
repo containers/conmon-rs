@@ -9,13 +9,14 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// The bytes a connection may hold. Clones share them.
 #[derive(Clone, Debug)]
-pub struct Budget {
+pub(super) struct Budget {
     bytes: Arc<Semaphore>,
     max: u32,
 }
 
 impl Budget {
-    pub fn new(max: u32) -> Self {
+    /// A budget of `max` bytes.
+    pub(super) fn new(max: u32) -> Self {
         Self {
             bytes: Arc::new(Semaphore::new(max as usize)),
             max,
@@ -25,13 +26,13 @@ impl Budget {
     /// Hold data within the budget, waits until there is room for it. Data
     /// larger than the whole budget takes all of it, so that every hold
     /// counts.
-    pub async fn hold(&self, data: Bytes) -> Held {
+    pub(super) async fn hold(&self, data: Bytes) -> Held {
         let len = data.len();
         self.hold_as(data, len).await
     }
 
     /// Hold data which counts as `len` bytes, see [`Self::hold`].
-    pub async fn hold_as(&self, data: Bytes, len: usize) -> Held {
+    pub(super) async fn hold_as(&self, data: Bytes, len: usize) -> Held {
         let len = u32::try_from(len).map_or(self.max, |len| len.min(self.max));
         // The semaphore never gets closed.
         let permit = self.bytes.clone().acquire_many_owned(len).await.ok();
@@ -40,21 +41,21 @@ impl Budget {
 
     /// The bytes which are not held right now.
     #[cfg(test)]
-    pub fn available(&self) -> usize {
+    pub(super) fn available(&self) -> usize {
         self.bytes.available_permits()
     }
 }
 
 /// Data which counts against a [`Budget`] until it gets dropped.
 #[derive(Debug)]
-pub struct Held {
+pub(super) struct Held {
     data: Bytes,
     permit: Option<OwnedSemaphorePermit>,
 }
 
 impl Held {
     /// The data, its share of the budget is given back.
-    pub fn into_bytes(self) -> Bytes {
+    pub(super) fn into_bytes(self) -> Bytes {
         self.data
     }
 }
@@ -72,7 +73,7 @@ impl Deref for Held {
 /// [`Held`], small data does not take an allocation of its own, which the
 /// budget does not count.
 #[derive(Debug, Default)]
-pub struct HeldBuf {
+pub(super) struct HeldBuf {
     data: BytesMut,
     permit: Option<OwnedSemaphorePermit>,
 }
@@ -80,13 +81,13 @@ pub struct HeldBuf {
 impl HeldBuf {
     /// What appending `len` bytes counts against the budget, the capacity
     /// the buffer grows by, see [`Self::push`].
-    pub fn cost(&self, len: usize) -> usize {
+    pub(super) fn cost(&self, len: usize) -> usize {
         self.capacity_for(len) - self.data.capacity()
     }
 
     /// Append data, which has to be held by the same budget as the data
     /// before, as its [`Self::cost`].
-    pub fn push(&mut self, held: Held) {
+    pub(super) fn push(&mut self, held: Held) {
         let capacity = self.capacity_for(held.len());
         if capacity > self.data.capacity() {
             let mut data = BytesMut::with_capacity(capacity);

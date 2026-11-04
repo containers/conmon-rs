@@ -36,7 +36,7 @@ const FLAG_FIN: u8 = 0x01;
 const MAX_CONTROL_FRAME_LEN: usize = 64 * 1024;
 
 /// The largest frame the protocol allows, its length has 24 bits.
-pub const MAX_DATA_FRAME_LEN: usize = 0xff_ffff;
+pub(super) const MAX_DATA_FRAME_LEN: usize = 0xff_ffff;
 
 /// How much of a data frame the server reads at once. Larger frames get
 /// handed to their stream in parts, so that the server does not buffer them
@@ -55,27 +55,27 @@ const MAX_HEADER_BLOCK_LEN: usize = 8 * 1024;
 const MAX_HEADERS: usize = 32;
 
 /// RST_STREAM status: the frame violates the protocol.
-pub const STATUS_PROTOCOL_ERROR: u32 = 1;
+pub(super) const STATUS_PROTOCOL_ERROR: u32 = 1;
 
 /// RST_STREAM status: the stream got refused before any processing.
-pub const STATUS_REFUSED_STREAM: u32 = 3;
+pub(super) const STATUS_REFUSED_STREAM: u32 = 3;
 
 /// RST_STREAM status: the stream is not needed anymore. spdystream resets
 /// with it as well, also for streams it rejects.
-pub const STATUS_CANCEL: u32 = 5;
+pub(super) const STATUS_CANCEL: u32 = 5;
 
 /// GOAWAY status: the connection ends normally.
-pub const GOAWAY_OK: u32 = 0;
+pub(super) const GOAWAY_OK: u32 = 0;
 
 /// GOAWAY status: the client violated the protocol.
-pub const GOAWAY_PROTOCOL_ERROR: u32 = 1;
+pub(super) const GOAWAY_PROTOCOL_ERROR: u32 = 1;
 
 /// A single SPDY frame. Only the frames and fields the server acts on are
 /// represented, see [`Frame::Ignored`]. Its debug output shows only the
 /// length of data, which may carry secrets, like typed passwords or
 /// forwarded traffic.
 #[derive(PartialEq)]
-pub enum Frame {
+pub(crate) enum Frame {
     /// The client opens a stream.
     SynStream {
         stream_id: u32,
@@ -166,11 +166,11 @@ impl fmt::Debug for Frame {
 /// The headers of a stream. SPDY requires lowercase names, multiple values
 /// of a name are joined with NUL bytes.
 #[derive(Debug, Default, PartialEq)]
-pub struct Headers(Vec<(String, String)>);
+pub(crate) struct Headers(Vec<(String, String)>);
 
 impl Headers {
     /// The first value of a header, the name is matched case insensitively.
-    pub fn get(&self, name: &str) -> Option<&str> {
+    pub(crate) fn get(&self, name: &str) -> Option<&str> {
         self.0
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case(name))
@@ -190,7 +190,7 @@ impl<const N: usize> From<[(&str, &str); N]> for Headers {
 }
 
 /// Reads the frames of one direction of a connection.
-pub struct Decoder {
+pub(super) struct Decoder {
     decompress: Decompress,
 
     /// The data frame which is handed out in parts: its stream, the bytes
@@ -211,7 +211,7 @@ impl Decoder {
     /// Read the next frame, `None` if the connection ended in between frames.
     /// A data frame larger than [`DATA_CHUNK_LEN`] comes as several ones of
     /// the same stream, only the last one with its FIN flag.
-    pub async fn read<R>(&mut self, reader: &mut R) -> Result<Option<Frame>>
+    pub(super) async fn read<R>(&mut self, reader: &mut R) -> Result<Option<Frame>>
     where
         R: AsyncRead + Unpin,
     {
@@ -441,14 +441,14 @@ impl Decoder {
 
 /// Writes the frames of one direction of a connection.
 #[derive(Default)]
-pub struct Encoder {
+pub(super) struct Encoder {
     /// Whether the zlib header went out with the first header block.
     started: bool,
 }
 
 impl Encoder {
     /// Append the encoded frame to the buffer.
-    pub fn encode(&mut self, frame: &Frame, buf: &mut BytesMut) -> Result<()> {
+    pub(super) fn encode(&mut self, frame: &Frame, buf: &mut BytesMut) -> Result<()> {
         match frame {
             Frame::SynStream {
                 stream_id,
@@ -583,7 +583,7 @@ impl Encoder {
 
 /// The entry points of the fuzz targets.
 #[cfg(any(test, feature = "fuzzing"))]
-pub mod fuzzing;
+pub(super) mod fuzzing;
 
 /// The Adler-32 checksum of the dictionary, which the zlib header names.
 const DICTIONARY_ID: u32 = 0xe3c6a7c2;

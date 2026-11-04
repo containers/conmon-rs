@@ -33,7 +33,7 @@ macro_rules! prefix {
     disable_version_flag(true)
 )]
 /// A pod level OCI container runtime monitor, started by a container engine like CRI-O.
-pub struct Config {
+pub(crate) struct Config {
     #[command(subcommand)]
     /// Possible subcommands.
     command: Option<Commands>,
@@ -153,72 +153,72 @@ pub struct Config {
 
 impl Config {
     /// Possible subcommands.
-    pub fn command(&self) -> Option<&Commands> {
+    pub(crate) fn command(&self) -> Option<&Commands> {
         self.command.as_ref()
     }
 
     /// Show version information.
-    pub fn version(&self) -> Option<Verbosity> {
+    pub(crate) fn version(&self) -> Option<Verbosity> {
         self.version
     }
 
     /// Show version information as JSON.
-    pub fn version_json(&self) -> Option<Verbosity> {
+    pub(crate) fn version_json(&self) -> Option<Verbosity> {
         self.version_json
     }
 
     /// The logging level.
-    pub fn log_level(&self) -> LogLevel {
+    pub(crate) fn log_level(&self) -> LogLevel {
         self.log_level
     }
 
     /// The logging driver.
-    pub fn log_driver(&self) -> LogDriver {
+    pub(crate) fn log_driver(&self) -> LogDriver {
         self.log_driver
     }
 
     /// Binary path of the OCI runtime.
-    pub fn runtime(&self) -> &Path {
+    pub(crate) fn runtime(&self) -> &Path {
         &self.runtime
     }
 
     /// Whether the runtime is crun, which gets arguments of its own, see
     /// `GenerateRuntimeArgs::default_args`.
-    pub fn runtime_is_crun(&self) -> bool {
+    pub(crate) fn runtime_is_crun(&self) -> bool {
         self.runtime.file_name() == Some(OsStr::new("crun"))
     }
 
     /// Path of the directory for conmonrs to hold files at runtime.
-    pub fn runtime_dir(&self) -> &Path {
+    pub(crate) fn runtime_dir(&self) -> &Path {
         &self.runtime_dir
     }
 
     /// Root directory used by the OCI runtime.
-    pub fn runtime_root(&self) -> Option<&Path> {
+    pub(crate) fn runtime_root(&self) -> Option<&Path> {
         self.runtime_root.as_deref()
     }
 
     /// Stay in the foreground instead of forking into the background.
-    pub fn skip_fork(&self) -> bool {
+    pub(crate) fn skip_fork(&self) -> bool {
         self.skip_fork
     }
 
     /// Enable OpenTelemetry tracing.
     #[cfg(feature = "tracing")]
-    pub fn enable_tracing(&self) -> bool {
+    pub(crate) fn enable_tracing(&self) -> bool {
         self.enable_tracing
     }
 
     /// OpenTelemetry gRPC endpoint.
     #[cfg(feature = "tracing")]
-    pub fn tracing_endpoint(&self) -> &str {
+    pub(crate) fn tracing_endpoint(&self) -> &str {
         &self.tracing_endpoint
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 /// Possible subcommands.
-pub enum Commands {
+pub(crate) enum Commands {
     /// Run pause, which bind mounts selected namespaces to the local file system.
     ///
     /// Only the namespaces selected by the flags are created and bind mounted to
@@ -236,7 +236,7 @@ pub enum Commands {
 
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 /// The arguments of the `pause` subcommand.
-pub struct PauseArgs {
+pub(crate) struct PauseArgs {
     #[arg(
         default_value("/var/run"),
         env(concat!(prefix!(), "PAUSE_BASE_PATH")),
@@ -245,7 +245,7 @@ pub struct PauseArgs {
         value_name("PATH")
     )]
     /// The base path for pinning the namespaces.
-    pub base_path: PathBuf,
+    pub(crate) base_path: PathBuf,
 
     #[arg(
         env(concat!(prefix!(), "PAUSE_POD_ID")),
@@ -254,42 +254,42 @@ pub struct PauseArgs {
     /// The unique pod identifier, which names the files of the namespaces. It consists of the
     /// letters A-Z and a-z, the digits 0-9, "_", "." and "-" only, is not "." or "..", and takes
     /// 251 bytes at most.
-    pub pod_id: String,
+    pub(crate) pod_id: String,
 
     #[arg(long("ipc"))]
     /// Unshare the IPC namespace.
-    pub ipc: bool,
+    pub(crate) ipc: bool,
 
     #[arg(long("pid"))]
     /// Unshare the PID namespace.
-    pub pid: bool,
+    pub(crate) pid: bool,
 
     #[arg(long("net"))]
     /// Unshare the network namespace.
-    pub net: bool,
+    pub(crate) net: bool,
 
     #[arg(long("user"))]
     /// Unshare the user namespace.
-    pub user: bool,
+    pub(crate) user: bool,
 
     #[arg(long("uts"))]
     /// Unshare the UTS namespace.
-    pub uts: bool,
+    pub(crate) uts: bool,
 
     #[arg(long("uid-mappings"), required_if_eq("user", "true"), short('u'))]
     /// User ID mappings for unsharing the user namespace.
     /// Repeat the flag for more mappings, each in the format: "CONTAINER_ID HOST_ID SIZE".
-    pub uid_mappings: Vec<String>,
+    pub(crate) uid_mappings: Vec<String>,
 
     #[arg(long("gid-mappings"), required_if_eq("user", "true"), short('g'))]
     /// Group ID mappings for unsharing the user namespace.
     /// Repeat the flag for more mappings, each in the format: "CONTAINER_ID HOST_ID SIZE".
-    pub gid_mappings: Vec<String>,
+    pub(crate) gid_mappings: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 /// Available log levels.
-pub enum LogLevel {
+pub(crate) enum LogLevel {
     /// Trace level, the most verbose one.
     Trace,
 
@@ -312,7 +312,7 @@ pub enum LogLevel {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 /// Available verbosity levels.
-pub enum Verbosity {
+pub(crate) enum Verbosity {
     /// The default output verbosity.
     Default,
 
@@ -322,7 +322,7 @@ pub enum Verbosity {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 /// Available log drivers.
-pub enum LogDriver {
+pub(crate) enum LogDriver {
     /// Use no log driver.
     None,
 
@@ -360,7 +360,7 @@ impl From<LogLevel> for LevelFilter {
 
 impl Config {
     /// Parse the configuration from the command line and the environment.
-    pub fn parse_args() -> Self {
+    pub(crate) fn parse_args() -> Self {
         Self::parse()
     }
 }
@@ -372,7 +372,7 @@ const FD_SOCKET: &str = "conmon-fd.sock";
 
 impl Config {
     /// Validate the configuration integrity.
-    pub fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         // The runtime flags default to a blank, so that `--version` and the
         // `pause` subcommand work without them.
         const RUNTIME_FLAG: &str = "--runtime";
@@ -432,7 +432,7 @@ impl Config {
 
     /// Make the paths absolute, the server changes into the root directory
     /// once it started, see `Server::start`.
-    pub fn make_absolute(&mut self) -> Result<()> {
+    pub(crate) fn make_absolute(&mut self) -> Result<()> {
         self.runtime = path::absolute(&self.runtime).context("make runtime path absolute")?;
         self.runtime_dir =
             path::absolute(&self.runtime_dir).context("make runtime dir absolute")?;
@@ -444,7 +444,7 @@ impl Config {
 
     /// Create the runtime directories and remove stale sockets. Separate from
     /// [`Config::validate`], which only checks and changes nothing on disk.
-    pub fn prepare(&self) -> Result<()> {
+    pub(crate) fn prepare(&self) -> Result<()> {
         fs::create_dir_all(self.runtime_dir()).context("create runtime dir")?;
 
         if let Some(rr) = self.runtime_root() {
@@ -521,13 +521,16 @@ impl Config {
         let pid = Pid::from_raw(pid);
         kill(pid, None) != Err(Errno::ESRCH) && !is_zombie(pid)
     }
-    pub fn socket(&self) -> PathBuf {
+    /// The socket the server serves the RPCs on.
+    pub(crate) fn socket(&self) -> PathBuf {
         self.runtime_dir().join(SOCKET)
     }
-    pub fn conmon_pidfile(&self) -> PathBuf {
+    /// The PID file the parent writes for the forked server.
+    pub(crate) fn conmon_pidfile(&self) -> PathBuf {
         self.runtime_dir().join(PIDFILE)
     }
-    pub fn fd_socket(&self) -> PathBuf {
+    /// The socket the clients pass file descriptors over.
+    pub(crate) fn fd_socket(&self) -> PathBuf {
         self.runtime_dir().join(FD_SOCKET)
     }
 }

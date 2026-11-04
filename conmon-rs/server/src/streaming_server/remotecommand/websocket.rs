@@ -17,12 +17,12 @@ use tracing::{debug, info, trace};
 
 /// How the messages of a WebSocket session look.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Framing {
-    pub version: Version,
+pub(crate) struct Framing {
+    pub(crate) version: Version,
 
     /// Whether the payloads are base64 encoded in text messages, see
     /// [`channel`].
-    pub base64: bool,
+    pub(crate) base64: bool,
 }
 
 /// The WebSocket subprotocols, without one a client gets binary `v1`.
@@ -59,14 +59,15 @@ pub(super) const WEBSOCKET_PROTOCOLS: [(&str, Framing); 5] = [
 ];
 
 impl Framing {
-    pub const V5: Self = Self {
+    /// The framing of `v5.channel.k8s.io`.
+    pub(crate) const V5: Self = Self {
         version: Version::V5,
         base64: false,
     };
 
     /// The framing for the subprotocols the client requested, in the order
     /// of the client, with the subprotocol the server answers with.
-    pub fn negotiate<'a>(
+    pub(crate) fn negotiate<'a>(
         requested: impl IntoIterator<Item = &'a str>,
     ) -> Option<(Self, Option<&'static str>)> {
         let mut requested = requested.into_iter().peekable();
@@ -83,14 +84,14 @@ impl Framing {
     }
 
     /// A message of the server on a channel.
-    pub fn message(self, channel: u8, data: &[u8]) -> Message {
+    pub(crate) fn message(self, channel: u8, data: &[u8]) -> Message {
         channel::message(self.base64, channel, data)
     }
 
     /// What a message of the client means, none for one which needs no
     /// handling. Like for Kubernetes, text messages carry the same as binary
     /// ones, also for v5, its server does not look at the type.
-    pub fn event(self, message: Message) -> Option<ClientEvent> {
+    pub(crate) fn event(self, message: Message) -> Option<ClientEvent> {
         let data = match message {
             Message::Binary(data) => data,
             Message::Text(text) => Bytes::from(text),
@@ -158,22 +159,22 @@ impl Framing {
 }
 
 /// The input of a WebSocket client.
-pub struct WebSocketInput {
-    pub messages: SplitStream<WebSocket>,
-    pub framing: Framing,
+pub(crate) struct WebSocketInput {
+    pub(crate) messages: SplitStream<WebSocket>,
+    pub(crate) framing: Framing,
 
     /// Touched by every message of the client except for pings and pongs,
     /// which a client like the WebSocket executor of client-go sends as a
     /// heartbeat. CRI-O does not count them either.
-    pub activity: Activity,
+    pub(crate) activity: Activity,
 
     /// Touched whenever a part of what the server sends went out, see
     /// [`web::ClientIo::written`].
-    pub written: Activity,
+    pub(crate) written: Activity,
 
     /// Drops the input of a client which sent a message larger than the
     /// server takes, see [`web::Discard`].
-    pub discard: web::Discard,
+    pub(crate) discard: web::Discard,
 }
 
 impl ClientInput for WebSocketInput {

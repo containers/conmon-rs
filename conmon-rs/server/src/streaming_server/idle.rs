@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::{
-    select,
+    select, task,
     time::{self, Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 /// which waits for the client only once a third of the send buffer drained,
 /// which can take a while with a send buffer of a few MiB and a slow
 /// client.
-pub const STALL_TIMEOUT: Duration = if cfg!(test) {
+pub(super) const STALL_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_secs(5)
 } else {
     Duration::from_secs(60)
@@ -29,15 +29,16 @@ pub const STALL_TIMEOUT: Duration = if cfg!(test) {
 /// sent or got, or a container which took the stdin of a session. Clones
 /// share the time.
 #[derive(Clone, Debug)]
-pub struct Activity(Arc<Mutex<Instant>>);
+pub(super) struct Activity(Arc<Mutex<Instant>>);
 
 impl Activity {
-    pub fn new() -> Self {
+    /// An activity whose last progress is now.
+    pub(super) fn new() -> Self {
         Self(Arc::new(Mutex::new(Instant::now())))
     }
 
     /// Something made progress now.
-    pub fn touch(&self) {
+    pub(super) fn touch(&self) {
         *lock(&self.0) = Instant::now();
     }
 
@@ -48,7 +49,7 @@ impl Activity {
 
     /// Resolves once the connection was not active for the timeout. A timeout
     /// too large to represent is none, like no timeout.
-    pub async fn idle(&self, timeout: Option<Duration>) {
+    pub(super) async fn idle(&self, timeout: Option<Duration>) {
         let Some(timeout) = timeout else {
             return future::pending().await;
         };
@@ -66,7 +67,7 @@ impl Activity {
     /// Run `run` until it is done, or until the connection was not active
     /// for the timeout, which gives `None`. `on_idle` runs before `run` gets
     /// dropped then.
-    pub async fn until_idle<T>(
+    pub(super) async fn until_idle<T>(
         &self,
         timeout: Option<Duration>,
         run: impl Future<Output = T>,
@@ -87,7 +88,7 @@ impl Activity {
     /// `None`. The writes of a connection touch it as they go out, which
     /// lets the end of a connection take as long as a slow client needs,
     /// see [`STALL_TIMEOUT`].
-    pub async fn until_stalled<T>(
+    pub(super) async fn until_stalled<T>(
         &self,
         start: Instant,
         timeout: Duration,
@@ -101,7 +102,7 @@ impl Activity {
     /// like a pager, keeps the end as long as it kept the rest of a session,
     /// one which ended for its idle timeout gets only the `timeout`, like
     /// with an idle timeout too large for the clock.
-    pub async fn until_stalled_or_idle<T>(
+    pub(super) async fn until_stalled_or_idle<T>(
         &self,
         start: Instant,
         timeout: Duration,
@@ -134,14 +135,14 @@ impl Activity {
     /// Watch the connection in a task of its own until `ended` gets
     /// cancelled, and run `on_idle` once it was not active for the timeout
     /// before that.
-    pub fn watch(
+    pub(super) fn watch(
         &self,
         timeout: Option<Duration>,
         ended: CancellationToken,
         on_idle: impl FnOnce() + Send + 'static,
     ) {
         let activity = self.clone();
-        tokio::spawn(async move {
+        task::spawn(async move {
             if activity
                 .until_idle(timeout, ended.cancelled(), || {})
                 .await

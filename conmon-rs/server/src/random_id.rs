@@ -6,7 +6,7 @@ use std::{fmt, str::FromStr};
 /// 128 random bits from the operating system, written as 32 lowercase hex
 /// digits.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RandomId(u128);
+pub(crate) struct RandomId(u128);
 
 impl RandomId {
     /// The length of the written ID.
@@ -14,7 +14,7 @@ impl RandomId {
 
     /// A new random ID. Panics if the operating system has no randomness,
     /// which Linux always has.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let mut bytes = [0; 16];
         getrandom::fill(&mut bytes).expect("random bytes of the operating system");
         Self(u128::from_ne_bytes(bytes))
@@ -53,7 +53,7 @@ impl FromStr for RandomId {
 
 /// A string which is no [`RandomId`].
 #[derive(Debug, PartialEq, Eq)]
-pub struct InvalidRandomId;
+pub(crate) struct InvalidRandomId;
 
 impl fmt::Display for InvalidRandomId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

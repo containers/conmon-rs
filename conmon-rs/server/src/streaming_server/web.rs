@@ -30,7 +30,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
-    task::JoinHandle,
+    task::{self, JoinHandle},
     time::{self, Duration, Instant},
 };
 use tokio_tungstenite::{
@@ -43,17 +43,17 @@ use tokio_tungstenite::{
 };
 use tracing::debug;
 
-pub use tokio_tungstenite::tungstenite::{
+pub(super) use tokio_tungstenite::tungstenite::{
     Error, Message,
     protocol::{CloseFrame, frame::coding::CloseCode},
 };
 
 /// A WebSocket of a client, after the upgrade of its request.
-pub type WebSocket = WebSocketStream<ClientIo<TokioIo<Upgraded>>>;
+pub(super) type WebSocket = WebSocketStream<ClientIo<TokioIo<Upgraded>>>;
 
 /// How long a client gets to answer the close of the server, and to end the
 /// connection after a message which was too large, see [`drain`].
-pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The most a client may still send after the close for a message which was
 /// too large, see [`drain`]. More than the rest of a message of the size
@@ -68,7 +68,7 @@ const READ_BUFFER_SIZE: usize = 16 * 1024;
 /// The close of the server once it is done, or after the client sent a
 /// message larger than the server takes, see [`is_too_large`], which tells
 /// the client why.
-pub fn close(too_large: bool, reason: &str) -> Message {
+pub(super) fn close(too_large: bool, reason: &str) -> Message {
     let (code, reason) = if too_large {
         (CloseCode::Size, "message too large")
     } else {
@@ -82,7 +82,7 @@ pub fn close(too_large: bool, reason: &str) -> Message {
 
 /// Send the close of the server without a reason, see [`close`], the sink
 /// once it went out.
-pub async fn send_close<S>(mut sink: S, too_large: bool) -> Option<S>
+pub(super) async fn send_close<S>(mut sink: S, too_large: bool) -> Option<S>
 where
     S: Sink<Message> + Unpin,
 {
@@ -99,7 +99,7 @@ where
 /// stream. Without it the client sees the connection end without a close
 /// handshake. A slow client still gets it, one which takes nothing for
 /// [`STALL_TIMEOUT`] does not, see [`ClientIo::written`].
-pub async fn answer_close<S, E>(messages: &mut S, written: &Activity)
+pub(super) async fn answer_close<S, E>(messages: &mut S, written: &Activity)
 where
     S: Stream<Item = Result<Message, E>> + Unpin,
 {
@@ -114,7 +114,7 @@ where
 
 /// Write the answer to the close of a client after a send failed for it,
 /// if the read could not, see [`answer_close`].
-pub async fn write_close_answer<S>(sink: &mut S)
+pub(super) async fn write_close_answer<S>(sink: &mut S)
 where
     S: Sink<Message, Error = Error> + Unpin,
 {
@@ -125,7 +125,7 @@ where
 
 /// Whether a send failed after a close, which is the one of the client
 /// while the server did not close yet, see [`answer_close`].
-pub fn is_closed_by_client(e: &Error) -> bool {
+pub(super) fn is_closed_by_client(e: &Error) -> bool {
     matches!(e, Error::Protocol(ProtocolError::SendAfterClosing))
 }
 
@@ -133,7 +133,7 @@ pub fn is_closed_by_client(e: &Error) -> bool {
 /// WebSocket cannot be read anymore then, the rest of the message did not
 /// get read, but the server can still close it, see [`close`], and has to
 /// [`drain`] it then.
-pub fn is_too_large(e: &Error) -> bool {
+pub(super) fn is_too_large(e: &Error) -> bool {
     matches!(e, Error::Capacity(CapacityError::MessageTooLong { .. }))
 }
 
@@ -144,7 +144,7 @@ pub fn is_too_large(e: &Error) -> bool {
 /// [`DRAIN_LIMIT`], on top of what got dropped while the close went out, see
 /// [`Discard`]. A socket closed with input it did not read resets the
 /// connection, which can drop the close and the status before it.
-pub async fn drain<T>(
+pub(super) async fn drain<T>(
     sink: SplitSink<WebSocketStream<ClientIo<T>>, Message>,
     messages: SplitStream<WebSocketStream<ClientIo<T>>>,
 ) where
@@ -172,7 +172,7 @@ pub async fn drain<T>(
 
 /// The connection of a WebSocket client, whose input can get dropped
 /// instead of read, see [`Discard`].
-pub struct ClientIo<T> {
+pub(super) struct ClientIo<T> {
     io: T,
     discard: Arc<DiscardState>,
 
@@ -205,10 +205,11 @@ struct DiscardState {
 /// of the client wakes a write which waits for it. Reads see nothing but the
 /// end of the connection.
 #[derive(Clone, Debug, Default)]
-pub struct Discard(Arc<DiscardState>);
+pub(super) struct Discard(Arc<DiscardState>);
 
 impl Discard {
-    pub fn discard(&self) {
+    /// Drop the input of the client from now on.
+    pub(super) fn discard(&self) {
         self.0.on.store(true, Ordering::Release);
         // A write which waits for a client busy with the rest of its message
         // would never get woken otherwise.
@@ -221,7 +222,8 @@ impl<T> ClientIo<T> {
     /// client which keeps sending does not hold the thread.
     const DISCARD_READS: usize = 16;
 
-    pub fn new(io: T) -> Self {
+    /// Wrap the connection of a client.
+    pub(super) fn new(io: T) -> Self {
         Self {
             io,
             discard: Arc::default(),
@@ -233,12 +235,12 @@ impl<T> ClientIo<T> {
 
     /// Touched whenever a part of what the server sends went out, which
     /// tells that the client still takes it, see [`Activity::until_stalled`].
-    pub fn written(&self) -> Activity {
+    pub(super) fn written(&self) -> Activity {
         self.written.clone()
     }
 
     /// Drops the input of the connection.
-    pub fn discarder(&self) -> Discard {
+    pub(super) fn discarder(&self) -> Discard {
         Discard(self.discard.clone())
     }
 
@@ -372,7 +374,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ClientIo<T> {
 /// Dropping its handle would leave it running, a writer to a client which
 /// does not read would hold the connection. The output of the writer, `None`
 /// if it did not end.
-pub async fn join_or_abort<T>(mut writer: JoinHandle<T>, written: &Activity) -> Option<T> {
+pub(super) async fn join_or_abort<T>(mut writer: JoinHandle<T>, written: &Activity) -> Option<T> {
     if let Some(output) = written
         .until_stalled(Instant::now(), STALL_TIMEOUT, &mut writer)
         .await
@@ -389,7 +391,7 @@ pub async fn join_or_abort<T>(mut writer: JoinHandle<T>, written: &Activity) -> 
 /// A socket closed with input it did not read resets the connection, which
 /// can drop what the client did not read yet, like the close and the output
 /// before it.
-pub async fn await_close_answer<S, E>(messages: &mut S)
+pub(super) async fn await_close_answer<S, E>(messages: &mut S)
 where
     S: Stream<Item = Result<Message, E>> + Unpin,
 {
@@ -421,7 +423,7 @@ where
 /// How a WebSocket session ended, which decides what its end waits for, see
 /// [`end`].
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum End {
+pub(super) enum End {
     /// The client sent a message larger than the server takes, which it
     /// cannot answer the close for, see [`drain`].
     TooLarge,
@@ -437,7 +439,7 @@ pub enum End {
 /// End a WebSocket session once its `writer`, which sends the close of the
 /// server, got the rest out, see [`join_or_abort`]. What comes after depends
 /// on how it ended, see [`End`].
-pub async fn end<T>(
+pub(super) async fn end<T>(
     writer: JoinHandle<Option<SplitSink<WebSocketStream<ClientIo<T>>, Message>>>,
     written: &Activity,
     mut messages: SplitStream<WebSocketStream<ClientIo<T>>>,
@@ -459,11 +461,11 @@ pub async fn end<T>(
 }
 
 /// A response of the streaming server.
-pub type Response = hyper::Response<Body>;
+pub(super) type Response = hyper::Response<Body>;
 
 /// The body of a response. The server sends short texts only, at once.
 #[derive(Debug, Default)]
-pub struct Body(Option<Bytes>);
+pub(super) struct Body(Option<Bytes>);
 
 impl From<Bytes> for Body {
     fn from(data: Bytes) -> Self {
@@ -492,14 +494,14 @@ impl HttpBody for Body {
 }
 
 /// A response with the status only.
-pub fn status(status: StatusCode) -> Response {
+pub(super) fn status(status: StatusCode) -> Response {
     let mut response = Response::default();
     *response.status_mut() = status;
     response
 }
 
 /// A response with a plain text, which tells the client what went wrong.
-pub fn text(status: StatusCode, text: impl Into<String>) -> Response {
+pub(super) fn text(status: StatusCode, text: impl Into<String>) -> Response {
     let mut response = Response::new(Bytes::from(text.into()).into());
     *response.status_mut() = status;
     response.headers_mut().insert(
@@ -510,7 +512,7 @@ pub fn text(status: StatusCode, text: impl Into<String>) -> Response {
 }
 
 /// A request which asks for a WebSocket, checked like RFC 6455 says.
-pub struct WebSocketUpgrade {
+pub(super) struct WebSocketUpgrade {
     key: HeaderValue,
     on_upgrade: OnUpgrade,
     protocol: Option<&'static str>,
@@ -520,7 +522,7 @@ pub struct WebSocketUpgrade {
 impl WebSocketUpgrade {
     /// Check the request, the rejection is the response to send otherwise.
     /// The server speaks HTTP/1 only, where a WebSocket starts with a GET.
-    pub fn from_request<B>(request: &mut Request<B>) -> Result<Self, Box<Response>> {
+    pub(super) fn from_request<B>(request: &mut Request<B>) -> Result<Self, Box<Response>> {
         let reject = |status, message: &'static str| Err(Box::new(text(status, message)));
         if request.method() != Method::GET {
             return reject(
@@ -568,13 +570,13 @@ impl WebSocketUpgrade {
     }
 
     /// The subprotocol the server picked out of the ones of the client.
-    pub fn protocol(mut self, protocol: Option<&'static str>) -> Self {
+    pub(super) fn protocol(mut self, protocol: Option<&'static str>) -> Self {
         self.protocol = protocol;
         self
     }
 
     /// The largest message and frame the client may send.
-    pub fn max_message_size(mut self, max: usize) -> Self {
+    pub(super) fn max_message_size(mut self, max: usize) -> Self {
         self.config = self
             .config
             .max_message_size(Some(max))
@@ -584,7 +586,7 @@ impl WebSocketUpgrade {
 
     /// Answer the request, the WebSocket goes to `callback` once the
     /// connection got upgraded.
-    pub fn on_upgrade<C, F>(self, callback: C) -> Response
+    pub(super) fn on_upgrade<C, F>(self, callback: C) -> Response
     where
         C: FnOnce(WebSocket) -> F + Send + 'static,
         F: Future<Output = ()> + Send + 'static,
@@ -595,7 +597,7 @@ impl WebSocketUpgrade {
             protocol,
             config,
         } = self;
-        tokio::spawn(async move {
+        task::spawn(async move {
             let upgraded = match on_upgrade.await {
                 Ok(upgraded) => upgraded,
                 Err(e) => {

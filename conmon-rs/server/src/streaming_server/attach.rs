@@ -22,14 +22,14 @@ use tracing::debug;
 
 #[derive(Debug)]
 /// Required attach session data.
-pub struct AttachSession {
-    pub container_id: Box<str>,
-    pub child: ReapableChild,
-    pub stdin: bool,
-    pub stdout: bool,
-    pub stderr: bool,
-    pub stop_after_stdin_eof: bool,
-    pub idle_timeout: Option<Duration>,
+pub(crate) struct AttachSession {
+    pub(crate) container_id: Box<str>,
+    pub(crate) child: ReapableChild,
+    pub(crate) stdin: bool,
+    pub(crate) stdout: bool,
+    pub(crate) stderr: bool,
+    pub(crate) stop_after_stdin_eof: bool,
+    pub(crate) idle_timeout: Option<Duration>,
 }
 
 impl StreamingServer {

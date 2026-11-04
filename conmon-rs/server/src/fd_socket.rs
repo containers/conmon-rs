@@ -110,14 +110,18 @@ impl Limits {
 const ANCILLARY_BUF_SIZE: usize =
     unsafe { libc::CMSG_SPACE((MAX_FDS * size_of::<RawFd>()) as libc::c_uint) } as usize;
 
+/// The server of the file descriptor socket and the descriptors it
+/// received, kept in their slots until a request takes them.
 #[derive(Debug, Default)]
-pub struct FdSocket {
+pub(crate) struct FdSocket {
     server: AsyncMutex<Option<Server>>,
     state: Mutex<State>,
 }
 
 impl FdSocket {
-    pub async fn start(self: Arc<Self>, path: PathBuf) -> Result<PathBuf> {
+    /// Start the server on `path`, unless it runs already, and return the
+    /// path it listens on.
+    pub(crate) async fn start(self: Arc<Self>, path: PathBuf) -> Result<PathBuf> {
         let mut server = self.server.lock().await;
         if let Some(server) = server.as_ref() {
             Ok(server.path.clone())
@@ -129,7 +133,7 @@ impl FdSocket {
 
     /// Take the descriptors of all slots, or none of them if one is missing,
     /// so that a failed request leaves them for a retry.
-    pub fn take_all<I>(&self, slots: I) -> Result<Vec<OwnedFd>>
+    pub(crate) fn take_all<I>(&self, slots: I) -> Result<Vec<OwnedFd>>
     where
         I: IntoIterator<Item = u64>,
     {

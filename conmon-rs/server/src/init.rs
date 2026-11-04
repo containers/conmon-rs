@@ -31,7 +31,7 @@ const OOM_SCORE_ADJ: &str = "/proc/self/oom_score_adj";
 
 /// Adjust the OOM score of the server, best effort without the privileges
 /// to lower it.
-pub fn set_oom_score(score: &str) -> Result<()> {
+pub(crate) fn set_oom_score(score: &str) -> Result<()> {
     set_oom_score_at(Path::new(OOM_SCORE_ADJ), score)
 }
 
@@ -51,7 +51,7 @@ fn set_oom_score_at(path: &Path, score: &str) -> Result<()> {
 }
 
 /// Set the default umask.
-pub fn set_default_umask() {
+pub(crate) fn set_default_umask() {
     umask(Mode::from_bits_truncate(0o022));
 }
 
@@ -62,7 +62,7 @@ pub fn set_default_umask() {
 /// pause process get it as well. Callers set those up themselves and let
 /// the server relay the messages, see the `notify` module.
 #[expect(unsafe_code, reason = "changing the environment")]
-pub fn unset_notify_socket() {
+pub(crate) fn unset_notify_socket() {
     // SAFETY: the server is still single threaded, the runtime and its
     // threads start later.
     unsafe { env::remove_var("NOTIFY_SOCKET") }
@@ -93,7 +93,7 @@ const MALLOC_THRESHOLD: libc::c_int = 128 * 1024;
 /// the process has a single thread. The runtimes and containers keep the
 /// defaults, an exec starts their allocator anew.
 #[cfg_attr(target_env = "gnu", expect(unsafe_code, reason = "mallopt"))]
-pub fn configure_malloc() {
+pub(crate) fn configure_malloc() {
     #[cfg(target_env = "gnu")]
     for (param, value, name) in [
         (libc::M_ARENA_MAX, MALLOC_ARENAS, "arenas"),
@@ -122,7 +122,7 @@ static THP_DISABLED: AtomicBool = AtomicBool::new(false);
 /// The setting gets inherited and kept across exec, so the runtimes and the
 /// cleanup commands get the one the server started with, see
 /// [`reset_inherited`]. A setting of whoever started the server stays.
-pub fn disable_thp() {
+pub(crate) fn disable_thp() {
     match prctl::get_thp_disable() {
         Ok(false) => {}
         // Already disabled, or not supported, like under qemu-user.
@@ -152,7 +152,7 @@ static INHERITED_NOFILE: OnceLock<(rlim_t, rlim_t)> = OnceLock::new();
 /// with the soft limit they started with, often 1024. The runtimes and the
 /// cleanup commands get the limits the server started with, see
 /// [`reset_inherited`].
-pub fn raise_nofile_limit() {
+pub(crate) fn raise_nofile_limit() {
     let (soft, hard) = match getrlimit(Resource::RLIMIT_NOFILE) {
         Ok(limits) => limits,
         Err(e) => {
@@ -174,7 +174,7 @@ pub fn raise_nofile_limit() {
 
 /// Remember the OOM score adjustment the server started with, before it
 /// protects itself with [`set_oom_score`].
-pub fn save_oom_score() {
+pub(crate) fn save_oom_score() {
     match std::fs::read(OOM_SCORE_ADJ) {
         Ok(score) => {
             let _ = INHERITED_OOM_SCORE.set(score.trim_ascii().into());
@@ -192,7 +192,7 @@ pub fn save_oom_score() {
 /// pause process keeps the ones of the server. Add it after the other
 /// pre_exec hooks, those run in order and may need the raised limit.
 #[expect(unsafe_code, reason = "a pre_exec hook")]
-pub fn reset_inherited(cmd: &mut Command) {
+pub(crate) fn reset_inherited(cmd: &mut Command) {
     let score: Option<&'static [u8]> = INHERITED_OOM_SCORE.get().map(|score| &**score);
     let thp_disabled = THP_DISABLED.load(Ordering::Relaxed);
     let nofile = INHERITED_NOFILE.get().copied();

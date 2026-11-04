@@ -16,17 +16,18 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::{select, time};
+use tokio::{select, task, time};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 /// The most resize events a SPDY client may send without completing one.
 pub(super) const MAX_RESIZE_BUFFER: usize = 4 * 1024;
 
+/// The stream type of the resize stream.
 pub(super) const STREAM_TYPE_RESIZE: &str = "resize";
 
 /// The SPDY protocols, the kubelet and client-go prefer the first one.
-pub const SPDY_PROTOCOLS: [(&str, Version); 4] = [
+pub(crate) const SPDY_PROTOCOLS: [(&str, Version); 4] = [
     ("v4.channel.k8s.io", Version::V4),
     ("v3.channel.k8s.io", Version::V3),
     ("v2.channel.k8s.io", Version::V2),
@@ -39,7 +40,7 @@ pub const SPDY_PROTOCOLS: [(&str, Version); 4] = [
 /// attach, so it may also come after the session started. Both get read
 /// together: once the stdin which the process does not read fills
 /// `PENDING_STDIN_MAX_BYTES` of the session, the resizes wait as well.
-pub struct SpdyInput {
+pub(crate) struct SpdyInput {
     stdin: Option<StreamReceiver>,
 
     /// Set once the client closed its stdin cleanly, so that the output,
@@ -89,11 +90,11 @@ impl SpdyInput {
         match StreamType::parse(stream.headers()) {
             Ok(StreamType::Resize) if self.resize.is_none() => {
                 let (receiver, sender) = stream.split();
-                tokio::spawn(close_sending_side(sender));
+                task::spawn(close_sending_side(sender));
                 self.resize = Some(receiver);
             }
             Ok(StreamType::Stdout | StreamType::Stderr) => {
-                tokio::spawn(close_sending_side(stream.split().1));
+                task::spawn(close_sending_side(stream.split().1));
             }
             _ => debug!("Rejecting a stream opened after the start of the session"),
         }
@@ -104,7 +105,7 @@ impl SpdyInput {
 /// objects back to back. Only the latest one matters, the earlier sizes are
 /// gone already, so a client sending many at once does not queue them.
 #[derive(Debug, Default)]
-pub struct ResizeEvents {
+pub(super) struct ResizeEvents {
     pub(super) buf: BytesMut,
     latest: Option<Bytes>,
 }
@@ -112,7 +113,7 @@ pub struct ResizeEvents {
 impl ResizeEvents {
     /// Split what the client sent into its JSON objects and keep the last
     /// one. A broken one drops what the client sent so far.
-    pub fn push(&mut self, data: &[u8]) {
+    pub(super) fn push(&mut self, data: &[u8]) {
         self.buf.extend_from_slice(data);
         let mut stream = serde_json::Deserializer::from_slice(&self.buf).into_iter::<IgnoredAny>();
         let mut start = 0;
@@ -149,7 +150,9 @@ impl ResizeEvents {
         }
     }
 
-    pub fn pop(&mut self) -> Option<Bytes> {
+    /// Take the latest resize event, if one came since the last one got
+    /// taken.
+    pub(super) fn pop(&mut self) -> Option<Bytes> {
         self.latest.take()
     }
 }
@@ -249,15 +252,15 @@ impl StreamType {
 /// The streams a session expects from a SPDY client. A resize stream is
 /// optional, see [`SpdyInput`].
 #[derive(Clone, Copy, Debug)]
-pub struct ExpectedStreams {
-    pub stdin: bool,
-    pub stdout: bool,
-    pub stderr: bool,
+pub(crate) struct ExpectedStreams {
+    pub(crate) stdin: bool,
+    pub(crate) stdout: bool,
+    pub(crate) stderr: bool,
 }
 
 /// The streams of a SPDY session, which the client opened until the session
 /// started.
-pub struct SpdyStreams {
+pub(crate) struct SpdyStreams {
     error: Stream,
     stdin: Option<Stream>,
     stdout: Option<Stream>,
@@ -267,7 +270,7 @@ pub struct SpdyStreams {
 
 impl SpdyStreams {
     /// Whether the client may open a stream, by its headers.
-    pub fn accept(headers: &Headers, version: Version) -> Result<()> {
+    pub(crate) fn accept(headers: &Headers, version: Version) -> Result<()> {
         match StreamType::parse(headers)? {
             StreamType::Resize if !version.spdy_resize() => {
                 bail!("unexpected stream type {STREAM_TYPE_RESIZE:?}")
@@ -280,7 +283,10 @@ impl SpdyStreams {
     /// Nothing reads the streams meanwhile: a client which sends more stdin
     /// than a stream queues before it opened the others holds up the
     /// connection until this times out. client-go opens all streams first.
-    pub async fn wait(connection: &mut Connection, expected: ExpectedStreams) -> Result<Self> {
+    pub(crate) async fn wait(
+        connection: &mut Connection,
+        expected: ExpectedStreams,
+    ) -> Result<Self> {
         let mut error = None;
         let (mut stdin, mut stdout, mut stderr, mut resize) = (None, None, None, None);
         let timeout = time::sleep(STREAM_CREATION_TIMEOUT);
@@ -328,7 +334,7 @@ impl SpdyStreams {
     /// the streams of the client. The sending side of stdin stays open, a
     /// client takes its end as the end of stdin, except for v1 like for the
     /// kubelet. The other sending sides get closed.
-    pub async fn into_parts(
+    pub(crate) async fn into_parts(
         self,
         connection: Connection,
         version: Version,
@@ -365,7 +371,7 @@ impl SpdyStreams {
 }
 
 /// The sending sides of a SPDY session.
-pub struct SpdyOutput {
+pub(crate) struct SpdyOutput {
     /// Shared with the input, see [`Output::spdy`](super::Output::spdy).
     pub(super) peer_closed: Arc<AtomicBool>,
     pub(super) version: Version,

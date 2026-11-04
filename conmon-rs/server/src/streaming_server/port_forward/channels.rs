@@ -16,7 +16,12 @@ use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use percent_encoding::percent_decode_str;
 use std::{pin::pin, sync::Arc};
-use tokio::{net::TcpStream, select, sync::mpsc, task::JoinSet};
+use tokio::{
+    net::TcpStream,
+    select,
+    sync::mpsc,
+    task::{self, JoinSet},
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
 
@@ -44,7 +49,7 @@ impl PortForward {
     /// The ports a channel protocol request forwards, by its query. The
     /// `port` parameter may repeat and hold several ports separated by
     /// commas.
-    pub fn query_ports(query: Option<&str>) -> Result<Vec<u16>> {
+    pub(crate) fn query_ports(query: Option<&str>) -> Result<Vec<u16>> {
         let mut ports = vec![];
         for pair in query.unwrap_or_default().split('&') {
             let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -107,7 +112,7 @@ impl PortForward {
 
         let (writer_activity, writer_too_large) = (activity.clone(), too_large.clone());
         // The sink, once the close went out.
-        let writer = tokio::spawn(async move {
+        let writer = task::spawn(async move {
             while let Some(message) = output_rx.recv().await {
                 if sink.send(message).await.is_err() {
                     return None;

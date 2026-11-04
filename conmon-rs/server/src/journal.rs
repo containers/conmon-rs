@@ -29,16 +29,16 @@ use tracing::{Level, Metadata};
 use tracing_subscriber::fmt::writer::MakeWriter;
 
 /// The datagram socket journald receives native protocol entries on.
-pub const SOCKET_PATH: &str = "/run/systemd/journal/socket";
+pub(crate) const SOCKET_PATH: &str = "/run/systemd/journal/socket";
 
 /// The SYSLOG_IDENTIFIER of the entries of the server, so that
 /// `journalctl -t conmonrs` finds them, and of containers without a tag, a
 /// name and an ID.
-pub const IDENTIFIER: &str = "conmonrs";
+pub(crate) const IDENTIFIER: &str = "conmonrs";
 
 /// The syslog priorities used for the `PRIORITY` field.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Priority {
+pub(crate) enum Priority {
     Error = 3,
     Warning = 4,
     Notice = 5,
@@ -48,11 +48,11 @@ pub enum Priority {
 
 /// A journal entry, encoded for the native protocol.
 #[derive(Debug, Default)]
-pub struct Entry(Vec<u8>);
+pub(crate) struct Entry(Vec<u8>);
 
 impl Entry {
     /// An entry with the `PRIORITY` and `MESSAGE` fields.
-    pub fn new(priority: Priority, message: impl AsRef<[u8]>) -> Self {
+    pub(crate) fn new(priority: Priority, message: impl AsRef<[u8]>) -> Self {
         let mut entry = Self::default();
         entry.reset(priority, message);
         entry
@@ -60,7 +60,7 @@ impl Entry {
 
     /// Start over with the `PRIORITY` and `MESSAGE` fields, keeping the
     /// allocation.
-    pub fn reset(&mut self, priority: Priority, message: impl AsRef<[u8]>) -> &mut Self {
+    pub(crate) fn reset(&mut self, priority: Priority, message: impl AsRef<[u8]>) -> &mut Self {
         self.0.clear();
         self.field("PRIORITY", [b'0' + priority as u8])
             .field("MESSAGE", message)
@@ -69,7 +69,7 @@ impl Entry {
     /// Append a field. The key must be a valid journal field name: upper case
     /// letters, digits and underscores, not starting with a digit or an
     /// underscore.
-    pub fn field(&mut self, key: &str, value: impl AsRef<[u8]>) -> &mut Self {
+    pub(crate) fn field(&mut self, key: &str, value: impl AsRef<[u8]>) -> &mut Self {
         debug_assert!(Self::valid_key(key), "invalid journal field name {key}");
         let value = value.as_ref();
         self.0.extend_from_slice(key.as_bytes());
@@ -89,7 +89,7 @@ impl Entry {
 
     /// Whether the key is a valid journal field name, see [`Entry::field`],
     /// at most 64 characters.
-    pub fn valid_key(key: &str) -> bool {
+    pub(crate) fn valid_key(key: &str) -> bool {
         (1..=64).contains(&key.len())
             && !key.starts_with(|c: char| c == '_' || c.is_ascii_digit())
             && key
@@ -98,12 +98,13 @@ impl Entry {
     }
 
     /// Append the already encoded fields of another entry.
-    pub fn extend(&mut self, fields: &Entry) -> &mut Self {
+    pub(crate) fn extend(&mut self, fields: &Entry) -> &mut Self {
         self.0.extend_from_slice(&fields.0);
         self
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
+    /// The encoded fields, as they get sent.
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 }
@@ -112,7 +113,7 @@ impl Entry {
 /// it restarts or its disk is slow. The modes use separate sockets, and the
 /// server logs one of their own, see [`SERVER_SOCKET`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Wait {
+pub(crate) enum Wait {
     /// Never block, the entry fails with `ErrorKind::WouldBlock`. For the
     /// server logs, which tracing writes from the runtime threads, and the
     /// container logs as long as the journal takes them right away.
@@ -143,7 +144,7 @@ static BOUNDED_SOCKET: OnceLock<UnixDatagram> = OnceLock::new();
 static SERVER_SOCKET: OnceLock<UnixDatagram> = OnceLock::new();
 
 /// Send an entry of the container output to the journal socket at a path.
-pub fn send_at(wait: Wait, path: &Path, entry: &Entry) -> io::Result<()> {
+pub(crate) fn send_at(wait: Wait, path: &Path, entry: &Entry) -> io::Result<()> {
     let cell = match wait {
         Wait::Never => &NEVER_SOCKET,
         Wait::Bounded(_) => &BOUNDED_SOCKET,
@@ -223,7 +224,7 @@ fn send_to(
 
 /// Whether an error means that there is no journal to send to: no socket
 /// file, or no one listening on it.
-pub fn unavailable(error: &io::Error) -> bool {
+pub(crate) fn unavailable(error: &io::Error) -> bool {
     matches!(
         error.kind(),
         ErrorKind::NotFound | ErrorKind::ConnectionRefused
@@ -278,7 +279,7 @@ fn create_memfd() -> nix::Result<OwnedFd> {
 /// Writes every log line as one journal entry with the priority derived from
 /// the tracing level.
 #[derive(Default)]
-pub struct Journal {
+pub(crate) struct Journal {
     priority: Option<Priority>,
 }
 
@@ -287,7 +288,7 @@ impl Journal {
 
     /// A writer with the priority of errors, for the errors of the server
     /// from before its logging got set up.
-    pub fn error() -> Self {
+    pub(crate) fn error() -> Self {
         Self {
             priority: Some(Priority::Error),
         }
@@ -333,7 +334,7 @@ impl Journal {
 /// has `/dev/null` as its stderr unless it logs to stdout, so the message
 /// would get lost. It bypasses tracing, as its subscriber may be what
 /// panicked.
-pub fn log_panics() {
+pub(crate) fn log_panics() {
     let default_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info: &PanicHookInfo<'_>| {
         // Nothing to report it to if this fails, the default hook follows.
@@ -411,11 +412,11 @@ impl<'a> MakeWriter<'a> for Journal {
 
 /// The entry point of the fuzz target.
 #[cfg(any(test, feature = "fuzzing"))]
-pub mod fuzzing;
+pub(crate) mod fuzzing;
 
 /// What the tests and the fuzz target share.
 #[cfg(any(test, feature = "fuzzing"))]
-pub mod testing;
+pub(crate) mod testing;
 
 #[cfg(test)]
 pub(crate) mod tests;

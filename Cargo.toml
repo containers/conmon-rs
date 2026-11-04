@@ -17,6 +17,7 @@ license = "Apache-2.0"
 repository = "https://github.com/containers/conmon-rs"
 
 [workspace.lints.rust]
+unreachable_pub = "warn"
 unsafe_code = "deny"
 
 [workspace.lints.clippy]

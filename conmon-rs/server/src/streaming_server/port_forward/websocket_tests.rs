@@ -13,7 +13,7 @@ use data_encoding::BASE64;
 use nix::sys::socket::{setsockopt, sockopt};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    task::LocalSet,
+    task::{self, LocalSet},
     time::{self, Duration},
 };
 
@@ -133,7 +133,7 @@ async fn port_forward_over_websocket_ends_idle_sessions_with_stuck_ports() -> Re
             // A pod which accepts, but never reads.
             let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
             let port = listener.local_addr()?.port();
-            let accepted = tokio::spawn(async move { listener.accept().await });
+            let accepted = task::spawn(async move { listener.accept().await });
 
             let (response, stream) = port_forward_websocket_with(
                 &server,
@@ -149,7 +149,7 @@ async fn port_forward_over_websocket_ends_idle_sessions_with_stuck_ports() -> Re
             let _connection = accepted.await??;
 
             // More than the socket buffers and the port queue hold.
-            let flood = tokio::spawn(async move {
+            let flood = task::spawn(async move {
                 let frame = client_frame(2, &[&[0], &[0; 60_000][..]].concat());
                 while writer.write_all(&frame).await.is_ok() {}
             });
@@ -171,7 +171,7 @@ async fn port_forward_over_websocket_ends_with_its_forwards() -> Result<()> {
             // A pod which closes the connection right away.
             let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
             let port = listener.local_addr()?.port();
-            let accepted = tokio::spawn(async move {
+            let accepted = task::spawn(async move {
                 let (connection, _) = listener.accept().await?;
                 drop(connection);
                 anyhow::Ok(())
@@ -187,7 +187,7 @@ async fn port_forward_over_websocket_ends_with_its_forwards() -> Result<()> {
 
             // The client keeps sending, the session still ends with the
             // forward of its only port.
-            let flood = tokio::spawn(async move {
+            let flood = task::spawn(async move {
                 let frame = client_frame(2, &[0, b'x']);
                 while writer.write_all(&frame).await.is_ok() {}
             });
@@ -268,7 +268,7 @@ async fn port_forward_over_websocket_pings_do_not_keep_sessions_active() -> Resu
             let server = StreamingServer::default();
             let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
             let port = listener.local_addr()?.port();
-            let accepted = tokio::spawn(async move { listener.accept().await });
+            let accepted = task::spawn(async move { listener.accept().await });
 
             let (response, stream) = port_forward_websocket_with(
                 &server,
@@ -284,7 +284,7 @@ async fn port_forward_over_websocket_pings_do_not_keep_sessions_active() -> Resu
             let _connection = accepted.await??;
 
             // A heartbeat like the one of client-go.
-            let heartbeat = tokio::spawn(async move {
+            let heartbeat = task::spawn(async move {
                 for opcode in [0x9, 0xa].into_iter().cycle() {
                     time::sleep(Duration::from_millis(100)).await;
                     if writer.write_all(&client_frame(opcode, &[])).await.is_err() {
@@ -346,7 +346,7 @@ async fn port_forward_over_websocket_closes_on_too_large_messages() -> Result<()
             // A pod which accepts, but never sends.
             let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
             let port = listener.local_addr()?.port();
-            let accepted = tokio::spawn(async move { listener.accept().await });
+            let accepted = task::spawn(async move { listener.accept().await });
 
             // The channel protocol, after the ports of the channels.
             let (response, mut stream) =
@@ -376,7 +376,7 @@ async fn port_forward_closes_on_too_large_messages_of_clients_which_do_not_read(
             // A pod which keeps sending.
             let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
             let port = listener.local_addr()?.port();
-            let pod = tokio::spawn(async move {
+            let pod = task::spawn(async move {
                 let (mut connection, _) = listener.accept().await?;
                 let data = vec![b'o'; 64 * 1024];
                 loop {

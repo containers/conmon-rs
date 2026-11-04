@@ -29,8 +29,10 @@ use tokio::{net::UnixDatagram, select, task};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, trace, warn};
 
+/// The socket a container sends its sd_notify messages to, which get
+/// relayed to the host socket.
 #[derive(Debug)]
-pub struct NotifySocket {
+pub(crate) struct NotifySocket {
     /// The container side.
     socket: UnixDatagram,
 
@@ -55,10 +57,10 @@ pub struct NotifySocket {
 
 impl NotifySocket {
     /// The directory below the bundle path which holds the socket.
-    pub const DIR: &'static str = "notify";
+    pub(crate) const DIR: &'static str = "notify";
 
     /// The socket name inside of `DIR`.
-    pub const FILE: &'static str = "notify.sock";
+    pub(crate) const FILE: &'static str = "notify.sock";
 
     /// The start of the socket name in the bundle directory before it moves
     /// into `DIR`, followed by a random ID, so that two creates with the same
@@ -87,7 +89,7 @@ impl NotifySocket {
     /// Bind the container side socket below the bundle path, the messages
     /// get relayed to the `host` socket. An `@` prefix denotes an abstract
     /// host socket, like for `NOTIFY_SOCKET`.
-    pub fn bind(bundle_path: &Path, host: &str) -> Result<Self> {
+    pub(crate) fn bind(bundle_path: &Path, host: &str) -> Result<Self> {
         let (host, host_addr, host_dir) =
             Self::connect_host(host).context("connect host notify socket")?;
 
@@ -172,7 +174,7 @@ impl NotifySocket {
 
     /// Relay messages until the token gets cancelled, which happens when the
     /// container exits.
-    pub fn spawn(self, token: CancellationToken) {
+    pub(crate) fn spawn(self, token: CancellationToken) {
         task::spawn(self.relay(token).instrument(debug_span!("notify")));
     }
 
@@ -332,7 +334,7 @@ impl Drop for NotifySocket {
 
 /// The entry point of the fuzz target.
 #[cfg(any(test, feature = "fuzzing"))]
-pub mod fuzzing;
+pub(crate) mod fuzzing;
 
 #[cfg(test)]
 mod tests;

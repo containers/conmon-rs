@@ -11,6 +11,8 @@ use std::{
 use tracing::{debug, trace};
 
 impl OOMWatcher {
+    /// The cgroup v1 path of the `subsystem` of a process, none if the
+    /// process is gone.
     pub(super) fn process_cgroup_subsystem_path_cgroup_v1(
         pid: Pid,
         subsystem: &str,
@@ -29,6 +31,7 @@ impl OOMWatcher {
         Ok(None)
     }
 
+    /// The cgroup v2 path of a process, none if the process is gone.
     pub(super) fn process_cgroup_subsystem_path_cgroup_v2(pid: Pid) -> Result<Option<PathBuf>> {
         if let Some(fp) = Self::try_open_cgroup_path(pid)? {
             return Self::unified_cgroup_path(BufReader::new(fp)).map(Some);

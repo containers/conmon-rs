@@ -27,7 +27,7 @@ const ACCEPT_ERROR_INTERVAL: Duration = Duration::from_secs(10);
 
 /// The failed accepts of a listener which keeps going.
 #[derive(Debug, Default)]
-pub struct AcceptErrors {
+pub(crate) struct AcceptErrors {
     /// When the last one got logged as an error.
     last_logged: Option<Instant>,
 }
@@ -37,7 +37,7 @@ impl AcceptErrors {
     /// fail every accept until something changes, so pause instead of
     /// spinning. Only a connection which failed on its own is no reason to
     /// wait, or to tell about it beyond the debug log.
-    pub async fn failed(&mut self, e: &io::Error) {
+    pub(crate) async fn failed(&mut self, e: &io::Error) {
         if connection_failed(e) {
             debug!("Unable to accept connection: {e}");
             return;
@@ -77,7 +77,7 @@ fn connection_failed(e: &io::Error) -> bool {
 /// Linux creates the file of a socket on bind with the mode of the socket
 /// minus the umask, so others cannot connect at any time, unlike with a
 /// chmod after the bind.
-pub fn private_socket(typ: SockType) -> io::Result<OwnedFd> {
+pub(crate) fn private_socket(typ: SockType) -> io::Result<OwnedFd> {
     let fd = socket(
         AddressFamily::Unix,
         typ,
@@ -90,7 +90,7 @@ pub fn private_socket(typ: SockType) -> io::Result<OwnedFd> {
 
 /// Listen on a socket at `path` which only its owner can connect to, see
 /// [`private_socket`].
-pub fn listen_private(path: &Path, typ: SockType) -> io::Result<OwnedFd> {
+pub(crate) fn listen_private(path: &Path, typ: SockType) -> io::Result<OwnedFd> {
     let fd = private_socket(typ)?;
     bind(fd.as_raw_fd(), &UnixAddr::new(path)?)?;
     listen(&fd, Backlog::MAXCONN)?;
@@ -99,7 +99,10 @@ pub fn listen_private(path: &Path, typ: SockType) -> io::Result<OwnedFd> {
 
 /// Bind a listener with `bind` at a socket path whatever its length, see
 /// [`shorten_path`]. The parent directory gets created if it does not exist.
-pub fn bind_long_path<L>(path: &Path, bind: impl FnOnce(PathBuf) -> io::Result<L>) -> Result<L> {
+pub(crate) fn bind_long_path<L>(
+    path: &Path,
+    bind: impl FnOnce(PathBuf) -> io::Result<L>,
+) -> Result<L> {
     // keep parent_fd in scope until the bind, or else the socket will not work
     let (path, _parent_dir) = shorten_socket_path(path)?;
     bind(path).context("bind server socket")
@@ -107,7 +110,7 @@ pub fn bind_long_path<L>(path: &Path, bind: impl FnOnce(PathBuf) -> io::Result<L
 
 /// Like [`shorten_path`], creating the parent directory if it does not
 /// exist.
-pub fn shorten_socket_path(path: &Path) -> Result<(PathBuf, File)> {
+pub(crate) fn shorten_socket_path(path: &Path) -> Result<(PathBuf, File)> {
     let (parent, _) = split_socket_path(path)?;
     fs::create_dir_all(parent).context("create parent directory")?;
     shorten_path(path)
@@ -117,7 +120,7 @@ pub fn shorten_socket_path(path: &Path) -> Result<(PathBuf, File)> {
 /// a socket address whatever its length. The directory has to exist and
 /// stays open as long as the returned file, the path is only valid until
 /// then.
-pub fn shorten_path(path: &Path) -> Result<(PathBuf, File)> {
+pub(crate) fn shorten_path(path: &Path) -> Result<(PathBuf, File)> {
     let (parent, name) = split_socket_path(path)?;
     let parent = File::open(parent).context("open parent directory")?;
     let fd = parent.as_raw_fd();

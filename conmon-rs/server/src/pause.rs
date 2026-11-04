@@ -41,7 +41,7 @@ mod subprocess;
 
 /// The main structure for this module.
 #[derive(Debug)]
-pub struct Pause {
+pub(crate) struct Pause {
     base_path: PathBuf,
     pod_id: Box<str>,
 
@@ -63,13 +63,16 @@ pub struct Pause {
 }
 
 impl Pause {
-    pub fn base_path(&self) -> &Path {
+    /// The directory which holds the bind mounts of the namespaces.
+    pub(crate) fn base_path(&self) -> &Path {
         &self.base_path
     }
-    pub fn pod_id(&self) -> &str {
+    /// The ID of the pod.
+    pub(crate) fn pod_id(&self) -> &str {
         &self.pod_id
     }
-    pub fn namespaces(&self) -> &[Namespace] {
+    /// The namespaces which were requested, created and bound.
+    pub(crate) fn namespaces(&self) -> &[Namespace] {
         &self.namespaces
     }
 }
@@ -93,7 +96,7 @@ impl Pause {
     /// A server holds the namespaces of a single pod. Later calls must ask for
     /// the same pod and configuration, they would get other namespaces than
     /// requested otherwise.
-    pub async fn init_shared(
+    pub(crate) async fn init_shared(
         base_path: &str,
         pod_id: &str,
         namespaces: Vec<Namespace>,
@@ -175,15 +178,15 @@ impl Pause {
     /// How long before the deadline of the shutdown it kills the pause
     /// subcommand of a running initialization, and how long it leaves for
     /// the unmounts of the pause instance, see [`Pause::shutdown`].
-    pub const KILL_WAIT: Duration = Duration::from_secs(1);
-    pub const STOP_WAIT: Duration = Duration::from_secs(1);
+    pub(crate) const KILL_WAIT: Duration = Duration::from_secs(1);
+    pub(crate) const STOP_WAIT: Duration = Duration::from_secs(1);
 
     /// Stop the pause instance for the shutdown, until the `deadline`. An
     /// initialization still running finishes in its own task, wait for it
     /// rather than leaving its pause process behind, and kill its subcommand
     /// if it does not finish. No request initializes one after this. It fails
     /// if the initialization or the stop did not finish in time.
-    pub async fn shutdown(deadline: Instant) -> Result<()> {
+    pub(crate) async fn shutdown(deadline: Instant) -> Result<()> {
         PAUSE
             .shutdown(deadline, Self::KILL_WAIT, Self::STOP_WAIT)
             .await
@@ -259,7 +262,7 @@ impl Pause {
     }
 
     /// Convert the requested namespaces, dropping duplicates.
-    pub fn parse_namespaces(requested: Reader<conmon::Namespace>) -> Result<Vec<Namespace>> {
+    pub(crate) fn parse_namespaces(requested: Reader<conmon::Namespace>) -> Result<Vec<Namespace>> {
         let mut namespaces = vec![];
         for namespace in requested.iter() {
             let namespace = match namespace? {
@@ -540,7 +543,7 @@ impl Stop for Pause {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// All available linux namespaces.
-pub enum Namespace {
+pub(crate) enum Namespace {
     /// IPC namespace. This creates new namespace for System V IPC POSIX message queues and
     /// similar.
     Ipc,
@@ -567,7 +570,7 @@ impl fmt::Display for Namespace {
 
 impl Namespace {
     /// The name of the namespace as used in `/proc/<pid>/ns` and the flags.
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Ipc => "ipc",
             Self::Pid => "pid",
@@ -579,7 +582,7 @@ impl Namespace {
 
     /// Bind the namespace of the process `pid` to the provided base path and
     /// pod ID.
-    pub fn bind<T: AsRef<Path>>(self, path: T, pod_id: &str, pid: Pid) -> Result<()> {
+    pub(crate) fn bind<T: AsRef<Path>>(self, path: T, pod_id: &str, pid: Pid) -> Result<()> {
         let bind_path = self.path(path, pod_id);
         fs::create_dir_all(
             bind_path
@@ -609,7 +612,7 @@ impl Namespace {
     /// the bind path open makes a plain unmount fail, which would keep the
     /// namespace alive unnoticed, like a network namespace with its
     /// interfaces. Detached, it ends once the last user let go of it.
-    pub fn umount<T: AsRef<Path>>(self, path: T, pod_id: &str) -> Result<()> {
+    pub(crate) fn umount<T: AsRef<Path>>(self, path: T, pod_id: &str) -> Result<()> {
         let bind_path = self.path(path, pod_id);
         match umount2(&bind_path, MntFlags::MNT_DETACH) {
             // Not mounted, like after a setup which failed before the bind.
@@ -620,11 +623,12 @@ impl Namespace {
     }
 
     /// Retrieve the bind path of the namespace for the provided base path and pod ID.
-    pub fn path<T: AsRef<Path>>(self, path: T, pod_id: &str) -> PathBuf {
+    pub(crate) fn path<T: AsRef<Path>>(self, path: T, pod_id: &str) -> PathBuf {
         path.as_ref().join(format!("{self}ns")).join(pod_id)
     }
 
-    pub fn to_capnp_namespace(self) -> conmon::Namespace {
+    /// The namespace in the RPC interface.
+    pub(crate) fn to_capnp_namespace(self) -> conmon::Namespace {
         match self {
             Namespace::Ipc => conmon::Namespace::Ipc,
             Namespace::Pid => conmon::Namespace::Pid,

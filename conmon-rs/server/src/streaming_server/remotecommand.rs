@@ -30,16 +30,22 @@ mod status;
 mod websocket;
 
 use spdy::SpdyOutput;
-pub use spdy::{ExpectedStreams, SPDY_PROTOCOLS, SpdyStreams};
-pub use status::{Operation, Status};
-pub use websocket::{Framing, WebSocketInput};
+pub(super) use spdy::{ExpectedStreams, SPDY_PROTOCOLS, SpdyStreams};
+pub(super) use status::{Operation, Status};
+pub(super) use websocket::{Framing, WebSocketInput};
 
-pub const STDIN_BYTE: u8 = 0;
-pub const STDOUT_BYTE: u8 = 1;
-pub const STDERR_BYTE: u8 = 2;
-pub const STREAM_ERR_BYTE: u8 = 3;
-pub const RESIZE_BYTE: u8 = 4;
-pub const CLOSE_BYTE: u8 = 255;
+/// The channel of stdin, the first byte of a WebSocket message.
+pub(super) const STDIN_BYTE: u8 = 0;
+/// The channel of stdout.
+pub(super) const STDOUT_BYTE: u8 = 1;
+/// The channel of stderr.
+pub(super) const STDERR_BYTE: u8 = 2;
+/// The channel of the status of the session.
+pub(super) const STREAM_ERR_BYTE: u8 = 3;
+/// The channel of the resize events.
+pub(super) const RESIZE_BYTE: u8 = 4;
+/// The channel which closes another one, since `v5.channel.k8s.io`.
+pub(super) const CLOSE_BYTE: u8 = 255;
 
 /// The status of a session which succeeded. The kubelet sends it as well,
 /// some clients take an empty error stream for a failure.
@@ -48,7 +54,7 @@ const SUCCESS_STATUS: &[u8] = b"{\"metadata\":{},\"status\":\"Success\"}";
 /// A version of the protocols, which decides how a session reports its
 /// status and whether the client resizes terminals.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Version {
+pub(super) enum Version {
     V1,
     V2,
     V3,
@@ -65,14 +71,14 @@ impl Version {
 
     /// Whether a SPDY client with a terminal opens a stream for resize
     /// events.
-    pub fn spdy_resize(self) -> bool {
+    pub(super) fn spdy_resize(self) -> bool {
         self >= Self::V3
     }
 }
 
 /// What a client sends during a session.
 #[derive(Debug, PartialEq)]
-pub enum ClientEvent {
+pub(super) enum ClientEvent {
     Stdin(Stdin),
 
     /// A resize event as JSON.
@@ -89,11 +95,12 @@ pub enum ClientEvent {
 
 /// The failure of a session whose client sent a message larger than the
 /// server takes.
-pub const MESSAGE_TOO_LARGE: &str = "message of the client exceeds the size limit of the server";
+pub(super) const MESSAGE_TOO_LARGE: &str =
+    "message of the client exceeds the size limit of the server";
 
 /// The stdin of a client.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Stdin {
+pub(super) enum Stdin {
     Data(Bytes),
 
     /// The client closed its stdin.
@@ -102,13 +109,13 @@ pub enum Stdin {
 
 impl Stdin {
     /// Stdin with data, none for an empty message, which carries nothing.
-    pub fn data(data: Bytes) -> Option<Self> {
+    pub(super) fn data(data: Bytes) -> Option<Self> {
         (!data.is_empty()).then_some(Self::Data(data))
     }
 }
 
 /// The input of a client.
-pub trait ClientInput: Send + 'static {
+pub(super) trait ClientInput: Send + 'static {
     /// The next event, `None` once the client went away without a clean
     /// close.
     fn next(&mut self) -> impl Future<Output = Option<ClientEvent>> + Send;
@@ -136,7 +143,7 @@ pub trait ClientInput: Send + 'static {
 /// and reads the output meanwhile, so that the process does not wait for it.
 /// A SPDY connection which ends after the client closed its stdin counts as
 /// a clean close.
-pub struct Output {
+pub(super) struct Output {
     transport: Transport,
     failed: bool,
 
@@ -185,7 +192,7 @@ enum Transport {
 impl Output {
     /// The output of a WebSocket session, whose end waits for the
     /// `idle_timeout` of the session as well, see [`Self::idle_timeout`].
-    pub fn websocket(
+    pub(super) fn websocket(
         sender: SplitSink<WebSocket, Message>,
         framing: Framing,
         activity: Activity,
@@ -205,7 +212,7 @@ impl Output {
     /// its stdin with its input, see [`SpdyInput`](spdy::SpdyInput), and
     /// whose end waits for the `idle_timeout` of the session as well, see
     /// [`Self::idle_timeout`].
-    pub fn spdy(output: SpdyOutput, idle_timeout: Option<Duration>) -> Self {
+    pub(super) fn spdy(output: SpdyOutput, idle_timeout: Option<Duration>) -> Self {
         let peer_closed = output.peer_closed.clone();
         Self::new(Transport::Spdy(output), peer_closed, idle_timeout)
     }
@@ -229,19 +236,19 @@ impl Output {
     /// too large, which tells the client why the session failed. The session
     /// failed, its status and its close do not wait for the idle timeout,
     /// only for the [`STALL_TIMEOUT`].
-    pub fn close_too_large(&mut self) {
+    pub(super) fn close_too_large(&mut self) {
         self.too_large = true;
         self.idle_timeout = None;
     }
 
     /// Set by the input once the client closed the connection cleanly.
-    pub fn peer_closed(&self) -> Arc<AtomicBool> {
+    pub(super) fn peer_closed(&self) -> Arc<AtomicBool> {
         self.peer_closed.clone()
     }
 
     /// Tell a WebSocket client before v5 that the session started, with an
     /// empty message on the first channel it gets output on.
-    pub async fn announce(&mut self, stdout: bool, stderr: bool) -> Result<()> {
+    pub(super) async fn announce(&mut self, stdout: bool, stderr: bool) -> Result<()> {
         let Transport::WebSocket { framing, .. } = &self.transport else {
             return Ok(());
         };
@@ -260,7 +267,7 @@ impl Output {
     }
 
     /// Send output of the process, `stream_byte` selects stdout or stderr.
-    pub async fn data(&mut self, stream_byte: u8, data: &Bytes) -> Result<()> {
+    pub(super) async fn data(&mut self, stream_byte: u8, data: &Bytes) -> Result<()> {
         let result = match &mut self.transport {
             Transport::WebSocket { framing, .. } => {
                 let message = framing.message(stream_byte, data);
@@ -285,7 +292,7 @@ impl Output {
     /// output queued before, a slow client gets it all the same, one which
     /// stopped reading for [`STALL_TIMEOUT`] does not get it, see
     /// [`Self::idle_timeout`].
-    pub async fn status(&mut self, status: &Status) -> Result<()> {
+    pub(super) async fn status(&mut self, status: &Status) -> Result<()> {
         let ending = self.ending();
         let idle_timeout = self.idle_timeout;
         self.written()
@@ -334,7 +341,7 @@ impl Output {
     /// to a client which went away fails. A SPDY connection pings the client
     /// itself, also when it is not read while stdin waits for the process,
     /// and ends once a write fails.
-    pub async fn ping(&mut self) -> Result<()> {
+    pub(super) async fn ping(&mut self) -> Result<()> {
         match &self.transport {
             Transport::WebSocket { .. } => self.send(Message::Ping(Bytes::new())).await,
             Transport::Spdy(output) if output.connection.done().is_cancelled() => {
@@ -350,7 +357,7 @@ impl Output {
     /// reading gets the connection ended after [`STALL_TIMEOUT`], counted
     /// from the status on, see [`Self::idle_timeout`]. Whether the close
     /// went out, which the client of a WebSocket answers.
-    pub async fn close(&mut self) -> bool {
+    pub(super) async fn close(&mut self) -> bool {
         let ending = self.ending();
         let written = self.written();
         let idle_timeout = self.idle_timeout;
@@ -453,7 +460,7 @@ impl Output {
 
 /// The entry points of the fuzz targets.
 #[cfg(any(test, feature = "fuzzing"))]
-pub mod fuzzing;
+pub(super) mod fuzzing;
 
 #[cfg(test)]
 mod tests;

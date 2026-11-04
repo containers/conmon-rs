@@ -32,13 +32,14 @@ use tracing::{debug, error};
 /// consumer closes the channel when it is done, the read loop drops the
 /// sender then and keeps reading the pipe.
 #[derive(Debug)]
-pub struct StdioSender {
+pub(crate) struct StdioSender {
     pub(super) tx: Sender<Message>,
     consumed: Arc<AtomicBool>,
 }
 
 impl StdioSender {
-    pub fn new(tx: Sender<Message>, consumed: &Arc<AtomicBool>) -> Self {
+    /// A sender on `tx`, whose consumer sets `consumed` once it attached.
+    pub(crate) fn new(tx: Sender<Message>, consumed: &Arc<AtomicBool>) -> Self {
         Self {
             tx,
             consumed: consumed.clone(),
@@ -105,22 +106,22 @@ impl StdioChannel {
 
 /// The output which an exec wrote while its runtime ran, per pipe.
 #[derive(Debug, Default)]
-pub struct EarlyStdio {
-    pub stdout: EarlyStream,
-    pub stderr: EarlyStream,
+pub(crate) struct EarlyStdio {
+    pub(crate) stdout: EarlyStream,
+    pub(crate) stderr: EarlyStream,
 }
 
 /// The output of a pipe up to [`ContainerIO::MAX_STDIO_STREAM_SIZE`].
 #[derive(Debug, Default)]
-pub struct EarlyStream {
-    pub data: Vec<u8>,
+pub(crate) struct EarlyStream {
+    pub(crate) data: Vec<u8>,
 
     /// Whether the output ended.
-    pub done: bool,
+    pub(crate) done: bool,
 
     /// Whether output got dropped because of the size limit. Nothing may be
     /// appended then, it would leave a gap.
-    pub truncated: bool,
+    pub(crate) truncated: bool,
 
     /// The end of the output which got dropped, where the error of a runtime
     /// which failed is, up to [`EarlyStream::TAIL_SIZE`].
@@ -177,7 +178,7 @@ impl ContainerIO {
     /// Retrieve clones of the stdout and stderr channels.
     ///
     /// Fails if the channels have been dropped via [`ContainerIO::drop_stdio`].
-    pub fn stdio(&self) -> Result<(Receiver<Message>, Receiver<Message>)> {
+    pub(crate) fn stdio(&self) -> Result<(Receiver<Message>, Receiver<Message>)> {
         let (stdout, stderr) = self.receivers()?;
         Ok((stdout.clone(), stderr.clone()))
     }
@@ -198,7 +199,7 @@ impl ContainerIO {
     /// a container is created nothing consumes them anymore, attach sessions
     /// use the attach broadcast, so they get dropped, see
     /// [`StdioChannel::close`].
-    pub fn drop_stdio(&mut self) {
+    pub(crate) fn drop_stdio(&mut self) {
         self.stdout.close();
         self.stderr.close();
     }
@@ -212,7 +213,7 @@ impl ContainerIO {
     /// pipe and drop what follows.
     ///
     /// The output of a pipe which is not of interest gets read and dropped.
-    pub fn collect_stdio(&self, stdout_enabled: bool, stderr_enabled: bool) -> Result<()> {
+    pub(crate) fn collect_stdio(&self, stdout_enabled: bool, stderr_enabled: bool) -> Result<()> {
         let (stdout, stderr) = self.stdio()?;
         self.consume_stdio();
         let stop = CancellationToken::new();
@@ -262,7 +263,7 @@ impl ContainerIO {
 
     /// The output collected since [`ContainerIO::collect_stdio`], empty
     /// without that.
-    pub async fn take_early_stdio(&self) -> EarlyStdio {
+    pub(crate) async fn take_early_stdio(&self) -> EarlyStdio {
         let Some(mut collector) = lock(&self.collector).take() else {
             return EarlyStdio::default();
         };
@@ -275,7 +276,7 @@ impl ContainerIO {
 
     /// Apply backpressure to the read loops from now on, see
     /// [`StdioSender`].
-    pub fn consume_stdio(&self) {
+    pub(crate) fn consume_stdio(&self) {
         self.consumed.store(true, Ordering::Release);
     }
 
@@ -286,7 +287,7 @@ impl ContainerIO {
     /// [`SharedContainerAttach::stop_output`].
     ///
     /// [`SharedContainerAttach::stop_output`]: crate::attach::SharedContainerAttach::stop_output
-    pub async fn runtime_error(&self, e: anyhow::Error) -> anyhow::Error {
+    pub(crate) async fn runtime_error(&self, e: anyhow::Error) -> anyhow::Error {
         let stderr = match self.terminal {
             None => {
                 // The runtime exited, only its remaining output is of
@@ -322,7 +323,7 @@ impl ContainerIO {
     /// an exec cancels `exited` also when it kills the process at its
     /// timeout, and a deadline which raced that one would end the output of
     /// a process which exited right at it.
-    pub async fn read_all(&self, exited: &CancellationToken) -> Result<(Vec<u8>, Vec<u8>)> {
+    pub(crate) async fn read_all(&self, exited: &CancellationToken) -> Result<(Vec<u8>, Vec<u8>)> {
         self.consume_stdio();
         let early = self.take_early_stdio().await;
         self.read_all_with_early(exited, early).await

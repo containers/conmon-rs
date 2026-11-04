@@ -38,8 +38,10 @@ use tokio::{
 };
 use tracing::{Instrument, debug, debug_span, error};
 
+/// The terminal of a process, which the runtime passes over a console
+/// socket.
 #[derive(Debug)]
-pub struct Terminal {
+pub(crate) struct Terminal {
     /// The socket the runtime connects to, removed with the terminal.
     path: TempFile,
     connected_rx: Receiver<OwnedFd>,
@@ -47,13 +49,14 @@ pub struct Terminal {
 }
 
 impl Terminal {
-    pub fn path(&self) -> &Path {
+    /// The console socket the runtime connects to.
+    pub(crate) fn path(&self) -> &Path {
         self.path.path()
     }
 
     /// Resizes the terminal also while something else holds it, like the
     /// runtime call which waits for the connection.
-    pub fn resizer(&self) -> TerminalResizer {
+    pub(crate) fn resizer(&self) -> TerminalResizer {
         self.resizer.clone()
     }
 
@@ -81,7 +84,7 @@ enum Tty {
 
 /// Resizes a [`Terminal`], see [`TerminalResizer::resize`].
 #[derive(Clone, Debug)]
-pub struct TerminalResizer(Arc<Mutex<Tty>>);
+pub(crate) struct TerminalResizer(Arc<Mutex<Tty>>);
 
 impl Default for TerminalResizer {
     fn default() -> Self {
@@ -94,7 +97,7 @@ impl TerminalResizer {
     /// away, a terminal which the runtime did not connect yet gets it once
     /// it does, before the process usually started, see
     /// [`Terminal::connect`].
-    pub fn resize(&self, width: u16, height: u16) -> Result<()> {
+    pub(crate) fn resize(&self, width: u16, height: u16) -> Result<()> {
         debug!("Resizing terminal to width {} and height {}", width, height);
         let mut tty = lock(&self.0);
         match &*tty {
@@ -159,7 +162,7 @@ struct Config {
 
 impl Terminal {
     /// Setup a new terminal instance.
-    pub fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         debug!("Creating new terminal");
         // The guard removes the socket again, also if the setup below fails.
         // In the temporary directory, not the runtime directory of the server:
@@ -208,7 +211,7 @@ impl Terminal {
     /// gets dropped leaves the descriptor queued for the next one. The
     /// terminal gets the size requested before, see
     /// [`TerminalResizer::resize`].
-    pub async fn connect(&mut self) -> Result<TerminalIo> {
+    pub(crate) async fn connect(&mut self) -> Result<TerminalIo> {
         debug!("Waiting for terminal socket connection");
         let fd = self
             .connected_rx
@@ -227,7 +230,7 @@ impl Terminal {
 
     /// The end of file character of the terminal, ^D unless the process
     /// changed it.
-    pub fn eof_char(&self) -> u8 {
+    pub(crate) fn eof_char(&self) -> u8 {
         const DEFAULT: u8 = 0x04;
         let Some(tty) = self.tty() else {
             return DEFAULT;
@@ -242,7 +245,7 @@ impl Terminal {
     }
 
     /// Resize the terminal width and height, see [`TerminalResizer::resize`].
-    pub fn resize(&self, width: u16, height: u16) -> Result<()> {
+    pub(crate) fn resize(&self, width: u16, height: u16) -> Result<()> {
         self.resizer.resize(width, height)
     }
 
@@ -369,13 +372,13 @@ impl AsFd for TerminalFd {
 
 /// The terminal for the loops which read and write it, which keep it open.
 #[derive(Clone, Debug)]
-pub struct TerminalIo(Arc<TerminalFd>);
+pub(crate) struct TerminalIo(Arc<TerminalFd>);
 
 impl TerminalIo {
     /// Open the other end of the terminal, in the devpts instance of the
     /// container, which keeps the terminal from hanging up while it is open.
     #[expect(unsafe_code, reason = "the TIOCGPTPEER ioctl")]
-    pub fn open_peer(&self) -> nix::Result<OwnedFd> {
+    pub(crate) fn open_peer(&self) -> nix::Result<OwnedFd> {
         // SAFETY: TIOCGPTPEER takes the flags of the new descriptor as an
         // integer and returns it or a negative error, it does not touch any
         // memory of ours, and the descriptor is kept open by the borrow for

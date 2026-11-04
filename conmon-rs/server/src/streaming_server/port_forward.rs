@@ -48,10 +48,10 @@ mod requests;
 mod tunnel;
 
 use namespace::Namespace;
-pub use tunnel::WebSocketProtocol;
+pub(super) use tunnel::WebSocketProtocol;
 
 /// The protocol the client has to ask for in the upgrade request.
-pub const PROTOCOL: &str = "portforward.k8s.io";
+pub(super) const PROTOCOL: &str = "portforward.k8s.io";
 
 const PORT_HEADER: &str = "port";
 const REQUEST_ID_HEADER: &str = "requestID";
@@ -162,14 +162,16 @@ struct Early {
 
 /// A port forward session of a pod.
 #[derive(Debug)]
-pub struct PortForward {
+pub(super) struct PortForward {
     netns_path: PathBuf,
     idle_timeout: Option<Duration>,
     ping_interval: Option<Duration>,
 }
 
 impl PortForward {
-    pub fn new(netns_path: PathBuf, idle_timeout: Option<Duration>) -> Self {
+    /// A session for the network namespace at `netns_path`, which ends once it
+    /// was idle for `idle_timeout`.
+    pub(super) fn new(netns_path: PathBuf, idle_timeout: Option<Duration>) -> Self {
         Self {
             netns_path,
             idle_timeout,
@@ -348,7 +350,7 @@ impl PortForward {
 
 /// The entry points of the fuzz targets.
 #[cfg(any(test, feature = "fuzzing"))]
-pub mod fuzzing;
+pub(super) mod fuzzing;
 
 #[cfg(test)]
 mod tests;

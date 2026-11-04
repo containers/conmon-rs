@@ -64,7 +64,7 @@ impl ChildReaper {
     /// once no runtime call which may still claim it is in progress, at most
     /// for [`ChildReaper::ORPHAN_MAX_DEFER`]. Once the server shuts down,
     /// those calls cannot register a process anymore and are not waited for.
-    pub fn start_orphan_sweep(self: Arc<Self>) {
+    pub(crate) fn start_orphan_sweep(self: Arc<Self>) {
         task::spawn(
             async move {
                 let mut sigchld = match signal(SignalKind::child()) {

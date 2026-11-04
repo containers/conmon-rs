@@ -43,20 +43,20 @@ use tracing::debug;
 const EARLY_FRAME_SIZE: usize = 32 * 1024;
 
 /// Required exec session data. Not `Debug`, the command may carry secrets.
-pub struct ExecSession {
-    pub child_reaper: Arc<ChildReaper>,
+pub(crate) struct ExecSession {
+    pub(crate) child_reaper: Arc<ChildReaper>,
 
     /// Whether the process gets a terminal. Its console socket gets created
     /// only once the client came.
-    pub tty: bool,
-    pub server_config: Arc<Config>,
-    pub cgroup_manager: CgroupManager,
-    pub container_id: Box<str>,
-    pub command: Vec<String>,
-    pub stdin: bool,
-    pub stdout: bool,
-    pub stderr: bool,
-    pub idle_timeout: Option<Duration>,
+    pub(crate) tty: bool,
+    pub(crate) server_config: Arc<Config>,
+    pub(crate) cgroup_manager: CgroupManager,
+    pub(crate) container_id: Box<str>,
+    pub(crate) command: Vec<String>,
+    pub(crate) stdin: bool,
+    pub(crate) stdout: bool,
+    pub(crate) stderr: bool,
+    pub(crate) idle_timeout: Option<Duration>,
 }
 
 impl StreamingServer {

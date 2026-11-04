@@ -11,7 +11,7 @@ use tokio::io::{Interest, unix::AsyncFd};
 /// A value holding a descriptor, which tokio waits for while it is registered,
 /// see [`register`].
 #[derive(Debug)]
-pub struct Fd<T> {
+pub(crate) struct Fd<T> {
     inner: T,
     raw: RawFd,
 }
@@ -32,7 +32,7 @@ impl<T> AsRawFd for Fd<T> {
 
 /// Register the descriptor of a value with the reactor of the runtime, the
 /// returned [`AsyncFd`] owns the value.
-pub fn register<T: AsFd>(inner: T, interest: Interest) -> io::Result<AsyncFd<Fd<T>>> {
+pub(crate) fn register<T: AsFd>(inner: T, interest: Interest) -> io::Result<AsyncFd<Fd<T>>> {
     let raw = inner.as_fd().as_raw_fd();
     #[expect(unsafe_code, reason = "registering a descriptor with tokio")]
     // SAFETY: the descriptor stays open and refers to the same file for as

@@ -15,7 +15,7 @@ use std::{io, path::PathBuf};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    task::LocalSet,
+    task::{self, LocalSet},
     time::{self, Duration},
 };
 
@@ -114,7 +114,7 @@ async fn clients_which_do_not_read_get_one_response() -> Result<()> {
             for _ in 0..MAX_CONNECTIONS {
                 let mut stream = TcpStream::connect((ADDR, server.port())).await?;
                 let request = request.clone();
-                writers.push(tokio::spawn(async move {
+                writers.push(task::spawn(async move {
                     while stream.write_all(request.as_bytes()).await.is_ok() {}
                 }));
             }

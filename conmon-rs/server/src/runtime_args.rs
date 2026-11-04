@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 use std::{fmt, path::Path};
 use tracing::debug;
 
+/// What the command line of the OCI runtime gets generated from.
 pub(crate) struct GenerateRuntimeArgs<'a> {
     pub(crate) config: &'a Config,
     pub(crate) id: &'a str,
@@ -22,7 +23,7 @@ impl GenerateRuntimeArgs<'_> {
     const LOG_LEVEL_FLAG_CRUN: &'static str = "--log-level";
 
     /// Generate the OCI runtime CLI arguments from the provided parameters.
-    pub fn create_args(
+    pub(crate) fn create_args(
         self,
         bundle_path: &Path,
         global_args: impl IntoIterator<Item = impl AsRef<str>>,

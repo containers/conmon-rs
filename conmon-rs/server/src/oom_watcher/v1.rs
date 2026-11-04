@@ -107,6 +107,8 @@ impl AsyncRead for AsyncEventFd {
 }
 
 impl OOMWatcher {
+    /// Watch the memory cgroup of a process with cgroup v1, see
+    /// [`OOMWatcher::watch`].
     pub(super) async fn oom_handling_cgroup_v1(
         token: &CancellationToken,
         pid: Pid,

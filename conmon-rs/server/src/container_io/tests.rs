@@ -57,7 +57,7 @@ fn pattern(len: usize) -> Vec<u8> {
 #[tokio::test]
 async fn drain_stops_on_busy_channel() {
     let (tx, rx) = crate::channel::bounded(16);
-    tokio::spawn(async move { while tx.send(()).await.is_ok() {} });
+    task::spawn(async move { while tx.send(()).await.is_ok() {} });
 
     let mut drain = Drain::default();
     let mut received = 0;
@@ -71,7 +71,7 @@ async fn drain_stops_on_busy_channel() {
 async fn drain_stops_after_waiting_in_total() {
     // A process left behind which never pauses long enough for one wait.
     let (tx, rx) = crate::channel::bounded(16);
-    tokio::spawn(async move {
+    task::spawn(async move {
         while tx.send(()).await.is_ok() {
             time::sleep(DRAIN_TIMEOUT * 9 / 10).await;
         }
@@ -241,7 +241,7 @@ async fn exec_output_during_runtime_is_kept() -> Result<()> {
 async fn read_stream_after_exit_is_bounded_in_time() {
     // A process left behind which never pauses long enough for the drain.
     let (tx, rx) = crate::channel::bounded(STDIO_CHANNEL_SIZE);
-    tokio::spawn(async move {
+    task::spawn(async move {
         while tx
             .send(Message::Data(Bytes::from_static(b"x"), Pipe::StdOut))
             .await
@@ -555,7 +555,7 @@ async fn read_stream_keeps_reading_until_the_exit() {
     // timeout, the output written right before that belongs to it.
     let (tx, rx) = crate::channel::bounded(STDIO_CHANNEL_SIZE);
     let exited = CancellationToken::new();
-    let writer = tokio::spawn({
+    let writer = task::spawn({
         let exited = exited.clone();
         async move {
             time::sleep(Duration::from_secs(3600)).await;

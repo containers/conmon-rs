@@ -236,7 +236,7 @@ enum StreamingRequest {
 }
 
 #[expect(
-    refining_impl_trait_reachable,
+    refining_impl_trait_internal,
     reason = "the methods return the concrete capnp promises, the trait any future"
 )]
 impl conmon::Server for Server {

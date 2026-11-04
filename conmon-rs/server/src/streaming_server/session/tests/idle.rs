@@ -95,7 +95,7 @@ async fn clients_which_stop_reading_go_idle() -> Result<()> {
             // The container writes output the client never reads.
             let output = {
                 let attach = attach.clone();
-                tokio::spawn(async move {
+                task::spawn(async move {
                     let data = Bytes::from(vec![b'o'; 64 * 1024]);
                     loop {
                         attach.write(IOMessage::Data(data.clone(), Pipe::StdOut));

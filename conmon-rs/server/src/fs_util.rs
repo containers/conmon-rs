@@ -30,6 +30,7 @@ pub(crate) struct FileId {
 }
 
 impl FileId {
+    /// The identity of the file of `metadata`.
     pub(crate) fn new(metadata: &Metadata) -> Self {
         Self {
             dev: metadata.dev(),

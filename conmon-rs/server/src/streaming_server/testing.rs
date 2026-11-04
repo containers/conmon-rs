@@ -53,7 +53,7 @@ pub(super) fn send_too_large(
     limit: usize,
 ) -> (OwnedReadHalf, JoinHandle<io::Result<()>>) {
     let (reader, mut writer) = stream.into_split();
-    let writer = tokio::spawn(async move {
+    let writer = task::spawn(async move {
         let len = limit + 1;
         let mut message = vec![0x82, 0x80 | 127];
         message.extend_from_slice(&u64::try_from(len).expect("fits").to_be_bytes());

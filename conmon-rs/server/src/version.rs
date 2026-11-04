@@ -9,7 +9,7 @@ const CARGO_TREE: &str = include_str!(concat!(env!("OUT_DIR"), "/cargo-tree.txt"
 
 /// The version structure.
 #[derive(Debug, Default, Eq, PartialEq, Serialize)]
-pub struct Version {
+pub(crate) struct Version {
     /// Specifies if the output should contain verbose debug information.
     #[serde(skip)]
     verbose: bool,
@@ -45,7 +45,7 @@ pub struct Version {
 
 impl Version {
     /// Create a new Version instance.
-    pub fn new(verbose: bool) -> Self {
+    pub(crate) fn new(verbose: bool) -> Self {
         Self {
             verbose,
             version: env!("CARGO_PKG_VERSION"),
@@ -61,22 +61,22 @@ impl Version {
     }
 
     /// The relay of sd_notify messages requested by `sdnotifySocket`.
-    pub const FEATURE_SDNOTIFY: &'static str = "sdnotify";
+    pub(crate) const FEATURE_SDNOTIFY: &'static str = "sdnotify";
 
     /// Forwarding ports by `servePortForwardContainer`.
-    pub const FEATURE_PORT_FORWARD: &'static str = "portforward";
+    pub(crate) const FEATURE_PORT_FORWARD: &'static str = "portforward";
 
     /// The `idleTimeoutSec` of the exec and attach serve requests, which
     /// older servers ignore. Port forwarding always applies its own.
-    pub const FEATURE_IDLE_TIMEOUT: &'static str = "idletimeout";
+    pub(crate) const FEATURE_IDLE_TIMEOUT: &'static str = "idletimeout";
 
     /// Exec and attach sessions over SPDY and the WebSocket protocols before
     /// `v5.channel.k8s.io`.
-    pub const FEATURE_STREAMING_PROTOCOLS: &'static str = "streamingprotocols";
+    pub(crate) const FEATURE_STREAMING_PROTOCOLS: &'static str = "streamingprotocols";
 
     /// The `containerName`, `tag` and `labels` of the journald log driver,
     /// which older servers ignore.
-    pub const FEATURE_JOURNALD_FIELDS: &'static str = "journaldfields";
+    pub(crate) const FEATURE_JOURNALD_FIELDS: &'static str = "journaldfields";
 
     const FEATURES: &'static [&'static str] = &[
         Self::FEATURE_SDNOTIFY,
@@ -87,52 +87,52 @@ impl Version {
     ];
 
     /// The optional features this build supports.
-    pub fn features(&self) -> &'static [&'static str] {
+    pub(crate) fn features(&self) -> &'static [&'static str] {
         self.features
     }
 
     /// Whether verbose output is enabled.
-    pub fn verbose(&self) -> bool {
+    pub(crate) fn verbose(&self) -> bool {
         self.verbose
     }
 
     /// The current crate version.
-    pub fn version(&self) -> &'static str {
+    pub(crate) fn version(&self) -> &'static str {
         self.version
     }
 
     /// The tag of the build.
-    pub fn tag(&self) -> &'static str {
+    pub(crate) fn tag(&self) -> &'static str {
         self.tag
     }
 
     /// The git commit SHA.
-    pub fn commit(&self) -> &'static str {
+    pub(crate) fn commit(&self) -> &'static str {
         self.commit
     }
 
     /// The build date string.
-    pub fn build_date(&self) -> &'static str {
+    pub(crate) fn build_date(&self) -> &'static str {
         self.build_date
     }
 
     /// The target triple.
-    pub fn target(&self) -> &'static str {
+    pub(crate) fn target(&self) -> &'static str {
         self.target
     }
 
     /// The Rust version used.
-    pub fn rust_version(&self) -> &'static str {
+    pub(crate) fn rust_version(&self) -> &'static str {
         self.rust_version
     }
 
     /// The Cargo version used.
-    pub fn cargo_version(&self) -> &'static str {
+    pub(crate) fn cargo_version(&self) -> &'static str {
         self.cargo_version
     }
 
     /// The cargo dependency tree.
-    pub fn cargo_tree(&self) -> &'static str {
+    pub(crate) fn cargo_tree(&self) -> &'static str {
         self.cargo_tree
     }
 
@@ -160,12 +160,12 @@ impl Version {
     }
 
     /// Print the version information to stdout.
-    pub fn print(&self) -> Result<()> {
+    pub(crate) fn print(&self) -> Result<()> {
         write_output(io::stdout().lock(), &self.text())
     }
 
     /// Print the version information as JSON to stdout.
-    pub fn print_json(&self) -> Result<()> {
+    pub(crate) fn print_json(&self) -> Result<()> {
         let mut json = serde_json::to_string(&self).context("serialize result")?;
         json.push('\n');
         write_output(io::stdout().lock(), &json)

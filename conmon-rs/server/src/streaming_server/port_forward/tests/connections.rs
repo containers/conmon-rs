@@ -65,7 +65,7 @@ async fn input_gets_taken_while_connecting() -> Result<()> {
     let (connected_tx, connected) = oneshot::channel();
 
     // More messages than the queue holds arrive before the connection.
-    let send = tokio::spawn(async move {
+    let send = task::spawn(async move {
         for i in 0..10u8 {
             input_tx.send(Bytes::from(vec![i]).into()).await?;
         }
@@ -105,7 +105,7 @@ async fn small_input_while_connecting_gets_collected() -> Result<()> {
     let connect_budget = Budget::new(CONNECT_BUDGET);
     let (input_tx, mut input) = mpsc::channel(CHANNEL_QUEUE);
     let (connected_tx, connected) = oneshot::channel();
-    let send = tokio::spawn({
+    let send = task::spawn({
         let budget = Budget::new(1000);
         async move {
             for i in 0..1000 {
@@ -180,7 +180,7 @@ async fn input_while_connecting_leaves_the_budget() -> Result<()> {
     // sends, which must not stop the other connections of the client.
     let budget = Budget::new(CHANNEL_BUFFER);
     let (input_tx, mut input) = mpsc::channel(CHANNEL_QUEUE);
-    let connecting = tokio::spawn(async move {
+    let connecting = task::spawn(async move {
         PortForward::drain_until(
             future::pending::<Result<()>>(),
             &Budget::new(CONNECT_BUDGET),
@@ -207,7 +207,7 @@ async fn connecting_streams_stop_taking_data_without_connect_budget() -> Result<
     let budget = Budget::new(CHANNEL_BUFFER);
     let connect_budget = Budget::new(4 * u32::try_from(READ_BUFFER)?);
     let (input_tx, mut input) = mpsc::channel(CHANNEL_QUEUE);
-    let connecting = tokio::spawn({
+    let connecting = task::spawn({
         let connect_budget = connect_budget.clone();
         async move {
             PortForward::drain_until(future::pending::<Result<()>>(), &connect_budget, &mut input)
@@ -246,7 +246,7 @@ async fn parallel_connections_all_get_established() -> Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
     let port = listener.local_addr()?.port();
     let namespace = Namespace::with_linger(NETNS.into(), Duration::from_secs(60));
-    let accept = tokio::spawn(async move {
+    let accept = task::spawn(async move {
         let mut connections = vec![];
         for _ in 0..64 {
             connections.push(listener.accept().await?);
@@ -280,7 +280,7 @@ async fn parallel_connections_all_get_established() -> Result<()> {
 #[tokio::test]
 async fn too_much_input_while_connecting_fails() -> Result<()> {
     let (input_tx, mut input) = mpsc::channel(4);
-    tokio::spawn(async move {
+    task::spawn(async move {
         while input_tx
             .send(Bytes::from(vec![0; READ_BUFFER]).into())
             .await

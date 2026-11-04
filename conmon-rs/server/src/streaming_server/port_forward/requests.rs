@@ -18,7 +18,7 @@ use std::{
     pin::{Pin, pin},
     sync::Arc,
 };
-use tokio::{io::AsyncWriteExt, net::TcpStream, select, time};
+use tokio::{io::AsyncWriteExt, net::TcpStream, select, task, time};
 use tokio_util::{
     sync::{CancellationToken, DropGuard},
     time::{DelayQueue, delay_queue::Key},
@@ -67,6 +67,7 @@ pub(super) struct Pending {
 }
 
 impl Pending {
+    /// No pending requests.
     pub(super) fn new() -> Self {
         Self {
             requests: HashMap::new(),
@@ -134,7 +135,7 @@ impl Pending {
 
 impl PortForward {
     /// Serve port forward requests on the upgraded connection until it ends.
-    pub async fn serve_spdy<T>(self, io: T)
+    pub(crate) async fn serve_spdy<T>(self, io: T)
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
     {
@@ -232,7 +233,7 @@ impl PortForward {
             ..
         }) = pending.remove(&request_id)
         {
-            tokio::spawn(Self::forward(
+            task::spawn(Self::forward(
                 request_id,
                 data.stream,
                 error.stream,
@@ -252,7 +253,7 @@ impl PortForward {
         );
         if let Some((_, mut error)) = request.error.take().map(|error| error.stream.split()) {
             let message = format!("request {request_id}: timed out waiting for streams");
-            tokio::spawn(async move {
+            task::spawn(async move {
                 let _ = error.send(message.into()).await;
                 let _ = error.close().await;
             });

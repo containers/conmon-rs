@@ -19,7 +19,7 @@ use tokio::{
 /// open for writing in a child which another thread forked meanwhile, then
 /// executing it fails with ETXTBSY until that child execs. A process of its
 /// own writes the file instead, so that this one never has it open.
-pub fn write_script(path: &Path, script: &str) -> Result<()> {
+pub(crate) fn write_script(path: &Path, script: &str) -> Result<()> {
     let mut child = Command::new("sh")
         .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
         .arg(path)
@@ -43,7 +43,7 @@ pub fn write_script(path: &Path, script: &str) -> Result<()> {
 }
 
 /// Wait until `condition` holds, checking it every 10ms for at most 5s.
-pub async fn wait_for(mut condition: impl FnMut() -> bool) -> Result<()> {
+pub(crate) async fn wait_for(mut condition: impl FnMut() -> bool) -> Result<()> {
     time::timeout(Duration::from_secs(5), async {
         while !condition() {
             time::sleep(Duration::from_millis(10)).await;
@@ -56,7 +56,7 @@ pub async fn wait_for(mut condition: impl FnMut() -> bool) -> Result<()> {
 /// Wait in real time until `condition` holds, checking it every 10ms for at
 /// most 10s, without blocking the runtime of the test. Unlike [`wait_for`],
 /// it also waits with a paused clock, which processes do not advance.
-pub async fn wait_for_real(condition: impl Fn() -> bool) {
+pub(crate) async fn wait_for_real(condition: impl Fn() -> bool) {
     for _ in 0..1000 {
         if condition() {
             return;
@@ -71,7 +71,7 @@ pub async fn wait_for_real(condition: impl Fn() -> bool) {
 /// Call `f` again for up to 5s while it fails because a socket is in use. A
 /// process which a parallel test forks holds the sockets of this one until
 /// it execs.
-pub async fn retry_while_in_use<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
+pub(crate) async fn retry_while_in_use<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
     let mut result = f();
     for _ in 0..500 {
         match &result {
@@ -88,7 +88,7 @@ pub async fn retry_while_in_use<T>(mut f: impl FnMut() -> Result<T>) -> Result<T
 /// A socket bound to a port which does not listen, so that connecting to
 /// the port fails. It keeps the port, a closed one could be taken by
 /// another test meanwhile.
-pub fn closed_port() -> Result<(TcpSocket, u16)> {
+pub(crate) fn closed_port() -> Result<(TcpSocket, u16)> {
     let socket = TcpSocket::new_v4()?;
     socket.bind((Ipv4Addr::LOCALHOST, 0).into())?;
     let port = socket.local_addr()?.port();
@@ -96,10 +96,10 @@ pub fn closed_port() -> Result<(TcpSocket, u16)> {
 }
 
 /// A child which gets killed and reaped if a test fails before it did.
-pub struct Guarded(pub std::process::Child);
+pub(crate) struct Guarded(pub std::process::Child);
 
 impl Guarded {
-    pub fn spawn(cmd: &mut Command) -> Result<Self> {
+    pub(crate) fn spawn(cmd: &mut Command) -> Result<Self> {
         Ok(Self(cmd.spawn()?))
     }
 }

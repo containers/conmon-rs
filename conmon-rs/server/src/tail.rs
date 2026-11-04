@@ -3,12 +3,13 @@
 /// Keeps the last `MAX` bytes of what got pushed, like the end of the stderr
 /// of a runtime, which holds its error.
 #[derive(Debug, Default)]
-pub struct Tail<const MAX: usize> {
+pub(crate) struct Tail<const MAX: usize> {
     buf: Vec<u8>,
 }
 
 impl<const MAX: usize> Tail<MAX> {
-    pub fn push(&mut self, data: &[u8]) {
+    /// Append `data`, of which only the last `MAX` bytes are kept.
+    pub(crate) fn push(&mut self, data: &[u8]) {
         // Only the end of a large push is kept, it does not get copied whole.
         let data = &data[data.len().saturating_sub(MAX)..];
         // Dropping the front only once it doubled keeps it amortized.
@@ -19,12 +20,12 @@ impl<const MAX: usize> Tail<MAX> {
     }
 
     /// The last `MAX` bytes.
-    pub fn end(&self) -> &[u8] {
+    pub(crate) fn end(&self) -> &[u8] {
         &self.buf[self.buf.len().saturating_sub(MAX)..]
     }
 
     /// The last `MAX` bytes, without copying them.
-    pub fn into_end(mut self) -> Vec<u8> {
+    pub(crate) fn into_end(mut self) -> Vec<u8> {
         let excess = self.buf.len().saturating_sub(MAX);
         self.buf.drain(..excess);
         self.buf
