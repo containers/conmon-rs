@@ -7,6 +7,7 @@ processes that we follow.
 
 - [Reporting Issues](#reporting-issues)
 - [Submitting Pull Requests](#submitting-pull-requests)
+- [Fuzzing](#fuzzing)
 - [Communications](#communications)
 - [Security](#security)
 - [Code of Conduct](#code-of-conduct)
@@ -55,6 +56,28 @@ separate from the rest of the PRs. But, squashing down to just one commit is ok
 too since in the end the entire PR will be reviewed anyway. When in doubt,
 squash.
 
+PRs that fix issues should include a reference like `Fixes #XXXX` in the PR
+description, as the PR template asks, so that GitHub closes the referenced
+issue when the PR is merged.
+
+Most PRs will be reviewed by the [OWNERS](OWNERS).
+
+### Building and testing
+
+Building the server needs the Cap'n Proto compiler and a Rust toolchain, see
+[docs/install.md](docs/install.md#build-from-source). The tests of the Go
+client and the integration suite need the Go version of [go.mod](./go.mod).
+The integration suite is a module of its own in
+[pkg/client/integration](./pkg/client/integration), so that its dependencies
+do not become requirements of the client. The dependencies of the client
+follow CRI-O main, the modules only the suite needs follow the latest
+releases.
+
+The [Makefile](./Makefile) has targets for most of what CI runs: `make` builds
+the server, `make lint` runs rustfmt, clippy, rustdoc, golangci-lint and
+shellcheck (which has to be installed) and `make lint-msrv` checks the sources
+with the `rust-version` toolchain of rustup. `make help` lists the rest.
+
 Format your changes with `make fmt`, then check them with the linters and the
 unit tests of the server and the Go client:
 
@@ -64,7 +87,45 @@ $ make lint unit unit-go
 
 Changes to Markdown, YAML or JSON files have to pass prettier, which `make
 prettier` applies and `make verify-prettier` checks, both in a container. `make
-verify` runs the other checks of CI as well.
+verify` runs the other checks of CI as well, like cargo-deny, typos (cargo-deny
+and typos have to be installed), actionlint and zizmor, some of them in
+containers.
+
+The unit tests run as a regular user, and so do most integration tests. The
+OOM and namespace specs need elevated permissions for the cgroups and bind
+mounts and skip or fail otherwise. Like CI, build the server, download the Go
+modules and install ginkgo as your user first, so that `target` and `.build`
+do not end up owned by root. Then run the suite as root with the `PATH` which
+finds `go`, your Go settings like `GOPROXY` (`GOENV`), your module cache and
+your Go toolchain. Leave out `GOCACHE`, root would leave files of its own in
+your build cache:
+
+```console
+$ make unit unit-go
+$ make release .install.ginkgo
+$ go mod download && go -C pkg/client/integration mod download
+$ sudo env PATH="$PATH" GOENV="$(go env GOENV)" GOMODCACHE="$(go env GOMODCACHE)" \
+    GOTOOLCHAIN="$(go env GOTOOLCHAIN)" make integration CONMON_BINARY=target/release/conmonrs
+```
+
+`make unit` runs the Rust unit tests with and without the `tracing` feature,
+`make unit-go` the unit tests of the Go client, which need no server.
+
+`RUNTIME_PATH` selects the OCI runtime of the integration suite.
+`CONMON_BINARY` selects the server to test, which the target builds
+otherwise, for example the static build of `make release-static`:
+
+```console
+$ sudo env PATH="$PATH" GOENV="$(go env GOENV)" GOMODCACHE="$(go env GOMODCACHE)" \
+    GOTOOLCHAIN="$(go env GOTOOLCHAIN)" make integration CONMON_BINARY=result/bin/conmonrs MAX_RSS_KB=5500
+```
+
+`make release-static` builds the static binary for the local architecture,
+the flake supports x86_64 and aarch64 Linux hosts. `nix build .#amd64`,
+`.#arm64`, `.#ppc64le` or `.#s390x` builds the binary of an architecture into
+`result/bin/conmonrs`, cross compiled on the other ones, like CI does.
+
+### Changing the schema
 
 PRs which change the Cap'n Proto schema in
 [conmon-rs/server/proto/conmon.capnp](conmon-rs/server/proto/conmon.capnp) run
@@ -97,45 +158,6 @@ compatible on the wire:
 
 `make verify-schema-layout`, which CI runs, guards these rules: it fails if a
 change moves an existing field of the schema to another slot.
-
-The unit tests run as a regular user, and so do most integration tests. The
-OOM and namespace specs need elevated permissions for the cgroups and bind
-mounts and skip or fail otherwise. Like CI, build the server, download the Go
-modules and install ginkgo as your user first, so that `target` and `.build`
-do not end up owned by root. Then run the suite as root with the `PATH` which
-finds `go`, your Go settings like `GOPROXY` (`GOENV`), your module cache and
-your Go toolchain. Leave out `GOCACHE`, root would leave files of its own in
-your build cache:
-
-```console
-$ make unit unit-go
-$ make release .install.ginkgo
-$ go mod download && go -C pkg/client/integration mod download
-$ sudo env PATH="$PATH" GOENV="$(go env GOENV)" GOMODCACHE="$(go env GOMODCACHE)" \
-    GOTOOLCHAIN="$(go env GOTOOLCHAIN)" make integration CONMON_BINARY=target/release/conmonrs
-```
-
-`make unit` runs the Rust unit tests with and without the `tracing` feature,
-`make unit-go` the unit tests of the Go client, which need no server.
-
-`CONMON_BINARY` selects the server to test, which the target builds
-otherwise, for example the static build of `make release-static`:
-
-```console
-$ sudo env PATH="$PATH" GOENV="$(go env GOENV)" GOMODCACHE="$(go env GOMODCACHE)" \
-    GOTOOLCHAIN="$(go env GOTOOLCHAIN)" make integration CONMON_BINARY=result/bin/conmonrs MAX_RSS_KB=5500
-```
-
-`make release-static` builds the static binary for the local architecture,
-the flake supports x86_64 and aarch64 Linux hosts. `nix build .#amd64`,
-`.#arm64`, `.#ppc64le` or `.#s390x` builds the binary of an architecture into
-`result/bin/conmonrs`, cross compiled on the other ones, like CI does.
-
-PRs that fix issues should include a reference like `Fixes #XXXX` in the PR
-description, as the PR template asks, so that GitHub closes the referenced
-issue when the PR is merged.
-
-Most PRs will be reviewed by the [OWNERS](OWNERS).
 
 ### Sign your PRs
 
@@ -190,6 +212,34 @@ Use your real name (sorry, no pseudonyms or anonymous contributions.)
 
 If you set your `user.name` and `user.email` git configs, you can sign your
 commit automatically with `git commit -s`.
+
+## Fuzzing
+
+The [fuzz](./fuzz) directory holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)
+targets for what clients and containers send: the streaming protocols (SPDY
+frames, header blocks and connections, WebSocket messages, resize events,
+upgrade headers and port forward queries, the setup of exec, attach and port
+forward sessions and their pending stdin), the container output as log lines,
+the notify messages and the process stat files with their command names, and
+for the journal entries the server writes.
+`cargo fuzz list` lists them, each file in
+[fuzz/fuzz_targets](./fuzz/fuzz_targets) tells what its target covers. They
+need a nightly toolchain, for example `cargo +nightly fuzz run spdy_frames`, CI
+pins the one of `FUZZ_TOOLCHAIN` in
+[ci.yml](.github/workflows/ci.yml). [fuzz/seeds](./fuzz/seeds) holds a few
+valid inputs per target to start from, pass the directory after the corpus,
+which libFuzzer does not create:
+
+```console
+$ mkdir -p fuzz/corpus/spdy_frames
+$ cargo +nightly fuzz run spdy_frames fuzz/corpus/spdy_frames fuzz/seeds/spdy_frames
+```
+
+cargo-fuzz builds with the release profile of the server, which strips the
+symbols and builds slowly. CI overrides it with
+`CARGO_PROFILE_RELEASE_STRIP=false CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
+CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_OPT_LEVEL=3
+CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16`, which helps local runs as well.
 
 ## Communications
 

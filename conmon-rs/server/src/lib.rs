@@ -7,7 +7,11 @@
 //! documentation:
 //!
 //! - <https://github.com/containers/conmon-rs/blob/main/README.md> on what
-//!   conmon-rs does and how it is built.
+//!   conmon-rs does.
+//! - <https://github.com/containers/conmon-rs/blob/main/docs/architecture.md>
+//!   on how the server and the client work together.
+//! - <https://github.com/containers/conmon-rs/blob/main/docs/install.md> on
+//!   how to install, verify and build it.
 //! - <https://github.com/containers/conmon-rs/blob/main/docs/server.md> on the
 //!   command line.
 //! - <https://github.com/containers/conmon-rs/blob/main/docs/protocols.md> on
