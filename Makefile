@@ -53,13 +53,13 @@ ACTIONLINT_VERSION := v1.7.12
 # The sha256 of the checksums file of the release, a bump of the version
 # updates it as well, see .install.actionlint.
 ACTIONLINT_CHECKSUMS_SHA256 := 433028cf0ba3c42163ea1a668dedce30fcdbe84fe912b1a5e288c006eab8a4f5
-ZIZMOR_VERSION := 1.31.1
-ZIZMOR_DIGEST := sha256:42d409dbb851d4c5d35a058cf042b828bea1e3f2884378c526eb0974780e18d9
+ZIZMOR_VERSION := 1.32.0
+ZIZMOR_DIGEST := sha256:3014cc8f68f663935f69b3c3e0e41f5ce102b268d97db13db0f62208747f860d
 ZIZMOR_IMAGE := ghcr.io/zizmorcore/zizmor:$(ZIZMOR_VERSION)@$(ZIZMOR_DIGEST)
 # Extra zizmor flags, CI passes --format=github for annotations.
 ZIZMOR_FLAGS ?=
-GRYPE_VERSION := v0.121.0
-GRYPE_DIGEST := sha256:621d56d1d68106b787022c81546f7e0a36202a25d1239f0c20195fab8c16f7ea
+GRYPE_VERSION := v0.121.1
+GRYPE_DIGEST := sha256:6b06708b036f74b2cd70e94b706b4586af96d1932e6ac46255940b2e39dd44a9
 GRYPE_IMAGE := docker.io/anchore/grype:$(GRYPE_VERSION)@$(GRYPE_DIGEST)
 # The SPDX SBOMs make scan checks, like the conmonrs.$ARCH.spdx.json files of
 # the bucket.
