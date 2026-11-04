@@ -4,6 +4,7 @@
 
 use crate::{
     attach::{AttachOutput, SharedContainerAttach},
+    channel::{Receiver, RecvError, Sender},
     container_log::SharedContainerLog,
     fs_util,
     mutex::lock,
@@ -13,7 +14,6 @@ use crate::{
     util::{sleep_until, with_stderr},
 };
 use anyhow::{Context, Result, bail};
-use async_channel::{Receiver, RecvError, Sender};
 use bytes::Bytes;
 use nix::errno::Errno;
 use std::{
@@ -350,7 +350,7 @@ struct StdioChannel {
 
 impl StdioChannel {
     fn new(capacity: usize, consumed: &Arc<AtomicBool>) -> Self {
-        let (tx, rx) = async_channel::bounded(capacity);
+        let (tx, rx) = crate::channel::bounded(capacity);
         Self {
             rx: Some(rx),
             tx: Some(StdioSender::new(tx, consumed)),

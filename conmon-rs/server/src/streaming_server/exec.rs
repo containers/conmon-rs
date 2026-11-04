@@ -7,6 +7,7 @@ use super::{
 use crate::conmon_capnp::conmon::CgroupManager;
 use crate::{
     attach::{SharedContainerAttach, StopOutput},
+    channel::Receiver as IOReceiver,
     child_reaper::{ChildReaper, ExitChannelData, RuntimeCall, WatchedExec},
     config::Config,
     container_io::{ContainerIO, Drain, EarlyStdio, Message as IOMessage, SharedContainerIO},
@@ -20,7 +21,6 @@ use crate::{
     terminal::{Terminal, TerminalResizer},
 };
 use anyhow::{Context, Result, bail};
-use async_channel::Receiver as IOReceiver;
 use bytes::Bytes;
 use nix::sys::signal::Signal;
 use std::{

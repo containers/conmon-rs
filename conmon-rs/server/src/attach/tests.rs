@@ -112,7 +112,7 @@ async fn done_after_all_pipes() -> Result<()> {
 async fn done_after_failed_read_loop() -> Result<()> {
     let attach = SharedContainerAttach::default();
     let (mut rx, _) = attach.subscribe();
-    let (message_tx, _message_rx) = async_channel::unbounded();
+    let (message_tx, _message_rx) = crate::channel::bounded(1);
 
     let stdout = attach.output();
     let stderr = stdout.clone();
