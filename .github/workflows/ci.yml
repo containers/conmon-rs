@@ -24,6 +24,10 @@ env:
   # The checksum belongs to the x86_64 Linux release of this version.
   SHELLCHECK_VERSION: "0.11.0"
   SHELLCHECK_SHA256: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+  # The checksum belongs to the static x86_64 Linux (musl) release of this
+  # version, see make lint-links.
+  LYCHEE_VERSION: "0.24.2"
+  LYCHEE_SHA256: "73657a111819a30c47c08352896796f23d64e4eb2b3ed39b6d32149241566fc5"
   # cargo-fuzz needs a nightly toolchain, a pinned one keeps new lints and
   # compiler changes out of unrelated pull requests.
   FUZZ_TOOLCHAIN: "nightly-2026-10-15"
@@ -34,8 +38,49 @@ env:
 # The jobs are named by what they do: lint-* checks the sources,
 # verify-* checks that generated or pinned things are up to date, build-* and
 # test-* build and test the server, publish-* changes the bucket or the cache.
+# changes decides which of them a pull request needs.
 jobs:
+  # Lists the files a pull request changes, see .github/changes, for the jobs
+  # which only run if their files changed: fuzz tells whether the fuzz
+  # targets may have changed, which build-fuzz and test-fuzz check with about
+  # half of the runner minutes of a pull request, code whether anything
+  # besides the documentation changed, which all jobs besides lint-files
+  # check. The jobs which need a skipped one skip as well, like
+  # verify-vulnerabilities, the test-integration and the test-critest jobs.
+  # The checkout of a pull request is the merge commit which GitHub tests,
+  # with its first parent, the branch it merges into, so git lists the files
+  # without the limit on their number of the API. The steps may fail without
+  # failing the job, whose outputs are only false if the script said so:
+  # anything it cannot tell runs the jobs.
+  # Every job of main runs: a release takes a commit of main only if all of
+  # its other jobs passed or got skipped by their own conditions, see
+  # .github/release-files, and the advisories workflow fuzzes the targets of
+  # the latest passed run of main. Pull requests skip the publish jobs anyway,
+  # GitHub counts skipped jobs as passed checks, and main has no required
+  # checks, tide merges the pull requests. A skipped matrix job shows its name
+  # with the expression unexpanded, see publish-cache.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      fuzz: ${{ github.event_name != 'pull_request' || steps.changes.outputs.fuzz != 'false' }}
+      code: ${{ github.event_name != 'pull_request' || steps.changes.outputs.code != 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: List the changes
+        id: changes
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: .github/changes >>"$GITHUB_OUTPUT"
+
   verify-proto:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -54,11 +99,16 @@ jobs:
       - run: make verify-schema-layout
 
   lint-go:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # The history with the tags, for the latest release which make
+      # verify-go-api compares with.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup-go
         id: go
@@ -76,6 +126,10 @@ jobs:
           for GOOS in freebsd darwin; do
             CGO_ENABLED=0 GOOS=$GOOS go build ./pkg/client/
           done
+      # CRI-O vendors the client, which has to stay compatible within a major
+      # version, see release.md.
+      - name: Verify the API of the Go client
+        run: make verify-go-api
       # The sources are lint clean, so all issues fail, not only new ones.
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
@@ -95,6 +149,8 @@ jobs:
   # One build environment for all checks of the Rust sources. Every check runs
   # even if an earlier one fails, so that a run reports all of them.
   lint-rust:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -128,9 +184,11 @@ jobs:
 
   # The checks which take seconds each, in one job instead of a runner each:
   # the shell scripts, the workflows, the spelling, the formatting of prettier,
-  # the pinned versions of dependencies.yaml and the RPM spec, the unreleased
-  # markers and the VEX document. Like in lint-rust, every check runs even if
-  # an earlier one fails, and only on a complete setup.
+  # the links of the Markdown files, the pinned versions of dependencies.yaml
+  # and the RPM spec, the unreleased markers and the VEX document. Like in
+  # lint-rust, every check runs even if an earlier one fails, and only on a
+  # complete setup. Pull requests which change nothing but the documentation
+  # skip all other jobs besides changes.
   lint-files:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -177,6 +235,21 @@ jobs:
         run: npx --yes "prettier@$PRETTIER_VERSION" --check .
         env:
           PRETTIER_VERSION: 3.9.10
+      # The static binary, which the tarball has in a directory of its name.
+      - name: Install lychee
+        id: lychee
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          NAME=lychee-x86_64-unknown-linux-musl
+          curl -sSfL -o lychee.tar.gz \
+            "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/$NAME.tar.gz"
+          echo "${LYCHEE_SHA256}  lychee.tar.gz" | sha256sum -c -
+          sudo tar -xzf lychee.tar.gz --strip-components=1 -C /usr/local/bin "$NAME/lychee"
+          rm lychee.tar.gz
+          lychee --version
+      - name: Check the Markdown links
+        if: ${{ !cancelled() && steps.lychee.outcome == 'success' }}
+        run: make lint-links
       # zeitgeist is a release binary, see the Makefile.
       - name: Verify dependencies
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -194,6 +267,8 @@ jobs:
         run: make verify-vex
 
   verify-deny:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -256,6 +331,8 @@ jobs:
   # toolchain which builds CRI-O, so the latest Go release checks it instead of
   # the minimum version of go.mod.
   verify-go-vulnerabilities:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -289,21 +366,29 @@ jobs:
   # for its own build. The builds have no access to the signing credentials,
   # see publish-static.yml, and only read the cache, see publish-cache.
   build-static-amd64:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     uses: ./.github/workflows/build-static.yml
     with:
       arch: amd64
 
   build-static-arm64:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     uses: ./.github/workflows/build-static.yml
     with:
       arch: arm64
 
   build-static-ppc64le:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     uses: ./.github/workflows/build-static.yml
     with:
       arch: ppc64le
 
   build-static-s390x:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     uses: ./.github/workflows/build-static.yml
     with:
       arch: s390x
@@ -407,6 +492,8 @@ jobs:
       - run: nix build ".#$ARCH.inputDerivation"
 
   test-unit:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -463,6 +550,8 @@ jobs:
   # place in the 10 GB of the repository, which would push out the ones of
   # the other jobs, they build in less than a minute without them.
   test-unit-arch:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: test-unit-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -531,6 +620,8 @@ jobs:
   # integration suite, the module in pkg/client/integration, runs in the
   # test-integration jobs.
   test-unit-go:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -556,10 +647,13 @@ jobs:
   # Builds all fuzz targets once, so that they keep compiling, for test-fuzz
   # to run one per job, and on main for the advisories workflow, which fuzzes
   # the targets of the latest passed run of main. A new target gets fuzzed
-  # without a change here.
+  # without a change here. Pull requests only build them if they change what
+  # the targets build from, see changes, main always does.
   # cargo-fuzz needs a nightly toolchain. The shipped release profile would
   # strip the symbols and take long to build, the fuzz build overrides it.
   build-fuzz:
+    needs: changes
+    if: needs.changes.outputs.fuzz == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -719,6 +813,8 @@ jobs:
   # The debug build is slower, so a timing sensitive failure here only costs
   # the coverage.
   test-integration-coverage:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -912,6 +1008,8 @@ jobs:
             critest-report.json
 
   test-get-script:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:

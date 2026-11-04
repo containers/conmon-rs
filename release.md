@@ -101,7 +101,13 @@ The same tag also versions the Go module `github.com/containers/conmon-rs`, so
 consumers like CRI-O pick the release up with `go get
 github.com/containers/conmon-rs@vX.Y.Z`. The Go module has no separate
 versioning, which means the Go client must stay backwards compatible within a
-major version.
+major version. `make verify-go-api`, which the ci workflow runs, checks that
+with gorelease against the latest release tag. An incompatible change needs a
+new major version, whose module path gets the major version as a suffix, like
+`github.com/containers/conmon-rs/v2`, see
+[the Go documentation](https://go.dev/doc/modules/major-version). The PR which
+moves to it adapts the target, whose latest release tag is one of the previous
+module path then.
 
 Red Hat maintainers then update the package in the Red Hat internal
 [brew](https://brewweb.engineering.redhat.com/brew) with those sources. To

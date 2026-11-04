@@ -34,7 +34,8 @@ jobs:
           cache: false
       # The crate has no public API besides the entry point, the private items
       # are the documentation of the server internals. The fuzzing feature only
-      # adds the entry points of the fuzz targets.
+      # adds the hidden entry points of the fuzz targets, which make
+      # lint-rustdoc checks with all features.
       - name: Build Documentation
         run: |
           cargo doc --locked --features tracing --no-deps --document-private-items

@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Print which jobs of the ci workflow the changes of a commit need, as the
+# outputs of its changes job: the files which differ between the commit
+# (HEAD by default) and its first parent. For a pull request, that is the
+# merge commit which GitHub tests and the branch it merges into, so the
+# result does not depend on how many commits the pull request has, or on the
+# ones main got in the meantime. The ci workflow only runs it for pull
+# requests, every job of main runs. For a merged pull request, the merge
+# commit on main shows what its run got.
+#
+# fuzz: whether the fuzz targets may build or behave differently, which the
+# build-fuzz and test-fuzz jobs check. They build from the server crate, the
+# fuzz crate and the workspace, with the FUZZ_TOOLCHAIN of ci.yml, the
+# setup-rust action and .github/run-fuzz, and a rust-toolchain file or the
+# cargo configuration could change how they build. The files of .config, like
+# the nextest profile, only matter for the unit tests.
+#
+# code: whether anything besides the documentation changed, which all jobs
+# besides lint-files check. The documentation is the Markdown files and
+# docs, outside of .github, whose files belong to the workflows and the
+# templates of GitHub. The doc comments of the Rust, Go and Cap'n Proto
+# sources count as code: rustdoc, the linters and the generated Go code
+# check them.
+#
+# Anything this cannot tell, like a commit without a parent, or one which
+# changes no file, prints true for both: when in doubt, run.
+REV=${1:-HEAD}
+
+# Without the rename detection, a rename lists the old path as well, so that
+# moving a file into docs counts as a change of code.
+if ! FILES=$(git -c core.quotePath=false diff --name-only --no-renames "$REV^1" "$REV" --) || [[ -z $FILES ]]; then
+    echo "::warning::Unable to list the changed files of $REV, running all jobs" >&2
+    printf 'fuzz=true\ncode=true\n'
+    exit 0
+fi
+
+echo "Changed files of $REV:" >&2
+FUZZ=false
+CODE=false
+while IFS= read -r FILE; do
+    echo "  $FILE" >&2
+    case $FILE in
+    *.md) ;;
+    conmon-rs/* | fuzz/* | Cargo.toml | Cargo.lock | rust-toolchain | rust-toolchain.toml | .cargo/* | .github/workflows/ci.yml | .github/actions/setup-rust/* | .github/run-fuzz)
+        FUZZ=true
+        ;;
+    esac
+    case $FILE in
+    .github/*)
+        CODE=true
+        ;;
+    *.md | docs/*) ;;
+    *)
+        CODE=true
+        ;;
+    esac
+done <<<"$FILES"
+
+printf 'fuzz=%s\ncode=%s\n' "$FUZZ" "$CODE"

@@ -188,6 +188,25 @@ dependencies:
       - path: Makefile
         match: "NODE_VERSION :="
 
+  # make verify-go-api, golang.org/x/exp has no releases, which zeitgeist
+  # could check. Bump it to the pseudo-version of a newer commit, which `go
+  # list -m golang.org/x/exp@latest` prints.
+  - name: gorelease
+    version: 0.0.0-20261014143641-f0251eb4aa3e
+    refPaths:
+      - path: Makefile
+        match: "GORELEASE_VERSION :="
+
+  # The tags of lychee are named lychee-vX.Y.Z, which zeitgeist cannot match,
+  # see https://github.com/lycheeverse/lychee/releases. A bump updates
+  # LYCHEE_SHA256 of ci.yml as well, the sha256 of the static x86_64 Linux
+  # tarball of the release.
+  - name: lychee
+    version: 0.24.2
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: "LYCHEE_VERSION:"
+
   - name: govulncheck
     version: 1.9.0
     refPaths:

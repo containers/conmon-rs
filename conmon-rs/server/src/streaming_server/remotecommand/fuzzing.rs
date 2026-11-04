@@ -82,7 +82,7 @@ pub(crate) fn messages(input: &[u8], mut event: impl FnMut(ClientEvent)) {
 /// types, which may come twice, get reset or come after the start. The
 /// session has to start or fail, and end with the client: the server may
 /// stop reading the client until the streams came, at most
-/// [`STREAM_CREATION_TIMEOUT`], the client waits a little longer than
+/// `STREAM_CREATION_TIMEOUT`, the client waits a little longer than
 /// that before it closes the connection.
 pub fn spdy(input: &[u8]) {
     let Some((&first, input)) = input.split_first() else {

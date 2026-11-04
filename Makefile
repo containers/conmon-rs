@@ -58,6 +58,9 @@ ZIZMOR_DIGEST := sha256:3014cc8f68f663935f69b3c3e0e41f5ce102b268d97db13db0f62208
 ZIZMOR_IMAGE := ghcr.io/zizmorcore/zizmor:$(ZIZMOR_VERSION)@$(ZIZMOR_DIGEST)
 # Extra zizmor flags, CI passes --format=github for annotations.
 ZIZMOR_FLAGS ?=
+# gorelease has no releases, the version is a commit of golang.org/x/exp,
+# see dependencies.yaml.
+GORELEASE_VERSION := v0.0.0-20261014143641-f0251eb4aa3e
 GRYPE_VERSION := v0.121.1
 GRYPE_DIGEST := sha256:6b06708b036f74b2cd70e94b706b4586af96d1932e6ac46255940b2e39dd44a9
 GRYPE_IMAGE := docker.io/anchore/grype:$(GRYPE_VERSION)@$(GRYPE_DIGEST)
@@ -146,11 +149,12 @@ lint-clippy: ## Lint the Rust sources and the fuzz targets with clippy.
 	cargo clippy --locked --all-targets --all-features -- -D warnings
 	cargo clippy --locked -p conmonrs-fuzz --all-targets -- -D warnings
 
-# Like the gh-pages workflow publishes it, with the private items, which
-# document the server internals.
+# With the private items, which document the server internals, like the
+# gh-pages workflow publishes it. All features cover the entry points of the
+# fuzz targets as well, which the published documentation leaves out.
 .PHONY: lint-rustdoc
 lint-rustdoc: ## Check the documentation of the Rust sources.
-	RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --features tracing --document-private-items
+	RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features --document-private-items
 
 # The oldest toolchain the locked dependencies support, installed through
 # rustup.
@@ -190,8 +194,16 @@ lint-typos: ## Check the spelling, typos of the version of CI has to be installe
 	fi
 	typos --config .github/typos.toml
 
+# The relative links of the Markdown files and their anchors, so that a moved
+# document or a renamed heading fails. Offline, a link to another site would
+# fail the pull requests with every outage of it. The lint-files job of CI
+# installs the release of LYCHEE_VERSION.
+.PHONY: lint-links
+lint-links: ## Check the links within the repository of the Markdown files with lychee, which has to be installed.
+	lychee --offline --include-fragments --no-progress $$(git ls-files '*.md')
+
 .PHONY: verify
-verify: verify-dependencies verify-spec verify-unreleased verify-vex verify-proto verify-schema-layout verify-prettier verify-deny lint-typos lint-workflows ## Run the checks of CI besides make lint and the tests.
+verify: verify-dependencies verify-spec verify-unreleased verify-vex verify-proto verify-schema-layout verify-go-api verify-prettier verify-deny lint-typos lint-links lint-workflows ## Run the checks of CI besides make lint and the tests.
 
 .PHONY: verify-dependencies
 verify-dependencies: .install.zeitgeist ## Verify the local dependencies.
@@ -240,6 +252,26 @@ schema-layout:
 .PHONY: verify-schema-layout
 verify-schema-layout: schema-layout ## Verify that the Cap'n Proto schema keeps the layout of its fields.
 	.github/verify-schema-layout $(SCHEMA_LAYOUT) $(BUILD_DIR)/conmon.capnp.layout
+
+# CRI-O vendors the Go client, which has to stay compatible within a major
+# version, see release.md. gorelease compares the API of the root module at
+# HEAD with the one of the latest release tag before it, which it downloads
+# through the module proxy, and fails for incompatible changes, like a removed
+# or changed exported identifier, and for problems of the module, like missing
+# sums or a retracted requirement. It refuses a working tree with changes or
+# untracked files, so it runs in a temporary worktree of HEAD, which checks the
+# committed changes whatever state the working tree is in.
+# The integration suite is a module of its own, which nothing imports. A clone
+# without the tags of the repository fails, `git fetch --tags
+# https://github.com/containers/conmon-rs.git` gets them.
+.PHONY: verify-go-api
+verify-go-api: .install.gorelease ## Verify that the Go client is compatible with the latest release.
+	BASE=$$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*') && \
+	DIR=$$(mktemp -d) && \
+	trap 'git worktree remove --force "$$DIR" 2>/dev/null; rm -rf "$$DIR"' EXIT && \
+	git worktree add -q --detach "$$DIR" HEAD && \
+	echo "Comparing the Go module of HEAD with $$BASE" && \
+	cd "$$DIR" && "$(abspath $(GOTOOLS_BINDIR))/gorelease" -base="$$BASE"
 
 .PHONY: verify-deny
 verify-deny: ## Check the dependencies with cargo-deny, which has to be installed.
@@ -324,6 +356,15 @@ fmt: .install.golangci-lint ## Format the Rust and Go sources.
 	VERSION=$$(go -C $(INTEGRATION_DIR) list -m -f {{.Version}} github.com/onsi/ginkgo/v2) && \
 	if ! "$(GOTOOLS_BINDIR)/ginkgo" version 2>/dev/null | grep -qx "Ginkgo Version $${VERSION#v}"; then \
 		GOBIN=$(abspath $(GOTOOLS_BINDIR)) go install "github.com/onsi/ginkgo/v2/ginkgo@$$VERSION"; \
+	fi
+
+# gorelease publishes no binaries, an installed one of GORELEASE_VERSION is
+# kept, see .install.ginkgo.
+.PHONY: .install.gorelease
+.install.gorelease:
+	VERSION=$$(go version -m "$(GOTOOLS_BINDIR)/gorelease" 2>/dev/null | awk '$$1 == "mod" { print $$3 }') && \
+	if [ "$$VERSION" != "$(GORELEASE_VERSION)" ]; then \
+		GOBIN=$(abspath $(GOTOOLS_BINDIR)) go install "golang.org/x/exp/cmd/gorelease@$(GORELEASE_VERSION)"; \
 	fi
 
 # The release binaries of golangci-lint, actionlint and zeitgeist, checked
