@@ -28,7 +28,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::{Bytes, BytesMut};
-pub use frame::Headers;
+pub(super) use frame::Headers;
 use frame::{Encoder, Frame, GOAWAY_OK, STATUS_CANCEL};
 use reader::Reader;
 use std::{
@@ -39,11 +39,12 @@ use std::{
         atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     },
 };
-pub use stream::{Stream, StreamReceiver, StreamSender};
+pub(super) use stream::{Stream, StreamReceiver, StreamSender};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, WriteHalf},
     select,
     sync::{Notify, mpsc},
+    task,
     time::{self, Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
@@ -90,10 +91,10 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// transport. A client which went away shows up as a failed write, also
 /// while the reader waits for a stream which does not take its data and
 /// misses the end of the connection.
-pub const PING_INTERVAL: Duration = Duration::from_secs(5);
+pub(super) const PING_INTERVAL: Duration = Duration::from_secs(5);
 
 /// A connection a client upgraded to SPDY/3.1.
-pub struct Connection {
+pub(super) struct Connection {
     streams: mpsc::Receiver<Stream>,
     shared: Arc<Shared>,
 }
@@ -106,7 +107,7 @@ impl Connection {
     /// Nothing waits for the echoes of the pings. Only the frames of the
     /// client keep the connection active, except for these echoes, and the
     /// data of the server, not its control frames, see [`Self::is_activity`].
-    pub fn serve<T, F>(
+    pub(super) fn serve<T, F>(
         io: T,
         idle_timeout: Option<Duration>,
         ping_interval: Option<Duration>,
@@ -136,7 +137,7 @@ impl Connection {
             last_stream_id: AtomicU32::new(0),
             live_streams: AtomicUsize::new(0),
         });
-        tokio::spawn(
+        task::spawn(
             Reader {
                 shared: shared.clone(),
                 reader,
@@ -155,9 +156,9 @@ impl Connection {
             }
         });
         if let Some(interval) = ping_interval {
-            tokio::spawn(Self::ping(shared.clone(), interval));
+            task::spawn(Self::ping(shared.clone(), interval));
         }
-        tokio::spawn(Self::write(
+        task::spawn(Self::write(
             shared.clone(),
             writer,
             encoder,
@@ -172,19 +173,19 @@ impl Connection {
     }
 
     /// The next stream the client opened, `None` once the connection ended.
-    pub async fn accept(&mut self) -> Option<Stream> {
+    pub(super) async fn accept(&mut self) -> Option<Stream> {
         self.streams.recv().await
     }
 
     /// When the connection was active the last time, for an idle timeout
     /// which its user applies instead of [`Connection::serve`], see there.
-    pub fn activity(&self) -> Activity {
+    pub(super) fn activity(&self) -> Activity {
         self.shared.activity.clone()
     }
 
     /// A handle to close the connection, while the connection itself still
     /// accepts streams.
-    pub fn handle(&self) -> ConnectionHandle {
+    pub(super) fn handle(&self) -> ConnectionHandle {
         ConnectionHandle(self.shared.clone())
     }
 
@@ -405,28 +406,28 @@ impl Queued {
 /// [`Connection`] is gone, the streams the client opens get refused, the ones
 /// nobody took yet get reset.
 #[derive(Clone)]
-pub struct ConnectionHandle(Arc<Shared>);
+pub(super) struct ConnectionHandle(Arc<Shared>);
 
 impl ConnectionHandle {
     /// Close the connection once the frames queued so far went out.
-    pub fn close(&self) {
+    pub(super) fn close(&self) {
         self.0.closing.cancel();
     }
 
     /// End the connection right away.
-    pub fn abort(&self) {
+    pub(super) fn abort(&self) {
         self.0.done.cancel();
     }
 
     /// Cancelled once the connection ended.
-    pub fn done(&self) -> CancellationToken {
+    pub(super) fn done(&self) -> CancellationToken {
         self.0.done.clone()
     }
 
     /// Touched whenever a part of the frames of the server went out, which
     /// tells that the client still takes them, see
     /// [`Activity::until_stalled`].
-    pub fn written(&self) -> Activity {
+    pub(super) fn written(&self) -> Activity {
         self.0.written.clone()
     }
 }
@@ -605,11 +606,11 @@ impl Drop for Live {
 
 /// The entry points of the fuzz targets.
 #[cfg(any(test, feature = "fuzzing"))]
-pub mod fuzzing;
+pub(super) mod fuzzing;
 
 /// A SPDY client for the tests of the protocols on top.
 #[cfg(test)]
-pub mod testing;
+pub(super) mod testing;
 
 #[cfg(test)]
 mod tests;

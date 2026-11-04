@@ -10,7 +10,7 @@ async fn failed_channels_let_go_of_their_input() -> Result<()> {
     // A client which does not read, the error waits.
     let (messages, mut output) = mpsc::channel(1);
     messages.send(Message::Binary(Bytes::new())).await?;
-    let forward = tokio::spawn(PortForward::forward_channel(
+    let forward = task::spawn(PortForward::forward_channel(
         Namespace::new(NETNS.into()),
         port,
         input,
@@ -57,7 +57,7 @@ async fn pods_which_reject_the_input_still_answer() -> Result<()> {
     // A client which does not read yet, the response waits.
     let (messages, mut output) = mpsc::channel(1);
     messages.send(Message::Binary(Bytes::new())).await?;
-    let forward = tokio::spawn(PortForward::forward_channel(
+    let forward = task::spawn(PortForward::forward_channel(
         Namespace::new(NETNS.into()),
         port,
         input,

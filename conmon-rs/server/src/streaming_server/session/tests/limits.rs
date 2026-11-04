@@ -35,7 +35,7 @@ async fn too_large_messages_of_clients_which_do_not_read_fail_the_session() -> R
             // thread.
             let output = {
                 let attach = attach.clone();
-                tokio::spawn(async move {
+                task::spawn(async move {
                     let data = Bytes::from(vec![b'o'; 64 * 1024]);
                     loop {
                         attach.write(IOMessage::Data(data.clone(), Pipe::StdOut));

@@ -25,14 +25,17 @@ struct LogEntry<'a> {
     partial: bool,
 }
 
+/// Writes the container output to a log file in the JSON format.
 #[derive(Debug)]
-pub struct JsonLogger {
+pub(crate) struct JsonLogger {
     /// The log file on disk.
     file: LogFile,
 }
 
 impl JsonLogger {
-    pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> JsonLogger {
+    /// A logger for the file at `path`, which gets replaced once it grows
+    /// beyond `max_log_size`.
+    pub(crate) fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> JsonLogger {
         Self {
             // Created readable by the owner only.
             file: LogFile::new(path, Some(0o600), max_log_size),

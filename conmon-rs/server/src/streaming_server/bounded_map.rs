@@ -11,7 +11,7 @@ use tracing::debug;
 /// them got taken or expired, a valid element never gets dropped for a new
 /// one. Clients take their element right after it got inserted, the map
 /// holds few of them and a linear search is quick enough.
-pub struct BoundedMap<K, V> {
+pub(super) struct BoundedMap<K, V> {
     /// The elements with the time of their insert, the oldest first.
     entries: VecDeque<(K, Instant, V)>,
     capacity: usize,
@@ -35,7 +35,7 @@ where
     /// Returns the new one back if the map is full. The keys are random
     /// tokens, which do not repeat, so the map does not look for an element
     /// with the same key.
-    pub fn insert(&mut self, k: K, v: V) -> Result<(), V> {
+    pub(super) fn insert(&mut self, k: K, v: V) -> Result<(), V> {
         let now = Instant::now();
         self.remove_expired(now);
 
@@ -49,7 +49,7 @@ where
     /// Remove an element from the map and return it if the element has not
     /// expired. The expired ones get removed as well, so that they do not
     /// linger until the next insert, they may hold sockets.
-    pub fn remove(&mut self, k: &K) -> Option<V> {
+    pub(super) fn remove(&mut self, k: &K) -> Option<V> {
         let now = Instant::now();
         // Taken before the other expired ones go, which tells about a client
         // which came too late.
@@ -67,12 +67,12 @@ where
 
     /// Whether the map holds an element for the key which has not expired,
     /// without taking it.
-    pub fn contains_key(&self, k: &K) -> bool {
+    pub(super) fn contains_key(&self, k: &K) -> bool {
         self.get(k).is_some()
     }
 
     /// The element for the key if it has not expired, without taking it.
-    pub fn get(&self, k: &K) -> Option<&V> {
+    pub(super) fn get(&self, k: &K) -> Option<&V> {
         let now = Instant::now();
         self.entries
             .iter()
@@ -81,7 +81,7 @@ where
     }
 
     /// Remove the expired elements, which may hold resources until then.
-    pub fn sweep(&mut self) {
+    pub(super) fn sweep(&mut self) {
         self.remove_expired(Instant::now());
     }
 
@@ -108,13 +108,13 @@ where
     }
 
     /// Whether the map holds no elements, also no expired ones.
-    pub fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Get the current number of items in the map
     #[cfg(test)]
-    pub fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         self.entries.len()
     }
 }
@@ -123,7 +123,7 @@ where
 /// of the kubelet and CRI-O. An element only holds what its client needs to
 /// start, a low limit would let clients which do not come fail the others
 /// until the elements expire.
-pub const DEFAULT_CAPACITY: usize = 1000;
+pub(crate) const DEFAULT_CAPACITY: usize = 1000;
 
 impl<K, V> Default for BoundedMap<K, V> {
     fn default() -> Self {

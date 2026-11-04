@@ -20,12 +20,12 @@ const HOST_NAME: &str = "host.name";
 const PROCESS_PID: &str = "process.pid";
 
 /// The main structure of this module.
-pub struct Telemetry;
+pub(crate) struct Telemetry;
 
 impl Telemetry {
     /// Build the tracer provider which exports the spans to the OTLP
     /// endpoint.
-    pub fn tracer_provider(endpoint: &str) -> Result<SdkTracerProvider> {
+    pub(crate) fn tracer_provider(endpoint: &str) -> Result<SdkTracerProvider> {
         global::set_text_map_propagator(TraceContextPropagator::new());
 
         let exporter = SpanExporter::builder()
@@ -58,7 +58,7 @@ impl Telemetry {
 
     /// Set the parent context of a span from the provided slice data. It has
     /// to happen before the span got entered the first time, which starts it.
-    pub fn set_parent_context(
+    pub(crate) fn set_parent_context(
         span: &Span,
         reader: Reader<conmon::text_text_map_entry::Owned>,
     ) -> Result<()> {

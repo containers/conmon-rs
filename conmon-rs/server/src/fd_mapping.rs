@@ -41,26 +41,26 @@ use tokio::process::Command;
 
 /// Held while a command with mappings gets built, spawned and dropped, see
 /// the module.
-pub fn spawn_lock() -> MutexGuard<'static, ()> {
+pub(crate) fn spawn_lock() -> MutexGuard<'static, ()> {
     static SPAWN_LOCK: Mutex<()> = Mutex::new(());
     lock(&SPAWN_LOCK)
 }
 
 /// Whether a spawn failed because a target of the mappings changed, see the
 /// module.
-pub fn target_changed(error: &io::Error) -> bool {
+pub(crate) fn target_changed(error: &io::Error) -> bool {
     error.raw_os_error() == Some(libc::EBUSY)
 }
 
 /// A mapping from a file descriptor in the parent to a file descriptor in the child.
 #[derive(Debug)]
-pub struct FdMapping {
-    pub parent_fd: OwnedFd,
-    pub child_fd: RawFd,
+pub(crate) struct FdMapping {
+    pub(crate) parent_fd: OwnedFd,
+    pub(crate) child_fd: RawFd,
 }
 
 /// Extension to add file descriptor mappings to a Command.
-pub trait CommandFdExt {
+pub(crate) trait CommandFdExt {
     /// Map the descriptors into the child, each target at most once.
     fn fd_mappings(&mut self, mappings: Vec<FdMapping>) -> &mut Self;
 }

@@ -10,7 +10,7 @@ async fn tunnels_end_with_clients_which_do_not_read() -> Result<()> {
         WebSocketStream::from_raw_socket(client, Role::Client, None),
     );
     let (mut spdy, connection) = tokio::io::duplex(TUNNEL_BUFFER);
-    let tunnel = tokio::spawn(PortForward::tunnel(socket, connection));
+    let tunnel = task::spawn(PortForward::tunnel(socket, connection));
 
     // The SPDY connection sends more than the client reads, then ends.
     let output = vec![0; 8 * TUNNEL_BUFFER];
@@ -22,7 +22,7 @@ async fn tunnels_end_with_clients_which_do_not_read() -> Result<()> {
     drop(spdy);
 
     // The client keeps sending, which the tunnel cannot write anymore.
-    let send = tokio::spawn(async move {
+    let send = task::spawn(async move {
         while client
             .send(Message::Binary(Bytes::from_static(b"data")))
             .await
@@ -49,7 +49,7 @@ async fn tunnels_answer_the_close_of_the_client_while_spdy_hangs() -> Result<()>
         WebSocketStream::from_raw_socket(client, Role::Client, None),
     );
     let (_spdy, connection) = tokio::io::duplex(TUNNEL_BUFFER);
-    let tunnel = tokio::spawn(PortForward::tunnel(socket, connection));
+    let tunnel = task::spawn(PortForward::tunnel(socket, connection));
 
     client.close(None).await?;
     let answer = time::timeout(Duration::from_secs(1), client.next())

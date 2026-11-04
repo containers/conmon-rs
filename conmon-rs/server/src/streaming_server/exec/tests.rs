@@ -25,7 +25,7 @@ use std::{
 };
 use tokio::{
     net::TcpStream,
-    task::LocalSet,
+    task::{self, LocalSet},
     time::{self, Duration},
 };
 
@@ -181,7 +181,7 @@ async fn lost_exit_ends_the_session_and_kills_the_process() -> Result<()> {
         matches!(&status, Some(Status::Error(e)) if e.contains("unable to get the exit")),
         "{status:?}"
     );
-    let exit = tokio::task::spawn_blocking(move || process.wait()).await??;
+    let exit = task::spawn_blocking(move || process.wait()).await??;
     assert_eq!(exit.signal(), Some(Signal::SIGKILL as i32));
     // Nothing waits for the read loops, which a lost exit never stops.
     assert!(stopped.is_cancelled());
@@ -228,7 +228,7 @@ async fn client_gone_hangs_up_the_terminal_and_keeps_reading() -> Result<()> {
     // A process which ignores the hang-up must not block on a full
     // terminal, its output gets read until the exit.
     assert!(!attach.output_stopped().is_cancelled());
-    let exit = tokio::task::spawn_blocking(move || process.wait()).await??;
+    let exit = task::spawn_blocking(move || process.wait()).await??;
     assert_eq!(exit.signal(), Some(Signal::SIGHUP as i32));
     Ok(())
 }
@@ -275,7 +275,7 @@ async fn terminal_gets_sizes_while_the_runtime_runs() -> Result<()> {
     // lets the resizing take what changed.
     let settle = || async {
         for _ in 0..10 {
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
     };
     let run = async {

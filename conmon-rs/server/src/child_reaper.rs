@@ -29,11 +29,13 @@ mod orphan_sweep;
 mod runtime_call;
 mod watcher;
 
-pub use runtime_call::RuntimeCall;
+pub(crate) use runtime_call::RuntimeCall;
 pub(crate) use runtime_call::RuntimeOutput;
 
+/// Watches the containers and execs of the server until they exit and
+/// reaps them.
 #[derive(Debug, Default)]
-pub struct ChildReaper {
+pub(crate) struct ChildReaper {
     /// The registered children, each until its watcher ended.
     grandchildren: Arc<Mutex<HashMap<Box<str>, Vec<ReapableChild>>>>,
 
@@ -65,7 +67,7 @@ pub struct ChildReaper {
 /// of its child, or wherever the caller gives up.
 #[derive(Debug)]
 #[cfg_attr(test, derive(Default))]
-pub struct InFlight {
+pub(crate) struct InFlight {
     calls: Option<Arc<watch::Sender<Calls>>>,
 
     /// The number of the call, see [`Calls`].
@@ -158,7 +160,7 @@ impl ChildReaper {
     /// Retrieve the container registered under `id`. Execs share the id of
     /// their container and are skipped. The error starts with
     /// [`CONTAINER_NOT_FOUND`] if there is none.
-    pub fn get(&self, id: &str) -> Result<ReapableChild> {
+    pub(crate) fn get(&self, id: &str) -> Result<ReapableChild> {
         let lock = lock(&self.grandchildren);
         let r = lock
             .get(id)
@@ -196,7 +198,7 @@ impl ChildReaper {
 
     /// Register and watch a child which `create_child` started, which ends
     /// its call.
-    pub fn watch_grandchild(
+    pub(crate) fn watch_grandchild(
         &self,
         child: Child,
         leak_fds: Vec<OwnedFd>,
@@ -316,7 +318,7 @@ impl ChildReaper {
     /// and wait for their watchers until the `deadline`. Containers
     /// registered meanwhile get neither, the shutdown kills them and what is
     /// left afterwards.
-    pub async fn terminate_containers(&self, deadline: Instant) {
+    pub(crate) async fn terminate_containers(&self, deadline: Instant) {
         let containers: HashSet<_> = lock(&self.grandchildren)
             .values()
             .flatten()
@@ -340,7 +342,7 @@ impl ChildReaper {
     /// calls in progress until the `deadline` of the shutdown. A process
     /// which does not exit on SIGKILL, like one stuck in the kernel, must not
     /// keep the server from stopping. It fails if they did not end in time.
-    pub async fn kill_grandchildren(&self, deadline: Instant) -> Result<()> {
+    pub(crate) async fn kill_grandchildren(&self, deadline: Instant) -> Result<()> {
         debug!("Killing grandchildren");
         let pids: Vec<_> = {
             let map = lock(&self.grandchildren);
@@ -425,7 +427,7 @@ impl ChildReaper {
 /// Signal a grandchild and its process group, unless it got reaped already,
 /// see [`Process::signal_group`]. The grandchildren got reparented to this
 /// subreaper, so the PID refers to a child.
-pub fn kill_grandchild(pid: Pid, s: Signal) {
+pub(crate) fn kill_grandchild(pid: Pid, s: Signal) {
     if let Err(e) = Process::child(pid).signal_group(s) {
         debug!(%pid, "Not signalling grandchild, it is gone: {e}");
     }
@@ -450,7 +452,7 @@ pub(crate) struct WatchedExec {
 /// A registered child, until its watcher ended. What only the watcher needs
 /// moves into it, see [`ExitHandling`](watcher::ExitHandling).
 #[derive(Clone, Debug)]
-pub struct ReapableChild {
+pub(crate) struct ReapableChild {
     /// Tells the registrations apart, unlike the PID, which gets reused.
     seq: u64,
     kind: ChildKind,
@@ -460,15 +462,18 @@ pub struct ReapableChild {
 }
 
 impl ReapableChild {
-    pub fn pid(&self) -> Pid {
+    /// The PID of the child.
+    pub(crate) fn pid(&self) -> Pid {
         self.pid
     }
 
-    pub fn io(&self) -> &SharedContainerIO {
+    /// The stdio of the child.
+    pub(crate) fn io(&self) -> &SharedContainerIO {
         &self.io
     }
 
-    pub fn token(&self) -> &CancellationToken {
+    /// Cancelled once the child exited.
+    pub(crate) fn token(&self) -> &CancellationToken {
         &self.token
     }
 }
@@ -480,18 +485,19 @@ const CONTAINER_NOT_FOUND: &str = "container not found";
 
 /// The exit code of an exec which could not be started, for example because
 /// the runtime failed.
-pub const EXIT_CODE_NOT_STARTED: i32 = -2;
+pub(crate) const EXIT_CODE_NOT_STARTED: i32 = -2;
 
 /// The exit code of a process which did not exit before its timeout. Clients
 /// take -3 for a timeout, no other failure may report it, except for
 /// [`EXIT_CODE_WAIT_FAILED`](crate::process::EXIT_CODE_WAIT_FAILED), which
 /// always did.
-pub const EXIT_CODE_TIMED_OUT: i32 = -3;
+pub(crate) const EXIT_CODE_TIMED_OUT: i32 = -3;
 
+/// The exit of a child, which its waiters get.
 #[derive(Clone, Debug)]
-pub struct ExitChannelData {
-    pub exit_code: i32,
-    pub timed_out: bool,
+pub(crate) struct ExitChannelData {
+    pub(crate) exit_code: i32,
+    pub(crate) timed_out: bool,
 }
 
 #[cfg(test)]

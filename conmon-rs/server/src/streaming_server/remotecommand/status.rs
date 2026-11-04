@@ -7,7 +7,7 @@ use std::fmt;
 
 /// What a session runs, which the status of its failure names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Operation {
+pub(crate) enum Operation {
     Exec,
     Attach,
 }
@@ -33,7 +33,7 @@ impl fmt::Display for Operation {
 
 /// The final status of a session.
 #[derive(Debug, PartialEq)]
-pub enum Status {
+pub(crate) enum Status {
     Success,
     ExitCode(i32),
 
@@ -47,7 +47,7 @@ impl Status {
     /// The status of a command which exited with `code`. A negative one
     /// tells that it could not be waited for, clients only take exit codes
     /// from 1 to 255.
-    pub fn exited(code: i32) -> Self {
+    pub(crate) fn exited(code: i32) -> Self {
         match code {
             0 => Self::Success,
             1.. => Self::ExitCode(code),
@@ -59,7 +59,7 @@ impl Status {
     }
 
     /// The failure of a session, worded like k8s.io/cri-streaming does.
-    pub fn failed(operation: Operation, error: impl fmt::Display) -> Self {
+    pub(crate) fn failed(operation: Operation, error: impl fmt::Display) -> Self {
         Self::Error(format!(
             "Internal error occurred: {}: {error}",
             operation.context()
@@ -95,7 +95,7 @@ impl Status {
 #[derive(Debug, Serialize)]
 /// The status of a failed session in JSON, the fields in the order of
 /// k8s.io/cri-streaming.
-pub struct ErrorMessage {
+pub(super) struct ErrorMessage {
     status: &'static str,
     message: String,
     reason: &'static str,
@@ -108,7 +108,7 @@ pub struct ErrorMessage {
 impl ErrorMessage {
     /// The status of a command which exited with the code, its message ends
     /// with the exit error like the text status before v4.
-    pub fn new<T>(exit_code: T) -> Self
+    pub(super) fn new<T>(exit_code: T) -> Self
     where
         T: fmt::Display,
     {
@@ -128,7 +128,7 @@ impl ErrorMessage {
 
     /// An error of the session itself, for example a command which could not
     /// be started, see [`Status::failed`].
-    pub fn internal(message: String) -> Self {
+    pub(super) fn internal(message: String) -> Self {
         Self {
             status: "Failure",
             message,

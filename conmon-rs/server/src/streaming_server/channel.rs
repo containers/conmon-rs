@@ -9,7 +9,7 @@ use data_encoding::BASE64;
 use tracing::debug;
 
 /// A message of the server on a channel.
-pub fn message(base64: bool, channel: u8, data: &[u8]) -> Message {
+pub(super) fn message(base64: bool, channel: u8, data: &[u8]) -> Message {
     if base64 {
         let mut text = String::with_capacity(1 + data.len().div_ceil(3) * 4);
         text.push(char::from(b'0' + channel));
@@ -25,7 +25,7 @@ pub fn message(base64: bool, channel: u8, data: &[u8]) -> Message {
 
 /// The channel and the payload of a message of the client, none for an
 /// empty one or invalid base64. Binary payloads do not get copied.
-pub fn decode(base64: bool, mut message: Bytes) -> Option<(u8, Bytes)> {
+pub(super) fn decode(base64: bool, mut message: Bytes) -> Option<(u8, Bytes)> {
     let &channel = message.first()?;
     if !base64 {
         message.advance(1);
@@ -42,7 +42,7 @@ pub fn decode(base64: bool, mut message: Bytes) -> Option<(u8, Bytes)> {
 
 /// The entry points of the fuzz targets.
 #[cfg(any(test, feature = "fuzzing"))]
-pub mod fuzzing {
+pub(super) mod fuzzing {
     use super::*;
 
     /// Decode the input as a message of a client. A message of the server

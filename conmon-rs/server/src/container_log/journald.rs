@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 /// and priorities conmon uses, so that `journalctl CONTAINER_ID=<id>` finds
 /// it and podman can put partial lines back together.
 #[derive(Debug)]
-pub struct JournaldLogger {
+pub(super) struct JournaldLogger {
     /// Shared with the blocking tasks which send the entries.
     shared: Arc<Shared>,
 }
@@ -105,7 +105,7 @@ impl JournaldLogger {
     /// and the tag if given, the syslog identifier and the labels. Like for
     /// conmon, the syslog identifier is the tag, the name without one, and
     /// the short container ID without both.
-    pub fn new<'a>(
+    pub(super) fn new<'a>(
         id: &str,
         name: &str,
         tag: &str,

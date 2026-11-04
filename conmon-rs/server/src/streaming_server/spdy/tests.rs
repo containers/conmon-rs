@@ -586,7 +586,7 @@ async fn closing_a_stuck_connection_ends_with_the_idle_timeout() -> Result<()> {
     client.open(1, [("streamtype", "data")].into()).await?;
     let mut stream = connection.accept().await.context("stream")?;
     let send =
-        tokio::spawn(async move { while stream.send(Bytes::from(vec![0; 1024])).await.is_ok() {} });
+        task::spawn(async move { while stream.send(Bytes::from(vec![0; 1024])).await.is_ok() {} });
     time::sleep(Duration::from_secs(1)).await;
     connection.handle().close();
     assert!(!connection.handle().done().is_cancelled());
@@ -825,7 +825,7 @@ async fn streams_transfer_more_than_the_budget() -> Result<()> {
     let (mut client, mut connection) = connect(accept_data, None)?;
     client.open(1, [("streamtype", "data")].into()).await?;
     let (mut receiver, _sender) = connection.accept().await.context("stream")?.split();
-    let received = tokio::spawn(async move {
+    let received = task::spawn(async move {
         let mut len = 0;
         while let Some(data) = receiver.recv().await {
             len += data.len();

@@ -160,7 +160,7 @@ async fn listen_stops_without_terminal() -> Result<()> {
 
     // A runtime which connects but never sends the descriptor must not
     // keep the listener around either once the terminal side is gone.
-    let listen = tokio::spawn(Terminal::listen(listener, config));
+    let listen = task::spawn(Terminal::listen(listener, config));
     let _stream = UnixStream::connect(dir.path().join("term.sock")).await?;
     drop(connected_rx);
     tokio::time::timeout(Duration::from_secs(5), listen).await???;

@@ -46,14 +46,14 @@ mod stream_protocol;
 mod testing;
 mod web;
 
-pub use attach::AttachSession;
+pub(crate) use attach::AttachSession;
 #[cfg(test)]
 pub(crate) use bounded_map::DEFAULT_CAPACITY;
-pub use exec::ExecSession;
+pub(crate) use exec::ExecSession;
 
 /// The entry points of the fuzz targets.
 #[cfg(any(test, feature = "fuzzing"))]
-pub mod fuzzing {
+pub(crate) mod fuzzing {
     pub use super::{
         channel::fuzzing::channel,
         handshake::fuzzing::upgrade_headers,
@@ -136,7 +136,7 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Default)]
 /// The main streaming server structure of this module.
-pub struct StreamingServer {
+pub(crate) struct StreamingServer {
     /// The port the server listens on, once it got started for the first
     /// session.
     port: OnceCell<u16>,
@@ -205,7 +205,7 @@ impl StreamingServer {
                 }
             };
             let state = state.clone();
-            tokio::spawn(async move {
+            task::spawn(async move {
                 // Until the connection ended or got upgraded.
                 let _permit = permit;
                 let service = service_fn(move |request| {
@@ -334,7 +334,7 @@ impl StreamingServer {
     }
 
     /// Start the server if required and return the URL of the exec session.
-    pub async fn exec_url(&self, session: ExecSession) -> Result<String> {
+    pub(crate) async fn exec_url(&self, session: ExecSession) -> Result<String> {
         self.wait_for_client(
             EXEC_PATH,
             |state| &mut state.sessions,
@@ -345,7 +345,7 @@ impl StreamingServer {
 
     /// Start the server if required and return the URL of the attach
     /// session.
-    pub async fn attach_url(&self, session: AttachSession) -> Result<String> {
+    pub(crate) async fn attach_url(&self, session: AttachSession) -> Result<String> {
         self.wait_for_client(
             ATTACH_PATH,
             |state| &mut state.sessions,
@@ -356,7 +356,7 @@ impl StreamingServer {
 
     /// Start the server if required and return the URL for forwarding ports
     /// into the network namespace.
-    pub async fn port_forward_url(
+    pub(crate) async fn port_forward_url(
         &self,
         netns_path: PathBuf,
         idle_timeout: Option<Duration>,

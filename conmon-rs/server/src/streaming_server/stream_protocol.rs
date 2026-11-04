@@ -4,15 +4,15 @@
 use std::{fmt, time::Duration};
 
 /// The header which tells what a stream of a Kubernetes client is for.
-pub const STREAM_TYPE_HEADER: &str = "streamType";
+pub(super) const STREAM_TYPE_HEADER: &str = "streamType";
 
 /// How long a Kubernetes client may take to open the streams which belong
 /// together, the default of the kubelet and CRI-O.
-pub const STREAM_CREATION_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const STREAM_CREATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The first of the protocols a client requested which the server supports,
 /// in the order of the client, with its name.
-pub fn first_supported<'a, T: Copy>(
+pub(super) fn first_supported<'a, T: Copy>(
     requested: impl IntoIterator<Item = &'a str>,
     supported: &[(&'static str, T)],
 ) -> Option<(T, &'static str)> {
@@ -28,7 +28,7 @@ const MAX_LOGGED_LEN: usize = 64;
 
 /// A string of a client for the logs: quoted and escaped, so that it cannot
 /// add lines to the log, and cut off after [`MAX_LOGGED_LEN`] characters.
-pub struct ClientStr<'a>(pub &'a str);
+pub(super) struct ClientStr<'a>(pub &'a str);
 
 impl fmt::Debug for ClientStr<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -40,7 +40,7 @@ impl fmt::Debug for ClientStr<'_> {
 }
 
 /// Bytes of a client for the logs, like [`ClientStr`].
-pub struct ClientBytes<'a>(pub &'a [u8]);
+pub(super) struct ClientBytes<'a>(pub &'a [u8]);
 
 impl fmt::Debug for ClientBytes<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -26,7 +26,7 @@ use tracing::{debug, error};
 
 /// Read a PID file like the runtimes write it, the number may be followed by
 /// a line ending.
-pub fn read_pid_file(path: &Path) -> Result<Pid> {
+pub(crate) fn read_pid_file(path: &Path) -> Result<Pid> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("read PID file {}", path.display()))?;
     parse_pid(&content).with_context(|| format!("parse PID file {}", path.display()))
@@ -39,7 +39,7 @@ fn parse_pid(pid: &str) -> Result<Pid> {
 
 /// The PID of a spawned child by the ID which the standard library reports,
 /// or tokio, which has none anymore once the child got reaped.
-pub fn child_pid(id: impl Into<Option<u32>>) -> Result<Pid> {
+pub(crate) fn child_pid(id: impl Into<Option<u32>>) -> Result<Pid> {
     let id = id.into().context("child got reaped already")?;
     positive_pid(i32::try_from(id).with_context(|| format!("invalid PID {id}"))?)
 }
@@ -62,7 +62,7 @@ fn positive_pid(pid: i32) -> Result<Pid> {
 static REAP_LOCK: RwLock<()> = RwLock::new(());
 
 /// Hold while reaping a child of the server, see [`REAP_LOCK`].
-pub fn reap_guard() -> RwLockWriteGuard<'static, ()> {
+pub(crate) fn reap_guard() -> RwLockWriteGuard<'static, ()> {
     mutex::write(&REAP_LOCK)
 }
 
@@ -104,12 +104,12 @@ fn pids() -> impl Iterator<Item = Pid> {
 }
 
 /// Whether the process is a zombie.
-pub fn is_zombie(pid: Pid) -> bool {
+pub(crate) fn is_zombie(pid: Pid) -> bool {
     Stat::read(pid).is_some_and(|stat| stat.state == 'Z')
 }
 
 /// The children of this process, found by scanning all processes.
-pub fn children_by_scan() -> Vec<Pid> {
+pub(crate) fn children_by_scan() -> Vec<Pid> {
     let own = getpid().as_raw();
     pids()
         .filter(|pid| Stat::read(*pid).is_some_and(|stat| stat.ppid == own))
@@ -141,14 +141,14 @@ fn group_has_child(pgid: Pid) -> bool {
 /// of this server would kill it as well. A container process which did not
 /// get a group of its own shares the one of its runtime, which runs in a
 /// group of its own.
-pub fn signals_group(pgid: Pid, own_pgid: Option<Pid>) -> bool {
+pub(crate) fn signals_group(pgid: Pid, own_pgid: Option<Pid>) -> bool {
     pgid.as_raw() > 1 && Some(pgid) != own_pgid
 }
 
 /// Open a pidfd for the process, which also works for one that already
 /// exited but was not reaped yet. The descriptor is close-on-exec.
 #[expect(unsafe_code, reason = "a system call nix does not wrap")]
-pub fn pidfd_open(pid: Pid) -> nix::Result<OwnedFd> {
+pub(crate) fn pidfd_open(pid: Pid) -> nix::Result<OwnedFd> {
     // SAFETY: pidfd_open takes a PID and flags and returns a new descriptor
     // or a negative error, it does not touch any memory of ours.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid.as_raw(), 0) };
@@ -161,7 +161,7 @@ pub fn pidfd_open(pid: Pid) -> nix::Result<OwnedFd> {
 /// Send a signal through a pidfd, none only checks that the process still
 /// exists.
 #[expect(unsafe_code, reason = "a system call nix does not wrap")]
-pub fn pidfd_send_signal(pidfd: impl AsFd, signal: Option<Signal>) -> nix::Result<()> {
+pub(crate) fn pidfd_send_signal(pidfd: impl AsFd, signal: Option<Signal>) -> nix::Result<()> {
     let signal = signal.map_or(0, |signal| signal as libc::c_int);
     // SAFETY: the descriptor is open for the duration of the call, the null
     // siginfo makes the kernel fill in the same as kill(2) does.
@@ -180,7 +180,7 @@ pub fn pidfd_send_signal(pidfd: impl AsFd, signal: Option<Signal>) -> nix::Resul
 /// A child process of the server, which can be signalled without hitting
 /// another process that reused its PID.
 #[derive(Debug)]
-pub struct Process {
+pub(crate) struct Process {
     pid: Pid,
 
     /// Keeps referring to the process after it got reaped, unlike the PID.
@@ -191,7 +191,7 @@ pub struct Process {
 impl Process {
     /// Refer to a child which was not reaped yet, so the PID is still its
     /// own.
-    pub fn open(pid: Pid) -> Self {
+    pub(crate) fn open(pid: Pid) -> Self {
         let pidfd = match pidfd_open(pid) {
             Ok(pidfd) => Some(pidfd),
             Err(e) => {
@@ -208,7 +208,7 @@ impl Process {
     /// then, a [`Process::child`] for it would only fail its signals unless
     /// the PID got reused by another child of the server, and a wait for it
     /// could take the exit status of that child.
-    pub fn open_child(pid: Pid) -> Option<Self> {
+    pub(crate) fn open_child(pid: Pid) -> Option<Self> {
         let _guard = mutex::read(&REAP_LOCK);
         match peek_exit(Id::Pid(pid)) {
             Ok(_) => Some(Self::open(pid)),
@@ -221,11 +221,12 @@ impl Process {
 
     /// Refer to a child by its PID alone, which gets checked to still belong
     /// to an unreaped child of the server before every signal.
-    pub fn child(pid: Pid) -> Self {
+    pub(crate) fn child(pid: Pid) -> Self {
         Self { pid, pidfd: None }
     }
 
-    pub fn pid(&self) -> Pid {
+    /// The PID of the process.
+    pub(crate) fn pid(&self) -> Pid {
         self.pid
     }
 
@@ -233,14 +234,14 @@ impl Process {
     /// gets reused once something took its exit status, the pidfd still
     /// refers to the exited process then and the signal fails with `ESRCH`
     /// instead of hitting another process.
-    pub fn signal(&self, signal: impl Into<Option<Signal>>) -> nix::Result<()> {
+    pub(crate) fn signal(&self, signal: impl Into<Option<Signal>>) -> nix::Result<()> {
         let _guard = mutex::read(&REAP_LOCK);
         self.signal_unlocked(signal.into())
     }
 
     /// Whether the child still runs. A zombie which was not reaped yet does
     /// not, although it can still be signalled.
-    pub fn is_running(&self) -> bool {
+    pub(crate) fn is_running(&self) -> bool {
         let _guard = mutex::read(&REAP_LOCK);
         self.signal_unlocked(None).is_ok() && matches!(peek_exit(Id::Pid(self.pid)), Ok(None))
     }
@@ -254,7 +255,7 @@ impl Process {
     /// whose children hold the pipes. They got reparented to this server,
     /// the subreaper, so the group gets signalled as long as one of them is
     /// an unreaped child of the server, which keeps the group ID in use.
-    pub fn signal_group(&self, signal: Signal) -> nix::Result<()> {
+    pub(crate) fn signal_group(&self, signal: Signal) -> nix::Result<()> {
         let _guard = mutex::read(&REAP_LOCK);
         let own_pgid = getpgid(None).ok();
         if let Err(e) = self.signal_unlocked(None) {
@@ -295,13 +296,13 @@ fn peek_exit(id: Id<'_>) -> nix::Result<Option<i32>> {
 
 /// Whether a child of any thread of this process exited and was not
 /// reaped yet, without reaping it.
-pub fn has_zombie() -> bool {
+pub(crate) fn has_zombie() -> bool {
     !matches!(peek_exit(Id::All), Ok(None) | Err(Errno::ECHILD))
 }
 
 /// The zombie children of this process, and whether the list is
 /// complete, see [`children`].
-pub fn zombie_children() -> (Vec<Pid>, bool) {
+pub(crate) fn zombie_children() -> (Vec<Pid>, bool) {
     let (children, complete) = children();
     let zombies = children.into_iter().filter(|pid| is_zombie(*pid)).collect();
     (zombies, complete)
@@ -360,7 +361,7 @@ pub(crate) const EXIT_CODE_WAIT_FAILED: i32 = -3;
 /// None if it still runs, with `WNOHANG`. The wait of nix fails with
 /// `EINVAL` for a child killed by a real-time signal, which it does not
 /// know, after the kernel reaped it already.
-pub fn wait_exit(id: Id<'_>, flags: WaitPidFlag) -> nix::Result<Option<i32>> {
+pub(crate) fn wait_exit(id: Id<'_>, flags: WaitPidFlag) -> nix::Result<Option<i32>> {
     Ok(wait_child(id, flags)?.map(|(_, exit)| exit.code()))
 }
 
@@ -437,7 +438,7 @@ pub(crate) fn wait_child(id: Id<'_>, flags: WaitPidFlag) -> nix::Result<Option<(
 
 /// Wait for a process to exit using pidfd_open for async polling,
 /// with a blocking waitpid fallback for older kernels.
-pub async fn wait_for_exit_code(pid: Pid) -> i32 {
+pub(crate) async fn wait_for_exit_code(pid: Pid) -> i32 {
     debug!("Waiting for exit code of pid {pid}");
 
     if let Some(code) = try_pidfd_wait(pid).await {
@@ -614,7 +615,7 @@ fn wait_for_exit_code_blocking(pid: Pid) -> i32 {
 
 /// The entry point of the fuzz target.
 #[cfg(any(test, feature = "fuzzing"))]
-pub mod fuzzing;
+pub(crate) mod fuzzing;
 
 #[cfg(test)]
 mod tests;

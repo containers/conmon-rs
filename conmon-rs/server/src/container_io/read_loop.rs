@@ -83,7 +83,7 @@ impl LogErrors {
 
 impl ContainerIO {
     /// Read the pipes of the runtime, which the process it starts shares.
-    pub fn connect_streams(
+    pub(crate) fn connect_streams(
         &mut self,
         stdin: Option<ChildStdin>,
         stdout: Option<ChildStdout>,
@@ -104,7 +104,11 @@ impl ContainerIO {
 
     /// Wait until the runtime connected the terminal and read it. A wait
     /// which gets dropped leaves the connection for the next one.
-    pub async fn connect_terminal(&mut self, stdin: bool, token: CancellationToken) -> Result<()> {
+    pub(crate) async fn connect_terminal(
+        &mut self,
+        stdin: bool,
+        token: CancellationToken,
+    ) -> Result<()> {
         let terminal = self
             .terminal
             .as_mut()
@@ -193,7 +197,7 @@ impl ContainerIO {
 
     /// Read the pipe until it ends and let the log drivers write what they
     /// still buffer, however the loop ended.
-    pub async fn read_loop<T>(
+    pub(crate) async fn read_loop<T>(
         reader: T,
         pipe: Pipe,
         logger: SharedContainerLog,
@@ -370,7 +374,9 @@ impl ContainerIO {
         }
     }
 
-    pub async fn read_loop_stdin(
+    /// Write the stdin of the attach endpoints to `writer` until they closed
+    /// it or the process exited, which cancels `token`.
+    pub(crate) async fn read_loop_stdin(
         mut writer: impl AsyncWrite + Unpin,
         attach: SharedContainerAttach,
         token: CancellationToken,

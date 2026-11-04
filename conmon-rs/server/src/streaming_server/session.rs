@@ -377,7 +377,7 @@ impl StreamingServer {
     ) -> JoinHandle<Option<Output>> {
         let idle_timeout = session.idle_timeout();
         let too_large = client.too_large.clone();
-        tokio::spawn(async move {
+        task::spawn(async move {
             let mut sender = sender;
             let mut status = None;
             let (result, operation) = match session {
@@ -522,7 +522,7 @@ impl StreamingServer {
     where
         I: ClientInput,
     {
-        tokio::spawn(async move {
+        task::spawn(async move {
             let mut pending = PendingStdin::default();
             let end = loop {
                 select! {
@@ -641,6 +641,8 @@ pub(super) enum InputEvent {
 }
 
 impl SessionInput {
+    /// Forward the input of `client` to the process of `io` and `attach`,
+    /// stdin only if `stdin` is set.
     pub(super) fn new(
         io: SharedContainerIO,
         attach: SharedContainerAttach,
@@ -860,7 +862,7 @@ impl PendingStdin {
 
 /// The entry points of the fuzz targets.
 #[cfg(any(test, feature = "fuzzing"))]
-pub mod fuzzing;
+pub(super) mod fuzzing;
 
 #[cfg(test)]
 mod tests;

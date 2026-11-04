@@ -12,6 +12,7 @@ use crate::streaming_server::{
 };
 use tokio::{
     io::{AsyncReadExt, duplex},
+    task,
     time::{self, Duration},
 };
 
@@ -303,7 +304,7 @@ async fn late_resize_streams_survive_a_cancelled_next() -> Result<()> {
         .await?;
     // The resets the client got, until the connection ended. A pause of the
     // frames, like on a slow machine, must not end the collection early.
-    let resets = tokio::spawn(async move {
+    let resets = task::spawn(async move {
         let mut resets = vec![];
         while let Ok(Some(frame)) = client.frame().await {
             if let Frame::RstStream { stream_id, .. } = frame {
@@ -502,7 +503,7 @@ async fn paused_clients_get_the_status_within_the_idle_timeout() -> Result<()> {
 
     // A client which pauses longer than the stall timeout, like the user of
     // a pager, then reads all of it.
-    let reader = tokio::spawn(async move {
+    let reader = task::spawn(async move {
         time::sleep(2 * STALL_TIMEOUT).await;
         let mut read = vec![];
         client.io().read_to_end(&mut read).await.map(|_| read)
@@ -544,7 +545,7 @@ async fn slow_clients_get_all_output_and_the_status() -> Result<()> {
 
     // A client which takes 16 KiB per second, which reads all output only
     // long after the timeouts, but never stops.
-    let reader = tokio::spawn(async move {
+    let reader = task::spawn(async move {
         let mut read = vec![];
         let mut buf = vec![0; 16 * 1024];
         loop {

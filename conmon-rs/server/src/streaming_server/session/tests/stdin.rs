@@ -93,7 +93,7 @@ async fn stdin_before_close_reaches_slow_containers() -> Result<()> {
     // Far more than the server holds, the container takes a part well
     // within the timeout, but all of it only long after.
     let attach = io.attach().clone();
-    let reader = tokio::spawn(async move {
+    let reader = task::spawn(async move {
         let mut stdin = vec![];
         loop {
             time::sleep(STDIN_FLUSH_TIMEOUT / 10).await;
@@ -127,7 +127,7 @@ async fn stdin_before_close_waits_for_stalled_containers_in_bounds() -> Result<(
     let (input, _) = stdin_and_close(40);
 
     let attach = io.attach().clone();
-    let reader = tokio::spawn(async move {
+    let reader = task::spawn(async move {
         for _ in 0..2 {
             time::sleep(Duration::from_secs(3)).await;
             attach.read().await?;

@@ -13,7 +13,7 @@ use futures::{SinkExt, StreamExt};
 use std::pin::pin;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream},
-    select, time,
+    select, task, time,
 };
 use tokio_tungstenite::WebSocketStream;
 use tokio_util::sync::CancellationToken;
@@ -21,7 +21,7 @@ use tracing::debug;
 
 /// A protocol a client may forward ports with over a WebSocket.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum WebSocketProtocol {
+pub(crate) enum WebSocketProtocol {
     /// SPDY tunneled through binary messages.
     SpdyTunnel,
 
@@ -46,7 +46,7 @@ impl WebSocketProtocol {
     /// The protocol for the subprotocols the client requested, with the one
     /// the server answers with. The tunnel wins like for the kubelet,
     /// otherwise the first supported one, none means binary channels.
-    pub fn negotiate<'a>(
+    pub(crate) fn negotiate<'a>(
         requested: impl IntoIterator<Item = &'a str>,
     ) -> Option<(Self, Option<&'static str>)> {
         let requested: Vec<_> = requested.into_iter().collect();
@@ -63,7 +63,7 @@ impl WebSocketProtocol {
 impl PortForward {
     /// Serve port forwarding on the upgraded WebSocket until it ends. The
     /// channel protocol forwards the ports, the tunnel ignores them.
-    pub async fn serve_websocket(
+    pub(crate) async fn serve_websocket(
         self,
         socket: WebSocket,
         protocol: WebSocketProtocol,
@@ -72,7 +72,7 @@ impl PortForward {
         match protocol {
             WebSocketProtocol::SpdyTunnel => {
                 let (server, tunnel) = tokio::io::duplex(TUNNEL_BUFFER);
-                let spdy = tokio::spawn(self.serve_spdy(server));
+                let spdy = task::spawn(self.serve_spdy(server));
                 Self::tunnel(socket, tunnel).await;
                 let _ = spdy.await;
             }
@@ -100,7 +100,7 @@ impl PortForward {
         let too_large = CancellationToken::new();
 
         // The sink, once the close went out.
-        let mut to_client = tokio::spawn({
+        let mut to_client = task::spawn({
             let too_large = too_large.clone();
             async move {
                 let mut buf = BytesMut::new();

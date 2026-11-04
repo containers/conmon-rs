@@ -33,11 +33,14 @@ static IS_CGROUP_V2: LazyLock<bool> = LazyLock::new(|| {
     statfs(CGROUP_ROOT).is_ok_and(|sts| sts.filesystem_type() == CGROUP2_SUPER_MAGIC)
 });
 
-pub struct OOMWatcher;
+/// Watches the cgroup of a process for OOM kills, see
+/// [`OOMWatcher::watch`].
+pub(crate) struct OOMWatcher;
 
+/// What watching a process for OOM kills found.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct OOMEvent {
-    pub oom: bool,
+pub(crate) struct OOMEvent {
+    pub(crate) oom: bool,
 
     /// The cgroup of the process has no memory events, because it got
     /// removed or has no memory controller, which hides whether an OOM
@@ -45,7 +48,7 @@ pub struct OOMEvent {
     /// with cgroup v1, an event before the removal, with cgroup v2, a new
     /// OOM kill of an outer cgroup or none to tell. So it only counts for a
     /// process which got killed by SIGKILL, see [`OOMEvent::is_oom`].
-    pub possible_oom: bool,
+    pub(crate) possible_oom: bool,
 }
 
 impl OOMEvent {
@@ -65,7 +68,7 @@ impl OOMEvent {
     }
 
     /// Whether the process which exited with `exit_code` got OOM killed.
-    pub fn is_oom(self, exit_code: i32) -> bool {
+    pub(crate) fn is_oom(self, exit_code: i32) -> bool {
         self.oom || (self.possible_oom && exit_code == 128 + Signal::SIGKILL as i32)
     }
 }
@@ -75,7 +78,7 @@ impl OOMWatcher {
     /// cancelled, which the exit of the process does, and return what was
     /// found. The OOM files get written for an OOM found on its own. None if
     /// the cgroup could not be watched, or the process was gone already.
-    pub async fn watch(
+    pub(crate) async fn watch(
         token: &CancellationToken,
         pid: Pid,
         exit_paths: &[PathBuf],
@@ -116,7 +119,7 @@ impl OOMWatcher {
 
     /// Create the empty OOM files, like conmon does. A failure is only
     /// logged, the exit gets reported either way, only without the OOM.
-    pub async fn write_oom_files(exit_paths: &[PathBuf]) {
+    pub(crate) async fn write_oom_files(exit_paths: &[PathBuf]) {
         for path in exit_paths {
             debug!("Writing OOM file: {}", path.display());
             if let Err(e) = File::create(path).await {

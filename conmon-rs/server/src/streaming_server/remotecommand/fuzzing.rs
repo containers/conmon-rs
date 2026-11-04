@@ -35,7 +35,7 @@ pub fn resize_events(data: &[u8]) {
 /// picks. Each message is a byte for its type, a byte for its length and
 /// its payload. The events of each go to `event`, binary ones get checked
 /// against the framing.
-pub fn messages(input: &[u8], mut event: impl FnMut(ClientEvent)) {
+pub(crate) fn messages(input: &[u8], mut event: impl FnMut(ClientEvent)) {
     let Some((&framing, mut input)) = input.split_first() else {
         return;
     };

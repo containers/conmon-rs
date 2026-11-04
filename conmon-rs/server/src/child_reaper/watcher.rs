@@ -138,7 +138,7 @@ impl ReapableChild {
 
     /// Split the child into the registered part and what only its watcher
     /// needs.
-    pub fn from_child(child: Child) -> (Box<str>, Self, ExitHandling) {
+    pub(crate) fn from_child(child: Child) -> (Box<str>, Self, ExitHandling) {
         static NEXT_SEQ: AtomicU64 = AtomicU64::new(0);
         let Child {
             id,
@@ -271,7 +271,7 @@ impl ReapableChild {
 
         cleanup_cmd.args(&raw_cmd[1..]).stdin(Stdio::null());
 
-        tokio::spawn(async move {
+        task::spawn(async move {
             match cleanup_cmd.status().await {
                 Ok(status) if !status.success() => {
                     error!("Unable to run cleanup command: {status}");

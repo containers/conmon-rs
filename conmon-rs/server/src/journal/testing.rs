@@ -1,7 +1,7 @@
 //! What the tests and the fuzz target of the journal client share.
 
 /// Decode the fields of an entry, the way journald does.
-pub fn decode(mut data: &[u8]) -> Vec<(String, Vec<u8>)> {
+pub(crate) fn decode(mut data: &[u8]) -> Vec<(String, Vec<u8>)> {
     let mut fields = vec![];
     while !data.is_empty() {
         let end = data.iter().position(|b| *b == b'\n').expect("newline");

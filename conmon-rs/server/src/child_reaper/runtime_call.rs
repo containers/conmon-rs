@@ -52,6 +52,7 @@ impl RuntimeOutput {
     /// How much of the end of stderr is kept.
     pub(super) const MAX_STDERR: usize = 64 * 1024;
 
+    /// Start reading the pipes of a runtime in the background.
     pub(crate) fn spawn(stdout: Option<ChildStdout>, stderr: Option<ChildStderr>) -> Self {
         let buf = Arc::<Mutex<StderrTail>>::default();
         let stderr_buf = buf.clone();
@@ -116,33 +117,33 @@ const FIRST_FD_AFTER_STDIO: RawFd = 3;
 
 /// How [`ChildReaper::create_child`] runs a runtime.
 #[derive(Debug)]
-pub struct RuntimeCall<'a> {
+pub(crate) struct RuntimeCall<'a> {
     /// The binary of the runtime.
-    pub runtime: &'a Path,
-    pub args: &'a [String],
+    pub(crate) runtime: &'a Path,
+    pub(crate) args: &'a [String],
 
     /// Where the command of an exec starts in `args`, which does not get
     /// logged, see [`LoggedArgs`].
-    pub command_start: Option<usize>,
+    pub(crate) command_start: Option<usize>,
 
     /// Whether the process gets a stdin pipe.
-    pub stdin: bool,
+    pub(crate) stdin: bool,
 
     /// Where the runtime writes the PID of the process it started.
-    pub pidfile: &'a Path,
+    pub(crate) pidfile: &'a Path,
 
     /// When a runtime which did not finish gets killed.
-    pub deadline: Instant,
-    pub env_vars: Vec<(String, String)>,
+    pub(crate) deadline: Instant,
+    pub(crate) env_vars: Vec<(String, String)>,
 
     /// Descriptors the runtime gets from 3 on, in this order.
-    pub additional_fds: Vec<OwnedFd>,
+    pub(crate) additional_fds: Vec<OwnedFd>,
 }
 
 impl<'a> RuntimeCall<'a> {
     /// A call without stdin, environment or descriptors, whose runtime gets
     /// killed at the `deadline`.
-    pub fn new(
+    pub(crate) fn new(
         runtime: &'a Path,
         args: &'a [String],
         pidfile: &'a Path,
@@ -260,7 +261,7 @@ impl ChildReaper {
     /// Run the runtime with the I/O of the process it starts, and return the
     /// PID of the process once the runtime exited. The caller registers it
     /// through [`ChildReaper::watch_grandchild`].
-    pub async fn create_child(
+    pub(crate) async fn create_child(
         &self,
         call: RuntimeCall<'_>,
         container_io: &mut ContainerIO,

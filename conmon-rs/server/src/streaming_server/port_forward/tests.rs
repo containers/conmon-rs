@@ -19,7 +19,7 @@ use tokio::{
     io::AsyncReadExt,
     net::{TcpListener, TcpSocket},
     sync::oneshot,
-    task::JoinSet,
+    task::{self, JoinSet},
 };
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::protocol::Role;
@@ -37,7 +37,7 @@ const NETNS: &str = "/proc/self/ns/net";
 
 fn serve() -> Result<Client> {
     let (client, server) = Client::pair()?;
-    tokio::spawn(
+    task::spawn(
         PortForward::new(NETNS.into(), None)
             .without_pings()
             .serve_spdy(server),

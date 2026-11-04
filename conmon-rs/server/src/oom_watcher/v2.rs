@@ -314,6 +314,8 @@ impl Subscriptions {
 static WATCH_FAILING: AtomicBool = AtomicBool::new(false);
 
 impl OOMWatcher {
+    /// Watch the cgroup of a process with cgroup v2, see
+    /// [`OOMWatcher::watch`].
     pub(super) async fn oom_handling_cgroup_v2(
         token: &CancellationToken,
         pid: Pid,

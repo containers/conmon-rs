@@ -10,7 +10,7 @@ use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
 #[derive(Debug)]
 /// The main structure used for container log handling.
-pub struct CriLogger {
+pub(crate) struct CriLogger {
     /// The log file on disk.
     file: LogFile,
 
@@ -20,7 +20,7 @@ pub struct CriLogger {
 
 impl CriLogger {
     /// Create a new file logger instance.
-    pub fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> CriLogger {
+    pub(crate) fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> CriLogger {
         Self {
             // Created readable by the group as well, like by conmon.
             file: LogFile::new(path, Some(0o640), max_log_size),

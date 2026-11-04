@@ -42,7 +42,7 @@ impl Pause {
     /// caller into it, so the child forks that init, which is the only process
     /// that stays around.
     #[expect(unsafe_code, reason = "forking")]
-    pub fn run(args: &PauseArgs) -> Result<()> {
+    pub(crate) fn run(args: &PauseArgs) -> Result<()> {
         let &PauseArgs {
             ref base_path,
             ref pod_id,

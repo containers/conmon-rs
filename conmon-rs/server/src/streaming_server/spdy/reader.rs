@@ -47,6 +47,8 @@ where
     T: AsyncRead,
     F: Fn(&Headers) -> Result<()>,
 {
+    /// Read the frames of the client until the connection ended, then end
+    /// the streams.
     pub(super) async fn run(mut self) {
         let shared = self.shared.clone();
         let end = self.read().await;

@@ -35,7 +35,9 @@ use tokio::{
 };
 use tracing::{debug, error, trace};
 
-pub type SharedContainerLog = Arc<Mutex<ContainerLog>>;
+/// A container log shared by its users, like the read loops of the stdio
+/// and the log reopening.
+pub(crate) type SharedContainerLog = Arc<Mutex<ContainerLog>>;
 
 /// A destination for the output of a container.
 ///
@@ -128,8 +130,9 @@ impl Driver {
     }
 }
 
+/// The log drivers of a container.
 #[derive(Debug, Default)]
-pub struct ContainerLog {
+pub(crate) struct ContainerLog {
     drivers: Vec<Driver>,
 
     /// Collects whole lines for the drivers which take them, shared by all
@@ -142,18 +145,18 @@ pub struct ContainerLog {
 
 impl ContainerLog {
     /// Create a new default SharedContainerLog.
-    pub fn new() -> SharedContainerLog {
+    pub(crate) fn new() -> SharedContainerLog {
         Arc::new(Mutex::new(Self::default()))
     }
 
     /// Check if this logger has any drivers configured.
-    pub fn has_drivers(&self) -> bool {
+    pub(crate) fn has_drivers(&self) -> bool {
         !self.drivers.is_empty()
     }
 
     /// Create a new SharedContainerLog for the container `id` from the
     /// requested drivers.
-    pub fn from_request(id: &str, reader: Reader<Owned>) -> Result<SharedContainerLog> {
+    pub(crate) fn from_request(id: &str, reader: Reader<Owned>) -> Result<SharedContainerLog> {
         let drivers = reader
             .iter()
             .map(|driver| -> Result<Driver> {
@@ -200,7 +203,7 @@ impl ContainerLog {
     }
 
     /// Asynchronously initialize all loggers.
-    pub async fn init(&mut self) -> Result<()> {
+    pub(crate) async fn init(&mut self) -> Result<()> {
         for driver in &mut self.drivers {
             driver.init().await?;
         }
@@ -209,7 +212,7 @@ impl ContainerLog {
 
     /// Reopen the container logs. All drivers get reopened even if one
     /// fails, the first error is returned.
-    pub async fn reopen(&mut self) -> Result<()> {
+    pub(crate) async fn reopen(&mut self) -> Result<()> {
         let mut result = Ok(());
         for driver in &mut self.drivers {
             result = result.and(driver.reopen().await);
@@ -219,7 +222,7 @@ impl ContainerLog {
 
     /// Write the contents of the provided bytes into all loggers. All of
     /// them get the chunk even if one fails, the first error is returned.
-    pub async fn write(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {
+    pub(crate) async fn write(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {
         let mut result = Ok(());
         for driver in &mut self.drivers {
             result = result.and(driver.write_chunk(pipe, bytes).await);
@@ -233,20 +236,20 @@ impl ContainerLog {
     }
 
     /// Whether a line of the pipe waits for its ending.
-    pub fn has_pending(&self, pipe: Pipe) -> bool {
+    pub(crate) fn has_pending(&self, pipe: Pipe) -> bool {
         self.buffers_lines && self.lines.has_pending(pipe)
     }
 
     /// Write the line of the pipe which waits for its ending as a partial
     /// one, because the output paused.
-    pub async fn flush(&mut self, pipe: Pipe) -> Result<()> {
+    pub(crate) async fn flush(&mut self, pipe: Pipe) -> Result<()> {
         let lines = self.lines.flush(pipe);
         self.write_lines(pipe, &lines).await
     }
 
     /// The output of the pipe ended, write the line which still waits for
     /// its ending.
-    pub async fn finish(&mut self, pipe: Pipe) -> Result<()> {
+    pub(crate) async fn finish(&mut self, pipe: Pipe) -> Result<()> {
         let lines = self.lines.finish(pipe);
         self.write_lines(pipe, &lines).await
     }
@@ -259,7 +262,7 @@ impl ContainerLog {
     /// quarter of the threads of the blocking pool at most, see
     /// [`Server::MAX_BLOCKING_THREADS`]. Tests, which share the static, do
     /// not wait for each other.
-    pub async fn sync(log: &SharedContainerLog) -> Result<()> {
+    pub(crate) async fn sync(log: &SharedContainerLog) -> Result<()> {
         const PERMITS: usize = if cfg!(test) {
             Semaphore::MAX_PERMITS
         } else {
@@ -589,6 +592,9 @@ impl LogFile {
     /// churn the allocator.
     const BUF_RETAIN_LIMIT: usize = 2 * Self::FLUSH_SIZE;
 
+    /// A log file at `path`, created with `mode`, which gets replaced once
+    /// it grows beyond `max_size`. Nothing gets opened before
+    /// [`LogFile::open`].
     pub(crate) fn new(path: impl AsRef<Path>, mode: Option<u32>, max_size: Option<usize>) -> Self {
         Self {
             path: path.as_ref().into(),
@@ -914,7 +920,7 @@ impl LogFile {
 
 /// The entry points of the fuzz targets, see `crate::fuzzing`.
 #[cfg(any(test, feature = "fuzzing"))]
-pub mod fuzzing;
+pub(crate) mod fuzzing;
 
 #[cfg(test)]
 mod tests;

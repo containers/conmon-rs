@@ -89,7 +89,7 @@ const _: () = assert!(
 
 #[derive(Debug)]
 /// The main server structure.
-pub struct Server {
+pub(crate) struct Server {
     /// Server configuration.
     config: Arc<Config>,
 
@@ -129,7 +129,7 @@ impl Server {
     }
 
     /// Create a new server for a validated and prepared configuration.
-    pub fn new(config: Config) -> Result<Self> {
+    pub(crate) fn new(config: Config) -> Result<Self> {
         Self::init().context("init self")?;
         Ok(Self::with_config(config))
     }
@@ -235,7 +235,7 @@ impl Server {
 
     /// Start the `Server` instance and consume it.
     #[expect(unsafe_code, reason = "forking")]
-    pub fn start(mut self) -> Result<()> {
+    pub(crate) fn start(mut self) -> Result<()> {
         // Fork as early as possible, before setting up tokio: a child of a
         // process with threads may only call async-signal-safe functions
         // until it execs, see the safety section of `nix::unistd::fork`.

@@ -16,7 +16,7 @@ use tokio::{
 use tracing::{Instrument, Span, warn};
 
 /// A value which has to be undone when it is no longer used.
-pub trait Stop {
+pub(crate) trait Stop {
     /// Undo the value, which may block, see [`stop_blocking`].
     fn stop(&self);
 }
@@ -24,7 +24,7 @@ pub trait Stop {
 /// Run the stop of a value on the blocking pool. Unmounting waits for the
 /// kernel, which can take long, the runtime thread runs every RPC and the
 /// I/O of all containers.
-pub async fn stop_blocking(stop: impl FnOnce() + Send + 'static) {
+pub(crate) async fn stop_blocking(stop: impl FnOnce() + Send + 'static) {
     if let Err(e) = task::spawn_blocking(stop).await {
         warn!("Unable to stop: {e}");
     }
@@ -38,7 +38,7 @@ pub async fn stop_blocking(stop: impl FnOnce() + Send + 'static) {
 /// so a request cancelled meanwhile, for example by a CRI-O timeout, cannot
 /// abandon a half set up value. A failed or panicked initialization leaves
 /// the cell empty, so the next request starts over.
-pub struct SingleFlight<T> {
+pub(crate) struct SingleFlight<T> {
     cell: OnceCell<T>,
 
     /// Whether an initialization runs.
@@ -64,7 +64,8 @@ impl Drop for InitRunning<'_> {
 }
 
 impl<T: Stop + Send + Sync + 'static> SingleFlight<T> {
-    pub const fn new() -> Self {
+    /// An empty instance, nothing gets initialized before the first request.
+    pub(crate) const fn new() -> Self {
         Self {
             cell: OnceCell::const_new(),
             running: LazyLock::new(Self::not_running),
@@ -77,7 +78,8 @@ impl<T: Stop + Send + Sync + 'static> SingleFlight<T> {
         watch::Sender::new(false)
     }
 
-    pub fn shutting_down(&self) -> bool {
+    /// Whether the server shuts down, no initialization starts then.
+    pub(crate) fn shutting_down(&self) -> bool {
         self.shutting_down.load(Ordering::SeqCst)
     }
 
@@ -85,7 +87,7 @@ impl<T: Stop + Send + Sync + 'static> SingleFlight<T> {
     /// initialization runs. A request which waited for the initialization of
     /// another one fails if that failed, its outcome goes to the request
     /// which started it and a retry runs a new one.
-    pub async fn get_or_init<F, Fut>(&'static self, init: F) -> Result<&'static T>
+    pub(crate) async fn get_or_init<F, Fut>(&'static self, init: F) -> Result<&'static T>
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = Result<T>> + Send,
@@ -150,7 +152,7 @@ impl<T: Stop + Send + Sync + 'static> SingleFlight<T> {
     }
 
     /// Set the process of the running initialization.
-    pub fn set_child(&self, child: Option<Process>) {
+    pub(crate) fn set_child(&self, child: Option<Process>) {
         *lock(&self.child) = child;
     }
 
@@ -159,7 +161,7 @@ impl<T: Stop + Send + Sync + 'static> SingleFlight<T> {
     /// kill its process if it does not finish and wait until `stop_wait`
     /// before the deadline for it to clean up, then for the stop of the
     /// value. No request initializes one after this.
-    pub async fn shutdown(
+    pub(crate) async fn shutdown(
         &'static self,
         deadline: Instant,
         kill_wait: Duration,

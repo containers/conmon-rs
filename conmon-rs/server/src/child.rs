@@ -10,13 +10,14 @@ use tokio_util::sync::CancellationToken;
 /// their container, but only the container itself is the target of
 /// container level operations like attach or log reopening.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChildKind {
+pub(crate) enum ChildKind {
     Container,
     Exec,
 }
 
+/// A container or exec, as it gets registered with the child reaper.
 #[derive(Debug)]
-pub struct Child {
+pub(crate) struct Child {
     pub(crate) id: Box<str>,
     pub(crate) kind: ChildKind,
     pub(crate) pid: Pid,

@@ -178,7 +178,7 @@ fn send_inline_and_as_memfd() -> anyhow::Result<()> {
 /// until they are received, which may fill up before the queue of the
 /// receiver does. So they are sent on a socket of their own, the shared
 /// ones of the other tests would fail every send meanwhile otherwise.
-pub fn fill(wait: Wait, path: &Path) -> io::Error {
+pub(crate) fn fill(wait: Wait, path: &Path) -> io::Error {
     let socket = match new_socket(wait) {
         Ok(socket) => socket,
         Err(e) => return e,
