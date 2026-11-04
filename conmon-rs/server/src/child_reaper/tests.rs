@@ -1107,7 +1107,7 @@ async fn slow_exec_consumers_get_all_output() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let io = SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?);
     let attach = io.attach().clone();
-    let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+    let (tx, rx) = crate::channel::bounded(STDIO_CHANNEL_SIZE);
     let sender = StdioSender::new(tx, &Arc::new(AtomicBool::new(true)));
     let (mut writer, reader) = tokio::io::duplex(64 * 1024);
     task::spawn(ContainerIO::read_loop(

@@ -64,8 +64,8 @@ const OUTPUT_CHANNEL_SIZE: usize = 128;
 pub struct SharedContainerAttach {
     // A bounded channel instead of a broadcast, so that a slow container stdin
     // applies backpressure to the attach clients instead of dropping input.
-    read_half_rx: async_channel::Receiver<Bytes>,
-    read_half_tx: async_channel::Sender<Bytes>,
+    read_half_rx: crate::channel::Receiver<Bytes>,
+    read_half_tx: crate::channel::Sender<Bytes>,
 
     /// The output towards the attach clients.
     output: Arc<OutputState>,
@@ -144,7 +144,7 @@ impl SharedContainerAttach {
     /// Create a new shared container attach instance for a container with or
     /// without a terminal.
     pub fn new(terminal: bool) -> Self {
-        let (read_half_tx, read_half_rx) = async_channel::bounded(STDIN_CHANNEL_SIZE);
+        let (read_half_tx, read_half_rx) = crate::channel::bounded(STDIN_CHANNEL_SIZE);
         Self {
             read_half_rx,
             read_half_tx,

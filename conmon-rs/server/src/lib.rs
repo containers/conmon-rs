@@ -87,6 +87,7 @@ pub mod fuzzing {
 mod async_fd;
 mod attach;
 mod capnp_util;
+mod channel;
 mod child;
 mod child_reaper;
 mod config;

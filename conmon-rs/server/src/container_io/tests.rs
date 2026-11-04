@@ -16,7 +16,7 @@ fn spawn_loop(
     consumed: bool,
 ) -> (DuplexStream, Receiver<Message>, JoinHandle<Result<()>>) {
     let (writer, reader) = duplex(64 * 1024);
-    let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+    let (tx, rx) = crate::channel::bounded(STDIO_CHANNEL_SIZE);
     let sender = StdioSender::new(tx, &Arc::new(AtomicBool::new(consumed)));
     let attach = SharedContainerAttach::default();
     let output = attach.output();
@@ -49,7 +49,7 @@ fn pattern(len: usize) -> Vec<u8> {
 
 #[tokio::test]
 async fn drain_stops_on_busy_channel() {
-    let (tx, rx) = async_channel::bounded(16);
+    let (tx, rx) = crate::channel::bounded(16);
     tokio::spawn(async move { while tx.send(()).await.is_ok() {} });
 
     let mut drain = Drain::default();
@@ -63,7 +63,7 @@ async fn drain_stops_on_busy_channel() {
 #[tokio::test(start_paused = true)]
 async fn drain_stops_after_waiting_in_total() {
     // A process left behind which never pauses long enough for one wait.
-    let (tx, rx) = async_channel::bounded(16);
+    let (tx, rx) = crate::channel::bounded(16);
     tokio::spawn(async move {
         while tx.send(()).await.is_ok() {
             time::sleep(DRAIN_TIMEOUT * 9 / 10).await;
@@ -76,7 +76,7 @@ async fn drain_stops_after_waiting_in_total() {
     assert_eq!(start.elapsed(), DRAIN_MAX_WAIT);
 
     // Time spent forwarding does not count.
-    let (tx, rx) = async_channel::bounded(16);
+    let (tx, rx) = crate::channel::bounded(16);
     tx.send(()).await.expect("send");
     let mut drain = Drain::default();
     assert!(drain.recv(rx.recv()).await.is_some());
@@ -87,7 +87,7 @@ async fn drain_stops_after_waiting_in_total() {
 
 #[tokio::test(start_paused = true)]
 async fn drain_stops_on_quiet_channel() {
-    let (_tx, rx) = async_channel::bounded::<()>(1);
+    let (_tx, rx) = crate::channel::bounded::<()>(1);
     let start = Instant::now();
     assert!(Drain::default().recv(rx.recv()).await.is_none());
     assert_eq!(start.elapsed(), DRAIN_TIMEOUT);
@@ -135,7 +135,7 @@ fn early_stream_end_spans_kept_and_dropped_output() {
 
 #[tokio::test]
 async fn collect_drops_disabled_output() {
-    let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+    let (tx, rx) = crate::channel::bounded(STDIO_CHANNEL_SIZE);
     for message in [
         Message::Data(Bytes::from_static(b"x"), Pipe::StdOut),
         Message::Done,
@@ -149,7 +149,7 @@ async fn collect_drops_disabled_output() {
 
 #[tokio::test]
 async fn read_stream_does_not_append_to_truncated_output() {
-    let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+    let (tx, rx) = crate::channel::bounded(STDIO_CHANNEL_SIZE);
     tx.send(Message::Data(Bytes::from_static(b"later"), Pipe::StdOut))
         .await
         .expect("send");
@@ -233,7 +233,7 @@ async fn exec_output_during_runtime_is_kept() -> Result<()> {
 #[tokio::test(start_paused = true)]
 async fn read_stream_after_exit_is_bounded_in_time() {
     // A process left behind which never pauses long enough for the drain.
-    let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+    let (tx, rx) = crate::channel::bounded(STDIO_CHANNEL_SIZE);
     tokio::spawn(async move {
         while tx
             .send(Message::Data(Bytes::from_static(b"x"), Pipe::StdOut))
@@ -400,7 +400,7 @@ async fn reads_full_chunks_after_large_one() -> Result<()> {
 async fn stopped_output_ends_read_while_pipe_is_held_open() -> Result<()> {
     // The writer stays, like a process left behind holding the pipe.
     let (mut writer, reader) = duplex(1024);
-    let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+    let (tx, rx) = crate::channel::bounded(STDIO_CHANNEL_SIZE);
     let sender = StdioSender::new(tx, &Arc::new(AtomicBool::new(true)));
     let attach = SharedContainerAttach::default();
     let read_loop = task::spawn(ContainerIO::read_loop(
@@ -546,7 +546,7 @@ async fn exec_output_is_capped_without_blocking() -> Result<()> {
 async fn read_stream_keeps_reading_until_the_exit() {
     // The watcher of the process tells when it exited, or killed it at its
     // timeout, the output written right before that belongs to it.
-    let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+    let (tx, rx) = crate::channel::bounded(STDIO_CHANNEL_SIZE);
     let exited = CancellationToken::new();
     let writer = tokio::spawn({
         let exited = exited.clone();
@@ -577,7 +577,7 @@ async fn read_stream_keeps_reading_until_the_exit() {
 #[tokio::test(start_paused = true)]
 async fn exit_ends_read_while_pipe_is_held_open() -> Result<()> {
     // The sender stays, like a background process holding the pipe.
-    let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+    let (tx, rx) = crate::channel::bounded(STDIO_CHANNEL_SIZE);
     let exited = CancellationToken::new();
     tx.send(Message::Data("before ".into(), Pipe::StdOut))
         .await?;
@@ -600,7 +600,7 @@ async fn exit_ends_read_while_pipe_is_held_open() -> Result<()> {
 
 #[tokio::test(start_paused = true)]
 async fn closed_channel_ends_the_output() -> Result<()> {
-    let (tx, rx) = async_channel::bounded(STDIO_CHANNEL_SIZE);
+    let (tx, rx) = crate::channel::bounded(STDIO_CHANNEL_SIZE);
     tx.send(Message::Data("data".into(), Pipe::StdOut)).await?;
     drop(tx);
 
