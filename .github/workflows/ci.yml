@@ -506,7 +506,7 @@ jobs:
           components: llvm-tools-preview
           save-if: ${{ env.SAVE_CACHE }}
       - name: Install cargo-llvm-cov and cargo-nextest
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-llvm-cov,cargo-nextest
       # The default features are what gets shipped, the tracing feature covers
@@ -597,7 +597,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y "${PACKAGES[@]}" qemu-user-binfmt
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-nextest
       # Under qemu-user, the first skipped test fails to find the reaped leader
@@ -678,7 +678,7 @@ jobs:
       - name: Check the lock file
         run: cargo fetch --locked
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-fuzz
       # The prebuilt cargo-fuzz defaults to the musl target it got built for,
@@ -829,7 +829,7 @@ jobs:
           components: llvm-tools-preview
           save-if: ${{ env.SAVE_CACHE }}
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-llvm-cov
       # The environment makes the build instrumented and every server process
