@@ -212,11 +212,7 @@ impl ContainerLog {
     pub async fn reopen(&mut self) -> Result<()> {
         let mut result = Ok(());
         for driver in &mut self.drivers {
-            if let Err(e) = driver.reopen().await
-                && result.is_ok()
-            {
-                result = Err(e);
-            }
+            result = result.and(driver.reopen().await);
         }
         result
     }
@@ -226,11 +222,7 @@ impl ContainerLog {
     pub async fn write(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {
         let mut result = Ok(());
         for driver in &mut self.drivers {
-            if let Err(e) = driver.write_chunk(pipe, bytes).await
-                && result.is_ok()
-            {
-                result = Err(e);
-            }
+            result = result.and(driver.write_chunk(pipe, bytes).await);
         }
         if self.buffers_lines {
             let lines = self.lines.push(pipe, bytes);
@@ -307,13 +299,8 @@ impl ContainerLog {
             return Ok(());
         }
         let mut result = Ok(());
-        for driver in &mut self.drivers {
-            if driver.buffers_lines()
-                && let Err(e) = driver.write_lines(pipe, lines).await
-                && result.is_ok()
-            {
-                result = Err(e);
-            }
+        for driver in self.drivers.iter_mut().filter(|d| d.buffers_lines()) {
+            result = result.and(driver.write_lines(pipe, lines).await);
         }
         result
     }

@@ -97,24 +97,29 @@ async fn requests_get_validated() -> anyhow::Result<()> {
     // A local capability, the requests need no socket.
     let client: conmon::Client = capnp_rpc::new_client(Server::with_config(config));
 
-    let create = |id: &str, bundle: &str, exit_path: &str| {
+    let create = |id: &str, bundle: &str, exit_path: &str, oom_exit_path: &str| {
         let mut request = client.create_container_request();
         let mut req = request.get().init_request();
         req.set_id(id);
         req.set_bundle_path(bundle);
-        req.init_exit_paths(1).set(0, exit_path);
+        req.reborrow().init_exit_paths(1).set(0, exit_path);
+        req.init_oom_exit_paths(1).set(0, oom_exit_path);
         request.send().promise
     };
     assert_eq!(
-        failure(create("id", "bundle", "/exit")).await,
+        failure(create("id", "bundle", "/exit", "/oom")).await,
         r#"bundle path "bundle" is not absolute"#
     );
     assert_eq!(
-        failure(create("id", "/bundle", "exit")).await,
+        failure(create("id", "/bundle", "exit", "/oom")).await,
         r#"exit path "exit" is not absolute"#
     );
     assert_eq!(
-        failure(create("--help", "/bundle", "/exit")).await,
+        failure(create("id", "/bundle", "/exit", "oom")).await,
+        r#"OOM exit path "oom" is not absolute"#
+    );
+    assert_eq!(
+        failure(create("--help", "/bundle", "/exit", "/oom")).await,
         r#"invalid container ID "--help""#
     );
 

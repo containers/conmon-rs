@@ -16,6 +16,7 @@ use port_forward::PortForward;
 use std::{
     convert::Infallible,
     io,
+    net::Ipv4Addr,
     path::PathBuf,
     sync::{Arc, Mutex, Weak},
 };
@@ -65,7 +66,7 @@ pub mod fuzzing {
     };
 }
 
-const ADDR: &str = "127.0.0.1";
+const ADDR: Ipv4Addr = Ipv4Addr::LOCALHOST;
 
 /// How long a client may take to send the head of its request, which only
 /// applies with a timer. A connection which never sends one would stay open
@@ -166,7 +167,7 @@ impl StreamingServer {
     /// port.
     async fn start_if_required(&self) -> Result<u16> {
         let port = self.port.get_or_try_init(|| async {
-            let listener = TcpListener::bind(ADDR.to_string() + ":0")
+            let listener = TcpListener::bind((ADDR, 0))
                 .await
                 .context("bind streaming server")?;
 

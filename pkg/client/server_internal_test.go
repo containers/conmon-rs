@@ -265,6 +265,44 @@ func TestSameWriter(t *testing.T) {
 	}
 }
 
+func TestPidGivenFile(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		content string
+		pid     uint32
+		fails   bool
+	}{
+		{content: "1234", pid: 1234},
+		{content: "1234\n", pid: 1234},
+		{content: "", fails: true},
+		{content: "abc", fails: true},
+		{content: "4294967296", fails: true},
+	} {
+		file := filepath.Join(t.TempDir(), "pid")
+		if err := os.WriteFile(file, []byte(tc.content), 0o600); err != nil {
+			t.Fatalf("write pid file: %v", err)
+		}
+
+		pid, err := pidGivenFile(file)
+		if tc.fails {
+			if err == nil {
+				t.Errorf("pid file %q parsed as %d, want an error", tc.content, pid)
+			}
+
+			continue
+		}
+
+		if err != nil || pid != tc.pid {
+			t.Errorf("pid file %q parsed as %d, %v, want %d", tc.content, pid, err, tc.pid)
+		}
+	}
+
+	if _, err := pidGivenFile(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Error("missing pid file parsed")
+	}
+}
+
 func TestServerOutputFile(t *testing.T) {
 	t.Parallel()
 

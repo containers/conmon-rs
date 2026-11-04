@@ -313,8 +313,11 @@ impl conmon::Server for Server {
         let runtime = self.config().runtime().to_path_buf();
         let exit_paths: Vec<PathBuf> = pry!(text_list(req.get_exit_paths()));
         let oom_exit_paths: Vec<PathBuf> = pry!(text_list(req.get_oom_exit_paths()));
-        for path in exit_paths.iter().chain(&oom_exit_paths) {
+        for path in &exit_paths {
             pry_err!(capnp_util::check_absolute("exit path", path));
+        }
+        for path in &oom_exit_paths {
+            pry_err!(capnp_util::check_absolute("OOM exit path", path));
         }
         let env_vars = pry!(req.get_env_vars().and_then(capnp_util::into_map));
 

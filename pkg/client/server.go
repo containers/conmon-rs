@@ -518,7 +518,7 @@ func pidGivenFile(file string) (uint32, error) {
 		bitSize = 32
 	)
 
-	pidU64, err := strconv.ParseUint(string(pidBytes), base, bitSize)
+	pidU64, err := strconv.ParseUint(strings.TrimSpace(string(pidBytes)), base, bitSize)
 	if err != nil {
 		return 0, fmt.Errorf("parsing pid: %w", err)
 	}

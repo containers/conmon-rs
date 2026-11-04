@@ -19,6 +19,7 @@ use nix::{
     },
 };
 use std::{
+    fmt::Write as _,
     fs::{self, File},
     io::{Read, Write},
     os::unix::net::UnixStream,
@@ -309,7 +310,7 @@ impl Pause {
                 })?;
             }
             let [container_id, host_id, size] = ids;
-            buf.push_str(&format!("{container_id} {host_id} {size}\n"));
+            writeln!(buf, "{container_id} {host_id} {size}")?;
         }
 
         if buf.len() >= page_size {
