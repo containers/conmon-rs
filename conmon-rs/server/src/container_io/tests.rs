@@ -1,9 +1,16 @@
-use super::*;
-use crate::container_log::{ContainerLog, test_helpers};
-use tokio::{
-    io::{DuplexStream, duplex},
-    task::{self, JoinHandle},
+use super::{drain::DRAIN_MAX_MESSAGES, stdio::EarlyStream, *};
+use crate::{
+    channel::Receiver,
+    container_log::{ContainerLog, test_helpers},
+    tail::Tail,
 };
+use tokio::{
+    io::{AsyncWriteExt, DuplexStream, duplex},
+    sync::broadcast,
+    task::{self, JoinHandle},
+    time::{self, Duration, Instant},
+};
+use tokio_util::sync::CancellationToken;
 
 /// Upper bound for tests which wait for something, it only hits if the
 /// waited for thing never happens.
