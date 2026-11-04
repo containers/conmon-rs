@@ -805,9 +805,10 @@ jobs:
             websockets: false
           - name: test-critest-websockets
             websockets: true
-          # CRI-O 1.37 vendors a v1.0 client, which serves exec and attach
+          # CRI-O v1.37.2 vendors a v1.0 client, which serves exec and attach
           # with stream_websockets as well, with requests that lack the fields
-          # of newer clients. The releases up to 1.36 vendor a v0.7 client,
+          # of newer clients. Its later releases vendor the client of main,
+          # see dependencies.yaml. The releases up to 1.36 vendor a v0.7 client,
           # which passes the --cgroup-manager that v1 rejects, so they cannot
           # run a v1 server at all.
           - name: test-critest-crio-1.37
