@@ -8,8 +8,13 @@
 //!
 //! - <https://github.com/containers/conmon-rs/blob/main/README.md> on what
 //!   conmon-rs does and how it is built.
-//! - <https://github.com/containers/conmon-rs/blob/main/usage.md> on the command
-//!   line, the RPCs and the attach, streaming and fd socket protocols.
+//! - <https://github.com/containers/conmon-rs/blob/main/docs/server.md> on the
+//!   command line.
+//! - <https://github.com/containers/conmon-rs/blob/main/docs/protocols.md> on
+//!   the RPCs and the attach, streaming and fd socket protocols.
+//! - <https://github.com/containers/conmon-rs/blob/main/README.md#documentation>
+//!   on the other documents, like configuring CRI-O, logging and
+//!   troubleshooting.
 
 use anyhow::{Context, Result};
 use config::{Commands, Config, Verbosity};

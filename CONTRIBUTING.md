@@ -75,8 +75,8 @@ CAPNP=capnp` uses a local one instead.
 
 Servers keep running across upgrades, so clients and servers of different
 releases talk to each other, see the compatibility section of
-[usage.md](usage.md#compatibility). The schema has to stay compatible on the
-wire:
+[docs/cri-o.md](docs/cri-o.md#compatibility). The schema has to stay
+compatible on the wire:
 
 - Only add fields, methods and enumerants, each with the next free ordinal.
 - Never change the type or the ordinal of a field, and never remove one.
@@ -89,11 +89,11 @@ wire:
   a feature string in
   [version.rs](conmon-rs/server/src/version.rs) and a matching `Feature`
   constant in [pkg/client](pkg/client/version.go), see the features section
-  of usage.md. An older server ignores new fields, so the client checks the
-  feature first.
+  of [docs/protocols.md](docs/protocols.md#features). An older server ignores
+  new fields, so the client checks the feature first.
 - Mark new fields, limits and other behavior changes which users can see
-  with "since unreleased" in the schema, the Go documentation and usage.md,
-  the release replaces it with the version.
+  with "since unreleased" in the schema, the Go documentation and the
+  documents in [docs](docs), the release replaces it with the version.
 
 `make verify-schema-layout`, which CI runs, guards these rules: it fails if a
 change moves an existing field of the schema to another slot.

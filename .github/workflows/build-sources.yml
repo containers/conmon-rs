@@ -42,7 +42,7 @@ jobs:
       - name: Check for unreleased markers
         run: |
           STATUS=0
-          git grep -in unreleased -- usage.md pkg/client conmon-rs/server/proto || STATUS=$?
+          git grep -in unreleased -- docs pkg/client conmon-rs/server/proto || STATUS=$?
           if [[ $STATUS == 0 ]]; then
             echo "::error::$TAG still says \"unreleased\" above. Tags cannot be moved, so release the next patch version from a commit without markers, see release.md."
             exit 1

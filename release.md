@@ -7,14 +7,14 @@ files it lists, the `version` in the `[workspace.package]` section of
 [rpm/conmon-rs.spec](rpm/conmon-rs.spec). The PR also runs
 `cargo update --workspace` to update [Cargo.lock](Cargo.lock) and replaces
 "unreleased" with `vX.Y.Z`, with the `v` like all markers of released
-versions, in [usage.md](usage.md), the Go documentation in
+versions, in the documents in [docs](docs), the Go documentation in
 [pkg/client](pkg/client) and the comments of
 [conmon-rs/server/proto/conmon.capnp](conmon-rs/server/proto/conmon.capnp).
-It then runs `make prettier`, as some markers sit in padded tables of
-[usage.md](usage.md).
+It then runs `make prettier`, as some markers sit in padded tables, like the
+one of [docs/protocols.md](docs/protocols.md#limits-and-timeouts).
 `make verify-dependencies verify-spec verify-prettier verify-unreleased` has
 to pass. The latter fails as long as no tag of the crate version exists and
-`git grep -in unreleased -- usage.md pkg/client conmon-rs/server/proto` prints
+`git grep -in unreleased -- docs pkg/client conmon-rs/server/proto` prints
 anything, so the ci workflow fails the PR if it misses one, and any other PR
 which adds one before the tag got pushed. Such a PR waits for the tag and
 reruns its checks. The release workflow refuses a tag whose sources still have

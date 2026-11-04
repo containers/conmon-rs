@@ -2156,7 +2156,7 @@ var _ = Describe("JSONLogger", func() {
 				tr.createContainerWithConfig(ctx, sut, cfg)
 				tr.startContainer()
 
-				// The schema is documented in usage.md.
+				// The schema is documented in docs/logging.md.
 				type entry struct {
 					Timestamp uint64 `json:"timestamp"`
 					Pipe      string `json:"pipe"`

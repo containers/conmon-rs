@@ -64,8 +64,8 @@ type ServeExecContainerResult struct {
 // and the older WebSocket versions down to channel.k8s.io.
 //
 // See the Streaming section of the package documentation for how long the
-// URL is good for and how many may wait (ErrTooManyRequests), and usage.md
-// in the repository for the protocols.
+// URL is good for and how many may wait (ErrTooManyRequests), and
+// docs/protocols.md in the repository for the protocols.
 func (c *ConmonClient) ServeExecContainer(
 	ctx context.Context,
 	cfg *ServeExecContainerConfig,
@@ -161,8 +161,8 @@ type ServeAttachContainerResult struct {
 // a running container. Clients speak the protocols of ServeExecContainer.
 //
 // See the Streaming section of the package documentation for how long the
-// URL is good for and how many may wait (ErrTooManyRequests), and usage.md
-// in the repository for the protocols.
+// URL is good for and how many may wait (ErrTooManyRequests), and
+// docs/protocols.md in the repository for the protocols.
 func (c *ConmonClient) ServeAttachContainer(
 	ctx context.Context,
 	cfg *ServeAttachContainerConfig,
@@ -229,8 +229,8 @@ type ServePortForwardContainerResult struct {
 // Servers without the FeaturePortForward feature return ErrUnsupported.
 //
 // See the Streaming section of the package documentation for how long the
-// URL is good for and how many may wait (ErrTooManyRequests), and usage.md
-// in the repository for the protocols.
+// URL is good for and how many may wait (ErrTooManyRequests), and
+// docs/protocols.md in the repository for the protocols.
 func (c *ConmonClient) ServePortForwardContainer(
 	ctx context.Context,
 	cfg *ServePortForwardContainerConfig,

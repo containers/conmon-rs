@@ -24,10 +24,18 @@ crun. CI runs the integration tests on cgroup v2 only.
 
 ## Documentation
 
-- [usage.md](usage.md): configuring CRI-O, the compatibility between CRI-O
-  and server versions, upgrades, the command line, the `pause` subcommand, the
-  protocols between the server and its clients, the features, logging, OOM
-  reporting, troubleshooting, tracing and the use on Red Hat OpenShift.
+- [docs/cri-o.md](docs/cri-o.md): configuring CRI-O, the compatibility between
+  CRI-O and server versions, upgrades and the use on Red Hat OpenShift.
+- [docs/server.md](docs/server.md): the command line of the server, what it
+  does when it starts and stops, and the `pause` subcommand.
+- [docs/protocols.md](docs/protocols.md): the Cap'n Proto RPC, the attach
+  socket, the streaming server for exec, attach and port forwarding with its
+  limits and security, the file descriptor socket, and the features a server
+  reports.
+- [docs/logging.md](docs/logging.md): the container log drivers and how the
+  server reports OOM kills.
+- [docs/troubleshooting.md](docs/troubleshooting.md): finding the logs of the
+  server, common failures, memory profiling and OpenTelemetry tracing.
 - [release.md](release.md): how to cut a release.
 - [SECURITY.md](SECURITY.md): how to report a security issue.
 - [Rust docs](https://containers.github.io/conmon-rs/conmonrs/index.html) of

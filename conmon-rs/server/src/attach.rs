@@ -1,6 +1,6 @@
 //! The attach sockets of the containers, see the attach socket section of
-//! usage.md: the stdin of the clients towards the container and the container
-//! output towards the clients.
+//! docs/protocols.md: the stdin of the clients towards the container and the
+//! container output towards the clients.
 
 use crate::{
     async_fd,
