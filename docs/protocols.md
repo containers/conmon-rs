@@ -14,7 +14,7 @@ killed and its call fails: for `createContainer` after 10 minutes, for an exec
 only starts the exec process. Each runtime runs in a process group of its own,
 which gets killed with it, so the helpers it started do not stay behind.
 
-Since unreleased, `execSyncContainer` returns at most 16 MiB less 64 KiB of
+Since v1.2.3, `execSyncContainer` returns at most 16 MiB less 64 KiB of
 output, stdout and stderr together, like conmon, so that the response fits
 into the 16 MiB gRPC messages of CRI-O and the kubelet. Each stream keeps up
 to half of it and more of what the other one leaves, so a large stdout does
@@ -117,7 +117,7 @@ a reset while its output backs up holds the end just as long, or until the
 kernel gives up resending to it, after 15 to 30 minutes with the default
 `tcp_retries2` of 15: there is no keepalive.
 
-Since unreleased, a WebSocket client which closes first, also one of port
+Since v1.2.3, a WebSocket client which closes first, also one of port
 forwarding, gets the close of the server in answer as soon as the server read
 it, also while the stdin before it still goes to the process. Before, the
 connection ended without it, which browsers report as code 1006 and which kept
@@ -145,7 +145,7 @@ the server from reading the client, which may then go idle, like a spdystream
 connection whose reader waits. Empty stdin messages do not count towards the
 stdin limit of a session.
 
-Since unreleased, the stdin which a client sent right before a clean close (the
+Since v1.2.3, the stdin which a client sent right before a clean close (the
 WebSocket close, or the end of a SPDY connection after its stdin) reaches the
 process as long as the process keeps taking it. Only a process which takes none
 of it for 5 seconds lets the session end without the rest, counted from the
@@ -206,7 +206,7 @@ like `?port=80&port=443`, as CRI-O does.
 | Request head                                                   | 64 KiB since v1.2.2, a larger one gets a 431                          |
 | Exec output while the runtime starts the process               | 16 MiB per stream, the session fails above, see above                 |
 | End of a session the client takes nothing of                   | 60 seconds or a longer exec or attach idle timeout, since v1.2.2      |
-| Stdin before a clean close which the process takes none of     | 5 seconds since unreleased, about a second before                     |
+| Stdin before a clean close which the process takes none of     | 5 seconds since v1.2.3, about a second before                         |
 | Idle connection                                                | The `idleTimeoutSec` of the request, see below                        |
 
 `idleTimeoutSec` ends a connection which got no frame of the client and no

@@ -60,7 +60,7 @@ and removes its sockets within 9.5 seconds, before `Shutdown` of the Go client,
 which sends SIGINT, gives up after 10 with `ErrShutdownTimeout`. If any of that
 fails or does not finish in time, the server logs it as an error and exits with
 status 1. A server which cannot listen for these signals does the same cleanup
-right away and exits with status 1. Since unreleased, the server first forwards
+right away and exits with status 1. Since v1.2.3, the server first forwards
 a SIGTERM to the containers, like conmon, and gives them up to 5 of the 9.5
 seconds to exit on it with their own exit codes before it kills them. Another
 SIGTERM or a SIGINT meanwhile kills them right away. Exec processes and

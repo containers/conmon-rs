@@ -86,7 +86,7 @@ interface Conmon {
         # The files the server writes the exit code of the container to once
         # it exited, as decimal text, 128 plus the signal number if a signal
         # killed it, also for real-time signals since v1.2.2, which gave
-        # -1 before. Since unreleased, also a traced process, like one under
+        # -1 before. Since v1.2.3, also a traced process, like one under
         # strace, gets its exit code instead of -1. Absolute paths.
         exitPaths @4 :List(Text);
         # The files the server creates empty if the container got OOM
@@ -230,14 +230,14 @@ interface Conmon {
     struct ExecSyncContainerResponse {
         # The exit code of the command, 128 plus the signal number if a
         # signal killed it, also for real-time signals since v1.2.2, which
-        # gave -1 before. Since unreleased, also a traced process, like one
+        # gave -1 before. Since v1.2.3, also a traced process, like one
         # under strace, gets its exit code instead of -1. -1 if the server
         # could not tell how it ended, -2 if it could not be started, then
         # `stderr` tells why, and -3 if it timed out. A server without pidfd
         # support also reports -3 if it could not get the exit status, then
         # without `timedOut`.
         exitCode @0 :Int32;
-        # The output of the command. Since unreleased, stdout and stderr
+        # The output of the command. Since v1.2.3, stdout and stderr
         # together hold at most 16 MiB less 64 KiB. Each keeps up to half of
         # it, and more if the other one leaves room, the rest gets dropped,
         # see docs/protocols.md. Before, each took up to 16 MiB.

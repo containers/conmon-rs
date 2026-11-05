@@ -31,7 +31,7 @@ type CreateContainerConfig struct {
 	// gets the exit code of the container as decimal text once it exited,
 	// 128 plus the number of the signal which killed it, like a shell
 	// reports it, also for real-time signals since v1.2.2, which gave
-	// -1 before. Since unreleased, also a traced process, like one under
+	// -1 before. Since v1.2.3, also a traced process, like one under
 	// strace, gets its exit code instead of -1. The paths have to be
 	// absolute, servers since v1.2.1 reject other ones.
 	ExitPaths []string
@@ -312,13 +312,13 @@ type ExecContainerResult struct {
 	// ExitCode specifies the returned exit status, 128 plus the number of
 	// the signal which killed the command, like a shell reports it, also
 	// for real-time signals since v1.2.2, which gave -1 before. Since
-	// unreleased, also a traced process, like one under strace, gets its
+	// v1.2.3, also a traced process, like one under strace, gets its
 	// exit code instead of -1. It is ExecExitCodeNotStarted if the server
 	// could not start the command, ExecExitCodeTimedOut if it timed out,
 	// and -1 if the server could not tell how the command ended.
 	ExitCode int32
 
-	// Stdout contains the stdout stream result. Since unreleased, Stdout
+	// Stdout contains the stdout stream result. Since v1.2.3, Stdout
 	// and Stderr together hold at most 16 MiB less 64 KiB. Each keeps up to
 	// half of it, and more if the other one leaves room, the rest gets
 	// dropped. Before, each took up to 16 MiB.

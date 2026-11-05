@@ -50,7 +50,7 @@ ends up as one entry. Like the `P` marker of the CRI log, a partial entry is
 a line which had no ending yet: it grew beyond 16 KiB, the output paused for
 half a second, or the output ended without one.
 
-Since unreleased, the server keeps a terminal open itself until the process
+Since v1.2.3, the server keeps a terminal open itself until the process
 exited, so its output ends at the exit, not once no process has it open. A
 process which closes the terminal and opens it again, like an init system or a
 getty, keeps its output in the log and for attach clients. This takes Linux
@@ -59,7 +59,7 @@ process has the terminal open. Before, the output ended once the terminal got
 closed the first time, and without stdin the server closed it as well.
 
 The server does not sync the log files to disk on a rotation, the entries sit
-in the page cache like other writes. Since unreleased, it syncs the CRI and
+in the page cache like other writes. Since v1.2.3, it syncs the CRI and
 JSON logs once the container exited and its output ended, before it writes
 the exit files, like conmon without `--no-sync-log`. CRI-O (since v1.31)
 rejects its `no_sync_log` option for a `pod` runtime handler, so the sync
@@ -105,7 +105,7 @@ cannot be read, nothing counts as one.
 The server watches the memory events of all containers through a single
 inotify instance, and reads the counters at most every 100 ms under memory
 pressure. If it cannot watch them, it checks the counters only once the
-process exited. Since unreleased, it logs a warning when that happens for
+process exited. Since v1.2.3, it logs a warning when that happens for
 another reason than a cgroup which is gone already, like a used up
 `fs.inotify.max_user_instances` or `fs.inotify.max_user_watches`, once until
 a watch works again.
