@@ -560,8 +560,8 @@ pub(crate) struct LogFile {
     /// opened, including the committed entries of `buf`.
     bytes_written: usize,
 
-    /// The pending output of the current chunk, allocated on first use, see
-    /// [`LogFile::buf`].
+    /// The pending output of the current chunk, allocated on first use and
+    /// released at its end, see [`LogFile::buf`].
     buf: Vec<u8>,
 
     /// Whether a failed write left the file in the middle of an entry, or it
@@ -578,19 +578,14 @@ impl LogFile {
     const ERR_UNINITIALIZED: &'static str = "logger not initialized";
 
     /// Initial capacity of the chunk buffer, it grows to what the read chunks
-    /// need with their line overhead.
+    /// need with their line overhead, up to about twice
+    /// [`LogFile::FLUSH_SIZE`] for the entry which crosses it, more for a
+    /// long JSON line with escaped bytes.
     const BUF_CAPACITY: usize = 8 * 1024;
 
     /// The entries get written once they take this much, a chunk of very
     /// short lines would grow the buffer to many times its size otherwise.
     const FLUSH_SIZE: usize = 16 * 1024;
-
-    /// Buffers which grew beyond this size get shrunk again after a write,
-    /// for example by a long line. The entry which crosses
-    /// [`LogFile::FLUSH_SIZE`] grows the buffer up to twice that size, which
-    /// is kept, shrinking and growing it again for every write would only
-    /// churn the allocator.
-    const BUF_RETAIN_LIMIT: usize = 2 * Self::FLUSH_SIZE;
 
     /// A log file at `path`, created with `mode`, which gets replaced once
     /// it grows beyond `max_size`. Nothing gets opened before
@@ -608,8 +603,8 @@ impl LogFile {
         }
     }
 
-    /// The buffer to append the entries of a chunk to. A container which
-    /// never writes output does not need one.
+    /// The buffer to append the entries of a chunk to. A log file holds one
+    /// only while it writes a chunk, see [`LogFile::end_chunk`].
     pub(crate) fn buf(&mut self) -> &mut Vec<u8> {
         if self.buf.capacity() == 0 {
             self.buf.reserve_exact(Self::BUF_CAPACITY);
@@ -792,10 +787,15 @@ impl LogFile {
     }
 
     /// Write the entries of the chunk which are still pending, see
-    /// [`LogFile::commit_entry`].
+    /// [`LogFile::commit_entry`], and release the buffer. The line overhead
+    /// of the entries grows it beyond [`LogFile::BUF_CAPACITY`] for most
+    /// full read chunks, which an idle container would keep otherwise. The
+    /// allocation of the next chunk costs little next to its write.
     pub(crate) async fn end_chunk(&mut self) -> Result<()> {
         self.rotation_failed = false;
-        self.flush().await
+        let res = self.flush().await;
+        self.buf = Vec::new();
+        res
     }
 
     /// Write a chunk of one entry per item, which `entry` appends to the
@@ -842,9 +842,6 @@ impl LogFile {
             self.bytes_written = self.bytes_written.saturating_sub(len - written);
         }
         self.buf.clear();
-        if self.buf.capacity() > Self::BUF_RETAIN_LIMIT {
-            self.buf.shrink_to(Self::BUF_CAPACITY);
-        }
         res
     }
 

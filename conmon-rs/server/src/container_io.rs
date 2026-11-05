@@ -165,16 +165,15 @@ impl ContainerIO {
             .context("create new terminal")?;
         let consumed = Arc::default();
         let stdout = StdioChannel::new(STDIO_CHANNEL_SIZE, &consumed);
-        // The channel preallocates its capacity. The one of stderr carries
-        // nothing with a terminal. An exec keeps it as long as the IO, only
-        // its consumer closes it.
-        let stderr = if terminal.is_some() {
-            let mut stderr = StdioChannel::new(1, &consumed);
+        // With a terminal, stderr carries nothing: no read loop takes its
+        // sender, so it goes right away and the consumers see the end. A
+        // channel which never got a message holds no buffer, whatever its
+        // capacity. An exec keeps the receiver as long as the IO, only its
+        // consumer closes it.
+        let mut stderr = StdioChannel::new(STDIO_CHANNEL_SIZE, &consumed);
+        if terminal.is_some() {
             stderr.tx = None;
-            stderr
-        } else {
-            StdioChannel::new(STDIO_CHANNEL_SIZE, &consumed)
-        };
+        }
         Ok(Self {
             attach: SharedContainerAttach::new(terminal.is_some()),
             terminal,

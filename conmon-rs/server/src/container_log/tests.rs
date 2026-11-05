@@ -736,7 +736,7 @@ async fn open_starts_after_a_torn_log_on_a_line_of_its_own() -> Result<()> {
 }
 
 #[tokio::test]
-async fn buffer_is_allocated_on_first_use() -> Result<()> {
+async fn buffer_is_held_only_during_a_chunk() -> Result<()> {
     let file = NamedTempFile::new()?;
     let mut sut = LogFile::new(file.path(), None, None);
     sut.open().await?;
@@ -746,6 +746,21 @@ async fn buffer_is_allocated_on_first_use() -> Result<()> {
     sut.flush().await?;
     assert_eq!(fs::read_to_string(file.path())?, "line\n");
     assert!(sut.buf.capacity() >= LogFile::BUF_CAPACITY);
+
+    // A full read chunk of short lines grows it beyond its initial
+    // capacity, which an idle container does not keep.
+    let lines = vec![b"x\n".as_slice(); 4096];
+    let mut grown = 0;
+    sut.write_entries(lines, |buf, line| {
+        buf.extend_from_slice(&[b' '; 45]);
+        buf.extend_from_slice(line);
+        grown = grown.max(buf.capacity());
+        Ok(())
+    })
+    .await?;
+    assert!(grown > LogFile::BUF_CAPACITY, "{grown}");
+    assert_eq!(sut.buf.capacity(), 0);
+    assert_eq!(fs::metadata(file.path())?.len(), 5 + 4096 * 47);
     Ok(())
 }
 
@@ -764,8 +779,8 @@ async fn short_lines_are_written_in_bounded_pieces() -> Result<()> {
         sut.commit_entry(start).await?;
         assert!(sut.buf.len() < LogFile::FLUSH_SIZE);
     }
-    sut.flush().await?;
-    assert!(sut.buf.capacity() <= LogFile::BUF_RETAIN_LIMIT);
+    sut.end_chunk().await?;
+    assert_eq!(sut.buf.capacity(), 0);
     assert_eq!(fs::read_to_string(file.path())?, expected);
     Ok(())
 }

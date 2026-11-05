@@ -13,6 +13,7 @@
 //! arbitrary host process.
 
 use crate::{
+    container_io::with_scratch,
     fs_util::{self, FileId, Removal, RemoveError},
     listener,
     random_id::RandomId,
@@ -21,11 +22,13 @@ use anyhow::{Context, Result, bail};
 use nix::sys::socket::{MsgFlags, UnixAddr, connect, recv, send};
 use std::{
     fs::{self, File, Metadata, Permissions},
+    future, io,
     os::unix::{fs::PermissionsExt, io::AsRawFd, net::UnixDatagram as StdUnixDatagram},
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
+    task::{Poll, ready},
 };
-use tokio::{net::UnixDatagram, select, task};
+use tokio::{io::ReadBuf, net::UnixDatagram, select, task};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, trace, warn};
 
@@ -182,9 +185,6 @@ impl NotifySocket {
     }
 
     async fn relay(self, token: CancellationToken) {
-        // One byte more tells a message which got cut off.
-        let mut buf = vec![0; Self::MAX_MESSAGE_SIZE + 1];
-
         // A message received but not relayed when the container exited.
         let mut pending = None;
         loop {
@@ -192,15 +192,16 @@ impl NotifySocket {
                 // Prefer the messages, they are read until the socket is
                 // empty after the cancellation anyway.
                 biased;
-                res = self.socket.recv(&mut buf) => match res {
-                    Ok(len) => {
+                res = future::poll_fn(|cx| self.poll_recv(cx)) => match res {
+                    Ok(None) => {}
+                    Ok(Some(message)) => {
                         // The host may stop reading, do not wait for it
                         // beyond the lifetime of the container.
                         select! {
                             biased;
-                            () = self.forward(&buf[..len]) => {}
+                            () = self.forward(&message) => {}
                             () = token.cancelled() => {
-                                pending = Some(len);
+                                pending = Some(message);
                                 break;
                             }
                         }
@@ -218,27 +219,47 @@ impl NotifySocket {
         // may come before the I/O driver saw the message, so do not rely on
         // the readiness tokio tracks and ask the kernel instead. A process
         // left behind could keep the socket full, so stop at some point.
-        let flags = MsgFlags::MSG_DONTWAIT;
         let mut remaining = Self::DRAIN_MAX_MESSAGES;
-        if let Some(len) = pending {
-            self.forward_now(&buf[..len]);
+        if let Some(message) = pending {
+            self.forward_now(&message);
             remaining -= 1;
         }
         while remaining > 0
-            && let Ok(len) = recv(self.socket.as_raw_fd(), &mut buf, flags)
+            && let Ok(message) = self.recv_now()
         {
-            self.forward_now(&buf[..len]);
+            if let Some(message) = message {
+                self.forward_now(&message);
+            }
             remaining -= 1;
         }
         debug!("Stopped relaying notify messages");
     }
 
+    /// Receive a message into the scratch buffer of the thread, see
+    /// [`with_scratch`], and return the part of it to relay, see
+    /// [`NotifySocket::check_message`]. The relay holds no buffer while it
+    /// waits for the container. One byte more than a message may take
+    /// tells one which got cut off.
+    fn poll_recv(&self, cx: &mut std::task::Context<'_>) -> Poll<io::Result<Option<Vec<u8>>>> {
+        with_scratch(Self::MAX_MESSAGE_SIZE + 1, |scratch| {
+            let mut buf = ReadBuf::new(scratch);
+            ready!(self.socket.poll_recv(cx, &mut buf))?;
+            Poll::Ready(Ok(Self::check_message(buf.filled())))
+        })
+    }
+
+    /// Receive a message without waiting, like [`NotifySocket::poll_recv`].
+    fn recv_now(&self) -> nix::Result<Option<Vec<u8>>> {
+        with_scratch(Self::MAX_MESSAGE_SIZE + 1, |scratch| {
+            let len = recv(self.socket.as_raw_fd(), scratch, MsgFlags::MSG_DONTWAIT)?;
+            Ok(Self::check_message(&scratch[..len]))
+        })
+    }
+
+    /// Relay a message which passed [`NotifySocket::check_message`].
     async fn forward(&self, message: &[u8]) {
-        let Some(message) = Self::check_message(message) else {
-            return;
-        };
         let result = match self.connect_host_again() {
-            Ok(()) => self.host.send(&message).await.map(drop).context("send"),
+            Ok(()) => self.host.send(message).await.map(drop).context("send"),
             Err(e) => Err(e),
         };
         self.relayed(result);
@@ -246,13 +267,10 @@ impl NotifySocket {
 
     /// Relay without waiting for the host, drop the message if it is full.
     fn forward_now(&self, message: &[u8]) {
-        let Some(message) = Self::check_message(message) else {
-            return;
-        };
         let flags = MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL;
         self.relayed(
             self.connect_host_again()
-                .and_then(|()| send(self.host.as_raw_fd(), &message, flags).context("send"))
+                .and_then(|()| send(self.host.as_raw_fd(), message, flags).context("send"))
                 .map(drop),
         );
     }
