@@ -153,7 +153,7 @@ where
 
 /// Answer the close of the server, which waits for it while the client
 /// still sends, then ends the connection without a reset.
-pub(super) async fn answer_close(stream: &mut TcpStream) -> Result<()> {
+pub(super) async fn expect_close_and_answer(stream: &mut TcpStream) -> Result<()> {
     // Input the server does not read would reset the connection.
     stream.write_all(&client_frame(0x2, &[0; 100])).await?;
     let mut byte = [0];

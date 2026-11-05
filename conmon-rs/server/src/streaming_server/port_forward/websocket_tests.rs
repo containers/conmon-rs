@@ -226,7 +226,7 @@ async fn port_forward_over_websocket_waits_for_the_close_answer() -> Result<()> 
             let error = String::from_utf8_lossy(&error[1..]);
             assert!(error.contains("error forwarding port"), "{error}");
             assert_eq!(server_frame(&mut stream).await?.0, 8);
-            answer_close(&mut stream).await
+            expect_close_and_answer(&mut stream).await
         })
         .await
 }

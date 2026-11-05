@@ -14,7 +14,7 @@ use crate::{
 };
 use anyhow::Result;
 use hyper::{
-    HeaderMap, Request, StatusCode,
+    HeaderMap, Method, Request, StatusCode,
     body::Incoming,
     header::{self, HeaderName, HeaderValue},
     upgrade::{OnUpgrade, Upgraded},
@@ -130,6 +130,14 @@ impl StreamingServer {
             Ok(protocol) => protocol,
             Err(response) => return *response,
         };
+        // A HEAD gets routed like a GET, but must not take the session.
+        if !matches!(*request.method(), Method::GET | Method::POST) {
+            let mut response = web::status(StatusCode::METHOD_NOT_ALLOWED);
+            response
+                .headers_mut()
+                .insert(header::ALLOW, HeaderValue::from_static("GET,POST"));
+            return response;
+        }
         let Some(on_upgrade) = request.extensions_mut().remove::<OnUpgrade>() else {
             return web::text(
                 StatusCode::INTERNAL_SERVER_ERROR,

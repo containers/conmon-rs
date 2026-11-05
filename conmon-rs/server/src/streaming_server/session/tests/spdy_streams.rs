@@ -1,6 +1,38 @@
 //! The streams of a SPDY session.
 
 use super::*;
+use crate::streaming_server::stream_protocol::STREAM_CREATION_TIMEOUT;
+
+/// A client which does not open all the streams of its session gets its
+/// connection ended after [`STREAM_CREATION_TIMEOUT`], the session does not
+/// start.
+#[tokio::test(start_paused = true)]
+async fn incomplete_spdy_sessions_time_out() -> Result<()> {
+    let (io, child, _token) = attach_child(false)?;
+    let session = Session::Attach(attach_config(child, true, false, None));
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    let mut client = Client::new(client)?;
+    // Stdin and stdout never come.
+    client.open(1, [("streamType", "error")].into()).await?;
+    let start = time::Instant::now();
+    let served = task::spawn(StreamingServer::handle_spdy(server, session, Version::V4));
+
+    // The server pings the client meanwhile.
+    time::timeout(STREAM_CREATION_TIMEOUT * 2, async {
+        while client.frame().await?.is_some() {}
+        anyhow::Ok(())
+    })
+    .await??;
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= STREAM_CREATION_TIMEOUT && elapsed < STREAM_CREATION_TIMEOUT + PING_INTERVAL,
+        "{elapsed:?}"
+    );
+    time::timeout(Duration::from_secs(5), served).await??;
+    // The session never started, its stdin never got closed.
+    assert!(!io.attach().stdin_closed().is_cancelled());
+    Ok(())
+}
 
 #[tokio::test]
 async fn spdy_stdin_stays_open_until_the_end() -> Result<()> {

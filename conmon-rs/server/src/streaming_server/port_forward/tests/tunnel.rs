@@ -66,7 +66,7 @@ async fn tunnels_answer_the_close_of_the_client_while_spdy_hangs() -> Result<()>
 }
 
 #[test]
-fn websocket_protocols_get_negotiated() {
+fn port_forward_protocols_get_negotiated() {
     let negotiate = |requested: &[&str]| WebSocketProtocol::negotiate(requested.iter().copied());
     assert_eq!(
         negotiate(&[]),

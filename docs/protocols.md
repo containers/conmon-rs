@@ -149,11 +149,12 @@ Since unreleased, the stdin which a client sent right before a clean close (the
 WebSocket close, or the end of a SPDY connection after its stdin) reaches the
 process as long as the process keeps taking it. Only a process which takes none
 of it for 5 seconds lets the session end without the rest, counted from the
-close, or from the start of an exec process which the runtime started within
-that time. Before, the process got about a second after the close and the rest
-got dropped, which cut off the uploads of clients which close right after their
-last write, like the Python client or `k8s_cp` of Ansible, once the process
-took less than about 1 MiB per second.
+close, or for an exec from the start of its process, however long the runtime
+takes to start it (the runtime gets killed after 60 seconds). Before, the
+process got about a second after the close and the rest got dropped, which cut
+off the uploads of clients which close right after their last write, like the
+Python client or `k8s_cp` of Ansible, once the process took less than about
+1 MiB per second.
 
 ### Port forwarding
 

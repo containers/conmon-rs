@@ -74,9 +74,21 @@ async fn attach_ends_on_disconnect_while_stdin_waits() -> Result<()> {
             for _ in 0..PENDING_STDIN_MAX_BYTES / 60_000 + 40 {
                 stream.write_all(&frame).await?;
             }
-            // Nothing tells that the session goes on, one which ends later
-            // passes.
-            time::sleep(Duration::from_millis(200)).await;
+            // The session still forwards the output, pings may come first.
+            wait_for(|| attach.has_readers()).await?;
+            attach.write(IOMessage::Data(Bytes::from_static(b"out"), Pipe::StdOut));
+            time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match server_frame(&mut stream).await? {
+                        (0x9, _) => {}
+                        frame => {
+                            assert_eq!(frame, (0x2, vec![STDOUT_BYTE, b'o', b'u', b't']));
+                            return anyhow::Ok(());
+                        }
+                    }
+                }
+            })
+            .await??;
             assert!(!attach.stdin_closed().is_cancelled());
             drop(stream);
 
@@ -126,9 +138,9 @@ async fn attach_without_stdin_ignores_stdin_close() -> Result<()> {
                 (0x2, vec![STDOUT_BYTE, b'o', b'u', b't'])
             );
             drop(stream);
-            // Nothing tells that the session ended, a close which comes
-            // later passes.
-            time::sleep(Duration::from_millis(50)).await;
+            // The end of the session, which drops its subscription, would
+            // have closed the stdin by then.
+            wait_for(|| !attach.has_readers()).await?;
             assert!(!attach.stdin_closed().is_cancelled());
             Ok(())
         })
@@ -566,7 +578,7 @@ async fn websocket_attach_waits_for_the_close_answer() -> Result<()> {
             token.cancel();
             assert_eq!(server_frame(&mut stream).await?.1[0], STREAM_ERR_BYTE);
             assert_eq!(server_frame(&mut stream).await?.0, 0x8);
-            answer_close(&mut stream).await
+            expect_close_and_answer(&mut stream).await
         })
         .await
 }

@@ -200,7 +200,7 @@ async fn input_while_connecting_leaves_the_budget() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn connecting_streams_stop_taking_data_without_connect_budget() -> Result<()> {
     // A port which never answers, whose client sends more than the
     // connect budget holds.
@@ -228,6 +228,7 @@ async fn connecting_streams_stop_taking_data_without_connect_budget() -> Result<
     })
     .await
     .context("budgets not taken")?;
+    // With the clock paused, the sleep ends only once the connection waits.
     time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         budget.available(),
