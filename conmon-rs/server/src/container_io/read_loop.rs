@@ -29,9 +29,8 @@ use tracing::{Instrument, debug, debug_span, error, info, trace};
 /// The most a read of a container I/O stream takes at once. The read loops
 /// read into the scratch buffer of their thread and copy each chunk out of
 /// it, see [`with_scratch`], so an idle container holds no read buffer. 8 KiB
-/// halves the reads and log writes of 4 KiB for bulk output and keeps what a
-/// container holds after it in line with the log buffers, see
-/// `LogFile::BUF_CAPACITY`.
+/// halves the reads and log writes of 4 KiB for bulk output, the log files
+/// start the buffer of each chunk with as much, see `LogFile::BUF_CAPACITY`.
 pub(crate) const READ_BUFFER_SIZE: usize = 8 * 1024;
 
 thread_local! {
@@ -41,9 +40,9 @@ thread_local! {
 
 /// Run `f` on a buffer of `len` bytes which the thread keeps for all reads
 /// which copy what they got out of it right away. The read loops of all
-/// containers and attach clients share it, instead of keeping a buffer each
-/// while they wait. It grows to the largest `len` asked for and holds what
-/// the last use left in it.
+/// containers and attach clients, the runtime calls and the notify relays
+/// share it, instead of keeping a buffer each while they wait. It grows to
+/// the largest `len` asked for and holds what the last use left in it.
 pub(crate) fn with_scratch<R>(len: usize, f: impl FnOnce(&mut [u8]) -> R) -> R {
     SCRATCH.with(|scratch| match scratch.try_borrow_mut() {
         Ok(mut scratch) => {

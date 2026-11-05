@@ -3,7 +3,7 @@
 
 use super::{ChildReaper, InFlight, PendingPid};
 use crate::{
-    container_io::ContainerIO,
+    container_io::{ContainerIO, READ_BUFFER_SIZE, with_scratch},
     fd_mapping::{self, CommandFdExt, FdMapping},
     fs_util, init,
     mutex::lock,
@@ -18,18 +18,20 @@ use nix::{
     unistd::Pid,
 };
 use std::{
-    io,
+    future, io,
     ops::{Deref, DerefMut},
     os::{
         fd::{OwnedFd, RawFd},
         unix::process::ExitStatusExt,
     },
     path::Path,
+    pin::Pin,
     process::{ExitStatus, Stdio},
     sync::{Arc, Mutex},
+    task::{Poll, ready},
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt},
+    io::{AsyncRead, ReadBuf},
     process::{Child as RuntimeChild, ChildStderr, ChildStdout, Command},
     select,
     task::{self, JoinHandle},
@@ -73,19 +75,26 @@ impl RuntimeOutput {
         Self { stderr: buf, task }
     }
 
-    /// Read until the end, keeping the end in `buf` if any.
+    /// Read until the end, keeping the end in `buf` if any. The reads go to
+    /// the scratch buffer of the thread, see [`with_scratch`], so that the
+    /// task of a create or exec with a terminal, or of a pause setup,
+    /// carries no buffers of its own.
     async fn read(mut reader: impl AsyncRead + Unpin, buf: Option<&Mutex<StderrTail>>) {
-        let mut chunk = [0; 8192];
-        loop {
-            let n = match reader.read(&mut chunk).await {
-                Ok(0) | Err(_) => return,
-                Ok(n) => n,
-            };
-            let Some(buf) = buf else {
-                continue;
-            };
-            lock(buf).push(&chunk[..n]);
-        }
+        let mut read = |cx: &mut std::task::Context<'_>| {
+            with_scratch(READ_BUFFER_SIZE, |scratch| {
+                let mut chunk = ReadBuf::new(scratch);
+                match ready!(Pin::new(&mut reader).poll_read(cx, &mut chunk)) {
+                    Ok(()) if !chunk.filled().is_empty() => {
+                        if let Some(buf) = buf {
+                            lock(buf).push(chunk.filled());
+                        }
+                        Poll::Ready(true)
+                    }
+                    Ok(()) | Err(_) => Poll::Ready(false),
+                }
+            })
+        };
+        while future::poll_fn(&mut read).await {}
     }
 
     /// The end of stderr, waiting at most `wait` for the rest of what is

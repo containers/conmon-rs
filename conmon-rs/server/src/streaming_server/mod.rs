@@ -72,10 +72,14 @@ const ADDR: Ipv4Addr = Ipv4Addr::LOCALHOST;
 /// applies with a timer. A connection which never sends one would stay open
 /// otherwise. Clients send it right after they connected, and every
 /// connection serves one request, see [`MAX_CONNECTIONS`]. Far below the 30
-/// seconds of hyper, so that connections without a request cannot hold the
-/// server off for long: a local process which keeps all of them open delays
-/// the requests of others by up to [`UPGRADE_TIMEOUT`], which bounds the
-/// whole connection, the backlog of the listener serves them in order.
+/// seconds of hyper, so that a connection without a request holds its
+/// permit for a short time only. That does not bound how long a local
+/// process can hold the server off: one which keeps opening connections,
+/// holds all permits and keeps the backlog of the listener full makes the
+/// connection of another client wait behind its own ones, a few times
+/// [`UPGRADE_TIMEOUT`], or get its handshake dropped and retried while the
+/// backlog is full, for as long as it keeps that up. It cannot use up the
+/// file descriptors of the server.
 const HEADER_READ_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_secs(1)
 } else {
