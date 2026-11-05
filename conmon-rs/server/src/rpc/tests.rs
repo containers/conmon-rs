@@ -3,6 +3,7 @@ use crate::{
     child_reaper::ReapableChild, config::Config, conmon_capnp::conmon::CgroupManager,
     streaming_server::DEFAULT_CAPACITY,
 };
+use nix::unistd::Pid;
 use std::{process::Stdio, sync::Arc};
 use tokio::{process::Command, task::LocalSet, time};
 

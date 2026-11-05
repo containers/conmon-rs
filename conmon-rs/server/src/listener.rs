@@ -7,7 +7,9 @@ use nix::sys::{
     stat::{Mode, fchmod},
 };
 use std::{
+    error::Error,
     ffi::OsStr,
+    fmt,
     fs::{self, File},
     io,
     os::{fd::OwnedFd, unix::io::AsRawFd},
@@ -72,6 +74,20 @@ fn connection_failed(e: &io::Error) -> bool {
         Some(libc::ECONNABORTED | libc::ECONNREFUSED | libc::ECONNRESET | libc::EPROTO)
     )
 }
+
+/// A socket which a running process still serves, so it must not be
+/// replaced. A type of its own tells it apart from other errors, like for
+/// the tests, which retry while a process they forked holds a socket.
+#[derive(Debug)]
+pub(crate) struct SocketInUse(pub(crate) String);
+
+impl fmt::Display for SocketInUse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Error for SocketInUse {}
 
 /// Create a non-blocking UNIX socket which only its owner can connect to.
 /// Linux creates the file of a socket on bind with the mode of the socket

@@ -1,0 +1,4 @@
+12:memory:/kubepods/burstable/pod1/1a2b
+11:cpu,cpuacct:/kubepods/burstable/pod1/1a2b
+1:name=systemd:/kubepods/burstable/pod1/1a2b
+0::/

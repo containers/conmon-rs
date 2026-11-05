@@ -9,7 +9,8 @@ type Target = fn(&[u8]);
 
 /// The entry points of the fuzz targets by their names, like the targets
 /// in `fuzz/fuzz_targets` call them.
-const TARGETS: [(&str, Target); 15] = [
+const TARGETS: [(&str, Target); 16] = [
+    ("cgroup_files", cgroup_files),
     ("channel_decode", |data| {
         if let Some((&base64, message)) = data.split_first() {
             channel(base64 & 1 == 1, message);

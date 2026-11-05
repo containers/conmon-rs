@@ -117,5 +117,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "cgroup_files"
+path = "fuzz_targets/cgroup_files.rs"
+test = false
+doc = false
+bench = false
+
 [lints]
 workspace = true

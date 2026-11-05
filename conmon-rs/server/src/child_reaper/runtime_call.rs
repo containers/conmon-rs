@@ -88,6 +88,16 @@ impl RuntimeOutput {
         }
     }
 
+    /// The end of stderr, waiting at most `wait` for the rest of what is
+    /// still in the pipe. The reader keeps the pipe open afterwards until
+    /// its writers closed it, a child which still writes to it must not get
+    /// EPIPE.
+    pub(crate) async fn take(mut self, wait: Duration) -> Vec<u8> {
+        // Detached rather than aborted on the timeout.
+        let _ = time::timeout(wait, &mut self.task).await;
+        Self::end(&self)
+    }
+
     /// Wait for the end of the output for a while, a helper of the runtime
     /// may hold the pipes open, and return the end of stderr.
     pub(crate) async fn finish(output: Option<Self>) -> Vec<u8> {
@@ -101,7 +111,17 @@ impl RuntimeOutput {
             debug!("Runtime output still held open, giving up on it");
             output.task.abort();
         }
+        Self::end(&output)
+    }
+
+    fn end(output: &Self) -> Vec<u8> {
         std::mem::take(&mut *lock(&output.stderr)).into_end()
+    }
+
+    /// Whether anything of stderr arrived yet.
+    #[cfg(test)]
+    pub(crate) fn has_stderr(&self) -> bool {
+        !lock(&self.stderr).end().is_empty()
     }
 }
 
@@ -256,7 +276,7 @@ impl ChildReaper {
     /// to exit on its own and one which got killed to exit. The helpers of a
     /// runtime which exited get it to close its output, see
     /// [`RuntimeOutput::finish`].
-    pub(super) const RUNTIME_GRACE: Duration = Duration::from_secs(5);
+    pub(crate) const RUNTIME_GRACE: Duration = Duration::from_secs(5);
 
     /// Run the runtime with the I/O of the process it starts, and return the
     /// PID of the process once the runtime exited. The caller registers it

@@ -26,17 +26,17 @@ macro_rules! progress {
 
 /// The OOM related counters of a memory events file.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct OomCounters {
+pub(super) struct OomCounters {
     /// Times the memory limit of the cgroup was hit.
     oom: u64,
 
     /// Processes killed because of it. Kills are accounted to the victim's
     /// leaf cgroup, so this drifts apart from `oom` by design and the two are
     /// compared separately.
-    oom_kill: u64,
+    pub(super) oom_kill: u64,
 
     /// Whether the file has the kill counter, which kernels since 4.13 do.
-    has_kill: bool,
+    pub(super) has_kill: bool,
 }
 
 impl OomCounters {
@@ -507,15 +507,22 @@ impl OOMWatcher {
         Ok((counters, found_oom))
     }
 
-    /// Parse the `oom` and `oom_kill` counters of a memory events file.
+    /// Read the `oom` and `oom_kill` counters of a memory events file.
     fn read_oom_counters(path: &Path) -> Result<OomCounters> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("read memory events file: {}", path.display()))?;
         trace!(content);
+        Self::parse_oom_counters(&content)
+            .with_context(|| format!("parse memory events file: {}", path.display()))
+    }
+
+    /// Parse the `oom` and `oom_kill` counters of the content of a memory
+    /// events file.
+    pub(super) fn parse_oom_counters(content: &str) -> Result<OomCounters> {
         let mut counters = OomCounters::default();
         let mut has_oom = false;
 
-        for (key, value) in Self::counters(&content) {
+        for (key, value) in Self::counters(content) {
             let target = match key {
                 "oom" => {
                     has_oom = true;
@@ -534,7 +541,7 @@ impl OOMWatcher {
         // counter. Without, it is no memory events file, or one which is
         // being written, like a fake one.
         if !has_oom {
-            bail!("no oom counter in memory events file {}", path.display())
+            bail!("no oom counter")
         }
         Ok(counters)
     }

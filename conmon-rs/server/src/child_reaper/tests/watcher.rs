@@ -1,6 +1,7 @@
 //! Watching a child until it exited and reporting its exit.
 
 use super::*;
+use crate::oom_watcher::OOMEvent;
 
 #[tokio::test(start_paused = true)]
 async fn watch_reports_exit_codes() -> Result<()> {
@@ -31,6 +32,38 @@ async fn check_watch(cases: &[(&str, i32)]) -> Result<()> {
     }
     // No temporary exit file is left behind.
     assert_eq!(std::fs::read_dir(dir.path())?.count(), 1);
+    Ok(())
+}
+
+/// An OOM which only the exit status tells, like once the cgroup is gone,
+/// gets its files from the watcher, but only for a SIGKILL.
+#[tokio::test]
+async fn possible_oom_counts_only_for_sigkill() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let possible = Some(OOMEvent::possible(true));
+    for (exit_code, oomed) in [(137, true), (143, false)] {
+        let path = dir.path().join(exit_code.to_string());
+        let paths = [path.clone()];
+        assert_eq!(
+            ReapableChild::handle_oom(possible, exit_code, &paths).await,
+            oomed,
+            "{exit_code}"
+        );
+        assert_eq!(path.exists(), oomed, "{exit_code}");
+    }
+
+    // Neither without a hint, nor for an OOM which the OOM watcher found
+    // and wrote the files for itself.
+    let path = dir.path().join("oom");
+    let paths = [path.clone()];
+    assert!(!ReapableChild::handle_oom(None, 137, &paths).await);
+    assert!(!ReapableChild::handle_oom(Some(OOMEvent::possible(false)), 137, &paths).await);
+    let found = OOMEvent {
+        oom: true,
+        possible_oom: false,
+    };
+    assert!(ReapableChild::handle_oom(Some(found), 0, &paths).await);
+    assert!(!path.exists());
     Ok(())
 }
 

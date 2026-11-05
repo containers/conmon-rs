@@ -364,12 +364,17 @@ impl Pause {
         debug!("Pause args: {:?}", args);
 
         // On the blocking pool, a hung file system must not stall the
-        // runtime thread and with it every request.
+        // runtime thread and with it every request. A PID file which an
+        // earlier server left behind must not count as the one of this
+        // setup, see left_init.
         let dir = base_path.to_path_buf();
-        task::spawn_blocking(move || fs::create_dir_all(dir))
-            .await
-            .context("join creating base path")?
-            .context("create base path")?;
+        let pid_path = Self::pause_pid_path(base_path, pod_id);
+        task::spawn_blocking(move || {
+            fs::create_dir_all(dir).and_then(|()| fs_util::remove_file(&pid_path))
+        })
+        .await
+        .context("join creating base path")?
+        .context("create base path")?;
         debug!("Pause base path: {}", base_path.display());
 
         // The running binary, also after a package upgrade replaced the file
@@ -422,8 +427,8 @@ impl Pause {
             // Stuck in the kernel, it gets reaped once it exits. The setup
             // may have bound namespaces already.
             task::spawn(async move { child.wait().await });
-            stop_blocking(move || pause.stop()).await;
-            bail!("pause did not exit after getting killed")
+            let e = anyhow::format_err!("pause did not exit after getting killed");
+            return Err(pause.undo(output, e, false).await);
         };
         match Self::check_setup(status) {
             Ok(()) => {}
@@ -439,8 +444,7 @@ impl Pause {
                 {
                     debug!("Unable to kill pause child: {e}");
                 }
-                stop_blocking(move || pause.stop()).await;
-                return Err(e);
+                return Err(pause.undo(output, e, true).await);
             }
         }
 
@@ -453,8 +457,7 @@ impl Pause {
                 Ok(pid) => pid,
                 Err(e) => {
                     warn!("Unable to read the pause PID, its init process stays behind");
-                    stop_blocking(move || pause.stop()).await;
-                    return Err(e);
+                    return Err(pause.undo(output, e, false).await);
                 }
             };
             info!("Pause PID is: {pid}");
@@ -477,6 +480,53 @@ impl Pause {
         }
 
         Ok(pause)
+    }
+
+    /// Undo a failed setup, which may have bound namespaces already, and
+    /// return its error with the end of what the subcommand printed, which
+    /// usually holds the reason. A subcommand which exited from a signal or
+    /// could not be waited for (`left`, see [`SetupFailure::Left`]) may also
+    /// have left the init of a PID namespace behind. The output gets only a
+    /// short wait after the stop: a process stuck in the kernel or a child
+    /// of the subcommand may hold the pipe open, the shutdown has no time
+    /// for that. The rest of what the subcommand printed before it exited
+    /// or got killed is read by then.
+    async fn undo(self, output: RuntimeOutput, e: anyhow::Error, left: bool) -> anyhow::Error {
+        stop_blocking(move || {
+            let mut pause = self;
+            if left {
+                // Before the stop removes the PID file.
+                pause.process = Self::left_init(&pause.base_path, &pause.pod_id, &pause.namespaces);
+            }
+            pause.stop();
+        })
+        .await;
+        with_stderr(e, &output.take(Self::OUTPUT_WAIT).await)
+    }
+
+    /// How long [`Pause::undo`] waits for the rest of the output, well below
+    /// the [`Pause::KILL_WAIT`] the shutdown leaves a killed setup.
+    const OUTPUT_WAIT: Duration = Duration::from_millis(100);
+
+    /// The init of a PID namespace which a killed pause subcommand may have
+    /// left behind. The child of the subcommand stops the init when the
+    /// subcommand dies before it sent the mounts message; only a kill after
+    /// that leaves the init running, a child of this server, the subreaper,
+    /// once the child of the subcommand exited as well. [`Pause::stop`]
+    /// removes the PID file, so only this can still stop the init. Best
+    /// effort: while the init is still a grandchild, it stays behind. Like
+    /// for a successful setup, the PID only counts while it belongs to an
+    /// unreaped child, which the orphan sweep reaps after a grace period.
+    /// The file is the one of this setup, [`Pause::init`] removed a left
+    /// one before the spawn.
+    fn left_init(base_path: &Path, pod_id: &str, namespaces: &[Namespace]) -> Option<Process> {
+        if !namespaces.contains(&Namespace::Pid) {
+            return None;
+        }
+        // Only an unreaped child, the PID may have been reused otherwise.
+        Self::read_pause_pid(base_path, pod_id)
+            .ok()
+            .and_then(Process::open_child)
     }
 
     /// Check the exit status of the pause subcommand. It undoes its own

@@ -43,7 +43,7 @@ impl OOMWatcher {
     /// The cgroupfs path of the unified hierarchy from a `/proc/<pid>/cgroup`
     /// file. Named cgroup v1 hierarchies, like the one of systemd, are
     /// listed as well and may come first.
-    fn unified_cgroup_path(cgroup_file: impl BufRead) -> Result<PathBuf> {
+    pub(super) fn unified_cgroup_path(cgroup_file: impl BufRead) -> Result<PathBuf> {
         for line in cgroup_file.lines() {
             let line = line.context("read line from cgroup file")?;
             if line.starts_with("0::") {
@@ -57,7 +57,7 @@ impl OOMWatcher {
     /// `hierarchy-ID:controller-list:cgroup-path` is the one of its hierarchy.
     /// The path may contain colons itself. The unified hierarchy of a hybrid
     /// setup lists no controllers, it is not the one of any subsystem.
-    fn cgroup_v1_path(line: &str, subsystem: &str) -> Result<Option<PathBuf>> {
+    pub(super) fn cgroup_v1_path(line: &str, subsystem: &str) -> Result<Option<PathBuf>> {
         let mut iter = line.splitn(3, ':').skip(1);
         let controllers = iter.next().context("no system found in cgroup")?;
         let path = Self::strip_cgroup_root(iter.next())?;
@@ -70,7 +70,7 @@ impl OOMWatcher {
 
     /// The cgroupfs path of the unified hierarchy line `0::cgroup-path` of
     /// `/proc/<pid>/cgroup`.
-    fn cgroup_v2_path(line: &str) -> Result<PathBuf> {
+    pub(super) fn cgroup_v2_path(line: &str) -> Result<PathBuf> {
         let path = Self::strip_cgroup_root(line.splitn(3, ':').nth(2))?;
         Ok(Path::new(CGROUP_ROOT).join(path))
     }

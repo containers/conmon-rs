@@ -3,6 +3,8 @@
 //! events of the unified hierarchy with cgroup v2.
 
 mod cgroup_path;
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) mod fuzzing;
 mod inotify;
 mod v1;
 mod v2;
@@ -93,7 +95,7 @@ impl OOMWatcher {
                 .context("setup cgroupv1 oom handling")
         };
         let event = res
-            .inspect_err(|e| error!("Failed to watch OOM: {e:#}"))
+            .inspect_err(|e| error!("Unable to watch OOM: {e:#}"))
             .ok()
             .flatten();
         if event.is_some_and(|event| event.oom) {
@@ -123,7 +125,7 @@ impl OOMWatcher {
         for path in exit_paths {
             debug!("Writing OOM file: {}", path.display());
             if let Err(e) = File::create(path).await {
-                error!("Could not create oom file at {}: {:#}", path.display(), e);
+                error!("Unable to create OOM file {}: {e:#}", path.display());
             }
         }
     }
