@@ -207,16 +207,11 @@ impl Process {
     /// may have reaped it already, and another process reused its PID. None
     /// then, a [`Process::child`] for it would only fail its signals unless
     /// the PID got reused by another child of the server, and a wait for it
-    /// could take the exit status of that child.
-    pub(crate) fn open_child(pid: Pid) -> Option<Self> {
+    /// could take the exit status of that child. The error tells why, for
+    /// the caller to log.
+    pub(crate) fn open_child(pid: Pid) -> nix::Result<Self> {
         let _guard = mutex::read(&REAP_LOCK);
-        match peek_exit(Id::Pid(pid)) {
-            Ok(_) => Some(Self::open(pid)),
-            Err(e) => {
-                debug!("PID {pid} is no unreaped child: {e}");
-                None
-            }
-        }
+        peek_exit(Id::Pid(pid)).map(|_| Self::open(pid))
     }
 
     /// Refer to a child by its PID alone, which gets checked to still belong
@@ -259,11 +254,7 @@ impl Process {
         let _guard = mutex::read(&REAP_LOCK);
         let own_pgid = getpgid(None).ok();
         if let Err(e) = self.signal_unlocked(None) {
-            if signals_group(self.pid, own_pgid) && group_has_child(self.pid) {
-                debug!("Signalling the remaining group of PID {}", self.pid);
-                return kill(Pid::from_raw(-self.pid.as_raw()), signal);
-            }
-            return Err(e);
+            return self.signal_remaining_group(signal, own_pgid, e);
         }
         if let Ok(pgid) = getpgid(Some(self.pid))
             && signals_group(pgid, own_pgid)
@@ -272,6 +263,28 @@ impl Process {
             debug!("Unable to signal process group {pgid}: {e}");
         }
         self.signal_unlocked(Some(signal))
+    }
+
+    /// Signal the remaining group of a process which is gone, if it still
+    /// has a member which keeps its ID in use, fail with `e` otherwise. Not
+    /// while another process has the PID: the group of a leader which got
+    /// reaped keeps the ID from getting reused, but once that group is gone
+    /// as well, a process which reused the PID may lead a group of its own
+    /// under it.
+    fn signal_remaining_group(
+        &self,
+        signal: Signal,
+        own_pgid: Option<Pid>,
+        e: Errno,
+    ) -> nix::Result<()> {
+        if signals_group(self.pid, own_pgid)
+            && kill(self.pid, None) == Err(Errno::ESRCH)
+            && group_has_child(self.pid)
+        {
+            debug!("Signalling the remaining group of PID {}", self.pid);
+            return kill(Pid::from_raw(-self.pid.as_raw()), signal);
+        }
+        Err(e)
     }
 
     fn signal_unlocked(&self, signal: Option<Signal>) -> nix::Result<()> {

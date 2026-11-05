@@ -393,7 +393,7 @@ pub(super) struct ExecTeardown {
 
     /// The process, which its watcher may reap before the token got
     /// cancelled, so it does not get signalled by its PID.
-    process: Process,
+    process: Arc<Process>,
 
     /// Set once the session ended with the idle timeout or lost the exit,
     /// which kills the process, like the reaper kills one after its timeout.

@@ -4,25 +4,28 @@
 use super::{Namespace, Pause};
 use crate::{config::PauseArgs, process::wait_child};
 use anyhow::{Context, Result, bail};
-use libc::pid_t;
+use libc::{c_ulong, pid_t};
 use nix::{
     errno::Errno,
-    sched::{CloneFlags, unshare},
+    mount::{MntFlags, MsFlags, mount, umount2},
+    poll::{PollFd, PollFlags, PollTimeout, poll},
+    sched::{CloneFlags, setns, unshare},
     sys::{
         prctl,
         signal::{SigSet, Signal, kill},
         wait::{Id, WaitPidFlag, waitpid},
     },
     unistd::{
-        ForkResult, Gid, Pid, SysconfVar, Uid, dup2_stderr, fork, getpid, setresgid, setresuid,
-        sysconf,
+        ForkResult, Gid, Pid, SysconfVar, Uid, chdir, dup2_stderr, fork, getpid, pivot_root,
+        setresgid, setresuid, sysconf,
     },
 };
 use std::{
     fmt::Write as _,
     fs::{self, File},
     io::{Read, Write},
-    os::unix::net::UnixStream,
+    net::Shutdown,
+    os::{fd::AsFd, unix::net::UnixStream},
     path::{Path, PathBuf},
 };
 use tracing::{debug, trace, warn};
@@ -40,7 +43,9 @@ impl Pause {
     /// The bind mounts keep every namespace alive except a PID namespace, which
     /// dies with its init process. Unsharing a PID namespace does not move the
     /// caller into it, so the child forks that init, which is the only process
-    /// that stays around.
+    /// that stays around, in an empty root without capabilities, see
+    /// [`Pause::enter_empty_root`], [`Pause::drop_privileges`] and
+    /// [`Pause::wait_for_binds`].
     #[expect(unsafe_code, reason = "forking")]
     pub(crate) fn run(args: &PauseArgs) -> Result<()> {
         let &PauseArgs {
@@ -88,9 +93,11 @@ impl Pause {
 
         let (sock_parent, sock_child) = UnixStream::pair().context("create unix socket pair")?;
 
-        // SAFETY: the pause process is single threaded at this point and the
-        // child only unshares namespaces, talks over the socket pair and waits
-        // for a signal, all of which is fine after a fork.
+        // SAFETY: the pause process is single threaded at this point, it
+        // starts no threads before, so no lock which the child needs can be
+        // held by another thread. The child only unshares namespaces, talks
+        // over the socket pair and forks the init, which is fine after a
+        // fork, and its errors allocate only with no other thread around.
         match unsafe { fork().context("forking process")? } {
             ForkResult::Parent { child } => {
                 // Close the child end, so that reads fail if the child dies.
@@ -148,31 +155,76 @@ impl Pause {
         unshare(flags).context("unshare with clone flags")?;
 
         // Only the next child becomes part of a new PID namespace, as its init.
-        let holder = if pid {
+        let (holder, init_sock) = if pid {
+            // Read before the fork, which allocates, while the mounts are
+            // still the ones of the host.
+            let empty_root = Self::root_can_pivot();
+            if !empty_root {
+                eprintln!(
+                    "The root cannot be pivoted, pause init keeps the root and mounts of the host"
+                );
+            }
             // The init inherits the mask, so no signal arrives before it waits
             // for them: they stay pending until then.
             let signals = Self::init_signals();
             signals.thread_block().context("block init signals")?;
-            // SAFETY: the child of the pause process is single threaded, the
-            // init only waits for signals and reaps after the fork.
+            // The init reports over it once it set up its root, and waits for
+            // it to close, see `wait_for_binds`.
+            let (mut init_sock, mut child_sock) =
+                UnixStream::pair().context("create init socket pair")?;
+            // SAFETY: the child of the pause process is single threaded like
+            // the pause process, see above. The init only sets up its root,
+            // drops its privileges, talks over the socket pair, waits for
+            // signals and reaps after the fork, its errors allocate only with
+            // no other thread around.
             match unsafe { fork().context("forking PID namespace init")? } {
                 ForkResult::Parent { child } => {
                     signals.thread_unblock().context("unblock init signals")?;
-                    child
+                    drop(child_sock);
+                    // Before the namespaces get bound, so that none of the
+                    // bind mounts propagates into the mount namespace of the
+                    // init. Nobody else stops the init if this fails: the
+                    // parent does not know it yet, and there is no PID file.
+                    if let Err(e) = Self::wait_for_init_root(&mut init_sock, &sock) {
+                        if let Err(e) = kill(child, Signal::SIGKILL) {
+                            debug!("Unable to kill pause init {child}: {e:#}");
+                        }
+                        return Err(e);
+                    }
+                    (child, Some(init_sock))
                 }
                 ForkResult::Child => {
                     drop(sock);
+                    drop(init_sock);
                     // The server reads the errors of the setup from stderr
                     // until it ends, which the init must not hold open. If
                     // it does, the server waits for it a bounded time.
-                    if let Ok(null) = File::open("/dev/null") {
+                    // /dev/null gets opened before the root is gone, stderr
+                    // replaced after the namespaces got bound, so that a
+                    // failure still reaches the server, which logs it. The
+                    // init keeps running in the root and the mount namespace
+                    // of the host then, where it can return to them, see
+                    // `enter_empty_root`. It drops its privileges either way.
+                    let null = File::open("/dev/null");
+                    if empty_root && let Err(e) = Self::enter_empty_root() {
+                        eprintln!("Unable to give pause init an empty root: {e:#}");
+                    }
+                    if let Err(e) = Self::drop_privileges() {
+                        eprintln!("Unable to drop the privileges of pause init: {e:#}");
+                    }
+                    if let Err(e) = Self::wait_for_binds(&mut child_sock) {
+                        eprintln!("Unable to make pause init not dumpable: {e:#}");
+                    }
+                    if let Ok(null) = null {
                         let _ = dup2_stderr(null);
                     }
+                    // Lets the pause child exit.
+                    drop(child_sock);
                     return Self::run_init(signals);
                 }
             }
         } else {
-            getpid()
+            (getpid(), None)
         };
 
         // Report the process holding all namespaces and wait for the parent
@@ -192,10 +244,221 @@ impl Pause {
         }
         result?;
 
+        // The init makes itself not dumpable now and stops holding stderr,
+        // before this process and the pause process exit, the server waits for
+        // the end of stderr.
+        if let Some(mut init_sock) = init_sock
+            && let Err(e) = init_sock
+                .shutdown(Shutdown::Write)
+                .and_then(|()| init_sock.read_to_end(&mut vec![]))
+        {
+            eprintln!("Unable to wait for pause init {holder}: {e}");
+        }
+
         // The bind mounts keep the namespaces alive on their own, only a PID
         // namespace dies with its init, which stays around.
         debug!("Namespaces bound, exiting pause child");
         Ok(())
+    }
+
+    /// Whether the root of this process can be pivoted, see
+    /// [`Pause::pivot_to_empty_root`]. Assumed if the mounts cannot be read,
+    /// a failed pivot returns to the mounts of the host where it can.
+    fn root_can_pivot() -> bool {
+        fs::read_to_string("/proc/self/mountinfo")
+            .map_or(true, |mountinfo| Self::root_has_parent_mount(&mountinfo))
+    }
+
+    /// Whether the root in a `/proc/<pid>/mountinfo` is a mount point which
+    /// is mounted on another mount, which pivot_root(2) needs. The root of
+    /// an initramfs is the root mount of its mount namespace, which is its
+    /// own parent, see proc_pid_mountinfo(5). A chroot into a directory which
+    /// is not a mount point has no mount at `/`.
+    fn root_has_parent_mount(mountinfo: &str) -> bool {
+        // The ID and parent ID of the mounts at `/`.
+        let roots: Vec<(&str, &str)> = mountinfo
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split(' ');
+                let (id, parent) = (fields.next()?, fields.next()?);
+                // Skips the device and the root of the mount.
+                (fields.nth(2)? == "/").then_some((id, parent))
+            })
+            .collect();
+        // The topmost one, which is no parent of another one.
+        roots
+            .iter()
+            .find(|(id, _)| !roots.iter().any(|(_, parent)| parent == id))
+            .is_some_and(|(id, parent)| id != parent)
+    }
+
+    /// Where the init of a PID namespace mounts its empty root, in a mount
+    /// namespace of its own. A directory which every host has, the server
+    /// runs the pause process through `/proc/self/exe`.
+    const EMPTY_ROOT: &'static str = "/proc";
+
+    /// Move into a mount namespace of its own with an empty, read-only root,
+    /// for the init of a PID namespace. A process of the pod which may trace
+    /// the init, like one with `CAP_SYS_PTRACE` without a user namespace,
+    /// would reach the root of the host through `/proc/1/root` otherwise.
+    /// The init needs no files, it only waits for signals and reaps. The
+    /// parent of the pause process binds the other namespaces of the init
+    /// from the host, which this does not change.
+    ///
+    /// On a failure, the init returns to the mount namespace of the host: a
+    /// copy of it would keep all mounts of the host busy for the lifetime of
+    /// the pod, and shared with them if making them private failed. With a
+    /// user namespace, the init may not return, the mount namespace of the
+    /// host belongs to the user namespace of the host. It stays in the copy
+    /// then, which the error tells.
+    fn enter_empty_root() -> Result<()> {
+        // Closed on return.
+        let host = File::open("/proc/self/ns/mnt").context("open mount namespace")?;
+        unshare(CloneFlags::CLONE_NEWNS).context("unshare mount namespace")?;
+        let Err(e) = Self::pivot_to_empty_root() else {
+            return Ok(());
+        };
+        match setns(&host, CloneFlags::CLONE_NEWNS) {
+            Ok(()) => Err(e),
+            Err(errno) => Err(anyhow::format_err!(
+                "{e:#}, staying in a copy of the host mount namespace, unable to return: {errno}"
+            )),
+        }
+    }
+
+    /// Replace the root of a mount namespace which [`Pause::enter_empty_root`]
+    /// unshared with an empty tmpfs.
+    fn pivot_to_empty_root() -> Result<()> {
+        // Nothing of the following may reach the host.
+        mount(
+            None::<&str>,
+            "/",
+            None::<&str>,
+            MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+            None::<&str>,
+        )
+        .context("make mounts private")?;
+        mount(
+            Some("tmpfs"),
+            Self::EMPTY_ROOT,
+            Some("tmpfs"),
+            MsFlags::MS_RDONLY | MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+            Some("size=4k,mode=0555"),
+        )
+        .context("mount empty root")?;
+        chdir(Self::EMPTY_ROOT).context("change into empty root")?;
+        // Stacks the old root on top of the new one, from where it gets
+        // detached along with the mounts of the host, see pivot_root(2). A
+        // chroot would not hide the host, `/proc/1/root/..` leads from the
+        // tmpfs to where it is mounted. A root which cannot be pivoted, like
+        // an initramfs, does not get here, see `root_can_pivot`.
+        pivot_root(".", ".").context("pivot root")?;
+        umount2(".", MntFlags::MNT_DETACH).context("detach old root")?;
+        chdir("/").context("change into new root")
+    }
+
+    /// Drop all capabilities of the init of a PID namespace, also when its
+    /// root could not be emptied. It only waits for signals and reaps, a
+    /// process of the pod which may trace it could make it run syscalls
+    /// with them otherwise, like mounting the disk of the host. It keeps its
+    /// user ID, the server still signals it. Every step runs, the first
+    /// failure gets returned. The init is single threaded, so the sets which
+    /// capset(2) clears for its thread are the ones of the process. Clearing
+    /// the permitted set clears the ambient one as well.
+    #[expect(unsafe_code, reason = "prctl and capset without a safe wrapper")]
+    fn drop_privileges() -> Result<()> {
+        let no_new_privs = prctl::set_no_new_privs().context("set no new privileges");
+
+        // Needs CAP_SETPCAP, before the effective set gets cleared. The
+        // kernel rejects the first capability it does not know. Best effort:
+        // a server without CAP_SETPCAP, like one with a trimmed bounding
+        // set, cannot drop them, and the cleared sets below already keep
+        // the init from using any, with no_new_privs it cannot regain them
+        // through an execve either.
+        let zero: c_ulong = 0;
+        let mut bounding = Ok(());
+        for cap in 0..c_ulong::from(u64::BITS) {
+            // SAFETY: a prctl which takes no pointers.
+            if unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap, zero, zero, zero) } == -1 {
+                let errno = Errno::last();
+                if !matches!(errno, Errno::EINVAL | Errno::EPERM) {
+                    bounding = Err(errno).with_context(|| format!("drop capability {cap}"));
+                }
+                break;
+            }
+        }
+
+        // The header of capset(2), `_LINUX_CAPABILITY_VERSION_3` for this
+        // thread, and two entries of the effective, permitted and
+        // inheritable sets, for 64 capabilities.
+        let header: [u32; 2] = [0x2008_0522, 0];
+        let data = [0u32; 6];
+        // SAFETY: the kernel reads the header and the two entries which the
+        // version takes, both outlive the call.
+        let sets = Errno::result(unsafe {
+            libc::syscall(libc::SYS_capset, header.as_ptr(), data.as_ptr())
+        })
+        .context("clear capability sets");
+
+        [no_new_privs, bounding, sets.map(drop)]
+            .into_iter()
+            .collect()
+    }
+
+    /// Report to the pause child that the init set up its root and wait for
+    /// the child to close its end of `sock`, which it does once the parent
+    /// of the pause process bound the namespaces, or on a failure. Then make
+    /// the init not dumpable: without capabilities, every process of the pod
+    /// with its user ID could trace it otherwise. Only a process with
+    /// `CAP_SYS_PTRACE` in the user namespace which the pause process got
+    /// executed in may trace it or open its `/proc/<pid>/root` and
+    /// `/proc/<pid>/ns` entries then. The parent of the pause process opens
+    /// the latter before, so binding needs no `CAP_SYS_PTRACE`, and no
+    /// process of the pod exists yet. A report or a wait which fails means
+    /// that the child is gone, which failed the setup and kills the init, so
+    /// only the dumpable flag can fail it. Allocates only for an error.
+    fn wait_for_binds(sock: &mut UnixStream) -> Result<()> {
+        let _ = sock.write_all(Self::MSG);
+        let mut buf = [0];
+        loop {
+            match sock.read(&mut buf) {
+                // Nothing gets sent, but it only waits for the end.
+                Ok(1..) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Ok(0) | Err(_) => break,
+            }
+        }
+        prctl::set_dumpable(false).context("make it not dumpable")
+    }
+
+    /// Wait until the init reported over `init_sock` that it set up its
+    /// root. Fails if the init died before, or once the parent of the pause
+    /// process closed `parent`, like when the server killed it after the
+    /// setup timeout: an init whose mounts stall would keep this process
+    /// waiting forever otherwise. The parent sends nothing meanwhile.
+    fn wait_for_init_root(init_sock: &mut UnixStream, parent: &UnixStream) -> Result<()> {
+        let ready = |fd: &PollFd| fd.revents().is_some_and(|events| !events.is_empty());
+        loop {
+            let (root, parent_gone) = {
+                let mut fds = [
+                    PollFd::new(init_sock.as_fd(), PollFlags::POLLIN),
+                    PollFd::new(parent.as_fd(), PollFlags::POLLIN),
+                ];
+                match poll(&mut fds, PollTimeout::NONE) {
+                    Ok(_) => (ready(&fds[0]), ready(&fds[1])),
+                    Err(Errno::EINTR) => continue,
+                    Err(e) => return Err(e).context("wait for the root of pause init"),
+                }
+            };
+            if root {
+                return init_sock
+                    .read_exact(&mut [0])
+                    .context("wait for the root of pause init");
+            }
+            if parent_gone {
+                bail!("pause process is gone while waiting for the root of pause init")
+            }
+        }
     }
 
     /// The init of the PID namespace, which keeps it alive until terminated.
@@ -406,14 +669,16 @@ impl PauseParent<'_> {
         // namespaces are already in place, so a failure is no reason to fail
         // the whole setup.
         if let Err(e) = waitpid(child, None) {
-            warn!("Unable to wait for pause child {child}: {e:#}");
+            eprintln!("Unable to wait for pause child {child}: {e:#}");
         }
 
         Ok(())
     }
 
     /// Undo a failed setup: kill the pause processes and remove the bind
-    /// mounts and PID file which may already exist.
+    /// mounts and PID file which may already exist. Its failures do not get
+    /// printed, the server adds stderr to the error of the setup, which
+    /// must carry only its cause, and the subcommand runs without logging.
     fn cleanup(&self) {
         let child = self.child;
 

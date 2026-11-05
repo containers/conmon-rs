@@ -410,6 +410,7 @@ impl conmon::Server for Server {
                         io,
                         cleanup_cmd,
                         token: token.clone(),
+                        process: None,
                     };
                     child_reaper.watch_grandchild(child, leak_fds, call)?;
 

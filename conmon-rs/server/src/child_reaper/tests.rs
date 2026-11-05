@@ -69,5 +69,6 @@ fn child(pid: Pid, timeout: Option<Instant>, exit_path: &Path, cleanup: &[&str])
         io: SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?),
         cleanup_cmd: cleanup.iter().map(ToString::to_string).collect(),
         token: CancellationToken::new(),
+        process: None,
     })
 }

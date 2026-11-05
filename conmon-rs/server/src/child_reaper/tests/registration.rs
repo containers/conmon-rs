@@ -55,7 +55,7 @@ async fn registration_keeps_the_child_claimed() -> Result<()> {
     let sh = spawn_sh("exec sleep 60")?;
     // As `create_child` leaves it.
     let mut call = reaper.begin_call(distant_deadline())?;
-    call.pending = Some(PendingPid::new(&reaper.pending, sh.pid));
+    call.claim(&reaper.pending, sh.pid);
     assert!(reaper.is_claimed(sh.pid));
 
     let child = child(sh.pid, None, &dir.path().join("exit"), &[])?;

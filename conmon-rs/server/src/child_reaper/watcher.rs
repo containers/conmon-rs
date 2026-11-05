@@ -8,7 +8,7 @@ use crate::{
     container_log::{ContainerLog, SharedContainerLog},
     init,
     oom_watcher::{OOMEvent, OOMWatcher},
-    process,
+    process::{self, Process},
 };
 use anyhow::{Context, Result};
 use nix::{sys::signal::Signal, unistd::Pid};
@@ -16,7 +16,10 @@ use std::{
     ffi::OsString,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tokio::{
     fs,
@@ -74,7 +77,7 @@ impl ReapableChild {
     /// process which inherited the pipes and keeps them open must not delay
     /// the exit file. Output on its way into the log is no pause, a slow log
     /// driver must not cut off the end of the log, up to the `deadline`.
-    /// False if the log drivers did not take the output by then.
+    /// False if the deadline passed, which got logged here.
     pub(super) async fn wait_for_output(attach: SharedContainerAttach, deadline: Instant) -> bool {
         let (mut rx, ended) = attach.subscribe();
         if ended {
@@ -93,8 +96,8 @@ impl ReapableChild {
             // another chance.
             let Ok(output) = time::timeout_at(deadline, drain.recv_output(&mut rx, None)).await
             else {
-                debug!("Output did not end in time, not waiting for it");
-                return true;
+                warn!("Output did not end in time, not waiting for it");
+                return false;
             };
             if output.is_none() && (drain.exhausted() || !attach.is_logging()) {
                 return true;
@@ -125,9 +128,10 @@ impl ReapableChild {
                     Ok(Message::Done) | Err(broadcast::error::RecvError::Closed)
                 ) {}
             };
-            // Read loops which hang in the log drivers cannot end, and that
-            // got logged already. With the deadline passed, the sync would
-            // get no time either.
+            // The read loops get until the deadline to end, the sync would
+            // get no time after it. A wait for the output which ran into the
+            // deadline, because the output did not end or the log drivers
+            // hang, logged that already, the read loops hardly end then.
             if time::timeout_at(deadline, end).await.is_err() {
                 if logged {
                     warn!("Read loops did not end in time, not waiting for them");
@@ -156,6 +160,7 @@ impl ReapableChild {
             io,
             cleanup_cmd,
             token,
+            process,
         } = child;
         (
             id,
@@ -163,6 +168,8 @@ impl ReapableChild {
                 seq: NEXT_SEQ.fetch_add(1, Ordering::Relaxed),
                 kind,
                 pid,
+                // Not reaped before its watcher runs, the PID is its own.
+                process: process.unwrap_or_else(|| Arc::new(Process::open(pid))),
                 io,
                 token,
             },

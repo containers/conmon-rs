@@ -305,6 +305,7 @@ async fn spawns_with_changed_targets_get_retried_once() -> Result<()> {
         let (passed, reader) = std::os::unix::net::UnixStream::pair()?;
         reader.set_nonblocking(true)?;
         runtime_call::TARGET_CHANGES.with(|n| n.set(changes));
+        runtime_call::SPAWN_ATTEMPTS.with(|n| n.set(0));
         let mut io = ContainerIO::new(false, ContainerLog::new())?;
         let call = RuntimeCall {
             additional_fds: vec![passed.into()],
@@ -312,12 +313,14 @@ async fn spawns_with_changed_targets_get_retried_once() -> Result<()> {
         };
         let err = reaper.create_child(call, &mut io).await.unwrap_err();
         runtime_call::TARGET_CHANGES.with(|n| n.set(0));
-        // The runtime ran and failed on its own.
-        assert_eq!(
-            !format!("{err:#}").contains("a target descriptor changed during spawn"),
-            retried,
-            "{err:#}"
-        );
+        // Tried once more, never twice. The retry itself may find a target
+        // which a parallel test changed for real, so whether the runtime
+        // ran only tells something when both spawns failed on purpose.
+        assert_eq!(runtime_call::SPAWN_ATTEMPTS.with(std::cell::Cell::get), 2);
+        let changed = format!("{err:#}").contains("a target descriptor changed during spawn");
+        if !retried {
+            assert!(changed, "{err:#}");
+        }
         // A process which a parallel test forks may hold a copy until it
         // execs.
         wait_for_real(|| matches!(std::io::Read::read(&mut &reader, &mut [0; 1]), Ok(0))).await;

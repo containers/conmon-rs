@@ -42,10 +42,13 @@ pub fn run() -> Result<()> {
     }
 
     if let Some(Commands::Pause(args)) = config.command() {
-        // The server adds stderr to the error of the request, see
-        // `Pause::init`, it runs without logging. One line per process: the
+        // The server adds stderr to the error of the request, or logs it
+        // after a successful setup, see `Pause::init`. So it runs without
+        // logging and prints its warnings to stderr, the cleanup after a
+        // failure prints nothing, the error must carry only the cause. The
         // forked child of the pause process ends up here as well and may add
-        // its own failure.
+        // its own failure, and the init prints warnings of its own, so stderr
+        // may hold several lines.
         if let Err(e) = Pause::run(args) {
             eprintln!("run pause: {e:#}");
             std::process::exit(1);

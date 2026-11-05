@@ -199,6 +199,7 @@ pub(super) fn attach_child(
         io: io.clone(),
         cleanup_cmd: vec![],
         token: token.clone(),
+        process: None,
     });
     Ok((io, child, token))
 }

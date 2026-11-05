@@ -118,27 +118,53 @@ fn signal_group_reaches_the_group_until_reaped() -> Result<()> {
 
 #[test]
 fn signal_group_reaches_members_of_reaped_leader() -> Result<()> {
-    // The leader of a group, and a member which outlives it.
-    let mut leader = Guarded::spawn(
+    for use_pidfd in [true, false] {
+        // The leader of a group, and a member which outlives it.
+        let mut leader = Guarded::spawn(
+            std::process::Command::new("sleep")
+                .arg("60")
+                .process_group(0),
+        )?;
+        let pgid = child_pid(leader.0.id())?;
+        let mut member = Guarded::spawn(
+            std::process::Command::new("sleep")
+                .arg("60")
+                .process_group(pgid.as_raw()),
+        )?;
+        let mut process = Process::open(pgid);
+        if !use_pidfd {
+            process.pidfd = None;
+        }
+        leader.0.kill()?;
+        leader.0.wait()?;
+
+        process.signal_group(Signal::SIGTERM)?;
+        assert_eq!(member.0.wait()?.signal(), Some(Signal::SIGTERM as i32));
+
+        // Without members, nothing gets signalled.
+        assert!(process.signal_group(Signal::SIGTERM).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn signal_group_skips_the_group_of_a_reused_pid() -> Result<()> {
+    // The pidfd of a process which got reaped, with the PID of another one
+    // which leads a group of its own, as if that one reused the PID.
+    let mut reaped = std::process::Command::new("true").spawn()?;
+    let pidfd = Process::open(child_pid(reaped.id())?).pidfd;
+    assert!(pidfd.is_some());
+    reaped.wait()?;
+    let reused = Guarded::spawn(
         std::process::Command::new("sleep")
             .arg("60")
             .process_group(0),
     )?;
-    let pgid = child_pid(leader.0.id())?;
-    let mut member = Guarded::spawn(
-        std::process::Command::new("sleep")
-            .arg("60")
-            .process_group(pgid.as_raw()),
-    )?;
-    leader.0.kill()?;
-    leader.0.wait()?;
+    let pid = child_pid(reused.0.id())?;
+    let process = Process { pid, pidfd };
 
-    let process = Process::child(pgid);
-    process.signal_group(Signal::SIGTERM)?;
-    assert_eq!(member.0.wait()?.signal(), Some(Signal::SIGTERM as i32));
-
-    // Without members, nothing gets signalled.
-    assert!(process.signal_group(Signal::SIGTERM).is_err());
+    assert_eq!(process.signal_group(Signal::SIGKILL), Err(Errno::ESRCH));
+    assert!(Process::child(pid).is_running());
     Ok(())
 }
 
@@ -184,7 +210,7 @@ fn open_child_checks_the_pid() -> Result<()> {
     child.0.wait()?;
 
     // The PID may belong to another process by now, it is not opened.
-    assert!(Process::open_child(pid).is_none());
+    assert!(Process::open_child(pid).is_err());
     Ok(())
 }
 
@@ -242,7 +268,7 @@ async fn wait_for_traced_process_waits_for_the_tracer() -> Result<()> {
             Some(libc::EPERM | libc::ENOSYS)
         )
     {
-        eprintln!("Skipping, tracing is not available: {e}");
+        eprintln!("skipped: tracing is not available: {e}");
         wait_for_exit_code(pid).await;
         return Ok(());
     }

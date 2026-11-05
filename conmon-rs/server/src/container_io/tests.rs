@@ -527,6 +527,36 @@ async fn runtime_errors_stop_the_output() -> Result<()> {
 }
 
 #[tokio::test]
+async fn runtime_errors_carry_the_end_of_stderr() -> Result<()> {
+    let mut io = ContainerIO::new(false, ContainerLog::new())?;
+    io.collect_stdio(true, true)?;
+    // More than the tail, but below the size limit, so not truncated.
+    let mut child = tokio::process::Command::new("sh")
+        .args([
+            "-c",
+            "head -c 100000 /dev/zero | tr '\\0' x >&2; printf oops >&2",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    io.connect_streams(
+        None,
+        child.stdout.take(),
+        child.stderr.take(),
+        CancellationToken::new(),
+    );
+    assert!(child.wait().await?.success());
+
+    let e = format!("{:#}", io.runtime_error(anyhow::anyhow!("failed")).await);
+    assert!(
+        e.starts_with("failed: xxx") && e.ends_with("xoops"),
+        "{e:.20}"
+    );
+    assert_eq!(e.len(), "failed: ".len() + EarlyStream::TAIL_SIZE);
+    Ok(())
+}
+
+#[tokio::test]
 async fn exec_output_is_capped_without_blocking() -> Result<()> {
     let (mut writer, rx, read_loop) = spawn_loop(ContainerLog::new(), true);
 

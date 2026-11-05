@@ -59,6 +59,12 @@ pub(crate) struct ChildReaper {
     /// The runtime calls in progress, including the registration of their
     /// child, which the shutdown waits for.
     in_flight: Arc<watch::Sender<Calls>>,
+
+    /// Cancelled by the shutdown once the runtime calls in progress did not
+    /// end within [`ChildReaper::IN_FLIGHT_WAIT`]. A call whose runtime
+    /// still runs fails then and kills it on its own, which only the call
+    /// can do safely, see [`ChildReaper::kill_pending`].
+    stop_calls: CancellationToken,
 }
 
 /// Counts a runtime call as in progress until dropped. A successful
@@ -74,8 +80,38 @@ pub(crate) struct InFlight {
     seq: u64,
 
     /// Keeps the process which the call started pending until the call
-    /// ends, also if the call gets dropped before its registration.
+    /// ends, also if the call gets dropped before its registration, see
+    /// [`InFlight::claim`].
     pending: Option<PendingPid>,
+
+    /// Cancelled once the shutdown stops the call, see
+    /// [`ChildReaper::stop_calls`].
+    stop: CancellationToken,
+}
+
+impl InFlight {
+    /// Mark the process `pid` which the call started as pending until the
+    /// call ends, and record it for the shutdown, which kills it if the
+    /// call does not end in time, see [`ChildReaper::kill_pending`]. It is
+    /// pending before it gets recorded. A shutdown which did not see the
+    /// record stopped the call before it looked at the calls, so the call
+    /// sees that here and kills the process itself.
+    fn claim(&mut self, pending: &PendingPids, pid: Pid) {
+        self.pending = Some(PendingPid::new(pending, pid));
+        if let Some(calls) = &self.calls {
+            calls.send_if_modified(|calls| {
+                if let Some(call) = calls.in_progress.get_mut(&self.seq) {
+                    call.process = Some(pid);
+                }
+                // Nobody waits for it.
+                false
+            });
+        }
+        if self.stop.is_cancelled() {
+            debug!(%pid, "Killing process of a runtime call stopped by the shutdown");
+            kill_grandchild(pid, Signal::SIGKILL);
+        }
+    }
 }
 
 impl Drop for InFlight {
@@ -94,10 +130,20 @@ struct Calls {
     /// The number of the next call.
     next: u64,
 
-    /// Until when each call in progress may still claim a process, by its
-    /// number: the deadline of its runtime and the
-    /// [`ChildReaper::CLAIM_MARGIN`].
-    in_progress: BTreeMap<u64, Instant>,
+    /// The calls in progress by their number.
+    in_progress: BTreeMap<u64, Call>,
+}
+
+/// A runtime call in progress, see [`Calls`].
+#[derive(Debug)]
+struct Call {
+    /// Until when the call may still claim a process: the deadline of its
+    /// runtime and the [`ChildReaper::CLAIM_MARGIN`].
+    claim_by: Instant,
+
+    /// The process which the call started, once it claimed it, see
+    /// [`InFlight::claim`].
+    process: Option<Pid>,
 }
 
 impl Calls {
@@ -107,7 +153,12 @@ impl Calls {
     fn may_claim_before(&self, before: u64, now: Instant) -> bool {
         self.in_progress
             .range(..before)
-            .any(|(_, &claim_by)| now < claim_by)
+            .any(|(_, call)| now < call.claim_by)
+    }
+
+    /// Whether no call is in progress.
+    fn ended(&self) -> bool {
+        self.in_progress.is_empty()
     }
 }
 
@@ -125,8 +176,8 @@ struct Candidate {
 type PendingPids = Arc<Mutex<HashMap<Pid, usize>>>;
 
 /// Marks a PID as pending for the lifetime of the guard. The marks get
-/// counted: a call keeps the mark of its runtime until it ends, and the PID
-/// of a runtime which got reaped may already be in use by the process of
+/// counted: a call keeps the mark of its runtime until it reaped it, and the
+/// PID of a runtime which got reaped may already be in use by the process of
 /// another call, whose mark must stay.
 #[derive(Debug)]
 struct PendingPid {
@@ -187,12 +238,19 @@ impl ChildReaper {
         self.in_flight.send_modify(|calls| {
             seq = calls.next;
             calls.next += 1;
-            calls.in_progress.insert(seq, claim_by);
+            calls.in_progress.insert(
+                seq,
+                Call {
+                    claim_by,
+                    process: None,
+                },
+            );
         });
         Ok(InFlight {
             calls: Some(self.in_flight.clone()),
             seq,
             pending: None,
+            stop: self.stop_calls.clone(),
         })
     }
 
@@ -247,8 +305,8 @@ impl ChildReaper {
         io: ContainerIO,
     ) -> Result<WatchedExec> {
         // Not reaped before the registration below, so the PID is still its
-        // own.
-        let process = Process::open(pid);
+        // own. Shared with the registration, one pidfd per exec.
+        let process = Arc::new(Process::open(pid));
         let io = SharedContainerIO::new(io);
         let child = Child {
             id,
@@ -260,6 +318,7 @@ impl ChildReaper {
             io: io.clone(),
             cleanup_cmd: vec![],
             token: token.clone(),
+            process: Some(process.clone()),
         };
         // The output stops once the process exited. Also if the registration
         // fails, its watcher reports the exit.
@@ -317,14 +376,17 @@ impl ChildReaper {
     /// Forward SIGTERM to the containers like conmon, to their PIDs only,
     /// and wait for their watchers until the `deadline`. Containers
     /// registered meanwhile get neither, the shutdown kills them and what is
-    /// left afterwards.
+    /// left afterwards. A container stays registered after its exit while
+    /// its watcher finishes the output, its PID may be in use by another
+    /// child by then, so it gets signalled through its pidfd, see
+    /// [`ReapableChild::process`].
     pub(crate) async fn terminate_containers(&self, deadline: Instant) {
         let containers: HashSet<_> = lock(&self.grandchildren)
             .values()
             .flatten()
             .filter(|gc| gc.kind == ChildKind::Container)
             .inspect(|gc| {
-                if let Err(e) = Process::child(gc.pid).signal(Signal::SIGTERM) {
+                if let Err(e) = gc.process.signal(Signal::SIGTERM) {
                     debug!(pid = %gc.pid, "Not signalling container, it is gone: {e}");
                 }
             })
@@ -344,21 +406,29 @@ impl ChildReaper {
     /// keep the server from stopping. It fails if they did not end in time.
     pub(crate) async fn kill_grandchildren(&self, deadline: Instant) -> Result<()> {
         debug!("Killing grandchildren");
-        let pids: Vec<_> = {
+        let processes: Vec<_> = {
             let map = lock(&self.grandchildren);
             // Children registered after this snapshot get killed on their
             // registration, see `watch_grandchild`.
             self.shutting_down.store(true, Ordering::SeqCst);
-            map.values().flatten().map(|gc| gc.pid).collect()
+            map.values()
+                .flatten()
+                .map(|gc| gc.process.clone())
+                .collect()
         };
         // Signal every grandchild first, their watchers end concurrently, so
         // that the shutdown takes as long as the slowest child instead of the
-        // sum of all of them.
-        for pid in pids {
+        // sum of all of them. One which exited, whose watcher still finishes
+        // the output, only gets what remains of its group signalled, which
+        // may hold the pipes, see `terminate_containers`.
+        for process in processes {
+            let pid = process.pid();
             let span = debug_span!("kill_grandchild", %pid);
             let _enter = span.enter();
             debug!("Killing single grandchild");
-            kill_grandchild(pid, Signal::SIGKILL);
+            if let Err(e) = process.signal_group(Signal::SIGKILL) {
+                debug!("Not signalling grandchild, it is gone: {e}");
+            }
         }
         // An init of a PID namespace only exits once every process of the
         // namespace is reaped, including zombies reparented to this process.
@@ -368,32 +438,82 @@ impl ChildReaper {
         // Runtime calls in progress get to finish, the server would kill a
         // runtime halfway otherwise. Their children got killed on
         // registration. A call which hangs does not take the time of the
-        // watchers, which end meanwhile.
+        // watchers, which end meanwhile. It gets stopped early enough to
+        // clean up before the deadline.
         let mut in_flight = self.in_flight.subscribe();
-        let in_flight_deadline = deadline.min(Instant::now() + Self::IN_FLIGHT_WAIT);
-        let calls_ended = time::timeout_at(
-            in_flight_deadline,
-            in_flight.wait_for(|calls| calls.in_progress.is_empty()),
-        )
-        .await
-        .is_ok();
-        // Also the watchers of the children which the calls registered.
-        let left = self.wait_for_watchers(deadline, |_| true).await;
+        let stop_at = deadline
+            .checked_sub(Self::STOP_BUDGET)
+            .unwrap_or(deadline)
+            .min(Instant::now() + Self::IN_FLIGHT_WAIT);
+        let ended_in_time = time::timeout_at(stop_at, in_flight.wait_for(Calls::ended))
+            .await
+            .is_ok();
+        if !ended_in_time {
+            self.stop_calls.cancel();
+            self.kill_pending();
+        }
+        // Also the watchers of the children which the calls registered, and
+        // the calls which got stopped, which still clean up.
+        let (left, calls_ended) = tokio::join!(self.wait_for_watchers(deadline, |_| true), async {
+            ended_in_time
+                || time::timeout_at(deadline, in_flight.wait_for(Calls::ended))
+                    .await
+                    .is_ok()
+        },);
 
-        match (left.is_empty(), calls_ended) {
-            (true, true) => {
+        let calls = match (ended_in_time, calls_ended) {
+            (true, _) => None,
+            (false, true) => Some("runtime calls in progress got stopped"),
+            (false, false) => Some("runtime calls still in progress"),
+        };
+        match (left.is_empty(), calls) {
+            (true, None) => {
                 debug!("Done killing all grandchildren");
                 Ok(())
             }
-            (true, false) => bail!("runtime calls still in progress"),
-            (false, true) => bail!("PIDs {left:?} did not exit"),
-            (false, false) => bail!("PIDs {left:?} did not exit, runtime calls still in progress"),
+            (true, Some(calls)) => bail!("{calls}"),
+            (false, None) => bail!("PIDs {left:?} did not exit"),
+            (false, Some(calls)) => bail!("PIDs {left:?} did not exit, {calls}"),
         }
     }
 
-    /// How long the shutdown waits for runtime calls in progress at most,
-    /// within its deadline.
+    /// How long the shutdown waits for runtime calls in progress to end on
+    /// their own, within its deadline. Those which take longer get stopped,
+    /// see [`ChildReaper::kill_pending`], and get the rest of the deadline
+    /// to end, at least the [`ChildReaper::STOP_BUDGET`].
     const IN_FLIGHT_WAIT: Duration = Duration::from_secs(5);
+
+    /// How long before the deadline of the shutdown the runtime calls in
+    /// progress get stopped at the latest. A stopped call kills its runtime
+    /// right away, waits for its exit and its output only briefly, and kills
+    /// the process the runtime left, see `stop_runtime`, which this covers
+    /// with some time to spare for the scheduling.
+    pub(crate) const STOP_BUDGET: Duration = Duration::from_secs(1);
+
+    /// Kill the processes which the runtime calls that did not end in time
+    /// started but did not register yet, like a created container whose
+    /// call waits for the output of its runtime. The server stops without
+    /// the calls, a process they leave would run without a watcher.
+    ///
+    /// The calls got stopped before, see [`ChildReaper::stop_calls`]. Their
+    /// runtimes are not signalled here: tokio reaps them without the
+    /// `REAP_LOCK` of [`Process`], so the PID of one may belong to another
+    /// process by now. A call kills its runtime itself while it still holds
+    /// it unreaped, see `stop_runtime`. The processes which the calls
+    /// claimed get reaped only by the orphan sweep and by their watchers,
+    /// under that lock, see [`kill_grandchild`]. Under the lock of the
+    /// grandchildren no call registers its process meanwhile, whose watcher
+    /// could reap it then, and under the one of the calls no call ends,
+    /// after which the sweep could reap it. A call which claims its process
+    /// later kills it itself, see [`InFlight::claim`].
+    fn kill_pending(&self) {
+        let _map = lock(&self.grandchildren);
+        let calls = self.in_flight.borrow();
+        for pid in calls.in_progress.values().filter_map(|call| call.process) {
+            debug!(%pid, "Killing process of a runtime call in progress");
+            kill_grandchild(pid, Signal::SIGKILL);
+        }
+    }
 
     /// Wait until the watchers of all grandchildren which match the `filter`
     /// ended, every watcher forgets its child at its end. Return the PIDs of
@@ -442,7 +562,7 @@ pub(crate) struct WatchedExec {
 
     /// The process, which its watcher may reap before the token got
     /// cancelled, so it does not get signalled by its PID.
-    pub(crate) process: Process,
+    pub(crate) process: Arc<Process>,
     pub(crate) exit_rx: Receiver<ExitChannelData>,
 
     /// Stops the output once dropped by its consumer after the exit.
@@ -457,6 +577,13 @@ pub(crate) struct ReapableChild {
     seq: u64,
     kind: ChildKind,
     pid: Pid,
+
+    /// Opened at the registration, before the watcher could reap the child.
+    /// The watcher reaps it before it cancels the token, the PID may belong
+    /// to another process in between, which the signals through the pidfd
+    /// do not reach. Kernels without pidfds (before 5.3) only get the check
+    /// of the PID, see [`Process::open`].
+    process: Arc<Process>,
     io: SharedContainerIO,
     token: CancellationToken,
 }
@@ -477,6 +604,12 @@ impl ReapableChild {
         &self.token
     }
 }
+
+// A stopped call ends within its budget.
+const _: () = assert!(
+    ChildReaper::STOP_BUDGET.as_nanos()
+        > ChildReaper::STOPPED_EXIT_WAIT.as_nanos() + ChildReaper::STOPPED_OUTPUT_WAIT.as_nanos()
+);
 
 /// The start of the error of a request for a container the server does not
 /// know, clients match it, see `ErrContainerNotFound` of the Go client. The

@@ -311,9 +311,10 @@ How to rely on them:
 
 ## Changes
 
-- unreleased: `execSyncContainer` and `serveExecContainer` reject a command
-  which is empty or whose first element starts with `-`, which a runtime could
-  take for its own options. Before, the server passed it on to the runtime.
+- unreleased: `execSyncContainer` and `serveExecContainer` pass the container
+  ID and the command to the runtime after `--`, so that a runtime cannot take a
+  command whose first element starts with `-` for its own options. Before, a
+  runtime could take such a command for options of its own.
 - unreleased: the stdin which a client sent right before a clean close
   reaches the process as long as it keeps taking it, with 5 seconds for
   a process which takes none of it. Before, the process got about a second
