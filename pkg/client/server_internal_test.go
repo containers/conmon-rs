@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -708,6 +709,32 @@ func TestNewKillsServerWhichDoesNotComeUp(t *testing.T) {
 	// starts once the context expired.
 	if elapsed := time.Since(start); elapsed < ctxTimeout+timeouts.cleanup {
 		t.Fatalf("server gone after %s, before the SIGKILL", elapsed)
+	}
+}
+
+func TestNewReportsServerWhichExited(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	// A launch which names itself in the PID file and exits without ever
+	// listening, like a server which crashed right after the fork.
+	binary := writeTestBinary(t, `printf %s $$ >"$4/pidfile"`)
+
+	_, err := NewContext(t.Context(), &ConmonServerConfig{
+		ServerRunDir:     dir,
+		ConmonServerPath: binary,
+		Runtime:          "/does/not/exist",
+		ClientLogger:     logrus.New(),
+		timeouts:         shortTimeouts(),
+	})
+	if !errors.Is(err, ErrServerExited) || !errors.Is(err, ErrServerUnreachable) {
+		t.Fatalf("got error %v, want %v and %v", err, ErrServerExited, ErrServerUnreachable)
+	}
+
+	// Reported right away, not once the wait for the server timed out.
+	if errors.Is(err, ErrServerNotUp) {
+		t.Fatalf("got error %v, which waited for the server", err)
 	}
 }
 
@@ -1907,18 +1934,31 @@ func TestConnectRunningServerFullBacklog(t *testing.T) {
 
 	dir := t.TempDir()
 
-	// A socket which nothing accepts on, with the smallest backlog.
+	fillBacklog(t, dir)
+
+	c := newTestClient(t, dir, logrus.New())
+
+	connected, err := c.connectRunningServer(t.Context())
+	if connected || !errors.Is(err, ErrServerNotResponding) || !errors.Is(err, syscall.EAGAIN) {
+		t.Fatalf("got connected %v, error %v, want %v", connected, err, ErrServerNotResponding)
+	}
+}
+
+// fillBacklog listens on the socket of a client in dir without accepting,
+// with the smallest backlog, and fills it until a dial fails with EAGAIN.
+func fillBacklog(t *testing.T, dir string) {
+	t.Helper()
+
 	fd := bindTestSocket(t, dir)
 
 	if err := syscall.Listen(fd, 0); err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 
-	// Fill the backlog until a dial fails like the one of New does.
 	for range 64 {
 		conn, dialErr := dialLongSocket("unix", filepath.Join(dir, socketName))
 		if errors.Is(dialErr, syscall.EAGAIN) {
-			break
+			return
 		}
 
 		if dialErr != nil {
@@ -1928,10 +1968,112 @@ func TestConnectRunningServerFullBacklog(t *testing.T) {
 		t.Cleanup(func() { conn.Close() })
 	}
 
+	t.Fatal("backlog not full")
+}
+
+func TestCallFullBacklog(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	fillBacklog(t, dir)
+
 	c := newTestClient(t, dir, logrus.New())
 
-	connected, err := c.connectRunningServer(t.Context())
-	if connected || !errors.Is(err, ErrServerNotResponding) || !errors.Is(err, syscall.EAGAIN) {
-		t.Fatalf("got connected %v, error %v, want %v", connected, err, ErrServerNotResponding)
+	_, err := c.Version(t.Context(), &VersionConfig{})
+	if !errors.Is(err, ErrServerNotResponding) || !errors.Is(err, syscall.EAGAIN) {
+		t.Fatalf("got error %v, want %v", err, ErrServerNotResponding)
+	}
+}
+
+// heaptrackRecorder writes a stand-in for heaptrack, which writes its
+// arguments into the returned file, one per line.
+func heaptrackRecorder(t *testing.T) (binary, argsFile string) {
+	t.Helper()
+
+	argsFile = filepath.Join(t.TempDir(), "args")
+
+	return writeTestBinary(t, `printf '%s\n' "$@" >'`+argsFile+`'`), argsFile
+}
+
+// heaptrackArgs returns the arguments heaptrack got, nil if it did not run.
+func heaptrackArgs(t *testing.T, argsFile string) []string {
+	t.Helper()
+
+	data, err := os.ReadFile(argsFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+
+	if err != nil {
+		t.Fatalf("read arguments: %v", err)
+	}
+
+	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+}
+
+func TestAttachHeaptrack(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		outputPath string
+		want       []string
+	}{
+		{name: "default output", want: []string{"--record-only", "-p", "42"}},
+		{
+			name:       "output path",
+			outputPath: "/heaptrack/out",
+			want:       []string{"--record-only", "-o", "/heaptrack/out", "-p", "42"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			binary, argsFile := heaptrackRecorder(t)
+			c := newTestClient(t, t.TempDir(), logrus.New())
+
+			c.attachHeaptrack(t.Context(), Heaptrack{
+				Enabled:    true,
+				BinaryPath: binary,
+				OutputPath: tc.outputPath,
+			}, 42)
+
+			if got := heaptrackArgs(t, argsFile); !slices.Equal(got, tc.want) {
+				t.Fatalf("got arguments %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+//nolint:paralleltest // changes the PATH of the process
+func TestAttachHeaptrackFromPath(t *testing.T) {
+	binary, argsFile := heaptrackRecorder(t)
+
+	dir := t.TempDir()
+	if err := os.Symlink(binary, filepath.Join(dir, heaptrackBinaryName)); err != nil {
+		t.Fatalf("link heaptrack: %v", err)
+	}
+
+	logger, hook := logrustest.NewNullLogger()
+	c := newTestClient(t, t.TempDir(), logger)
+
+	// Without one in the PATH it does not run.
+	t.Setenv("PATH", t.TempDir())
+	c.attachHeaptrack(t.Context(), Heaptrack{Enabled: true}, 42)
+
+	if got := heaptrackArgs(t, argsFile); got != nil {
+		t.Fatalf("heaptrack ran with %q", got)
+	}
+
+	if entry := hook.LastEntry(); entry == nil || entry.Level != logrus.ErrorLevel {
+		t.Fatalf("got log entry %v, want an error", entry)
+	}
+
+	t.Setenv("PATH", dir)
+	c.attachHeaptrack(t.Context(), Heaptrack{Enabled: true}, 42)
+
+	want := []string{"--record-only", "-p", "42"}
+	if got := heaptrackArgs(t, argsFile); !slices.Equal(got, want) {
+		t.Fatalf("got arguments %q, want %q", got, want)
 	}
 }

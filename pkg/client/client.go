@@ -55,6 +55,9 @@ type ConmonClient struct {
 	// cgroupManagerWarning warns once about per command cgroup managers
 	// which get ignored.
 	cgroupManagerWarning sync.Once
+	// idleTimeoutWarning warns once about idle timeouts which the server
+	// ignores.
+	idleTimeoutWarning sync.Once
 	// features are the recorded features of the server and featuresConn
 	// the connection they got recorded on, guarded by featuresMu, which
 	// gets taken after connMu.
@@ -122,10 +125,16 @@ type ConmonServerConfig struct {
 	Stderr io.Writer
 
 	// CgroupManager can be used to select the cgroup manager. The zero value
-	// is CgroupManagerSystemd.
+	// is CgroupManagerSystemd. It is a client side setting: the client sends
+	// it with the requests which run the runtime, also to a server which
+	// was already running when New connected to it.
 	CgroupManager CgroupManager
 
-	// Tracing can be used to enable OpenTelemetry tracing.
+	// Tracing can be used to enable OpenTelemetry tracing. Its Tracer, and
+	// Enabled for passing the span of each call to the server, are client
+	// side settings, which also apply to a server which was already running
+	// when New connected to it. Endpoint, and Enabled for the server itself,
+	// only apply to a server New starts.
 	Tracing *Tracing
 
 	// Heaptrack can be used to memory profile the server.
@@ -273,8 +282,10 @@ const serverProbeTimeout = 3 * time.Second
 //
 // If a server is already started with the same
 // [ConmonServerConfig.ServerRunDir] the client connects to the existing server
-// instead. The other options of the [ConmonServerConfig] are ignored then and
-// the settings of the existing server remain unchanged.
+// instead. The settings of the server process are ignored then and those of
+// the existing server remain unchanged, Heaptrack only attaches to a server
+// New starts. The client side settings still apply: ClientLogger and
+// ClientFieldLogger, CgroupManager and Tracing.
 //
 // A new server only gets started if no server runs on the socket of the run
 // directory: the socket does not exist or refuses the connection, the

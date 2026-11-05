@@ -55,7 +55,11 @@ type NamespacesResponse struct {
 // bind mounting it to the local filesystem.
 //
 // Only the namespaces selected by the CreateNamespacesConfig are created and
-// returned, in the requested order and without duplicates. They are mounted to
+// returned, without duplicates. A later call for the same pod has to ask for
+// the same namespaces, BasePath and ID mappings and gets the namespaces of
+// the first one, in the order of its request, see CreateNamespacesResponse,
+// so callers match the entries by their Type rather than by position. They
+// are mounted to
 // $BASE_PATH/[ipc,pid,net,user,uts]ns/$POD_ID, where BASE_PATH and POD_ID are
 // taken from the CreateNamespacesConfig. A pause process only stays around as
 // init of a requested PID namespace, all other namespaces are kept alive by

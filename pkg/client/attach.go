@@ -34,7 +34,10 @@ const (
 type AttachStreams struct {
 	// Standard input stream, can be nil. It gets read until EOF or the
 	// detach keys, and closed once the attach ends or the client shuts
-	// down, which also ends a read blocked on it.
+	// down. Its Close has to end a Read blocked on it, like the one of an
+	// io.Pipe or of a pipe from os.Pipe does, unlike a file in blocking mode
+	// such as an inherited stdin, otherwise a goroutine of the client keeps
+	// waiting in the Read until it returns.
 	Stdin *In
 
 	// Standard output stream, can be nil. It gets closed once the output

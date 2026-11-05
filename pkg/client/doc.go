@@ -27,9 +27,22 @@
 // Features of the response of Version list what the server supports beyond
 // what its version tells, see the Feature constants. SupportsFeature checks
 // one of them for the server the client is connected to, which may be older
-// than the binary on disk. Methods which need a feature fail with
-// ErrUnsupported on a server without it, fields which an older server
-// ignores say so in their documentation.
+// than the binary on disk.
+//
+// A request fails with ErrUnsupported on a server without the feature it
+// needs if dropping it would change what the container or the session does:
+// ServePortForwardContainer needs FeaturePortForward, and
+// CreateContainerConfig.SdNotifySocket needs FeatureSdNotify, without which
+// the unit of the container would never get ready. Best effort fields get
+// dropped by an older server instead, the request succeeds without them:
+// the IdleTimeout of ServeExecContainerConfig and ServeAttachContainerConfig
+// without FeatureIdleTimeout, which the client logs a warning about once,
+// and the ContainerName, Tag and Labels of a ContainerLogDriver without
+// FeatureJournaldFields. Fields which an older server ignores say so in
+// their documentation. ServeExecContainer and ServeAttachContainer succeed
+// on a server without FeatureStreamingProtocols, only the SPDY or older
+// WebSocket upgrade of the client fails then, so a caller which serves
+// such clients checks the feature itself.
 //
 // # Errors
 //
@@ -44,9 +57,10 @@
 // Features, also matches errors.ErrUnsupported.
 //
 // A call fails with an error matching ErrServerUnreachable if no server
-// listens on the socket when the client connects, and with
+// listens on the socket when the client connects, with
+// ErrServerNotResponding if the backlog of the socket is full then, and with
 // ErrServerDisconnected if the connection ended during the call, for example
-// because the server exited. The next call connects again in both cases.
+// because the server exited. The next call connects again in each case.
 //
 // # Streaming
 //

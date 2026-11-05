@@ -28,9 +28,11 @@ MAX_RSS_GROWTH_KB ?= 2000
 # The generated Go code embeds a schema which differs between capnp versions,
 # use the one pinned by flake.lock. Set CAPNP=capnp to use the local one.
 CAPNP ?= nix shell --inputs-from . nixpkgs\#capnproto --command capnp
-# Evaluated in the recipes, so that a failing cargo stops the build.
-CRATE_VERSION := cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "$(BINARY)") | .version'
-CRATE_RUST_VERSION := cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "$(BINARY)") | .rust_version'
+# The version and rust-version of the workspace, which the crate inherits.
+# Read without cargo, which the lint-files job of CI does not install, and
+# evaluated in the recipes, so that a missing value stops the build.
+CRATE_VERSION := sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$$/\1/p' Cargo.toml | grep .
+CRATE_RUST_VERSION := sed -n '/^\[workspace\.package\]/,/^\[/s/^rust-version = "\(.*\)"$$/\1/p' Cargo.toml | grep .
 SPEC_FILE := rpm/conmon-rs.spec
 PREFIX ?= /usr
 CI_TAG ?=

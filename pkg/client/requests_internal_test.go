@@ -129,6 +129,14 @@ func (r recordingConmon) ServePortForwardContainer(
 	return respond(r, "ServePortForwardContainer", req, err, call.AllocResults)
 }
 
+func (r recordingConmon) ReopenLogContainer(
+	_ context.Context, call proto.Conmon_reopenLogContainer,
+) error {
+	req, err := call.Args().Request()
+
+	return respond(r, "ReopenLogContainer", req, err, call.AllocResults)
+}
+
 func (r recordingConmon) SetWindowSizeContainer(
 	_ context.Context, call proto.Conmon_setWindowSizeContainer,
 ) error {
@@ -194,8 +202,8 @@ type requestCase struct {
 	want request
 }
 
-// containerRequestCases returns the request cases of the version, container
-// and window size calls.
+// containerRequestCases returns the request cases of the version, container,
+// log and window size calls.
 func containerRequestCases() []requestCase {
 	return []requestCase{
 		{
@@ -298,6 +306,16 @@ func containerRequestCases() []requestCase {
 					`commandArgs = [], metadataOld = void, metadata = [], ` +
 					`envVars = [], cgroupManager = systemd, additionalFds = [], ` +
 					`leakFds = [], sdnotifySocket = "")`,
+			},
+		},
+		{
+			name: "ReopenLogContainer",
+			call: func(ctx context.Context, c *ConmonClient) error {
+				return c.ReopenLogContainer(ctx, &ReopenLogContainerConfig{ID: "id"})
+			},
+			want: request{
+				method: "ReopenLogContainer",
+				text:   `(id = "id", metadataOld = void, metadata = [])`,
 			},
 		},
 		{

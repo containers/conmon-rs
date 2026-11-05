@@ -2,11 +2,13 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
 	"strconv"
 	"sync/atomic"
+	"syscall"
 
 	"capnproto.org/go/capnp/v3"
 	"capnproto.org/go/capnp/v3/rpc"
@@ -22,7 +24,8 @@ import (
 // new one, which records the features of the server again. A connection
 // which gets reset during the call, like by Close or Shutdown, fails it as
 // disconnected, see ErrServerDisconnected. A dial without a server fails
-// with ErrServerUnreachable.
+// with ErrServerUnreachable, one to a socket whose backlog is full with
+// ErrServerNotResponding.
 func (c *ConmonClient) client(ctx context.Context) (proto.Conmon, error) {
 	_, rpcClient, err := c.clientConn(ctx)
 
@@ -71,8 +74,12 @@ func (c *ConmonClient) usableConn(ctx context.Context) (*rpcConn, proto.Conmon, 
 
 	socketConn, err := dialLongSocket("unix", c.socket())
 	if err != nil {
-		if serverMissing(err) {
+		switch {
+		case serverMissing(err):
 			err = fmt.Errorf("%w: %w", ErrServerUnreachable, err)
+		case errors.Is(err, syscall.EAGAIN):
+			// The backlog of the socket is full, like in New.
+			err = fmt.Errorf("%w: socket backlog full: %w", ErrServerNotResponding, err)
 		}
 
 		return nil, proto.Conmon{}, false, err

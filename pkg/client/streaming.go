@@ -47,7 +47,7 @@ type ServeExecContainerConfig struct {
 	// of the server do not count. Stdin counts once the server reads it,
 	// stdin which backs up behind a process which does not read it stops
 	// that. Zero disables the timeout. Servers without [FeatureIdleTimeout]
-	// ignore it.
+	// ignore it, the client logs a warning once then.
 	IdleTimeout time.Duration
 }
 
@@ -96,6 +96,7 @@ func (c *ConmonClient) ServeExecContainer(
 			req.SetStdout(cfg.Stdout)
 			req.SetStderr(cfg.Stderr)
 			req.SetIdleTimeoutSec(idleTimeoutSeconds(cfg.IdleTimeout))
+			c.warnIgnoredIdleTimeout(cfg.IdleTimeout)
 
 			c.setCgroupManager(cfg.CgroupManager, req)
 
@@ -147,7 +148,7 @@ type ServeAttachContainerConfig struct {
 	// [ServeExecContainerConfig.IdleTimeout], without killing anything.
 	// Stdin which backs up behind a container which does not read it stops
 	// counting. Zero disables the timeout. Servers without
-	// [FeatureIdleTimeout] ignore it.
+	// [FeatureIdleTimeout] ignore it, the client logs a warning once then.
 	IdleTimeout time.Duration
 }
 
@@ -185,6 +186,7 @@ func (c *ConmonClient) ServeAttachContainer(
 			req.SetStderr(cfg.Stderr)
 			req.SetStopAfterStdinEof(cfg.StopAfterStdinEOF)
 			req.SetIdleTimeoutSec(idleTimeoutSeconds(cfg.IdleTimeout))
+			c.warnIgnoredIdleTimeout(cfg.IdleTimeout)
 
 			return nil
 		},
@@ -284,11 +286,32 @@ func readURL[T interface{ Url() (string, error) }](response T) (string, error) {
 }
 
 // idleTimeoutSeconds converts an idle timeout to seconds, rounded up so that a
-// short timeout does not disable it.
+// short timeout does not disable it. Rounded without adding a second first,
+// which would overflow close to the largest duration.
 func idleTimeoutSeconds(timeout time.Duration) uint64 {
 	if timeout <= 0 {
 		return 0
 	}
 
-	return uint64((timeout + time.Second - 1) / time.Second)
+	return uint64((timeout-1)/time.Second + 1)
+}
+
+// warnIgnoredIdleTimeout warns once if the server ignores the idle timeout of
+// an exec or attach session. Unlike a field whose absence changes what the
+// container does, the request does not fail then: CRI-O sets the timeout for
+// every session, also on a server which outlived an upgrade of CRI-O. It
+// relies on the recorded features, see SupportsFeature.
+func (c *ConmonClient) warnIgnoredIdleTimeout(timeout time.Duration) {
+	features := c.serverFeatures()
+	if timeout <= 0 || features == nil || features[FeatureIdleTimeout] {
+		return
+	}
+
+	c.idleTimeoutWarning.Do(func() {
+		c.logger.Warnf(
+			"Server PID %d on %s does not report the %q feature and ignores the idle "+
+				"timeout of exec and attach sessions (logged once)",
+			c.PID(), c.socket(), FeatureIdleTimeout,
+		)
+	})
 }
