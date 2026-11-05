@@ -345,10 +345,24 @@ jobs:
         with:
           go-version: stable
           cache: false
+      # Without a cache, the module proxy fails the job now and then, like
+      # with an INTERNAL_ERROR, so the downloads get retried before the scan.
       # go run would turn the exit code of govulncheck into 1.
+      - name: Download govulncheck and the Go modules
+        run: |
+          for ATTEMPT in 1 2 3; do
+            if GOBIN=$RUNNER_TEMP go install golang.org/x/vuln/cmd/govulncheck@v1.9.0 &&
+              go mod download; then
+              exit 0
+            fi
+            if ((ATTEMPT < 3)); then
+              echo "::warning::Downloading the Go modules failed, retrying"
+              sleep $((ATTEMPT * 15))
+            fi
+          done
+          exit 1
       - name: govulncheck
         run: |
-          GOBIN=$RUNNER_TEMP go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
           STATUS=0
           "$RUNNER_TEMP/govulncheck" ./... >govulncheck.txt 2>&1 || STATUS=$?
           cat govulncheck.txt
@@ -747,16 +761,28 @@ jobs:
 
   # The jobs which run the server pin the same Ubuntu release for every
   # architecture, the kernel and the memory budget depend on it, see
-  # dependencies.yaml.
+  # dependencies.yaml. amd64 runs the suite with runc as well, the release
+  # which .github/install-runc pins, not the one of the containerd.io package
+  # of the runner image. The runc job gates publish-marker and releases like
+  # the crun job, only the crun job saves the caches.
   test-integration-amd64:
     needs: build-static-amd64
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [crun, runc]
+    name: test-integration-amd64-${{ matrix.runtime }}
     env:
       ARCH: amd64
-      # The resident set size every spec checks the server against, and how
-      # much it may grow in the memory leak specs, see the Makefile.
+      RUNTIME: ${{ matrix.runtime }}
+      # The resident set size every spec checks the server against, its
+      # private anonymous part, and how much it may grow in the memory leak
+      # specs, see the Makefile. The RssAnon budget gets tightened once the
+      # values the suite prints for every spec are known per architecture.
       MAX_RSS_KB: 5500
+      MAX_RSS_ANON_KB: 4096
       MAX_RSS_GROWTH_KB: 2000
     steps: &test-integration-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -776,6 +802,9 @@ jobs:
           name: build-static-${{ env.ARCH }}
           path: .build/static
       - run: chmod +x .build/static/conmonrs
+      - name: Install runc
+        if: env.RUNTIME == 'runc'
+        run: .github/install-runc
       # What the memory budget of the server depends on.
       - name: System info
         run: |
@@ -790,12 +819,14 @@ jobs:
         uses: ./.github/actions/run-integration
         with:
           conmon-binary: .build/static/conmonrs
+          runtime-path: ${{ env.RUNTIME == 'runc' && '/usr/local/bin/runc' || '/usr/bin/crun' }}
           max-rss-kb: ${{ env.MAX_RSS_KB }}
+          max-rss-anon-kb: ${{ env.MAX_RSS_ANON_KB }}
           max-rss-growth-kb: ${{ env.MAX_RSS_GROWTH_KB }}
-          report-name: test-integration-${{ env.ARCH }}-report
+          report-name: test-integration-${{ env.ARCH }}-${{ env.RUNTIME }}-report
           restore-test-files: ${{ env.ARCH == 'amd64' }}
-          save-test-files: ${{ env.ARCH == 'amd64' && env.SAVE_CACHE == 'true' }}
-          save-cache: ${{ env.SAVE_CACHE }}
+          save-test-files: ${{ env.ARCH == 'amd64' && env.RUNTIME == 'crun' && env.SAVE_CACHE == 'true' }}
+          save-cache: ${{ env.RUNTIME == 'crun' && env.SAVE_CACHE || 'false' }}
 
   # The same suite on a native arm64 runner, the build-static jobs only run the
   # other architectures once under emulation.
@@ -805,7 +836,9 @@ jobs:
     timeout-minutes: 10
     env:
       ARCH: arm64
+      RUNTIME: crun
       MAX_RSS_KB: 5500
+      MAX_RSS_ANON_KB: 4096
       MAX_RSS_GROWTH_KB: 2000
     steps: *test-integration-steps
 
@@ -852,13 +885,14 @@ jobs:
       # failure only costs the coverage, the job stays green and uploads what
       # got covered, which shows as a drop of the coverage. A failing job would
       # fail the check, even if allowed to. The test files are the ones the
-      # test-integration-amd64 job saved.
+      # crun job of test-integration-amd64 saved.
       - name: Integration tests
         id: integration
         uses: ./.github/actions/run-integration
         with:
           conmon-binary: target/debug/conmonrs
           max-rss-kb: 1048576
+          max-rss-anon-kb: 1048576
           test-flags: --cover --coverpkg github.com/containers/conmon-rs/pkg/client --coverprofile go-coverage.out
           test-env: LLVM_PROFILE_FILE=${{ steps.build.outputs.profile-file }}
           report-name: test-integration-coverage-report
@@ -886,7 +920,8 @@ jobs:
 
   # Runs critest against CRI-O with the static binary. With stream_websockets,
   # CRI-O hands exec and attach to the streaming server of conmon-rs, which
-  # critest reaches directly over WebSocket. Port forwarding stays with CRI-O.
+  # critest reaches directly over WebSocket. CRI-O main hands port forwarding
+  # to it as well, which critest speaks over SPDY, v1.37.2 keeps it.
   # The jobs with a crio tag run that release of CRI-O instead of main, whose
   # vendored client is older than the server under test. Like the others,
   # they hold back the marker and the releases: their CRI-O is pinned, so a
@@ -909,9 +944,12 @@ jobs:
           # see dependencies.yaml. The releases up to 1.36 vendor a v0.7 client,
           # which passes the --cgroup-manager that v1 rejects, so they cannot
           # run a v1 server at all.
+          # CRI-O starts the servers with the log driver none by default,
+          # which one job keeps, the others log to the journal.
           - name: test-critest-crio-1.37
             crio: v1.37.2
             websockets: false
+            server-logs: false
           - name: test-critest-crio-1.37-websockets
             crio: v1.37.2
             websockets: true
@@ -919,6 +957,7 @@ jobs:
     env:
       CRIO_VERSION: ${{ matrix.crio }}
       STREAM_WEBSOCKETS: ${{ matrix.websockets }}
+      SERVER_LOGS: ${{ matrix.server-logs }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -983,13 +1022,26 @@ jobs:
           fi
 
           # critest does not show the failures of the conmon-rs servers.
-          echo "::group::conmon-rs warnings and errors"
-          sudo journalctl -t conmonrs -p warning --no-pager || true
-          echo "::endgroup::"
+          # With the log driver none, they must not log at all.
+          if [[ ${SERVER_LOGS:-true} == true ]]; then
+            echo "::group::conmon-rs warnings and errors"
+            sudo journalctl -t conmonrs -p warning --no-pager || true
+            echo "::endgroup::"
+          elif [[ -n $(sudo journalctl -t conmonrs --no-pager -q) ]]; then
+            echo "::error::The conmon-rs servers logged to the journal with the log driver none"
+            sudo journalctl -t conmonrs --no-pager -q
+            TEST_RC=1
+          fi
 
-          # CRI-O logs these only if conmon-rs served the sessions.
+          # CRI-O logs these only if conmon-rs served the sessions. CRI-O
+          # main hands port forwarding over as well, and serves it itself if
+          # the server does not support it, which critest does not notice.
           if [[ $STREAM_WEBSOCKETS == true ]]; then
-            for KIND in exec attach; do
+            KINDS=(exec attach)
+            if [[ -z $CRIO_VERSION ]]; then
+              KINDS+=("port forward")
+            fi
+            for KIND in "${KINDS[@]}"; do
               if ! grep -q "Using $KIND URL from container monitor" journal.log; then
                 echo "::error::CRI-O did not hand any $KIND session to conmon-rs"
                 TEST_RC=1
@@ -1044,6 +1096,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/get -l v1.1.1 -o .build/old/conmonrs
+      # v1.0.1 has no sha256sums.txt and the bucket no checksum for it: without
+      # cosign the script fails, with -k it installs the binary with warnings.
+      - name: Get a release without checksums
+        if: ${{ !matrix.cosign }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if scripts/get -l v1.0.1 -o .build/unverified/conmonrs 2>&1 | tee .build/get.log; then
+            echo "Installed a release without checksums without -k"
+            exit 1
+          fi
+          grep -q "Unable to fetch the checksums of release v1.0.1" .build/get.log
+          scripts/get -k -l v1.0.1 -o .build/unverified/conmonrs 2>&1 | tee .build/get.log
+          grep -q "WARNING: unable to fetch the checksums of release v1.0.1" .build/get.log
+          test -x .build/unverified/conmonrs
 
   # The release workflow publishes the marker of a tag. The marker of main
   # only moves to a commit whose binaries got published and whose tests

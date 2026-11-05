@@ -28,7 +28,10 @@ operations against it:
   server on localhost which speaks the Kubernetes remote command protocols over
   WebSocket and SPDY, so CRI-O can hand the URL straight to the kubelet. The
   same server forwards ports into the pod network namespace over SPDY or
-  WebSocket (`servePortForwardContainer`).
+  WebSocket (`servePortForwardContainer`). The server rejects exec commands
+  which are empty or whose first element starts with `-`, which a runtime
+  could otherwise take for its own options, see the
+  [changes of the protocols](protocols.md#changes).
 - **Attach**: `attachContainer` serves output and stdin of a container on a per
   container attach socket, the protocol conmon speaks as well.
 - **Namespaces**: `createNamespaces` creates the pod level namespaces and bind
@@ -44,17 +47,19 @@ operations against it:
   the server build and its features.
 
 The server is single threaded: a tokio `current_thread` runtime drives all I/O
-and runs the Cap'n Proto RPC on the same thread, and blocking work like file
-I/O goes to a small bounded pool. With cgroup v2, all containers of a pod
-share one inotify instance for OOM detection, with cgroup v1 every container
-gets an eventfd on its `memory.oom_control`. The read loops of all containers
-share one scratch buffer of the runtime thread, 8 KiB, or 33 KiB once an
-attach client sent stdin, so an idle container holds no read buffer. Per
-container, the server keeps an 8 KiB buffer per log
-file once the container wrote output, the channels for exec output and a few
-tasks. With glibc, the server limits malloc to a single arena instead of one
-per thread. That is why a pod with many containers still fits in a few
-megabytes.
+and runs the Cap'n Proto RPC on the same thread, and blocking work like file I/O
+goes to a small bounded pool. With cgroup v2, all containers of a pod share one
+inotify instance for OOM detection, with cgroup v1 every container gets an
+eventfd on its `memory.oom_control`. The read loops of all containers, the
+readers of runtime output and the notify relays share one scratch buffer of the
+runtime thread, 8 KiB, or 33 KiB once an attach client sent stdin, so an idle
+container holds no read buffer. Per container, the server keeps the channels for
+exec output and a few tasks; a log file holds its buffer only while it writes a
+chunk of output. With glibc, the server limits malloc to a single arena instead
+of one per thread. That is why a pod with many containers still fits in a few
+megabytes: an idle server has about 0.5 MiB of memory of its own besides the
+pages of its binary, see [Debugging a pod](troubleshooting.md#debugging-a-pod)
+for the numbers and the budget CI enforces.
 
 The following diagram shows how the pieces connect:
 

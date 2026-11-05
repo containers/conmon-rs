@@ -9,17 +9,18 @@ All operations are RPCs on the `conmon.sock` UNIX domain socket, defined in
 `startFdSocket`, `serveExecContainer`, `serveAttachContainer` and
 `servePortForwardContainer`. The Go client wraps each of them in a method with
 plain Go request and response structures. An OCI runtime which hangs gets
-killed and its call fails: for `createContainer` after 10 minutes, for an exec
-60 seconds after its timeout, or after 60 seconds without one, as the runtime
-only starts the exec process. Each runtime runs in a process group of its own,
-which gets killed with it, so the helpers it started do not stay behind.
+killed and its call fails: for `createContainer` after 10 minutes (since
+v1.2.0), for an exec 60 seconds after its timeout, or after 60 seconds without
+one (since v1.2.0), as the runtime only starts the exec process. Each runtime
+runs in a process group of its own, which gets killed with it, so the helpers
+it started do not stay behind.
 
-Since unreleased, `execSyncContainer` returns at most 16 MiB less 64 KiB of
-output, stdout and stderr together, like conmon, so that the response fits
-into the 16 MiB gRPC messages of CRI-O and the kubelet. Each stream keeps up
-to half of it and more of what the other one leaves, so a large stdout does
+`execSyncContainer` returns at most 16 MiB less 64 KiB of output (since
+unreleased), stdout and stderr together, like conmon, so that the response
+fits into the 16 MiB gRPC messages of CRI-O and the kubelet. Each stream keeps
+up to half of it and more of what the other one leaves, so a large stdout does
 not drop a short error on stderr. Output beyond the limit gets dropped without
-notice. Before, stdout and stderr took up to 16 MiB each.
+notice.
 
 A call which fails carries a message of the server. Only the prefixes which
 the comment of the `Conmon` interface in the schema lists stay stable, like
@@ -31,15 +32,14 @@ matches them with errors like `ErrContainerNotFound`.
 `attachContainer` makes the server listen on a `SOCK_SEQPACKET` UNIX socket at
 the requested path, which has to be absolute since v1.2.2. Packets from the
 client are the container's stdin, passed on as they are, NUL bytes included. A
-packet of more than 33 KiB (64 KiB before v1.2.2) gets truncated to its
-first 33 KiB. The Go client sends one read of its stdin per packet, at most
-32 KiB plus the start of a detach key sequence which it held back. The client's
-input ends when it shuts down the write side of its connection. Packets to the
-client start with one byte selecting the stream, `2` for stdout and `3` for
-stderr, followed by up to 8192 bytes of data, since v1.2.2. Before, a
-packet had at most 8191 bytes of data, which split every full read of 8 KiB in
-two. A single `0` byte tells the client that the container output ended. This
-is the same protocol conmon speaks, so existing attach clients work unchanged.
+packet of more than 33 KiB gets truncated to its first 33 KiB. The Go client
+sends one read of its stdin per packet, at most 32 KiB plus the start of a
+detach key sequence which it held back. The client's input ends when it shuts
+down the write side of its connection. Packets to the client start with one byte
+selecting the stream, `2` for stdout and `3` for stderr, followed by up to 8192
+bytes of data. A single `0` byte tells the client that the container output
+ended. This is the same protocol conmon speaks, so existing attach clients work
+unchanged.
 
 With `stopAfterStdinEof`, the server closes the container's stdin once the
 input of a client ended, the output is still forwarded until the container
@@ -62,10 +62,9 @@ with a random port. Each URL carries a one time token which is valid for a
 minute. At most 1000 URLs of each kind (exec and attach, port forward) wait for
 their client at once, a request beyond that fails with an error starting with
 `maximum number of in-flight requests exceeded` (`ErrTooManyRequests` of the Go
-client), like the kubelet fails requests beyond its limit. v1.1.1 and older drop
-the oldest URL instead. CRI-O passes these URLs to the kubelet, which connects
-directly. Most streaming options of CRI-O do not apply to this server, see
-[Configure CRI-O](cri-o.md#configure-cri-o).
+client), like the kubelet fails requests beyond its limit. CRI-O passes these
+URLs to the kubelet, which connects directly. Most streaming options of CRI-O do
+not apply to this server, see [Configure CRI-O](cri-o.md#configure-cri-o).
 
 ### Exec and attach
 
@@ -100,11 +99,9 @@ stderr which come after the start end right away. The server supports
 decides. From v4 on, the final status is JSON, before only a failure is
 reported as text.
 
-Since v1.2.2, a client which takes the end of a session slowly, the
-output queued for it, the status and the close, gets all of it, only one which
-takes nothing of it for 60 seconds gets its connection closed. Before, a client
-which did not take all of it within a few seconds lost the rest, and client-go
-took the missing status for a success. After the close, the server reads and
+A client which takes the end of a session slowly, the output queued for it,
+the status and the close, gets all of it, only one which takes nothing of it
+for 60 seconds gets its connection closed. After the close, the server reads and
 drops what the client still sends until it answered the WebSocket close or
 closed the SPDY connection, for up to 5 seconds, as closing a connection with
 unread input resets it, which may lose the end of the session. Port forwarding
@@ -117,27 +114,21 @@ a reset while its output backs up holds the end just as long, or until the
 kernel gives up resending to it, after 15 to 30 minutes with the default
 `tcp_retries2` of 15: there is no keepalive.
 
-Since unreleased, a WebSocket client which closes first, also one of port
-forwarding, gets the close of the server in answer as soon as the server read
-it, also while the stdin before it still goes to the process. Before, the
-connection ended without it, which browsers report as code 1006 and which kept
-the Python Kubernetes client waiting for up to 3 seconds in `close()`.
+A WebSocket client which closes first, also one of port forwarding, gets the
+close of the server in answer as soon as the server read it, also while the
+stdin before it still goes to the process.
 
-Since v1.2.2, an exec process with a terminal gets the size the client
-sends while the runtime starts it, usually before the command runs, like
-with CRI-O. Before, the terminal got it only once the runtime finished, so a
-short command like `kubectl exec -it -- ls` saw a terminal without rows or
-columns.
+An exec process with a terminal gets the size the client sends while the
+runtime starts it, usually before the command runs, like with CRI-O.
 
 An exec process which writes more than 16 MiB to stdout or stderr while the
-runtime still starts it gets its output cut there. Since v1.2.2, the
-session then fails with an error status instead of reporting the exit code.
+runtime still starts it gets its output cut there, and the session fails with
+an error status.
 
-Since v1.2.2, an exec process without a terminal whose client went away
-gets the end of its stdin and its output pipes closed, so that its writes
-fail. Before, its output got read and dropped until it exited, which still
-happens with a terminal after its SIGHUP. Only the idle timeout or a lost exit
-kill it.
+An exec process without a terminal whose client went away gets the end of its
+stdin and its output pipes closed, so that its writes fail. One with a terminal
+gets a SIGHUP, after which its output gets read and dropped until it exits.
+Only the idle timeout or a lost exit kill it.
 
 Stdin counts towards the [idle timeout](#limits-and-timeouts) once the server
 reads it. Stdin which backs up behind a process which does not read it stops
@@ -150,11 +141,9 @@ WebSocket close, or the end of a SPDY connection after its stdin) reaches the
 process as long as the process keeps taking it. Only a process which takes none
 of it for 5 seconds lets the session end without the rest, counted from the
 close, or for an exec from the start of its process, however long the runtime
-takes to start it (the runtime gets killed after 60 seconds). Before, the
-process got about a second after the close and the rest got dropped, which cut
-off the uploads of clients which close right after their last write, like the
-Python client or `k8s_cp` of Ansible, once the process took less than about
-1 MiB per second.
+takes to start it (the runtime gets killed after 60 seconds). Older servers cut
+off the uploads of clients which close right after their last write, see
+[Changes](#changes).
 
 ### Port forwarding
 
@@ -196,18 +185,18 @@ like `?port=80&port=443`, as CRI-O does.
 | URLs which wait for their client, per kind                     | 1000, see above                                                       |
 | Time until the token of an unused URL expires                  | 60 seconds, the first connection takes it                             |
 | WebSocket message or frame of the client                       | 1 MiB, 4 MiB for exec and attach since v1.2.2, more ends it           |
-| Stdin of a session which the process did not take yet          | About 9 MiB, 3 MiB before v1.2.2, plus what a SPDY connection holds   |
+| Stdin of a session which the process did not take yet          | About 9 MiB, plus what a SPDY connection holds                        |
 | What the client sent on a SPDY connection which no stream took | About 4 MiB, plus the frame which waits to be placed                  |
 | What a forwarded connection sends while it gets established    | 1 MiB per connection, from a connect budget of 16 MiB per session     |
 | Streams of a SPDY connection                                   | 1024, which count until the server let go of them, also after a reset |
 | Headers of a SPDY stream                                       | 32 in 8 KiB                                                           |
 | Ports of the WebSocket port forward protocol                   | 40                                                                    |
-| Connections which did not get upgraded yet                     | 256 since v1.2.1, see [Streaming security](#streaming-security)       |
+| Connections which did not get upgraded yet                     | 256, see [Streaming security](#streaming-security)                    |
 | Time to send the request head, to get upgraded                 | 5 seconds, 10 seconds, see [Streaming security](#streaming-security)  |
-| Request head                                                   | 64 KiB since v1.2.2, a larger one gets a 431                          |
+| Request head                                                   | 64 KiB, a larger one gets a 431                                       |
 | Exec output while the runtime starts the process               | 16 MiB per stream, the session fails above, see above                 |
-| End of a session the client takes nothing of                   | 60 seconds or a longer exec or attach idle timeout, since v1.2.2      |
-| Stdin before a clean close which the process takes none of     | 5 seconds since unreleased, about a second before                     |
+| End of a session the client takes nothing of                   | 60 seconds or a longer exec or attach idle timeout                    |
+| Stdin before a clean close which the process takes none of     | 5 seconds since unreleased                                            |
 | Idle connection                                                | The `idleTimeoutSec` of the request, see below                        |
 
 `idleTimeoutSec` ends a connection which got no frame of the client and no
@@ -258,24 +247,23 @@ it did not get the URL of:
   port forward).
 - A token only works on the path of its kind, `/exec/`, `/attach/` or
   `/portforward/`, an exec token on the attach path gets a 404 like an unknown
-  one. Before v1.2.1, exec and attach tokens work on either of their paths.
+  one.
 
-Since v1.2.1, at most 256 connections which did not get upgraded yet get
-served at once, more wait in the backlog of the listener. A connection serves a
-single request, it has 5 seconds to send the head of the request and 10 seconds
-until it got upgraded, otherwise the server closes it. A local process which
-holds all of these connections open delays the requests of others by up to 5
-seconds, as it has to send a request head within that time, but cannot use up
-the file descriptors of the server. Since v1.2.2, the head of a request may
-take at most 64 KiB, a larger one gets a 431, so that these connections hold
-about 16 MiB at most.
+At most 256 connections which did not get upgraded yet get served at once, more
+wait in the backlog of the listener. A connection serves a single request, it
+has 5 seconds to send the head of the request and 10 seconds until it got
+upgraded, otherwise the server closes it. A local process which keeps opening
+connections, holds all 256 of them and keeps the backlog of the listener full
+can delay the requests of others for as long as it keeps that up, but cannot use
+up the file descriptors of the server. The head of a request may take at most 64
+KiB, a larger one gets a 431, so that these connections hold about 16 MiB at
+most.
 
 The logs show only the first 8 hex digits of a token, which tell the sessions
 apart but are not enough to use one. Responses never name the token: a request
 for a token which is unknown, used or expired gets a bare 404, one whose token
-is not 32 lowercase hex digits a 400 `Invalid URL`. Since v1.2.2, uppercase
-hex digits get the 400 as well, before they matched the token like lowercase
-ones.
+is not 32 lowercase hex digits a 400 `Invalid URL`, also one with uppercase
+hex digits.
 
 ## File descriptor socket
 
@@ -284,15 +272,15 @@ passing file descriptors, which the client can then reference by slot number in
 `createContainer` (`additionalFds` and `leakFds`). A request carries the
 descriptors as `SCM_RIGHTS` ancillary data and one little endian `u64`
 `(request_id << 32) | num_fds`. The response repeats that `u64` followed by one
-`u64` slot per descriptor. On error the lower 32 bits of the first word are
-all ones and the rest of the message is the error text. A request carries at
-most 253 descriptors, the most the kernel passes with one message
-(`SCM_MAX_FD`). Received descriptors are closed when the connection ends or on
-an empty request, a `u64` of zero without descriptors, which gets no response.
-Since v1.2.1, a connection holds at most 1024 descriptors which no request took
-yet, and all connections together a quarter of the open files limit of the
-server, a request beyond that fails. The full description lives in the module
-documentation of [fd_socket.rs](../conmon-rs/server/src/fd_socket.rs).
+`u64` slot per descriptor. On error the lower 32 bits of the first word are all
+ones and the rest of the message is the error text. A request carries at most
+253 descriptors, the most the kernel passes with one message (`SCM_MAX_FD`).
+Received descriptors are closed when the connection ends or on an empty request,
+a `u64` of zero without descriptors, which gets no response. A connection holds
+at most 1024 descriptors which no request took yet, and all connections together
+a quarter of the open files limit of the server, a request beyond that fails.
+The full description lives in the module documentation of
+[fd_socket.rs](../conmon-rs/server/src/fd_socket.rs).
 
 ## Features
 
@@ -320,3 +308,66 @@ How to rely on them:
   have been replaced by one of another version. The Go client records them
   on every connection, its methods which need a feature check it and fail
   with `ErrUnsupported`, `SupportsFeature` reports them to the caller.
+
+## Changes
+
+- unreleased: `execSyncContainer` and `serveExecContainer` reject a command
+  which is empty or whose first element starts with `-`, which a runtime could
+  take for its own options. Before, the server passed it on to the runtime.
+- unreleased: the stdin which a client sent right before a clean close
+  reaches the process as long as it keeps taking it, with 5 seconds for
+  a process which takes none of it. Before, the process got about a second
+  after the close and the rest got dropped, which cut off the uploads of
+  clients which close right after their last write, like the Python client or
+  `k8s_cp` of Ansible, once the process took less than about 1 MiB per second.
+- unreleased: a WebSocket client which closes first gets the close of the
+  server in answer as soon as the server read it. Before, the connection ended
+  without it, which browsers report as code 1006 and which kept the Python
+  Kubernetes client waiting for up to 3 seconds in `close()`.
+- unreleased: `execSyncContainer` returns at most 16 MiB less 64 KiB of output,
+  stdout and stderr together. Before, stdout and stderr took up to 16 MiB each.
+- v1.2.2: a streaming client which takes the end of a session slowly gets all
+  of it, unless it takes nothing of it for 60 seconds. Before, a client which
+  did not take all of it within a few seconds lost the rest, and client-go took
+  the missing status for a success.
+- v1.2.2: an exec process with a terminal gets the size the client sends while
+  the runtime starts it. Before, the terminal got it only once the runtime
+  finished, so a short command like `kubectl exec -it -- ls` saw a terminal
+  without rows or columns.
+- v1.2.2: a streaming exec session whose output got cut while the runtime
+  started the process fails with an error status, before it reported the exit
+  code.
+- v1.2.2: an exec process without a terminal whose client went away gets the
+  end of its stdin and its output pipes closed. Before, its output got read and
+  dropped until it exited.
+- v1.2.2: the WebSocket messages of exec and attach clients may take 4 MiB,
+  before 1 MiB.
+- v1.2.2: the stdin of a session which the process did not take yet may take
+  about 9 MiB, before about 3 MiB.
+- v1.2.2: the head of a request to the streaming server may take at most 64 KiB,
+  so that the connections which did not get upgraded yet hold about 16 MiB at
+  most.
+- v1.2.2: a token with uppercase hex digits gets a 400, before it matched the
+  token like lowercase ones.
+- v1.2.2: packets to an attach client carry up to 8192 bytes of data. Before,
+  a packet had at most 8191 bytes of data, which split every full read of 8 KiB
+  in two.
+- v1.2.2: attach packets from the client get truncated to 33 KiB, before to
+  64 KiB.
+- v1.2.2: the attach socket path and the `netNsPath` of port forwarding have
+  to be absolute.
+- v1.2.1: at most 256 connections to the streaming server which did not get
+  upgraded yet get served at once.
+- v1.2.1: exec and attach tokens only work on the path of their kind, before
+  on either of their paths.
+- v1.2.1: a connection of the fd socket holds at most 1024 descriptors which no
+  request took yet, and all connections together a quarter of the open files
+  limit of the server.
+- v1.2.0: the runtime of a `createContainer` gets killed after 10 minutes, the
+  one of an exec without a timeout after 60 seconds, each together with its
+  process group. Before, a runtime which hung kept its call waiting until it
+  exited, only the runtime of an exec with a timeout got killed, 60 seconds
+  after it.
+- v1.2.0: a request beyond the 1000 URLs which wait for their client fails
+  with `maximum number of in-flight requests exceeded`. v1.1.1 and older drop
+  the oldest URL instead.

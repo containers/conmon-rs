@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install runc from GitHub releases into OUTPUT, /usr/local/bin/runc by
+# default, the amd64 integration tests run it next to crun. The binary has to
+# match its checksum in runc.sha256sum of the release, whose own sha256 is
+# pinned here, a bump of the version updates it as well. The runc of the
+# containerd.io package of the runner image in /usr/bin stays untouched.
+RUNC_VERSION=1.5.2
+RUNC_CHECKSUMS_SHA256=1922bc06670a35b95f9d9c0e730294482717a2660a538c4ea6d5ccba7eb665af
+OUTPUT=${1:-/usr/local/bin/runc}
+
+case $(uname -m) in
+x86_64) ARCH=amd64 ;;
+aarch64) ARCH=arm64 ;;
+*)
+    echo "Unsupported architecture $(uname -m)" >&2
+    exit 1
+    ;;
+esac
+URL=https://github.com/opencontainers/runc/releases/download/v$RUNC_VERSION
+
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+"$(dirname "$0")/install-binary" -s "$RUNC_CHECKSUMS_SHA256" \
+    "$URL/runc.$ARCH" "$URL/runc.sha256sum" "$TMPDIR/runc"
+
+sudo install -m 755 "$TMPDIR/runc" "$OUTPUT"
+"$OUTPUT" --version

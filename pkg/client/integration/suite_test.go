@@ -77,6 +77,10 @@ var (
 	// The budget of the Makefile for a dynamically linked release build,
 	// MAX_RSS_KB overrides it. See the Makefile for the budgets.
 	maxRSSKB = 10240
+	// The budget of the private anonymous memory of the server (RssAnon),
+	// which the mapped binary and libraries do not count towards,
+	// MAX_RSS_ANON_KB overrides it. The same first guess as the Makefile.
+	maxRSSAnonKB = 4096
 	// How much the resident set of the server may grow over the execs of the
 	// memory leak specs, MAX_RSS_GROWTH_KB overrides it.
 	maxRSSGrowthKB = 2000
@@ -91,6 +95,15 @@ func TestConmonClient(t *testing.T) {
 		}
 
 		maxRSSKB = rssInt
+	}
+
+	if anonStr := os.Getenv("MAX_RSS_ANON_KB"); anonStr != "" {
+		anonInt, err := strconv.Atoi(anonStr)
+		if err != nil {
+			t.Fatalf("parse MAX_RSS_ANON_KB: %v", err)
+		}
+
+		maxRSSAnonKB = anonInt
 	}
 
 	if growthStr := os.Getenv("MAX_RSS_GROWTH_KB"); growthStr != "" {
@@ -523,7 +536,10 @@ func registerSpecHooks(tr **testRunner, sut **client.ConmonClient) {
 }
 
 // expectRSSBelowCeiling checks the resident set size of the server of a
-// spec, if it got one, against maxRSSKB.
+// spec, if it got one, against maxRSSKB, and its private anonymous part
+// against maxRSSAnonKB. Most of the resident set are the mapped binary and
+// libraries, a regression of the memory the server allocates would hide in
+// the slack of the total.
 func expectRSSBelowCeiling(sut *client.ConmonClient) {
 	if sut == nil {
 		return
@@ -531,15 +547,18 @@ func expectRSSBelowCeiling(sut *client.ConmonClient) {
 
 	pid := sut.PID()
 	Expect(pid).To(BeNumerically(">", 0))
-	rss := vmRSSGivenPID(pid)
+	rss := statusKBGivenPID(pid, "VmRSS")
+	anon := statusKBGivenPID(pid, "RssAnon")
 	// Named after the spec, so that a value can be attributed in the
 	// verbose output of a whole run.
 	GinkgoWriter.Printf(
-		"VmRSS for server is %d kB in %q\n",
+		"VmRSS for server is %d kB, RssAnon %d kB in %q\n",
 		rss,
+		anon,
 		CurrentSpecReport().FullText(),
 	)
 	Expect(rss).To(BeNumerically("<", maxRSSKB), "VmRSS of the server in kB")
+	Expect(anon).To(BeNumerically("<", maxRSSAnonKB), "RssAnon of the server in kB")
 }
 
 // containerRunner returns a function which starts a server with a started
@@ -718,6 +737,12 @@ func logGrownMappings(before, after map[string]int) {
 // vmRSSGivenPID returns the resident set size of the process in kB, as an
 // int, so that the difference of two values cannot wrap.
 func vmRSSGivenPID(pid uint32) int {
+	return statusKBGivenPID(pid, "VmRSS")
+}
+
+// statusKBGivenPID returns the value in kB of the field of the status of the
+// process in /proc, like VmRSS or RssAnon.
+func statusKBGivenPID(pid uint32, field string) int {
 	const procPath = "/proc"
 
 	procEntry := filepath.Join(procPath, strconv.Itoa(int(pid)), "status")
@@ -729,24 +754,28 @@ func vmRSSGivenPID(pid uint32) int {
 
 	scanner := bufio.NewScanner(f)
 
-	var rss string
+	var value string
 
 	for scanner.Scan() {
-		if !strings.Contains(scanner.Text(), "VmRSS:") {
+		parts := strings.Fields(scanner.Text())
+		if len(parts) == 0 || parts[0] != field+":" {
 			continue
 		}
 
-		parts := strings.Fields(scanner.Text())
 		Expect(parts).To(HaveLen(3))
-		rss = parts[1]
+		Expect(parts[2]).To(Equal("kB"))
+		value = parts[1]
 
 		break
 	}
 
-	rssKB, err := strconv.Atoi(rss)
+	Expect(scanner.Err()).To(Succeed())
+	Expect(value).NotTo(BeEmpty(), "no %s in %s", field, procEntry)
+
+	kb, err := strconv.Atoi(value)
 	Expect(err).To(Succeed())
 
-	return rssKB
+	return kb
 }
 
 // serverResources are the open file descriptors and the threads of the
@@ -1014,6 +1043,10 @@ func generateRuntimeConfigWithProcessArgs(
 	// killer to pick it.
 	g.SetProcessOOMScoreAdj(0)
 	g.SetRootPath(rootfs)
+	// The default seccomp profile of runtime-tools denies newer syscalls
+	// with EPERM, like faccessat2, on which the init of runc 1.5 aborts. The
+	// specs do not test seccomp, and CRI-O brings its own profile.
+	g.Config.Linux.Seccomp = nil
 
 	if changeSpec != nil {
 		changeSpec(g)

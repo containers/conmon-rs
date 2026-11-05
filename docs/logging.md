@@ -13,9 +13,9 @@ the log, like `kubectl logs -f`, reads the old file to its end first.
 `reopenLogContainer`, which CRI-O calls after the kubelet rotated the log,
 starts a new file at the path the same way. The server appends to the log
 files, so a file which gets truncated in place, for example to free disk
-space, continues at its new end. Since v1.2.2, a log file which exists
-when the container gets created is appended to like with conmon instead of
-truncated, its content counts for the maximum size. A write which fails in the
+space, continues at its new end. A log file which exists when the container
+gets created is appended to like with conmon, its content counts for the
+maximum size. A write which fails in the
 middle of an entry, like on a full disk, drops the rest of the entries read
 with it, the next entry starts on a line of its own, and so does the first
 entry after existing content without a final newline. A rotation which fails
@@ -24,9 +24,8 @@ it again.
 
 - `containerRuntimeInterface`: the CRI log format, one line per entry with an
   RFC 3339 timestamp in nanoseconds of when the server read the output, the
-  stream, a `P` (partial) or `F` (full) marker and the line. Since v1.2.2,
-  the files it creates are readable by their group (mode `0640`) like with
-  conmon, before only by their owner.
+  stream, a `P` (partial) or `F` (full) marker and the line. The files it
+  creates are readable by their group (mode `0640`) like with conmon.
 - `json`: one JSON object per line with `timestamp` (seconds since the epoch),
   `pipe` (`stdout` or `stderr`), `message` (the line without its ending) and
   `partial: true` when the line had no ending yet. The files it creates are
@@ -42,7 +41,7 @@ it again.
   fields, see `labels` in the schema for the rules and limits. journald drops
   entries with more than 1024 fields. Like for conmon, the `SYSLOG_IDENTIFIER`
   is the `tag`, the `containerName` without one, and the short ID without
-  both, since v1.2.2. Before, it was `conmonrs` without a `tag`.
+  both, since v1.2.2.
 
 The JSON and journald drivers collect whole lines across reads, so a line
 written in several pieces or a multi byte character split by a read still
@@ -55,8 +54,7 @@ exited, so its output ends at the exit, not once no process has it open. A
 process which closes the terminal and opens it again, like an init system or a
 getty, keeps its output in the log and for attach clients. This takes Linux
 4.13 or later (`TIOCGPTPEER`), on older kernels the output still ends once no
-process has the terminal open. Before, the output ended once the terminal got
-closed the first time, and without stdin the server closed it as well.
+process has the terminal open.
 
 The server does not sync the log files to disk on a rotation, the entries sit
 in the page cache like other writes. Since unreleased, it syncs the CRI and
@@ -65,11 +63,14 @@ the exit files, like conmon without `--no-sync-log`. CRI-O (since v1.31)
 rejects its `no_sync_log` option for a `pod` runtime handler, so the sync
 cannot be turned off. The exit files wait up to 5 seconds for the log drivers
 to take the last output and for the sync, a slower disk does not hold them
-back longer. Before, the server never synced the container logs.
+back longer.
 
-The server's own logs go to the server log driver. Running with
-`--log-level debug` prints every RPC and I/O decision and is the first thing to
-try when debugging a container that misbehaves under conmon-rs.
+The server's own logs go to the server log driver, see [Server
+logs](troubleshooting.md#server-logs). Running with `--log-level debug` prints
+every RPC and I/O decision and is the first thing to try when debugging a
+container that misbehaves under conmon-rs. CRI-O starts the servers with its
+own log level and without logs, [Debugging a
+pod](troubleshooting.md#debugging-a-pod) describes how to get them.
 
 ## OOM reporting
 
@@ -94,19 +95,16 @@ leaf is gone at the exit, a kill in that cgroup which the leaf did not account
 for, together with an exit by `SIGKILL` (status 137), counts as an OOM, which
 may also be the one of another container in it. Without such a cgroup, or if
 its counters cannot be read, an exit by `SIGKILL` with the leaf gone counts as
-an OOM as well. Before v1.2.2, the server watched the parent of the leaf
-instead of that ancestor, the container scope which the systemd cgroup manager
-removes along with the leaf, so that any exit by `SIGKILL` with the leaf gone
-counted as an OOM. Since v1.2.2, a leaf without the memory controller,
-which has no `memory.events`, is not gone: a kill counted by the cgroup above
-it may be an OOM the same way, but without such a cgroup, or if its counters
+an OOM as well. A leaf without the memory controller, which has no
+`memory.events`, does not count as gone: a kill counted by the cgroup above it
+may be an OOM the same way, but without such a cgroup, or if its counters
 cannot be read, nothing counts as one.
 
 The server watches the memory events of all containers through a single
 inotify instance, and reads the counters at most every 100 ms under memory
 pressure. If it cannot watch them, it checks the counters only once the
-process exited. Since unreleased, it logs a warning when that happens for
-another reason than a cgroup which is gone already, like a used up
+process exited. It logs a warning when that happens for another reason than a
+cgroup which is gone already, like a used up
 `fs.inotify.max_user_instances` or `fs.inotify.max_user_watches`, once until
 a watch works again.
 
@@ -118,3 +116,27 @@ event counts without a readable counter and while the cgroup is still under
 OOM, which covers a victim in a nested memory cgroup. An event which the
 counter does not confirm, like an OOM of an ancestor which killed a sibling,
 does not count.
+
+## Changes
+
+- unreleased: the server keeps a terminal open itself until the process
+  exited. Before, the output ended once the terminal got closed the first
+  time, and without stdin the server closed it as well.
+- unreleased: the server syncs the CRI and JSON logs once the container exited
+  and its output ended, before it never synced the container logs.
+- unreleased: the server logs a warning when it cannot watch the memory events
+  of a container for another reason than a cgroup which is gone already.
+- v1.2.2: the OOM check watches the pod cgroup, or the nearest ancestor which
+  is no systemd scope, above the leaf of crun. Before, it watched the parent of
+  the leaf, the container scope which the systemd cgroup manager removes along
+  with the leaf, so that any exit by `SIGKILL` with the leaf gone counted as an
+  OOM.
+- v1.2.2: a leaf without the memory controller does not count as gone for the
+  OOM check.
+- v1.2.2: the `SYSLOG_IDENTIFIER` of the `journald` container log driver is
+  the `tag`, the `containerName` or the short ID, like for conmon. Before, it
+  was `conmonrs` without a `tag`.
+- v1.2.2: a log file which exists when the container gets created is appended
+  to, before it got truncated.
+- v1.2.2: the files of the `containerRuntimeInterface` driver are readable by
+  their group (mode `0640`), before only by their owner.

@@ -20,7 +20,8 @@ kills and writes the exit codes once the containers terminate. The engine
 talks to it over a UNIX domain socket, so no new monitor process is needed for
 additional containers or execs. It works with cgroup v1 and v2 and any OCI
 runtime with the `create`, `exec` and console socket conventions of runc, like
-crun. CI runs the integration tests on cgroup v2 only.
+crun. CI runs the integration tests with crun, and on amd64 with runc as well,
+on cgroup v2 only.
 
 ## Documentation
 
@@ -39,7 +40,8 @@ crun. CI runs the integration tests on cgroup v2 only.
 - [docs/logging.md](docs/logging.md): the container log drivers and how the
   server reports OOM kills.
 - [docs/troubleshooting.md](docs/troubleshooting.md): finding the logs of the
-  server, common failures, memory profiling and OpenTelemetry tracing.
+  server, common failures, debugging the server of a pod under CRI-O, memory
+  profiling and OpenTelemetry tracing.
 - [CONTRIBUTING.md](CONTRIBUTING.md): building, testing and fuzzing the
   sources, and submitting changes.
 - [release.md](release.md): how to cut a release.
@@ -58,12 +60,7 @@ The [get script](scripts/get) downloads the latest statically linked binary of
 ```
 
 [docs/install.md](docs/install.md) describes the options of the script, the
-copr RPMs and how to build from source. The sections on
-[verifying the downloads](docs/install.md#verify-the-downloads),
-[scanning with the VEX document](docs/install.md#scan-with-the-vex-document)
-and [verifying the source tarball](docs/install.md#verify-the-source-tarball)
-moved there from this README, its development notes to
-[CONTRIBUTING.md](CONTRIBUTING.md#building-and-testing).
+copr RPMs and how to build from source.
 
 ## Architecture
 

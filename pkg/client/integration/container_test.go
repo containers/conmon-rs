@@ -157,8 +157,10 @@ var _ = Describe("ConmonClient", func() {
 						[]string{"/busybox", "tail", "/dev/zero"},
 						func(g generate.Generator) {
 							// Pin the swap as well, otherwise the cgroup swaps on
-							// hosts with swap instead of being killed.
-							const limit = 1024 * 1024
+							// hosts with swap instead of being killed. Enough
+							// for the init of runc, a Go program, tail grows
+							// beyond any limit.
+							const limit = 32 * 1024 * 1024
 							g.SetLinuxResourcesMemoryLimit(limit)
 							g.SetLinuxResourcesMemorySwap(limit)
 						},

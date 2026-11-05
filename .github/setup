@@ -133,6 +133,13 @@ install_crio() {
 
 # Configure and start the installed CRI-O with the binary under test.
 start_crio() {
+    # CRI-O starts the servers with the log driver none otherwise, which
+    # leaves no logs of them in the journal. CRI-O adds its own PATH to the
+    # list. SERVER_LOGS=false keeps the default of CRI-O.
+    local monitor_env='monitor_env = ["LOG_DRIVER=systemd"]'
+    if [[ ${SERVER_LOGS:-true} != true ]]; then
+        monitor_env='# monitor_env = []'
+    fi
     cat <<EOT | sudo tee /etc/crio/crio.conf.d/10-crun.conf
 [crio.runtime]
 log_level = "debug"
@@ -142,9 +149,7 @@ default_runtime = "crun"
 runtime_path = "/usr/libexec/crio/crun"
 runtime_type = "pod"
 monitor_path = "/usr/libexec/crio/conmonrs"
-# CRI-O starts the servers with the log driver none otherwise, which leaves
-# no logs of them in the journal. CRI-O adds its own PATH to the list.
-monitor_env = ["LOG_DRIVER=systemd"]
+$monitor_env
 # Exec and attach through the streaming server of conmon-rs, which critest
 # only reaches over WebSocket. crio status config does not show it.
 stream_websockets = ${STREAM_WEBSOCKETS:-false}
@@ -181,7 +186,12 @@ EOT
     # writes more.
     sudo crio status config | grep 'default_runtime = "crun"' >/dev/null
     sudo crio status config | grep 'runtime_type = "pod"' >/dev/null
-    sudo crio status config | grep -F '"LOG_DRIVER=systemd"' >/dev/null
+    if [[ ${SERVER_LOGS:-true} == true ]]; then
+        sudo crio status config | grep -F '"LOG_DRIVER=systemd"' >/dev/null
+    elif sudo crio status config | grep -F 'LOG_DRIVER=' >/dev/null; then
+        echo "::error::CRI-O sets a log driver for the conmon-rs servers" >&2
+        exit 1
+    fi
 
     {
         echo "### CRI-O and conmon-rs"

@@ -44,11 +44,9 @@ child replaces its stdin, stdout and stderr with `/dev/null` like a daemon, so
 neither the server nor the processes it starts write to the ones of the caller
 anymore. The server closes the other file descriptors it inherited, changes into
 `/`, acts as child subreaper for the containers and listens on `conmon.sock` in
-the runtime directory. Since v1.2.2, `conmon.sock` and the [fd
-socket](protocols.md#file-descriptor-socket) get mode `0700` on bind like the
-attach sockets, instead of `0755` from the umask `022`, which the server sets
-itself. Connecting needs write access, so only their owner and root could
-connect before as well.
+the runtime directory. `conmon.sock` and the [fd
+socket](protocols.md#file-descriptor-socket) get mode `0700` on bind, like the
+attach sockets.
 
 The server adds arguments of its own to every runtime call for a container or
 an exec, before the arguments of the request: `--root=<RUNTIME_ROOT>`
@@ -56,21 +54,22 @@ for `--runtime-root`, and `--systemd-cgroup` for the `systemd` cgroup manager
 of the request. If the file name of the runtime is `crun`, it also adds
 `--log=journald:<container ID>`, and for the log levels `trace` and `debug`
 of the server `--log-level=debug`, for `warn` `--log-level=warning` and for
-`error` `--log-level=error`. crun keeps its default for `info` and `off`, and
-before v1.2.2 for `trace` as well.
+`error` `--log-level=error`. crun keeps its default for `info` and `off`.
 
 On SIGTERM or SIGINT, the server kills the containers, stops the pause process
 and removes its sockets within 9.5 seconds, before `Shutdown` of the Go client,
 which sends SIGINT, gives up after 10 with `ErrShutdownTimeout`. If any of that
 fails or does not finish in time, the server logs it as an error and exits with
 status 1. A server which cannot listen for these signals does the same cleanup
-right away and exits with status 1. Since unreleased, the server first forwards
-a SIGTERM to the containers, like conmon, and gives them up to 5 of the 9.5
-seconds to exit on it with their own exit codes before it kills them. Another
-SIGTERM or a SIGINT meanwhile kills them right away. Exec processes and
-containers created meanwhile do not get the SIGTERM. A container which ignores
-it, like the init of a PID namespace without a handler for it, delays the
-shutdown by the full 5 seconds.
+right away and exits with status 1.
+
+On SIGTERM, the server (since unreleased) first forwards the SIGTERM to the
+containers, like conmon, and gives them up to 5 of the 9.5 seconds to exit on
+it with their own exit codes before it kills them. Another SIGTERM or a SIGINT
+meanwhile kills them right away. Exec processes and containers created
+meanwhile do not get the SIGTERM. A container which ignores it, like the init
+of a PID namespace without a handler for it, delays the shutdown by the full 5
+seconds.
 
 ### The `pause` subcommand
 
@@ -92,8 +91,30 @@ Each requested namespace is unshared and bind mounted to
 `$BASE_PATH/[ipc,pid,net,user,uts]ns/$POD_ID`. The bind mounts keep the
 namespaces alive, except for a PID namespace, which dies with its init process.
 Only when `--pid` is requested a pause process stays behind, its PID is written
-to `$BASE_PATH/conmonrs/$POD_ID.pid`. The mounts and the pause process are
-removed when the server shuts down. Since v1.2.2, the bind mounts get
-unmounted lazily (`MNT_DETACH`), a process which still holds one open keeps its
-namespace alive until it lets go of it. Before, a bind path which a process
-held open stayed mounted and its file stayed behind.
+to `$BASE_PATH/conmonrs/$POD_ID.pid`. Since unreleased, that process runs in
+a mount namespace of its own with an empty, read-only root, without any
+capabilities, with `no_new_privs` and not dumpable, so that a process of the
+pod cannot reach the host file system through `/proc/<pid>/root` or trace it.
+If the empty root cannot be set up, like for a root which cannot be pivoted,
+it returns to the mount namespace and root of the host and the server logs a
+warning; with `--user` it cannot return and stays in a private copy of the
+mount namespace of the host, which the warning says. The mounts and the pause
+process are removed when the server shuts down. The bind mounts get unmounted lazily
+(`MNT_DETACH`), a process which still holds one open keeps its namespace alive
+until it lets go of it.
+
+## Changes
+
+- unreleased: the pause process runs in a mount namespace of its own with an
+  empty, read-only root and drops all capabilities, before it kept the root of
+  the host and its capabilities.
+- unreleased: on SIGTERM, the server forwards the SIGTERM to the containers
+  and gives them up to 5 seconds to exit on it, before it killed them right
+  away.
+- v1.2.2: the server unmounts the namespace bind mounts lazily, before a bind
+  path which a process held open stayed mounted and its file stayed behind.
+- v1.2.2: the server passes `--log-level=debug` to crun for its log level
+  `trace` as well, before crun kept its default there.
+- v1.2.2: `conmon.sock` and the fd socket get mode `0700` on bind, before
+  `0755` from the umask `022`, which the server sets itself. Connecting needs
+  write access, so only their owner and root could connect before as well.
