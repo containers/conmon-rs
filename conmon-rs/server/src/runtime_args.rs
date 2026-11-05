@@ -26,13 +26,10 @@ impl GenerateRuntimeArgs<'_> {
     pub(crate) fn create_args(
         self,
         bundle_path: &Path,
-        global_args: impl IntoIterator<Item = impl AsRef<str>>,
         command_args: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<Vec<String>> {
         let mut args = Vec::with_capacity(16);
         args.extend(self.default_args());
-
-        args.extend(global_args.into_iter().map(|arg| arg.as_ref().into()));
 
         args.push("create".into());
         args.push("--bundle".into());

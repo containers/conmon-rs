@@ -42,7 +42,7 @@ func TestRequireServerFeatureDoesNotBlock(t *testing.T) {
 		release:  release,
 	})
 
-	c, err := (&ConmonServerConfig{ServerRunDir: dir, ClientLogger: logrus.New()}).toClient()
+	c, err := (&ConmonServerConfig{ServerRunDir: dir}).toClient()
 	if err != nil {
 		t.Fatalf("client: %v", err)
 	}
@@ -111,12 +111,12 @@ func TestRequireServerFeature(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	serveVersionSocket(t, dir, versionConmon{features: []string{FeatureSdNotify}})
+	serveVersionSocket(t, dir, versionConmon{features: []string{FeatureIdleTimeout}})
 
 	c := newTestClient(t, dir, logrus.New())
 	t.Cleanup(func() { c.Close() })
 
-	if err := requireFeature(t.Context(), c, FeatureSdNotify); err != nil {
+	if err := requireFeature(t.Context(), c, FeatureIdleTimeout); err != nil {
 		t.Fatalf("reported feature: %v", err)
 	}
 
@@ -130,7 +130,7 @@ func TestRequireServerFeature(t *testing.T) {
 	// A closed client does not check the features at all.
 	c.Close()
 
-	if err := requireFeature(t.Context(), c, FeatureSdNotify); !errors.Is(
+	if err := requireFeature(t.Context(), c, FeatureIdleTimeout); !errors.Is(
 		err,
 		ErrClientClosed,
 	) {
@@ -146,14 +146,14 @@ func TestSupportsFeature(t *testing.T) {
 
 	t.Cleanup(func() { c.Close() })
 
-	if c.SupportsFeature(FeatureSdNotify) {
+	if c.SupportsFeature(FeatureIdleTimeout) {
 		t.Fatal("feature supported before connecting")
 	}
 
 	for i, features := range [][]string{
-		{FeatureSdNotify, FeatureStreamingProtocols},
+		{FeatureIdleTimeout, FeatureStreamingProtocols},
 		// Another server, which replaced the first one.
-		{FeatureSdNotify},
+		{FeatureIdleTimeout},
 	} {
 		if i > 0 {
 			if err := os.Remove(c.socket()); err != nil {
@@ -169,7 +169,6 @@ func TestSupportsFeature(t *testing.T) {
 		}
 
 		for _, feature := range []string{
-			FeatureSdNotify,
 			FeaturePortForward,
 			FeatureIdleTimeout,
 			FeatureStreamingProtocols,
@@ -220,7 +219,7 @@ func TestSupportsFeatureAfterReconnect(t *testing.T) {
 
 	dir := t.TempDir()
 	stop := serveVersionSocket(t, dir, versionConmon{
-		features: []string{FeatureSdNotify, FeatureStreamingProtocols},
+		features: []string{FeatureIdleTimeout, FeatureStreamingProtocols},
 	})
 
 	c := newTestClient(t, dir, logrus.New())
@@ -236,7 +235,7 @@ func TestSupportsFeatureAfterReconnect(t *testing.T) {
 		// ones, the call which reconnected still succeeds.
 		//nolint:err113 // any failure of Version
 		{versionErr: errors.New("version failed")},
-		{features: []string{FeatureSdNotify}},
+		{features: []string{FeatureIdleTimeout}},
 	} {
 		// Another server replaces the one the client is connected to.
 		conn := c.conn
@@ -260,8 +259,12 @@ func TestSupportsFeatureAfterReconnect(t *testing.T) {
 			t.Fatalf("server with %v: feature supported %v, want %v", server.features, got, want)
 		}
 
-		if !c.SupportsFeature(FeatureSdNotify) {
-			t.Fatalf("server with %v: feature %q not supported", server.features, FeatureSdNotify)
+		if !c.SupportsFeature(FeatureIdleTimeout) {
+			t.Fatalf(
+				"server with %v: feature %q not supported",
+				server.features,
+				FeatureIdleTimeout,
+			)
 		}
 	}
 }
@@ -270,7 +273,7 @@ func TestRequireServerFeatureAfterReconnect(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	stop := serveVersionSocket(t, dir, versionConmon{features: []string{FeatureSdNotify}})
+	stop := serveVersionSocket(t, dir, versionConmon{features: []string{FeatureIdleTimeout}})
 
 	c := newTestClient(t, dir, logrus.New())
 	t.Cleanup(func() { c.Close() })
@@ -295,7 +298,7 @@ func TestRequireServerFeatureAfterReconnect(t *testing.T) {
 	// list.
 	stopServer()
 
-	requests, stop := serveRecording(t, dir, FeatureSdNotify, FeaturePortForward)
+	requests, stop := serveRecording(t, dir, FeatureIdleTimeout, FeaturePortForward)
 
 	if _, err := c.ServePortForwardContainer(t.Context(), &ServePortForwardContainerConfig{
 		NetNsPath: "/proc/1/ns/net",
@@ -311,23 +314,12 @@ func TestRequireServerFeatureAfterReconnect(t *testing.T) {
 	// unimplemented.
 	stopServer()
 
-	stop = serveVersionSocket(t, dir, versionConmon{features: []string{FeatureSdNotify}})
+	serveVersionSocket(t, dir, versionConmon{features: []string{FeatureIdleTimeout}})
 
 	if _, err := c.ServePortForwardContainer(t.Context(), &ServePortForwardContainerConfig{
 		NetNsPath: "/proc/1/ns/net",
 	}); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("port forward on an older server: got error %v, want %v", err, ErrUnsupported)
-	}
-
-	// An even older one ignores the sd_notify socket.
-	stopServer()
-	serveVersionSocket(t, dir, versionConmon{})
-
-	if _, err := c.CreateContainer(t.Context(), &CreateContainerConfig{
-		ID:             "id",
-		SdNotifySocket: "/notify.sock",
-	}); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("sd_notify socket on an older server: got error %v, want %v", err, ErrUnsupported)
 	}
 }
 
@@ -489,7 +481,7 @@ func TestVersionErrorOutput(t *testing.T) {
 	}
 }
 
-func TestVersionContext(t *testing.T) {
+func TestVersionTimeout(t *testing.T) {
 	t.Parallel()
 
 	binary := writeTestBinary(t, `exec sleep 60`)
@@ -499,7 +491,7 @@ func TestVersionContext(t *testing.T) {
 
 	start := time.Now()
 
-	if _, err := VersionContext(ctx, binary); err == nil {
+	if _, err := versionContext(ctx, binary); err == nil {
 		t.Fatal("hanging binary succeeded")
 	}
 

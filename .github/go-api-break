@@ -1,0 +1,62 @@
+# The incompatible changes of the Go client which are intended against one
+# release, like removed API which CRI-O does not use. The first line which is
+# no comment is the tag of that release, the others are lines of the
+# "## incompatible changes" section of the report of gorelease. make
+# verify-go-api prints the whole report and fails as usual, unless it compares
+# with that tag, gorelease found no errors or diagnostics and every
+# incompatible change it reports is one of the lines below. Once the next
+# release got tagged, gorelease compares with that one, the file is a no-op
+# then and gets deleted afterwards, see release.md.
+v1.2.2
+AttachConfig.DetachKeys: removed
+AttachConfig.ExecSession: removed
+AttachConfig.Passthrough: removed
+AttachConfig.PostAttachFunc: removed
+AttachConfig.PreAttachFunc: removed
+CgroupManagerPerCommand: removed
+(*ConmonClient).CreateNamespaces: removed
+(*ConmonClient).Kill: removed
+(*ConmonClient).RemoteFDs: removed
+(*ConmonClient).SetWindowSizeContainer: removed
+(*ConmonClient).Shutdown: removed
+ConmonServerConfig.ClientFieldLogger: removed
+ConmonServerConfig.ClientLogger: removed
+ContainerLogDriver.Labels: removed
+ContainerLogDriver.Tag: removed
+CreateContainerConfig.AdditionalFDs: removed
+CreateContainerConfig.CgroupManager: removed
+CreateContainerConfig.CleanupCmd: removed
+CreateContainerConfig.EnvVars: removed
+CreateContainerConfig.GlobalArgs: removed
+CreateContainerConfig.LeakFDs: removed
+CreateContainerConfig.SdNotifySocket: removed
+CreateContainerResponse.NamespacesPath: removed
+CreateNamespacesConfig: removed
+CreateNamespacesResponse: removed
+DialLongSocket: removed
+ErrCgroupManagerPerCommand: removed
+ErrMissingIDMappings: removed
+ErrRemoteFDsBroken: removed
+ErrTerminalSizeNil: removed
+ErrTooManyFileDescriptors: removed
+ExecSyncConfig.CgroupManager: removed
+ExecSyncConfig.EnvVars: removed
+FeatureJournaldFields: removed
+LogDriverTypeJSONLogger: removed
+NamespaceIPC: removed
+NamespaceNet: removed
+NamespacePID: removed
+Namespace: removed
+NamespacesResponse: removed
+NamespaceUser: removed
+NamespaceUTS: removed
+NewConmonServerConfig: removed
+NewContext: removed
+NewRemoteFDs: removed
+RemoteFD: removed
+RemoteFDs: removed
+ServeAttachContainerConfig.CgroupManager: removed
+ServeExecContainerConfig.CgroupManager: removed
+ServerVersion.CargoTree: removed
+SetWindowSizeContainerConfig: removed
+VersionContext: removed

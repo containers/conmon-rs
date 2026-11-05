@@ -7,7 +7,7 @@ fn forget_grandchild_drops_empty_entries() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let exit_path = dir.path().join("exit");
     let reapable = |pid| -> Result<ReapableChild> {
-        Ok(ReapableChild::from_child(child(pid, None, &exit_path, &[])?).1)
+        Ok(ReapableChild::from_child(child(pid, None, &exit_path)?).1)
     };
     // The PID of the first one got reused.
     let (first, second, third) = (
@@ -58,38 +58,10 @@ async fn registration_keeps_the_child_claimed() -> Result<()> {
     call.claim(&reaper.pending, sh.pid);
     assert!(reaper.is_claimed(sh.pid));
 
-    let child = child(sh.pid, None, &dir.path().join("exit"), &[])?;
-    reaper.watch_grandchild(child, vec![], call)?;
+    let child = child(sh.pid, None, &dir.path().join("exit"))?;
+    reaper.watch_grandchild(child, call)?;
     assert!(reaper.is_claimed(sh.pid));
     assert!(!lock(&reaper.pending).contains_key(&sh.pid));
     assert!(!reaper.calls_in_progress());
-    Ok(())
-}
-
-#[tokio::test]
-async fn leaked_fds_stay_open_until_the_exit() -> Result<()> {
-    use nix::{fcntl::OFlag, unistd::pipe2};
-    use std::io::{ErrorKind, Read};
-
-    let reaper = ChildReaper::default();
-    let dir = tempfile::tempdir()?;
-    let sh = spawn_sh("exec sleep 60")?;
-    let (reader, writer) = pipe2(OFlag::O_NONBLOCK)?;
-    let mut reader = std::fs::File::from(reader);
-    let call = reaper.begin_call(distant_deadline())?;
-    let child = child(sh.pid, None, &dir.path().join("exit"), &[])?;
-    let mut exit_rx = reaper.watch_grandchild(child, vec![writer], call)?;
-
-    // The server keeps the descriptor while the process runs.
-    let mut buf = [0; 1];
-    assert_eq!(
-        reader.read(&mut buf).map_err(|e| e.kind()),
-        Err(ErrorKind::WouldBlock)
-    );
-
-    sh.process.signal(Signal::SIGKILL)?;
-    exit_rx.recv().await?;
-    wait_for_real(|| matches!((&reader).read(&mut [0; 1]), Ok(0))).await;
-    assert!(matches!(reader.read(&mut buf), Ok(0)));
     Ok(())
 }

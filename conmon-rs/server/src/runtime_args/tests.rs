@@ -32,7 +32,7 @@ where
 }
 
 fn create(args: GenerateRuntimeArgs) -> Result<Vec<String>> {
-    args.create_args(Path::new("/bundle"), ["--global"], ["--command"])
+    args.create_args(Path::new("/bundle"), ["--command"])
 }
 
 #[test]
@@ -45,7 +45,6 @@ fn create_args_for_runc() {
     assert_eq!(
         args,
         [
-            "--global",
             "create",
             "--bundle",
             "/bundle",
@@ -114,7 +113,6 @@ fn create_args_for_crun_with_root_and_systemd() {
             "--log-level=debug",
             "--root=/run/crun",
             "--systemd-cgroup",
-            "--global",
             "create",
             "--bundle",
             "/bundle",
@@ -226,7 +224,6 @@ async fn exec_and_create_args_with_terminal() {
     assert_eq!(
         create,
         [
-            "--global",
             "create",
             "--bundle",
             "/bundle",

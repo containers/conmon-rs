@@ -4,7 +4,6 @@
 use super::{ChildReaper, InFlight, PendingPid};
 use crate::{
     container_io::{ContainerIO, READ_BUFFER_SIZE, with_scratch},
-    fd_mapping::{self, CommandFdExt, FdMapping},
     fs_util, init,
     mutex::lock,
     process::{Process, child_pid, read_pid_file, signal_name, wait_for_exit_code},
@@ -20,10 +19,7 @@ use nix::{
 use std::{
     future, io,
     ops::{Deref, DerefMut},
-    os::{
-        fd::{OwnedFd, RawFd},
-        unix::process::ExitStatusExt,
-    },
+    os::unix::process::ExitStatusExt,
     path::Path,
     pin::{Pin, pin},
     process::{ExitStatus, Stdio},
@@ -77,8 +73,8 @@ impl RuntimeOutput {
 
     /// Read until the end, keeping the end in `buf` if any. The reads go to
     /// the scratch buffer of the thread, see [`with_scratch`], so that the
-    /// task of a create or exec with a terminal, or of a pause setup,
-    /// carries no buffers of its own.
+    /// task of a create or exec with a terminal carries no buffers of its
+    /// own.
     async fn read(mut reader: impl AsyncRead + Unpin, buf: Option<&Mutex<StderrTail>>) {
         let mut read = |cx: &mut std::task::Context<'_>| {
             with_scratch(READ_BUFFER_SIZE, |scratch| {
@@ -97,24 +93,9 @@ impl RuntimeOutput {
         while future::poll_fn(&mut read).await {}
     }
 
-    /// The end of stderr, waiting at most `wait` for the rest of what is
-    /// still in the pipe. The reader keeps the pipe open afterwards until
-    /// its writers closed it, a child which still writes to it must not get
-    /// EPIPE.
-    pub(crate) async fn take(mut self, wait: Duration) -> Vec<u8> {
-        // Detached rather than aborted on the timeout.
-        let _ = time::timeout(wait, &mut self.task).await;
-        Self::end(&self)
-    }
-
     /// Wait for the end of the output for a while, a helper of the runtime
-    /// may hold the pipes open, and return the end of stderr.
-    pub(crate) async fn finish(output: Option<Self>) -> Vec<u8> {
-        Self::finish_unless_stopped(output, &CancellationToken::new()).await
-    }
-
-    /// Like [`RuntimeOutput::finish`], but only briefly once the shutdown
-    /// stopped the call through `stop`.
+    /// may hold the pipes open, but only briefly once the shutdown stopped
+    /// the call through `stop`, and return the end of stderr.
     async fn finish_unless_stopped(output: Option<Self>, stop: &CancellationToken) -> Vec<u8> {
         let Some(mut output) = output else {
             return vec![];
@@ -134,26 +115,7 @@ impl RuntimeOutput {
     fn end(output: &Self) -> Vec<u8> {
         std::mem::take(&mut *lock(&output.stderr)).into_end()
     }
-
-    /// Whether anything of stderr arrived yet.
-    #[cfg(test)]
-    pub(crate) fn has_stderr(&self) -> bool {
-        !lock(&self.stderr).end().is_empty()
-    }
 }
-
-#[cfg(test)]
-thread_local! {
-    /// How many spawns of the thread fail as if a target of the descriptors
-    /// changed, see [`ChildReaper::spawn_command`].
-    pub(super) static TARGET_CHANGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-
-    /// How many spawns the thread tried, see [`ChildReaper::spawn_command`].
-    pub(super) static SPAWN_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// first usable file descriptor after stdin, stdout and stderr
-const FIRST_FD_AFTER_STDIO: RawFd = 3;
 
 /// How [`ChildReaper::create_child`] runs a runtime.
 #[derive(Debug)]
@@ -174,15 +136,10 @@ pub(crate) struct RuntimeCall<'a> {
 
     /// When a runtime which did not finish gets killed.
     pub(crate) deadline: Instant,
-    pub(crate) env_vars: Vec<(String, String)>,
-
-    /// Descriptors the runtime gets from 3 on, in this order.
-    pub(crate) additional_fds: Vec<OwnedFd>,
 }
 
 impl<'a> RuntimeCall<'a> {
-    /// A call without stdin, environment or descriptors, whose runtime gets
-    /// killed at the `deadline`.
+    /// A call without stdin, whose runtime gets killed at the `deadline`.
     pub(crate) fn new(
         runtime: &'a Path,
         args: &'a [String],
@@ -196,73 +153,13 @@ impl<'a> RuntimeCall<'a> {
             stdin: false,
             pidfile,
             deadline,
-            env_vars: vec![],
-            additional_fds: vec![],
         }
     }
 }
 
 impl ChildReaper {
-    /// Spawn the runtime with the descriptors from 3 on, see
-    /// [`ChildReaper::create_child`]. A spawn which failed because a target
-    /// of the descriptors changed meanwhile gets tried once more, see
-    /// [`fd_mapping`]. With descriptors, the commands get built, spawned and
-    /// dropped under the [`fd_mapping::spawn_lock`], and the descriptors get
-    /// closed under it as well.
-    fn spawn_runtime(
-        runtime: &Path,
-        args: &[String],
-        stdin: bool,
-        env_vars: &[(String, String)],
-        fds: Vec<OwnedFd>,
-    ) -> Result<RuntimeChild> {
-        // Only commands with mappings take part, the others do not wait.
-        let spawning = (!fds.is_empty()).then(fd_mapping::spawn_lock);
-        let spawn = || Self::spawn_command(runtime, args, stdin, env_vars, &fds);
-        let result = match spawn() {
-            Err(e) if fd_mapping::target_changed(&e) => {
-                debug!("Retrying the runtime spawn: {e}");
-                spawn()
-            }
-            result => result,
-        };
-        drop(fds);
-        drop(spawning);
-        result.map_err(|e| {
-            if fd_mapping::target_changed(&e) {
-                anyhow::Error::from(e).context("a target descriptor changed during spawn")
-            } else {
-                e.into()
-            }
-        })
-    }
-
-    /// Spawn the runtime once, with duplicates of the descriptors, which
-    /// its command owns in its pre_exec hook. The caller holds the
-    /// [`fd_mapping::spawn_lock`] with descriptors.
-    fn spawn_command(
-        runtime: &Path,
-        args: &[String],
-        stdin: bool,
-        env_vars: &[(String, String)],
-        fds: &[OwnedFd],
-    ) -> io::Result<RuntimeChild> {
-        #[cfg(test)]
-        SPAWN_ATTEMPTS.with(|n| n.set(n.get() + 1));
-        #[cfg(test)]
-        if TARGET_CHANGES.with(|n| n.replace(n.get().saturating_sub(1))) > 0 {
-            return Err(io::Error::from_raw_os_error(libc::EBUSY));
-        }
-        let mappings = fds
-            .iter()
-            .enumerate()
-            .map(|(i, fd)| {
-                Ok(FdMapping {
-                    parent_fd: fd.try_clone()?,
-                    child_fd: i as RawFd + FIRST_FD_AFTER_STDIO,
-                })
-            })
-            .collect::<io::Result<_>>()?;
+    /// Spawn the runtime, see [`ChildReaper::create_child`].
+    fn spawn_runtime(runtime: &Path, args: &[String], stdin: bool) -> Result<RuntimeChild> {
         let mut cmd = Command::new(runtime);
         // A runtime which gets dropped, for example on a panic, must not keep
         // running unobserved.
@@ -277,27 +174,17 @@ impl ChildReaper {
         // runtime would pass on to the container.
         cmd.stdin(if stdin { Stdio::piped() } else { Stdio::null() });
 
-        cmd.args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .envs(env_vars.iter().map(|(k, v)| (k, v)))
-            .fd_mappings(mappings);
-        // After the mappings: the pre_exec hooks run in the order they got
-        // added, and this one lowers the open files limit to the one the
-        // server started with, below which the mappings may have to move a
-        // descriptor of the server.
+        cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        // Lowers the open files limit to the one the server started with.
         init::reset_inherited(&mut cmd);
-        // The mappings live in the pre_exec hook of the command, dropping it
-        // after the spawn closes the duplicates and the placeholders in the
-        // parent.
-        cmd.spawn()
+        Ok(cmd.spawn()?)
     }
 
     /// How long a runtime gets for what follows its exit or its failure: one
     /// which exited successfully to connect the terminal, one which failed
     /// to exit on its own and one which got killed to exit. The helpers of a
     /// runtime which exited get it to close its output, see
-    /// [`RuntimeOutput::finish`].
+    /// [`RuntimeOutput::finish_unless_stopped`].
     pub(crate) const RUNTIME_GRACE: Duration = Duration::from_secs(5);
 
     /// How long a call which the shutdown stopped waits for the exit of its
@@ -321,8 +208,6 @@ impl ChildReaper {
             stdin,
             pidfile,
             deadline: runtime_deadline,
-            env_vars,
-            additional_fds,
         } = call;
         let mut in_flight = self.begin_call(runtime_deadline)?;
         // A PID file left from before, like of a container created in the
@@ -337,8 +222,7 @@ impl ChildReaper {
                 command_start
             }
         );
-        let child = Self::spawn_runtime(runtime, args, stdin, &env_vars, additional_fds)
-            .context("spawn child process")?;
+        let child = Self::spawn_runtime(runtime, args, stdin).context("spawn child process")?;
 
         // Not waited for yet, so it has its PID. Dropping it on a failure
         // kills it.
@@ -685,7 +569,7 @@ impl Runtime {
     }
 
     /// Kill the process group of the runtime, which it leads, see
-    /// `spawn_command`. Nothing once it got reaped, the ID of the group may
+    /// `spawn_runtime`. Nothing once it got reaped, the ID of the group may
     /// belong to another one then, the runtime has no ID anymore.
     fn kill_group(&self) -> nix::Result<()> {
         let Ok(pid) = child_pid(self.child.id()) else {

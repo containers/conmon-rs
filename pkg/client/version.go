@@ -35,13 +35,8 @@ type ServerVersion struct {
 	// The used Cargo version.
 	CargoVersion string `json:"cargo_version"` //nolint:tagliatelle // Rust's serde will use that format.
 
-	// The cargo dependency tree. Always empty here, Version and
-	// VersionContext do not ask for it. Use ConmonClient.Version with
-	// Verbose.
-	CargoTree string `json:"cargo_tree"` //nolint:tagliatelle // Rust's serde will use that format.
-
 	// The optional features the server supports, see the Feature constants
-	// like [FeatureSdNotify].
+	// like [FeaturePortForward].
 	Features []string `json:"features"`
 }
 
@@ -58,12 +53,11 @@ func Version(binaryPath string) (res *ServerVersion, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), versionTimeout)
 	defer cancel()
 
-	return VersionContext(ctx, binaryPath)
+	return versionContext(ctx, binaryPath)
 }
 
-// VersionContext works like Version, the context bounds running the binary
-// instead of the fixed timeout.
-func VersionContext(ctx context.Context, binaryPath string) (res *ServerVersion, err error) {
+// versionContext implements Version, the context bounds running the binary.
+func versionContext(ctx context.Context, binaryPath string) (res *ServerVersion, err error) {
 	if binaryPath == "" {
 		binaryPath = binaryName
 	}
@@ -148,12 +142,13 @@ type VersionResponse struct {
 	CargoTree string
 
 	// Features are the optional features the server supports, see the
-	// Feature constants like [FeatureSdNotify].
+	// Feature constants like [FeaturePortForward].
 	Features []string
 }
 
-// FeatureSdNotify is reported by servers which relay sd_notify messages,
-// see CreateContainerConfig.SdNotifySocket. Since v1.1.0.
+// FeatureSdNotify was reported by the servers from v1.1.0 to before
+// unreleased, which relayed the sd_notify messages of a container. Later
+// servers do not report it, and the client has no field to request it.
 const FeatureSdNotify = "sdnotify"
 
 // FeaturePortForward is reported by servers which forward ports, see
@@ -171,11 +166,6 @@ const FeatureIdleTimeout = "idletimeout"
 // v5.channel.k8s.io, see ServeExecContainer. Others only speak
 // v5.channel.k8s.io. Since v1.2.0.
 const FeatureStreamingProtocols = "streamingprotocols"
-
-// FeatureJournaldFields is reported by servers which write the
-// ContainerName, Tag and Labels of a ContainerLogDriver to the journal.
-// Others ignore them. Since v1.2.1.
-const FeatureJournaldFields = "journaldfields"
 
 // SupportsFeature reports whether the server reports the feature, see the
 // Feature constants. New records the features of the server it starts or

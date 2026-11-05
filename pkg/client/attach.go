@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/containers/conmon-rs/internal/proto"
-	"go.podman.io/common/pkg/detach"
 	"go.podman.io/common/pkg/resize"
 )
 
@@ -28,16 +27,15 @@ const (
 )
 
 // AttachStreams are the stdio streams for the AttachConfig. The attach
-// closes them once it is connected to the container and PreAttachFunc
-// succeeded. The caller closes them if AttachContainer fails before that,
-// or with Passthrough.
+// closes them once it is connected to the container. The caller closes them
+// if AttachContainer fails before that.
 type AttachStreams struct {
-	// Standard input stream, can be nil. It gets read until EOF or the
-	// detach keys, and closed once the attach ends or the client shuts
-	// down. Its Close has to end a Read blocked on it, like the one of an
-	// io.Pipe or of a pipe from os.Pipe does, unlike a file in blocking mode
-	// such as an inherited stdin, otherwise a goroutine of the client keeps
-	// waiting in the Read until it returns.
+	// Standard input stream, can be nil. It gets read until EOF, and closed
+	// once the attach ends or the client shuts down. Its Close has to end a
+	// Read blocked on it, like the one of an io.Pipe or of a pipe from os.Pipe
+	// does, unlike a file in blocking mode such as an inherited stdin,
+	// otherwise a goroutine of the client keeps waiting in the Read until it
+	// returns.
 	Stdin *In
 
 	// Standard output stream, can be nil. It gets closed once the output
@@ -70,11 +68,6 @@ type AttachConfig struct {
 	// other ones.
 	SocketPath string
 
-	// ExecSession ID, if this is an attach for an Exec.
-	//
-	// Deprecated: The server only logs it, attach sessions are per container.
-	ExecSession string
-
 	// Whether a terminal was setup for the command this is attaching to.
 	Tty bool
 
@@ -92,13 +85,6 @@ type AttachConfig struct {
 	// Whether the container supports stdin or not.
 	ContainerStdin bool
 
-	// Whether the output is passed through the caller's std streams, rather than
-	// ones created for the attach session. Only the pre attach function runs
-	// then.
-	//
-	// Deprecated: Nothing is attached with it, call PreAttachFunc directly.
-	Passthrough bool
-
 	// Channel of resize events. They are applied until the attach returns,
 	// the channel is not read afterwards. Senders should stop or close it
 	// once the attach is over.
@@ -106,17 +92,6 @@ type AttachConfig struct {
 
 	// The standard streams for this attach session.
 	Streams AttachStreams
-
-	// A closure to be run before the streams are attached.
-	// This could be used to start a container.
-	PreAttachFunc func() error
-
-	// A closure to be run after the streams are attached.
-	// This could be used to notify callers the streams have been attached.
-	PostAttachFunc func() error
-
-	// The keys that indicate the attach session should be detached.
-	DetachKeys []byte
 }
 
 // attachSession is an attach in progress.
@@ -202,12 +177,6 @@ func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) (
 
 			req.SetStopAfterStdinEof(cfg.StopAfterStdinEOF)
 
-			if cfg.ExecSession != "" {
-				if err := req.SetExecSessionId(cfg.ExecSession); err != nil {
-					return fmt.Errorf("set exec session ID: %w", err)
-				}
-			}
-
 			return nil
 		},
 		noResponse,
@@ -223,65 +192,33 @@ func (c *ConmonClient) AttachContainer(ctx context.Context, cfg *AttachConfig) (
 	return nil
 }
 
-func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) (err error) {
-	var (
-		conn    *net.UnixConn
-		session *attachSession
-	)
+func (c *ConmonClient) attach(ctx context.Context, cfg *AttachConfig) error {
+	c.logger.Debugf("Attaching to container %s", cfg.ID)
 
-	if !cfg.Passthrough {
-		c.logger.Debugf("Attaching to container %s", cfg.ID)
+	ctx, session, err := c.startAttachSession(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer c.endAttachSession(session)
 
-		ctx, session, err = c.startAttachSession(ctx, cfg)
-		if err != nil {
-			return err
-		}
-		defer c.endAttachSession(session)
+	// The resize events are applied until the attach returns.
+	resizeDone := make(chan struct{})
+	defer close(resizeDone)
 
-		// The resize events are applied until the attach returns.
-		resizeDone := make(chan struct{})
-		defer close(resizeDone)
+	go c.forwardResizeEvents(ctx, cfg, resizeDone)
 
-		go c.forwardResizeEvents(ctx, cfg, resizeDone)
-
-		conn, err = dialLongSocket("unixpacket", cfg.SocketPath)
-		if err != nil {
-			return fmt.Errorf("failed to connect to container's attach socket: %w", err)
-		}
-
-		defer func() {
-			if err := conn.Close(); err != nil {
-				c.logger.Errorf("unable to close socket: %q", err)
-			}
-		}()
+	conn, err := dialLongSocket("unixpacket", cfg.SocketPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect to container's attach socket: %w", err)
 	}
 
-	if cfg.PreAttachFunc != nil {
-		if err := cfg.PreAttachFunc(); err != nil {
-			return fmt.Errorf("run pre attach func: %w", err)
+	defer func() {
+		if err := conn.Close(); err != nil {
+			c.logger.Errorf("unable to close socket: %q", err)
 		}
-	}
-
-	if cfg.Passthrough {
-		return nil
-	}
+	}()
 
 	receiveStdoutError, stdinDone := c.setupStdioChannels(ctx, cfg, conn, session)
-
-	if cfg.PostAttachFunc != nil {
-		if err := cfg.PostAttachFunc(); err != nil {
-			// Stop copying stdin and receiving the output, like an ended
-			// context does.
-			session.closeStdin()
-			c.stopOutput(func() {
-				if closeErr := conn.CloseRead(); closeErr != nil {
-					c.logger.Errorf("Unable to close conn: %v", closeErr)
-				}
-			}, receiveStdoutError)
-
-			return fmt.Errorf("run post attach func: %w", err)
-		}
-	}
 
 	if err := c.readStdio(ctx, cfg, conn, session, receiveStdoutError, stdinDone); err != nil {
 		return fmt.Errorf("read stdio: %w", err)
@@ -317,10 +254,7 @@ func (c *ConmonClient) forwardResizeEvents(
 
 			c.logger.Debugf("Got a resize event: %+v", size)
 
-			if err := c.SetWindowSizeContainer(ctx, &SetWindowSizeContainerConfig{
-				ID:   cfg.ID,
-				Size: &size,
-			}); err != nil {
+			if err := c.setWindowSize(ctx, cfg.ID, size); err != nil {
 				c.logger.Debugf("Failed to write to control file to resize terminal: %v", err)
 			}
 		}
@@ -348,10 +282,10 @@ func (c *ConmonClient) setupStdioChannels(
 
 	if stdin != nil {
 		go func() {
-			_, err := detach.Copy(conn, stdin, cfg.DetachKeys)
+			_, err := io.Copy(conn, stdin)
 
 			// A closed stdin does not end the attach, the output does.
-			// One which the client closed, for example on Shutdown, can
+			// One which the client closed, for example on ShutdownContext, can
 			// return any error then, like os.ErrClosed for an *os.File.
 			if !session.stdinClosed.Load() && !stdinConnClosed(err) {
 				stdinDone <- err
@@ -584,16 +518,12 @@ func (c *ConmonClient) readStdio(
 		// afterwards still has to be received below.
 		closeErr := conn.CloseWrite()
 
-		// A detach or a failed stdin copy ends the attach right away, the
-		// output stops before it returns.
+		// A failed stdin copy ends the attach right away, the output stops
+		// before it returns.
 		if err != nil {
-			if !errors.Is(err, detach.ErrDetach) {
-				err = fmt.Errorf("copy stdin: %w", err)
-			}
-
 			c.stopOutput(closeRead, receiveStdoutError)
 
-			return errors.Join(closeErr, err)
+			return errors.Join(closeErr, fmt.Errorf("copy stdin: %w", err))
 		}
 
 		if closeErr != nil {
@@ -665,43 +595,26 @@ func (c *ConmonClient) stopOutput(closeRead func(), receiveStdoutError <-chan er
 	}
 }
 
-// SetWindowSizeContainerConfig is the configuration for calling the SetWindowSizeContainer method.
-type SetWindowSizeContainerConfig struct {
-	// ID specifies the container ID.
-	ID string
-
-	// Size is the new terminal size.
-	Size *resize.TerminalSize
-}
-
-// SetWindowSizeContainer can be used to change the window size of a running
-// container. It fails for a container without a terminal, with
-// ErrMissingConfig for a nil config and with ErrTerminalSizeNil for a config
-// without a Size. Since v1.2.2, a size which comes before the runtime
-// connected the terminal gets applied once it does.
-func (c *ConmonClient) SetWindowSizeContainer(
+// setWindowSize changes the size of the terminal of a running container,
+// for the resize events of an attach. It fails for a container without a
+// terminal. Since v1.2.2, a size which comes before the runtime connected the
+// terminal gets applied once it does.
+func (c *ConmonClient) setWindowSize(
 	ctx context.Context,
-	cfg *SetWindowSizeContainerConfig,
+	id string,
+	size resize.TerminalSize,
 ) (retErr error) {
-	ctx, span := c.startSpan(ctx, "SetWindowSizeContainer")
+	ctx, span := c.startSpan(ctx, "setWindowSize")
 	defer endSpan(span, &retErr)
-
-	if cfg == nil {
-		return ErrMissingConfig
-	}
-
-	if cfg.Size == nil {
-		return ErrTerminalSizeNil
-	}
 
 	_, err := call(ctx, c, proto.Conmon.SetWindowSizeContainer,
 		func(req proto.Conmon_SetWindowSizeRequest) error {
-			if err := req.SetId(cfg.ID); err != nil {
+			if err := req.SetId(id); err != nil {
 				return fmt.Errorf("set ID: %w", err)
 			}
 
-			req.SetWidth(cfg.Size.Width)
-			req.SetHeight(cfg.Size.Height)
+			req.SetWidth(size.Width)
+			req.SetHeight(size.Height)
 
 			return nil
 		},

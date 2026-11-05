@@ -9,7 +9,7 @@ type Target = fn(&[u8]);
 
 /// The entry points of the fuzz targets by their names, like the targets
 /// in `fuzz/fuzz_targets` call them.
-const TARGETS: [(&str, Target); 16] = [
+const TARGETS: [(&str, Target); 15] = [
     ("cgroup_files", cgroup_files),
     ("channel_decode", |data| {
         if let Some((&base64, message)) = data.split_first() {
@@ -19,7 +19,6 @@ const TARGETS: [(&str, Target); 16] = [
     ("client_messages", client_messages),
     ("journal_entry", journal_entry),
     ("log_lines", log_lines),
-    ("notify_filter", notify_filter),
     ("pending_stdin", pending_stdin),
     ("port_forward_query", |data| {
         query_ports(&String::from_utf8_lossy(data));

@@ -6,7 +6,7 @@ use crate::{
     journal::{self, Entry, Priority, Wait},
     mutex::lock,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::{
     io::{self, ErrorKind},
     path::Path,
@@ -81,36 +81,10 @@ impl JournaldLogger {
     /// The field marking a line which had no ending yet.
     const PARTIAL_FIELD: (&'static str, &'static str) = ("CONTAINER_PARTIAL_MESSAGE", "true");
 
-    /// The fields the logger sets itself, which a label cannot replace.
-    const OWN_FIELDS: [&'static str; 8] = [
-        "MESSAGE",
-        "PRIORITY",
-        "CONTAINER_ID",
-        "CONTAINER_ID_FULL",
-        "CONTAINER_NAME",
-        "CONTAINER_TAG",
-        "SYSLOG_IDENTIFIER",
-        Self::PARTIAL_FIELD.0,
-    ];
-
-    /// The most labels of a logger. journald drops entries with more than
-    /// 1024 fields (`ENTRY_FIELDS_MAX`), which would lose every line.
-    const MAX_LABELS: usize = 256;
-
-    /// The most bytes of the names and values of all labels together, which
-    /// every entry carries.
-    const MAX_LABEL_BYTES: usize = 64 * 1024;
-
     /// A logger with the fields conmon writes: the container ID, the name
-    /// and the tag if given, the syslog identifier and the labels. Like for
-    /// conmon, the syslog identifier is the tag, the name without one, and
-    /// the short container ID without both.
-    pub(super) fn new<'a>(
-        id: &str,
-        name: &str,
-        tag: &str,
-        labels: impl IntoIterator<Item = (&'a str, &'a str)>,
-    ) -> Result<Self> {
+    /// if given and the syslog identifier, which is the name, or the short
+    /// container ID without one, like for conmon without a tag.
+    pub(super) fn new(id: &str, name: &str) -> Self {
         let short_id: String = id.chars().take(Self::SHORT_ID_LEN).collect();
         let mut fields = Entry::default();
         fields
@@ -119,29 +93,12 @@ impl JournaldLogger {
         if !name.is_empty() {
             fields.field("CONTAINER_NAME", name);
         }
-        if !tag.is_empty() {
-            fields.field("CONTAINER_TAG", tag);
-        }
-        let identifier = [tag, name, &short_id]
+        let identifier = [name, &short_id]
             .into_iter()
             .find(|s| !s.is_empty())
             .unwrap_or(journal::IDENTIFIER);
         fields.field("SYSLOG_IDENTIFIER", identifier);
-        let (mut count, mut bytes) = (0, 0);
-        for (key, value) in labels {
-            Self::validate_label(key)?;
-            count += 1;
-            bytes += key.len() + value.len();
-            if count > Self::MAX_LABELS || bytes > Self::MAX_LABEL_BYTES {
-                bail!(
-                    "too many journald labels: at most {} with {} bytes together",
-                    Self::MAX_LABELS,
-                    Self::MAX_LABEL_BYTES
-                );
-            }
-            fields.field(key, value);
-        }
-        Ok(Self {
+        Self {
             shared: Arc::new(Shared {
                 fields,
                 failing: AtomicBool::new(false),
@@ -149,22 +106,17 @@ impl JournaldLogger {
                 #[cfg(test)]
                 socket: None,
             }),
-        })
+        }
     }
 
-    /// Check that a label is a field name which the journal takes and which
-    /// the logger does not set itself.
-    fn validate_label(key: &str) -> Result<()> {
-        if !Entry::valid_key(key) {
-            bail!(
-                "invalid journald label {key:?}: use uppercase letters, digits and \
-                 underscores, starting with a letter, at most 64 characters"
-            );
-        }
-        if Self::OWN_FIELDS.contains(&key) {
-            bail!("journald label {key:?} replaces a field of the logger");
-        }
-        Ok(())
+    /// A logger which sends to the `socket` instead of the one of journald.
+    #[cfg(test)]
+    pub(super) fn with_socket(id: &str, socket: &Path) -> Self {
+        let mut logger = Self::new(id, "");
+        Arc::get_mut(&mut logger.shared)
+            .expect("unshared logger")
+            .socket = Some(socket.to_owned());
+        logger
     }
 
     /// The journal priority of the output of a pipe.

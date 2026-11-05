@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"errors"
-	"slices"
 	"testing"
 	"time"
 
@@ -17,7 +16,6 @@ func TestLogDriverTypes(t *testing.T) {
 
 	for typ, want := range map[LogDriverType]proto.Conmon_LogDriver_Type{
 		LogDriverTypeContainerRuntimeInterface: proto.Conmon_LogDriver_Type_containerRuntimeInterface,
-		LogDriverTypeJSONLogger:                proto.Conmon_LogDriver_Type_json,
 		LogDriverTypeJournald:                  proto.Conmon_LogDriver_Type_journald,
 	} {
 		got, err := logDriverTypes.toProto(typ)
@@ -26,10 +24,9 @@ func TestLogDriverTypes(t *testing.T) {
 		}
 	}
 
-	labels := map[string]string{"POD": "web"}
 	logDrivers := []ContainerLogDriver{
-		{Type: LogDriverTypeJournald, ContainerName: "name", Tag: "tag", Labels: labels},
-		{Type: LogDriverTypeJSONLogger, Path: "log", MaxSize: 1},
+		{Type: LogDriverTypeJournald, ContainerName: "name"},
+		{Type: LogDriverTypeContainerRuntimeInterface, Path: "/log", MaxSize: 1},
 	}
 
 	types, err := validateLogDrivers(logDrivers)
@@ -37,7 +34,7 @@ func TestLogDriverTypes(t *testing.T) {
 		t.Fatalf("validate log drivers: %v", err)
 	}
 
-	// The request carries the fields of the journald driver.
+	// The request carries the fields of the drivers.
 	_, seg, err := capnp.NewMessage(capnp.SingleSegment(nil))
 	if err != nil {
 		t.Fatalf("new message: %v", err)
@@ -62,37 +59,16 @@ func TestLogDriverTypes(t *testing.T) {
 		t.Fatalf("got %d log drivers, the first of type %v", list.Len(), list.At(0).Type())
 	}
 
-	json := list.At(1)
+	cri := list.At(1)
 
-	path, err := json.Path()
-	if err != nil || json.Type() != proto.Conmon_LogDriver_Type_json ||
-		path != "log" || json.MaxSize() != 1 {
-		t.Errorf("got JSON driver %v, %q, %d, %v", json.Type(), path, json.MaxSize(), err)
+	path, err := cri.Path()
+	if err != nil || cri.Type() != proto.Conmon_LogDriver_Type_containerRuntimeInterface ||
+		path != "/log" || cri.MaxSize() != 1 {
+		t.Errorf("got CRI driver %v, %q, %d, %v", cri.Type(), path, cri.MaxSize(), err)
 	}
 
-	journald := list.At(0)
-
-	entries, err := journald.Labels()
-	if err != nil || entries.Len() != 1 {
-		t.Fatalf("labels: %v, %d entries", err, entries.Len())
-	}
-
-	texts := []func() (string, error){
-		journald.ContainerName, journald.Tag, entries.At(0).Key, entries.At(0).Value,
-	}
-	got := make([]string, 0, len(texts))
-
-	for _, text := range texts {
-		value, textErr := text()
-		if textErr != nil {
-			t.Fatalf("read text: %v", textErr)
-		}
-
-		got = append(got, value)
-	}
-
-	if want := []string{"name", "tag", "POD", "web"}; !slices.Equal(got, want) {
-		t.Errorf("got name, tag and label %q, want %q", got, want)
+	if name, err := list.At(0).ContainerName(); err != nil || name != "name" {
+		t.Errorf("got container name %q, %v, want %q", name, err, "name")
 	}
 
 	if _, err := validateLogDrivers([]ContainerLogDriver{
@@ -105,14 +81,12 @@ func TestLogDriverTypes(t *testing.T) {
 func TestCreateContainerValidatesWithoutServer(t *testing.T) {
 	t.Parallel()
 
-	// No server runs, the configuration fails before the feature check
-	// of the sd_notify socket dials one.
+	// No server runs, the configuration fails before the client dials one.
 	c := newTestClient(t, t.TempDir(), logrus.New())
 
 	if _, err := c.CreateContainer(t.Context(), &CreateContainerConfig{
-		ID:             "id",
-		LogDrivers:     []ContainerLogDriver{{Type: LogDriverType(42)}},
-		SdNotifySocket: "/notify.sock",
+		ID:         "id",
+		LogDrivers: []ContainerLogDriver{{Type: LogDriverType(42)}},
 	}); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("got error %v, want %v", err, ErrInvalidValue)
 	}

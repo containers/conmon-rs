@@ -273,14 +273,38 @@ verify-schema-layout: schema-layout ## Verify that the Cap'n Proto schema keeps 
 # The integration suite is a module of its own, which nothing imports. A clone
 # without the tags of the repository fails, `git fetch --tags
 # https://github.com/containers/conmon-rs.git` gets them.
+# GO_API_BREAK, if committed, names a release tag and the incompatible changes
+# which are intended against it, see the file. gorelease still runs and prints
+# its report, its failure only gets forgiven for that tag, with the verdict on
+# the incompatible changes, which gorelease only gives without errors of the
+# packages, no diagnostics of the module and only listed incompatible changes.
+GO_API_BREAK := .github/go-api-break
+
 .PHONY: verify-go-api
 verify-go-api: .install.gorelease ## Verify that the Go client is compatible with the latest release.
 	BASE=$$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*') && \
-	DIR=$$(mktemp -d) && \
-	trap 'git worktree remove --force "$$DIR" 2>/dev/null; rm -rf "$$DIR"' EXIT && \
+	DIR=$$(mktemp -d) && TMP=$$(mktemp -d) && \
+	trap 'git worktree remove --force "$$DIR" 2>/dev/null; rm -rf "$$DIR" "$$TMP"' EXIT && \
 	git worktree add -q --detach "$$DIR" HEAD && \
 	echo "Comparing the Go module of HEAD with $$BASE" && \
-	cd "$$DIR" && "$(abspath $(GOTOOLS_BINDIR))/gorelease" -base="$$BASE"
+	cd "$$DIR" && touch "$$TMP/break" && \
+	if [ -f "$(GO_API_BREAK)" ]; then sed -e '/^#/d' -e '/^$$/d' "$(GO_API_BREAK)" >"$$TMP/break"; fi && \
+	ALLOWED=$$(head -n 1 "$$TMP/break") && \
+	tail -n +2 "$$TMP/break" | sort >"$$TMP/allowed" && \
+	STATUS=0 && "$(abspath $(GOTOOLS_BINDIR))/gorelease" -base="$$BASE" >"$$TMP/report" 2>&1 || STATUS=$$? ; \
+	cat "$$TMP/report" ; \
+	sed -n '/^## incompatible changes$$/,/^#/{/^#/d;/^$$/d;p}' "$$TMP/report" | sort >"$$TMP/found" ; \
+	if [ "$$STATUS" = 1 ] && [ -n "$$ALLOWED" ] && [ "$$ALLOWED" = "$$BASE" ] && \
+		[ -s "$$TMP/found" ] && [ -z "$$(comm -23 "$$TMP/found" "$$TMP/allowed")" ] && \
+		grep -qx 'Incompatible changes were detected.' "$$TMP/report" && \
+		! grep -qx '# diagnostics' "$$TMP/report"; then \
+		echo "The incompatible changes against $$BASE are intended, see $(GO_API_BREAK)" ; \
+		STATUS=0 ; \
+	elif [ "$$STATUS" != 0 ] && [ "$$ALLOWED" = "$$BASE" ]; then \
+		echo "Incompatible changes against $$BASE which $(GO_API_BREAK) does not list:" ; \
+		comm -23 "$$TMP/found" "$$TMP/allowed" ; \
+	fi ; \
+	exit "$$STATUS"
 
 .PHONY: verify-deny
 verify-deny: ## Check the dependencies with cargo-deny, which has to be installed.

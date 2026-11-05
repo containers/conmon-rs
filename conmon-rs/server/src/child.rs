@@ -25,7 +25,6 @@ pub(crate) struct Child {
     pub(crate) oom_exit_paths: Vec<PathBuf>,
     pub(crate) timeout: Option<Instant>,
     pub(crate) io: SharedContainerIO,
-    pub(crate) cleanup_cmd: Vec<String>,
     pub(crate) token: CancellationToken,
 
     /// The process, if the caller holds it already, like an exec, so that

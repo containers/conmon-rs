@@ -40,9 +40,9 @@ thread_local! {
 
 /// Run `f` on a buffer of `len` bytes which the thread keeps for all reads
 /// which copy what they got out of it right away. The read loops of all
-/// containers and attach clients, the runtime calls and the notify relays
-/// share it, instead of keeping a buffer each while they wait. It grows to
-/// the largest `len` asked for and holds what the last use left in it.
+/// containers and attach clients and the runtime calls share it, instead of
+/// keeping a buffer each while they wait. It grows to the largest `len`
+/// asked for and holds what the last use left in it.
 pub(crate) fn with_scratch<R>(len: usize, f: impl FnOnce(&mut [u8]) -> R) -> R {
     SCRATCH.with(|scratch| match scratch.try_borrow_mut() {
         Ok(mut scratch) => {

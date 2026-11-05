@@ -64,7 +64,7 @@ fn paths_get_absolute() -> Result<()> {
 }
 
 #[tokio::test]
-async fn prepare_keeps_the_sockets_of_a_running_server() -> Result<()> {
+async fn prepare_keeps_the_socket_of_a_running_server() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let runtime_dir = dir.path().to_str().context("utf8 path")?;
     let config = Config::parse_for_test(["--runtime-dir", runtime_dir]);
@@ -72,12 +72,19 @@ async fn prepare_keeps_the_sockets_of_a_running_server() -> Result<()> {
     // Left behind by a server which is gone. A process which a parallel
     // test forks may hold it until it execs.
     drop(std::os::unix::net::UnixListener::bind(config.socket())?);
-    std::fs::write(config.fd_socket(), "")?;
+    // And the fd socket of an older server.
+    let fd_socket = dir.path().join("conmon-fd.sock");
+    drop(tokio_seqpacket::UnixSeqpacketListener::bind(&fd_socket)?);
     retry_while_in_use(|| config.prepare()).await?;
     assert!(!config.socket().exists());
-    assert!(!config.fd_socket().exists());
+    assert!(!fd_socket.exists());
 
-    // A running server keeps them.
+    // One which cannot be removed does not stop the server.
+    std::fs::create_dir(&fd_socket)?;
+    config.prepare()?;
+    std::fs::remove_dir(&fd_socket)?;
+
+    // A running server keeps it.
     let server = std::os::unix::net::UnixListener::bind(config.socket())?;
     let err = config.prepare().unwrap_err();
     assert!(err.is::<listener::SocketInUse>(), "{err:#}");
@@ -85,21 +92,19 @@ async fn prepare_keeps_the_sockets_of_a_running_server() -> Result<()> {
     drop(server);
     std::fs::remove_file(config.socket())?;
 
-    // A socket of another type is no server of this kind, one of another
-    // user is not reachable either.
-    // Root can connect anyway.
-    let root = nix::unistd::geteuid().is_root();
-    let _other_type = std::os::unix::net::UnixListener::bind(config.fd_socket())?;
-    let _inaccessible = if root {
-        None
-    } else {
-        let listener = std::os::unix::net::UnixListener::bind(config.socket())?;
-        std::fs::set_permissions(config.socket(), Permissions::from_mode(0o000))?;
-        Some(listener)
-    };
+    // A socket of another type is no server of this kind.
+    let other_type = tokio_seqpacket::UnixSeqpacketListener::bind(config.socket())?;
     config.prepare()?;
-    assert!(!config.fd_socket().exists());
     assert!(!config.socket().exists());
+    drop(other_type);
+
+    // One of another user is not reachable either, root can connect anyway.
+    if !nix::unistd::geteuid().is_root() {
+        let _inaccessible = std::os::unix::net::UnixListener::bind(config.socket())?;
+        std::fs::set_permissions(config.socket(), Permissions::from_mode(0o000))?;
+        config.prepare()?;
+        assert!(!config.socket().exists());
+    }
     Ok(())
 }
 

@@ -19,7 +19,6 @@ import (
 	"capnproto.org/go/capnp/v3/rpc"
 	"github.com/containers/conmon-rs/internal/proto"
 	"github.com/sirupsen/logrus"
-	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -302,11 +301,6 @@ func TestMissingConfig(t *testing.T) {
 			return err
 		},
 		"ReopenLogContainer": func() error { return c.ReopenLogContainer(ctx, nil) },
-		"CreateNamespaces": func() error {
-			_, err := c.CreateNamespaces(ctx, nil)
-
-			return err
-		},
 		"ServeExecContainer": func() error {
 			_, err := c.ServeExecContainer(ctx, nil)
 
@@ -322,8 +316,7 @@ func TestMissingConfig(t *testing.T) {
 
 			return err
 		},
-		"AttachContainer":        func() error { return c.AttachContainer(ctx, nil) },
-		"SetWindowSizeContainer": func() error { return c.SetWindowSizeContainer(ctx, nil) },
+		"AttachContainer": func() error { return c.AttachContainer(ctx, nil) },
 	} {
 		if err := call(); !errors.Is(err, ErrMissingConfig) {
 			t.Errorf("%s: got error %v, want %v", name, err, ErrMissingConfig)
@@ -334,43 +327,18 @@ func TestMissingConfig(t *testing.T) {
 	if _, err := c.ServePortForwardContainer(ctx, nil); !errors.Is(err, ErrMissingNetNsPath) {
 		t.Errorf("got error %v, want %v", err, ErrMissingNetNsPath)
 	}
-
-	// Like a nil config, a missing terminal size fails before the client
-	// connects.
-	err := c.SetWindowSizeContainer(ctx, &SetWindowSizeContainerConfig{ID: "id"})
-	if !errors.Is(err, ErrTerminalSizeNil) {
-		t.Errorf("got error %v, want %v", err, ErrTerminalSizeNil)
-	}
 }
 
-func TestClientFieldLogger(t *testing.T) {
+func TestClientLogger(t *testing.T) {
 	t.Parallel()
 
-	logger := logrus.New()
-	entry := logrus.NewEntry(logrus.New()).WithField("component", "test")
+	c, err := (&ConmonServerConfig{ServerRunDir: t.TempDir()}).toClient()
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
 
-	for _, tc := range []struct {
-		name   string
-		config ConmonServerConfig
-		want   logrus.Ext1FieldLogger
-	}{
-		{"default", ConmonServerConfig{}, logrus.StandardLogger()},
-		{"logger", ConmonServerConfig{ClientLogger: logger}, logger},
-		{"entry", ConmonServerConfig{ClientFieldLogger: entry}, entry},
-		{"entry first", ConmonServerConfig{ClientLogger: logger, ClientFieldLogger: entry}, entry},
-		{"nil entry", ConmonServerConfig{ClientFieldLogger: (*logrus.Entry)(nil)}, logrus.StandardLogger()},
-		{"nil entry and logger", ConmonServerConfig{ClientLogger: logger, ClientFieldLogger: (*logrus.Entry)(nil)}, logger},
-	} {
-		tc.config.ServerRunDir = t.TempDir()
-
-		c, err := tc.config.toClient()
-		if err != nil {
-			t.Fatalf("%s: client: %v", tc.name, err)
-		}
-
-		if c.logger != tc.want {
-			t.Errorf("%s: got logger %v, want %v", tc.name, c.logger, tc.want)
-		}
+	if c.logger != logrus.StandardLogger() {
+		t.Errorf("got logger %v, want the standard logger", c.logger)
 	}
 }
 
@@ -419,72 +387,8 @@ func TestEndSpan(t *testing.T) {
 	}
 }
 
-// cgroupManagerRequest records the cgroup manager of a request.
-type cgroupManagerRequest struct {
-	manager proto.Conmon_CgroupManager
-}
-
-func (r *cgroupManagerRequest) SetCgroupManager(manager proto.Conmon_CgroupManager) {
-	r.manager = manager
-}
-
-func TestSetCgroupManagerWarnsOnce(t *testing.T) {
-	t.Parallel()
-
-	logger, hook := logrustest.NewNullLogger()
-
-	c := newTestClient(t, t.TempDir(), logger)
-	c.cgroupManager = CgroupManagerSystemd
-
-	for range 3 {
-		req := &cgroupManagerRequest{}
-		c.setCgroupManager(CgroupManagerCgroupfs, req)
-
-		if req.manager != proto.Conmon_CgroupManager_systemd {
-			t.Fatalf("got cgroup manager %v, want the global one", req.manager)
-		}
-	}
-
-	if got := len(hook.AllEntries()); got != 1 {
-		t.Fatalf("got %d log entries, want one warning", got)
-	}
-
-	// The per command one gets used if the global one asks for it.
-	c.cgroupManager = CgroupManagerPerCommand
-	req := &cgroupManagerRequest{}
-	c.setCgroupManager(CgroupManagerCgroupfs, req)
-
-	if req.manager != proto.Conmon_CgroupManager_cgroupfs {
-		t.Fatalf("got cgroup manager %v, want the per command one", req.manager)
-	}
-}
-
 func TestValidateCgroupManager(t *testing.T) {
 	t.Parallel()
-
-	c := newTestClient(t, t.TempDir(), logrus.New())
-
-	// A per command value which gets ignored is not checked.
-	c.cgroupManager = CgroupManagerSystemd
-	if err := c.validateCgroupManager(CgroupManager(42)); err != nil {
-		t.Fatalf("ignored cgroup manager rejected: %v", err)
-	}
-
-	c.cgroupManager = CgroupManagerPerCommand
-
-	for _, tc := range []struct {
-		manager CgroupManager
-		want    error
-	}{
-		{manager: CgroupManagerSystemd},
-		{manager: CgroupManagerCgroupfs},
-		{manager: CgroupManagerPerCommand, want: ErrCgroupManagerPerCommand},
-		{manager: CgroupManager(42), want: ErrInvalidValue},
-	} {
-		if err := c.validateCgroupManager(tc.manager); !errors.Is(err, tc.want) {
-			t.Fatalf("cgroup manager %d: got error %v, want %v", tc.manager, err, tc.want)
-		}
-	}
 
 	// The global one gets checked by New.
 	_, err := New(&ConmonServerConfig{ServerRunDir: t.TempDir(), CgroupManager: CgroupManager(42)})
@@ -498,10 +402,9 @@ func TestCgroupManagerString(t *testing.T) {
 	t.Parallel()
 
 	for manager, want := range map[CgroupManager]string{
-		CgroupManagerSystemd:    "systemd",
-		CgroupManagerCgroupfs:   "cgroupfs",
-		CgroupManagerPerCommand: "per command",
-		CgroupManager(42):       "CgroupManager(42)",
+		CgroupManagerSystemd:  "systemd",
+		CgroupManagerCgroupfs: "cgroupfs",
+		CgroupManager(42):     "CgroupManager(42)",
 	} {
 		if got := manager.String(); got != want {
 			t.Errorf("cgroup manager %d: got %q, want %q", manager, got, want)

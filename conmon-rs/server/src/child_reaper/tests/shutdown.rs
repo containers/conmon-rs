@@ -16,8 +16,7 @@ async fn registration_after_shutdown_kills_child() -> Result<()> {
     assert!(
         reaper
             .watch_grandchild(
-                child(pid, None, &dir.path().join("exit"), &[])?,
-                vec![],
+                child(pid, None, &dir.path().join("exit"))?,
                 InFlight::default()
             )
             .is_err()
@@ -202,8 +201,7 @@ async fn shutdown_does_not_wait_forever_for_a_watcher() -> Result<()> {
     let sh = spawn_sh("exec sleep 60")?;
     // Registered without a watcher, like a child whose watcher never ends
     // because the process is stuck in the kernel.
-    let (id, stuck, _) =
-        ReapableChild::from_child(child(sh.pid, None, &dir.path().join("exit"), &[])?);
+    let (id, stuck, _) = ReapableChild::from_child(child(sh.pid, None, &dir.path().join("exit"))?);
     lock(&reaper.grandchildren).insert(id, vec![stuck]);
 
     let start = Instant::now();
@@ -222,14 +220,14 @@ async fn terminate_signals_the_containers_only() -> Result<()> {
     let reaper = ChildReaper::default();
     let dir = tempfile::tempdir()?;
     let container = spawn_sh("exec sleep 60")?;
-    let registered = child(container.pid, None, &dir.path().join("container"), &[])?;
-    reaper.watch_grandchild(registered, vec![], InFlight::default())?;
+    let registered = child(container.pid, None, &dir.path().join("container"))?;
+    reaper.watch_grandchild(registered, InFlight::default())?;
     let exec = spawn_sh("exec sleep 60")?;
     let registered = Child {
         kind: ChildKind::Exec,
-        ..child(exec.pid, None, &dir.path().join("exec"), &[])?
+        ..child(exec.pid, None, &dir.path().join("exec"))?
     };
-    reaper.watch_grandchild(registered, vec![], InFlight::default())?;
+    reaper.watch_grandchild(registered, InFlight::default())?;
 
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut terminate = pin!(reaper.terminate_containers(deadline));
@@ -239,9 +237,9 @@ async fn terminate_signals_the_containers_only() -> Result<()> {
     let late = spawn_sh("exec sleep 60")?;
     let registered = Child {
         id: "late".into(),
-        ..child(late.pid, None, &dir.path().join("late"), &[])?
+        ..child(late.pid, None, &dir.path().join("late"))?
     };
-    reaper.watch_grandchild(registered, vec![], InFlight::default())?;
+    reaper.watch_grandchild(registered, InFlight::default())?;
     time::timeout(Duration::from_secs(20), terminate).await?;
 
     let terminated = 128 + Signal::SIGTERM as i32;
@@ -261,8 +259,8 @@ async fn terminate_waits_until_the_deadline() -> Result<()> {
     let ignoring = spawn_sh("trap '' TERM; exec sleep 60")?;
     let comm = format!("/proc/{}/comm", ignoring.pid);
     wait_for_real(|| std::fs::read_to_string(&comm).is_ok_and(|c| c == "sleep\n")).await;
-    let registered = child(ignoring.pid, None, &dir.path().join("container"), &[])?;
-    reaper.watch_grandchild(registered, vec![], InFlight::default())?;
+    let registered = child(ignoring.pid, None, &dir.path().join("container"))?;
+    reaper.watch_grandchild(registered, InFlight::default())?;
 
     let start = Instant::now();
     let grace = Duration::from_millis(300);
@@ -278,8 +276,8 @@ async fn shutdown_waits_for_the_watchers() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let running = spawn_sh("exec sleep 60")?;
     let call = reaper.begin_call(distant_deadline())?;
-    let registered = child(running.pid, None, &dir.path().join("exit"), &[])?;
-    reaper.watch_grandchild(registered, vec![], call)?;
+    let registered = child(running.pid, None, &dir.path().join("exit"))?;
+    reaper.watch_grandchild(registered, call)?;
 
     // A call in progress registers its child after the snapshot.
     let call = reaper.begin_call(distant_deadline())?;
@@ -290,8 +288,8 @@ async fn shutdown_waits_for_the_watchers() -> Result<()> {
     });
     wait_for_real(|| is_gone(running.pid)).await;
     let late = spawn_sh("exec sleep 60")?;
-    let registered = child(late.pid, None, &dir.path().join("late"), &[])?;
-    assert!(reaper.watch_grandchild(registered, vec![], call).is_err());
+    let registered = child(late.pid, None, &dir.path().join("late"))?;
+    assert!(reaper.watch_grandchild(registered, call).is_err());
 
     time::timeout(Duration::from_secs(20), shutdown).await???;
     assert!(is_gone(late.pid));
@@ -310,8 +308,7 @@ async fn exited_children_get_only_their_group_signalled() -> Result<()> {
     let mut leader = Guarded::spawn(Command::new("sleep").arg("60").process_group(0))?;
     let pid = child_pid(leader.0.id())?;
     let mut member = Guarded::spawn(Command::new("sleep").arg("60").process_group(pid.as_raw()))?;
-    let (id, exited, _) =
-        ReapableChild::from_child(child(pid, None, &dir.path().join("exit"), &[])?);
+    let (id, exited, _) = ReapableChild::from_child(child(pid, None, &dir.path().join("exit"))?);
     lock(&reaper.grandchildren).insert(id, vec![exited]);
     leader.0.kill()?;
     leader.0.wait()?;

@@ -7,7 +7,7 @@ use crate::{
         Process, child_pid, children_by_scan, has_zombie, is_zombie, read_pid_file,
         wait_for_exit_code, zombie_children,
     },
-    test_util::{Guarded, wait_for, wait_for_real},
+    test_util::{Guarded, wait_for_real},
 };
 use futures::FutureExt;
 use nix::sys::{
@@ -58,7 +58,7 @@ fn spawn_sh(script: &str) -> Result<Spawned> {
     Ok(Spawned { pid, process })
 }
 
-fn child(pid: Pid, timeout: Option<Instant>, exit_path: &Path, cleanup: &[&str]) -> Result<Child> {
+fn child(pid: Pid, timeout: Option<Instant>, exit_path: &Path) -> Result<Child> {
     Ok(Child {
         id: "id".into(),
         kind: ChildKind::Container,
@@ -67,7 +67,6 @@ fn child(pid: Pid, timeout: Option<Instant>, exit_path: &Path, cleanup: &[&str])
         oom_exit_paths: vec![],
         timeout,
         io: SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?),
-        cleanup_cmd: cleanup.iter().map(ToString::to_string).collect(),
         token: CancellationToken::new(),
         process: None,
     })

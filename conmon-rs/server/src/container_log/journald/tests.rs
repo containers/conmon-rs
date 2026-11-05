@@ -1,21 +1,12 @@
 use super::*;
 use crate::{container_log::LineBuffer, journal::testing::decode};
+use anyhow::bail;
 use std::os::unix::net::UnixDatagram;
 
 type Fields = Vec<(String, Vec<u8>)>;
 
 fn field(key: &str, value: &str) -> (String, Vec<u8>) {
     (key.to_owned(), value.as_bytes().to_vec())
-}
-
-impl JournaldLogger {
-    fn with_socket(id: &str, socket: &Path) -> Self {
-        let mut logger = Self::new(id, "", "", []).expect("logger");
-        Arc::get_mut(&mut logger.shared)
-            .expect("unshared logger")
-            .socket = Some(socket.to_owned());
-        logger
-    }
 }
 
 /// The entries the logger sent to the socket. Writing waits for the
@@ -41,7 +32,7 @@ fn priorities() {
 
 #[test]
 fn short_ids_are_kept() -> Result<()> {
-    let logger = JournaldLogger::new("abc", "", "", [])?;
+    let logger = JournaldLogger::new("abc", "");
     assert_eq!(
         decode(logger.shared.fields.as_bytes()),
         [
@@ -54,31 +45,25 @@ fn short_ids_are_kept() -> Result<()> {
 }
 
 #[test]
-fn syslog_identifier_like_conmon() -> Result<()> {
+fn syslog_identifier_like_conmon() {
     let id = "0123456789abcdef";
-    let identifier = |name, tag| -> Result<_> {
-        let logger = JournaldLogger::new(id, name, tag, [])?;
-        let fields = decode(logger.shared.fields.as_bytes());
-        Ok(fields.last().cloned())
+    let identifier = |name| {
+        let logger = JournaldLogger::new(id, name);
+        decode(logger.shared.fields.as_bytes()).last().cloned()
     };
-    // The tag, then the name, as CRI-O passes it, then the short ID.
+    // The name, as CRI-O passes it, then the short ID.
     assert_eq!(
-        identifier("k8s_ctr", "tag")?,
-        Some(field("SYSLOG_IDENTIFIER", "tag"))
-    );
-    assert_eq!(
-        identifier("k8s_ctr", "")?,
+        identifier("k8s_ctr"),
         Some(field("SYSLOG_IDENTIFIER", "k8s_ctr"))
     );
     assert_eq!(
-        identifier("", "")?,
+        identifier(""),
         Some(field("SYSLOG_IDENTIFIER", "0123456789ab"))
     );
-    Ok(())
 }
 
 #[tokio::test]
-async fn name_tag_and_labels_come_from_the_request() -> Result<()> {
+async fn name_comes_from_the_request() -> Result<()> {
     use crate::{
         conmon_capnp::conmon::{create_container_request, log_driver::Type},
         container_log::{ContainerLog, Driver},
@@ -91,8 +76,9 @@ async fn name_tag_and_labels_come_from_the_request() -> Result<()> {
     let mut driver = drivers.reborrow().get(0);
     driver.set_type(Type::Journald);
     driver.set_container_name("k8s_ctr");
-    driver.set_tag("tag");
-    let mut label = driver.init_labels(1).get(0);
+    // Retired, an older client may still send them.
+    driver.set_tag_old("tag");
+    let mut label = driver.init_labels_old(1).get(0);
     label.set_key("POD");
     label.set_value("web");
 
@@ -107,56 +93,9 @@ async fn name_tag_and_labels_come_from_the_request() -> Result<()> {
             field("CONTAINER_ID_FULL", "abc"),
             field("CONTAINER_ID", "abc"),
             field("CONTAINER_NAME", "k8s_ctr"),
-            field("CONTAINER_TAG", "tag"),
-            field("SYSLOG_IDENTIFIER", "tag"),
-            field("POD", "web"),
+            field("SYSLOG_IDENTIFIER", "k8s_ctr"),
         ]
     );
-    Ok(())
-}
-
-#[test]
-fn name_tag_and_labels_like_conmon() -> Result<()> {
-    let labels = [("POD", "web"), ("A_1", "")];
-    let logger = JournaldLogger::new("abc", "k8s_ctr", "tag", labels)?;
-    assert_eq!(
-        decode(logger.shared.fields.as_bytes()),
-        [
-            field("CONTAINER_ID_FULL", "abc"),
-            field("CONTAINER_ID", "abc"),
-            field("CONTAINER_NAME", "k8s_ctr"),
-            field("CONTAINER_TAG", "tag"),
-            field("SYSLOG_IDENTIFIER", "tag"),
-            field("POD", "web"),
-            field("A_1", ""),
-        ]
-    );
-
-    // As many labels as journald takes, with names and values within
-    // the limit, but not more.
-    let names: Vec<String> = (0..=JournaldLogger::MAX_LABELS)
-        .map(|i| format!("L{i}"))
-        .collect();
-    let labels = |n: usize| names[..n].iter().map(|name| (name.as_str(), "v"));
-    assert!(JournaldLogger::new("abc", "", "", labels(JournaldLogger::MAX_LABELS)).is_ok());
-    let err = JournaldLogger::new("abc", "", "", labels(JournaldLogger::MAX_LABELS + 1))
-        .err()
-        .context("too many labels")?;
-    assert!(
-        err.to_string().contains("too many journald labels"),
-        "{err}"
-    );
-    let large = "v".repeat(JournaldLogger::MAX_LABEL_BYTES);
-    assert!(JournaldLogger::new("abc", "", "", [("LARGE", large.as_str())]).is_err());
-
-    let long = "A".repeat(65);
-    let invalid = ["", "lower", "_TRUSTED", "1A", "A-B", &long, "MESSAGE"];
-    for key in invalid {
-        assert!(
-            JournaldLogger::new("abc", "", "", [(key, "x")]).is_err(),
-            "{key}"
-        );
-    }
     Ok(())
 }
 

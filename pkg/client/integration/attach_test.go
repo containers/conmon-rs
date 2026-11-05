@@ -24,7 +24,7 @@ var _ = Describe("ConmonClient", func() {
 	runContainer := containerRunner(&tr, &sut)
 
 	Describe("Attach", func() {
-		It("should fail to attach to or resize an unknown container", func(ctx SpecContext) {
+		It("should fail to attach to an unknown container", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 			sut = tr.configGivenEnv()
@@ -35,11 +35,6 @@ var _ = Describe("ConmonClient", func() {
 				SocketPath: socketPath,
 			})).To(MatchError(client.ErrContainerNotFound))
 			Expect(socketPath).NotTo(BeAnExistingFile())
-
-			Expect(sut.SetWindowSizeContainer(ctx, &client.SetWindowSizeContainerConfig{
-				ID:   "unknown",
-				Size: &resize.TerminalSize{Width: 10, Height: 20},
-			})).To(MatchError(client.ErrContainerNotFound))
 		}, SpecTimeout(specTimeout))
 
 		matrix := []struct {

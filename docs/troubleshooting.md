@@ -52,7 +52,7 @@ following chunks do not wait then, what the journal does not take right away
 gets dropped for at least a second and after that as long as it takes nothing,
 so that a stalled journal does not slow down the container and its other logs,
 and one which does not keep up by about half at most. The log files of the
-`containerRuntimeInterface` and `json` drivers lose nothing this way.
+`containerRuntimeInterface` driver lose nothing this way.
 
 ### crun logs
 
@@ -120,10 +120,9 @@ of CRI-O.
 
 CRI-O starts the server of a pod when it creates the infra container of the pod,
 whose ID is the ID of the pod. The runtime directory of the server holds the RPC
-socket `conmon.sock`. The fd socket `conmon-fd.sock` only exists once a client
-asked for it with `RemoteFDs`, which CRI-O does not. CRI-O drops the infra
-container of a pod by default (`drop_infra_ctr = true`), unless the pod shares
-its PID namespace, the runtime directory is then
+socket `conmon.sock`. CRI-O drops the infra container of a pod by default
+(`drop_infra_ctr = true`), unless the pod shares its PID namespace, the runtime
+directory is then
 `/run/containers/storage/overlay-containers/<pod ID>/userdata`. With an infra
 container which runs, it is the directory of that container in the storage,
 `/var/lib/containers/storage/overlay-containers/<pod ID>/userdata` by default,
@@ -209,9 +208,9 @@ W3C Trace Context, so the propagator has to write it, like
 - v1.2.2: the message of a panic goes to the journal with the server log
   drivers other than `stdout`, `none` included, before only to stderr. A
   server which did not fork writes it only to the stderr it kept.
-- v1.2.2: `journalctl -t conmonrs` no longer shows the output of the containers
-  which use the `journald` container log driver without a `tag`, which got the
-  identifier `conmonrs` before.
+- v1.2.2: `journalctl -t conmonrs` shows only the logs of the server. Before, it
+  also showed the output of the containers which use the `journald` container
+  log driver, whose entries got the identifier `conmonrs`.
 - v1.2.2: once the lines of container output waited for the journal in vain,
   the following chunks drop what it does not take right away, before each of
   them waited up to about two seconds again.

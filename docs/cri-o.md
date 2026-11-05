@@ -76,12 +76,12 @@ works with depends on the client it vendors, see
 The `monitor_env` of the runtime handler configures the servers which CRI-O
 starts for it:
 
-| Entry                          | Effect                                                                                                                                                                                                                                                  | Since CRI-O |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| `LOG_DRIVER=<driver>`          | The server log driver (`--log-driver`): `systemd`, `stdout` or `none`. Without it, CRI-O starts the servers with `none`, see [Server logs](troubleshooting.md#server-logs) and [Debugging a pod](troubleshooting.md#debugging-a-pod).                   | v1.34       |
-| `HEAPTRACK_OUTPUT_PATH=<path>` | Profiles the memory of the servers with heaptrack, see [Memory profiling](troubleshooting.md#memory-profiling).                                                                                                                                         | v1.34       |
-| `HEAPTRACK_BINARY_PATH=<path>` | The heaptrack binary, also enables the profiling.                                                                                                                                                                                                       | v1.34       |
-| Any other `KEY=value`          | Part of the environment of the server, which passes it on to the runtime, its hooks and the cleanup commands, together with `CRI_O_EXTERNAL=1` and the `PATH` and `XDG_RUNTIME_DIR` of CRI-O. `CONMON_*` variables configure the server like its flags. | v1.38       |
+| Entry                          | Effect                                                                                                                                                                                                                                | Since CRI-O |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `LOG_DRIVER=<driver>`          | The server log driver (`--log-driver`): `systemd`, `stdout` or `none`. Without it, CRI-O starts the servers with `none`, see [Server logs](troubleshooting.md#server-logs) and [Debugging a pod](troubleshooting.md#debugging-a-pod). | v1.34       |
+| `HEAPTRACK_OUTPUT_PATH=<path>` | Profiles the memory of the servers with heaptrack, see [Memory profiling](troubleshooting.md#memory-profiling).                                                                                                                       | v1.34       |
+| `HEAPTRACK_BINARY_PATH=<path>` | The heaptrack binary, also enables the profiling.                                                                                                                                                                                     | v1.34       |
+| Any other `KEY=value`          | Part of the environment of the server, which passes it on to the runtime and its hooks, together with `CRI_O_EXTERNAL=1` and the `PATH` and `XDG_RUNTIME_DIR` of CRI-O. `CONMON_*` variables configure the server like its flags.     | v1.38       |
 
 CRI-O v1.37.2 and older start the servers with the environment of CRI-O and
 use no other `monitor_env` entries for them. The releases of the 1.37 branch
@@ -138,19 +138,13 @@ create the pod. Since v0.6.0, the server takes the cgroup manager from each
 request instead, which the clients before v0.6.0 do not send, so CRI-O v1.25
 to v1.28 with the `cgroupfs` cgroup manager need a server before v0.6.0.
 
-v1.0.0 also broke the wire format: changing the type of the retired
-`metadataOld` fields from `Data` to `Void` moved the pointer slots of the fields
-after them, for example `metadata` of `CreateContainerRequest` from pointer 9 to
-8, `envVars` from 10 to 9 and `namespaces` of `CreateNamespacesRequest` from 1
-to 0. Across the break, both sides read these fields from the wrong slots: the
-server takes the tracing metadata of a request as its environment variables or
-the other way around, `createContainer` its file descriptors and sd_notify
-socket from other fields, and `createNamespaces` its namespaces and paths as
-well. CRI-O sets none of these fields besides the tracing metadata and does not
-call `createNamespaces`, so its requests only lose the tracing metadata, or it
-ends up in the environment of the runtime calls of a newer server. A client of
-v1.1.0 or newer reads the [features](protocols.md#features) of a server before
-v1.0.0 as empty.
+v1.0.0 also broke the wire format: changing the type of the `metadataOld`
+fields from `Data` to `Void` moved the pointer slots of the fields after them,
+for example `metadata` of `CreateContainerRequest` from pointer 9 to 8. Across
+the break, both sides read these fields from the wrong slots. CRI-O sets none of
+them besides the tracing metadata, so its requests only lose the tracing
+metadata. A client of v1.1.0 or newer reads the
+[features](protocols.md#features) of a server before v1.0.0 as empty.
 
 From v1.0.0 on, a newer client works with an older server: it checks the
 features of the server before it relies on them, and an older server ignores the
@@ -174,8 +168,7 @@ requests, which carry no affected field besides the tracing metadata, but a
 CRI-O with the client of v1.2.1 or newer serves exec, attach and port
 forwarding for these pods with its own streaming server instead. Drain the node
 before an upgrade or downgrade across the break, or recreate its pods after it,
-to give them servers of the new version. A client which sets the other affected
-fields must not talk to servers across the break.
+to give them servers of the new version.
 
 ## Red Hat OpenShift
 

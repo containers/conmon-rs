@@ -1,7 +1,7 @@
 //! The setup of the server process before it serves: umask, environment, OOM
 //! score, open files limit, malloc and transparent huge pages, and giving the
-//! runtime calls and cleanup commands the OOM score, huge pages setting and
-//! open files limits the server started with.
+//! runtime calls the OOM score, huge pages setting and open files limits the
+//! server started with.
 
 use anyhow::{Context, Result};
 use nix::{
@@ -58,9 +58,7 @@ pub(crate) fn set_default_umask() {
 /// Drop the sd_notify socket of whoever started the server. The server
 /// does not talk to systemd itself, but every process it runs would
 /// inherit the socket: the runtime then adds its own notify socket mount
-/// and `NOTIFY_SOCKET` to the container, the cleanup commands and the
-/// pause process get it as well. Callers set those up themselves and let
-/// the server relay the messages, see the `notify` module.
+/// and `NOTIFY_SOCKET` to the container.
 #[expect(unsafe_code, reason = "changing the environment")]
 pub(crate) fn unset_notify_socket() {
     // SAFETY: the server is still single threaded, the runtime and its
@@ -119,8 +117,8 @@ static THP_DISABLED: AtomicBool = AtomicBool::new(false);
 /// tunable which can takes effect only from the start of the process. Huge
 /// pages which were already allocated stay.
 ///
-/// The setting gets inherited and kept across exec, so the runtimes and the
-/// cleanup commands get the one the server started with, see
+/// The setting gets inherited and kept across exec, so the runtimes get the
+/// one the server started with, see
 /// [`reset_inherited`]. A setting of whoever started the server stays.
 pub(crate) fn disable_thp() {
     match prctl::get_thp_disable() {
@@ -148,10 +146,9 @@ static INHERITED_NOFILE: OnceLock<(rlim_t, rlim_t)> = OnceLock::new();
 
 /// Raise the soft limit of open files to the hard one. The server holds the
 /// pipes, log files, pidfds and sockets of every container of a pod and the
-/// descriptors which clients pass, while Go programs like CRI-O start it
-/// with the soft limit they started with, often 1024. The runtimes and the
-/// cleanup commands get the limits the server started with, see
-/// [`reset_inherited`].
+/// sessions of the streaming server, while Go programs like CRI-O start it
+/// with the soft limit they started with, often 1024. The runtimes get the
+/// limits the server started with, see [`reset_inherited`].
 pub(crate) fn raise_nofile_limit() {
     let (soft, hard) = match getrlimit(Resource::RLIMIT_NOFILE) {
         Ok(limits) => limits,
@@ -188,9 +185,8 @@ pub(crate) fn save_oom_score() {
 /// [`save_oom_score`], [`disable_thp`] and [`raise_nofile_limit`]. The
 /// runtimes pass them on to the container processes, an exec would be the
 /// last process the kernel picks otherwise. conmon resets the OOM score of
-/// its runtime the same way. Only for the runtimes and cleanup commands, the
-/// pause process keeps the ones of the server. Add it after the other
-/// pre_exec hooks, those run in order and may need the raised limit.
+/// its runtime the same way. Add it after the other pre_exec hooks, those run
+/// in order and may need the raised limit.
 #[expect(unsafe_code, reason = "a pre_exec hook")]
 pub(crate) fn reset_inherited(cmd: &mut Command) {
     let score: Option<&'static [u8]> = INHERITED_OOM_SCORE.get().map(|score| &**score);

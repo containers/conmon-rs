@@ -1,20 +1,13 @@
 package client_test
 
 import (
-	"context"
-	"errors"
-	"io"
-	"net"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/containers/conmon-rs/pkg/client"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
-	"go.podman.io/common/pkg/resize"
 	"go.podman.io/storage/pkg/unshare"
 )
 
@@ -60,24 +53,6 @@ var _ = Describe("ConmonClient", func() {
 				SpecTimeout(specTimeout),
 			)
 
-			It(
-				testName("should execute cleanup command when container exits", terminal),
-				func(ctx SpecContext) {
-					tr = newTestRunner()
-					tr.createRuntimeConfig(terminal)
-					// The container ID is only known after the runtime config exists.
-					cleanupPath := filepath.Join(tr.tmpDir, "cleanup-"+tr.ctrID)
-					sut = tr.configGivenEnv()
-					cfg := tr.defaultConfig(terminal)
-					cfg.CleanupCmd = []string{"touch", cleanupPath}
-					tr.createContainerWithConfig(ctx, sut, cfg)
-					tr.startContainer()
-					Eventually(cleanupPath, 10*time.Second).Should(BeAnExistingFile())
-					Expect(fileContents(cleanupPath)).To(BeEmpty())
-				},
-				SpecTimeout(specTimeout),
-			)
-
 			It(testName("should return error if invalid command", terminal), func(ctx SpecContext) {
 				tr = newTestRunner()
 				tr.createRuntimeConfigWithProcessArgs(terminal, []string{"invalid"}, nil)
@@ -97,52 +72,6 @@ var _ = Describe("ConmonClient", func() {
 				sut = tr.configGivenEnv()
 				tr.createContainer(ctx, sut, terminal)
 			}, SpecTimeout(specTimeout))
-
-			It(
-				testName("should succeed/error to set the window size", terminal),
-				func(ctx SpecContext) {
-					tr = newTestRunner()
-					// Report the size of the terminal until the resize shows up.
-					tr.createRuntimeConfigWithProcessArgs(
-						terminal,
-						[]string{
-							"/busybox",
-							"sh",
-							"-c",
-							sttyLoop,
-						},
-						nil,
-					)
-					sut = tr.configGivenEnv()
-					tr.createContainer(ctx, sut, terminal)
-					tr.startContainer()
-
-					err := sut.SetWindowSizeContainer(
-						ctx,
-						&client.SetWindowSizeContainerConfig{
-							ID: tr.ctrID,
-							Size: &resize.TerminalSize{
-								Width:  10,
-								Height: 20,
-							},
-						},
-					)
-					if !terminal {
-						Expect(err).To(MatchError(ContainSubstring("container has no terminal")))
-						Expect(err).NotTo(MatchError(client.ErrContainerNotFound))
-
-						return
-					}
-
-					Expect(err).To(Succeed())
-
-					// stty prints the rows, then the columns.
-					Eventually(fileContents, 10*time.Second).
-						WithArguments(tr.logPath()).
-						Should(ContainSubstring(" 20 10"))
-				},
-				SpecTimeout(specTimeout),
-			)
 
 			It(
 				testName("should catch out of memory (oom) events", terminal),
@@ -202,22 +131,6 @@ var _ = Describe("ConmonClient", func() {
 					Should(ContainSubstring(" P world"))
 				Expect(fileContents(tr.logPath())).NotTo(ContainSubstring("hello"))
 			}, SpecTimeout(specTimeout))
-			It(testName("should respect global args", terminal), func(ctx SpecContext) {
-				tr = newTestRunner()
-				tr.createRuntimeConfigWithProcessArgs(
-					terminal,
-					[]string{"/busybox", "sh", "-c", "echo hello && echo world"},
-					nil,
-				)
-				logFile := MustFile(filepath.Join(tr.tmpDir, "runtime-log"))
-				sut = tr.configGivenEnv()
-				cfg := tr.defaultConfig(terminal)
-				cfg.GlobalArgs = []string{"--log", logFile, "--debug"}
-				tr.createContainerWithConfig(ctx, sut, cfg)
-				tr.startContainer()
-
-				Expect(fileContents(logFile)).NotTo(BeEmpty())
-			}, SpecTimeout(specTimeout))
 		}
 
 		It("should keep the output of a terminal which got opened again", func(ctx SpecContext) {
@@ -240,147 +153,6 @@ var _ = Describe("ConmonClient", func() {
 				ContainSubstring("first"),
 				ContainSubstring("second"),
 			))
-		}, SpecTimeout(specTimeout))
-
-		// sendPipe sends the write end of a new pipe to the fd socket of the
-		// server and closes it, so that only the server holds it then. It
-		// returns the read end and the slot of the write end. The fd socket
-		// gets closed with the spec, which releases the slots the container
-		// did not take.
-		sendPipe := func(ctx context.Context) (*os.File, client.RemoteFD) {
-			remoteFDs, err := sut.RemoteFDs(ctx)
-			Expect(err).To(Succeed())
-			DeferCleanup(remoteFDs.Close)
-
-			reader, writer, err := os.Pipe()
-			Expect(err).To(Succeed())
-			DeferCleanup(reader.Close)
-
-			slots, err := remoteFDs.SendContext(ctx, int(writer.Fd()))
-			Expect(err).To(Succeed())
-			Expect(slots).To(HaveLen(1))
-			Expect(writer.Close()).To(Succeed())
-
-			return reader, slots[0]
-		}
-
-		It("should pass additional file descriptors to the container", func(ctx SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfigWithProcessArgs(
-				false,
-				[]string{"/busybox", "sh", "-c", "echo passed >&3"},
-				nil,
-			)
-			sut = tr.configGivenEnv()
-
-			reader, slot := sendPipe(ctx)
-
-			// The runtime gets the descriptor as fd 3 and passes it on.
-			cfg := tr.defaultConfig(false)
-			cfg.AdditionalFDs = []client.RemoteFD{slot}
-			cfg.CommandArgs = []string{"--preserve-fds", "1"}
-			tr.createContainerWithConfig(ctx, sut, cfg)
-			tr.startContainer()
-
-			// Neither the server nor the runtime keep a copy, the output
-			// ends with the container.
-			Expect(reader.SetReadDeadline(time.Now().Add(10 * time.Second))).To(Succeed())
-			Expect(io.ReadAll(reader)).To(BeEquivalentTo("passed\n"))
-		}, SpecTimeout(specTimeout))
-
-		It("should hold leaked file descriptors until the container exits", func(ctx SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfig(false)
-			sut = tr.configGivenEnv()
-
-			reader, slot := sendPipe(ctx)
-
-			cfg := tr.defaultConfig(false)
-			cfg.LeakFDs = []client.RemoteFD{slot}
-			tr.createContainerWithConfig(ctx, sut, cfg)
-
-			// The server holds it while the container waits for its start.
-			Expect(reader.SetReadDeadline(time.Now().Add(500 * time.Millisecond))).To(Succeed())
-
-			_, err := reader.Read(make([]byte, 1))
-			Expect(err).To(MatchError(os.ErrDeadlineExceeded))
-
-			// And closes it once the container exited.
-			tr.startContainer()
-			Expect(reader.SetReadDeadline(time.Now().Add(10 * time.Second))).To(Succeed())
-
-			_, err = reader.Read(make([]byte, 1))
-			Expect(err).To(MatchError(io.EOF))
-			Eventually(fileContents, 5*time.Second).WithArguments(tr.exitPath()).Should(Equal("0"))
-		}, SpecTimeout(specTimeout))
-
-		It("should relay sd_notify messages", func(ctx SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfigWithProcessArgs(
-				false,
-				[]string{"/busybox", "sh", "-c", "/busybox ls $NOTIFY_SOCKET"},
-				func(g generate.Generator) {
-					// What the container engine sets up for the container.
-					g.AddMount(specs.Mount{
-						Destination: "/run/notify",
-						Source:      filepath.Join(tr.tmpDir, "notify"),
-						Options:     []string{"bind", "ro"},
-					})
-					g.AddProcessEnv("NOTIFY_SOCKET", "/run/notify/notify.sock")
-				},
-			)
-			sut = tr.configGivenEnv()
-
-			// The host side, usually the notify socket of systemd.
-			hostPath := filepath.Join(tr.tmpDir, "host.sock")
-			host, err := net.ListenUnixgram(
-				"unixgram",
-				&net.UnixAddr{Name: hostPath, Net: "unixgram"},
-			)
-			Expect(err).To(Succeed())
-
-			defer host.Close()
-
-			cfg := tr.defaultConfig(false)
-			cfg.SdNotifySocket = hostPath
-			tr.createContainerWithConfig(ctx, sut, cfg)
-
-			// busybox cannot send datagrams, so send from the host side what
-			// the container would send through the mount.
-			ctrPath := filepath.Join(tr.tmpDir, "notify", "notify.sock")
-			conn, err := net.DialUnix(
-				"unixgram",
-				nil,
-				&net.UnixAddr{Name: ctrPath, Net: "unixgram"},
-			)
-			Expect(err).To(Succeed())
-
-			defer conn.Close()
-
-			const message = "READY=1\nSTATUS=up"
-
-			_, err = conn.Write([]byte(message))
-			Expect(err).To(Succeed())
-
-			Expect(host.SetReadDeadline(time.Now().Add(10 * time.Second))).To(Succeed())
-
-			buf := make([]byte, 4096)
-			n, err := host.Read(buf)
-			Expect(err).To(Succeed())
-			Expect(string(buf[:n])).To(Equal(message))
-
-			// The socket existed before the runtime mounted its directory.
-			tr.startContainer()
-			Eventually(fileContents, 5*time.Second).
-				WithArguments(tr.logPath()).
-				Should(ContainSubstring("/run/notify/notify.sock"))
-
-			// The socket goes away with the container.
-			Eventually(func() bool {
-				_, err := os.Stat(ctrPath)
-
-				return errors.Is(err, os.ErrNotExist)
-			}, time.Second*5).Should(BeTrue())
 		}, SpecTimeout(specTimeout))
 	})
 

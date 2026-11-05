@@ -34,20 +34,14 @@ type ServeExecContainerConfig struct {
 	// Stderr indicates if stderr should be available or not.
 	Stderr bool
 
-	// CgroupManager can be used to select the cgroup manager.
-	//
-	// To use this option set [ConmonServerConfig.CgroupManager] to
-	// [CgroupManagerPerCommand].
-	CgroupManager CgroupManager
-
 	// IdleTimeout fails a session whose connection got no frame of the
 	// client and no data either way for this long, rounded up to whole
 	// seconds, and kills the process then. WebSocket pings and pongs, the
 	// pings of the server and the answers to them and other control frames
 	// of the server do not count. Stdin counts once the server reads it,
 	// stdin which backs up behind a process which does not read it stops
-	// that. Zero disables the timeout. Servers without [FeatureIdleTimeout]
-	// ignore it, the client logs a warning once then.
+	// that. Zero disables the timeout. Servers before v1.2.0 ignore it, the
+	// client logs a warning once then.
 	IdleTimeout time.Duration
 }
 
@@ -77,10 +71,6 @@ func (c *ConmonClient) ServeExecContainer(
 		return nil, ErrMissingConfig
 	}
 
-	if err := c.validateCgroupManager(cfg.CgroupManager); err != nil {
-		return nil, err
-	}
-
 	url, err := call(ctx, c, proto.Conmon.ServeExecContainer,
 		func(req proto.Conmon_ServeExecContainerRequest) error {
 			if err := req.SetId(cfg.ID); err != nil {
@@ -97,8 +87,7 @@ func (c *ConmonClient) ServeExecContainer(
 			req.SetStderr(cfg.Stderr)
 			req.SetIdleTimeoutSec(idleTimeoutSeconds(cfg.IdleTimeout))
 			c.warnIgnoredIdleTimeout(cfg.IdleTimeout)
-
-			c.setCgroupManager(cfg.CgroupManager, req)
+			req.SetCgroupManager(proto.Conmon_CgroupManager(c.cgroupManager))
 
 			return nil
 		},
@@ -138,17 +127,11 @@ type ServeAttachContainerConfig struct {
 	// terminal, the end of the stdin of the client ends the session.
 	StopAfterStdinEOF bool
 
-	// CgroupManager can be used to select the cgroup manager.
-	//
-	// Deprecated: Attach does not run the runtime, so the value was never
-	// sent and has no effect.
-	CgroupManager CgroupManager
-
 	// IdleTimeout fails a session which was idle for this long, like
 	// [ServeExecContainerConfig.IdleTimeout], without killing anything.
 	// Stdin which backs up behind a container which does not read it stops
-	// counting. Zero disables the timeout. Servers without
-	// [FeatureIdleTimeout] ignore it, the client logs a warning once then.
+	// counting. Zero disables the timeout. Servers before v1.2.0 ignore it,
+	// the client logs a warning once then.
 	IdleTimeout time.Duration
 }
 

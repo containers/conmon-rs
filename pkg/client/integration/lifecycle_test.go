@@ -56,7 +56,7 @@ var _ = Describe("ConmonClient", func() {
 			sut3 := tr.configGivenEnv()
 			DeferCleanup(sut3.Close)
 			DeferCleanup(sut.Close)
-			Expect(sut3.Shutdown()).To(Succeed())
+			Expect(sut3.ShutdownContext(ctx)).To(Succeed())
 
 			sut = nil
 
@@ -175,20 +175,15 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	Describe("Shutdown", func() {
-		// startServer starts a server with a created container and its fd
-		// socket, and returns its PID.
+		// startServer starts a server with a created container and returns
+		// its PID.
 		startServer := func(ctx context.Context, terminal bool) uint32 {
 			tr = newTestRunner()
 			tr.createRuntimeConfig(terminal)
 			sut = tr.configGivenEnv()
 			tr.createContainer(ctx, sut, terminal)
 
-			remoteFDs, err := sut.RemoteFDs(ctx)
-			Expect(err).To(Succeed())
-			Expect(remoteFDs.Close()).To(Succeed())
-
 			Expect(filepath.Join(tr.tmpDir, "conmon.sock")).To(BeAnExistingFile())
-			Expect(filepath.Join(tr.tmpDir, "conmon-fd.sock")).To(BeAnExistingFile())
 
 			return sut.PID()
 		}
@@ -203,7 +198,6 @@ var _ = Describe("ConmonClient", func() {
 			// The server PID file is removed by New already, the "pidfile"
 			// in the run directory belongs to the container of the bundle.
 			Expect(filepath.Join(tr.tmpDir, "conmon.sock")).NotTo(BeAnExistingFile())
-			Expect(filepath.Join(tr.tmpDir, "conmon-fd.sock")).NotTo(BeAnExistingFile())
 
 			tr.expectContainerStoppedOrGone()
 		}
@@ -215,7 +209,7 @@ var _ = Describe("ConmonClient", func() {
 					pid := startServer(ctx, terminal)
 
 					// Shutdown should kill the container and clean up
-					Expect(sut.Shutdown()).To(Succeed())
+					Expect(sut.ShutdownContext(ctx)).To(Succeed())
 					sut = nil
 
 					expectServerGone(pid)
@@ -384,11 +378,9 @@ var _ = Describe("ConmonClient", func() {
 				Expect(version.CargoVersion).NotTo(BeEmpty())
 				// Every feature of the server has a constant of the client.
 				Expect(version.Features).To(ConsistOf(
-					client.FeatureSdNotify,
 					client.FeaturePortForward,
 					client.FeatureIdleTimeout,
 					client.FeatureStreamingProtocols,
-					client.FeatureJournaldFields,
 				))
 
 				if verbose {

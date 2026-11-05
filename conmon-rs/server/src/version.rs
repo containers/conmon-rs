@@ -60,9 +60,6 @@ impl Version {
         }
     }
 
-    /// The relay of sd_notify messages requested by `sdnotifySocket`.
-    pub(crate) const FEATURE_SDNOTIFY: &'static str = "sdnotify";
-
     /// Forwarding ports by `servePortForwardContainer`.
     pub(crate) const FEATURE_PORT_FORWARD: &'static str = "portforward";
 
@@ -74,16 +71,12 @@ impl Version {
     /// `v5.channel.k8s.io`.
     pub(crate) const FEATURE_STREAMING_PROTOCOLS: &'static str = "streamingprotocols";
 
-    /// The `containerName`, `tag` and `labels` of the journald log driver,
-    /// which older servers ignore.
-    pub(crate) const FEATURE_JOURNALD_FIELDS: &'static str = "journaldfields";
-
+    /// The features of this build. Earlier servers also reported `sdnotify`
+    /// and `journaldfields`, whose fields got retired, see the schema.
     const FEATURES: &'static [&'static str] = &[
-        Self::FEATURE_SDNOTIFY,
         Self::FEATURE_PORT_FORWARD,
         Self::FEATURE_IDLE_TIMEOUT,
         Self::FEATURE_STREAMING_PROTOCOLS,
-        Self::FEATURE_JOURNALD_FIELDS,
     ];
 
     /// The optional features this build supports.
@@ -258,13 +251,7 @@ mod tests {
         let v = Version::new(false);
         assert_eq!(
             v.features(),
-            [
-                "sdnotify",
-                "portforward",
-                "idletimeout",
-                "streamingprotocols",
-                "journaldfields"
-            ]
+            ["portforward", "idletimeout", "streamingprotocols"]
         );
         let json = serde_json::to_value(&v)?;
         assert_eq!(json.get("features"), Some(&serde_json::json!(v.features())));

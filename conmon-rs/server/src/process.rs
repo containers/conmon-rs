@@ -202,18 +202,6 @@ impl Process {
         Self { pid, pidfd }
     }
 
-    /// Like [`Process::open`] for a PID which was not checked to belong to
-    /// an unreaped child yet, like the one of a PID file: the orphan sweep
-    /// may have reaped it already, and another process reused its PID. None
-    /// then, a [`Process::child`] for it would only fail its signals unless
-    /// the PID got reused by another child of the server, and a wait for it
-    /// could take the exit status of that child. The error tells why, for
-    /// the caller to log.
-    pub(crate) fn open_child(pid: Pid) -> nix::Result<Self> {
-        let _guard = mutex::read(&REAP_LOCK);
-        peek_exit(Id::Pid(pid)).map(|_| Self::open(pid))
-    }
-
     /// Refer to a child by its PID alone, which gets checked to still belong
     /// to an unreaped child of the server before every signal.
     pub(crate) fn child(pid: Pid) -> Self {
@@ -236,6 +224,7 @@ impl Process {
 
     /// Whether the child still runs. A zombie which was not reaped yet does
     /// not, although it can still be signalled.
+    #[cfg(test)]
     pub(crate) fn is_running(&self) -> bool {
         let _guard = mutex::read(&REAP_LOCK);
         self.signal_unlocked(None).is_ok() && matches!(peek_exit(Id::Pid(self.pid)), Ok(None))

@@ -15,19 +15,18 @@
 //! - <https://github.com/containers/conmon-rs/blob/main/docs/server.md> on the
 //!   command line.
 //! - <https://github.com/containers/conmon-rs/blob/main/docs/protocols.md> on
-//!   the RPCs and the attach, streaming and fd socket protocols.
+//!   the RPCs and the attach and streaming protocols.
 //! - <https://github.com/containers/conmon-rs/blob/main/README.md#documentation>
 //!   on the other documents, like configuring CRI-O, logging and
 //!   troubleshooting.
 
 use anyhow::{Context, Result};
-use config::{Commands, Config, Verbosity};
-use pause::Pause;
+use config::{Config, Verbosity};
 use server::Server;
 use version::Version;
 
-/// Run conmonrs: print the version, run the `pause` subcommand or start the
-/// server, depending on the command line.
+/// Run conmonrs: print the version or start the server, depending on the
+/// command line.
 pub fn run() -> Result<()> {
     // Before the heap grows, see the function.
     init::disable_thp();
@@ -39,21 +38,6 @@ pub fn run() -> Result<()> {
 
     if let Some(v) = config.version_json() {
         return Version::new(v == Verbosity::Full).print_json();
-    }
-
-    if let Some(Commands::Pause(args)) = config.command() {
-        // The server adds stderr to the error of the request, or logs it
-        // after a successful setup, see `Pause::init`. So it runs without
-        // logging and prints its warnings to stderr, the cleanup after a
-        // failure prints nothing, the error must carry only the cause. The
-        // forked child of the pause process ends up here as well and may add
-        // its own failure, and the init prints warnings of its own, so stderr
-        // may hold several lines.
-        if let Err(e) = Pause::run(args) {
-            eprintln!("run pause: {e:#}");
-            std::process::exit(1);
-        }
-        return Ok(());
     }
 
     config.validate().context("validate config")?;
@@ -88,8 +72,8 @@ pub mod conmon_capnp {
 pub mod fuzzing {
     pub use crate::{
         container_log::fuzzing::lines as log_lines, journal::fuzzing::entry as journal_entry,
-        notify::fuzzing::filter as notify_filter, oom_watcher::fuzzing::cgroup_files,
-        process::fuzzing::stat as proc_stat, streaming_server::fuzzing::*,
+        oom_watcher::fuzzing::cgroup_files, process::fuzzing::stat as proc_stat,
+        streaming_server::fuzzing::*,
     };
 
     #[cfg(test)]
@@ -105,22 +89,17 @@ mod child_reaper;
 mod config;
 mod container_io;
 mod container_log;
-mod fd_mapping;
-mod fd_socket;
 mod fs_util;
 mod init;
 mod journal;
 mod listener;
 mod mutex;
-mod notify;
 mod oom_watcher;
-mod pause;
 mod process;
 mod random_id;
 mod rpc;
 mod runtime_args;
 mod server;
-mod single_flight;
 mod streaming_server;
 mod tail;
 #[cfg(feature = "tracing")]

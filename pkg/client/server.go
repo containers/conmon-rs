@@ -28,12 +28,12 @@ type serverProcess struct {
 	// the PID, it never refers to another process which got the PID once
 	// the server exited. It gets closed once the server is known to be
 	// gone, got replaced by another one or the client got closed, and no
-	// Shutdown or KillContext uses it anymore, see usePidfd.
+	// ShutdownContext or KillContext uses it anymore, see usePidfd.
 	pidfd *os.File
 	// done is set once the process is known to be gone.
 	done atomic.Bool
-	// users counts the Shutdown and KillContext calls in progress, guarded
-	// by the pidfdMu of the client.
+	// users counts the ShutdownContext and KillContext calls in progress,
+	// guarded by the pidfdMu of the client.
 	users int
 	// startTime is when the process started, see processStartTime, 0 if
 	// it is unknown. Without a pidfd, it tells the server apart from a
@@ -610,12 +610,6 @@ func processStat(pid uint32) [][]byte {
 	return bytes.Fields(stat[bytes.LastIndexByte(stat, ')')+1:])
 }
 
-// Shutdown kills the server via SIGINT and waits up to 10 seconds for the
-// server PID to be removed from the system, see ShutdownContext.
-func (c *ConmonClient) Shutdown() error {
-	return c.ShutdownContext(context.Background())
-}
-
 // ShutdownContext kills the server via SIGINT and waits for the server PID
 // to be removed from the system, up to 10 seconds or until the context ends.
 // The server kills its containers before it exits. If it is still running
@@ -637,12 +631,6 @@ func (c *ConmonClient) ShutdownContext(ctx context.Context) (retErr error) {
 	return c.endServer(ctx, "stop server", func(server *serverProcess) error {
 		return c.stopServer(ctx, server, serverStopTimeout, false)
 	})
-}
-
-// Kill kills the server via SIGKILL and waits up to 10 seconds for the
-// server PID to be removed from the system, see KillContext.
-func (c *ConmonClient) Kill() error {
-	return c.KillContext(context.Background())
 }
 
 // KillContext kills the server via SIGKILL and waits for the server PID to
@@ -700,13 +688,12 @@ func (c *ConmonClient) endServer(
 // shut down, otherwise its resources leak.
 //
 // The methods of the client fail with ErrClientClosed afterwards, calls in
-// progress fail as well, attach sessions with ErrClientClosed. A Shutdown or
-// KillContext (or Kill) in progress still finishes. Close is safe to call at
-// any time: on a closed client it does nothing, after Shutdown or KillContext
-// (or Kill) it closes the client for good. Those do not mark the client as
-// closed, its methods connect again to a server which runs on the
-// ServerRunDir later. Close does not close a RemoteFDs which the RemoteFDs
-// method returned, the caller closes it.
+// progress fail as well, attach sessions with ErrClientClosed. A
+// ShutdownContext or KillContext in progress still finishes. Close is safe to
+// call at any time: on a closed client it does nothing, after ShutdownContext
+// or KillContext it closes the client for good. Those do not mark the client
+// as closed, its methods connect again to a server which runs on the
+// ServerRunDir later.
 func (c *ConmonClient) Close() error {
 	// Set before taking pidfdMu, so that usePidfd fails once Close got the
 	// lock.
@@ -733,7 +720,7 @@ func (c *ConmonClient) Close() error {
 
 // pickUpReplacement records the server which replaced the recorded one,
 // if that one exited and another server answers Version on the socket of
-// the run directory within serverProbeTimeout. Shutdown and KillContext
+// the run directory within serverProbeTimeout. ShutdownContext and KillContext
 // stop the server which runs then, also if no call connected to it yet.
 func (c *ConmonClient) pickUpReplacement(ctx context.Context) {
 	server := c.currentServer()
@@ -760,7 +747,7 @@ func (c *ConmonClient) pickUpReplacement(ctx context.Context) {
 		return
 	}
 
-	// Another Shutdown, KillContext or connection may have recorded a
+	// Another ShutdownContext, KillContext or connection may have recorded a
 	// server in the meantime, which stays.
 	if c.setServerPIDIf(server, resp.ProcessID) {
 		c.logger.Warnf("Server PID %d exited, server PID %d replaced it",
@@ -827,10 +814,10 @@ func (c *ConmonClient) closeUnusedPidfdLocked(server *serverProcess) error {
 	return nil
 }
 
-// serverStopTimeout bounds the wait for the server to exit on Shutdown. The
-// server finishes its shutdown before, it checks its budget against a copy
-// of this value at compile time, see CLIENT_STOP_TIMEOUT in
-// conmon-rs/server/src/server.rs.
+// serverStopTimeout bounds the wait for the server to exit on
+// ShutdownContext. The server finishes its shutdown before, it checks its
+// budget against a copy of this value at compile time, see
+// CLIENT_STOP_TIMEOUT in conmon-rs/server/src/server.rs.
 const serverStopTimeout = 10 * time.Second
 
 // serverCleanupTimeout bounds each wait for a server which New started but
@@ -958,8 +945,8 @@ func (s *serverProcess) signal(sig syscall.Signal) error {
 // concurrently, the check falls back to the PID. A process which got the
 // PID later counts as an exited server if its start time differs, which
 // cannot be read everywhere, so that an exited server can still look
-// running. Only Shutdown and KillContext, which keep the pidfd open, signal
-// a server based on it.
+// running. Only ShutdownContext and KillContext, which keep the pidfd open,
+// signal a server based on it.
 func (c *ConmonClient) serverExited(server *serverProcess) bool {
 	if server.done.Load() {
 		return true

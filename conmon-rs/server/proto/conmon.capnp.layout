@@ -9,8 +9,8 @@ interface Conmon @0xb737e899dd6633f1 {
   attachContainer @3 (request :AttachRequest) -> (response :AttachResponse);
   reopenLogContainer @4 (request :ReopenLogRequest) -> (response :ReopenLogResponse);
   setWindowSizeContainer @5 (request :SetWindowSizeRequest) -> (response :SetWindowSizeResponse);
-  createNamespaces @6 (request :CreateNamespacesRequest) -> (response :CreateNamespacesResponse);
-  startFdSocket @7 (request :StartFdSocketRequest) -> (response :StartFdSocketResponse);
+  createNamespacesOld @6 (request :CreateNamespacesRequest) -> (response :CreateNamespacesResponse);
+  startFdSocketOld @7 (request :StartFdSocketRequest) -> (response :StartFdSocketResponse);
   serveExecContainer @8 (request :ServeExecContainerRequest) -> (response :ServeExecContainerResponse);
   serveAttachContainer @9 (request :ServeAttachContainerRequest) -> (response :ServeAttachContainerResponse);
   servePortForwardContainer @10 (request :ServePortForwardContainerRequest) -> (response :ServePortForwardContainerResponse);
@@ -40,27 +40,27 @@ interface Conmon @0xb737e899dd6633f1 {
     exitPaths @4 :List(Text);  # ptr[2]
     oomExitPaths @5 :List(Text);  # ptr[3]
     logDrivers @6 :List(LogDriver);  # ptr[4]
-    cleanupCmd @7 :List(Text);  # ptr[5]
-    globalArgs @8 :List(Text);  # ptr[6]
+    cleanupCmdOld @7 :List(Text);  # ptr[5]
+    globalArgsOld @8 :List(Text);  # ptr[6]
     commandArgs @9 :List(Text);  # ptr[7]
     metadataOld @10 :Void;  # bits[0, 0)
     metadata @11 :List(TextTextMapEntry);  # ptr[8]
-    envVars @12 :List(TextTextMapEntry);  # ptr[9]
+    envVarsOld @12 :List(TextTextMapEntry);  # ptr[9]
     cgroupManager @13 :CgroupManager;  # bits[16, 32)
-    additionalFds @14 :List(UInt64);  # ptr[10]
-    leakFds @15 :List(UInt64);  # ptr[11]
-    sdnotifySocket @16 :Text;  # ptr[12]
+    additionalFdsOld @14 :List(UInt64);  # ptr[10]
+    leakFdsOld @15 :List(UInt64);  # ptr[11]
+    sdnotifySocketOld @16 :Text;  # ptr[12]
   }
   struct LogDriver @0xae78ee8eb6b3a134 {  # 16 bytes, 4 ptrs
     type @0 :Type;  # bits[0, 16)
     path @1 :Text;  # ptr[0]
     maxSize @2 :UInt64;  # bits[64, 128)
     containerName @3 :Text;  # ptr[1]
-    tag @4 :Text;  # ptr[2]
-    labels @5 :List(TextTextMapEntry);  # ptr[3]
+    tagOld @4 :Text;  # ptr[2]
+    labelsOld @5 :List(TextTextMapEntry);  # ptr[3]
     enum Type @0xf026e3d750335bc1 {
       containerRuntimeInterface @0;
-      json @1;
+      jsonOld @1;
       journald @2;
     }
   }
@@ -78,7 +78,7 @@ interface Conmon @0xb737e899dd6633f1 {
     terminal @3 :Bool;  # bits[64, 65)
     metadataOld @4 :Void;  # bits[0, 0)
     metadata @5 :List(TextTextMapEntry);  # ptr[2]
-    envVars @6 :List(TextTextMapEntry);  # ptr[3]
+    envVarsOld @6 :List(TextTextMapEntry);  # ptr[3]
     cgroupManager @7 :CgroupManager;  # bits[80, 96)
   }
   struct ExecSyncContainerResponse @0xd9d61d1d803c85fc {  # 8 bytes, 2 ptrs
@@ -90,7 +90,7 @@ interface Conmon @0xb737e899dd6633f1 {
   struct AttachRequest @0xdf703ca0befc3afc {  # 8 bytes, 4 ptrs
     id @0 :Text;  # ptr[0]
     socketPath @1 :Text;  # ptr[1]
-    execSessionId @2 :Text;  # ptr[2]
+    execSessionIdOld @2 :Text;  # ptr[2]
     stopAfterStdinEof @3 :Bool;  # bits[0, 1)
     metadataOld @4 :Void;  # bits[0, 0)
     metadata @5 :List(TextTextMapEntry);  # ptr[3]

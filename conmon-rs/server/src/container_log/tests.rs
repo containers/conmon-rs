@@ -521,7 +521,7 @@ fn log_paths_have_to_be_absolute() -> Result<()> {
         .init_log_drivers(2);
     for (i, path) in ["/log", "log"].into_iter().enumerate() {
         let mut driver = drivers.reborrow().get(u32::try_from(i)?);
-        driver.set_type(Type::Json);
+        driver.set_type(Type::ContainerRuntimeInterface);
         driver.set_path(path);
     }
     let drivers = drivers.into_reader();
@@ -605,22 +605,22 @@ async fn failed_flush_drops_chunk() -> Result<()> {
 
 #[tokio::test]
 async fn drivers_share_the_output() -> Result<()> {
-    let (cri, json, log) = test_helpers::container_log(true).await?;
+    let (cri, lines, log) = test_helpers::container_log(true).await?;
     let mut log = log.lock().await;
 
     log.write(Pipe::StdOut, b"a\nparti").await?;
     log.write(Pipe::StdOut, b"al\n").await?;
     log.finish(Pipe::StdOut).await?;
 
-    // The CRI log writes partial lines as they come, the JSON one joins
-    // them.
+    // The CRI log writes partial lines as they come, the journald driver
+    // joins them.
     let ts = test_helpers::TIMESTAMP;
     assert_eq!(
         test_helpers::read(&cri)?,
         format!("{ts} stdout F a\n{ts} stdout P parti\n{ts} stdout F al\n")
     );
-    let json = test_helpers::read(&json)?;
-    let messages: Vec<_> = json
+    let lines = test_helpers::read(&lines)?;
+    let messages: Vec<_> = lines
         .lines()
         .map(|line| {
             let entry: serde_json::Value = serde_json::from_str(line)?;
@@ -633,31 +633,33 @@ async fn drivers_share_the_output() -> Result<()> {
 
 #[tokio::test]
 async fn failing_driver_does_not_stop_the_others() -> Result<()> {
-    let (cri, json, log) = test_helpers::container_log(false).await?;
+    let (cri, lines, log) = test_helpers::container_log(false).await?;
     let mut log = log.lock().await;
-    // Only the JSON log gets opened, the CRI one fails every write.
-    if let Driver::Json(json) = &mut log.drivers[1] {
-        json.init().await?;
-    }
+    // The CRI driver did not get opened and fails every write, the journald
+    // one needs no opening.
 
     assert!(log.write(Pipe::StdOut, b"line\n").await.is_err());
     assert!(test_helpers::read(&cri)?.is_empty());
-    assert!(test_helpers::read(&json)?.contains(r#""message":"line""#));
+    assert!(test_helpers::read(&lines)?.contains(r#""message":"line""#));
     Ok(())
 }
 
 #[tokio::test]
 async fn reopen_reopens_all_drivers() -> Result<()> {
-    let (cri, json, log) = test_helpers::container_log(true).await?;
+    let (cri, _journal, log) = test_helpers::container_log(false).await?;
+    let (other, other_cri) = test_helpers::cri_logger(None).await?;
     let mut log = log.lock().await;
+    log.drivers[1] = Driver::Cri(other_cri);
+    log.init().await?;
     log.write(Pipe::StdOut, b"before\n").await?;
 
-    // The CRI log cannot be opened again.
+    // The first log cannot be opened again, the second one still gets a new
+    // file.
     fs::remove_file(cri.path())?;
     fs::create_dir(cri.path())?;
 
     assert!(log.reopen().await.is_err());
-    assert!(test_helpers::read(&json)?.is_empty());
+    assert!(test_helpers::read(&other)?.is_empty());
     fs::remove_dir(cri.path())?;
     Ok(())
 }
@@ -665,11 +667,11 @@ async fn reopen_reopens_all_drivers() -> Result<()> {
 #[tokio::test]
 async fn sync_skips_files_which_cannot_be_synced() -> Result<()> {
     // Nothing got opened, there is nothing to sync.
-    let (_cri, _json, log) = test_helpers::container_log(false).await?;
+    let (_cri, _lines, log) = test_helpers::container_log(false).await?;
     ContainerLog::sync(&log).await?;
 
     // A device takes no sync, the other files still get synced.
-    let (_cri, json, log) = test_helpers::container_log(false).await?;
+    let (_cri, lines, log) = test_helpers::container_log(false).await?;
     {
         let mut log = log.lock().await;
         log.drivers[0] = Driver::Cri(cri::CriLogger::new("/dev/null", None));
@@ -677,7 +679,7 @@ async fn sync_skips_files_which_cannot_be_synced() -> Result<()> {
         log.write(Pipe::StdOut, b"line\n").await?;
     }
     ContainerLog::sync(&log).await?;
-    assert!(test_helpers::read(&json)?.contains(r#""message":"line""#));
+    assert!(test_helpers::read(&lines)?.contains(r#""message":"line""#));
     Ok(())
 }
 

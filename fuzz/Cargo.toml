@@ -104,13 +104,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "notify_filter"
-path = "fuzz_targets/notify_filter.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "proc_stat"
 path = "fuzz_targets/proc_stat.rs"
 test = false

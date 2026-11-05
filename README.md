@@ -32,11 +32,10 @@ on cgroup v2 only.
 - [docs/cri-o.md](docs/cri-o.md): configuring CRI-O, the compatibility between
   CRI-O and server versions, upgrades and the use on Red Hat OpenShift.
 - [docs/server.md](docs/server.md): the command line of the server, what it
-  does when it starts and stops, and the `pause` subcommand.
+  does when it starts and stops.
 - [docs/protocols.md](docs/protocols.md): the Cap'n Proto RPC, the attach
   socket, the streaming server for exec, attach and port forwarding with its
-  limits and security, the file descriptor socket, and the features a server
-  reports.
+  limits and security, and the features a server reports.
 - [docs/logging.md](docs/logging.md): the container log drivers and how the
   server reports OOM kills.
 - [docs/troubleshooting.md](docs/troubleshooting.md): finding the logs of the

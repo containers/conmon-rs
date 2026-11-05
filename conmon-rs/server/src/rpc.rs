@@ -12,8 +12,6 @@ use crate::{
     },
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
-    notify::NotifySocket,
-    pause::Pause,
     random_id::RandomId,
     runtime_args::GenerateRuntimeArgs,
     server::Server,
@@ -119,6 +117,22 @@ fn text_list<'a, T: From<&'a str>>(
         .iter()
         .map(|text| Ok(text?.to_str()?.into()))
         .collect()
+}
+
+/// Fail a request which sets one of the retired fields, which an older
+/// client may send, named like they were, see the schema. Ignoring one would
+/// change what the runtime does, like its root through `globalArgs` or the
+/// descriptors it inherits through `additionalFds`, or the journal entries
+/// of a container through the `tag` of a log driver. Empty ones, which the
+/// older clients send by default, pass. A client since v1.1.0 checks the
+/// feature of the `sdnotifySocket` before it sends one.
+fn reject_retired<const N: usize>(method: &str, fields: [(&str, bool); N]) -> Result<(), Error> {
+    match fields.iter().find(|(_, empty)| !empty) {
+        Some((field, _)) => Err(Error::unimplemented(format!(
+            "the {field} of {method} is not supported by this server"
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// The result of an exec_sync.
@@ -297,11 +311,43 @@ impl conmon::Server for Server {
 
         enter_request!(req, "create_container", id.as_str());
 
-        let cleanup_cmd: Vec<String> = pry!(text_list(req.get_cleanup_cmd()));
-
         debug!("Got a create container request");
 
+        pry!(reject_retired(
+            "createContainer",
+            [
+                (
+                    "sdnotifySocket",
+                    pry!(req.get_sdnotify_socket_old()).is_empty(),
+                ),
+                ("cleanupCmd", pry!(req.get_cleanup_cmd_old()).is_empty()),
+                ("globalArgs", pry!(req.get_global_args_old()).is_empty()),
+                ("envVars", pry!(req.get_env_vars_old()).is_empty()),
+                (
+                    "additionalFds",
+                    pry!(req.get_additional_fds_old()).is_empty(),
+                ),
+                ("leakFds", pry!(req.get_leak_fds_old()).is_empty()),
+            ],
+        ));
+
         let log_drivers = pry!(req.get_log_drivers());
+        for driver in log_drivers {
+            pry!(reject_retired(
+                "createContainer",
+                [
+                    (
+                        "json log driver",
+                        pry!(driver.get_type()) != conmon::log_driver::Type::JsonOld,
+                    ),
+                    ("tag of a log driver", pry!(driver.get_tag_old()).is_empty()),
+                    (
+                        "labels of a log driver",
+                        pry!(driver.get_labels_old()).is_empty(),
+                    ),
+                ],
+            ));
+        }
         let container_log = pry_err!(ContainerLog::from_request(&id, log_drivers));
         let mut container_io =
             pry_err!(ContainerIO::new(req.get_terminal(), container_log.clone()));
@@ -312,7 +358,6 @@ impl conmon::Server for Server {
         debug!("PID file is {}", pidfile.display());
 
         let child_reaper = self.reaper().clone();
-        let global_args: Vec<String> = pry!(text_list(req.get_global_args()));
         let command_args: Vec<String> = pry!(text_list(req.get_command_args()));
         let cgroup_manager = pry!(req.get_cgroup_manager());
         let args = GenerateRuntimeArgs {
@@ -322,7 +367,7 @@ impl conmon::Server for Server {
             pidfile: &pidfile,
             cgroup_manager,
         };
-        let args = pry_err!(args.create_args(bundle_path, &global_args, &command_args));
+        let args = pry_err!(args.create_args(bundle_path, &command_args));
         let stdin = req.get_stdin();
         let runtime = self.config().runtime().to_path_buf();
         let exit_paths: Vec<PathBuf> = pry!(text_list(req.get_exit_paths()));
@@ -333,36 +378,6 @@ impl conmon::Server for Server {
         for path in &oom_exit_paths {
             pry_err!(capnp_util::check_absolute("OOM exit path", path));
         }
-        let env_vars = pry!(req.get_env_vars().and_then(capnp_util::into_map));
-
-        // The runtime mounts the socket directory, so it has to exist before
-        // the runtime runs.
-        let sdnotify_socket = pry!(pry!(req.get_sdnotify_socket()).to_str());
-        let notify_socket = if sdnotify_socket.is_empty() {
-            None
-        } else {
-            // A relative path would resolve against the root directory the
-            // server changed into, an abstract address has no path.
-            if !sdnotify_socket.starts_with('@') {
-                pry_err!(capnp_util::check_absolute(
-                    "sdnotify socket",
-                    Path::new(sdnotify_socket)
-                ));
-            }
-            Some(pry_err!(NotifySocket::bind(bundle_path, sdnotify_socket)))
-        };
-
-        // Take both lists at once and after everything else which can fail
-        // the request here: a failure up to and including the take leaves
-        // all descriptors in place for a retry. Once taken, they belong to
-        // this call, a later failure closes them.
-        let additional_slots = pry!(req.get_additional_fds());
-        let leak_slots = pry!(req.get_leak_fds());
-        let mut additional_fds = pry_err!(
-            self.fd_socket()
-                .take_all(additional_slots.iter().chain(leak_slots.iter()))
-        );
-        let leak_fds = additional_fds.split_off(additional_slots.len() as usize);
 
         let runtime_deadline = Instant::now() + Self::CREATE_RUNTIME_TIMEOUT;
         Promise::from_future(
@@ -378,8 +393,6 @@ impl conmon::Server for Server {
                         .create_child(
                             RuntimeCall {
                                 stdin,
-                                env_vars,
-                                additional_fds,
                                 ..RuntimeCall::new(&runtime, &args, &pidfile, runtime_deadline)
                             },
                             &mut container_io,
@@ -408,17 +421,10 @@ impl conmon::Server for Server {
                         oom_exit_paths,
                         timeout: None,
                         io,
-                        cleanup_cmd,
-                        token: token.clone(),
+                        token,
                         process: None,
                     };
-                    child_reaper.watch_grandchild(child, leak_fds, call)?;
-
-                    // Only now does the container exit cancel the token, a
-                    // failure above drops the socket instead.
-                    if let Some(notify_socket) = notify_socket {
-                        notify_socket.spawn(token);
-                    }
+                    child_reaper.watch_grandchild(child, call)?;
                     Ok(grandchild_pid)
                 });
                 let grandchild_pid = task_result(create).await?;
@@ -444,6 +450,11 @@ impl conmon::Server for Server {
 
         enter_request!(req, "exec_sync_container", id.as_str());
 
+        pry!(reject_retired(
+            "execSyncContainer",
+            [("envVars", pry!(req.get_env_vars_old()).is_empty())],
+        ));
+
         // The timeout starts now, the runtime may hang before the process
         // even starts.
         let time_to_timeout = Self::exec_deadline(req.get_timeout_sec());
@@ -463,7 +474,6 @@ impl conmon::Server for Server {
         let mut container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger));
 
         let command: Vec<String> = pry!(text_list(req.get_command()));
-        let env_vars = pry!(req.get_env_vars().and_then(capnp_util::into_map));
         let cgroup_manager = pry!(req.get_cgroup_manager());
 
         let args = GenerateRuntimeArgs {
@@ -493,7 +503,6 @@ impl conmon::Server for Server {
                         .create_child(
                             RuntimeCall {
                                 command_start: Some(args.command_start),
-                                env_vars,
                                 ..RuntimeCall::new(
                                     &runtime,
                                     &args.args,
@@ -588,11 +597,6 @@ impl conmon::Server for Server {
 
         debug!("Got an attach container request");
 
-        let exec_session_id = pry!(pry!(req.get_exec_session_id()).to_str());
-        if !exec_session_id.is_empty() {
-            debug!("Using exec session id {}", exec_session_id);
-        }
-
         let socket_path = pry!(pry!(req.get_socket_path()).to_string());
         pry_err!(capnp_util::check_absolute(
             "socket path",
@@ -664,78 +668,26 @@ impl conmon::Server for Server {
         )
     }
 
-    /// Create a new set of namespaces.
-    fn create_namespaces(
+    /// Retired, the pause process which created the namespaces is gone.
+    fn create_namespaces_old(
         self: Rc<Server>,
-        params: conmon::CreateNamespacesParams,
-        mut results: conmon::CreateNamespacesResults,
+        _: conmon::CreateNamespacesOldParams,
+        _: conmon::CreateNamespacesOldResults,
     ) -> Promise<(), capnp::Error> {
-        let req = pry!(pry!(params.get()).get_request());
-        let pod_id = pry!(pry!(req.get_pod_id()).to_str());
-
-        enter_request!(req, "create_namespaces", pod_id);
-
-        debug!("Got a create namespaces request");
-
-        let base_path = pry!(pry!(req.get_base_path()).to_string());
-        let pod_id = pod_id.to_owned();
-        let namespaces = pry_err!(Pause::parse_namespaces(pry!(req.get_namespaces())));
-        let uid_mappings = pry!(text_list(req.get_uid_mappings()));
-        let gid_mappings = pry!(text_list(req.get_gid_mappings()));
-
-        Promise::from_future(
-            async move {
-                let pause = capnp_err!(
-                    Pause::init_shared(&base_path, &pod_id, namespaces, uid_mappings, gid_mappings)
-                        .await
-                )?;
-
-                let response = results.get().init_response();
-                let mut namespaces =
-                    response.init_namespaces(capnp_err!(pause.namespaces().len().try_into())?);
-
-                for (idx, namespace) in pause.namespaces().iter().enumerate() {
-                    let mut ns = namespaces.reborrow().get(capnp_err!(idx.try_into())?);
-                    ns.set_path(
-                        namespace
-                            .path(pause.base_path(), &pod_id)
-                            .display()
-                            .to_string(),
-                    );
-                    ns.set_type(namespace.to_capnp_namespace());
-                }
-
-                Ok(())
-            }
-            .instrument(debug_span!("promise")),
-        )
+        Promise::err(Error::unimplemented(
+            "createNamespaces is not supported by this server".into(),
+        ))
     }
 
-    fn start_fd_socket(
+    /// Retired, the fd socket is gone.
+    fn start_fd_socket_old(
         self: Rc<Server>,
-        params: conmon::StartFdSocketParams,
-        mut results: conmon::StartFdSocketResults,
+        _: conmon::StartFdSocketOldParams,
+        _: conmon::StartFdSocketOldResults,
     ) -> Promise<(), capnp::Error> {
-        let req = pry!(pry!(params.get()).get_request());
-
-        enter_request!(req, "start_fd_socket");
-
-        debug!("Got a start fd socket request");
-
-        let path = self.config().fd_socket();
-        let fd_socket = self.fd_socket().clone();
-
-        Promise::from_future(
-            async move {
-                let path = capnp_err!(fd_socket.start(path).await)?;
-
-                let mut resp = results.get().init_response();
-                resp.set_path(capnp_err!(path.to_str().context("fd_socket path to str"))?);
-
-                Ok(())
-            }
-            .instrument(debug_span!("promise")),
-        )
+        Promise::err(Error::unimplemented(
+            "startFdSocket is not supported by this server".into(),
+        ))
     }
 
     fn serve_exec_container(

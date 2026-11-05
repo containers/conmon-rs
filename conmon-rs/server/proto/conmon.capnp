@@ -55,13 +55,15 @@ interface Conmon {
         # older server.
         metadataOld @9 :Void;
         # The optional features this server supports, which the version
-        # alone does not tell. Known values: `sdnotify`, the relay of
-        # sd_notify messages requested by `sdnotifySocket`; `portforward`,
+        # alone does not tell. Known values: `portforward`,
         # `servePortForwardContainer`; `idletimeout`, the `idleTimeoutSec` of
         # the exec and attach serve requests, which older servers ignore;
         # `streamingprotocols`, exec and attach sessions over SPDY and the
-        # WebSocket protocols before `v5.channel.k8s.io`; `journaldfields`,
-        # the `containerName`, `tag` and `labels` of the journald logger.
+        # WebSocket protocols before `v5.channel.k8s.io`. Servers before
+        # unreleased also reported `sdnotify`, the relay of sd_notify
+        # messages requested by `sdnotifySocketOld`, and `journaldfields`,
+        # the `containerName`, `tagOld` and `labelsOld` of the journald
+        # logger, which got retired.
         features @10 :List(Text);
     }
 
@@ -95,17 +97,15 @@ interface Conmon {
         # Where the output of the container goes, every driver gets all of
         # it, see docs/logging.md.
         logDrivers @6 :List(LogDriver);
-        # The command the server starts once the container exited and the
-        # exit files got written, without waiting for it. The server runs in
-        # `/`, so a relative path with a slash resolves against it, a bare
-        # name through the `PATH` of the server.
-        cleanupCmd @7 :List(Text);
-        # Arguments of the runtime before the `create` command. They only
-        # apply to the `create` call, not to the `exec` ones of
-        # `execSyncContainer` and `serveExecContainer`. The root of the
-        # runtime belongs in the `--runtime-root` of the server, which
-        # applies to every call.
-        globalArgs @8 :List(Text);
+        # Retired in unreleased, a request which sets it fails as not
+        # supported. The command the server started once the container
+        # exited before.
+        cleanupCmdOld @7 :List(Text);
+        # Retired in unreleased, a request which sets it fails as not
+        # supported. Arguments of the runtime before the `create` command
+        # before. The root of the runtime belongs in the `--runtime-root` of
+        # the server, which applies to every call.
+        globalArgsOld @8 :List(Text);
         # Arguments of the `create` command of the runtime, before the
         # container ID.
         commandArgs @9 :List(Text);
@@ -114,32 +114,27 @@ interface Conmon {
         # format, see the compatibility section of docs/cri-o.md.
         metadataOld @10 :Void;
         metadata @11 :Metadata;
-        # Environment variables of the runtime, on top of the ones of the
-        # server.
-        envVars @12 :TextTextMap;
+        # Retired in unreleased, a request which sets it fails as not
+        # supported. Environment variables of the runtime on top of the ones
+        # of the server before.
+        envVarsOld @12 :TextTextMap;
         # The cgroup manager of the runtime, `systemd` adds `--systemd-cgroup`
         # to the runtime arguments.
         cgroupManager @13 :CgroupManager;
-        # Slots of the fd socket, see `startFdSocket`, whose file descriptors
-        # the runtime gets as fd 3 and onwards in their order. With
-        # `--preserve-fds` in `commandArgs`, it passes them on.
-        additionalFds @14 :List(UInt64);
-        # Slots of the fd socket whose file descriptors the server holds
-        # until the container exited, without passing them on.
-        leakFds @15 :List(UInt64);
-        # The host sd_notify socket to relay messages to, usually the
-        # `NOTIFY_SOCKET` of systemd. If set, the server binds
-        # `<bundlePath>/notify/notify.sock` before it runs the runtime and
-        # relays the datagrams sent there to the host socket until the
-        # container exits. Like conmon, it only passes the assignments
-        # `READY=1`, `RELOADING=1`, `STOPPING=1`, `WATCHDOG=1`,
-        # `WATCHDOG=trigger`, `STATUS=`, `ERRNO=`, `BUSERROR=` and
-        # `MONOTONIC_USEC=`. The caller mounts the `notify` directory into the
-        # container and sets `NOTIFY_SOCKET` for its process, which the
-        # runtime does not see. The value is an absolute path or an abstract
-        # socket address written as `@name`. Since v1.2.2, a relative path
-        # gets rejected.
-        sdnotifySocket @16 :Text;
+        # Retired in unreleased, a request which sets it fails as not
+        # supported. Slots of the fd socket of `startFdSocketOld` before,
+        # whose file descriptors the runtime got as fd 3 and onwards.
+        additionalFdsOld @14 :List(UInt64);
+        # Retired in unreleased, a request which sets it fails as not
+        # supported. Slots of the fd socket whose file descriptors the server
+        # held until the container exited before.
+        leakFdsOld @15 :List(UInt64);
+        # Retired in unreleased, a request which sets it fails as not
+        # supported. The host sd_notify socket which the server relayed the
+        # messages of the container to before. Servers since unreleased do
+        # not report the `sdnotify` feature, which clients since v1.1.0
+        # check first.
+        sdnotifySocketOld @16 :Text;
     }
 
     struct LogDriver {
@@ -153,30 +148,27 @@ interface Conmon {
         # The maximum log size in bytes, 0 means unlimited.
         maxSize @2 :UInt64;
 
-        # The fields below only apply to the journald logger, like the
-        # options of conmon.
-
-        # The name of the container, written as CONTAINER_NAME.
+        # The name of the container, which the journald logger writes as
+        # CONTAINER_NAME, like the option of conmon. Since v1.2.2, it is
+        # also the SYSLOG_IDENTIFIER, or the short container ID without a
+        # name; older servers used `conmonrs`.
         containerName @3 :Text;
 
-        # The tag of the entries, written as CONTAINER_TAG and as
-        # SYSLOG_IDENTIFIER. Without a tag, servers since v1.2.2 use the
-        # container name as the identifier, and the short container ID
-        # without both, like conmon, older ones "conmonrs".
-        tag @4 :Text;
+        # Retired in unreleased, a request which sets it fails as not
+        # supported. The tag of the journal entries before, written as
+        # CONTAINER_TAG and SYSLOG_IDENTIFIER.
+        tagOld @4 :Text;
 
-        # Additional fields of every entry. A key has to be a valid journal
-        # field name: uppercase letters, digits and underscores, starting
-        # with a letter, at most 64 characters, and none of the fields which
-        # the logger sets itself, like MESSAGE or CONTAINER_ID. At most 256
-        # labels with 64 KiB of names and values together.
-        labels @5 :TextTextMap;
+        # Retired in unreleased, a request which sets it fails as not
+        # supported. Additional fields of every journal entry before.
+        labelsOld @5 :TextTextMap;
 
         enum Type {
             # The CRI logger, requires `path` to be set.
             containerRuntimeInterface @0;
-            # The JSON logger, requires `path` to be set.
-            json @1;
+            # Retired in unreleased, the JSON logger before. A request with
+            # it fails as not supported.
+            jsonOld @1;
             # The journald logger.
             journald @2;
         }
@@ -197,9 +189,8 @@ interface Conmon {
     }
 
     # Create a container with the runtime and monitor it until it exited:
-    # write its output to the log drivers, its exit code to the exit files,
-    # and run the cleanup command. The container gets started with the
-    # runtime by the caller.
+    # write its output to the log drivers and its exit code to the exit
+    # files. The container gets started with the runtime by the caller.
     createContainer @1 (request: CreateContainerRequest) -> (response: CreateContainerResponse);
 
     ###############################################
@@ -219,9 +210,10 @@ interface Conmon {
         # format, see the compatibility section of docs/cri-o.md.
         metadataOld @4 :Void;
         metadata @5 :Metadata;
-        # Environment variables of the runtime, on top of the ones of the
-        # server, like the ones of `CreateContainerRequest`.
-        envVars @6 :TextTextMap;
+        # Retired in unreleased, a request which sets it fails as not
+        # supported. Environment variables of the runtime on top of the ones
+        # of the server before.
+        envVarsOld @6 :TextTextMap;
         # Like the one of `CreateContainerRequest`, `systemd` adds
         # `--systemd-cgroup` to the runtime arguments.
         cgroupManager @7 :CgroupManager;
@@ -260,8 +252,9 @@ interface Conmon {
         # on for the attach clients of the container until it exited, see
         # docs/protocols.md. Other paths get rejected since v1.2.2.
         socketPath @1 :Text;
-        # Deprecated, only logged, attach sessions are per container.
-        execSessionId @2 :Text;
+        # Retired in unreleased, the server ignores it. Only logged before,
+        # attach sessions are per container.
+        execSessionIdOld @2 :Text;
         # Close the container's stdin once the input of a client ended, the
         # output is still forwarded until the container closes it. The stdin
         # of a terminal is never closed. The value of the latest attach call
@@ -365,9 +358,11 @@ interface Conmon {
         path @1 :Text; # Path to the bind mount of the namespace.
     }
 
-    # Create the namespaces of a pod with `conmonrs pause` and bind mount them
-    # below `basePath`, see docs/server.md.
-    createNamespaces @6 (request: CreateNamespacesRequest) -> (response: CreateNamespacesResponse);
+    # Retired in unreleased. It created the namespaces of a pod with the
+    # pause process of the server before, servers since unreleased fail it
+    # with an error which tells that it is not supported. The types above
+    # only stay for the layout of the schema.
+    createNamespacesOld @6 (request: CreateNamespacesRequest) -> (response: CreateNamespacesResponse);
 
     ###############################################
     # StartFdSocket
@@ -379,10 +374,10 @@ interface Conmon {
         path @0 :Text; # The path to the fd socket.
     }
 
-    # Listen on the fd socket, whose file descriptors `createContainer`
-    # references by slot, see docs/protocols.md. Further calls return the same
-    # path.
-    startFdSocket @7 (request: StartFdSocketRequest) -> (response: StartFdSocketResponse);
+    # Retired in unreleased. It started the fd socket, whose file
+    # descriptors `createContainer` referenced by slot, before. Servers since
+    # unreleased fail it with an error which tells that it is not supported.
+    startFdSocketOld @7 (request: StartFdSocketRequest) -> (response: StartFdSocketResponse);
 
     ###############################################
     # Helper types

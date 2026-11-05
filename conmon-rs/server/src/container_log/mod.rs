@@ -1,23 +1,17 @@
 //! The log drivers of the containers, which write the container output to
-//! the CRI or JSON log files or to journald.
+//! the CRI log files or to journald.
 
 mod cri;
 mod journald;
-mod json;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
 use crate::conmon_capnp::conmon::log_driver::{self, Owned, Type};
 use crate::{
-    capnp_util::{check_absolute, into_map},
-    container_io::Pipe,
-    container_log::cri::CriLogger,
-    container_log::journald::JournaldLogger,
-    container_log::json::JsonLogger,
-    fs_util,
-    server::Server,
+    capnp_util::check_absolute, container_io::Pipe, container_log::cri::CriLogger,
+    container_log::journald::JournaldLogger, fs_util, server::Server,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use bytes::{Bytes, BytesMut};
 use capnp::struct_list::Reader;
 use std::{
@@ -85,7 +79,6 @@ trait Logger {
 #[derive(Debug)]
 enum Driver {
     Cri(CriLogger),
-    Json(JsonLogger),
     Journald(JournaldLogger),
 }
 
@@ -94,7 +87,6 @@ macro_rules! dispatch {
     ($self:expr, $logger:ident => $call:expr) => {
         match $self {
             Driver::Cri($logger) => $call,
-            Driver::Json($logger) => $call,
             Driver::Journald($logger) => $call,
         }
     };
@@ -104,7 +96,6 @@ impl Driver {
     fn buffers_lines(&self) -> bool {
         match self {
             Driver::Cri(_) => CriLogger::BUFFERS_LINES,
-            Driver::Json(_) => JsonLogger::BUFFERS_LINES,
             Driver::Journald(_) => JournaldLogger::BUFFERS_LINES,
         }
     }
@@ -165,16 +156,16 @@ impl ContainerLog {
                     Type::ContainerRuntimeInterface => {
                         Driver::Cri(CriLogger::new(Self::path(&driver)?, max_size))
                     }
-                    Type::Json => Driver::Json(JsonLogger::new(Self::path(&driver)?, max_size)),
-                    Type::Journald => {
-                        let labels: Vec<(&str, &str)> = into_map(driver.get_labels()?)?;
-                        Driver::Journald(JournaldLogger::new(
-                            id,
-                            driver.get_container_name()?.to_str()?,
-                            driver.get_tag()?.to_str()?,
-                            labels,
-                        )?)
+                    // Retired, `createContainer` rejects it with the other
+                    // retired fields before, see `reject_retired`.
+                    Type::JsonOld => {
+                        debug_assert!(false, "the retired log driver type got through");
+                        bail!("unsupported log driver type")
                     }
+                    Type::Journald => Driver::Journald(JournaldLogger::new(
+                        id,
+                        driver.get_container_name()?.to_str()?,
+                    )),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -579,8 +570,7 @@ impl LogFile {
 
     /// Initial capacity of the chunk buffer, it grows to what the read chunks
     /// need with their line overhead, up to about twice
-    /// [`LogFile::FLUSH_SIZE`] for the entry which crosses it, more for a
-    /// long JSON line with escaped bytes.
+    /// [`LogFile::FLUSH_SIZE`] for the entry which crosses it.
     const BUF_CAPACITY: usize = 8 * 1024;
 
     /// The entries get written once they take this much, a chunk of very

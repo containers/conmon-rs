@@ -13,9 +13,11 @@ import (
 // Starts or connects to the server of a run directory and releases the
 // client again, the server keeps running.
 func ExampleNew() {
-	cfg := client.NewConmonServerConfig("/usr/bin/crun", "", "/run/conmonrs/pod")
-
-	conmon, err := client.New(cfg)
+	conmon, err := client.New(&client.ConmonServerConfig{
+		Runtime:      "/usr/bin/crun",
+		ServerRunDir: "/run/conmonrs/pod",
+		LogDriver:    client.LogDriverSystemd,
+	})
 	if err != nil {
 		fmt.Println("start server:", err)
 
@@ -28,9 +30,10 @@ func ExampleNew() {
 
 // Stops the server, with SIGKILL if it does not exit on its own.
 func ExampleConmonClient_ShutdownContext() {
-	conmon, err := client.New(
-		client.NewConmonServerConfig("/usr/bin/crun", "", "/run/conmonrs/pod"),
-	)
+	conmon, err := client.New(&client.ConmonServerConfig{
+		Runtime:      "/usr/bin/crun",
+		ServerRunDir: "/run/conmonrs/pod",
+	})
 	if err != nil {
 		fmt.Println("start server:", err)
 
@@ -51,9 +54,10 @@ func ExampleConmonClient_ShutdownContext() {
 
 // Asks the server whether it supports a feature before using it.
 func ExampleConmonClient_Version() {
-	conmon, err := client.New(
-		client.NewConmonServerConfig("/usr/bin/crun", "", "/run/conmonrs/pod"),
-	)
+	conmon, err := client.New(&client.ConmonServerConfig{
+		Runtime:      "/usr/bin/crun",
+		ServerRunDir: "/run/conmonrs/pod",
+	})
 	if err != nil {
 		fmt.Println("start server:", err)
 
@@ -68,17 +72,18 @@ func ExampleConmonClient_Version() {
 		return
 	}
 
-	if slices.Contains(version.Features, client.FeatureIdleTimeout) {
-		fmt.Println("idle timeouts apply")
+	if slices.Contains(version.Features, client.FeaturePortForward) {
+		fmt.Println("port forwarding is supported")
 	}
 }
 
 // Checks a feature of the running server, which may be older than the
 // binary on disk.
 func ExampleConmonClient_SupportsFeature() {
-	conmon, err := client.New(
-		client.NewConmonServerConfig("/usr/bin/crun", "", "/run/conmonrs/pod"),
-	)
+	conmon, err := client.New(&client.ConmonServerConfig{
+		Runtime:      "/usr/bin/crun",
+		ServerRunDir: "/run/conmonrs/pod",
+	})
 	if err != nil {
 		fmt.Println("start server:", err)
 
@@ -95,9 +100,10 @@ func ExampleConmonClient_SupportsFeature() {
 
 // Runs a command in a container, bounded by a timeout.
 func ExampleConmonClient_ExecSyncContainer() {
-	conmon, err := client.New(
-		client.NewConmonServerConfig("/usr/bin/crun", "", "/run/conmonrs/pod"),
-	)
+	conmon, err := client.New(&client.ConmonServerConfig{
+		Runtime:      "/usr/bin/crun",
+		ServerRunDir: "/run/conmonrs/pod",
+	})
 	if err != nil {
 		fmt.Println("start server:", err)
 
@@ -126,9 +132,10 @@ func ExampleConmonClient_ExecSyncContainer() {
 
 // Hands out a URL for an exec session, which a streaming client connects to.
 func ExampleConmonClient_ServeExecContainer() {
-	conmon, err := client.New(
-		client.NewConmonServerConfig("/usr/bin/crun", "", "/run/conmonrs/pod"),
-	)
+	conmon, err := client.New(&client.ConmonServerConfig{
+		Runtime:      "/usr/bin/crun",
+		ServerRunDir: "/run/conmonrs/pod",
+	})
 	if err != nil {
 		fmt.Println("start server:", err)
 

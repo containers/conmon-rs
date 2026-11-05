@@ -126,37 +126,8 @@ async fn runtime_output_with_terminal_does_not_block() -> Result<()> {
     let err = format!("{:#}", res.err().context("runtime failure expected")?);
     assert!(err.contains("runtime exited with status 1"), "{err}");
     assert!(err.trim_end().ends_with("the-error"));
-    assert!(err.len() < 2 * RuntimeOutput::MAX_STDERR);
+    assert!(err.len() < 2 * runtime_call::RuntimeOutput::MAX_STDERR);
     assert!(start.elapsed() < Duration::from_secs(10));
-    Ok(())
-}
-
-/// A take gets what is still in the pipe within its wait, and gives up on a
-/// pipe which stays open without blocking for longer.
-#[tokio::test]
-async fn taken_output_gets_the_rest_within_its_wait() -> Result<()> {
-    let mut child = tokio::process::Command::new("sh")
-        .args(["-c", "printf a >&2; sleep 0.2; printf b >&2"])
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
-    let output = RuntimeOutput::spawn(None, child.stderr.take());
-    assert_eq!(output.take(Duration::from_secs(10)).await, b"ab");
-
-    let mut child = tokio::process::Command::new("sh")
-        .args(["-c", "printf a >&2; exec sleep 60"])
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
-    let output = RuntimeOutput::spawn(None, child.stderr.take());
-    wait_for(|| output.has_stderr()).await?;
-    let start = Instant::now();
-    assert_eq!(output.take(Duration::from_millis(100)).await, b"a");
-    assert!(
-        start.elapsed() < Duration::from_secs(5),
-        "{:?}",
-        start.elapsed()
-    );
     Ok(())
 }
 
@@ -249,7 +220,7 @@ async fn stale_pid_file_does_not_get_cleaned_up() -> Result<()> {
     let reaper = ChildReaper::default();
     let dir = tempfile::tempdir()?;
     let pidfile = dir.path().join("pid");
-    // A child of the server which nobody registered, like the pause init.
+    // A child of the server which nobody registered.
     let other = spawn_sh("exec sleep 60")?;
     std::fs::write(&pidfile, other.pid.to_string())?;
 
@@ -288,42 +259,5 @@ async fn dropped_runtime_gets_killed_with_its_group() -> Result<()> {
     }
     let helper = read_pid_file(&helper_pidfile)?;
     wait_for_real(|| is_gone(helper) || is_zombie(helper)).await;
-    Ok(())
-}
-
-/// A spawn which failed because a target of the passed descriptors changed
-/// gets tried once more. The passed descriptor and its duplicates get closed
-/// either way.
-#[tokio::test]
-async fn spawns_with_changed_targets_get_retried_once() -> Result<()> {
-    let reaper = ChildReaper::default();
-    let dir = tempfile::tempdir()?;
-    let pidfile = dir.path().join("pid");
-    let args = ["-c".into(), "exit 1".into()];
-    for (changes, retried) in [(1, true), (2, false)] {
-        // Reading it ends once all copies of the other end got closed.
-        let (passed, reader) = std::os::unix::net::UnixStream::pair()?;
-        reader.set_nonblocking(true)?;
-        runtime_call::TARGET_CHANGES.with(|n| n.set(changes));
-        runtime_call::SPAWN_ATTEMPTS.with(|n| n.set(0));
-        let mut io = ContainerIO::new(false, ContainerLog::new())?;
-        let call = RuntimeCall {
-            additional_fds: vec![passed.into()],
-            ..RuntimeCall::new(Path::new("sh"), &args, &pidfile, distant_deadline())
-        };
-        let err = reaper.create_child(call, &mut io).await.unwrap_err();
-        runtime_call::TARGET_CHANGES.with(|n| n.set(0));
-        // Tried once more, never twice. The retry itself may find a target
-        // which a parallel test changed for real, so whether the runtime
-        // ran only tells something when both spawns failed on purpose.
-        assert_eq!(runtime_call::SPAWN_ATTEMPTS.with(std::cell::Cell::get), 2);
-        let changed = format!("{err:#}").contains("a target descriptor changed during spawn");
-        if !retried {
-            assert!(changed, "{err:#}");
-        }
-        // A process which a parallel test forks may hold a copy until it
-        // execs.
-        wait_for_real(|| matches!(std::io::Read::read(&mut &reader, &mut [0; 1]), Ok(0))).await;
-    }
     Ok(())
 }
