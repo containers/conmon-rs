@@ -1,8 +1,8 @@
 //! The processes the server monitors, containers and execs.
 
-use crate::container_io::SharedContainerIO;
+use crate::{container_io::SharedContainerIO, process::Process};
 use nix::unistd::Pid;
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -27,4 +27,9 @@ pub(crate) struct Child {
     pub(crate) io: SharedContainerIO,
     pub(crate) cleanup_cmd: Vec<String>,
     pub(crate) token: CancellationToken,
+
+    /// The process, if the caller holds it already, like an exec, so that
+    /// the registration does not open a second pidfd for it. The
+    /// registration opens it otherwise.
+    pub(crate) process: Option<Arc<Process>>,
 }

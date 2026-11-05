@@ -71,6 +71,13 @@ meanwhile do not get the SIGTERM. A container which ignores it, like the init
 of a PID namespace without a handler for it, delays the shutdown by the full 5
 seconds.
 
+Runtime calls in progress, like the `create` of a container or an exec, get up
+to 5 seconds after the containers got killed to finish. Since unreleased, the
+server stops the ones which did not finish by then, or 7 of the 9.5 seconds
+after the signal at the latest, so also after the 5 seconds of SIGTERM: it
+kills their runtimes and the processes they started, the calls fail, and the
+server exits with status 1.
+
 ### The `pause` subcommand
 
 `conmonrs pause` creates the pod level namespaces. The server runs it for the
@@ -93,13 +100,19 @@ namespaces alive, except for a PID namespace, which dies with its init process.
 Only when `--pid` is requested a pause process stays behind, its PID is written
 to `$BASE_PATH/conmonrs/$POD_ID.pid`. Since unreleased, that process runs in
 a mount namespace of its own with an empty, read-only root, without any
-capabilities, with `no_new_privs` and not dumpable, so that a process of the
-pod cannot reach the host file system through `/proc/<pid>/root` or trace it.
-If the empty root cannot be set up, like for a root which cannot be pivoted,
-it returns to the mount namespace and root of the host and the server logs a
-warning; with `--user` it cannot return and stays in a private copy of the
-mount namespace of the host, which the warning says. The mounts and the pause
-process are removed when the server shuts down. The bind mounts get unmounted lazily
+capabilities and with `no_new_privs`, so that a process of the pod cannot reach
+the host file system through `/proc/<pid>/root`. Once its namespaces are bound
+it is not dumpable either, so that a process of the pod cannot trace it;
+binding them needs no `CAP_SYS_PTRACE` without `--user`. On a root which cannot
+be pivoted, like an initramfs or a chroot whose root is no mount point, it
+keeps the root and the mounts of the host and the server logs a warning. If
+the empty root fails otherwise, it returns to the mount namespace and root of
+the host with a warning; with `--user` it cannot return and stays in a private
+copy of the mount namespace of the host, which the warning says. Because of
+the empty root, `nsenter -t <pid> -m` or `-a` finds no commands there; join
+the namespaces by their bind mounts, like `nsenter --pid=$BASE_PATH/pidns/$POD_ID`,
+or with `-n`, `-p` or `-u`. The mounts and the pause process are removed when
+the server shuts down. The bind mounts get unmounted lazily
 (`MNT_DETACH`), a process which still holds one open keeps its namespace alive
 until it lets go of it.
 

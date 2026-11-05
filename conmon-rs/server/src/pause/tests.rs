@@ -257,14 +257,12 @@ fn pause_pid_paths_of_pods_differ() {
     );
 }
 
-/// Needs root to bind a namespace and passes without, so it only runs
-/// locally, like with `unshare -rm cargo test -p conmonrs
-/// busy_namespace_bind_gets_detached`. The unit tests of CI run without root.
+/// Needs root to bind a namespace, like with `unshare -rm cargo test -p
+/// conmonrs busy_namespace_bind_gets_detached -- --ignored`. CI runs it as
+/// root in the unit test job.
 #[test]
+#[ignore = "needs root"]
 fn busy_namespace_bind_gets_detached() -> Result<()> {
-    if !nix::unistd::geteuid().is_root() {
-        return Ok(());
-    }
     let dir = tempfile::tempdir()?;
     let (namespace, pod) = (Namespace::Uts, "pod");
     let path = namespace.path(dir.path(), pod);

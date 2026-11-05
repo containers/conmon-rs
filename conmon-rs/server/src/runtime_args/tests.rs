@@ -75,6 +75,25 @@ fn ids_which_look_like_options_are_rejected() {
 }
 
 #[test]
+fn exec_commands_follow_the_end_of_the_options() {
+    // Commands which look like options of the runtime, or which are empty,
+    // follow the ID after `--` as they are, the runtime takes neither for an
+    // option.
+    for command in [&[][..], &["-d"], &["--cap=CAP_SYS_ADMIN", "sh"], &["--"]] {
+        let exec = runtime_args(
+            &["--runtime", "/usr/bin/runc"],
+            CgroupManager::Cgroupfs,
+            |args| args.exec_args(command),
+        );
+        let (options, rest) = exec.args.split_at(exec.command_start);
+        assert_eq!(options, ["exec", "-d", "--pid-file=/pidfile", "--", "id"]);
+        assert_eq!(rest, command, "{command:?}");
+        // Only the one which ends the options.
+        assert_eq!(options.iter().filter(|arg| *arg == "--").count(), 1);
+    }
+}
+
+#[test]
 fn create_args_for_crun_with_root_and_systemd() {
     let args = runtime_args(
         &[
@@ -152,6 +171,7 @@ fn exec_args_without_terminal() {
             "exec",
             "-d",
             "--pid-file=/pidfile",
+            "--",
             "id",
             "sh",
             "-c",
@@ -183,6 +203,7 @@ async fn exec_and_create_args_with_terminal() {
             console_socket.as_str(),
             "--tty",
             "--pid-file=/pidfile",
+            "--",
             "id",
             "true"
         ]
@@ -231,7 +252,10 @@ fn exec_commands_are_not_logged() {
     };
     assert_eq!(
         format!("{logged:?}"),
-        r#"["--systemd-cgroup", "exec", "-d", "--pid-file=/pidfile", "id"] with 3 command args"#
+        concat!(
+            r#"["--systemd-cgroup", "exec", "-d", "--pid-file=/pidfile", "--", "id"]"#,
+            " with 3 command args"
+        )
     );
 
     // Other calls get logged in full.

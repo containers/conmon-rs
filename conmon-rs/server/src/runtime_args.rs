@@ -71,6 +71,10 @@ impl GenerateRuntimeArgs<'_> {
         }
 
         args.push(format!("--pid-file={}", self.pidfile.display()));
+        // Ends the options of the runtime: the ID and the command follow as
+        // positional arguments, also a command which starts with a dash,
+        // which a runtime would take for an option of its own otherwise.
+        args.push("--".into());
         args.push(self.checked_id()?.into());
         let command_start = args.len();
         args.extend(command.into_iter().map(|arg| arg.as_ref().into()));

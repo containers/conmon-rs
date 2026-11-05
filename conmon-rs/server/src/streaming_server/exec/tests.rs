@@ -232,7 +232,7 @@ async fn lost_exit_ends_the_session_and_kills_the_process() -> Result<()> {
         _stop_output: attach.stop_output_on_exit(token.clone()),
         attach,
         token,
-        process: Process::open(child_pid(process.id())?),
+        process: Arc::new(Process::open(child_pid(process.id())?)),
         kill: Arc::default(),
     };
     let started = StartedExec {
@@ -277,7 +277,7 @@ fn tear_down_without_kill(tty: bool) -> Result<(std::process::Child, SharedConta
         _stop_output: attach.stop_output_on_exit(token.clone()),
         attach: attach.clone(),
         token,
-        process: Process::open(child_pid(process.id())?),
+        process: Arc::new(Process::open(child_pid(process.id())?)),
         kill: Arc::default(),
     });
     Ok((process, attach))

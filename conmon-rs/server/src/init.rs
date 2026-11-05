@@ -305,6 +305,7 @@ mod tests {
         {
             // Disabled by whoever started the tests, which stays, or not
             // supported by the kernel.
+            eprintln!("skipped: transparent huge pages are disabled or not supported");
             return Ok(());
         }
         disable_thp();

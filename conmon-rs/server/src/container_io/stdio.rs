@@ -301,7 +301,12 @@ impl ContainerIO {
                     let exited = CancellationToken::new();
                     exited.cancel();
                     match self.read_all_with_early(&exited, early).await {
-                        Ok((_, stderr)) => stderr,
+                        // Only the end, like of truncated output, the error
+                        // must not carry up to the size limit.
+                        Ok((_, mut stderr)) => {
+                            stderr.drain(..stderr.len().saturating_sub(EarlyStream::TAIL_SIZE));
+                            stderr
+                        }
                         Err(read_err) => {
                             debug!("Unable to read runtime output: {read_err:#}");
                             vec![]

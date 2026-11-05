@@ -87,6 +87,16 @@ const _: () = assert!(
             + DRAIN_MAX_WAIT.as_nanos()
 );
 
+// The runtime calls in progress get stopped after the grace of the
+// containers on SIGTERM, and the stopped ones get to clean up before the
+// deadline of the grandchildren, which leaves the time of the socket removal.
+const _: () = assert!(
+    Server::CLEANUP_TIMEOUT.as_nanos()
+        > Server::TERMINATE_GRACE.as_nanos()
+            + Server::SOCKET_REMOVAL_TIMEOUT.as_nanos()
+            + ChildReaper::STOP_BUDGET.as_nanos()
+);
+
 #[derive(Debug)]
 /// The main server structure.
 pub(crate) struct Server {

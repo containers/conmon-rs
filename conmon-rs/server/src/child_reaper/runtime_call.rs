@@ -25,7 +25,7 @@ use std::{
         unix::process::ExitStatusExt,
     },
     path::Path,
-    pin::Pin,
+    pin::{Pin, pin},
     process::{ExitStatus, Stdio},
     sync::{Arc, Mutex},
     task::{Poll, ready},
@@ -110,12 +110,20 @@ impl RuntimeOutput {
     /// Wait for the end of the output for a while, a helper of the runtime
     /// may hold the pipes open, and return the end of stderr.
     pub(crate) async fn finish(output: Option<Self>) -> Vec<u8> {
+        Self::finish_unless_stopped(output, &CancellationToken::new()).await
+    }
+
+    /// Like [`RuntimeOutput::finish`], but only briefly once the shutdown
+    /// stopped the call through `stop`.
+    async fn finish_unless_stopped(output: Option<Self>, stop: &CancellationToken) -> Vec<u8> {
         let Some(mut output) = output else {
             return vec![];
         };
-        if time::timeout(ChildReaper::RUNTIME_GRACE, &mut output.task)
+        let task = &mut output.task;
+        let grace = ChildReaper::RUNTIME_GRACE;
+        if wait_unless_stopped(task, grace, stop, ChildReaper::STOPPED_OUTPUT_WAIT)
             .await
-            .is_err()
+            .is_none()
         {
             debug!("Runtime output still held open, giving up on it");
             output.task.abort();
@@ -139,6 +147,9 @@ thread_local! {
     /// How many spawns of the thread fail as if a target of the descriptors
     /// changed, see [`ChildReaper::spawn_command`].
     pub(super) static TARGET_CHANGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// How many spawns the thread tried, see [`ChildReaper::spawn_command`].
+    pub(super) static SPAWN_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// first usable file descriptor after stdin, stdout and stderr
@@ -237,6 +248,8 @@ impl ChildReaper {
         fds: &[OwnedFd],
     ) -> io::Result<RuntimeChild> {
         #[cfg(test)]
+        SPAWN_ATTEMPTS.with(|n| n.set(n.get() + 1));
+        #[cfg(test)]
         if TARGET_CHANGES.with(|n| n.replace(n.get().saturating_sub(1))) > 0 {
             return Err(io::Error::from_raw_os_error(libc::EBUSY));
         }
@@ -287,6 +300,12 @@ impl ChildReaper {
     /// [`RuntimeOutput::finish`].
     pub(crate) const RUNTIME_GRACE: Duration = Duration::from_secs(5);
 
+    /// How long a call which the shutdown stopped waits for the exit of its
+    /// killed runtime, and then for the output of the runtime, instead of
+    /// the [`ChildReaper::RUNTIME_GRACE`], see [`ChildReaper::STOP_BUDGET`].
+    pub(super) const STOPPED_EXIT_WAIT: Duration = Duration::from_millis(500);
+    pub(super) const STOPPED_OUTPUT_WAIT: Duration = Duration::from_millis(250);
+
     /// Run the runtime with the I/O of the process it starts, and return the
     /// PID of the process once the runtime exited. The caller registers it
     /// through [`ChildReaper::watch_grandchild`].
@@ -318,17 +337,21 @@ impl ChildReaper {
                 command_start
             }
         );
-        let child = Self::spawn_runtime(runtime, args, stdin, &env_vars, additional_fds);
-        let mut child = Runtime(child.context("spawn child process")?);
+        let child = Self::spawn_runtime(runtime, args, stdin, &env_vars, additional_fds)
+            .context("spawn child process")?;
 
         // Not waited for yet, so it has its PID. Dropping it on a failure
         // kills it.
         let runtime_pid = child_pid(child.id()).context("PID of runtime")?;
-        let _runtime_pending = PendingPid::new(&self.pending, runtime_pid);
+        let mut child = Runtime {
+            child,
+            pending: Some(PendingPid::new(&self.pending, runtime_pid)),
+        };
 
         debug!("Running child on PID: {runtime_pid}");
 
         let token = CancellationToken::new();
+        let stop = in_flight.stop.clone();
 
         // With streams, the read loops take the output of the runtime along
         // with the one of the process. With a terminal, the runtime has pipes
@@ -339,17 +362,24 @@ impl ChildReaper {
             .is_some()
             .then(|| RuntimeOutput::spawn(child.stdout.take(), child.stderr.take()));
 
-        let connected =
-            Self::connect_io(&mut child, container_io, stdin, &token, runtime_deadline).await;
+        let connected = Self::connect_io(
+            &mut child,
+            container_io,
+            stdin,
+            &token,
+            runtime_deadline,
+            &stop,
+        )
+        .await;
         let status = match connected {
-            Ok(()) => Self::wait_runtime(&mut child, runtime_deadline).await,
+            Ok(()) => Self::wait_runtime(&mut child, runtime_deadline, &stop).await,
             Err(e) => Err(e),
         };
         let status = match status {
             Ok(status) => status,
             Err(RuntimeFailure { error, grace }) => {
                 token.cancel();
-                let stderr = Self::stop_runtime(child, output, grace).await;
+                let stderr = Self::stop_runtime(child, output, grace, &stop).await;
                 return Err(self.fail_create(pidfile, error, &stderr));
             }
         };
@@ -363,9 +393,9 @@ impl ChildReaper {
         // the pending mark, like a caller which gives up before that does.
         let grandchild_pid = status.success().then(|| read_pid_file(pidfile));
         if let Some(Ok(pid)) = &grandchild_pid {
-            in_flight.pending = Some(PendingPid::new(&self.pending, *pid));
+            in_flight.claim(&self.pending, *pid);
         }
-        let stderr = RuntimeOutput::finish(output).await;
+        let stderr = RuntimeOutput::finish_unless_stopped(output, &stop).await;
 
         let error = match grandchild_pid {
             Some(Ok(pid)) => return Ok((pid, token, in_flight)),
@@ -388,13 +418,15 @@ impl ChildReaper {
 
     /// Connect the I/O of the process which the runtime starts: wait until
     /// the runtime connected the terminal, or read the pipes of the runtime,
-    /// which the process shares.
+    /// which the process shares. Fails once the `deadline` passed or the
+    /// shutdown cancelled `stop`, like [`ChildReaper::wait_runtime`].
     async fn connect_io(
         child: &mut Runtime,
         container_io: &mut ContainerIO,
         stdin: bool,
         token: &CancellationToken,
         deadline: Instant,
+        stop: &CancellationToken,
     ) -> Result<(), RuntimeFailure> {
         if container_io.terminal().is_none() {
             let (stdin, stdout, stderr) =
@@ -411,17 +443,24 @@ impl ChildReaper {
                     .map_err(RuntimeFailure::new)
             }
             () = time::sleep_until(deadline) => Err(RuntimeFailure::timed_out()),
-            status = child.wait() => match status.context("wait for child") {
+            () = stop.cancelled() => Err(RuntimeFailure::stopped()),
+            status = child.reap() => match status.context("wait for child") {
                 // The runtime succeeded, so it did connect and the descriptor
                 // is queued already.
-                Ok(status) if status.success() => time::timeout(
-                    Self::RUNTIME_GRACE,
-                    container_io.connect_terminal(stdin, token.clone()),
-                )
-                .await
-                .context("runtime exited without connecting the terminal")
-                .and_then(|res| res.context("wait for terminal socket connection"))
-                .map_err(RuntimeFailure::new),
+                Ok(status) if status.success() => {
+                    let connect = container_io.connect_terminal(stdin, token.clone());
+                    match wait_unless_stopped(connect, Self::RUNTIME_GRACE, stop, Duration::ZERO)
+                        .await
+                    {
+                        Some(res) => res
+                            .context("wait for terminal socket connection")
+                            .map_err(RuntimeFailure::new),
+                        None if stop.is_cancelled() => Err(RuntimeFailure::stopped()),
+                        None => Err(RuntimeFailure::new(format_err!(
+                            "runtime exited without connecting the terminal"
+                        ))),
+                    }
+                }
                 // A failure is reported later together with its output.
                 Ok(_) => Ok(()),
                 Err(e) => Err(RuntimeFailure::new(e)),
@@ -431,28 +470,44 @@ impl ChildReaper {
 
     /// Wait for the exit of the runtime. A runtime which hangs gets killed
     /// once its deadline passed, and a wait which fails gets cleaned up like
-    /// a runtime which failed.
+    /// a runtime which failed. A runtime which still runs once the shutdown
+    /// stops the call through `stop` gets killed right away as well, by
+    /// this call, which holds it until it got reaped, see
+    /// [`ChildReaper::kill_pending`].
     async fn wait_runtime(
         child: &mut Runtime,
         deadline: Instant,
+        stop: &CancellationToken,
     ) -> Result<ExitStatus, RuntimeFailure> {
-        match time::timeout_at(deadline, child.wait()).await {
-            Ok(status) => status
+        select! {
+            // A runtime which exited in time succeeded.
+            biased;
+            status = child.reap() => status
                 .context("wait for runtime")
                 .map_err(RuntimeFailure::new),
-            Err(_) => Err(RuntimeFailure::timed_out()),
+            () = time::sleep_until(deadline) => Err(RuntimeFailure::timed_out()),
+            () = stop.cancelled() => Err(RuntimeFailure::stopped()),
         }
     }
 
-    /// Stop a runtime which failed before it exited: give it `grace` to exit
-    /// on its own, so that it still writes the PID file the cleanup needs,
-    /// kill it otherwise, and return its stderr.
+    /// Stop a runtime which failed before it exited, or whose call the
+    /// shutdown stopped: give it `grace` to exit on its own, so that it
+    /// still writes the PID file the cleanup needs, kill it otherwise, and
+    /// return its stderr. It gets killed through `child`, which tokio did
+    /// not reap yet, so neither its PID nor its group got reused. Its
+    /// pending mark ends once it got reaped, or once a killed runtime did
+    /// not exit within [`ChildReaper::RUNTIME_GRACE`], before waiting for
+    /// its output. Once the shutdown stopped the call through `stop`, the
+    /// runtime gets killed right away and the waits get shorter, so that
+    /// the call ends within the [`ChildReaper::STOP_BUDGET`].
     async fn stop_runtime(
         mut child: Runtime,
         output: Option<RuntimeOutput>,
         grace: Duration,
+        stop: &CancellationToken,
     ) -> Vec<u8> {
-        if time::timeout(grace, child.wait()).await.is_err() {
+        let exited = wait_unless_stopped(child.reap(), grace, stop, Duration::ZERO).await;
+        if exited.is_none() {
             debug!("Runtime did not exit in time, killing it");
             // Its helpers in its process group go with it, like hooks or a
             // runc init which did not set up the container yet, which would
@@ -469,15 +524,24 @@ impl ChildReaper {
             // Its container process gets reparented to this server only once
             // it is gone, the cleanup relies on that. A runtime stuck in the
             // kernel is not waited for forever.
-            match time::timeout(Self::RUNTIME_GRACE, child.wait()).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => debug!("Unable to wait for runtime: {e}"),
-                Err(_) => warn!("Killed runtime did not exit, cleaning up anyway"),
+            let reaped = child.reap();
+            let (grace, stopped) = (Self::RUNTIME_GRACE, Self::STOPPED_EXIT_WAIT);
+            match wait_unless_stopped(reaped, grace, stop, stopped).await {
+                Some(Ok(_)) => {}
+                Some(Err(e)) => debug!("Unable to wait for runtime: {e}"),
+                None => warn!("Killed runtime did not exit, cleaning up anyway"),
             }
         }
+        // Dropped before its mark: the drop kills the group of a runtime
+        // which did not exit, while the mark still keeps the orphan sweep
+        // from reaping it and its group number from getting reused. Neither
+        // is held while waiting for the output.
+        let pending = child.pending.take();
+        drop(child);
+        drop(pending);
 
         // Its stderr usually holds the reason.
-        RuntimeOutput::finish(output).await
+        RuntimeOutput::finish_unless_stopped(output, stop).await
     }
 
     /// Clean up after a failed runtime call and build its error, with the
@@ -523,6 +587,28 @@ impl ChildReaper {
     }
 }
 
+/// Wait for `future` for at most `limit`, and only for `stopped` more once
+/// the shutdown stopped the call through `stop`, see
+/// [`ChildReaper::STOP_BUDGET`]. None if it did not finish by then.
+async fn wait_unless_stopped<T>(
+    future: impl Future<Output = T>,
+    limit: Duration,
+    stop: &CancellationToken,
+    stopped: Duration,
+) -> Option<T> {
+    let deadline = Instant::now() + limit;
+    let mut future = pin!(future);
+    select! {
+        biased;
+        res = &mut future => return Some(res),
+        () = time::sleep_until(deadline) => return None,
+        () = stop.cancelled() => {}
+    }
+    time::timeout_at(deadline.min(Instant::now() + stopped), future)
+        .await
+        .ok()
+}
+
 /// A runtime call which failed before its runtime exited, see
 /// [`ChildReaper::stop_runtime`].
 struct RuntimeFailure {
@@ -547,6 +633,14 @@ impl RuntimeFailure {
             grace: Duration::ZERO,
         }
     }
+
+    /// The shutdown stopped the call, see [`ChildReaper::stop_calls`].
+    fn stopped() -> Self {
+        Self {
+            error: format_err!("runtime got stopped by the shutdown"),
+            grace: Duration::ZERO,
+        }
+    }
 }
 
 /// A runtime whose process group gets killed if it is dropped before it got
@@ -556,28 +650,45 @@ impl RuntimeFailure {
 /// would be left running, see [`ChildReaper::stop_runtime`]. Until it got
 /// reaped, the ID of the group is still the one of the runtime.
 #[derive(Debug)]
-struct Runtime(RuntimeChild);
+struct Runtime {
+    child: RuntimeChild,
+
+    /// Keeps the runtime pending until it got reaped, so that the orphan
+    /// sweep leaves its exit status to tokio. Its PID may belong to another
+    /// process after that, which another mark may keep pending.
+    pending: Option<PendingPid>,
+}
 
 impl Deref for Runtime {
     type Target = RuntimeChild;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.child
     }
 }
 
 impl DerefMut for Runtime {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.child
     }
 }
 
 impl Runtime {
+    /// Wait for the exit of the runtime, which reaps it, and end its pending
+    /// mark right away. Returns the status again once it got reaped.
+    async fn reap(&mut self) -> io::Result<ExitStatus> {
+        let status = self.child.wait().await;
+        if status.is_ok() {
+            self.pending = None;
+        }
+        status
+    }
+
     /// Kill the process group of the runtime, which it leads, see
     /// `spawn_command`. Nothing once it got reaped, the ID of the group may
     /// belong to another one then, the runtime has no ID anymore.
     fn kill_group(&self) -> nix::Result<()> {
-        let Ok(pid) = child_pid(self.0.id()) else {
+        let Ok(pid) = child_pid(self.child.id()) else {
             return Ok(());
         };
         killpg(pid, Signal::SIGKILL)

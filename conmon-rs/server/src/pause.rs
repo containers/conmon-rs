@@ -370,11 +370,11 @@ impl Pause {
         let dir = base_path.to_path_buf();
         let pid_path = Self::pause_pid_path(base_path, pod_id);
         task::spawn_blocking(move || {
-            fs::create_dir_all(dir).and_then(|()| fs_util::remove_file(&pid_path))
+            fs::create_dir_all(dir).context("create base path")?;
+            fs_util::remove_file(&pid_path).context("remove old pause PID file")
         })
         .await
-        .context("join creating base path")?
-        .context("create base path")?;
+        .context("join creating base path")??;
         debug!("Pause base path: {}", base_path.display());
 
         // The running binary, also after a package upgrade replaced the file
@@ -393,8 +393,8 @@ impl Pause {
             .arg(base_path)
             .args(args)
             // The init of a PID namespace outlives this call, it does not
-            // keep stderr open, see `run_child`. Only errors are of
-            // interest, which end up in the error of a failed setup.
+            // keep stderr open, see `run_child`. Its errors end up in the
+            // error of a failed setup, its warnings get logged otherwise.
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -468,15 +468,25 @@ impl Pause {
             // This relies on the pause process having waited for its child,
             // whose exit makes the init a child of the server. If that wait
             // failed, the init may still be a grandchild and counts as gone.
-            if let Some(process) = Process::open_child(pid) {
-                pause.process = Some(process);
-                Self::spawn_reaper(pid, pause.exited.clone());
-            } else {
-                warn!("Pause PID {pid} exited already, the PID namespace is gone");
-                pause.exited.store(true, Ordering::SeqCst);
+            match Process::open_child(pid) {
+                Ok(process) => {
+                    pause.process = Some(process);
+                    Self::spawn_reaper(pid, pause.exited.clone());
+                }
+                Err(e) => {
+                    warn!("Pause PID {pid} exited already, the PID namespace is gone: {e}");
+                    pause.exited.store(true, Ordering::SeqCst);
+                }
             }
         } else {
             info!("No PID namespace requested, pause process exited after binding");
+        }
+
+        // The subcommand prints its warnings, it runs without logging.
+        let stderr = output.take(Self::OUTPUT_WAIT).await;
+        let stderr = String::from_utf8_lossy(&stderr);
+        if !stderr.trim().is_empty() {
+            warn!("Pause: {}", stderr.trim());
         }
 
         Ok(pause)
@@ -504,8 +514,9 @@ impl Pause {
         with_stderr(e, &output.take(Self::OUTPUT_WAIT).await)
     }
 
-    /// How long [`Pause::undo`] waits for the rest of the output, well below
-    /// the [`Pause::KILL_WAIT`] the shutdown leaves a killed setup.
+    /// How long [`Pause::undo`] waits for the rest of the output and
+    /// [`Pause::left_init`] for the init, together well below the
+    /// [`Pause::KILL_WAIT`] the shutdown leaves a killed setup.
     const OUTPUT_WAIT: Duration = Duration::from_millis(100);
 
     /// The init of a PID namespace which a killed pause subcommand may have
@@ -513,20 +524,32 @@ impl Pause {
     /// subcommand dies before it sent the mounts message; only a kill after
     /// that leaves the init running, a child of this server, the subreaper,
     /// once the child of the subcommand exited as well. [`Pause::stop`]
-    /// removes the PID file, so only this can still stop the init. Best
-    /// effort: while the init is still a grandchild, it stays behind. Like
-    /// for a successful setup, the PID only counts while it belongs to an
-    /// unreaped child, which the orphan sweep reaps after a grace period.
-    /// The file is the one of this setup, [`Pause::init`] removed a left
-    /// one before the spawn.
+    /// removes the PID file, so only this can still stop the init. The
+    /// child exits right after the subcommand, the init is still its child
+    /// until then, so it gets up to [`Pause::OUTPUT_WAIT`] to become one of
+    /// this server. Like for a successful setup, the PID only counts while
+    /// it belongs to an unreaped child, which the orphan sweep reaps after a
+    /// grace period. The file is the one of this setup, [`Pause::init`]
+    /// removed a left one before the spawn. Blocks, it runs in
+    /// [`stop_blocking`].
     fn left_init(base_path: &Path, pod_id: &str, namespaces: &[Namespace]) -> Option<Process> {
         if !namespaces.contains(&Namespace::Pid) {
             return None;
         }
-        // Only an unreaped child, the PID may have been reused otherwise.
-        Self::read_pause_pid(base_path, pod_id)
-            .ok()
-            .and_then(Process::open_child)
+        let pid = Self::read_pause_pid(base_path, pod_id).ok()?;
+        let start = std::time::Instant::now();
+        loop {
+            // Only an unreaped child, the PID may have been reused otherwise.
+            match Process::open_child(pid) {
+                Ok(process) => return Some(process),
+                Err(e) if start.elapsed() >= Self::OUTPUT_WAIT => {
+                    debug!("Pause PID {pid} is no child, its init stays behind if it runs: {e}");
+                    return None;
+                }
+                Err(_) => {}
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// Check the exit status of the pause subcommand. It undoes its own

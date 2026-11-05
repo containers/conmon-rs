@@ -20,6 +20,7 @@ async fn too_many_streaming_sessions_fail_with_the_bare_message() -> anyhow::Res
         io: SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?),
         cleanup_cmd: vec![],
         token: CancellationToken::new(),
+        process: None,
     });
     let exec = || {
         StreamingRequest::Exec(ExecSession {

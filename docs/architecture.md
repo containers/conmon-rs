@@ -28,9 +28,9 @@ operations against it:
   server on localhost which speaks the Kubernetes remote command protocols over
   WebSocket and SPDY, so CRI-O can hand the URL straight to the kubelet. The
   same server forwards ports into the pod network namespace over SPDY or
-  WebSocket (`servePortForwardContainer`). The server rejects exec commands
-  which are empty or whose first element starts with `-`, which a runtime
-  could otherwise take for its own options, see the
+  WebSocket (`servePortForwardContainer`). The server passes exec commands to
+  the runtime after `--`, so that a runtime cannot take a command whose first
+  element starts with `-` for its own options, see the
   [changes of the protocols](protocols.md#changes).
 - **Attach**: `attachContainer` serves output and stdin of a container on a per
   container attach socket, the protocol conmon speaks as well.

@@ -34,6 +34,11 @@ async fn exit_files_wait_for_quiet_output() -> Result<()> {
     assert_eq!(start.elapsed(), DRAIN_MAX_WAIT);
     writer.abort();
 
+    // A deadline which passes while the drain waits ends the wait.
+    let start = Instant::now();
+    assert!(!ReapableChild::wait_for_output(attach.clone(), start + DRAIN_TIMEOUT / 2).await);
+    assert_eq!(start.elapsed(), DRAIN_TIMEOUT / 2);
+
     // Ended output does not wait at all.
     drop(output);
     let start = Instant::now();

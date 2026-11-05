@@ -529,6 +529,7 @@ jobs:
       # The ci profile of .config/nextest.toml retries failed tests and writes
       # a JUnit report, which lists the ones which passed on a retry.
       - name: Generate code coverage
+        id: coverage
         env:
           NEXTEST_PROFILE: ci
         run: |
@@ -537,7 +538,26 @@ jobs:
           mv target/nextest/ci/junit.xml junit-default.xml
           cargo llvm-cov nextest --locked --no-report --features tracing
           mv target/nextest/ci/junit.xml junit-tracing.xml
-          cargo llvm-cov report --lcov --output-path lcov.info
+      # The tests which need root, which the runs above skip, with the
+      # instrumented binaries of the first run, whose coverage the report
+      # includes. Cargo runs as the runner user, only the test binaries run
+      # as root through the target runner, which keeps the profile path of
+      # cargo-llvm-cov in the environment. The profiles they write go back
+      # to the runner user, also after a failure, no file in target may
+      # belong to root for the report and the cache.
+      - name: Run tests which need root
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -n -E
+        run: |
+          STATUS=0
+          cargo llvm-cov nextest --locked --no-report --run-ignored only --test-threads 1 || STATUS=$?
+          sudo -n chown -R "$(id -u):$(id -g)" target
+          exit "$STATUS"
+      # Also after a failure of the tests which need root, whose step fails
+      # the job then.
+      - name: Generate the coverage report
+        if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
+        run: cargo llvm-cov report --lcov --output-path lcov.info
       # A run which failed stops the step before its report got moved. It
       # is then still in target/nextest/ci.
       - name: Report flaky tests
@@ -547,6 +567,7 @@ jobs:
             .github/report-flakes "$REPORT"
           done
       - name: Upload Results
+        if: ${{ !cancelled() && steps.coverage.outcome == 'success' }}
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: lcov.info
