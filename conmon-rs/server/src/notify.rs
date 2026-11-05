@@ -104,7 +104,10 @@ impl NotifySocket {
         // A leftover of a previous run makes the bind fail, but another
         // container of this bundle may still use the socket.
         if StdUnixDatagram::unbound()?.connect(&short_path).is_ok() {
-            bail!("notify socket {} is in use", path.display())
+            bail!(listener::SocketInUse(format!(
+                "notify socket {} is in use",
+                path.display()
+            )))
         }
         fs_util::remove_file(&short_path)
             .with_context(|| format!("remove stale {}", path.display()))?;

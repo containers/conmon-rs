@@ -461,7 +461,10 @@ impl Config {
             if Self::socket_in_use(&socket, typ)
                 .with_context(|| format!("check socket {}", socket.display()))?
             {
-                bail!("socket {} is in use by a running server", socket.display())
+                bail!(listener::SocketInUse(format!(
+                    "socket {} is in use by a running server",
+                    socket.display()
+                )))
             }
             fs_util::remove_file(&socket)
                 .with_context(|| format!("remove stale socket {}", socket.display()))?;

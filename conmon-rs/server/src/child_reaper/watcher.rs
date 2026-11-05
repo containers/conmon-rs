@@ -25,7 +25,7 @@ use tokio::{
     task,
     time::{self, Instant},
 };
-use tracing::{Instrument, debug, debug_span, error, warn};
+use tracing::{Instrument, debug, debug_span, error, trace, warn};
 
 /// Runs a closure once dropped, at the end of a task however it ends.
 struct OnDrop<F: FnOnce()>(Option<F>);
@@ -54,7 +54,7 @@ impl ReapableChild {
     /// Whether the process which exited with `exit_code` got OOM killed. The
     /// watcher writes the files for the OOMs it could tell on its own, this
     /// the ones which only the exit status tells.
-    async fn handle_oom(
+    pub(super) async fn handle_oom(
         event: Option<OOMEvent>,
         exit_code: i32,
         oom_exit_paths: &[PathBuf],
@@ -74,10 +74,11 @@ impl ReapableChild {
     /// process which inherited the pipes and keeps them open must not delay
     /// the exit file. Output on its way into the log is no pause, a slow log
     /// driver must not cut off the end of the log, up to the `deadline`.
-    pub(super) async fn wait_for_output(attach: SharedContainerAttach, deadline: Instant) {
+    /// False if the log drivers did not take the output by then.
+    pub(super) async fn wait_for_output(attach: SharedContainerAttach, deadline: Instant) -> bool {
         let (mut rx, ended) = attach.subscribe();
         if ended {
-            return;
+            return true;
         }
         let mut drain = Drain::default();
         loop {
@@ -86,17 +87,17 @@ impl ReapableChild {
                 .is_err()
             {
                 warn!("Log drivers did not take the output in time, not waiting for them");
-                return;
+                return false;
             }
             // A read loop which got output while the drain waited gives it
             // another chance.
             let Ok(output) = time::timeout_at(deadline, drain.recv_output(&mut rx, None)).await
             else {
                 debug!("Output did not end in time, not waiting for it");
-                return;
+                return true;
             };
             if output.is_none() && (drain.exhausted() || !attach.is_logging()) {
-                return;
+                return true;
             }
         }
     }
@@ -109,7 +110,7 @@ impl ReapableChild {
     /// takes [`DRAIN_MAX_LOG_WAIT`] at most.
     pub(super) async fn finish_output(attach: SharedContainerAttach, logger: &SharedContainerLog) {
         let deadline = Instant::now() + DRAIN_MAX_LOG_WAIT;
-        Self::wait_for_output(attach.clone(), deadline).await;
+        let logged = Self::wait_for_output(attach.clone(), deadline).await;
         attach.stop_output();
         let (mut rx, ended) = attach.subscribe();
         if !ended {
@@ -124,8 +125,13 @@ impl ReapableChild {
                     Ok(Message::Done) | Err(broadcast::error::RecvError::Closed)
                 ) {}
             };
+            // Read loops which hang in the log drivers cannot end, and that
+            // got logged already. With the deadline passed, the sync would
+            // get no time either.
             if time::timeout_at(deadline, end).await.is_err() {
-                warn!("Read loops did not end in time, not waiting for them");
+                if logged {
+                    warn!("Read loops did not end in time, not waiting for them");
+                }
                 return;
             }
         }
@@ -255,8 +261,10 @@ impl ReapableChild {
                 }
 
                 debug!("Sending exit struct to channel: {:?}", exit_channel_data);
+                // Only the consumer of an exec receives it, nobody of a
+                // container.
                 if exit_tx.send(exit_channel_data).is_err() {
-                    debug!("Unable to send exit status");
+                    trace!("Nobody receives the exit status");
                 }
                 debug!("Task done");
             }
@@ -291,7 +299,7 @@ impl ReapableChild {
             async {
                 debug!(code, "Writing exit code to file");
                 if let Err(e) = Self::write_exit_file(path_buf, &code_str).await {
-                    error!("Could not write exit file: {e:#}");
+                    error!("Unable to write exit file: {e:#}");
                 }
             }
             .instrument(span)

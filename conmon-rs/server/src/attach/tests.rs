@@ -294,7 +294,7 @@ async fn write_loop_drains_after_exit() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn write_loop_gives_up_on_stuck_client_after_exit() -> Result<()> {
     let attach = SharedContainerAttach::default();
     let _output = attach.output();
@@ -309,8 +309,9 @@ async fn write_loop_gives_up_on_stuck_client_after_exit() -> Result<()> {
         attach.write(Message::Data(data.clone(), Pipe::StdOut));
         task::yield_now().await;
     }
-    // Nothing tells that it waits, a loop which gives up later passes.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The paused clock advances only once the loop waits, then past the
+    // time it gives up after an exit.
+    tokio::time::sleep(10 * DRAIN_MAX_WAIT).await;
     assert!(!write_loop.is_finished());
 
     // Neither the output nor the done packet wait for it after the exit.
@@ -520,7 +521,7 @@ async fn attach_client(attach: &SharedContainerAttach, path: &Path) -> Result<Un
     Ok(client)
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn listens_again_once_the_socket_got_removed() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("attach");
@@ -554,8 +555,9 @@ async fn listens_again_once_the_socket_got_removed() -> Result<()> {
     assert_eq!(recv_packet(&second).await?, b"\x02x");
 
     // The stopped listener leaves the new socket alone, the exit removes
-    // it.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // it. The paused clock only advances once the stopped listener ended,
+    // nothing else is left for it to wait for.
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(path.exists());
     token.cancel();
     wait_for(|| !path.exists()).await?;

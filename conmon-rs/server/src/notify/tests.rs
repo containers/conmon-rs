@@ -1,4 +1,5 @@
 use super::*;
+use crate::listener::SocketInUse;
 use crate::test_util::{retry_while_in_use, wait_for};
 use std::{
     os::{
@@ -157,7 +158,10 @@ async fn bind_replaces_a_stale_socket_but_not_a_live_one() -> Result<()> {
     assert!(fs::metadata(&path)?.file_type().is_socket());
 
     // Another container of the bundle still uses the socket.
-    assert!(NotifySocket::bind(bundle.path(), host).is_err());
+    let e = NotifySocket::bind(bundle.path(), host)
+        .err()
+        .context("bound twice")?;
+    assert!(e.is::<SocketInUse>(), "{e:#}");
     assert!(path.exists());
 
     drop(first);

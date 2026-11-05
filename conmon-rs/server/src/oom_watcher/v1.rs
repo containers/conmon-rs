@@ -24,7 +24,7 @@ use tracing::debug;
 
 /// The state of a cgroup v1 `memory.oom_control` file.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct OomControl {
+pub(super) struct OomControl {
     /// Whether the OOM killer is disabled, tasks wait in the OOM then.
     kill_disable: bool,
 
@@ -32,11 +32,11 @@ struct OomControl {
     under_oom: bool,
 
     /// Processes killed in this cgroup, kernels before 4.13 have no counter.
-    oom_kill: Option<u64>,
+    pub(super) oom_kill: Option<u64>,
 }
 
 impl OomControl {
-    fn parse(content: &str) -> Self {
+    pub(super) fn parse(content: &str) -> Self {
         let mut control = Self::default();
         for (key, value) in OOMWatcher::counters(content) {
             let value = value.ok();

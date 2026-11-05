@@ -1,5 +1,6 @@
 //! Helpers shared by the tests.
 
+use crate::listener::SocketInUse;
 use anyhow::{Context, Result, ensure};
 use std::{
     io::Write,
@@ -42,7 +43,10 @@ pub(crate) fn write_script(path: &Path, script: &str) -> Result<()> {
     Ok(())
 }
 
-/// Wait until `condition` holds, checking it every 10ms for at most 5s.
+/// Wait until `condition` holds, checking it every 10ms for at most 5s on
+/// the clock of tokio. With a paused clock, those 5s pass at once while
+/// nothing else is ready to run, so it only suits conditions which tasks
+/// of the test bring about, not other processes.
 pub(crate) async fn wait_for(mut condition: impl FnMut() -> bool) -> Result<()> {
     time::timeout(Duration::from_secs(5), async {
         while !condition() {
@@ -55,7 +59,11 @@ pub(crate) async fn wait_for(mut condition: impl FnMut() -> bool) -> Result<()> 
 
 /// Wait in real time until `condition` holds, checking it every 10ms for at
 /// most 10s, without blocking the runtime of the test. Unlike [`wait_for`],
-/// it also waits with a paused clock, which processes do not advance.
+/// it also waits with a paused clock, which processes do not advance. It
+/// suits conditions which other processes bring about, like an exit, which
+/// take longer on a loaded machine or under emulation. It panics instead
+/// of failing, so that it also fits where nothing returns an error, like
+/// in a branch of a `select!`.
 pub(crate) async fn wait_for_real(condition: impl Fn() -> bool) {
     for _ in 0..1000 {
         if condition() {
@@ -75,7 +83,7 @@ pub(crate) async fn retry_while_in_use<T>(mut f: impl FnMut() -> Result<T>) -> R
     let mut result = f();
     for _ in 0..500 {
         match &result {
-            Err(e) if format!("{e:#}").contains("in use") => {
+            Err(e) if e.is::<SocketInUse>() => {
                 time::sleep(Duration::from_millis(10)).await;
                 result = f();
             }

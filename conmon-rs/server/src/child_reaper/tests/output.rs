@@ -9,7 +9,9 @@ async fn exit_files_wait_for_quiet_output() -> Result<()> {
 
     // Nothing flows, a process holds the pipes open.
     let start = Instant::now();
-    ReapableChild::wait_for_output(attach.clone(), Instant::now() + DRAIN_MAX_LOG_WAIT).await;
+    assert!(
+        ReapableChild::wait_for_output(attach.clone(), Instant::now() + DRAIN_MAX_LOG_WAIT).await
+    );
     assert_eq!(start.elapsed(), DRAIN_TIMEOUT);
 
     // Output which keeps flowing is bounded.
@@ -26,14 +28,16 @@ async fn exit_files_wait_for_quiet_output() -> Result<()> {
         }
     });
     let start = Instant::now();
-    ReapableChild::wait_for_output(attach.clone(), Instant::now() + DRAIN_MAX_LOG_WAIT).await;
+    assert!(
+        ReapableChild::wait_for_output(attach.clone(), Instant::now() + DRAIN_MAX_LOG_WAIT).await
+    );
     assert_eq!(start.elapsed(), DRAIN_MAX_WAIT);
     writer.abort();
 
     // Ended output does not wait at all.
     drop(output);
     let start = Instant::now();
-    ReapableChild::wait_for_output(attach, Instant::now() + DRAIN_MAX_LOG_WAIT).await;
+    assert!(ReapableChild::wait_for_output(attach, Instant::now() + DRAIN_MAX_LOG_WAIT).await);
     assert_eq!(start.elapsed(), Duration::ZERO);
     Ok(())
 }
@@ -109,7 +113,7 @@ async fn exit_files_wait_for_slow_log_drivers() -> Result<()> {
 
     drop(held);
     drop(l.writer);
-    wait.await?;
+    assert!(wait.await?);
     assert!(crate::container_log::test_helpers::read(&l.cri)?.contains("last line"));
     l.task.await?
 }
@@ -259,7 +263,7 @@ async fn exit_files_wait_for_log_drivers_bounded() -> Result<()> {
     wait_logging(&l.attach).await?;
 
     let start = Instant::now();
-    ReapableChild::wait_for_output(l.attach, Instant::now() + DRAIN_MAX_LOG_WAIT).await;
+    assert!(!ReapableChild::wait_for_output(l.attach, Instant::now() + DRAIN_MAX_LOG_WAIT).await);
     assert_eq!(start.elapsed(), DRAIN_MAX_LOG_WAIT);
 
     drop(held);

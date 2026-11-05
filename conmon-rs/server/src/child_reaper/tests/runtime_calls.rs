@@ -131,6 +131,35 @@ async fn runtime_output_with_terminal_does_not_block() -> Result<()> {
     Ok(())
 }
 
+/// A take gets what is still in the pipe within its wait, and gives up on a
+/// pipe which stays open without blocking for longer.
+#[tokio::test]
+async fn taken_output_gets_the_rest_within_its_wait() -> Result<()> {
+    let mut child = tokio::process::Command::new("sh")
+        .args(["-c", "printf a >&2; sleep 0.2; printf b >&2"])
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let output = RuntimeOutput::spawn(None, child.stderr.take());
+    assert_eq!(output.take(Duration::from_secs(10)).await, b"ab");
+
+    let mut child = tokio::process::Command::new("sh")
+        .args(["-c", "printf a >&2; exec sleep 60"])
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let output = RuntimeOutput::spawn(None, child.stderr.take());
+    wait_for(|| output.has_stderr()).await?;
+    let start = Instant::now();
+    assert_eq!(output.take(Duration::from_millis(100)).await, b"a");
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn runtime_killed_by_a_signal_names_it() -> Result<()> {
     let reaper = ChildReaper::default();
@@ -229,10 +258,13 @@ async fn stale_pid_file_does_not_get_cleaned_up() -> Result<()> {
     let call = RuntimeCall::new(Path::new("sh"), &args, &pidfile, distant_deadline());
     assert!(reaper.create_child(call, &mut io).await.is_err());
     assert!(!pidfile.exists());
-    // A killed process takes a moment to exit, nothing tells that no kill
-    // comes.
-    time::sleep(Duration::from_millis(100)).await;
-    assert!(!is_gone(other.pid) && !is_zombie(other.pid));
+    // A cleanup would have sent its SIGKILL before the call returned. A
+    // signal sent now comes second, the exit tells which one ended it.
+    other.process.signal(Signal::SIGTERM)?;
+    assert_eq!(
+        wait_for_exit_code(other.pid).await,
+        128 + Signal::SIGTERM as i32
+    );
     Ok(())
 }
 

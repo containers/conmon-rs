@@ -1,5 +1,8 @@
 use super::*;
-use crate::test_util::Guarded;
+use crate::{
+    child_reaper::ChildReaper,
+    test_util::{Guarded, wait_for},
+};
 use nix::sys::wait::WaitPidFlag;
 use std::{process::Command as StdCommand, sync::Arc};
 
@@ -72,6 +75,90 @@ fn dead_pause_process_is_noticed() -> Result<()> {
     assert!(!running.is_alive());
     child.0.wait()?;
     assert!(!running.is_alive());
+    Ok(())
+}
+
+/// The init which a killed pause subcommand left behind as a child of the
+/// server gets stopped along with the failed setup.
+#[test]
+fn left_init_gets_stopped() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (base_path, pod_id) = (dir.path(), "pod");
+    let pid_path = Pause::pause_pid_path(base_path, pod_id);
+    let mut child = Guarded::spawn(StdCommand::new("sleep").arg("60"))?;
+    let pid = child_pid(child.0.id())?;
+
+    // Not without the PID file, nor for a PID which is no child.
+    assert!(Pause::left_init(base_path, pod_id, &[Namespace::Pid]).is_none());
+    fs::create_dir_all(pid_path.parent().context("no parent")?)?;
+    fs::write(&pid_path, "1")?;
+    assert!(Pause::left_init(base_path, pod_id, &[Namespace::Pid]).is_none());
+
+    // Nor without a PID namespace, which has no init.
+    fs::write(&pid_path, pid.to_string())?;
+    assert!(Pause::left_init(base_path, pod_id, &[Namespace::Net]).is_none());
+    let process = Pause::left_init(base_path, pod_id, &[Namespace::Pid]).context("no init")?;
+    assert_eq!(process.pid(), pid);
+
+    let pause = Pause {
+        base_path: base_path.into(),
+        pod_id: pod_id.into(),
+        namespaces: vec![],
+        uid_mappings: vec![],
+        gid_mappings: vec![],
+        process: Some(process),
+        exited: Arc::default(),
+    };
+    pause.stop();
+    assert!(!pid_path.exists());
+    assert_eq!(child.0.wait()?.signal(), Some(Signal::SIGTERM as i32));
+    Ok(())
+}
+
+/// Undoing a setup whose subcommand got killed stops the init it left before
+/// removing its PID file, and the error carries what the subcommand printed
+/// so far, without waiting for a writer which still holds the pipe.
+#[tokio::test]
+async fn undone_left_setups_stop_the_init_and_keep_stderr() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (base_path, pod_id) = (dir.path(), "pod");
+    let pid_path = Pause::pause_pid_path(base_path, pod_id);
+    let mut init = Guarded::spawn(StdCommand::new("sleep").arg("60"))?;
+    fs::create_dir_all(pid_path.parent().context("no parent")?)?;
+    fs::write(&pid_path, child_pid(init.0.id())?.to_string())?;
+
+    // A subcommand which printed the reason and whose child holds stderr.
+    let mut subcommand = Command::new("sh")
+        .args(["-c", "echo oops >&2; exec sleep 60"])
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let output = RuntimeOutput::spawn(None, subcommand.stderr.take());
+    wait_for(|| output.has_stderr()).await?;
+
+    let pause = Pause {
+        base_path: base_path.into(),
+        pod_id: pod_id.into(),
+        namespaces: vec![Namespace::Pid],
+        uid_mappings: vec![],
+        gid_mappings: vec![],
+        process: None,
+        exited: Arc::default(),
+    };
+    let start = std::time::Instant::now();
+    let e = pause
+        .undo(output, anyhow::format_err!("killed"), true)
+        .await;
+    // Without waiting for the end of stderr, which the sleep holds open for
+    // longer than the grace a finish of the output would give it.
+    assert!(
+        start.elapsed() < ChildReaper::RUNTIME_GRACE - Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(format!("{e:#}"), "killed: oops");
+    assert!(!pid_path.exists());
+    assert_eq!(init.0.wait()?.signal(), Some(Signal::SIGTERM as i32));
     Ok(())
 }
 

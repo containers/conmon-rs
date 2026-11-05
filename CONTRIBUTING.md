@@ -232,7 +232,8 @@ targets for what clients and containers send: the streaming protocols (SPDY
 frames, header blocks and connections, WebSocket messages, resize events,
 upgrade headers and port forward queries, the setup of exec, attach and port
 forward sessions and their pending stdin), the container output as log lines,
-the notify messages and the process stat files with their command names, and
+the notify messages, the process stat files with their command names and the
+cgroup files of the OOM watcher with the cgroup paths of the containers, and
 for the journal entries the server writes.
 `cargo fuzz list` lists them, each file in
 [fuzz/fuzz_targets](./fuzz/fuzz_targets) tells what its target covers. They

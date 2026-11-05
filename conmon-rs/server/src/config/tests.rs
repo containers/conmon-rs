@@ -80,7 +80,7 @@ async fn prepare_keeps_the_sockets_of_a_running_server() -> Result<()> {
     // A running server keeps them.
     let server = std::os::unix::net::UnixListener::bind(config.socket())?;
     let err = config.prepare().unwrap_err();
-    assert!(format!("{err:#}").contains("in use"), "{err:#}");
+    assert!(err.is::<listener::SocketInUse>(), "{err:#}");
     assert!(config.socket().exists());
     drop(server);
     std::fs::remove_file(config.socket())?;

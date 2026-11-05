@@ -732,6 +732,8 @@ impl Server {
         mut shutdown_rx: oneshot::Receiver<Result<()>>,
     ) -> Result<Result<()>> {
         let socket = self.config().socket();
+        // Not with_context, which the FutureExt of OpenTelemetry makes
+        // ambiguous with the tracing feature.
         let listener = listener::bind_long_path(&socket, |path| {
             let fd = listener::listen_private(&path, SockType::Stream)?;
             UnixListener::from_std(fd.into())

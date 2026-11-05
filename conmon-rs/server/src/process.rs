@@ -515,7 +515,7 @@ async fn try_pidfd_wait(pid: Pid) -> Option<i32> {
     let async_fd = match async_fd::register(owned_fd, Interest::READABLE) {
         Ok(fd) => fd,
         Err(e) => {
-            error!("Failed to create AsyncFd from pidfd: {e:#}");
+            error!("Unable to create AsyncFd from pidfd: {e:#}");
             return None;
         }
     };
