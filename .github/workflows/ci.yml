@@ -524,6 +524,8 @@ jobs:
           cargo llvm-cov nextest --locked --no-report --features tracing
           mv target/nextest/ci/junit.xml junit-tracing.xml
           cargo llvm-cov report --lcov --output-path lcov.info
+      # A run which failed stops the step before its report got moved. It
+      # is then still in target/nextest/ci.
       - name: Report flaky tests
         if: ${{ !cancelled() }}
         run: |

@@ -46,6 +46,11 @@ updates:
     open-pull-requests-limit: 10
     labels:
       - "release-note-none"
+    groups:
+      github-actions:
+        update-types:
+          - minor
+          - patch
   # The Go dependencies follow CRI-O, which vendors the client, so only
   # security updates get opened.
   - package-ecosystem: gomod

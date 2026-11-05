@@ -5,7 +5,8 @@ with pkgs; rustPlatform.buildRustPackage {
   # The source has no .git directory, pass the build metadata in.
   BUILD_COMMIT = rev;
   SOURCE_DATE_EPOCH = lastModified;
-  # Use Pure to avoid exuding the .git directory
+  # Pure applies only the patterns of ../.gitignore, the flake source has no
+  # .git directory, see BUILD_COMMIT.
   src = nix-gitignore.gitignoreSourcePure [ ../.gitignore ] ./..;
   doCheck = false;
   nativeBuildInputs = with buildPackages; [

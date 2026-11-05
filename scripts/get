@@ -114,15 +114,16 @@ verify_requirements() {
     done
 }
 
+# Only over HTTPS, redirects included.
 curl_retry() {
-    curl -sSfL --retry 5 --retry-delay 3 "$@"
+    curl -sSfL --proto '=https' --retry 5 --retry-delay 3 "$@"
 }
 
 # Prints the response of a GitHub API request, or why it failed. Returns 2 if
 # the API does not know the object, 1 on other errors, like the rate limit.
 github_api() {
     # --fail keeps the bodies of retried errors out of the response.
-    local args=(-fsL --retry 5 --retry-delay 3 --retry-max-time 30 -w '\n%{http_code}')
+    local args=(-fsL --proto '=https' --retry 5 --retry-delay 3 --retry-max-time 30 -w '\n%{http_code}')
     if [[ $GITHUB_TOKEN != "" ]]; then
         args+=(--header "Authorization: Bearer $GITHUB_TOKEN")
     fi
@@ -240,7 +241,7 @@ verify_signature() {
     # attestations, the ci workflow signed the older ones. The ci workflow
     # runs both.
     local status workflow
-    status=$(curl -sSL --retry 5 --retry-delay 3 -o /dev/null -w '%{http_code}' -I \
+    status=$(curl -sSL --proto '=https' --retry 5 --retry-delay 3 -o /dev/null -w '%{http_code}' -I \
         "$BASE_URL/$COMMIT/conmonrs.$ARCH.intoto.jsonl")
     case $status in
     200) workflow=publish-static.yml ;;

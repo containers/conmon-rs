@@ -119,7 +119,9 @@ var (
 	// connections on the socket of the run directory but does not answer in
 	// time, or the backlog of the socket is full. New does not start another
 	// server then, it would take over the sockets of the one which runs and
-	// orphan its containers.
+	// orphan its containers. The error of a method matches it as well if
+	// the backlog is full when the client connects, the next call connects
+	// again. Use errors.Is to check for it.
 	ErrServerNotResponding = errors.New("server accepted the connection but did not respond")
 
 	// ErrRemoteFDsBroken gets matched by the error of a request of

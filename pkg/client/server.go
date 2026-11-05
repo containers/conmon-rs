@@ -124,7 +124,7 @@ func (c *ConmonClient) connectRunningServer(ctx context.Context) (bool, error) {
 		// The backlog of the socket is full, the server does not accept
 		// the connections it got.
 		if errors.Is(err, syscall.EAGAIN) {
-			return false, fmt.Errorf("%w: %w", ErrServerNotResponding, err)
+			return false, fmt.Errorf("%w: socket backlog full: %w", ErrServerNotResponding, err)
 		}
 
 		return false, fmt.Errorf("not starting another server: %w", err)
