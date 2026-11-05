@@ -861,5 +861,48 @@ async fn streams_opened_with_fin_have_no_data() -> Result<()> {
     let (mut receiver, _sender) = connection.accept().await.context("stream")?.split();
     assert_eq!(receiver.recv().await, None);
     assert!(!receiver.is_reset());
+    assert!(receiver.is_closed_by_client());
+    Ok(())
+}
+
+#[tokio::test]
+async fn headers_with_fin_close_the_client_side() -> Result<()> {
+    let (mut client, mut connection) = connect(accept_data, None)?;
+    client.open(1, [("streamtype", "data")].into()).await?;
+    let stream = connection.accept().await.context("stream")?;
+    client.frame().await?;
+
+    client
+        .send(Frame::Data {
+            stream_id: 1,
+            fin: false,
+            data: Bytes::from_static(b"ping"),
+        })
+        .await?;
+    client
+        .send(Frame::Headers {
+            stream_id: 1,
+            fin: true,
+        })
+        .await?;
+    let (mut receiver, mut sender) = stream.split();
+    let received = time::timeout(Duration::from_secs(5), async {
+        (receiver.recv().await, receiver.recv().await)
+    })
+    .await?;
+    assert_eq!(received, (Some(Bytes::from_static(b"ping")), None));
+    assert!(!receiver.is_reset());
+    assert!(receiver.is_closed_by_client());
+
+    // The side of the server stays open.
+    sender.send(Bytes::from_static(b"pong")).await?;
+    assert_eq!(
+        client.frame().await?,
+        Some(Frame::Data {
+            stream_id: 1,
+            fin: false,
+            data: Bytes::from_static(b"pong")
+        })
+    );
     Ok(())
 }

@@ -6,7 +6,10 @@ use crate::{
         StreamingServer, TOO_MANY_REQUESTS, UPGRADE_TIMEOUT,
         bounded_map::DEFAULT_CAPACITY,
         remotecommand::STDIN_BYTE,
-        testing::{attach_session, client_frame, response_head},
+        testing::{
+            SPDY_EXEC_UPGRADE, attach_child, attach_config, attach_session, client_frame,
+            response_head, upgrade,
+        },
     },
 };
 use anyhow::{Context, Result};
@@ -213,8 +216,24 @@ async fn requests_get_routed_by_path_and_method() -> Result<()> {
             assert!(response.starts_with("http/1.1 400"), "{response}");
 
             // A token of no session.
-            let response = respond("POST", &format!("/exec/{token}")).await?;
-            assert!(response.starts_with("http/1.1 404"), "{response}");
+            for method in ["HEAD", "POST"] {
+                let response = respond(method, &format!("/exec/{token}")).await?;
+                assert!(response.starts_with("http/1.1 404"), "{response}");
+            }
+
+            // A HEAD gets the answer of a GET, but no upgrade, which would
+            // take the session.
+            let (_, child, _token) = attach_child(false)?;
+            let url = server
+                .attach_url(attach_config(child, true, false, None))
+                .await?;
+            let (response, _) = upgrade(&server, &url, "HEAD", "").await?;
+            assert!(response.starts_with("http/1.1 400"), "{response}");
+            let (response, _) = upgrade(&server, &url, "HEAD", SPDY_EXEC_UPGRADE).await?;
+            assert!(response.starts_with("http/1.1 405"), "{response}");
+            assert!(response.contains("\r\nallow: get,post\r\n"), "{response}");
+            let (response, _) = upgrade(&server, &url, "POST", SPDY_EXEC_UPGRADE).await?;
+            assert!(response.starts_with("http/1.1 101"), "{response}");
             Ok(())
         })
         .await

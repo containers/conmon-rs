@@ -9,7 +9,11 @@ use crate::{
 use anyhow::{Context, Result};
 use bytes::Bytes;
 
-use crate::streaming_server::{remotecommand::STREAM_ERR_BYTE, web};
+use crate::streaming_server::{
+    remotecommand::{CLOSE_BYTE, STDIN_BYTE, STREAM_ERR_BYTE},
+    session::STDIN_FLUSH_TIMEOUT,
+    web,
+};
 use crate::{
     process::child_pid,
     streaming_server::{
@@ -24,6 +28,7 @@ use std::{
     sync::Arc,
 };
 use tokio::{
+    io::AsyncWriteExt,
     net::TcpStream,
     task::{self, LocalSet},
     time::{self, Duration},
@@ -32,13 +37,20 @@ use tokio::{
 /// A runtime which takes `delay` to start the process, which then
 /// writes its output, and its config.
 fn slow_runtime(dir: &Path, delay: &str) -> Result<Config> {
+    slow_runtime_with(dir, delay, "echo started")
+}
+
+/// Like [`slow_runtime`], the process runs the shell commands, its stdin is
+/// file descriptor 3. A background process gets `/dev/null` as its stdin.
+fn slow_runtime_with(dir: &Path, delay: &str, process: &str) -> Result<Config> {
     let runtime = dir.join("runtime");
     crate::test_util::write_script(
         &runtime,
         &format!(
             "sleep {delay}\n\
              for arg; do case $arg in --pid-file=*) pidfile=${{arg#--pid-file=}};; esac; done\n\
-             sh -c 'echo started' &\n\
+             exec 3<&0\n\
+             ({process}) &\n\
              echo $! >\"$pidfile\""
         ),
     )?;
@@ -55,6 +67,15 @@ async fn exec_websocket(
     config: Config,
     idle_timeout: Option<Duration>,
 ) -> Result<(StreamingServer, TcpStream)> {
+    exec_websocket_with(config, idle_timeout, false).await
+}
+
+/// Like [`exec_websocket`], maybe with stdin.
+async fn exec_websocket_with(
+    config: Config,
+    idle_timeout: Option<Duration>,
+    stdin: bool,
+) -> Result<(StreamingServer, TcpStream)> {
     let server = StreamingServer::default();
     let url = server
         .exec_url(ExecSession {
@@ -64,7 +85,7 @@ async fn exec_websocket(
             cgroup_manager: CgroupManager::Cgroupfs,
             container_id: "id".into(),
             command: vec!["true".into()],
-            stdin: false,
+            stdin,
             stdout: true,
             stderr: false,
             idle_timeout,
@@ -98,7 +119,60 @@ async fn slow_exec_starts_are_no_idleness() -> Result<()> {
             let output = String::from_utf8_lossy(&output);
             assert!(output.contains("started"), "{output}");
             assert!(!output.contains("idle timeout"), "{output}");
-            answer_close(&mut stream).await
+            expect_close_and_answer(&mut stream).await
+        })
+        .await
+}
+
+/// A client which closes right after its stdin, while the runtime takes
+/// longer than [`STDIN_FLUSH_TIMEOUT`] to start the process: all of the
+/// stdin reaches the process, nothing took it before.
+#[tokio::test]
+async fn stdin_before_close_waits_for_slow_exec_starts() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("stdin");
+    let delay = STDIN_FLUSH_TIMEOUT + Duration::from_secs(1);
+    let config = slow_runtime_with(
+        dir.path(),
+        &delay.as_secs().to_string(),
+        &format!(
+            "cat <&3 >\"{0}.part\" && mv \"{0}.part\" \"{0}\"",
+            path.display()
+        ),
+    )?;
+
+    LocalSet::new()
+        .run_until(async {
+            let (_server, mut stream) = exec_websocket_with(config, None, true).await?;
+            // More than the channels towards the process hold.
+            let mut frames = vec![];
+            let mut expected = vec![];
+            for i in 0..10u8 {
+                let mut message = vec![STDIN_BYTE];
+                message.resize(32 * 1024 + 1, i);
+                frames.extend(client_frame(0x2, &message));
+                expected.extend_from_slice(&message[1..]);
+            }
+            frames.extend(client_frame(0x2, &[CLOSE_BYTE, STDIN_BYTE]));
+            frames.extend(client_frame(0x8, &1000u16.to_be_bytes()));
+            stream.write_all(&frames).await?;
+
+            let stdin = time::timeout(delay + Duration::from_secs(10), async {
+                loop {
+                    if let Ok(stdin) = tokio::fs::read(&path).await {
+                        return stdin;
+                    }
+                    time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await?;
+            assert!(
+                stdin == expected,
+                "got {} of {} bytes",
+                stdin.len(),
+                expected.len()
+            );
+            Ok(())
         })
         .await
 }

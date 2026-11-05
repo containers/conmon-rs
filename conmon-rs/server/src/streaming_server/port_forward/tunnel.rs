@@ -6,7 +6,7 @@ use super::{
 };
 use crate::streaming_server::{
     stream_protocol::first_supported,
-    web::{self, Message, WebSocket},
+    web::{self, ClientMessage, Message, WebSocket},
 };
 use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
@@ -124,9 +124,9 @@ impl PortForward {
         });
 
         let from_client = async {
-            while let Some(message) = messages.next().await {
-                match message {
-                    Ok(Message::Binary(data)) => {
+            loop {
+                match web::next_message(&mut messages, &discard).await {
+                    ClientMessage::Data(Message::Binary(data)) => {
                         // The SPDY connection ended, its close goes to the
                         // client, which still gets read until it answered,
                         // for a bounded time.
@@ -135,24 +135,19 @@ impl PortForward {
                             break;
                         }
                     }
-                    Ok(Message::Text(_)) => {
+                    ClientMessage::Data(_) => {
                         debug!("Ending port forward tunnel, the client sent a text message");
                         break;
                     }
-                    Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => {}
-                    Err(e) if web::is_too_large(&e) => {
-                        debug!("Ending port forward tunnel: {e}");
+                    ClientMessage::TooLarge => {
                         too_large.cancel();
-                        // It may still be busy writing the rest, which holds
-                        // up the close for it.
-                        discard.discard();
                         break;
                     }
-                    Ok(Message::Close(_)) => {
+                    ClientMessage::Closed(_) => {
                         web::answer_close(&mut messages, &written).await;
                         break;
                     }
-                    Err(_) => break,
+                    ClientMessage::Gone => break,
                 }
             }
             // Ends the SPDY connection, which ends the output as well.

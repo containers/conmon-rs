@@ -9,7 +9,7 @@ use crate::streaming_server::{
     budget::{Budget, Held},
     channel,
     idle::Activity,
-    web::{self, Message, WebSocket},
+    web::{self, ClientMessage, Message, WebSocket},
 };
 use anyhow::{Context, Result, ensure};
 use bytes::{Bytes, BytesMut};
@@ -167,32 +167,26 @@ impl PortForward {
                 done = forwards.join_next() => if done.is_none() {
                     break;
                 },
-                message = messages.next() => {
-                    // Pings and pongs only keep the WebSocket alive, the
-                    // heartbeat of a client does not keep it from going idle.
+                message = web::next_message(&mut messages, &discard) => {
+                    // The heartbeat of a client does not keep it from going
+                    // idle, see [`web::next_message`].
                     let data = match message {
-                        Some(Ok(Message::Binary(data))) => data,
-                        Some(Ok(Message::Text(text))) => Bytes::from(text),
-                        Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
+                        ClientMessage::Data(message) => message.into_data(),
                         // The client cannot be read anymore, it gets the
                         // close only. Like for Kubernetes, that ends the
                         // session, the error channels of the ports are not
                         // about it.
-                        Some(Err(e)) if web::is_too_large(&e) => {
-                            debug!("Ending port forward WebSocket: {e}");
+                        ClientMessage::TooLarge => {
                             too_large.cancel();
-                            // It may still be busy writing the rest, which
-                            // holds up the close for it.
-                            discard.discard();
                             end = web::End::TooLarge;
                             break;
                         }
-                        Some(Ok(Message::Close(_))) => {
+                        ClientMessage::Closed(_) => {
                             web::answer_close(&mut messages, &written).await;
                             end = web::End::Gone;
                             break;
                         }
-                        Some(Err(_)) | None => {
+                        ClientMessage::Gone => {
                             end = web::End::Gone;
                             break;
                         }

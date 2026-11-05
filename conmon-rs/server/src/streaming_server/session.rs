@@ -81,7 +81,7 @@ pub(super) const PING_INTERVAL: Duration = if cfg!(test) {
 /// the container to take a part of it, see [`ClientRx::stdin_taken`]. A slow
 /// container gets all of it, only one which stopped reading its stdin holds
 /// up the end of the session this long.
-const STDIN_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const STDIN_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The latest resize event of a client, older ones are replaced.
 pub(super) type ResizeRx = watch::Receiver<Option<Bytes>>;
@@ -117,9 +117,10 @@ pub(super) struct ClientRx {
     too_large: CancellationToken,
 
     /// Touched whenever the container took a part of the stdin, at the clean
-    /// close of the client and once an exec process started. The stdin
-    /// before the close gets forwarded until the container did not take any
-    /// of it for [`STDIN_FLUSH_TIMEOUT`].
+    /// close of the client, and while the runtime starts an exec process
+    /// with stdin.
+    /// The stdin before the close gets forwarded until the container did not
+    /// take any of it for [`STDIN_FLUSH_TIMEOUT`].
     stdin_taken: Activity,
 }
 
@@ -296,16 +297,7 @@ impl StreamingServer {
 
         tokio::select! {
             rv_a = (&mut send_task) => {
-                let output = match rv_a {
-                    Ok(output) => {
-                        info!("All messages sent");
-                        output
-                    }
-                    Err(a) => {
-                        error!("Error sending messages: {a:?}");
-                        None
-                    }
-                };
+                let output = Self::sent(rv_a);
                 // The client answers the close of a WebSocket, the read task
                 // drops what it sends until then, see
                 // [`web::await_close_answer`]. A close which did not go out
@@ -352,10 +344,30 @@ impl StreamingServer {
                             input.drain(output).await;
                         }
                     }
+                    // The session ends a SPDY connection once it sent
+                    // everything, which ends the input as well.
+                    Ok(InputEnd::Gone) if send_task.is_finished() => {
+                        Self::sent((&mut send_task).await);
+                    }
                     Ok(InputEnd::Gone) => info!("Client connection ended"),
-                    Err(b) => error!("Error receiving messages: {b:?}")
+                    Err(e) => error!("Unable to receive messages: {e}"),
                 }
                 send_task.abort();
+            }
+        }
+    }
+
+    /// Log how the write task ended, return its output once the close went
+    /// out.
+    fn sent(result: Result<Option<Output>, task::JoinError>) -> Option<Output> {
+        match result {
+            Ok(output) => {
+                info!("All messages sent");
+                output
+            }
+            Err(e) => {
+                error!("Unable to send messages: {e}");
+                None
             }
         }
     }
@@ -389,15 +401,28 @@ impl StreamingServer {
                         // torn down once the task finished. A client which
                         // sent too much fails the session meanwhile, it
                         // does not wait for its status. The terminal gets
-                        // the size of the client meanwhile.
-                        let start = task::spawn(Self::start_exec(*s, client.resize.clone()));
-                        let started = select! {
-                            started = start => started.context("join exec start")??,
-                            () = too_large.cancelled() => bail!(MESSAGE_TOO_LARGE),
+                        // the size of the client meanwhile. The stdin which
+                        // the client sent before a close waits for the
+                        // process, the runtime does not count as a container
+                        // which stopped taking it while it runs (it gets
+                        // killed after its deadline). A clean close without
+                        // pending stdin waits for the runtime as well then,
+                        // the process gets torn down in order afterwards.
+                        // Without stdin, nothing waits.
+                        let stdin = s.stdin;
+                        let mut start = task::spawn(Self::start_exec(*s, client.resize.clone()));
+                        let period = STDIN_FLUSH_TIMEOUT / 2;
+                        let mut starting = time::interval_at(time::Instant::now() + period, period);
+                        let started = loop {
+                            select! {
+                                started = &mut start => break started.context("join exec start")??,
+                                () = too_large.cancelled() => bail!(MESSAGE_TOO_LARGE),
+                                _ = starting.tick(), if stdin => client.stdin_taken.touch(),
+                            }
                         };
                         // The client waited for the runtime, which is no
-                        // idleness of its own, and the stdin it sent before
-                        // a close waited for the process to start.
+                        // idleness of its own, and the stdin gets its time
+                        // from the start of the process.
                         activity.touch();
                         client.stdin_taken.touch();
                         let kill = started.teardown.kill.clone();

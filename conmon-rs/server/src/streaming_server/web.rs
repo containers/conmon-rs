@@ -41,7 +41,7 @@ use tokio_tungstenite::{
         protocol::{Role, WebSocketConfig},
     },
 };
-use tracing::debug;
+use tracing::{debug, trace};
 
 pub(super) use tokio_tungstenite::tungstenite::{
     Error, Message,
@@ -112,6 +112,50 @@ where
     }
 }
 
+/// What a read of a WebSocket client gave, see [`next_message`].
+#[derive(Debug)]
+pub(super) enum ClientMessage {
+    /// A binary or a text message.
+    Data(Message),
+
+    /// The close of the client, which still needs its answer, see
+    /// [`answer_close`].
+    Closed(Option<CloseFrame>),
+
+    /// A message larger than the server takes, the input of the client gets
+    /// dropped from now on, see [`is_too_large`] and [`Discard`].
+    TooLarge,
+
+    /// The client went away or the read failed.
+    Gone,
+}
+
+/// Read the next message of a WebSocket client which the server handles,
+/// pings and pongs only keep the WebSocket alive. A client which sent a
+/// message larger than the server takes may still be busy writing the rest,
+/// which would hold up what the server sends, so its input gets dropped.
+pub(super) async fn next_message<S>(messages: &mut S, discard: &Discard) -> ClientMessage
+where
+    S: Stream<Item = Result<Message, Error>> + Unpin,
+{
+    loop {
+        match messages.next().await {
+            Some(Ok(Message::Ping(_))) => trace!("Got ping"),
+            Some(Ok(Message::Pong(_))) => trace!("Got pong"),
+            // Raw frames only get sent, reads never return them.
+            Some(Ok(Message::Frame(_))) => {}
+            Some(Ok(Message::Close(frame))) => return ClientMessage::Closed(frame),
+            Some(Ok(message)) => return ClientMessage::Data(message),
+            Some(Err(e)) if is_too_large(&e) => {
+                debug!("Unable to read the client: {e}");
+                discard.discard();
+                return ClientMessage::TooLarge;
+            }
+            Some(Err(_)) | None => return ClientMessage::Gone,
+        }
+    }
+}
+
 /// Write the answer to the close of a client after a send failed for it,
 /// if the read could not, see [`answer_close`].
 pub(super) async fn write_close_answer<S>(sink: &mut S)
@@ -133,7 +177,7 @@ pub(super) fn is_closed_by_client(e: &Error) -> bool {
 /// WebSocket cannot be read anymore then, the rest of the message did not
 /// get read, but the server can still close it, see [`close`], and has to
 /// [`drain`] it then.
-pub(super) fn is_too_large(e: &Error) -> bool {
+fn is_too_large(e: &Error) -> bool {
     matches!(e, Error::Capacity(CapacityError::MessageTooLong { .. }))
 }
 

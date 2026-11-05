@@ -100,10 +100,10 @@ impl StreamingServer {
                 event = input.next() => match event {
                     InputEvent::Resize(data) => input.resize(&data),
                     InputEvent::Ping => sender.ping().await?,
-                    // Without a terminal and stdin once, that ends the
-                    // session, like for CRI-O with conmon. Otherwise keep
-                    // forwarding the output until it ends, and with stdin
-                    // once close the container stdin.
+                    // Without a terminal and without stdin once, that ends
+                    // the session, like for CRI-O with conmon. Otherwise
+                    // keep forwarding the output until it ends, and with
+                    // stdin once close the container stdin.
                     InputEvent::StdinClosed if !terminal && !stop_after_stdin_eof => break,
                     InputEvent::StdinClosed => {
                         if stop_after_stdin_eof {

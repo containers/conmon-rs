@@ -9,10 +9,10 @@ use crate::streaming_server::{
     channel,
     idle::Activity,
     stream_protocol::{ClientBytes, ClientStr, first_supported},
-    web::{self, Message, WebSocket},
+    web::{self, ClientMessage, Message, WebSocket},
 };
 use bytes::Bytes;
-use futures::stream::{SplitStream, StreamExt};
+use futures::stream::SplitStream;
 use tracing::{debug, info, trace};
 
 /// How the messages of a WebSocket session look.
@@ -107,16 +107,8 @@ impl Framing {
                 }
                 return Some(ClientEvent::Closed);
             }
-            Message::Pong(_) => {
-                trace!("Got pong");
-                return None;
-            }
-            Message::Ping(_) => {
-                trace!("Got ping");
-                return None;
-            }
-            // Raw frames only get sent, reads never return them.
-            Message::Frame(_) => return None,
+            // Skipped by web::next_message, reads never return raw frames.
+            Message::Pong(_) | Message::Ping(_) | Message::Frame(_) => return None,
         };
 
         if self.version == Version::V5 {
@@ -180,23 +172,16 @@ pub(crate) struct WebSocketInput {
 impl ClientInput for WebSocketInput {
     async fn next(&mut self) -> Option<ClientEvent> {
         loop {
-            match self.messages.next().await {
-                Some(Ok(message)) => {
-                    if !matches!(message, Message::Ping(_) | Message::Pong(_)) {
-                        self.activity.touch();
-                    }
-                    if let Some(event) = self.framing.event(message) {
-                        return Some(event);
-                    }
-                }
-                Some(Err(e)) if web::is_too_large(&e) => {
-                    debug!("Unable to read the client: {e}");
-                    // It may still be busy writing the rest, which holds up
-                    // the status and the close for it.
-                    self.discard.discard();
-                    return Some(ClientEvent::TooLarge);
-                }
-                _ => return None,
+            let message = match web::next_message(&mut self.messages, &self.discard).await {
+                ClientMessage::Data(message) => message,
+                // The framing logs it and ends the input.
+                ClientMessage::Closed(frame) => Message::Close(frame),
+                ClientMessage::TooLarge => return Some(ClientEvent::TooLarge),
+                ClientMessage::Gone => return None,
+            };
+            self.activity.touch();
+            if let Some(event) = self.framing.event(message) {
+                return Some(event);
             }
         }
     }
