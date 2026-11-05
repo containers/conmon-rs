@@ -57,9 +57,8 @@ impl ChildReaper {
     /// could never be stopped.
     ///
     /// Every other child has an owner which reaps it: the runtimes are waited
-    /// for by tokio, the container processes by their watchers, and the
-    /// cleanup commands and the pause init by the tasks which spawned them.
-    /// They are never zombies for long, so a zombie which is neither
+    /// for by tokio and the container processes by their watchers. They are
+    /// never zombies for long, so a zombie which is neither
     /// registered nor pending for [`ChildReaper::ORPHAN_GRACE`] is an orphan,
     /// once no runtime call which may still claim it is in progress, at most
     /// for [`ChildReaper::ORPHAN_MAX_DEFER`]. Once the server shuts down,

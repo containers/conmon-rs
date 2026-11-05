@@ -262,16 +262,16 @@ async fn read_stream_after_exit_is_bounded_in_time() {
 
 #[tokio::test(start_paused = true)]
 async fn read_loop_flushes_paused_line() -> Result<()> {
-    let (cri, json, logger) = test_helpers::container_log(true).await?;
+    let (cri, lines, logger) = test_helpers::container_log(true).await?;
     let (mut writer, _rx, read_loop) = spawn_loop(logger, false);
 
     writer.write_all(b"prompt> ").await?;
-    // The CRI log writes partial lines right away, the JSON one only once
+    // The CRI log writes partial lines right away, the journald driver only once
     // the output paused.
     let mut flushed = false;
     for _ in 0..100 {
         time::sleep(ContainerIO::IDLE_FLUSH / 10).await;
-        if test_helpers::read(&json)?.contains(r#""message":"prompt> ","partial":true"#) {
+        if test_helpers::read(&lines)?.contains(r#""message":"prompt> ","partial":true"#) {
             flushed = true;
             break;
         }
@@ -286,15 +286,15 @@ async fn read_loop_flushes_paused_line() -> Result<()> {
     writer.write_all(b"ls\n").await?;
     drop(writer);
     read_loop.await??;
-    let json = test_helpers::read(&json)?;
-    assert_eq!(json.lines().count(), 2, "{json}");
-    assert!(json.contains(r#""message":"ls""#));
+    let lines = test_helpers::read(&lines)?;
+    assert_eq!(lines.lines().count(), 2, "{lines}");
+    assert!(lines.contains(r#""message":"ls""#));
     Ok(())
 }
 
 #[tokio::test(start_paused = true)]
 async fn read_loop_flushes_trickling_line() -> Result<()> {
-    let (_cri, json, logger) = test_helpers::container_log(true).await?;
+    let (_cri, lines, logger) = test_helpers::container_log(true).await?;
     let (mut writer, _rx, read_loop) = spawn_loop(logger, false);
 
     // Progress output which never pauses as long as the line waits.
@@ -302,7 +302,7 @@ async fn read_loop_flushes_trickling_line() -> Result<()> {
     for _ in 0..10 {
         writer.write_all(b".").await?;
         time::sleep(ContainerIO::IDLE_FLUSH * 4 / 5).await;
-        if test_helpers::read(&json)?.contains(r#""partial":true"#) {
+        if test_helpers::read(&lines)?.contains(r#""partial":true"#) {
             flushed = true;
             break;
         }
@@ -315,7 +315,7 @@ async fn read_loop_flushes_trickling_line() -> Result<()> {
 
 #[tokio::test]
 async fn last_line_is_logged_before_the_output_ends() -> Result<()> {
-    let (_cri, json, logger) = test_helpers::container_log(true).await?;
+    let (_cri, lines, logger) = test_helpers::container_log(true).await?;
     let attach = SharedContainerAttach::default();
     let (mut rx, _) = attach.subscribe();
     let (mut writer, reader) = duplex(1024);
@@ -334,14 +334,14 @@ async fn last_line_is_logged_before_the_output_ends() -> Result<()> {
     // be busy with the last line anymore then.
     while time::timeout(WAIT, rx.recv()).await?? != Message::Done {}
     assert!(logger.try_lock().is_ok());
-    assert!(test_helpers::read(&json)?.contains(r#""message":"no newline","partial":true"#));
+    assert!(test_helpers::read(&lines)?.contains(r#""message":"no newline","partial":true"#));
     read_loop.await?
 }
 
 #[tokio::test]
 async fn log_errors_do_not_stop_the_loop() -> Result<()> {
     // The drivers are not opened, so every write fails.
-    let (_cri, _json, logger) = test_helpers::container_log(false).await?;
+    let (_cri, _lines, logger) = test_helpers::container_log(false).await?;
     let (mut writer, rx, read_loop) = spawn_loop(logger, true);
 
     writer.write_all(b"first\n").await?;
@@ -453,7 +453,7 @@ async fn terminal_output_continues_once_the_slave_got_reopened() -> Result<()> {
         },
     };
 
-    let (_cri, json, logger) = test_helpers::container_log(true).await?;
+    let (_cri, lines, logger) = test_helpers::container_log(true).await?;
     let mut io = ContainerIO::new(true, logger)?;
     let (mut rx, _) = io.attach().subscribe();
     let pty = nix::pty::openpty(None, None)?;
@@ -488,7 +488,7 @@ async fn terminal_output_continues_once_the_slave_got_reopened() -> Result<()> {
     drop(slave);
     exited.cancel();
     assert_eq!(time::timeout(WAIT, rx.recv()).await??, Message::Done);
-    let log = test_helpers::read(&json)?;
+    let log = test_helpers::read(&lines)?;
     assert!(log.contains("first") && log.contains("second"), "{log}");
     Ok(())
 }

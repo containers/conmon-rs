@@ -161,42 +161,7 @@ var _ = Describe("ConmonClient", func() {
 			Expect(result.Stderr).NotTo(BeEmpty())
 		}, SpecTimeout(specTimeout))
 
-		It("should pass the environment variables to the runtime", func(ctx SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "10"}, nil)
-
-			// A runtime which records the variable of its exec calls, the
-			// container process does not get it.
-			envFile := filepath.Join(tr.tmpDir, "runtime-env")
-			wrapper := filepath.Join(tr.tmpDir, "runtime")
-			script := fmt.Sprintf(
-				"#!/bin/sh\n"+
-					"if [ -n \"$CONMON_TEST_ENV\" ]; then printf %%s \"$CONMON_TEST_ENV\" >'%s'; fi\n"+
-					"exec '%s' \"$@\"\n",
-				envFile, runtimePath,
-			)
-			//nolint:gosec // the runtime has to be executable
-			Expect(os.WriteFile(wrapper, []byte(script), 0o700)).To(Succeed())
-
-			sut = tr.configGivenEnvWith(func(cfg *client.ConmonServerConfig) {
-				cfg.Runtime = wrapper
-			})
-			tr.createContainer(ctx, sut, false)
-			tr.startContainer()
-			Expect(envFile).NotTo(BeAnExistingFile())
-
-			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
-				ID:      tr.ctrID,
-				Command: []string{"/busybox", "true"},
-				Timeout: 10,
-				EnvVars: map[string]string{"CONMON_TEST_ENV": "set"},
-			})
-			Expect(err).To(Succeed())
-			Expect(result.ExitCode).To(BeEquivalentTo(0))
-			Expect(fileContents(envFile)).To(Equal("set"))
-		}, SpecTimeout(specTimeout))
-
-		It("should pass the cgroup manager of each call to the runtime", func(ctx SpecContext) {
+		It("should pass the cgroup manager of the client to the runtime", func(ctx SpecContext) {
 			tr = newTestRunner()
 			tr.createRuntimeConfigWithProcessArgs(false, []string{"/busybox", "sleep", "10"}, nil)
 
@@ -215,22 +180,24 @@ var _ = Describe("ConmonClient", func() {
 
 			sut = tr.configGivenEnvWith(func(cfg *client.ConmonServerConfig) {
 				cfg.Runtime = wrapper
-				cfg.CgroupManager = client.CgroupManagerPerCommand
+				cfg.CgroupManager = client.CgroupManagerCgroupfs
 			})
-			cfg := tr.defaultConfig(false)
-			cfg.CgroupManager = client.CgroupManagerCgroupfs
-			tr.createContainerWithConfig(ctx, sut, cfg)
+			tr.createContainer(ctx, sut, false)
 			tr.startContainer()
 
-			for _, manager := range []client.CgroupManager{
-				client.CgroupManagerCgroupfs,
-				client.CgroupManagerSystemd,
-			} {
-				result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
-					ID:            tr.ctrID,
-					Command:       []string{"/busybox", "true"},
-					Timeout:       10,
-					CgroupManager: manager,
+			// A second client of the same server sends its own one, it is a
+			// setting of the client.
+			systemd := tr.configGivenEnvWith(func(cfg *client.ConmonServerConfig) {
+				cfg.Runtime = wrapper
+				cfg.CgroupManager = client.CgroupManagerSystemd
+			})
+			DeferCleanup(systemd.Close)
+
+			for _, c := range []*client.ConmonClient{sut, systemd} {
+				result, err := c.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+					ID:      tr.ctrID,
+					Command: []string{"/busybox", "true"},
+					Timeout: 10,
 				})
 				Expect(err).To(Succeed())
 				Expect(result.ExitCode).To(BeEquivalentTo(0), string(result.Stderr))

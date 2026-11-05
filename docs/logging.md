@@ -26,24 +26,17 @@ it again.
   RFC 3339 timestamp in nanoseconds of when the server read the output, the
   stream, a `P` (partial) or `F` (full) marker and the line. The files it
   creates are readable by their group (mode `0640`) like with conmon.
-- `json`: one JSON object per line with `timestamp` (seconds since the epoch),
-  `pipe` (`stdout` or `stderr`), `message` (the line without its ending) and
-  `partial: true` when the line had no ending yet. The files it creates are
-  only readable by their owner (mode `0600`).
 - `journald`: one journal entry per line with the fields `CONTAINER_ID_FULL`,
   `CONTAINER_ID` (the first 12 characters) and `SYSLOG_IDENTIFIER`, at
   priority info for stdout and error for stderr, so that
   `journalctl CONTAINER_ID_FULL=<id>` or `CONTAINER_ID=<short id>` shows the
   output like with conmon. A line which had no ending yet carries
   `CONTAINER_PARTIAL_MESSAGE=true`. The maximum size does not apply. Like the
-  options of conmon, `containerName` adds `CONTAINER_NAME`, `tag` adds
-  `CONTAINER_TAG`, and `labels` add fields of their own, named like journal
-  fields, see `labels` in the schema for the rules and limits. journald drops
-  entries with more than 1024 fields. Like for conmon, the `SYSLOG_IDENTIFIER`
-  is the `tag`, the `containerName` without one, and the short ID without
-  both, since v1.2.2.
+  option of conmon, `containerName` adds `CONTAINER_NAME`, which CRI-O passes.
+  The `SYSLOG_IDENTIFIER` is the `containerName`, and the short ID without
+  one, since v1.2.2.
 
-The JSON and journald drivers collect whole lines across reads, so a line
+The journald driver collects whole lines across reads, so a line
 written in several pieces or a multi byte character split by a read still
 ends up as one entry. Like the `P` marker of the CRI log, a partial entry is
 a line which had no ending yet: it grew beyond 16 KiB, the output paused for
@@ -57,8 +50,8 @@ getty, keeps its output in the log and for attach clients. This takes Linux
 process has the terminal open.
 
 The server does not sync the log files to disk on a rotation, the entries sit
-in the page cache like other writes. Since unreleased, it syncs the CRI and
-JSON logs once the container exited and its output ended, before it writes
+in the page cache like other writes. Since unreleased, it syncs the CRI logs
+once the container exited and its output ended, before it writes
 the exit files, like conmon without `--no-sync-log`. CRI-O (since v1.31)
 rejects its `no_sync_log` option for a `pod` runtime handler, so the sync
 cannot be turned off. The exit files wait up to 5 seconds for the log drivers
@@ -122,7 +115,7 @@ does not count.
 - unreleased: the server keeps a terminal open itself until the process
   exited. Before, the output ended once the terminal got closed the first
   time, and without stdin the server closed it as well.
-- unreleased: the server syncs the CRI and JSON logs once the container exited
+- unreleased: the server syncs the CRI logs once the container exited
   and its output ended, before it never synced the container logs.
 - unreleased: the server logs a warning when it cannot watch the memory events
   of a container for another reason than a cgroup which is gone already.
@@ -134,8 +127,8 @@ does not count.
 - v1.2.2: a leaf without the memory controller does not count as gone for the
   OOM check.
 - v1.2.2: the `SYSLOG_IDENTIFIER` of the `journald` container log driver is
-  the `tag`, the `containerName` or the short ID, like for conmon. Before, it
-  was `conmonrs` without a `tag`.
+  the `containerName` or the short ID, like for conmon. Before, it was
+  `conmonrs`.
 - v1.2.2: a log file which exists when the container gets created is appended
   to, before it got truncated.
 - v1.2.2: the files of the `containerRuntimeInterface` driver are readable by

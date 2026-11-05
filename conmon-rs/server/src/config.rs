@@ -1,7 +1,7 @@
 //! Configuration related structures
 use crate::{fs_util, listener, process::is_zombie};
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Parser, ValueEnum};
 use nix::{
     errno::Errno,
     sys::{
@@ -34,10 +34,6 @@ macro_rules! prefix {
 )]
 /// A pod level OCI container runtime monitor, started by a container engine like CRI-O.
 pub(crate) struct Config {
-    #[command(subcommand)]
-    /// Possible subcommands.
-    command: Option<Commands>,
-
     #[arg(
         default_missing_value("default"),
         env(concat!(prefix!(), "VERSION")),
@@ -85,8 +81,8 @@ pub(crate) struct Config {
     /// The logging driver used by the server.
     log_driver: LogDriver,
 
-    // The blank default lets `--version` and `pause` work without the flag,
-    // see `Config::validate`.
+    // The blank default lets `--version` work without the flag, see
+    // `Config::validate`.
     #[arg(
         default_value(" "),
         env(concat!(prefix!(), "RUNTIME")),
@@ -152,11 +148,6 @@ pub(crate) struct Config {
 }
 
 impl Config {
-    /// Possible subcommands.
-    pub(crate) fn command(&self) -> Option<&Commands> {
-        self.command.as_ref()
-    }
-
     /// Show version information.
     pub(crate) fn version(&self) -> Option<Verbosity> {
         self.version
@@ -214,77 +205,6 @@ impl Config {
     pub(crate) fn tracing_endpoint(&self) -> &str {
         &self.tracing_endpoint
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
-/// Possible subcommands.
-pub(crate) enum Commands {
-    /// Run pause, which bind mounts selected namespaces to the local file system.
-    ///
-    /// Only the namespaces selected by the flags are created and bind mounted to
-    /// `$BASE_PATH/[ipc,pid,net,user,uts]ns/$POD_ID`, where POD_ID is the value of `--pod-id`.
-    /// The bind mounts keep the namespaces alive, so `conmonrs pause` exits once they are in
-    /// place.
-    ///
-    /// Only a PID namespace (via `--pid`) dies with its init process, which therefore keeps
-    /// running. Its PID is tracked in `$BASE_PATH/conmonrs/$POD_ID.pid`.
-    ///
-    /// UID and GID mappings are required if unsharing of the user namespace (via `--user`) is
-    /// selected.
-    Pause(PauseArgs),
-}
-
-#[derive(Args, Clone, Debug, Eq, PartialEq)]
-/// The arguments of the `pause` subcommand.
-pub(crate) struct PauseArgs {
-    #[arg(
-        default_value("/var/run"),
-        env(concat!(prefix!(), "PAUSE_BASE_PATH")),
-        long("base-path"),
-        short('p'),
-        value_name("PATH")
-    )]
-    /// The base path for pinning the namespaces.
-    pub(crate) base_path: PathBuf,
-
-    #[arg(
-        env(concat!(prefix!(), "PAUSE_POD_ID")),
-        long("pod-id"),
-    )]
-    /// The unique pod identifier, which names the files of the namespaces. It consists of the
-    /// letters A-Z and a-z, the digits 0-9, "_", "." and "-" only, is not "." or "..", and takes
-    /// 251 bytes at most.
-    pub(crate) pod_id: String,
-
-    #[arg(long("ipc"))]
-    /// Unshare the IPC namespace.
-    pub(crate) ipc: bool,
-
-    #[arg(long("pid"))]
-    /// Unshare the PID namespace.
-    pub(crate) pid: bool,
-
-    #[arg(long("net"))]
-    /// Unshare the network namespace.
-    pub(crate) net: bool,
-
-    #[arg(long("user"))]
-    /// Unshare the user namespace.
-    pub(crate) user: bool,
-
-    #[arg(long("uts"))]
-    /// Unshare the UTS namespace.
-    pub(crate) uts: bool,
-
-    #[arg(long("uid-mappings"), required_if_eq("user", "true"), short('u'))]
-    /// User ID mappings for unsharing the user namespace.
-    /// Repeat the flag for more mappings, each in the format: "CONTAINER_ID HOST_ID SIZE".
-    pub(crate) uid_mappings: Vec<String>,
-
-    #[arg(long("gid-mappings"), required_if_eq("user", "true"), short('g'))]
-    /// Group ID mappings for unsharing the user namespace.
-    /// Repeat the flag for more mappings, each in the format: "CONTAINER_ID HOST_ID SIZE".
-    pub(crate) gid_mappings: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -368,13 +288,15 @@ impl Config {
 // The socket and the PID file are the ones of `pkg/client/client.go`.
 const SOCKET: &str = "conmon.sock";
 const PIDFILE: &str = "pidfile";
-const FD_SOCKET: &str = "conmon-fd.sock";
+
+/// The fd socket of older servers, see [`Config::prepare`].
+const OLD_FD_SOCKET: &str = "conmon-fd.sock";
 
 impl Config {
     /// Validate the configuration integrity.
     pub(crate) fn validate(&self) -> Result<()> {
-        // The runtime flags default to a blank, so that `--version` and the
-        // `pause` subcommand work without them.
+        // The runtime flags default to a blank, so that `--version` works
+        // without them.
         const RUNTIME_FLAG: &str = "--runtime";
         if self
             .runtime()
@@ -452,22 +374,29 @@ impl Config {
         }
 
         // A socket left behind gets replaced, but not the one of a server
-        // which still runs, its containers would be lost otherwise.
-        for (socket, typ) in [
-            (self.socket(), SockType::Stream),
-            (self.fd_socket(), SockType::SeqPacket),
-        ] {
-            // A socket which cannot be checked may be in use as well.
-            if Self::socket_in_use(&socket, typ)
-                .with_context(|| format!("check socket {}", socket.display()))?
-            {
-                bail!(listener::SocketInUse(format!(
-                    "socket {} is in use by a running server",
-                    socket.display()
-                )))
-            }
-            fs_util::remove_file(&socket)
-                .with_context(|| format!("remove stale socket {}", socket.display()))?;
+        // which still runs, its containers would be lost otherwise. A socket
+        // which cannot be checked may be in use as well.
+        let socket = self.socket();
+        if Self::socket_in_use(&socket)
+            .with_context(|| format!("check socket {}", socket.display()))?
+        {
+            bail!(listener::SocketInUse(format!(
+                "socket {} is in use by a running server",
+                socket.display()
+            )))
+        }
+        fs_util::remove_file(&socket)
+            .with_context(|| format!("remove stale socket {}", socket.display()))?;
+
+        // The fd socket of an older server in a reused runtime directory,
+        // which nothing serves anymore. Only a leftover, which must not stop
+        // the server, the logging does not run yet, like for `init`.
+        let fd_socket = self.runtime_dir().join(OLD_FD_SOCKET);
+        if let Err(e) = fs_util::remove_file(&fd_socket) {
+            eprintln!(
+                "Unable to remove the stale socket {}: {e:#}",
+                fd_socket.display()
+            );
         }
 
         Ok(())
@@ -477,12 +406,12 @@ impl Config {
     /// not wait for a server which does not accept them in time, a full
     /// backlog counts as in use as well. A socket of a server which exited
     /// is not in use, also if a process left behind still holds it.
-    fn socket_in_use(path: &Path, typ: SockType) -> Result<bool> {
+    fn socket_in_use(path: &Path) -> Result<bool> {
         // The path may be too long for a socket address.
         let (short_path, _dir) = listener::shorten_path(path)?;
         let fd = socket(
             AddressFamily::Unix,
-            typ,
+            SockType::Stream,
             SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
             None,
         )
@@ -532,10 +461,6 @@ impl Config {
     pub(crate) fn conmon_pidfile(&self) -> PathBuf {
         self.runtime_dir().join(PIDFILE)
     }
-    /// The socket the clients pass file descriptors over.
-    pub(crate) fn fd_socket(&self) -> PathBuf {
-        self.runtime_dir().join(FD_SOCKET)
-    }
 }
 
 impl Config {
@@ -552,7 +477,6 @@ impl Config {
         let without_env = |arg: clap::Arg| arg.env(None);
         let matches = <Self as CommandFactory>::command()
             .mut_args(without_env)
-            .mut_subcommands(|command| command.mut_args(without_env))
             .try_get_matches_from(
                 std::iter::once("conmonrs".into()).chain(args.into_iter().map(Into::into)),
             )

@@ -197,7 +197,6 @@ pub(super) fn attach_child(
         oom_exit_paths: vec![],
         timeout: None,
         io: io.clone(),
-        cleanup_cmd: vec![],
         token: token.clone(),
         process: None,
     });

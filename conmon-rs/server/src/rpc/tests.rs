@@ -18,7 +18,6 @@ async fn too_many_streaming_sessions_fail_with_the_bare_message() -> anyhow::Res
         oom_exit_paths: vec![],
         timeout: None,
         io: SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?),
-        cleanup_cmd: vec![],
         token: CancellationToken::new(),
         process: None,
     });
@@ -82,15 +81,138 @@ async fn too_many_streaming_sessions_fail_with_the_bare_message() -> anyhow::Res
         .await
 }
 
-/// The message of the error which a request fails with.
-async fn failure<T>(response: impl Future<Output = capnp::Result<T>>) -> String {
+/// The message of the error of the `kind` which a request fails with.
+async fn failure_of_kind<T>(
+    kind: capnp::ErrorKind,
+    response: impl Future<Output = capnp::Result<T>>,
+) -> String {
     match response.await {
         Ok(_) => panic!("request succeeded"),
         Err(e) => {
-            assert_eq!(e.kind, capnp::ErrorKind::Failed, "{e}");
+            assert_eq!(e.kind, kind, "{e}");
             e.extra
         }
     }
+}
+
+/// The message of the error which a request fails with.
+async fn failure<T>(response: impl Future<Output = capnp::Result<T>>) -> String {
+    failure_of_kind(capnp::ErrorKind::Failed, response).await
+}
+
+/// The retired requests fail with a message which names them, for the
+/// older clients.
+#[tokio::test]
+async fn retired_requests_are_not_supported() {
+    let config = Config::parse_for_test::<_, &str>([]);
+    let client: conmon::Client = capnp_rpc::new_client(Server::with_config(config));
+    let unimplemented = capnp::ErrorKind::Unimplemented;
+
+    let request = client.create_namespaces_old_request();
+    assert_eq!(
+        failure_of_kind(unimplemented, request.send().promise).await,
+        "createNamespaces is not supported by this server"
+    );
+    let request = client.start_fd_socket_old_request();
+    assert_eq!(
+        failure_of_kind(unimplemented, request.send().promise).await,
+        "startFdSocket is not supported by this server"
+    );
+
+    // A container which relies on a retired field does not get created
+    // without it.
+    type Set = dyn Fn(conmon::create_container_request::Builder<'_>);
+    let create = |set: &Set| {
+        let mut request = client.create_container_request();
+        let mut req = request.get().init_request();
+        req.set_id("id");
+        req.set_bundle_path("/bundle");
+        set(req);
+        request.send().promise
+    };
+    let retired: [(&str, &Set); 9] = [
+        ("sdnotifySocket", &|mut req| {
+            req.set_sdnotify_socket_old("/run/systemd/notify");
+        }),
+        ("cleanupCmd", &|req| {
+            req.init_cleanup_cmd_old(1).set(0, "true");
+        }),
+        ("globalArgs", &|req| {
+            req.init_global_args_old(1).set(0, "--root=/run/other");
+        }),
+        ("envVars", &|req| {
+            let mut entry = req.init_env_vars_old(1).get(0);
+            entry.set_key("KEY");
+            entry.set_value("value");
+        }),
+        ("additionalFds", &|req| {
+            req.init_additional_fds_old(1).set(0, 1);
+        }),
+        ("leakFds", &|req| {
+            req.init_leak_fds_old(1).set(0, 1);
+        }),
+        ("json log driver", &|req| {
+            let mut driver = req.init_log_drivers(1).get(0);
+            driver.set_type(conmon::log_driver::Type::JsonOld);
+            driver.set_path("/log");
+        }),
+        ("tag of a log driver", &|req| {
+            let mut driver = req.init_log_drivers(1).get(0);
+            driver.set_type(conmon::log_driver::Type::Journald);
+            driver.set_tag_old("tag");
+        }),
+        ("labels of a log driver", &|req| {
+            let mut driver = req.init_log_drivers(1).get(0);
+            driver.set_type(conmon::log_driver::Type::Journald);
+            let mut label = driver.init_labels_old(1).get(0);
+            label.set_key("KEY");
+            label.set_value("value");
+        }),
+    ];
+    for (field, set) in retired {
+        assert_eq!(
+            failure_of_kind(unimplemented, create(set)).await,
+            format!("the {field} of createContainer is not supported by this server")
+        );
+    }
+
+    let mut request = client.exec_sync_container_request();
+    let mut req = request.get().init_request();
+    req.set_id("id");
+    req.reborrow().init_command(1).set(0, "true");
+    let mut entry = req.init_env_vars_old(1).get(0);
+    entry.set_key("KEY");
+    entry.set_value("value");
+    assert_eq!(
+        failure_of_kind(unimplemented, request.send().promise).await,
+        "the envVars of execSyncContainer is not supported by this server"
+    );
+}
+
+/// The older clients send the retired fields empty, which passes.
+#[tokio::test]
+async fn empty_retired_fields_pass() {
+    let config = Config::parse_for_test::<_, &str>([]);
+    let client: conmon::Client = capnp_rpc::new_client(Server::with_config(config));
+    let mut request = client.create_container_request();
+    let mut req = request.get().init_request();
+    req.set_id("id");
+    // Fails after the retired fields got checked.
+    req.set_bundle_path("bundle");
+    req.reborrow().init_cleanup_cmd_old(0);
+    req.reborrow().init_global_args_old(0);
+    req.reborrow().init_env_vars_old(0);
+    req.reborrow().init_additional_fds_old(0);
+    req.reborrow().init_leak_fds_old(0);
+    req.set_sdnotify_socket_old("");
+    let mut driver = req.init_log_drivers(1).get(0);
+    driver.set_type(conmon::log_driver::Type::Journald);
+    driver.set_tag_old("");
+    driver.init_labels_old(0);
+    assert_eq!(
+        failure(request.send().promise).await,
+        r#"bundle path "bundle" is not absolute"#
+    );
 }
 
 #[tokio::test]
@@ -125,16 +247,6 @@ async fn requests_get_validated() -> anyhow::Result<()> {
         r#"invalid container ID "--help""#
     );
 
-    let mut request = client.create_container_request();
-    let mut req = request.get().init_request();
-    req.set_id("id");
-    req.set_bundle_path("/bundle");
-    req.set_sdnotify_socket("notify.sock");
-    assert_eq!(
-        failure(request.send().promise).await,
-        r#"sdnotify socket "notify.sock" is not absolute"#
-    );
-
     let mut request = client.attach_container_request();
     let mut req = request.get().init_request();
     req.set_id("id");
@@ -156,6 +268,15 @@ async fn requests_get_validated() -> anyhow::Result<()> {
     // Clients match the start, see `ErrContainerNotFound` of the Go client.
     let mut request = client.reopen_log_container_request();
     request.get().init_request().set_id("unknown");
+    let err = failure(request.send().promise).await;
+    assert!(err.starts_with("container not found"), "{err}");
+
+    // The Go client resizes the terminal of an attach with it.
+    let mut request = client.set_window_size_container_request();
+    let mut req = request.get().init_request();
+    req.set_id("unknown");
+    req.set_width(80);
+    req.set_height(24);
     let err = failure(request.send().promise).await;
     assert!(err.starts_with("container not found"), "{err}");
     Ok(())

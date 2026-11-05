@@ -10,7 +10,6 @@ use anyhow::{Context, Result, bail};
 use nix::{errno::Errno, sys::signal::Signal, unistd::Pid};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    os::fd::OwnedFd,
     pin::pin,
     str,
     sync::{
@@ -30,7 +29,6 @@ mod runtime_call;
 mod watcher;
 
 pub(crate) use runtime_call::RuntimeCall;
-pub(crate) use runtime_call::RuntimeOutput;
 
 /// Watches the containers and execs of the server until they exit and
 /// reaps them.
@@ -259,7 +257,6 @@ impl ChildReaper {
     pub(crate) fn watch_grandchild(
         &self,
         child: Child,
-        leak_fds: Vec<OwnedFd>,
         call: InFlight,
     ) -> Result<Receiver<ExitChannelData>> {
         let pid = child.pid;
@@ -273,7 +270,6 @@ impl ChildReaper {
         let (grandchildren, forgotten) = (self.grandchildren.clone(), self.forgotten.clone());
         let key = id.clone();
         let exit_rx = reapable_grandchild.watch(exit, move || {
-            drop(leak_fds);
             Self::forget_grandchild(&grandchildren, &key, seq);
             forgotten.notify_waiters();
         });
@@ -316,7 +312,6 @@ impl ChildReaper {
             oom_exit_paths: vec![],
             timeout,
             io: io.clone(),
-            cleanup_cmd: vec![],
             token: token.clone(),
             process: Some(process.clone()),
         };
@@ -325,7 +320,7 @@ impl ChildReaper {
         let stop_output = io.attach().stop_output_on_exit(token.clone());
         // The registration fails only while the server shuts down, which
         // killed the process already.
-        let exit_rx = self.watch_grandchild(child, vec![], call)?;
+        let exit_rx = self.watch_grandchild(child, call)?;
         Ok(WatchedExec {
             io,
             token,

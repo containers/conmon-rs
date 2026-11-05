@@ -18,7 +18,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 	logrustest "github.com/sirupsen/logrus/hooks/test"
-	"go.podman.io/common/pkg/detach"
 	"go.podman.io/common/pkg/resize"
 )
 
@@ -120,6 +119,50 @@ func TestHandlePacket(t *testing.T) {
 	if _, err := c.handlePacket(cfg, packet, len(packet), true); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("got error %v, want %v", err, io.ErrShortWrite)
 	}
+}
+
+// packetPair returns both ends of a unix packet socket pair, like the ones
+// of the attach sockets. Both get closed with the test.
+func packetPair(t *testing.T) (a, b *net.UnixConn) {
+	t.Helper()
+
+	// Without SOCK_CLOEXEC, which not every platform the client builds for
+	// has, under the fork lock like the net package does it, so that no
+	// child of a parallel test inherits the descriptors.
+	syscall.ForkLock.RLock()
+
+	pair, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+	if err == nil {
+		syscall.CloseOnExec(pair[0])
+		syscall.CloseOnExec(pair[1])
+	}
+
+	syscall.ForkLock.RUnlock()
+
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+
+	unixConn := func(fd int) *net.UnixConn {
+		file := os.NewFile(uintptr(fd), "packet socket")
+		defer file.Close()
+
+		conn, err := net.FileConn(file)
+		if err != nil {
+			t.Fatalf("file conn: %v", err)
+		}
+
+		t.Cleanup(func() { conn.Close() })
+
+		unixConn, ok := conn.(*net.UnixConn)
+		if !ok {
+			t.Fatalf("got %T, want a unix connection", conn)
+		}
+
+		return unixConn
+	}
+
+	return unixConn(pair[0]), unixConn(pair[1])
 }
 
 func TestRedirectResponseToOutputStreams(t *testing.T) {
@@ -480,19 +523,18 @@ func TestClosedFileStdinKeepsAttach(t *testing.T) {
 	}
 }
 
-func TestDetachStopsOutput(t *testing.T) {
+func TestStdinErrorStopsOutput(t *testing.T) {
 	t.Parallel()
 
 	c := newTestClient(t, t.TempDir(), logrus.New())
 
 	stdin, stdinWriter := io.Pipe()
-	// A slow stream, which is still being written to on the detach.
+	// A slow stream, which is still being written to on the failure.
 	stdout := &testOut{delay: 20 * time.Millisecond}
 	cfg := &AttachConfig{
 		ID:         "id",
 		SocketPath: serveAttachSocket(t),
 		Streams:    AttachStreams{Stdin: &In{stdin}, Stdout: &Out{stdout}},
-		DetachKeys: []byte{16, 17},
 	}
 
 	attachErr := make(chan error, 1)
@@ -505,15 +547,11 @@ func TestDetachStopsOutput(t *testing.T) {
 		return out != ""
 	})
 
-	// The keys get read one at a time, like from a terminal.
-	for _, key := range cfg.DetachKeys {
-		if _, err := stdinWriter.Write([]byte{key}); err != nil {
-			t.Fatalf("write detach key: %v", err)
-		}
-	}
+	// Reading the stdin of the caller fails, which ends the attach.
+	stdinWriter.CloseWithError(io.ErrUnexpectedEOF)
 
-	if err := <-attachErr; !errors.Is(err, detach.ErrDetach) {
-		t.Fatalf("got error %v, want %v", err, detach.ErrDetach)
+	if err := <-attachErr; !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("got error %v, want %v", err, io.ErrUnexpectedEOF)
 	}
 
 	// The output stopped before the attach returned.
@@ -632,7 +670,7 @@ func TestStdinConnClosed(t *testing.T) {
 	// Reading the stdin of the caller failed, like a connection which got
 	// reset, which the attach reports.
 	for _, err := range []error{
-		nil, io.ErrUnexpectedEOF, detach.ErrDetach, net.ErrClosed, syscall.EPIPE,
+		nil, io.ErrUnexpectedEOF, net.ErrClosed, syscall.EPIPE,
 		&net.OpError{Op: "read", Err: net.ErrClosed},
 		&net.OpError{Op: "read", Err: os.NewSyscallError("read", syscall.ECONNRESET)},
 	} {

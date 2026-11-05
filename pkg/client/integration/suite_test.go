@@ -203,69 +203,12 @@ func (tr *testRunner) createRuntimeConfigWithProcessArgs(
 	MustFile(tr.logPath())
 }
 
-// expectNamespaceFile verifies that a namespace bind mount exists at the path:
-// a plain file that is backed by the nsfs filesystem rather than the empty
-// regular file the mount target was created from. The namespace has to be a
-// new one, not the one of the test process.
-func expectNamespaceFile(path string) {
-	stat, err := os.Lstat(path)
-	Expect(err).To(Succeed())
-	Expect(stat.IsDir()).To(BeFalse())
-	Expect(stat.Size()).To(BeZero())
-
-	var statfs unix.Statfs_t
-
-	Expect(unix.Statfs(path, &statfs)).To(Succeed())
-	Expect(statfs.Type).To(BeEquivalentTo(unix.NSFS_MAGIC), "%s is not a namespace", path)
-
-	// The path is <base>/<type>ns/<pod ID>.
-	nsType := strings.TrimSuffix(filepath.Base(filepath.Dir(path)), "ns")
-
-	var bound, own unix.Stat_t
-
-	Expect(unix.Stat(path, &bound)).To(Succeed())
-	Expect(unix.Stat("/proc/self/ns/"+nsType, &own)).To(Succeed())
-	Expect(bound.Ino).NotTo(Equal(own.Ino), "%s is the %s namespace of the host", path, nsType)
-}
-
-// pauseProcessRunning returns true if a conmonrs pause process for the pod is
-// still alive.
-func pauseProcessRunning(podID string) bool {
-	return pauseProcessCount(podID) > 0
-}
-
-// pauseProcessCount returns the number of conmonrs pause processes of the pod.
-func pauseProcessCount(podID string) int {
-	cmd := exec.CommandContext(context.Background(), "ps", "-eo", "args")
-
-	var stdout bytes.Buffer
-
-	cmd.Stdout = &stdout
-	Expect(cmd.Run()).To(Succeed())
-
-	count := 0
-
-	for line := range strings.SplitSeq(stdout.String(), "\n") {
-		if strings.Contains(line, " pause ") && strings.Contains(line, podID) {
-			count++
-		}
-	}
-
-	return count
-}
-
 // execPIDFiles returns the PID files of execs left in the runtime directory.
 func execPIDFiles(runtimeDir string) []string {
 	files, err := filepath.Glob(filepath.Join(runtimeDir, "exec_*pid"))
 	Expect(err).To(Succeed())
 
 	return files
-}
-
-// childrenOf returns the PIDs of all processes whose parent is pid, zombies
-// included.
-func childrenOf(pid int) []int {
-	return childrenOfWithState(pid, "")
 }
 
 // zombieChildrenOf returns the PIDs of the zombie children of pid.
@@ -394,8 +337,6 @@ func (tr *testRunner) defaultConfig(terminal bool) *client.CreateContainerConfig
 			Type: client.LogDriverTypeContainerRuntimeInterface,
 			Path: tr.logPath(),
 		}},
-		CleanupCmd:  []string{},
-		GlobalArgs:  []string{},
 		CommandArgs: []string{},
 	}
 }
@@ -595,7 +536,7 @@ func cleanupSpec(tr *testRunner, sut *client.ConmonClient) {
 	}
 
 	if sut != nil {
-		if err := sut.Shutdown(); err != nil {
+		if err := sut.ShutdownContext(context.Background()); err != nil {
 			errs = append(errs, fmt.Errorf("shutdown server: %w", err))
 
 			// Like CRI-O does it, a server which does not exit in time
@@ -652,11 +593,16 @@ func (tr *testRunner) configGivenEnv() *client.ConmonClient {
 func (tr *testRunner) configGivenEnvWith(
 	changeConfig func(*client.ConmonServerConfig),
 ) *client.ConmonClient {
-	cfg := client.NewConmonServerConfig(runtimePath, tr.rr.runtimeRoot, tr.tmpDir)
-	cfg.ConmonServerPath = conmonPath
-	cfg.LogDriver = client.LogDriverStdout
-
-	cfg.ClientLogger = logrus.StandardLogger()
+	cfg := &client.ConmonServerConfig{
+		ConmonServerPath: conmonPath,
+		LogLevel:         client.LogLevelDebug,
+		LogDriver:        client.LogDriverStdout,
+		Runtime:          runtimePath,
+		RuntimeRoot:      tr.rr.runtimeRoot,
+		ServerRunDir:     tr.tmpDir,
+		Stdout:           os.Stdout,
+		Stderr:           os.Stderr,
+	}
 
 	if tr.enableTracing {
 		cfg.Tracing = &client.Tracing{Enabled: true}

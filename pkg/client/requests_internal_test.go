@@ -13,7 +13,6 @@ import (
 	"github.com/containers/conmon-rs/internal/proto"
 	"github.com/sirupsen/logrus"
 	"go.podman.io/common/pkg/resize"
-	"go.podman.io/storage/pkg/idtools"
 )
 
 // registerSchemas registers the schema of the protocol, which the text
@@ -95,14 +94,6 @@ func (r recordingConmon) AttachContainer(
 	req, err := call.Args().Request()
 
 	return respond(r, "AttachContainer", req, err, call.AllocResults)
-}
-
-func (r recordingConmon) CreateNamespaces(
-	_ context.Context, call proto.Conmon_createNamespaces,
-) error {
-	req, err := call.Args().Request()
-
-	return respond(r, "CreateNamespaces", req, err, call.AllocResults)
 }
 
 func (r recordingConmon) ServeExecContainer(
@@ -252,19 +243,9 @@ func containerRequestCases() []requestCase {
 							Path:          "/journald",
 							MaxSize:       2048,
 							ContainerName: "name",
-							Tag:           "tag",
-							Labels:        map[string]string{"LABEL": "label"},
 						},
-						{Type: LogDriverTypeJSONLogger, Path: "/json.log"},
 					},
-					CleanupCmd:     []string{"cleanup", "arg"},
-					GlobalArgs:     []string{"--global"},
-					CommandArgs:    []string{"--command"},
-					EnvVars:        map[string]string{"ENV": "env"},
-					CgroupManager:  CgroupManagerCgroupfs,
-					AdditionalFDs:  []RemoteFD{3, 4},
-					LeakFDs:        []RemoteFD{5},
-					SdNotifySocket: "/notify.sock",
+					CommandArgs: []string{"--command"},
 				})
 
 				return err
@@ -275,17 +256,14 @@ func containerRequestCases() []requestCase {
 					`stdin = false, exitPaths = ["/exit-1", "/exit-2"], ` +
 					`oomExitPaths = ["/oom"], logDrivers = [` +
 					`(type = containerRuntimeInterface, path = "/cri.log", ` +
-					`maxSize = 1024, containerName = "", tag = "", labels = []), ` +
+					`maxSize = 1024, containerName = "", tagOld = "", labelsOld = []), ` +
 					`(type = journald, path = "/journald", maxSize = 2048, ` +
-					`containerName = "name", tag = "tag", ` +
-					`labels = [(key = "LABEL", value = "label")]), ` +
-					`(type = json, path = "/json.log", maxSize = 0, ` +
-					`containerName = "", tag = "", labels = [])], ` +
-					`cleanupCmd = ["cleanup", "arg"], globalArgs = ["--global"], ` +
+					`containerName = "name", tagOld = "", labelsOld = [])], ` +
+					`cleanupCmdOld = [], globalArgsOld = [], ` +
 					`commandArgs = ["--command"], metadataOld = void, ` +
-					`metadata = [], envVars = [(key = "ENV", value = "env")], ` +
-					`cgroupManager = cgroupfs, additionalFds = [3, 4], ` +
-					`leakFds = [5], sdnotifySocket = "/notify.sock")`,
+					`metadata = [], envVarsOld = [], ` +
+					`cgroupManager = cgroupfs, additionalFdsOld = [], ` +
+					`leakFdsOld = [], sdnotifySocketOld = "")`,
 			},
 		},
 		{
@@ -302,10 +280,10 @@ func containerRequestCases() []requestCase {
 				method: "CreateContainer",
 				text: `(id = "id", bundlePath = "", terminal = false, ` +
 					`stdin = true, exitPaths = [], oomExitPaths = [], ` +
-					`logDrivers = [], cleanupCmd = [], globalArgs = [], ` +
+					`logDrivers = [], cleanupCmdOld = [], globalArgsOld = [], ` +
 					`commandArgs = [], metadataOld = void, metadata = [], ` +
-					`envVars = [], cgroupManager = systemd, additionalFds = [], ` +
-					`leakFds = [], sdnotifySocket = "")`,
+					`envVarsOld = [], cgroupManager = cgroupfs, additionalFdsOld = [], ` +
+					`leakFdsOld = [], sdnotifySocketOld = "")`,
 			},
 		},
 		{
@@ -321,10 +299,7 @@ func containerRequestCases() []requestCase {
 		{
 			name: "SetWindowSizeContainer",
 			call: func(ctx context.Context, c *ConmonClient) error {
-				return c.SetWindowSizeContainer(ctx, &SetWindowSizeContainerConfig{
-					ID:   "id",
-					Size: &resize.TerminalSize{Width: 80, Height: 24},
-				})
+				return c.setWindowSize(ctx, "id", resize.TerminalSize{Width: 80, Height: 24})
 			},
 			want: request{
 				method: "SetWindowSizeContainer",
@@ -335,8 +310,7 @@ func containerRequestCases() []requestCase {
 	}
 }
 
-// execRequestCases returns the request cases of the exec, attach and
-// namespace calls.
+// execRequestCases returns the request cases of the exec and attach calls.
 func execRequestCases() []requestCase {
 	return []requestCase{
 		{
@@ -348,12 +322,10 @@ func execRequestCases() []requestCase {
 				defer cancel()
 
 				_, err := c.ExecSyncContainer(ctx, &ExecSyncConfig{
-					ID:            "id",
-					Command:       []string{"command", "arg"},
-					Timeout:       30,
-					Terminal:      true,
-					EnvVars:       map[string]string{"ENV": "env"},
-					CgroupManager: CgroupManagerCgroupfs,
+					ID:       "id",
+					Command:  []string{"command", "arg"},
+					Timeout:  30,
+					Terminal: true,
 				})
 
 				return err
@@ -362,8 +334,7 @@ func execRequestCases() []requestCase {
 				method: "ExecSyncContainer",
 				text: `(id = "id", timeoutSec = 1, command = ["command", "arg"], ` +
 					`terminal = true, metadataOld = void, metadata = [], ` +
-					`envVars = [(key = "ENV", value = "env")], ` +
-					`cgroupManager = cgroupfs)`,
+					`envVarsOld = [], cgroupManager = cgroupfs)`,
 			},
 		},
 		{
@@ -380,7 +351,7 @@ func execRequestCases() []requestCase {
 				method: "ExecSyncContainer",
 				text: `(id = "id", timeoutSec = 30, command = [], ` +
 					`terminal = false, metadataOld = void, metadata = [], ` +
-					`envVars = [], cgroupManager = systemd)`,
+					`envVarsOld = [], cgroupManager = cgroupfs)`,
 			},
 		},
 		{
@@ -389,14 +360,13 @@ func execRequestCases() []requestCase {
 				return attachWithoutSocket(ctx, c, &AttachConfig{
 					ID:                "id",
 					SocketPath:        "/attach.sock",
-					ExecSession:       "exec",
 					StopAfterStdinEOF: true,
 				})
 			},
 			want: request{
 				method: "AttachContainer",
 				text: `(id = "id", socketPath = "/attach.sock", ` +
-					`execSessionId = "exec", stopAfterStdinEof = true, ` +
+					`execSessionIdOld = "", stopAfterStdinEof = true, ` +
 					`metadataOld = void, metadata = [])`,
 			},
 		},
@@ -411,52 +381,8 @@ func execRequestCases() []requestCase {
 			want: request{
 				method: "AttachContainer",
 				text: `(id = "id", socketPath = "/attach.sock", ` +
-					`execSessionId = "", stopAfterStdinEof = false, ` +
+					`execSessionIdOld = "", stopAfterStdinEof = false, ` +
 					`metadataOld = void, metadata = [])`,
-			},
-		},
-		{
-			// Without a base path the default one.
-			name: "CreateNamespaces",
-			call: func(ctx context.Context, c *ConmonClient) error {
-				_, err := c.CreateNamespaces(ctx, &CreateNamespacesConfig{
-					Namespaces: []Namespace{NamespaceIPC, NamespaceNet},
-					PodID:      "pod",
-				})
-
-				return err
-			},
-			want: request{
-				method: "CreateNamespaces",
-				text: `(metadataOld = void, namespaces = [ipc, net], ` +
-					`uidMappings = [], gidMappings = [], basePath = "/var/run", ` +
-					`podId = "pod", metadata = [])`,
-			},
-		},
-		{
-			name: "CreateNamespaces with user namespace",
-			call: func(ctx context.Context, c *ConmonClient) error {
-				_, err := c.CreateNamespaces(ctx, &CreateNamespacesConfig{
-					Namespaces: []Namespace{
-						NamespacePID,
-						NamespaceUser,
-						NamespaceUTS,
-					},
-					IDMappings: idtools.NewIDMappingsFromMaps(
-						[]idtools.IDMap{{ContainerID: 0, HostID: 1000, Size: 1}},
-						[]idtools.IDMap{{ContainerID: 1, HostID: 2000, Size: 2}},
-					),
-					BasePath: "/base",
-					PodID:    "pod",
-				})
-
-				return err
-			},
-			want: request{
-				method: "CreateNamespaces",
-				text: `(metadataOld = void, namespaces = [pid, user, uts], ` +
-					`uidMappings = ["0 1000 1"], gidMappings = ["1 2000 2"], ` +
-					`basePath = "/base", podId = "pod", metadata = [])`,
 			},
 		},
 	}
@@ -471,14 +397,13 @@ func serveExecRequestCases() []requestCase {
 			name: "ServeExecContainer",
 			call: func(ctx context.Context, c *ConmonClient) error {
 				_, err := c.ServeExecContainer(ctx, &ServeExecContainerConfig{
-					ID:            "id",
-					Command:       []string{"command", "arg"},
-					Tty:           true,
-					Stdin:         false,
-					Stdout:        false,
-					Stderr:        true,
-					CgroupManager: CgroupManagerCgroupfs,
-					IdleTimeout:   1500 * time.Millisecond,
+					ID:          "id",
+					Command:     []string{"command", "arg"},
+					Tty:         true,
+					Stdin:       false,
+					Stdout:      false,
+					Stderr:      true,
+					IdleTimeout: 1500 * time.Millisecond,
 				})
 
 				return err
@@ -507,7 +432,7 @@ func serveExecRequestCases() []requestCase {
 				method: "ServeExecContainer",
 				text: `(metadata = [], id = "id", command = [], tty = false, ` +
 					`stdin = true, stdout = false, stderr = true, ` +
-					`cgroupManager = systemd, idleTimeoutSec = 0)`,
+					`cgroupManager = cgroupfs, idleTimeoutSec = 0)`,
 			},
 		},
 		{
@@ -527,7 +452,7 @@ func serveExecRequestCases() []requestCase {
 				method: "ServeExecContainer",
 				text: `(metadata = [], id = "id", command = [], tty = false, ` +
 					`stdin = false, stdout = true, stderr = false, ` +
-					`cgroupManager = systemd, idleTimeoutSec = 0)`,
+					`cgroupManager = cgroupfs, idleTimeoutSec = 0)`,
 			},
 		},
 		{
@@ -632,10 +557,11 @@ func TestRequestsCarryTheConfig(t *testing.T) {
 			t.Parallel()
 
 			dir := t.TempDir()
-			requests, _ := serveRecording(t, dir, FeatureSdNotify, FeaturePortForward)
+			requests, _ := serveRecording(t, dir, FeaturePortForward)
 
+			// Not the zero value, so that every request has to carry it.
 			c := newTestClient(t, dir, logrus.New())
-			c.cgroupManager = CgroupManagerPerCommand
+			c.cgroupManager = CgroupManagerCgroupfs
 
 			t.Cleanup(func() { c.Close() })
 

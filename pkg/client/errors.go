@@ -9,23 +9,10 @@ import (
 )
 
 var (
-	// ErrMissingIDMappings gets returned if user namespace unsharing is selected
-	// but no IDMappings being provided.
-	ErrMissingIDMappings = errors.New(
-		"unsharing user namespace selected but no IDMappings provided",
-	)
-
 	// ErrUnsupported gets returned if the server does not support the
 	// feature. Errors which match it also match [errors.ErrUnsupported], so
 	// that callers which check for the latter detect it as well.
 	ErrUnsupported error = unsupportedError{}
-
-	// ErrCgroupManagerPerCommand gets returned if a per command configuration
-	// asks for CgroupManagerPerCommand itself, which the server knows nothing
-	// about.
-	ErrCgroupManagerPerCommand = errors.New(
-		"the per command cgroup manager cannot be CgroupManagerPerCommand itself",
-	)
 
 	// ErrMissingNetNsPath gets returned if port forwarding is requested
 	// without the path of the network namespace.
@@ -37,15 +24,11 @@ var (
 
 	// ErrInvalidValue gets matched by the error of New and of a method if
 	// the configuration has a value which none of the constants of its type
-	// names, like an unknown CgroupManager, LogDriverType or Namespace, and
+	// names, like an unknown CgroupManager or LogDriverType, and
 	// if the server answered with a value the client does not know. New only
 	// checks the LogLevel and LogDriver if it starts a server, they do not
 	// apply to one which runs already. Use errors.Is to check for it.
 	ErrInvalidValue = errors.New("invalid value")
-
-	// ErrTerminalSizeNil gets returned by SetWindowSizeContainer if the
-	// configuration has no Size.
-	ErrTerminalSizeNil = errors.New("terminal size cannot be nil")
 
 	// ErrContainerNotFound gets matched by the error of a method if the
 	// server does not know the container of the request, for example because
@@ -67,12 +50,12 @@ var (
 	// ErrClientClosed gets returned by the methods of a client after Close.
 	ErrClientClosed = errors.New("client is closed")
 
-	// ErrShutdownTimeout gets returned by ShutdownContext (or Shutdown) and
-	// KillContext (or Kill) if the server is still running once the wait for
-	// it timed out, while an ended context fails with the error of the
-	// context. After ShutdownContext, KillContext sends SIGKILL, which a
-	// server only survives while it is stuck in the kernel, KillContext
-	// returns ErrShutdownTimeout again then.
+	// ErrShutdownTimeout gets returned by ShutdownContext and KillContext if
+	// the server is still running once the wait for it timed out, while an
+	// ended context fails with the error of the context. After
+	// ShutdownContext, KillContext sends SIGKILL, which a server only
+	// survives while it is stuck in the kernel, KillContext returns
+	// ErrShutdownTimeout again then.
 	ErrShutdownTimeout = errors.New("timed out waiting for server PID to disappear")
 
 	// ErrServerExited gets matched by the error of New if the server it
@@ -92,7 +75,7 @@ var (
 	// context ended before.
 	ErrServerNotUp = errors.New("server did not accept connections")
 
-	// ErrServerPIDUnknown gets matched by the error of Shutdown and
+	// ErrServerPIDUnknown gets matched by the error of ShutdownContext and
 	// KillContext if the client does not know the PID of the server, which
 	// they do not signal then, for example because the server did not report
 	// it.
@@ -101,10 +84,10 @@ var (
 	// ErrServerDisconnected gets matched by the error of a method if the
 	// connection to the server ended during the call, for example because the
 	// server exited, unlike a request which the server rejected. Calls in
-	// flight while Close, Shutdown or KillContext reset the connection match
-	// it as well, or fail with ErrClientClosed. The next call connects again,
-	// also to a server which replaced the exited one, after Close it fails
-	// with ErrClientClosed instead. Use errors.Is to check for it.
+	// flight while Close, ShutdownContext or KillContext reset the connection
+	// match it as well, or fail with ErrClientClosed. The next call connects
+	// again, also to a server which replaced the exited one, after Close it
+	// fails with ErrClientClosed instead. Use errors.Is to check for it.
 	ErrServerDisconnected = errors.New("disconnected from the server")
 
 	// ErrServerUnreachable gets matched by the error of a method if no
@@ -123,20 +106,6 @@ var (
 	// the backlog is full when the client connects, the next call connects
 	// again. Use errors.Is to check for it.
 	ErrServerNotResponding = errors.New("server accepted the connection but did not respond")
-
-	// ErrRemoteFDsBroken gets matched by the error of a request of
-	// RemoteFDs which got no valid response, which got interrupted by its
-	// context after it was sent, or which ran into Close. Every request
-	// afterwards fails with it as well, a new RemoteFDs is needed then. A
-	// request which the server rejected, or which could not be sent, does
-	// not match it and keeps the connection usable.
-	ErrRemoteFDsBroken = errors.New("fd socket connection broken")
-
-	// ErrTooManyFileDescriptors gets returned by Send and SendContext of
-	// RemoteFDs for more than 253 file descriptors, which the kernel does
-	// not pass in one message. Nothing gets sent then, the connection stays
-	// usable.
-	ErrTooManyFileDescriptors = errors.New("too many file descriptors")
 )
 
 // unsupportedError is the type of ErrUnsupported. It matches

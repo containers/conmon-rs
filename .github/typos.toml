@@ -11,8 +11,6 @@ extend-ignore-re = [
     "typ",
     "ws",
     "consts",
-    # The inheritable capabilities in /proc/<pid>/status.
-    "CapInh",
 ]
 [default.extend-words]
 # in-toto, the format of the attestation bundles.

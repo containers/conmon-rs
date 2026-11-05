@@ -21,29 +21,22 @@ fn inherited_fds_reports_descriptors_above_stderr() -> Result<()> {
 }
 
 #[tokio::test]
-async fn cleanup_removes_the_sockets() -> Result<()> {
+async fn cleanup_removes_the_socket() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let socket = dir.path().join("conmon.sock");
-    let fd_socket = dir.path().join("conmon-fd.sock");
     File::create(&socket)?;
-    File::create(&fd_socket)?;
 
     let reaper = Arc::new(ChildReaper::default());
     let deadline = || Instant::now() + Duration::from_secs(10);
-    Server::cleanup(reaper.clone(), &socket, &fd_socket, deadline()).await?;
+    Server::cleanup(reaper.clone(), &socket, deadline()).await?;
     assert!(!socket.exists());
-    assert!(!fd_socket.exists());
 
-    // An fd socket which was never started is fine, and so is a socket
-    // which got removed already, like with its directory.
-    File::create(&socket)?;
-    Server::cleanup(reaper.clone(), &socket, &fd_socket, deadline()).await?;
-    assert!(!socket.exists());
-    Server::cleanup(reaper.clone(), &socket, &fd_socket, deadline()).await?;
+    // A socket which got removed already, like with its directory, is fine.
+    Server::cleanup(reaper.clone(), &socket, deadline()).await?;
 
     // Other failures are reported.
     std::fs::create_dir(&socket)?;
-    let err = Server::cleanup(reaper, &socket, &fd_socket, deadline())
+    let err = Server::cleanup(reaper, &socket, deadline())
         .await
         .err()
         .map(|e| format!("{e:#}"));
@@ -109,42 +102,34 @@ async fn unfinished_shutdown_is_logged_and_ends_the_server_with_it() -> Result<(
         .with_ansi(false)
         .set_default();
     let dir = tempfile::tempdir()?;
+    // A socket which cannot be removed.
     let socket = dir.path().join("conmon.sock");
-    let fd_socket = dir.path().join("conmon-fd.sock");
-    File::create(&socket)?;
+    std::fs::create_dir(&socket)?;
 
-    // Like a stop of the pause instance which hangs.
-    let start = Instant::now();
     let result = Server::shutdown(
         Arc::new(ChildReaper::default()),
         &socket,
-        &fd_socket,
-        start + Server::CLEANUP_TIMEOUT,
-        |_| std::future::pending(),
+        Instant::now() + Server::CLEANUP_TIMEOUT,
     )
     .await;
-    assert_eq!(start.elapsed(), Server::CLEANUP_TIMEOUT);
-    // The other parts finished nevertheless.
-    assert!(!socket.exists());
-
-    let err = result.err().map(|e| format!("{e:#}"));
-    assert_eq!(err.as_deref(), Some("stop pause: did not finish in time"));
+    let err = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+    assert!(err.starts_with("remove socket file: "), "{err}");
     let logged = log.contents()?;
     assert!(
-        logged.contains("ERROR") && logged.contains("Shutdown did not finish: stop pause"),
+        logged.contains("ERROR") && logged.contains("Shutdown did not finish: remove socket file"),
         "{logged}"
     );
 
     // The backend ends the server with it, which then exits non-zero. It
     // got logged already.
     let (tx, rx) = oneshot::channel();
-    tx.send(Err(format_err!("stop pause: did not finish in time")))
+    tx.send(Err(format_err!("remove socket file: failed")))
         .map_err(|_| format_err!("send"))?;
     assert!(Server::logged(Server::shutdown_result(rx.await)).is_err());
     let (tx, rx) = oneshot::channel();
     tx.send(Ok(())).map_err(|_| format_err!("send"))?;
     Server::logged(Server::shutdown_result(rx.await))?;
-    assert_eq!(log.contents()?.matches("stop pause").count(), 1);
+    assert_eq!(log.contents()?.matches("remove socket file").count(), 1);
 
     // Without a result, the server failed itself, which gets logged.
     let (tx, rx) = oneshot::channel::<Result<()>>();

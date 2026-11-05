@@ -6,7 +6,6 @@ use crate::{
     child::{Child, ChildKind},
     container_io::{DRAIN_MAX_LOG_WAIT, Drain, Message},
     container_log::{ContainerLog, SharedContainerLog},
-    init,
     oom_watcher::{OOMEvent, OOMWatcher},
     process::{self, Process},
 };
@@ -15,7 +14,6 @@ use nix::{sys::signal::Signal, unistd::Pid};
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
-    process::Stdio,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -23,7 +21,6 @@ use std::{
 };
 use tokio::{
     fs,
-    process::Command,
     sync::broadcast::{self, Receiver},
     task,
     time::{self, Instant},
@@ -50,7 +47,6 @@ pub(crate) struct ExitHandling {
 
     /// When the process gets killed, only an exec_sync has one.
     timeout: Option<Instant>,
-    cleanup_cmd: Vec<String>,
 }
 
 impl ReapableChild {
@@ -158,7 +154,6 @@ impl ReapableChild {
             oom_exit_paths,
             timeout,
             io,
-            cleanup_cmd,
             token,
             process,
         } = child;
@@ -177,7 +172,6 @@ impl ReapableChild {
                 exit_paths,
                 oom_exit_paths,
                 timeout,
-                cleanup_cmd,
             },
         )
     }
@@ -215,7 +209,6 @@ impl ReapableChild {
             exit_paths,
             oom_exit_paths,
             timeout,
-            cleanup_cmd,
         } = exit;
         let pid = self.pid();
         // Only one exit code will be written.
@@ -263,10 +256,6 @@ impl ReapableChild {
                 debug!(?exit_paths, oomed, "Write to exit paths");
                 Self::write_to_exit_paths(exit_code, &exit_paths).await;
 
-                if !cleanup_cmd.is_empty() {
-                    Self::spawn_cleanup_process(&cleanup_cmd);
-                }
-
                 debug!("Sending exit struct to channel: {:?}", exit_channel_data);
                 // Only the consumer of an exec receives it, nobody of a
                 // container.
@@ -278,23 +267,6 @@ impl ReapableChild {
             .instrument(debug_span!("watch", %pid)),
         );
         exit_rx
-    }
-
-    fn spawn_cleanup_process(raw_cmd: &[String]) {
-        let mut cleanup_cmd = Command::new(&raw_cmd[0]);
-        init::reset_inherited(&mut cleanup_cmd);
-
-        cleanup_cmd.args(&raw_cmd[1..]).stdin(Stdio::null());
-
-        task::spawn(async move {
-            match cleanup_cmd.status().await {
-                Ok(status) if !status.success() => {
-                    error!("Unable to run cleanup command: {status}");
-                }
-                Ok(_) => {}
-                Err(e) => error!("Unable to run cleanup command: {e:#}"),
-            }
-        });
     }
 
     /// Write the exit code to every exit path. Failures are logged per path,

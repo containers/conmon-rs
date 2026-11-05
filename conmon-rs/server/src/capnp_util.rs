@@ -1,8 +1,6 @@
 //! Helpers for the Cap'n Proto requests: the check of their paths and the
 //! conversion of their maps.
 
-use crate::conmon_capnp::conmon;
-use capnp::struct_list::Reader;
 use std::path::Path;
 
 /// Fail for a path of a request which is not absolute, an empty one
@@ -15,9 +13,10 @@ pub(crate) fn check_absolute(what: &str, path: &Path) -> anyhow::Result<()> {
 }
 
 /// Convert a capnp map, a list of key value entries, into a rust map, like
-/// the environment variables or the labels of a request.
+/// the metadata of a request.
+#[cfg(feature = "tracing")]
 pub(crate) fn into_map<'a, K, V, T>(
-    reader: Reader<'a, conmon::text_text_map_entry::Owned>,
+    reader: capnp::struct_list::Reader<'a, crate::conmon_capnp::conmon::text_text_map_entry::Owned>,
 ) -> capnp::Result<T>
 where
     K: From<&'a str>,

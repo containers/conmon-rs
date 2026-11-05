@@ -45,58 +45,9 @@ type CreateContainerConfig struct {
 	// LogDrivers is a slice of selected log drivers.
 	LogDrivers []ContainerLogDriver
 
-	// CleanupCmd is the command that will be executed once the container
-	// exited and its exit files got written. The server does not wait for
-	// it. The server runs in /, so a relative path with a slash resolves
-	// against it, a bare name through the PATH of the server.
-	CleanupCmd []string
-
-	// GlobalArgs are the additional arguments passed to the create runtime
-	// call before the command, e.g. crun --runtime-arg create. They only
-	// apply to the create call, not to the exec ones of ExecSyncContainer
-	// and ServeExecContainer. The root of the runtime belongs in
-	// [ConmonServerConfig.RuntimeRoot], which applies to every call.
-	GlobalArgs []string
-
 	// CommandArgs are the additional arguments passed to the create runtime call
 	// after the command. e.g: crun create --runtime-opt
 	CommandArgs []string
-
-	// EnvVars are the environment variables passed to the create runtime call.
-	EnvVars map[string]string
-
-	// CgroupManager can be used to select the cgroup manager.
-	//
-	// To use this option set [ConmonServerConfig.CgroupManager] to
-	// [CgroupManagerPerCommand].
-	CgroupManager CgroupManager
-
-	// AdditionalFDs can be used to pass additional file descriptors to the
-	// container. They are slots of the fd socket, see RemoteFDs, which the
-	// runtime gets as fd 3 and onwards in their order. The runtime has to be
-	// told to pass them on, for example with --preserve-fds in CommandArgs.
-	AdditionalFDs []RemoteFD
-
-	// LeakFDs can be used to keep file descriptors open as long as the
-	// container is running. They are slots of the fd socket, see RemoteFDs,
-	// which the server holds until the container exited without passing them
-	// on.
-	LeakFDs []RemoteFD
-
-	// SdNotifySocket is the path of the host sd_notify socket, usually the
-	// NOTIFY_SOCKET of systemd: an absolute path, or @name for an abstract
-	// socket. Since v1.2.2, a relative path gets rejected. If set, the
-	// server binds <BundlePath>/notify/notify.sock before it runs the
-	// runtime and relays the messages sent there to the host socket until
-	// the container exits.
-	// Like conmon, it only passes the assignments which tell the state of a
-	// service, like READY=1 or WATCHDOG=1, the sdnotifySocket field of
-	// conmon.capnp in the repository lists them. The caller mounts the
-	// notify directory into the container and sets NOTIFY_SOCKET for the
-	// container process accordingly. Servers without [FeatureSdNotify]
-	// would ignore it, CreateContainer fails with [ErrUnsupported] on them
-	// instead.
-	SdNotifySocket string
 }
 
 // ContainerLogDriver specifies a selected logging mechanism.
@@ -113,23 +64,10 @@ type ContainerLogDriver struct {
 	MaxSize uint64
 
 	// ContainerName is written as CONTAINER_NAME by LogDriverTypeJournald,
-	// like the name of conmon. Servers without FeatureJournaldFields ignore
-	// it.
+	// like the name of conmon. Servers since v1.2.2 also use it as the
+	// SYSLOG_IDENTIFIER, and the short container ID without one, older ones
+	// "conmonrs". Servers before v1.2.1 ignore it.
 	ContainerName string
-
-	// Tag is written as CONTAINER_TAG and SYSLOG_IDENTIFIER by
-	// LogDriverTypeJournald, like the log tag of conmon. Without one, servers
-	// since v1.2.2 use the ContainerName as the identifier, and the short
-	// container ID without both, like conmon, older ones "conmonrs". Servers
-	// without FeatureJournaldFields ignore it.
-	Tag string
-
-	// Labels are additional fields of every entry of LogDriverTypeJournald,
-	// like the log labels of conmon. A key has to be a journal field name
-	// like POD_NAME, the labels field of conmon.capnp in the repository has
-	// the rules and limits, which the server checks. Servers without
-	// [FeatureJournaldFields] ignore them.
-	Labels map[string]string
 }
 
 // LogDriverType specifies available log drivers.
@@ -138,34 +76,24 @@ type LogDriverType int
 const (
 	// LogDriverTypeContainerRuntimeInterface is the Kubernetes CRI logger
 	// type.
-	LogDriverTypeContainerRuntimeInterface LogDriverType = iota
-
-	// LogDriverTypeJSONLogger writes one JSON object per line to the path
-	// of the driver.
-	LogDriverTypeJSONLogger
+	LogDriverTypeContainerRuntimeInterface LogDriverType = 0
 
 	// LogDriverTypeJournald writes to the systemd journal, the path of the
-	// driver is not used.
-	LogDriverTypeJournald
+	// driver is not used. The value 1 belonged to the retired JSON logger.
+	LogDriverTypeJournald LogDriverType = 2
 )
 
 // CreateContainerResponse is the response of the CreateContainer method.
 type CreateContainerResponse struct {
 	// PID is the container process identifier.
 	PID uint32
-
-	// NamespacesPath is the base path where the namespaces are mounted.
-	//
-	// Deprecated: The server never reported it, so it is always empty. Use
-	// the paths returned by CreateNamespaces instead.
-	NamespacesPath string
 }
 
 // CreateContainer creates a container by running the create command of the
 // runtime and monitors it from then on. The container process waits for the
 // start command of the runtime, which the caller runs, before it runs the
-// command of the container. The server writes the exit and OOM files and runs
-// the cleanup command once the container exited.
+// command of the container. The server writes the exit and OOM files once the
+// container exited.
 //
 // A context which ends only ends the wait of the client. A server since
 // v1.1.0 finishes the create in a task of its own and keeps watching the
@@ -183,33 +111,12 @@ func (c *ConmonClient) CreateContainer(
 		return nil, ErrMissingConfig
 	}
 
-	if err := c.validateCgroupManager(cfg.CgroupManager); err != nil {
-		return nil, err
-	}
-
 	driverTypes, err := validateLogDrivers(cfg.LogDrivers)
 	if err != nil {
 		return nil, err
 	}
 
-	// An older server ignores the field, the unit would never get ready.
-	// Checked after the configuration, which needs no server, the request
-	// goes to the checked server.
-	var rpcClient proto.Conmon
-
-	if cfg.SdNotifySocket != "" {
-		rpcClient, err = c.requireServerFeature(ctx, FeatureSdNotify, "sd_notify socket")
-	} else if rpcClient, err = c.client(ctx); err != nil {
-		err = fmt.Errorf("create RPC client: %w", err)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	defer rpcClient.Release()
-
-	return callOn(ctx, c, rpcClient, proto.Conmon.CreateContainer,
+	return call(ctx, c, proto.Conmon.CreateContainer,
 		func(req proto.Conmon_CreateContainerRequest) error {
 			if err := req.SetId(cfg.ID); err != nil {
 				return fmt.Errorf("set ID: %w", err)
@@ -234,38 +141,11 @@ func (c *ConmonClient) CreateContainer(
 				return fmt.Errorf("init log drivers: %w", err)
 			}
 
-			if err := stringSliceToTextList(cfg.CleanupCmd, req.NewCleanupCmd); err != nil {
-				return fmt.Errorf("convert cleanup command string slice to text list: %w", err)
-			}
-
-			if err := stringSliceToTextList(cfg.GlobalArgs, req.NewGlobalArgs); err != nil {
-				return fmt.Errorf("convert global arguments string slice to text list: %w", err)
-			}
-
 			if err := stringSliceToTextList(cfg.CommandArgs, req.NewCommandArgs); err != nil {
 				return fmt.Errorf("convert command arguments string slice to text list: %w", err)
 			}
 
-			if err := stringStringMapToMapEntryList(cfg.EnvVars, req.NewEnvVars); err != nil {
-				return fmt.Errorf("convert environment variables to map entry list: %w", err)
-			}
-
-			c.setCgroupManager(cfg.CgroupManager, req)
-
-			if err := remoteFDSliceToUInt64List(
-				cfg.AdditionalFDs,
-				req.NewAdditionalFds,
-			); err != nil {
-				return fmt.Errorf("convert file descriptor slice to slot list: %w", err)
-			}
-
-			if err := remoteFDSliceToUInt64List(cfg.LeakFDs, req.NewLeakFds); err != nil {
-				return fmt.Errorf("convert file descriptor slice to slot list: %w", err)
-			}
-
-			if err := req.SetSdnotifySocket(cfg.SdNotifySocket); err != nil {
-				return fmt.Errorf("set sd_notify socket: %w", err)
-			}
+			req.SetCgroupManager(proto.Conmon_CgroupManager(c.cgroupManager))
 
 			return nil
 		},
@@ -303,15 +183,6 @@ type ExecSyncConfig struct {
 
 	// Terminal specifies if a tty should be used.
 	Terminal bool
-
-	// EnvVars are the environment variables passed to the exec runtime call.
-	EnvVars map[string]string
-
-	// CgroupManager can be used to select the cgroup manager.
-	//
-	// To use this option set [ConmonServerConfig.CgroupManager] to
-	// [CgroupManagerPerCommand].
-	CgroupManager CgroupManager
 }
 
 // ExecContainerResult is the result for calling the ExecSyncContainer method.
@@ -366,10 +237,6 @@ func (c *ConmonClient) ExecSyncContainer(
 		return nil, ErrMissingConfig
 	}
 
-	if err := c.validateCgroupManager(cfg.CgroupManager); err != nil {
-		return nil, err
-	}
-
 	// The command would get at least the minimum timeout of the server.
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("exec sync: %w", err)
@@ -388,12 +255,7 @@ func (c *ConmonClient) ExecSyncContainer(
 			}
 
 			req.SetTerminal(cfg.Terminal)
-
-			if err := stringStringMapToMapEntryList(cfg.EnvVars, req.NewEnvVars); err != nil {
-				return fmt.Errorf("convert environment variables to map entry list: %w", err)
-			}
-
-			c.setCgroupManager(cfg.CgroupManager, req)
+			req.SetCgroupManager(proto.Conmon_CgroupManager(c.cgroupManager))
 
 			return nil
 		},
@@ -447,7 +309,6 @@ func execTimeout(ctx context.Context, timeout uint64) uint64 {
 // logDriverTypes maps the log driver types to their protocol values.
 var logDriverTypes = enumTable[LogDriverType, proto.Conmon_LogDriver_Type]{
 	{LogDriverTypeContainerRuntimeInterface, proto.Conmon_LogDriver_Type_containerRuntimeInterface},
-	{LogDriverTypeJSONLogger, proto.Conmon_LogDriver_Type_json},
 	{LogDriverTypeJournald, proto.Conmon_LogDriver_Type_journald},
 }
 
@@ -492,14 +353,6 @@ func initLogDrivers(
 
 		if err := n.SetContainerName(logDriver.ContainerName); err != nil {
 			return fmt.Errorf("set log driver container name: %w", err)
-		}
-
-		if err := n.SetTag(logDriver.Tag); err != nil {
-			return fmt.Errorf("set log driver tag: %w", err)
-		}
-
-		if err := stringStringMapToMapEntryList(logDriver.Labels, n.NewLabels); err != nil {
-			return fmt.Errorf("set log driver labels: %w", err)
 		}
 	}
 

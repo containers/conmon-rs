@@ -35,7 +35,6 @@ func TestNewKeepsServerWhichDoesNotAnswer(t *testing.T) {
 		ServerRunDir:     dir,
 		ConmonServerPath: "/does/not/exist",
 		Runtime:          "/does/not/exist",
-		ClientLogger:     logrus.New(),
 		timeouts:         timeouts,
 	})
 
@@ -113,7 +112,6 @@ func TestNewReplacesServerWhichGoesAway(t *testing.T) {
 			ServerRunDir:     dir,
 			ConmonServerPath: "/does/not/exist",
 			Runtime:          "/does/not/exist",
-			ClientLogger:     logrus.New(),
 			timeouts:         shortTimeouts(),
 		})
 
@@ -177,7 +175,6 @@ func TestNewStartsServerOnlyWithoutListener(t *testing.T) {
 			ServerRunDir:     dir,
 			ConmonServerPath: "/does/not/exist",
 			Runtime:          "/does/not/exist",
-			ClientLogger:     logrus.New(),
 		})
 
 		return err
@@ -494,11 +491,11 @@ func TestShutdown(t *testing.T) {
 			cmd := startTestServer(t, false)
 			c := newClient(cmd.Process.Pid)
 
-			if err := c.Shutdown(); err != nil {
+			if err := c.ShutdownContext(context.Background()); err != nil {
 				t.Fatalf("shutdown: %v", err)
 			}
 
-			if err := c.Shutdown(); err != nil {
+			if err := c.ShutdownContext(context.Background()); err != nil {
 				t.Fatalf("shutdown again: %v", err)
 			}
 
@@ -559,7 +556,7 @@ func TestShutdownServerWhichExited(t *testing.T) {
 		t.Fatalf("wait: %v", err)
 	}
 
-	if err := c.Shutdown(); err != nil {
+	if err := c.ShutdownContext(context.Background()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 }
@@ -585,7 +582,7 @@ func TestSetServerPID(t *testing.T) {
 		t.Fatal("pidfd of the old PID still open")
 	}
 
-	if err := c.Shutdown(); err != nil {
+	if err := c.ShutdownContext(context.Background()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 
@@ -619,7 +616,7 @@ func TestSetServerPID(t *testing.T) {
 		t.Fatalf("got error %v, want %v", err, syscall.ESRCH)
 	}
 
-	if err := c.Shutdown(); err != nil {
+	if err := c.ShutdownContext(context.Background()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 }
@@ -683,11 +680,10 @@ func TestNewKillsServerWhichDoesNotComeUp(t *testing.T) {
 	timeouts := shortTimeouts()
 	start := time.Now()
 
-	_, err := NewContext(ctx, &ConmonServerConfig{
+	_, err := newContext(ctx, &ConmonServerConfig{
 		ServerRunDir:     dir,
 		ConmonServerPath: binary,
 		Runtime:          "/does/not/exist",
-		ClientLogger:     logrus.New(),
 		timeouts:         timeouts,
 	})
 	if !errors.Is(err, ErrServerNotUp) || !errors.Is(err, context.DeadlineExceeded) {
@@ -721,11 +717,10 @@ func TestNewReportsServerWhichExited(t *testing.T) {
 	// listening, like a server which crashed right after the fork.
 	binary := writeTestBinary(t, `printf %s $$ >"$4/pidfile"`)
 
-	_, err := NewContext(t.Context(), &ConmonServerConfig{
+	_, err := newContext(t.Context(), &ConmonServerConfig{
 		ServerRunDir:     dir,
 		ConmonServerPath: binary,
 		Runtime:          "/does/not/exist",
-		ClientLogger:     logrus.New(),
 		timeouts:         shortTimeouts(),
 	})
 	if !errors.Is(err, ErrServerExited) || !errors.Is(err, ErrServerUnreachable) {
@@ -758,11 +753,10 @@ func TestNewTakesPIDFromServer(t *testing.T) {
 	done := make(chan result, 1)
 
 	go func() {
-		cl, err := NewContext(t.Context(), &ConmonServerConfig{
+		cl, err := newContext(t.Context(), &ConmonServerConfig{
 			ServerRunDir:     dir,
 			ConmonServerPath: binary,
 			Runtime:          "/does/not/exist",
-			ClientLogger:     logrus.New(),
 		})
 		done <- result{cl, err}
 	}()
@@ -773,7 +767,7 @@ func TestNewTakesPIDFromServer(t *testing.T) {
 
 	serveVersionSocket(t, dir, versionConmon{
 		pid:      uint32(server.Process.Pid),
-		features: []string{FeatureSdNotify},
+		features: []string{FeatureIdleTimeout},
 	})
 
 	res := <-done
@@ -788,15 +782,15 @@ func TestNewTakesPIDFromServer(t *testing.T) {
 	}
 
 	// The features of the answer got recorded.
-	if !cl.SupportsFeature(FeatureSdNotify) || cl.SupportsFeature(FeaturePortForward) {
-		t.Fatalf("got features %v, want only %q", cl.serverFeatures(), FeatureSdNotify)
+	if !cl.SupportsFeature(FeatureIdleTimeout) || cl.SupportsFeature(FeaturePortForward) {
+		t.Fatalf("got features %v, want only %q", cl.serverFeatures(), FeatureIdleTimeout)
 	}
 
 	if _, err := os.Stat(cl.pidFile()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("PID file not removed: %v", err)
 	}
 
-	if err := cl.Shutdown(); err != nil {
+	if err := cl.ShutdownContext(context.Background()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 
@@ -829,11 +823,10 @@ func TestNewContextCancelled(t *testing.T) {
 			//nolint:contextcheck // writes the binary for the whole test
 			binary := writeTestBinary(t, `touch "$4/started"`)
 
-			_, err := NewContext(ctx, &ConmonServerConfig{
+			_, err := newContext(ctx, &ConmonServerConfig{
 				ServerRunDir:     dir,
 				ConmonServerPath: binary,
 				Runtime:          "/does/not/exist",
-				ClientLogger:     logrus.New(),
 			})
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("got error %v, want %v", err, context.Canceled)
@@ -869,9 +862,8 @@ func TestShutdownWithoutPID(t *testing.T) {
 	// A zero PID would signal the process group of the caller. Nothing gets
 	// stopped then, the attach sessions keep their stdin.
 	for name, stop := range map[string]func() error{
-		"Shutdown":    c.Shutdown,
-		"Kill":        c.Kill,
-		"KillContext": func() error { return c.KillContext(t.Context()) },
+		"ShutdownContext": func() error { return c.ShutdownContext(t.Context()) },
+		"KillContext":     func() error { return c.KillContext(t.Context()) },
 	} {
 		if err := stop(); !errors.Is(err, ErrServerPIDUnknown) {
 			t.Fatalf("%s: got error %v, want %v", name, err, ErrServerPIDUnknown)
@@ -1092,7 +1084,7 @@ func TestShutdownAfterReconnectToAnotherServer(t *testing.T) {
 	}
 
 	// Shutdown stops the server the client talks to.
-	if err := c.Shutdown(); err != nil {
+	if err := c.ShutdownContext(context.Background()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 
@@ -1163,7 +1155,7 @@ func TestShutdownPicksUpReplacement(t *testing.T) {
 
 			serveVersionSocket(t, dir, versionConmon{pid: uint32(second.Process.Pid)})
 
-			stop := c.Shutdown
+			stop := func() error { return c.ShutdownContext(t.Context()) }
 			if kill {
 				stop = func() error { return c.KillContext(t.Context()) }
 			}
@@ -1371,7 +1363,7 @@ func TestShutdownClosesAttachStdin(t *testing.T) {
 	}
 	defer c.endAttachSession(session)
 
-	if err := c.Shutdown(); err != nil {
+	if err := c.ShutdownContext(context.Background()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 
@@ -1416,7 +1408,7 @@ func TestKillContext(t *testing.T) {
 	}
 
 	// A server which is gone already is no error.
-	if err := c.Kill(); err != nil {
+	if err := c.KillContext(context.Background()); err != nil {
 		t.Fatalf("kill again: %v", err)
 	}
 
@@ -1546,7 +1538,7 @@ func TestConnectRunningServerIgnoresOtherSocketTypes(t *testing.T) {
 
 	dir := t.TempDir()
 
-	// A packet socket, like the attach or fd sockets, which the server
+	// A packet socket, like the attach sockets, which the server
 	// replaces on start.
 	listener, err := net.ListenUnix(
 		"unixpacket",
@@ -1595,11 +1587,10 @@ func TestNewRemovesStalePIDFile(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 	defer cancel()
 
-	_, err := NewContext(ctx, &ConmonServerConfig{
+	_, err := newContext(ctx, &ConmonServerConfig{
 		ServerRunDir:     dir,
 		ConmonServerPath: binary,
 		Runtime:          "/does/not/exist",
-		ClientLogger:     logrus.New(),
 		timeouts:         shortTimeouts(),
 	})
 	if !errors.Is(err, ErrServerNotUp) {
@@ -1628,11 +1619,10 @@ func TestNewKeepsPIDFileOfServerNotStopped(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
 	defer cancel()
 
-	_, err := NewContext(ctx, &ConmonServerConfig{
+	_, err := newContext(ctx, &ConmonServerConfig{
 		ServerRunDir:     dir,
 		ConmonServerPath: binary,
 		Runtime:          "/does/not/exist",
-		ClientLogger:     logrus.New(),
 		timeouts:         shortTimeouts(),
 	})
 	if !errors.Is(err, ErrServerNotUp) {
@@ -1659,7 +1649,6 @@ func TestNewDropsLaunchEnvironment(t *testing.T) {
 		ServerRunDir:     dir,
 		ConmonServerPath: binary,
 		Runtime:          "/does/not/exist",
-		ClientLogger:     logrus.New(),
 		Env: []string{
 			"CONMON_VERSION=full",
 			"CONMON_VERSION_JSON=full",
@@ -1723,7 +1712,6 @@ func TestNewReportsServerErrors(t *testing.T) {
 				LogDriver:        tc.driver,
 				Env:              tc.env,
 				Stderr:           stderr,
-				ClientLogger:     logrus.New(),
 			})
 			if err == nil {
 				t.Fatal("started a server which failed")

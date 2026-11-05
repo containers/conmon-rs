@@ -54,12 +54,12 @@ struct LogLoop {
     attach: SharedContainerAttach,
     logger: crate::container_log::SharedContainerLog,
     cri: tempfile::NamedTempFile,
-    json: tempfile::NamedTempFile,
+    lines: crate::container_log::test_helpers::Journal,
     task: JoinHandle<Result<()>>,
 }
 
 async fn log_loop() -> Result<LogLoop> {
-    let (cri, json, logger) = crate::container_log::test_helpers::container_log(true).await?;
+    let (cri, lines, logger) = crate::container_log::test_helpers::container_log(true).await?;
     let attach = SharedContainerAttach::default();
     let (writer, reader) = tokio::io::duplex(1024);
     let task = task::spawn(ContainerIO::read_loop(
@@ -77,7 +77,7 @@ async fn log_loop() -> Result<LogLoop> {
         attach,
         logger,
         cri,
-        json,
+        lines,
         task,
     })
 }
@@ -145,7 +145,7 @@ async fn exit_files_wait_for_the_last_line() -> Result<()> {
     drop(held);
     wait.await?;
     assert!(
-        crate::container_log::test_helpers::read(&l.json)?
+        crate::container_log::test_helpers::read(&l.lines)?
             .contains(r#""message":"no newline","partial":true"#)
     );
     l.task.await?
@@ -162,7 +162,7 @@ async fn nothing_gets_logged_after_the_output_finished() -> Result<()> {
     // ending. It gets written once the read loop ended.
     ReapableChild::finish_output(l.attach.clone(), &l.logger).await;
     (&mut l.task).await??;
-    let read = || crate::container_log::test_helpers::read(&l.json);
+    let read = || crate::container_log::test_helpers::read(&l.lines);
     assert!(read()?.contains(r#""message":"no newline","partial":true"#));
 
     // Its later output does not reach the log anymore.
@@ -202,13 +202,13 @@ async fn slow_exec_consumers_get_all_output() -> Result<()> {
     // The process wrote its output and exited.
     let sh = spawn_sh("exit 0")?;
     let call = reaper.begin_call(distant_deadline())?;
-    let mut child = child(sh.pid, None, &dir.path().join("exit"), &[])?;
+    let mut child = child(sh.pid, None, &dir.path().join("exit"))?;
     child.kind = ChildKind::Exec;
     child.exit_paths = vec![];
     child.io = io.clone();
     let token = child.token.clone();
     let _stop = attach.stop_output_on_exit(token.clone());
-    let mut exit_rx = reaper.watch_grandchild(child, vec![], call)?;
+    let mut exit_rx = reaper.watch_grandchild(child, call)?;
     exit_rx.recv().await?;
 
     let mut received = 0;

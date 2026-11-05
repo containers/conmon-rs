@@ -8,11 +8,9 @@ use crate::{
     child_reaper::ChildReaper,
     config::{Config, LogDriver},
     container_io::DRAIN_MAX_WAIT,
-    fd_socket::FdSocket,
     fs_util, init,
     journal::{self, Journal},
     listener,
-    pause::Pause,
     streaming_server::StreamingServer,
 };
 use anyhow::{Context, Result, format_err};
@@ -69,17 +67,8 @@ const CLIENT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const _: () = assert!(Server::SHUTDOWN_TIMEOUT.as_nanos() < CLIENT_STOP_TIMEOUT.as_nanos());
 
 // The cleanup gets what the tracer and the runtime leave of the shutdown.
-// That leaves the grandchildren and a running initialization of the pause
-// instance time after what the pause shutdown and the sockets take, also
-// after the grace of the containers on SIGTERM, which leaves the killed ones
-// time to drain their output.
-const _: () = assert!(
-    Server::CLEANUP_TIMEOUT.as_nanos()
-        > Server::TERMINATE_GRACE.as_nanos()
-            + Server::SOCKET_REMOVAL_TIMEOUT.as_nanos()
-            + Pause::KILL_WAIT.as_nanos()
-            + Pause::STOP_WAIT.as_nanos()
-);
+// That leaves the killed grandchildren time to drain their output after the
+// grace of the containers on SIGTERM and what the socket takes.
 const _: () = assert!(
     Server::CLEANUP_TIMEOUT.as_nanos()
         > Server::TERMINATE_GRACE.as_nanos()
@@ -106,9 +95,6 @@ pub(crate) struct Server {
     /// Child reaper instance.
     reaper: Arc<ChildReaper>,
 
-    /// Fd socket instance.
-    fd_socket: Arc<FdSocket>,
-
     /// OpenTelemetry tracer instance.
     #[cfg(feature = "tracing")]
     tracer: Option<SdkTracerProvider>,
@@ -128,11 +114,6 @@ impl Server {
         &self.reaper
     }
 
-    /// Fd socket instance.
-    pub(crate) fn fd_socket(&self) -> &Arc<FdSocket> {
-        &self.fd_socket
-    }
-
     /// Streaming server instance.
     pub(crate) fn streaming_server(&self) -> &Arc<StreamingServer> {
         &self.streaming_server
@@ -150,7 +131,6 @@ impl Server {
         Self {
             config: Arc::new(config),
             reaper: Default::default(),
-            fd_socket: Default::default(),
             #[cfg(feature = "tracing")]
             tracer: Default::default(),
             streaming_server: Default::default(),
@@ -166,9 +146,8 @@ impl Server {
     /// example a test harness waiting for its own pipe to close.
     ///
     /// conmon does the same thing, see `close_all_fds_ge_than(3)` there. Any
-    /// descriptor conmon-rs actually needs is either created after this point
-    /// or received later over the fd socket, so nothing above stderr is worth
-    /// keeping.
+    /// descriptor conmon-rs actually needs is created after this point, so
+    /// nothing above stderr is worth keeping.
     #[expect(unsafe_code, reason = "closing descriptors which may be gone")]
     fn close_inherited_fds() {
         for fd in Self::inherited_fds() {
@@ -319,8 +298,8 @@ impl Server {
     /// Like a daemon, do not keep the standard streams of the caller, like
     /// the file the Go client reads the launch errors from, see
     /// `startServer` in `pkg/client`. The processes the server starts, like
-    /// cleanup commands, would write into it otherwise. Only the stdout log
-    /// driver writes to them.
+    /// the runtimes, would write into it otherwise. Only the stdout log driver
+    /// writes to them.
     fn redirect_stdio(&self) -> Result<()> {
         if self.config().log_driver() == LogDriver::Stdout {
             return Ok(());
@@ -436,13 +415,13 @@ impl Server {
     /// the very end of the shutdown.
     const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 
-    /// How long the cleanup may take: the grandchildren, the pause instance
-    /// and the sockets, whatever the tracer and the runtime leave.
+    /// How long the cleanup may take: the grandchildren and the socket,
+    /// whatever the tracer and the runtime leave.
     const CLEANUP_TIMEOUT: Duration = Self::SHUTDOWN_TIMEOUT
         .saturating_sub(Self::TRACER_SHUTDOWN_TIMEOUT)
         .saturating_sub(Self::RUNTIME_SHUTDOWN_TIMEOUT);
 
-    /// How long the removal of the sockets may take at the end of the
+    /// How long the removal of the socket may take at the end of the
     /// cleanup, through a blocking pool which stuck threads may fill up.
     const SOCKET_REMOVAL_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -531,7 +510,6 @@ impl Server {
     async fn run_tasks(self) -> Result<Result<()>> {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let socket = self.config().socket();
-        let fd_socket = self.config().fd_socket();
         let reaper = self.reaper.clone();
         self.reaper.clone().start_orphan_sweep();
         // Before the backend binds the socket, a signal which arrives once a
@@ -544,7 +522,7 @@ impl Server {
         // signal handler next to it.
         let local = LocalSet::new();
         local.spawn_local(Self::traced(
-            Self::start_signal_handler(signals, reaper, socket, fd_socket, shutdown_tx),
+            Self::start_signal_handler(signals, reaper, socket, shutdown_tx),
             debug_span!("signal_handler"),
         ));
         local
@@ -575,7 +553,6 @@ impl Server {
         signals: Result<[SignalStream; 2]>,
         reaper: Arc<ChildReaper>,
         socket: T,
-        fd_socket: T,
         shutdown_tx: oneshot::Sender<Result<()>>,
     ) {
         let signalled = Self::wait_for_signal(signals, &reaper).await;
@@ -586,7 +563,7 @@ impl Server {
                 Instant::now() + Self::CLEANUP_TIMEOUT
             }
         };
-        let shutdown = Self::shutdown(reaper, socket, fd_socket, deadline, Pause::shutdown).await;
+        let shutdown = Self::shutdown(reaper, socket, deadline).await;
         let result = Self::all_ok([signalled.map(drop), shutdown]);
         // The backend returns it, the server exits non-zero on a failure.
         debug!("Sending shutdown message");
@@ -647,22 +624,13 @@ impl Server {
     /// unless a log driver is stuck.
     const TERMINATE_GRACE: Duration = Duration::from_secs(5);
 
-    /// Clean up and stop the pause instance through `pause` until the
-    /// `deadline`, and report what did not finish.
-    async fn shutdown<T: AsRef<Path>, F: Future<Output = Result<()>>>(
+    /// Clean up until the `deadline`, and report what did not finish.
+    async fn shutdown<T: AsRef<Path>>(
         reaper: Arc<ChildReaper>,
         socket: T,
-        fd_socket: T,
         deadline: Instant,
-        pause: impl FnOnce(Instant) -> F,
     ) -> Result<()> {
-        // The pause shutdown may wait for a running initialization, the
-        // containers must not wait for that.
-        let (cleaned, paused) = tokio::join!(
-            Self::cleanup(reaper, socket, fd_socket, deadline),
-            Self::until(deadline, pause(deadline)),
-        );
-        let result = Self::all_ok([cleaned, paused.context("stop pause")]);
+        let result = Self::cleanup(reaper, socket, deadline).await;
         if let Err(e) = &result {
             error!("Shutdown did not finish: {e:#}");
         }
@@ -677,13 +645,12 @@ impl Server {
         received.context("signal handler ended without a result")
     }
 
-    /// Kill the grandchildren and remove the socket files, until the
+    /// Kill the grandchildren and remove the socket file, until the
     /// `deadline`. Failures are collected rather than returned early, the
     /// server must stop in any case.
     async fn cleanup<T: AsRef<Path>>(
         reaper: Arc<ChildReaper>,
         socket: T,
-        fd_socket: T,
         deadline: Instant,
     ) -> Result<()> {
         debug!("Starting grandchildren cleanup task");
@@ -701,14 +668,7 @@ impl Server {
         .await
         .context("remove socket file");
 
-        debug!("Removing fd socket file {}", fd_socket.as_ref().display());
-        let fd_socket_removed = Self::until(deadline, async {
-            fs_util::removed(fs::remove_file(fd_socket).await).map_err(Into::into)
-        })
-        .await
-        .context("remove fd socket file");
-
-        Self::all_ok([killed, socket_removed, fd_socket_removed])
+        Self::all_ok([killed, socket_removed])
     }
 
     /// Run the future until the deadline, fail if it did not finish by then.

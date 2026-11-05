@@ -103,13 +103,13 @@ CI only runs the checks of the files, like prettier, typos and the links. It
 skips the fuzzing of a PR which does not change the Rust sources, see the
 `changes` job of [ci.yml](.github/workflows/ci.yml).
 
-The unit tests run as a regular user, and so do most integration tests. The
-OOM and namespace specs need elevated permissions for the cgroups and bind
-mounts and skip or fail otherwise. Like CI, build the server, download the Go
-modules and install ginkgo as your user first, so that `target` and `.build`
-do not end up owned by root. Then run the suite as root with the `PATH` which
-finds `go`, your Go settings like `GOPROXY` (`GOENV`), your module cache and
-your Go toolchain. Leave out `GOCACHE`, root would leave files of its own in
+The unit tests run as a regular user, and so do most integration tests. The OOM
+specs need elevated permissions for the cgroups, like the port forward specs for
+the network namespaces, and skip otherwise. Like CI, build the server, download
+the Go modules and install ginkgo as your user first, so that `target` and
+`.build` do not end up owned by root. Then run the suite as root with the `PATH`
+which finds `go`, your Go settings like `GOPROXY` (`GOENV`), your module cache
+and your Go toolchain. Leave out `GOCACHE`, root would leave files of its own in
 your build cache:
 
 ```console
@@ -160,8 +160,12 @@ compatible on the wire:
   v1.0.0 changed the type of the `metadataOld` fields from `Data` to `Void`,
   which moved the pointer slots of the fields after them and broke every
   client and server of another major version.
-- Retire a field by renaming it, for example to `fooOld`, with its type
-  unchanged, and document that the server ignores it.
+- Retire a field by renaming it, for example to `fooOld`, with its slot and
+  type unchanged. If ignoring a value which an older client sets would change
+  what the server does, the server rejects a request with a non-empty one as
+  unimplemented, otherwise it ignores the field, like `execSessionIdOld`. The
+  schema comment of the field says which. A retired method keeps its ordinal
+  and fails as unimplemented.
 - New behavior which a client has to know about before it relies on it gets
   a feature string in
   [version.rs](conmon-rs/server/src/version.rs) and a matching `Feature`
@@ -239,9 +243,9 @@ targets for what clients and containers send: the streaming protocols (SPDY
 frames, header blocks and connections, WebSocket messages, resize events,
 upgrade headers and port forward queries, the setup of exec, attach and port
 forward sessions and their pending stdin), the container output as log lines,
-the notify messages, the process stat files with their command names and the
-cgroup files of the OOM watcher with the cgroup paths of the containers, and
-for the journal entries the server writes.
+the process stat files with their command names and the cgroup files of the OOM
+watcher with the cgroup paths of the containers, and for the journal entries the
+server writes.
 `cargo fuzz list` lists them, each file in
 [fuzz/fuzz_targets](./fuzz/fuzz_targets) tells what its target covers. They
 need a nightly toolchain, for example `cargo +nightly fuzz run spdy_frames`, CI

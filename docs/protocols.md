@@ -5,15 +5,15 @@
 All operations are RPCs on the `conmon.sock` UNIX domain socket, defined in
 [conmon-rs/server/proto/conmon.capnp](../conmon-rs/server/proto/conmon.capnp):
 `version`, `createContainer`, `execSyncContainer`, `attachContainer`,
-`reopenLogContainer`, `setWindowSizeContainer`, `createNamespaces`,
-`startFdSocket`, `serveExecContainer`, `serveAttachContainer` and
-`servePortForwardContainer`. The Go client wraps each of them in a method with
-plain Go request and response structures. An OCI runtime which hangs gets
-killed and its call fails: for `createContainer` after 10 minutes (since
-v1.2.0), for an exec 60 seconds after its timeout, or after 60 seconds without
-one (since v1.2.0), as the runtime only starts the exec process. Each runtime
-runs in a process group of its own, which gets killed with it, so the helpers
-it started do not stay behind.
+`reopenLogContainer`, `setWindowSizeContainer`, `serveExecContainer`,
+`serveAttachContainer` and `servePortForwardContainer`. The Go client wraps them
+in methods with plain Go request and response structures, it applies the
+terminal sizes of an attach with `setWindowSizeContainer`. An OCI runtime which
+hangs gets killed and its call fails: for `createContainer` after 10 minutes
+(since v1.2.0), for an exec 60 seconds after its timeout, or after 60 seconds
+without one (since v1.2.0), as the runtime only starts the exec process. Each
+runtime runs in a process group of its own, which gets killed with it, so the
+helpers it started do not stay behind.
 
 `execSyncContainer` returns at most 16 MiB less 64 KiB of output (since
 unreleased), stdout and stderr together, like conmon, so that the response
@@ -33,13 +33,12 @@ matches them with errors like `ErrContainerNotFound`.
 the requested path, which has to be absolute since v1.2.2. Packets from the
 client are the container's stdin, passed on as they are, NUL bytes included. A
 packet of more than 33 KiB gets truncated to its first 33 KiB. The Go client
-sends one read of its stdin per packet, at most 32 KiB plus the start of a
-detach key sequence which it held back. The client's input ends when it shuts
-down the write side of its connection. Packets to the client start with one byte
-selecting the stream, `2` for stdout and `3` for stderr, followed by up to 8192
-bytes of data. A single `0` byte tells the client that the container output
-ended. This is the same protocol conmon speaks, so existing attach clients work
-unchanged.
+sends one read of its stdin per packet, at most 32 KiB. The client's input ends
+when it shuts down the write side of its connection. Packets to the client start
+with one byte selecting the stream, `2` for stdout and `3` for stderr, followed
+by up to 8192 bytes of data. A single `0` byte tells the client that the
+container output ended. This is the same protocol conmon speaks, so existing
+attach clients work unchanged.
 
 With `stopAfterStdinEof`, the server closes the container's stdin once the
 input of a client ended, the output is still forwarded until the container
@@ -265,42 +264,22 @@ for a token which is unknown, used or expired gets a bare 404, one whose token
 is not 32 lowercase hex digits a 400 `Invalid URL`, also one with uppercase
 hex digits.
 
-## File descriptor socket
-
-`startFdSocket` makes the server listen on a `SOCK_SEQPACKET` UNIX socket for
-passing file descriptors, which the client can then reference by slot number in
-`createContainer` (`additionalFds` and `leakFds`). A request carries the
-descriptors as `SCM_RIGHTS` ancillary data and one little endian `u64`
-`(request_id << 32) | num_fds`. The response repeats that `u64` followed by one
-`u64` slot per descriptor. On error the lower 32 bits of the first word are all
-ones and the rest of the message is the error text. A request carries at most
-253 descriptors, the most the kernel passes with one message (`SCM_MAX_FD`).
-Received descriptors are closed when the connection ends or on an empty request,
-a `u64` of zero without descriptors, which gets no response. A connection holds
-at most 1024 descriptors which no request took yet, and all connections together
-a quarter of the open files limit of the server, a request beyond that fails.
-The full description lives in the module documentation of
-[fd_socket.rs](../conmon-rs/server/src/fd_socket.rs).
-
 ## Features
 
 Beyond its version, `version` reports the optional features of a server,
 which clients check before they rely on them. `conmonrs --version-json` prints
 them as well, and so does `conmonrs --version` since v1.2.2:
 
-| Feature              | Since  | What the server does                                                                                                                  |
-| -------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `sdnotify`           | v1.1.0 | Relays the `sd_notify` messages of a container to the `sdnotifySocket` of `createContainer`.                                          |
-| `portforward`        | v1.2.0 | `servePortForwardContainer` forwards ports, see [Port forwarding](#port-forwarding).                                                  |
-| `idletimeout`        | v1.2.0 | Exec and attach sessions apply their `idleTimeoutSec`, every server with `portforward` applies the one of port forwarding.            |
-| `streamingprotocols` | v1.2.0 | Exec and attach sessions speak SPDY/3.1 and the WebSocket protocols before `v5.channel.k8s.io`.                                       |
-| `journaldfields`     | v1.2.1 | The `journald` container log driver writes the `containerName`, `tag` and `labels` of the request, see [Logging](logging.md#logging). |
+| Feature              | Since  | What the server does                                                                                                       |
+| -------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `portforward`        | v1.2.0 | `servePortForwardContainer` forwards ports, see [Port forwarding](#port-forwarding).                                       |
+| `idletimeout`        | v1.2.0 | Exec and attach sessions apply their `idleTimeoutSec`, every server with `portforward` applies the one of port forwarding. |
+| `streamingprotocols` | v1.2.0 | Exec and attach sessions speak SPDY/3.1 and the WebSocket protocols before `v5.channel.k8s.io`.                            |
 
 How to rely on them:
 
 - Servers before v1.1.0 report an empty list, they do not know the field.
-- Features only get added, a later release never drops one. A client
-  ignores the ones it does not know.
+- A client ignores the features it does not know.
 - Check the features of the server the client talks to, not the ones of the
   binary on disk: a server keeps running across upgrades, see
   [Upgrading](cri-o.md#upgrading).
@@ -361,9 +340,6 @@ How to rely on them:
   upgraded yet get served at once.
 - v1.2.1: exec and attach tokens only work on the path of their kind, before
   on either of their paths.
-- v1.2.1: a connection of the fd socket holds at most 1024 descriptors which no
-  request took yet, and all connections together a quarter of the open files
-  limit of the server.
 - v1.2.0: the runtime of a `createContainer` gets killed after 10 minutes, the
   one of an exec without a timeout after 60 seconds, each together with its
   process group. Before, a runtime which hung kept its call waiting until it

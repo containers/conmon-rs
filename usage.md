@@ -10,7 +10,6 @@ file moved to:
 | `#compatibility`                  | [Compatibility](docs/cri-o.md#compatibility)                                       |
 | `#upgrading`                      | [Upgrading](docs/cri-o.md#upgrading)                                               |
 | `#command-line`                   | [Command line](docs/server.md#command-line)                                        |
-| `#the-pause-subcommand`           | [The `pause` subcommand](docs/server.md#the-pause-subcommand)                      |
 | `#protocols`                      | [Protocols](docs/protocols.md)                                                     |
 | `#capn-proto-rpc`                 | [Cap'n Proto RPC](docs/protocols.md#capn-proto-rpc)                                |
 | `#attach-socket`                  | [Attach socket](docs/protocols.md#attach-socket)                                   |
@@ -20,7 +19,6 @@ file moved to:
 | `#limits-and-timeouts`            | [Limits and timeouts](docs/protocols.md#limits-and-timeouts)                       |
 | `#streaming-protocols-by-version` | [Streaming protocols by version](docs/protocols.md#streaming-protocols-by-version) |
 | `#streaming-security`             | [Streaming security](docs/protocols.md#streaming-security)                         |
-| `#file-descriptor-socket`         | [File descriptor socket](docs/protocols.md#file-descriptor-socket)                 |
 | `#features`                       | [Features](docs/protocols.md#features)                                             |
 | `#logging`                        | [Logging](docs/logging.md#logging)                                                 |
 | `#oom-reporting`                  | [OOM reporting](docs/logging.md#oom-reporting)                                     |
