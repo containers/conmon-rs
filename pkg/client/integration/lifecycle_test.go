@@ -12,6 +12,8 @@ import (
 	"github.com/containers/conmon-rs/pkg/client"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/opencontainers/runtime-tools/generate"
 )
 
 var _ = Describe("ConmonClient", func() {
@@ -233,6 +235,94 @@ var _ = Describe("ConmonClient", func() {
 			sut = nil
 
 			expectServerGone(pid)
+		}, SpecTimeout(specTimeout))
+
+		// startTerminable starts a server with a started container which
+		// runs the process, and returns the PID and the output of the
+		// server. The container shares the PID namespace of the host, so
+		// that its process gets the default action of SIGTERM, which the
+		// init of a PID namespace of its own ignores. Its /proc is a bind
+		// mount of the one of the host, a rootless runtime cannot mount a
+		// new one for that namespace.
+		startTerminable := func(ctx context.Context, processArgs []string) (uint32, *syncBuffer) {
+			tr = newTestRunner()
+			tr.createRuntimeConfigWithProcessArgs(false, processArgs, func(g generate.Generator) {
+				Expect(g.RemoveLinuxNamespace(string(specs.PIDNamespace))).To(Succeed())
+				g.RemoveMount("/proc")
+				g.AddMount(specs.Mount{
+					Destination: "/proc",
+					Type:        "bind",
+					Source:      "/proc",
+					Options:     []string{"rbind"},
+				})
+			})
+
+			// The server outlives New and keeps writing to it.
+			output := &syncBuffer{}
+			sut = tr.configGivenEnvWith(func(cfg *client.ConmonServerConfig) {
+				cfg.Stdout = output
+				cfg.Stderr = output
+			})
+			tr.createContainer(ctx, sut, false)
+			tr.startContainer()
+
+			return sut.PID(), output
+		}
+
+		It("should terminate the containers on SIGTERM", func(ctx SpecContext) {
+			pid, _ := startTerminable(ctx, []string{"/busybox", "sleep", "1000"})
+			Expect(syscall.Kill(int(pid), syscall.SIGTERM)).To(Succeed())
+
+			// The hooks must not look at the server, which goes away by
+			// itself, only the client is left to release.
+			DeferCleanup(sut.Close)
+
+			sut = nil
+
+			expectServerGone(pid)
+
+			// The container exited on the SIGTERM the server forwarded, like
+			// a shell reports it, before the server stopped.
+			Expect(fileContents(tr.exitPath())).To(Equal("143"))
+		}, SpecTimeout(specTimeout))
+
+		It("should kill the containers on a second SIGTERM", func(ctx SpecContext) {
+			// The shell ignores SIGTERM before it runs sleep, which keeps
+			// ignoring it.
+			sleep := []string{"/busybox", "sleep", "1001"}
+			pid, output := startTerminable(ctx, []string{
+				"/busybox", "sh", "-c", "trap '' TERM; exec " + strings.Join(sleep, " "),
+			})
+			Eventually(pidsWithCmdline, 10*time.Second).
+				WithArguments(sleep).
+				ShouldNot(BeEmpty())
+
+			DeferCleanup(sut.Close)
+
+			sut = nil
+
+			start := time.Now()
+
+			Expect(syscall.Kill(int(pid), syscall.SIGTERM)).To(Succeed())
+			// A signal which arrives before the server took the first one
+			// would count as the same. The wait counts towards the 4 seconds
+			// below, so a slow log fails here.
+			Eventually(output.String, 2*time.Second).Should(
+				ContainSubstring("Received SIGTERM"),
+				"the server did not log the first SIGTERM within 2 seconds",
+			)
+			Expect(syscall.Kill(int(pid), syscall.SIGTERM)).To(Succeed())
+
+			// The server killed the container right away instead of
+			// waiting for the grace of 5 seconds, the time includes the
+			// wait for the first SIGTERM to arrive.
+			Eventually(func() error {
+				return syscall.Kill(int(pid), 0)
+			}, 4*time.Second).Should(MatchError(syscall.ESRCH))
+			Expect(time.Since(start)).To(BeNumerically("<", 4*time.Second))
+			expectServerGone(pid)
+			Expect(output.String()).To(ContainSubstring("Received another SIGTERM"))
+			Expect(fileContents(tr.exitPath())).To(Equal("137"))
 		}, SpecTimeout(specTimeout))
 
 		It("should leave created children behind if being killed", func(ctx SpecContext) {

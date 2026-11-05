@@ -166,6 +166,13 @@ type CreateContainerResponse struct {
 // start command of the runtime, which the caller runs, before it runs the
 // command of the container. The server writes the exit and OOM files and runs
 // the cleanup command once the container exited.
+//
+// A context which ends only ends the wait of the client. A server since
+// v1.1.0 finishes the create in a task of its own and keeps watching the
+// container, which may exist although the call failed with the error of the
+// context, so the caller deletes it with the runtime. A server since v1.2.0
+// kills a runtime which takes longer than 10 minutes to create the container
+// and fails the call.
 func (c *ConmonClient) CreateContainer(
 	ctx context.Context, cfg *CreateContainerConfig,
 ) (_ *CreateContainerResponse, retErr error) {

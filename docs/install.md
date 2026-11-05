@@ -29,8 +29,11 @@ signatures and fail. The signature has to come from the ci workflow run of
 exactly that commit on `main`. Without cosign, the script only checks the
 SHA-256 checksum, the one of `sha256sums.txt` for a release and the one in the
 bucket otherwise, which only shows that the download is complete. It fails if no
-checksum got published, like for old commits and the releases before v1.1.0,
-unless `-k` is given.
+checksum got published, like for old commits, and for a release if its
+`sha256sums.txt` cannot be fetched, like for the releases before v1.1.0, which
+have none, unless `-k` is given. With `-k`, a release falls back to the checksum
+in the bucket with a warning, and a binary without any checksum gets installed
+unverified.
 
 Without `-t` and `-l`, the script checks with the GitHub API that the latest
 commit of the bucket is on `main`, and warns if it is more than a day older than

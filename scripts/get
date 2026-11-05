@@ -26,7 +26,7 @@ usage() {
     printf "  -l\tTag to be used\n"
     printf "  -a\tArchitecture to retrieve: %s (defaults to the local system)\n" "${ARCHES[*]}"
     printf "  -n\tDo not print the version after install, means don't execute the binary; the version is never printed for another architecture\n"
-    printf "  -k\tInstall the binary even if no checksum got published for it (insecure, only without cosign)\n"
+    printf "  -k\tInstall the binary even if no checksum got published for it, and fall back to the checksum of the bucket if the checksums of a release cannot be fetched (insecure, only without cosign)\n"
     printf "  -h\tShow this help message\n"
 }
 
@@ -271,16 +271,27 @@ verify_signature() {
 # A checksum only shows that the download is complete, not who built it.
 verify_checksum() {
     echo "No cosign found, verifying the checksum only"
-    # The checksums of a release come from GitHub, not from the bucket.
-    if [[ $TAG != "" ]] &&
-        curl_retry "https://github.com/$SLUG/releases/download/$TAG/sha256sums.txt" -o sha256sums.txt 2>/dev/null; then
-        echo "Using the checksums of release $TAG"
-        if ! grep -E "^[0-9a-f]{64}  conmonrs\.$ARCH\$" sha256sums.txt >"conmonrs.$ARCH.sha256"; then
-            echo "Release $TAG has no checksum for conmonrs.$ARCH"
+    # The checksums of a release come from GitHub, not from the bucket. Only
+    # -k falls back to the bucket if they cannot be fetched, like for the
+    # releases before v1.1.0, which have none, or if GitHub fails.
+    if [[ $TAG != "" ]]; then
+        if curl_retry "https://github.com/$SLUG/releases/download/$TAG/sha256sums.txt" -o sha256sums.txt; then
+            echo "Using the checksums of release $TAG"
+            if ! grep -E "^[0-9a-f]{64}  conmonrs\.$ARCH\$" sha256sums.txt >"conmonrs.$ARCH.sha256"; then
+                echo "Release $TAG has no checksum for conmonrs.$ARCH"
+                exit 1
+            fi
+            sha256sum -c "conmonrs.$ARCH.sha256"
+            return
+        fi
+        if [[ $INSECURE == "" ]]; then
+            echo "Unable to fetch the checksums of release $TAG, install cosign or use -k to fall back to the checksum of the bucket"
             exit 1
         fi
+        echo "WARNING: unable to fetch the checksums of release $TAG, falling back to the checksum of the bucket" >&2
+    fi
     # Older commits have no checksum file.
-    elif ! curl_retry "$BASE_URL/$COMMIT/conmonrs.$ARCH.sha256" -o "conmonrs.$ARCH.sha256" 2>/dev/null; then
+    if ! curl_retry "$BASE_URL/$COMMIT/conmonrs.$ARCH.sha256" -o "conmonrs.$ARCH.sha256" 2>/dev/null; then
         if [[ $INSECURE == "" ]]; then
             echo "No checksum published for commit $COMMIT, install cosign or use -k to skip the verification"
             exit 1

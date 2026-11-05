@@ -22,8 +22,14 @@ CONMON_BINARY ?=
 # The resident set size every spec checks the server against, and how much it
 # may grow over the execs of the memory leak specs. A dynamically linked
 # release build stays well below 10 MiB, the static glibc builds CI tests get
-# 5500 KiB (see .github/workflows/ci.yml).
+# 5500 KiB (see .github/workflows/ci.yml). Most of it is the mapped binary
+# and libraries (RssFile), an idle server has about 0.5 MiB of private
+# anonymous memory (RssAnon), which every spec checks against its own budget,
+# so that a regression of a few MiB does not hide in the slack of the total.
+# The RssAnon budget is a first guess, it gets tightened once CI printed the
+# values of every spec per architecture.
 MAX_RSS_KB ?= 10240
+MAX_RSS_ANON_KB ?= 4096
 MAX_RSS_GROWTH_KB ?= 2000
 # The generated Go code embeds a schema which differs between capnp versions,
 # use the one pinned by flake.lock. Set CAPNP=capnp to use the local one.
@@ -126,6 +132,7 @@ integration: .install.ginkgo $(if $(CONMON_BINARY),,release) ## Run the integrat
 	export CONMON_BINARY="$(abspath $(or $(CONMON_BINARY),target/release/$(BINARY)))" && \
 	export RUNTIME_BINARY="$(RUNTIME_PATH)" && \
 	export MAX_RSS_KB="$(MAX_RSS_KB)" && \
+	export MAX_RSS_ANON_KB="$(MAX_RSS_ANON_KB)" && \
 	export MAX_RSS_GROWTH_KB="$(MAX_RSS_GROWTH_KB)" && \
 	"$(GOTOOLS_BINDIR)/ginkgo" $(TEST_FLAGS) $(GINKGO_FLAGS)
 

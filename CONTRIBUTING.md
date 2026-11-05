@@ -123,7 +123,11 @@ $ sudo env PATH="$PATH" GOENV="$(go env GOENV)" GOMODCACHE="$(go env GOMODCACHE)
 `make unit` runs the Rust unit tests with and without the `tracing` feature,
 `make unit-go` the unit tests of the Go client, which need no server.
 
-`RUNTIME_PATH` selects the OCI runtime of the integration suite.
+`RUNTIME_PATH` selects the OCI runtime of the integration suite, runc by
+default, CI runs it with crun and on amd64 with the runc release of
+[install-runc](.github/install-runc) as well. `MAX_RSS_KB` and
+`MAX_RSS_ANON_KB` set the memory budgets of the server, see the
+[Makefile](Makefile).
 `CONMON_BINARY` selects the server to test, which the target builds
 otherwise, for example the static build of `make release-static`:
 
@@ -166,7 +170,10 @@ compatible on the wire:
   new fields, so the client checks the feature first.
 - Mark new fields, limits and other behavior changes which users can see
   with "since unreleased" in the schema, the Go documentation and the
-  documents in [docs](docs), the release replaces it with the version.
+  documents in [docs](docs), the release replaces it with the version. The
+  documents describe the current behavior, with the marker where a client or
+  operator has to check the version to rely on it, and list what changed, with
+  the previous behavior, in the "Changes" section at their end, newest first.
 
 `make verify-schema-layout`, which CI runs, guards these rules: it fails if a
 change moves an existing field of the schema to another slot.

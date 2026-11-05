@@ -14,9 +14,17 @@ configurations `runtime_type` and optionally the `monitor_path`, for example:
 default_runtime = "crun"
 
 [crio.runtime.runtimes.crun]
+runtime_path = "/usr/bin/crun"
 runtime_type = "pod"
+runtime_root = "/run/crun"
 monitor_path = "/path/to/conmonrs"  # Optional, lookup $PATH if not set
 ```
+
+A table of a runtime handler in a drop-in file replaces the whole handler of
+that name rather than merging its keys into the one of `crio.conf` or of an
+earlier drop-in. The table of the example is the complete definition of the
+`crun` handler, so it has to list every other option the handler needs, like
+its `allowed_annotations` or `monitor_env`, as well.
 
 The `pod` runtime type is what selects conmon-rs. A `monitor_path` pointing to
 conmonrs with the default `oci` runtime type does not work, CRI-O expects conmon
@@ -68,12 +76,12 @@ works with depends on the client it vendors, see
 The `monitor_env` of the runtime handler configures the servers which CRI-O
 starts for it:
 
-| Entry                          | Effect                                                                                                                                                                                                                                                       | Since CRI-O |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------- |
-| `LOG_DRIVER=<driver>`          | The server log driver (`--log-driver`): `systemd`, `stdout` or `none`. Without it, CRI-O starts the servers with `none`, so they write no logs (since v1.2.2, except for the message of a panic), see [Troubleshooting](troubleshooting.md#troubleshooting). | v1.34       |
-| `HEAPTRACK_OUTPUT_PATH=<path>` | Profiles the memory of the servers with heaptrack, see [Troubleshooting](troubleshooting.md#troubleshooting).                                                                                                                                                | v1.34       |
-| `HEAPTRACK_BINARY_PATH=<path>` | The heaptrack binary, also enables the profiling.                                                                                                                                                                                                            | v1.34       |
-| Any other `KEY=value`          | Part of the environment of the server, which passes it on to the runtime, its hooks and the cleanup commands, together with `CRI_O_EXTERNAL=1` and the `PATH` and `XDG_RUNTIME_DIR` of CRI-O. `CONMON_*` variables configure the server like its flags.      | v1.38       |
+| Entry                          | Effect                                                                                                                                                                                                                                                  | Since CRI-O |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `LOG_DRIVER=<driver>`          | The server log driver (`--log-driver`): `systemd`, `stdout` or `none`. Without it, CRI-O starts the servers with `none`, see [Server logs](troubleshooting.md#server-logs) and [Debugging a pod](troubleshooting.md#debugging-a-pod).                   | v1.34       |
+| `HEAPTRACK_OUTPUT_PATH=<path>` | Profiles the memory of the servers with heaptrack, see [Memory profiling](troubleshooting.md#memory-profiling).                                                                                                                                         | v1.34       |
+| `HEAPTRACK_BINARY_PATH=<path>` | The heaptrack binary, also enables the profiling.                                                                                                                                                                                                       | v1.34       |
+| Any other `KEY=value`          | Part of the environment of the server, which passes it on to the runtime, its hooks and the cleanup commands, together with `CRI_O_EXTERNAL=1` and the `PATH` and `XDG_RUNTIME_DIR` of CRI-O. `CONMON_*` variables configure the server like its flags. | v1.38       |
 
 CRI-O v1.37.2 and older start the servers with the environment of CRI-O and
 use no other `monitor_env` entries for them. The releases of the 1.37 branch
@@ -85,11 +93,18 @@ variables. Only the variables of the other flags take effect, in practice the
 tracing ones while the tracing of CRI-O is off, and only with a build with the
 `tracing` feature, see [Tracing](troubleshooting.md#tracing). Do not set
 `CONMON_SKIP_FORK`, `CONMON_VERSION` or `CONMON_VERSION_JSON`: the clients up to
-v1.2.1, which every CRI-O release vendors, pass them on to the server, which
-then hangs or fails every pod.
+v1.2.1, which the CRI-O releases up to v1.37 vendor, pass them on to the server,
+which then hangs or fails every pod. The client of v1.2.2, which CRI-O v1.38 and
+`main` vendor, drops them.
 
 Some CRI-O options do not reach the server. CRI-O passes `no_pivot` only to
-conmon, the server creates the containers without `--no-pivot`. The
+conmon, the server creates the containers without `--no-pivot`. CRI-O applies
+the `container_create_timeout` of a runtime handler only to conmon and VM
+runtimes: with a `pod` runtime handler, it waits for the server as long as the
+CRI request lasts, and a server since v1.2.0 kills a runtime which takes longer
+than its own limit of 10 minutes to create a container, see [Cap'n Proto
+RPC](protocols.md#capn-proto-rpc). A create which CRI-O gives up on still
+finishes on the server, which keeps watching the container. The
 `platform_runtime_paths` of a runtime handler only apply to some of the runtime
 calls which CRI-O makes itself, like update and checkpoint: the server runs the
 `runtime_path` of the handler for the containers it creates and the commands
@@ -114,7 +129,7 @@ clients before v1.0.0, and the other way around:
 | v1.35         | a commit before v0.7.3                                     | v0.7.3, v0.8.0     |
 | v1.36         | v0.7.3                                                     | v0.7.3, v0.8.0     |
 | v1.37         | v1.0.1 up to v1.37.2, v1.2.1 in the releases after v1.37.2 | v1.0.0 and newer   |
-| v1.38, `main` | v1.2.1                                                     | v1.0.0 and newer   |
+| v1.38, `main` | v1.2.2                                                     | v1.0.0 and newer   |
 
 The clients before v1.0.0 start the server with `--cgroup-manager`, which
 v1.0.0 removed: a newer server exits right away with
@@ -156,16 +171,36 @@ v1.37 this crosses the wire format break of v1.0.0: CRI-O v1.36 and older
 cannot start a server of v1.0.0 or newer, and the old servers of the pods
 which keep running report no features to a newer CRI-O. They still serve its
 requests, which carry no affected field besides the tracing metadata, but a
-CRI-O with the client of v1.2.1 serves exec, attach and port forwarding for
-these pods with its own streaming server instead. Drain the node before an
-upgrade or downgrade across the break, or recreate its pods after it, to give
-them servers of the new version. A client which sets the other affected
+CRI-O with the client of v1.2.1 or newer serves exec, attach and port
+forwarding for these pods with its own streaming server instead. Drain the node
+before an upgrade or downgrade across the break, or recreate its pods after it,
+to give them servers of the new version. A client which sets the other affected
 fields must not talk to servers across the break.
 
 ## Red Hat OpenShift
 
 OpenShift ships conmon-rs. To use it for a runtime, apply a `MachineConfig`
-that sets the runtime type, for example for `crun`:
+with a drop-in which sets the runtime type, for example for `crun`. The
+drop-in replaces the whole handler, see [Configure CRI-O](#configure-cri-o),
+so it repeats the other options of the handler which OpenShift defines. The
+ones below are those of the `crun` handler in the `crio.yaml` templates of the
+machine-config-operator; compare them with the handler of your release, for
+example with `crio config` in an `oc debug node` shell. The file holds:
+
+```toml
+[crio.runtime.runtimes.crun]
+runtime_root = "/run/crun"
+runtime_type = "pod"
+allowed_annotations = [
+    "io.containers.trace-syscall",
+    "io.kubernetes.cri-o.Devices",
+    "io.kubernetes.cri-o.LinkLogs",
+]
+container_min_memory = "512KiB"
+default_annotations = {"run.oci.systemd.subgroup" = ""}
+```
+
+As a `MachineConfig`:
 
 ```yaml
 apiVersion: machineconfiguration.openshift.io/v1
@@ -181,7 +216,7 @@ spec:
     storage:
       files:
         - contents:
-            source: data:,%5Bcrio.runtime.runtimes.crun%5D%0Aruntime_type%20%3D%20%22pod%22%0A
+            source: data:,%5Bcrio.runtime.runtimes.crun%5D%0Aruntime_root%20%3D%20%22%2Frun%2Fcrun%22%0Aruntime_type%20%3D%20%22pod%22%0Aallowed_annotations%20%3D%20%5B%0A%20%20%20%20%22io.containers.trace-syscall%22%2C%0A%20%20%20%20%22io.kubernetes.cri-o.Devices%22%2C%0A%20%20%20%20%22io.kubernetes.cri-o.LinkLogs%22%2C%0A%5D%0Acontainer_min_memory%20%3D%20%22512KiB%22%0Adefault_annotations%20%3D%20%7B%22run.oci.systemd.subgroup%22%20%3D%20%22%22%7D%0A
           mode: 420
           overwrite: true
           path: /etc/crio/crio.conf.d/99-conmonrs.conf

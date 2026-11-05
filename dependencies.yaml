@@ -150,6 +150,17 @@ dependencies:
       - path: .github/install-crun
         match: CRUN_VERSION=
 
+  # A bump updates RUNC_CHECKSUMS_SHA256 of .github/install-runc as well, the
+  # sha256 of runc.sha256sum of the release.
+  - name: runc
+    version: 1.5.2
+    upstream:
+      flavour: github
+      url: opencontainers/runc
+    refPaths:
+      - path: .github/install-runc
+        match: RUNC_VERSION=
+
   # A bump updates ACTIONLINT_CHECKSUMS_SHA256 of the Makefile as well, the
   # sha256 of the checksums file of the release.
   - name: actionlint
