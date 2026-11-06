@@ -271,7 +271,10 @@ async fn read_loop_flushes_paused_line() -> Result<()> {
     let mut flushed = false;
     for _ in 0..100 {
         time::sleep(ContainerIO::IDLE_FLUSH / 10).await;
-        if test_helpers::read(&lines)?.contains(r#""message":"prompt> ","partial":true"#) {
+        if lines
+            .read()?
+            .contains(r#""message":"prompt> ","partial":true"#)
+        {
             flushed = true;
             break;
         }
@@ -286,7 +289,7 @@ async fn read_loop_flushes_paused_line() -> Result<()> {
     writer.write_all(b"ls\n").await?;
     drop(writer);
     read_loop.await??;
-    let lines = test_helpers::read(&lines)?;
+    let lines = lines.read()?;
     assert_eq!(lines.lines().count(), 2, "{lines}");
     assert!(lines.contains(r#""message":"ls""#));
     Ok(())
@@ -302,7 +305,7 @@ async fn read_loop_flushes_trickling_line() -> Result<()> {
     for _ in 0..10 {
         writer.write_all(b".").await?;
         time::sleep(ContainerIO::IDLE_FLUSH * 4 / 5).await;
-        if test_helpers::read(&lines)?.contains(r#""partial":true"#) {
+        if lines.read()?.contains(r#""partial":true"#) {
             flushed = true;
             break;
         }
@@ -334,7 +337,11 @@ async fn last_line_is_logged_before_the_output_ends() -> Result<()> {
     // be busy with the last line anymore then.
     while time::timeout(WAIT, rx.recv()).await?? != Message::Done {}
     assert!(logger.try_lock().is_ok());
-    assert!(test_helpers::read(&lines)?.contains(r#""message":"no newline","partial":true"#));
+    assert!(
+        lines
+            .read()?
+            .contains(r#""message":"no newline","partial":true"#)
+    );
     read_loop.await?
 }
 
@@ -460,7 +467,7 @@ async fn terminal_output_continues_once_the_slave_got_reopened() -> Result<()> {
     let name = std::fs::read_link(format!("/proc/self/fd/{}", pty.slave.as_raw_fd()))?;
     let socket = io.terminal().context("no terminal")?.path();
     let stream = tokio::net::UnixStream::connect(socket).await?;
-    crate::terminal::tests::send_fd(&stream, b"x", pty.master.as_fd()).await?;
+    crate::test_util::send_fd(&stream, b"x", pty.master.as_fd()).await?;
     let exited = CancellationToken::new();
     io.connect_terminal(false, exited.clone()).await?;
     drop(pty.master);
@@ -488,7 +495,7 @@ async fn terminal_output_continues_once_the_slave_got_reopened() -> Result<()> {
     drop(slave);
     exited.cancel();
     assert_eq!(time::timeout(WAIT, rx.recv()).await??, Message::Done);
-    let log = test_helpers::read(&lines)?;
+    let log = lines.read()?;
     assert!(log.contains("first") && log.contains("second"), "{log}");
     Ok(())
 }

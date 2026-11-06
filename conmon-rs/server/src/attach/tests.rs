@@ -2,9 +2,11 @@ use super::*;
 use crate::{
     container_io::{ContainerIO, StdioSender},
     container_log::ContainerLog,
-    test_util::wait_for,
+    test_util::{Log, wait_for},
 };
-use nix::sys::socket::{AddressFamily, MsgFlags, SockFlag, connect, send, socket};
+use nix::sys::socket::{
+    AddressFamily, MsgFlags, SockFlag, connect, send, setsockopt, socket, sockopt,
+};
 use std::os::{
     fd::OwnedFd,
     unix::fs::{MetadataExt, PermissionsExt},
@@ -272,6 +274,74 @@ async fn write_loop_stops_on_hangup() -> Result<()> {
     Ok(())
 }
 
+/// Receive the packets of output messages numbered by [`numbered`] until
+/// the one of `last`, and return their numbers.
+async fn recv_numbered(client: &UnixSeqpacket, last: usize) -> Result<Vec<usize>> {
+    let mut received = vec![];
+    while received.last() != Some(&last) {
+        let packet = recv_packet(client).await?;
+        let (pipe, number) = packet.split_first().context("empty packet")?;
+        assert_eq!(*pipe, 2);
+        received.push(str::from_utf8(number)?.parse()?);
+    }
+    Ok(received)
+}
+
+/// Write the output messages numbered from `start`, `count` of them.
+fn numbered(attach: &SharedContainerAttach, start: usize, count: usize) {
+    for i in start..start + count {
+        attach.write(Message::Data(Bytes::from(i.to_string()), Pipe::StdOut));
+    }
+}
+
+/// A client which falls behind the output by more than the channel holds
+/// loses the oldest messages, which gets logged once until it caught up,
+/// and keeps the connection.
+#[tokio::test]
+async fn write_loop_skips_the_oldest_output_for_a_slow_client() -> Result<()> {
+    const WARNING: &str = "WARN Attach client too slow";
+    let (log, _subscriber) = Log::capture();
+    let attach = SharedContainerAttach::default();
+    let (server, client) = seqpacket_pair()?;
+    // The smallest send buffer takes a few packets, so that the loop
+    // waits for the client long before it caught up.
+    setsockopt(&*server, sockopt::SndBuf, &1)?;
+    let (rx, _) = attach.subscribe();
+    let write_loop = task::spawn(Attach::write_loop(
+        server,
+        rx,
+        false,
+        CancellationToken::new(),
+    ));
+    let size = OUTPUT_CHANNEL_SIZE;
+
+    // The client does not read while the output comes, the loop gets to
+    // run only afterwards, then skips the oldest and waits for the client.
+    numbered(&attach, 0, 2 * size);
+    for _ in 0..10 {
+        task::yield_now().await;
+    }
+    // It falls behind again before it caught up.
+    numbered(&attach, 2 * size, 2 * size);
+    let received = recv_numbered(&client, 4 * size - 1).await?;
+    assert_eq!(received.first(), Some(&size));
+    assert!(received.windows(2).all(|w| w[0] < w[1]), "{received:?}");
+    assert!(received.ends_with(&(3 * size..4 * size).collect::<Vec<_>>()));
+    assert_eq!(log.contents()?.matches(WARNING).count(), 1);
+
+    // The connection stays.
+    numbered(&attach, 4 * size, 1);
+    assert_eq!(recv_numbered(&client, 4 * size).await?, [4 * size]);
+    assert!(!write_loop.is_finished());
+
+    // Once it caught up, falling behind gets logged again.
+    numbered(&attach, 4 * size + 1, 2 * size);
+    let received = recv_numbered(&client, 6 * size).await?;
+    assert_eq!(received.first(), Some(&(5 * size + 1)));
+    assert_eq!(log.contents()?.matches(WARNING).count(), 2);
+    Ok(())
+}
+
 #[tokio::test]
 async fn write_loop_drains_after_exit() -> Result<()> {
     let attach = SharedContainerAttach::default();
@@ -512,6 +582,57 @@ async fn stdin_eof_keeps_listener() -> Result<()> {
     Ok(())
 }
 
+/// Connect a client to an attach socket, which closes its write side
+/// once it sent its stdin.
+fn eof_client(path: &Path, stdin: &[u8]) -> Result<OwnedFd> {
+    let fd = socket(
+        AddressFamily::Unix,
+        SockType::SeqPacket,
+        SockFlag::SOCK_CLOEXEC,
+        None,
+    )?;
+    connect(fd.as_raw_fd(), &UnixAddr::new(path)?)?;
+    send(fd.as_raw_fd(), stdin, MsgFlags::empty())?;
+    nix::sys::socket::shutdown(fd.as_raw_fd(), nix::sys::socket::Shutdown::Write)?;
+    Ok(fd)
+}
+
+/// The stopAfterStdinEof of the latest attach applies to the later
+/// connections of all its sockets, also the ones of earlier attaches, in
+/// both directions.
+#[tokio::test]
+async fn latest_stop_after_stdin_eof_applies() -> Result<()> {
+    for latest in [true, false] {
+        let dir = tempfile::tempdir()?;
+        let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+        let token = CancellationToken::new();
+        let attach = SharedContainerAttach::default();
+        attach.add(&first, token.clone(), !latest)?;
+        attach.add(&second, token.clone(), latest)?;
+
+        let _client = eof_client(&first, b"x")?;
+        let data = timeout(Duration::from_secs(5), attach.read()).await??;
+        assert_eq!(data, &b"x"[..]);
+        if latest {
+            timeout(Duration::from_secs(5), attach.stdin_closed().cancelled()).await?;
+        } else {
+            // Nothing tells when the connection saw the end of its stdin, a
+            // close would follow well within the wait.
+            let closed = timeout(
+                Duration::from_millis(200),
+                attach.stdin_closed().cancelled(),
+            )
+            .await;
+            assert!(closed.is_err(), "latest {latest}: stdin got closed");
+            let _other = eof_client(&first, b"y")?;
+            let data = timeout(Duration::from_secs(5), attach.read()).await??;
+            assert_eq!(data, &b"y"[..]);
+        }
+        token.cancel();
+    }
+    Ok(())
+}
+
 /// Connect to an attach socket and wait until the connection receives
 /// the output.
 async fn attach_client(attach: &SharedContainerAttach, path: &Path) -> Result<UnixSeqpacket> {
@@ -562,6 +683,72 @@ async fn listens_again_once_the_socket_got_removed() -> Result<()> {
     token.cancel();
     wait_for(|| !path.exists()).await?;
     wait_for(|| lock(&attach.listeners).is_empty()).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn listens_again_once_the_socket_got_replaced() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("attach");
+    let token = CancellationToken::new();
+    let attach = SharedContainerAttach::default();
+    attach.add(&path, token.clone(), false)?;
+    let first_stop = lock(&attach.listeners)
+        .get(&path)
+        .context("no listener")?
+        .stop
+        .clone();
+
+    // Another socket took the path, like one of a previous server. Nobody
+    // can connect to the listener anymore, the new one replaces the other
+    // socket.
+    fs::remove_file(&path)?;
+    let other = std::os::unix::net::UnixListener::bind(&path)?;
+    let other_ino = fs::metadata(&path)?.ino();
+    attach.add(&path, token.clone(), false)?;
+    assert!(first_stop.is_cancelled());
+    assert_ne!(fs::metadata(&path)?.ino(), other_ino);
+    attach_client(&attach, &path).await?;
+    drop(other);
+    token.cancel();
+    wait_for(|| !path.exists()).await?;
+    Ok(())
+}
+
+/// A path which is no socket stays, the attach fails and names it.
+#[tokio::test]
+async fn paths_which_are_no_sockets_stay() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("attach");
+    fs::create_dir(&path)?;
+    let attach = SharedContainerAttach::default();
+    let err = attach
+        .add(&path, CancellationToken::new(), false)
+        .err()
+        .map(|e| format!("{e:#}"));
+    assert_eq!(
+        err,
+        Some(format!(
+            "create attach endpoint: attach socket path {} exists and is no socket",
+            path.display()
+        ))
+    );
+    assert!(path.is_dir());
+    assert!(lock(&attach.listeners).is_empty());
+
+    // A path which cannot be checked fails as well, like one below a file.
+    let file = dir.path().join("file");
+    fs::write(&file, b"")?;
+    let err = attach
+        .add(file.join("attach"), CancellationToken::new(), false)
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_default();
+    assert!(
+        err.starts_with("create attach endpoint: check attach socket path: "),
+        "{err}"
+    );
+    assert!(lock(&attach.listeners).is_empty());
     Ok(())
 }
 

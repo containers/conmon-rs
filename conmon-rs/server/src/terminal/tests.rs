@@ -1,25 +1,7 @@
 use super::*;
-use crate::attach::SharedContainerAttach;
-use nix::{fcntl::FdFlag, pty, sys::socket::ControlMessage};
-use std::{io::IoSlice, os::unix::fs::PermissionsExt, time::Duration};
-
-/// Send the terminal descriptor with some data, like a runtime does.
-pub(crate) async fn send_fd(stream: &UnixStream, data: &[u8], fd: BorrowedFd<'_>) -> Result<()> {
-    let fds = [fd.as_raw_fd()];
-    stream
-        .async_io(Interest::WRITABLE, || {
-            socket::sendmsg::<()>(
-                stream.as_raw_fd(),
-                &[IoSlice::new(data)],
-                &[ControlMessage::ScmRights(&fds)],
-                MsgFlags::empty(),
-                None,
-            )
-            .map_err(io::Error::from)
-        })
-        .await?;
-    Ok(())
-}
+use crate::{attach::SharedContainerAttach, test_util::send_fd};
+use nix::{fcntl::FdFlag, pty};
+use std::{os::unix::fs::PermissionsExt, time::Duration};
 
 /// The width and height of a terminal.
 #[expect(unsafe_code, reason = "the TIOCGWINSZ ioctl")]

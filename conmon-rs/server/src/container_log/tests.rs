@@ -619,7 +619,7 @@ async fn drivers_share_the_output() -> Result<()> {
         test_helpers::read(&cri)?,
         format!("{ts} stdout F a\n{ts} stdout P parti\n{ts} stdout F al\n")
     );
-    let lines = test_helpers::read(&lines)?;
+    let lines = lines.read()?;
     let messages: Vec<_> = lines
         .lines()
         .map(|line| {
@@ -640,7 +640,7 @@ async fn failing_driver_does_not_stop_the_others() -> Result<()> {
 
     assert!(log.write(Pipe::StdOut, b"line\n").await.is_err());
     assert!(test_helpers::read(&cri)?.is_empty());
-    assert!(test_helpers::read(&lines)?.contains(r#""message":"line""#));
+    assert!(lines.read()?.contains(r#""message":"line""#));
     Ok(())
 }
 
@@ -679,7 +679,7 @@ async fn sync_skips_files_which_cannot_be_synced() -> Result<()> {
         log.write(Pipe::StdOut, b"line\n").await?;
     }
     ContainerLog::sync(&log).await?;
-    assert!(test_helpers::read(&lines)?.contains(r#""message":"line""#));
+    assert!(lines.read()?.contains(r#""message":"line""#));
     Ok(())
 }
 

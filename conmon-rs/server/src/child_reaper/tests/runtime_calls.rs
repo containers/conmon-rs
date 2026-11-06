@@ -11,12 +11,19 @@ async fn failed_create_cleanup_spares_claimed_pid() -> Result<()> {
     let pid = sh.pid;
     std::fs::write(&pidfile, pid.to_string())?;
 
-    // A stale PID file naming a process this server waits for.
+    // A stale PID file naming a process this server waits for. A cleanup
+    // would have sent its SIGKILL before it returned. A signal sent now
+    // comes second, the exit tells which one ended it.
     let pending = PendingPid::new(&reaper.pending, pid);
     reaper.cleanup_failed_grandchild(&pidfile);
-    assert!(!is_gone(pid) && !is_zombie(pid));
-
+    sh.process.signal(Signal::SIGTERM)?;
+    assert_eq!(wait_for_exit_code(pid).await, 128 + Signal::SIGTERM as i32);
     drop(pending);
+
+    // Once nothing waits for it, it gets cleaned up.
+    let sh = spawn_sh("exec sleep 60")?;
+    let pid = sh.pid;
+    std::fs::write(&pidfile, pid.to_string())?;
     reaper.cleanup_failed_grandchild(&pidfile);
     wait_for_real(|| is_gone(pid)).await;
     Ok(())
@@ -227,7 +234,11 @@ async fn stale_pid_file_does_not_get_cleaned_up() -> Result<()> {
     let mut io = ContainerIO::new(false, ContainerLog::new())?;
     let args = ["-c".into(), "exit 1".into()];
     let call = RuntimeCall::new(Path::new("sh"), &args, &pidfile, distant_deadline());
-    assert!(reaper.create_child(call, &mut io).await.is_err());
+    let err = reaper.create_child(call, &mut io).await.err();
+    assert_eq!(
+        err.map(|e| format!("{e:#}")).as_deref(),
+        Some("runtime exited with status 1")
+    );
     assert!(!pidfile.exists());
     // A cleanup would have sent its SIGKILL before the call returned. A
     // signal sent now comes second, the exit tells which one ended it.

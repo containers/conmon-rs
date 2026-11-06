@@ -48,14 +48,14 @@ pub(super) mod fuzzing {
     /// Decode the input as a message of a client. A message of the server
     /// with its first byte as the channel and the rest as the payload decodes
     /// to them again, for channels which base64 messages can carry as a
-    /// single ASCII digit offset.
-    pub fn channel(base64: bool, input: &[u8]) {
-        let _ = decode(base64, Bytes::copy_from_slice(input));
+    /// single ASCII digit offset. Returns whether the input decoded.
+    pub fn channel(base64: bool, input: &[u8]) -> bool {
+        let decoded = decode(base64, Bytes::copy_from_slice(input)).is_some();
         let Some((&channel, payload)) = input.split_first() else {
-            return;
+            return decoded;
         };
         if base64 && channel > 0x7f - b'0' {
-            return;
+            return decoded;
         }
         let message = match message(base64, channel, payload) {
             Message::Binary(data) => data,
@@ -66,6 +66,7 @@ pub(super) mod fuzzing {
             decode(base64, message),
             Some((channel, Bytes::copy_from_slice(payload)))
         );
+        decoded
     }
 }
 

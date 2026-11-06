@@ -1,14 +1,12 @@
 use super::*;
-use hyper::Method;
 
 /// Check the headers of an upgrade request, one `name: value` per line
 /// of the input, like the server does for a WebSocket or SPDY. Lines
-/// which are no valid header get skipped.
+/// which are no valid header get skipped. A GET request, so that the
+/// WebSocket upgrade checks all of its headers, it rejects other methods
+/// right away.
 pub fn upgrade_headers(input: &[u8]) {
     let mut request = Request::new(());
-    if input.first().is_some_and(|b| b & 1 == 1) {
-        *request.method_mut() = Method::POST;
-    }
     let headers = request.headers_mut();
     for line in input.split(|b| *b == b'\n') {
         let Some(colon) = line.iter().position(|b| *b == b':') else {

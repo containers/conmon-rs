@@ -20,7 +20,7 @@ async fn connections_fall_back_to_ipv6() -> Result<()> {
     let mut bound = None;
     for _ in 0..10 {
         let Ok(listener) = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await else {
-            eprintln!("skipping, no IPv6 loopback");
+            eprintln!("skipped: no IPv6 loopback");
             return Ok(());
         };
         let port = listener.local_addr()?.port();

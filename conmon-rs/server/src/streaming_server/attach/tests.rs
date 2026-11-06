@@ -1,13 +1,14 @@
 use crate::{
+    attach::OUTPUT_CHANNEL_SIZE,
     container_io::{Message as IOMessage, Pipe},
     streaming_server::{
         StreamingServer,
-        remotecommand::{CLOSE_BYTE, STDIN_BYTE, STDOUT_BYTE, STREAM_ERR_BYTE},
+        remotecommand::{CLOSE_BYTE, STDIN_BYTE, STDOUT_BYTE, STREAM_ERR_BYTE, Version},
         session::{PENDING_STDIN_MAX_BYTES, PING_INTERVAL},
-        spdy::testing::Frame,
+        spdy::testing::{Client, Frame},
         testing::*,
     },
-    test_util::wait_for,
+    test_util::{Log, wait_for},
 };
 use anyhow::Result;
 use bytes::Bytes;
@@ -178,6 +179,89 @@ async fn spdy_attach_forwards_stdin_and_output() -> Result<()> {
             Ok(())
         })
         .await
+}
+
+/// A session which falls behind the output by more than the attach channel
+/// holds skips the oldest output, which gets logged once until it caught up,
+/// and goes on.
+#[tokio::test]
+async fn slow_attach_sessions_skip_the_oldest_output() -> Result<()> {
+    const WARNING: &str = "WARN Attach client too slow";
+    let (log, _subscriber) = Log::capture();
+    LocalSet::new()
+        .run_until(async {
+            // A connection which takes only a few frames, so that the
+            // session waits for the client long before it caught up.
+            let (io, mut client) = spdy_attach_duplex(false, None, Version::V4, 64).await?;
+            let attach = io.attach().clone();
+            wait_for(|| attach.has_readers()).await?;
+            let write = |start: usize, count: usize| {
+                for i in start..start + count {
+                    let data = Bytes::from(format!("{i}\n"));
+                    attach.write(IOMessage::Data(data, Pipe::StdOut));
+                }
+            };
+            let size = OUTPUT_CHANNEL_SIZE;
+            let mut stdout = String::new();
+
+            // The client does not read while the output comes, the session
+            // gets to run only afterwards, then skips the oldest and waits
+            // for the client.
+            write(0, 2 * size);
+            for _ in 0..10 {
+                task::yield_now().await;
+            }
+            // It falls behind again before it caught up.
+            write(2 * size, 2 * size);
+            let numbers = read_numbers(&mut client, &mut stdout, 4 * size - 1).await?;
+            assert_eq!(numbers.first(), Some(&size));
+            assert!(numbers.windows(2).all(|w| w[0] < w[1]), "{numbers:?}");
+            assert!(numbers.ends_with(&(3 * size..4 * size).collect::<Vec<_>>()));
+            assert_eq!(log.contents()?.matches(WARNING).count(), 1);
+
+            // The session goes on.
+            write(4 * size, 1);
+            assert_eq!(
+                read_numbers(&mut client, &mut stdout, 4 * size).await?,
+                [4 * size]
+            );
+
+            // Once it caught up, falling behind gets logged again.
+            write(4 * size + 1, 2 * size);
+            let numbers = read_numbers(&mut client, &mut stdout, 6 * size).await?;
+            assert_eq!(numbers.first(), Some(&(5 * size + 1)));
+            assert_eq!(log.contents()?.matches(WARNING).count(), 2);
+            Ok(())
+        })
+        .await
+}
+
+/// Read the stdout of a SPDY attach client until the line with the
+/// number `last`, and return the numbers of the lines. `stdout` keeps a
+/// line which did not end yet.
+async fn read_numbers<T>(
+    client: &mut Client<T>,
+    stdout: &mut String,
+    last: usize,
+) -> Result<Vec<usize>>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut numbers = vec![];
+    while numbers.last() != Some(&last) {
+        let Frame::Data { data, .. } = client
+            .frame_until(|f| matches!(f, Frame::Data { stream_id: 5, .. }))
+            .await?
+        else {
+            unreachable!("a data frame");
+        };
+        stdout.push_str(std::str::from_utf8(&data)?);
+        while let Some((line, rest)) = stdout.split_once('\n') {
+            numbers.push(line.parse()?);
+            *stdout = rest.to_owned();
+        }
+    }
+    Ok(numbers)
 }
 
 #[tokio::test]
