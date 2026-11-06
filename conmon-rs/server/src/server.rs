@@ -25,7 +25,6 @@ use nix::{
     sys::{
         prctl,
         signal::{Signal, kill},
-        socket::SockType,
         stat::Mode,
     },
     unistd::{ForkResult, Pid, chdir, dup2_stderr, dup2_stdin, dup2_stdout, fork},
@@ -705,7 +704,7 @@ impl Server {
         // Not with_context, which the FutureExt of OpenTelemetry makes
         // ambiguous with the tracing feature.
         let listener = listener::bind_long_path(&socket, |path| {
-            let fd = listener::listen_private(&path, SockType::Stream)?;
+            let fd = listener::listen_private(&path)?;
             UnixListener::from_std(fd.into())
         })
         .context(format!("bind socket {}", socket.display()))?;

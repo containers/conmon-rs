@@ -145,7 +145,8 @@ impl OOMWatcher {
         };
 
         // Registering an event only needs the file open, like for conmon.
-        // The kernel keeps what it needs of it once registered.
+        // The kernel keeps what it needs of it once registered. No unit test
+        // covers the registration, the CI runners have cgroup v2 only.
         let oom_cgroup_file =
             File::open(&memory_cgroup_file_oom_path).context("opening cgroup oom file")?;
         let oom_event_fd = AsyncEventFd::new().context("creating eventfd")?;

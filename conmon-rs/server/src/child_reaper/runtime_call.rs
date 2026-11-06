@@ -413,6 +413,8 @@ impl ChildReaper {
             match wait_unless_stopped(reaped, grace, stop, stopped).await {
                 Some(Ok(_)) => {}
                 Some(Err(e)) => debug!("Unable to wait for runtime: {e}"),
+                // Not unit tested, a killed process which does not exit in
+                // time cannot be built in one.
                 None => warn!("Killed runtime did not exit, cleaning up anyway"),
             }
         }

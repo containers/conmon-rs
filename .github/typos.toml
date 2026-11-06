@@ -2,15 +2,6 @@
 extend-ignore-re = [
     # ignore the generated schema binary string in *.capnp.go files
     "const schema_[0-9a-f]+ = \"(\\\\?.|[^\"\\\\])*\"( \\+\\s+\"(\\\\?.|[^\"\\\\])*\")+",
-    "ans",
-    "typ",
-    "consts",
-]
-[type.rust]
-extend-ignore-re = [
-    "typ",
-    "ws",
-    "consts",
 ]
 [default.extend-words]
 # in-toto, the format of the attestation bundles.

@@ -126,8 +126,8 @@ impl Driver {
 pub(crate) struct ContainerLog {
     drivers: Vec<Driver>,
 
-    /// Collects whole lines for the drivers which take them, shared by all
-    /// of them.
+    /// Collects whole lines for the journald drivers, the only ones which
+    /// take them.
     lines: LineBuffer,
 
     /// Whether any driver takes whole lines.
@@ -372,8 +372,8 @@ impl Deref for Text<'_> {
     }
 }
 
-/// Collects the output of both pipes into whole lines for the drivers which
-/// write one entry per line.
+/// Collects the output of both pipes into whole lines for journald, which
+/// writes one entry per line.
 ///
 /// A read chunk may end anywhere, in the middle of a line, between "\r" and
 /// "\n" or inside a multi byte character. Keeping the incomplete tail until
@@ -789,22 +789,18 @@ impl LogFile {
     }
 
     /// Write a chunk of one entry per item, which `entry` appends to the
-    /// buffer, and end it. The entries after a failed one still get
-    /// written, the first error is returned.
+    /// buffer, and end it. An entry which fails to commit does not stop the
+    /// later ones, the first error is returned.
     pub(crate) async fn write_entries<T>(
         &mut self,
         items: impl IntoIterator<Item = T>,
-        mut entry: impl FnMut(&mut Vec<u8>, T) -> Result<()>,
+        mut entry: impl FnMut(&mut Vec<u8>, T),
     ) -> Result<()> {
         let mut res = Ok(());
         for item in items {
             let buf = self.buf();
             let start = buf.len();
-            if let Err(e) = entry(buf, item) {
-                buf.truncate(start);
-                res = res.and(Err(e));
-                continue;
-            }
+            entry(buf, item);
             res = res.and(self.commit_entry(start).await);
         }
         res.and(self.end_chunk().await)

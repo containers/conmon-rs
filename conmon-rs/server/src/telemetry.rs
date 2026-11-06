@@ -2,7 +2,6 @@
 //! the exporter of the spans and the trace context the clients pass with their
 //! requests.
 
-use crate::capnp_util;
 use crate::conmon_capnp::conmon;
 use anyhow::{Context, Result};
 use capnp::struct_list::Reader;
@@ -67,7 +66,7 @@ impl Telemetry {
             return Ok(());
         }
 
-        let metadata = Metadata(capnp_util::into_map(reader)?);
+        let metadata = Metadata(into_map(reader)?);
         let ctx = global::get_text_map_propagator(|prop| prop.extract(&metadata));
         // Without the telemetry layer, which only exists with tracing
         // enabled, there is nothing to set.
@@ -76,6 +75,17 @@ impl Telemetry {
             Err(e) => Err(e).context("set parent context"),
         }
     }
+}
+
+/// Convert the capnp map of the metadata, a list of key value entries, into
+/// a rust map.
+fn into_map<'a>(
+    reader: Reader<'a, conmon::text_text_map_entry::Owned>,
+) -> capnp::Result<HashMap<&'a str, &'a str>> {
+    reader
+        .iter()
+        .map(|entry| Ok((entry.get_key()?.to_str()?, entry.get_value()?.to_str()?)))
+        .collect()
 }
 
 /// Additional telemetry metadata to carry.

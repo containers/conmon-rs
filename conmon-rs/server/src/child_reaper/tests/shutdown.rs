@@ -22,6 +22,12 @@ async fn registration_after_shutdown_kills_child() -> Result<()> {
             .is_err()
     );
     wait_for_real(|| is_gone(pid)).await;
+    // Its create fails, so it gets no exit file.
+    let left = reaper
+        .wait_for_watchers(Instant::now() + Duration::from_secs(10), |_| true)
+        .await;
+    assert!(left.is_empty(), "{left:?}");
+    assert!(!dir.path().join("exit").exists());
 
     // New calls do not start at all. The runtime would write the PID file,
     // the call would succeed otherwise.
@@ -292,7 +298,16 @@ async fn shutdown_waits_for_the_watchers() -> Result<()> {
     assert!(reaper.watch_grandchild(registered, call).is_err());
 
     time::timeout(Duration::from_secs(20), shutdown).await???;
+    // The container registered before the snapshot still gets its exit
+    // file, which CRI-O reads after a restart.
+    let killed = 128 + Signal::SIGKILL as i32;
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("exit"))?,
+        killed.to_string()
+    );
     assert!(is_gone(late.pid));
+    // Its create failed, so it leaves no exit file.
+    assert!(!dir.path().join("late").exists());
     assert!(lock(&reaper.grandchildren).is_empty());
     Ok(())
 }

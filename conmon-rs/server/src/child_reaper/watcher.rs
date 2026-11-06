@@ -49,6 +49,14 @@ pub(crate) struct ExitHandling {
     timeout: Option<Instant>,
 }
 
+impl ExitHandling {
+    /// Write neither exit nor OOM exit files, for a child whose call fails.
+    pub(super) fn drop_exit_paths(&mut self) {
+        self.exit_paths.clear();
+        self.oom_exit_paths.clear();
+    }
+}
+
 impl ReapableChild {
     /// Whether the process which exited with `exit_code` got OOM killed. The
     /// watcher writes the files for the OOMs it could tell on its own, this
