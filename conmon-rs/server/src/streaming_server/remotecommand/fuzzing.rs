@@ -5,6 +5,7 @@ use super::{
     websocket::WEBSOCKET_PROTOCOLS,
 };
 use crate::streaming_server::{
+    session::fuzzing::resize_event,
     spdy::{
         Connection, Headers,
         fuzzing::{client_frames, spawn_client},
@@ -19,16 +20,22 @@ use tokio::{
 };
 
 /// The resize stream of a SPDY client, split into parts at NUL bytes.
-/// Every event is a single JSON value, without whitespace around it.
-pub fn resize_events(data: &[u8]) {
+/// Every event is a single JSON value, without whitespace around it, which
+/// gets parsed like the session does, see `session::fuzzing::resize_event`.
+/// Returns whether the stream gave events and all of them got parsed.
+pub fn resize_events(data: &[u8]) -> bool {
     let mut events = ResizeEvents::default();
+    let (mut count, mut parsed) = (0, true);
     for part in data.split(|b| *b == 0) {
         events.push(part);
         while let Some(event) = events.pop() {
             assert!(!event.is_empty() && event.trim_ascii().len() == event.len());
             assert!(serde_json::from_slice::<IgnoredAny>(&event).is_ok());
+            count += 1;
+            parsed &= resize_event(&event);
         }
     }
+    count > 0 && parsed
 }
 
 /// The messages of a WebSocket client, for the framing the first byte

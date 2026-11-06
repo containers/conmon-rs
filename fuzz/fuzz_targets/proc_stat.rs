@@ -5,4 +5,6 @@
 use conmonrs::fuzzing::proc_stat;
 use libfuzzer_sys::fuzz_target;
 
-fuzz_target!(|data: &[u8]| proc_stat(data));
+fuzz_target!(|data: &[u8]| {
+    proc_stat(data);
+});

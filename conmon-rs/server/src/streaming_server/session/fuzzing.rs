@@ -5,17 +5,28 @@ use std::sync::LazyLock;
 
 /// The messages of a WebSocket client for every framing, see
 /// `remotecommand::fuzzing::messages`, with the resize events they carry
-/// parsed like the session does. A size which got parsed reads the same
-/// from the JSON Kubernetes sends.
-pub fn client_messages(input: &[u8]) {
+/// parsed like the session does, see `resize_event`. Returns whether the
+/// input gave events and all of its resize events got parsed.
+pub fn client_messages(input: &[u8]) -> bool {
+    let (mut events, mut parsed) = (0, true);
     messages(input, |event| {
-        if let ClientEvent::Resize(data) = event
-            && let Ok(size) = ResizeEvent::parse(&data)
-        {
-            let json = format!(r#"{{"Width":{},"Height":{}}}"#, size.width, size.height);
-            assert_eq!(ResizeEvent::parse(json.as_bytes()).ok(), Some(size));
+        events += 1;
+        if let ClientEvent::Resize(data) = event {
+            parsed &= resize_event(&data);
         }
     });
+    events > 0 && parsed
+}
+
+/// Parse a resize event like the session does, whether that succeeded. A
+/// size which got parsed reads the same from the JSON Kubernetes sends.
+pub(crate) fn resize_event(data: &[u8]) -> bool {
+    let Ok(size) = ResizeEvent::parse(data) else {
+        return false;
+    };
+    let json = format!(r#"{{"Width":{},"Height":{}}}"#, size.width, size.height);
+    assert_eq!(ResizeEvent::parse(json.as_bytes()).ok(), Some(size));
+    true
 }
 
 /// The stdin of [`pending_stdin`] counts up modulo a prime, so that its

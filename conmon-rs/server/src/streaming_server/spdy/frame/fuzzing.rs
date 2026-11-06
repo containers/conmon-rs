@@ -12,14 +12,15 @@ pub fn frames(mut input: &[u8]) {
 /// client controls, parse it as a decompressed one, and decode it once
 /// deflated like the server does, which always gets past the
 /// decompression to the parsing. Headers which got parsed come back the
-/// same once encoded, unless they exceed the limit.
-pub fn header_block(raw: &[u8]) {
-    let _ = Decoder::default().header_block(raw);
+/// same once encoded, unless they exceed the limit. Returns whether the
+/// input got decoded, compressed or not.
+pub fn header_block(raw: &[u8]) -> bool {
+    let compressed = Decoder::default().header_block(raw).is_ok();
     let block = Encoder::default().deflate(raw);
     let decoded = Decoder::default().header_block(&block);
     let Ok(headers) = Decoder::parse_header_block(raw) else {
         assert!(decoded.is_err());
-        return;
+        return compressed;
     };
     let serialized = Encoder::serialize(&headers);
     let decoded = Decoder::default().header_block(&Encoder::default().deflate(&serialized));
@@ -28,4 +29,5 @@ pub fn header_block(raw: &[u8]) {
     } else {
         assert!(decoded.is_err());
     }
+    true
 }

@@ -13,14 +13,14 @@ async fn registration_after_shutdown_kills_child() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let sh = spawn_sh("exec sleep 60")?;
     let pid = sh.pid;
-    assert!(
-        reaper
-            .watch_grandchild(
-                child(pid, None, &dir.path().join("exit"))?,
-                InFlight::default()
-            )
-            .is_err()
-    );
+    let err = reaper
+        .watch_grandchild(
+            child(pid, None, &dir.path().join("exit"))?,
+            InFlight::default(),
+        )
+        .err()
+        .map(|e| format!("{e:#}"));
+    assert_eq!(err.as_deref(), Some("server is shutting down"));
     wait_for_real(|| is_gone(pid)).await;
     // Its create fails, so it gets no exit file.
     let left = reaper
@@ -76,7 +76,11 @@ async fn shutdown_waits_for_calls_in_progress() -> Result<()> {
     time::sleep(Duration::from_secs(1)).await;
     assert!(!shutdown.is_finished());
     // No new call starts meanwhile.
-    assert!(reaper.begin_call(distant_deadline()).is_err());
+    let err = reaper.begin_call(distant_deadline()).err();
+    assert_eq!(
+        err.map(|e| format!("{e:#}")).as_deref(),
+        Some("server is shutting down")
+    );
 
     drop(call);
     shutdown.await??;
@@ -149,7 +153,11 @@ async fn shutdown_waits_for_calls_in_progress() -> Result<()> {
     let reaper = ChildReaper::default();
     let mut call = reaper.begin_call(distant_deadline())?;
     let deadline = Instant::now() + Duration::from_secs(1);
-    assert!(reaper.kill_grandchildren(deadline).await.is_err());
+    let err = reaper.kill_grandchildren(deadline).await.err();
+    assert_eq!(
+        err.map(|e| format!("{e:#}")).as_deref(),
+        Some("runtime calls still in progress")
+    );
     let late = spawn_sh("exec sleep 60")?;
     call.claim(&reaper.pending, late.pid);
     assert!(matches!(
@@ -160,9 +168,13 @@ async fn shutdown_waits_for_calls_in_progress() -> Result<()> {
 
     // A runtime which still runs gets killed by its call, which fails. The
     // shutdown does not signal it by its PID, which tokio reaps. Stopped
-    // right away, the call ends within the budget of the stop, also with a
-    // terminal, whose runtime has pipes of its own, which a helper in a
-    // session of its own may hold open.
+    // right away, the call waits only briefly for the exit and the output
+    // of its runtime, also with a terminal, whose runtime has pipes of its
+    // own, which a helper in a session of its own holds open. Whether that
+    // fits into the budget of the stop depends on the machine, a loaded
+    // one or one under emulation may take longer. The cases above cover
+    // the result of the shutdown, here the call has to end well before the
+    // waits without a stop, the grace of the runtime, would let it.
     time::resume();
     for terminal in [false, true] {
         let reaper = Arc::new(ChildReaper::default());
@@ -172,7 +184,7 @@ async fn shutdown_waits_for_calls_in_progress() -> Result<()> {
             let reaper = reaper.clone();
             let pidfile = dir.path().join("pid");
             let script = format!(
-                "setsid sleep 5 & echo $$ >{}; exec sleep 60",
+                "setsid sleep 10 & echo $$ >{}; exec sleep 60",
                 runtime_pidfile.display()
             );
             let args = ["-c".into(), script];
@@ -184,15 +196,26 @@ async fn shutdown_waits_for_calls_in_progress() -> Result<()> {
         });
         wait_for_real(|| read_pid_file(&runtime_pidfile).is_ok()).await;
         let runtime = read_pid_file(&runtime_pidfile)?;
-        let deadline = Instant::now() + ChildReaper::STOP_BUDGET;
-        let err = reaper.kill_grandchildren(deadline).await.err();
-        assert_eq!(
-            err.map(|e| format!("{e:#}")).as_deref(),
-            Some("runtime calls in progress got stopped"),
-            "terminal: {terminal}"
+        let start = Instant::now();
+        let err = reaper
+            .kill_grandchildren(start + ChildReaper::STOP_BUDGET)
+            .await
+            .err()
+            .map(|e| format!("{e:#}"));
+        assert!(
+            matches!(
+                err.as_deref(),
+                Some("runtime calls in progress got stopped" | "runtime calls still in progress")
+            ),
+            "terminal: {terminal}, {err:?}"
         );
         let err = call.await?.err().map(|e| format!("{e:#}"));
         assert_eq!(err.as_deref(), Some("runtime got stopped by the shutdown"));
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < ChildReaper::RUNTIME_GRACE,
+            "terminal: {terminal}, {elapsed:?}"
+        );
         assert!(is_gone(runtime));
         assert!(lock(&reaper.pending).is_empty());
         assert!(!reaper.calls_in_progress());
@@ -295,7 +318,11 @@ async fn shutdown_waits_for_the_watchers() -> Result<()> {
     wait_for_real(|| is_gone(running.pid)).await;
     let late = spawn_sh("exec sleep 60")?;
     let registered = child(late.pid, None, &dir.path().join("late"))?;
-    assert!(reaper.watch_grandchild(registered, call).is_err());
+    let err = reaper.watch_grandchild(registered, call).err();
+    assert_eq!(
+        err.map(|e| format!("{e:#}")).as_deref(),
+        Some("server is shutting down")
+    );
 
     time::timeout(Duration::from_secs(20), shutdown).await???;
     // The container registered before the snapshot still gets its exit

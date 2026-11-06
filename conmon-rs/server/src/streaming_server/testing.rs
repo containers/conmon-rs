@@ -1,18 +1,18 @@
 //! What the tests of the streaming server share.
 
 use crate::{
-    child::{Child, ChildKind},
     child_reaper::ReapableChild,
-    container_io::{ContainerIO, SharedContainerIO},
-    container_log::ContainerLog,
+    container_io::SharedContainerIO,
     streaming_server::{
         ADDR, AttachSession, Session, StreamingServer, remotecommand::Version,
         spdy::testing::Client, web::CloseCode,
     },
+    test_util::container_child,
 };
 use anyhow::{Context, Result};
-use nix::unistd::Pid;
-use std::io;
+use hyper::{server::conn::http1, service::service_fn};
+use hyper_util::rt::{TokioIo, TokioTimer};
+use std::{convert::Infallible, io};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, duplex},
     net::{TcpStream, tcp::OwnedReadHalf},
@@ -125,8 +125,69 @@ pub(super) async fn attach_session_with(
     Ok((io, server, stream))
 }
 
+/// Like [`attach_session_with`] without a terminal, on a connection in
+/// memory, see [`upgrade_duplex`].
+pub(super) async fn attach_session_duplex(
+    stdin: bool,
+    stop_after_stdin_eof: bool,
+    idle_timeout: Option<Duration>,
+) -> Result<(SharedContainerIO, StreamingServer, DuplexStream)> {
+    let (io, child, _) = attach_child(false)?;
+    let server = StreamingServer::default();
+    let url = server
+        .attach_url(attach_config(
+            child,
+            stdin,
+            stop_after_stdin_eof,
+            idle_timeout,
+        ))
+        .await?;
+    let (response, stream) = upgrade_duplex(&server, &url).await?;
+    assert!(response.starts_with("http/1.1 101"), "{response}");
+    Ok((io, server, stream))
+}
+
+/// Like [`upgrade`] to a WebSocket of v5, on a connection in memory, which
+/// a task serves with the routes of the server, without the limits of
+/// `serve`, so that the session runs with a paused clock as well, which a
+/// TCP connection does not keep up with.
+pub(super) async fn upgrade_duplex(
+    server: &StreamingServer,
+    url: &str,
+) -> Result<(String, DuplexStream)> {
+    let path = url
+        .strip_prefix(&format!("http://{ADDR}:{}", server.port()))
+        .context("url")?;
+    let (mut client, stream) = duplex(64 * 1024);
+    let state = server.state.clone();
+    task::spawn(async move {
+        let service = service_fn(move |request| {
+            let response = StreamingServer::route(request, &state);
+            async move { Ok::<_, Infallible>(response) }
+        });
+        let _ = http1::Builder::new()
+            .timer(TokioTimer::new())
+            .serve_connection(TokioIo::new(stream), service)
+            .with_upgrades()
+            .await;
+    });
+    client
+        .write_all(
+            format!(
+                "GET {path} HTTP/1.1\r\nHost: {ADDR}\r\nContent-Length: 0\r\n{}\r\n",
+                websocket_headers(PROTOCOL_V5)
+            )
+            .as_bytes(),
+        )
+        .await?;
+    Ok((response_head(&mut client).await?, client))
+}
+
 /// Read the head of an HTTP response, in lowercase.
-pub(super) async fn response_head(stream: &mut TcpStream) -> Result<String> {
+pub(super) async fn response_head<R>(stream: &mut R) -> Result<String>
+where
+    R: AsyncRead + Unpin,
+{
     let mut response = vec![];
     while !response.ends_with(b"\r\n\r\n") {
         response.push(stream.read_u8().await?);
@@ -187,19 +248,9 @@ pub(super) async fn close_first(stream: &mut TcpStream) -> Result<()> {
 pub(super) fn attach_child(
     terminal: bool,
 ) -> Result<(SharedContainerIO, ReapableChild, CancellationToken)> {
-    let io = SharedContainerIO::new(ContainerIO::new(terminal, ContainerLog::new())?);
-    let token = CancellationToken::new();
-    let (_, child, _) = ReapableChild::from_child(Child {
-        id: "id".into(),
-        kind: ChildKind::Container,
-        pid: Pid::from_raw(0),
-        exit_paths: vec![],
-        oom_exit_paths: vec![],
-        timeout: None,
-        io: io.clone(),
-        token: token.clone(),
-        process: None,
-    });
+    let child = container_child(terminal)?;
+    let (io, token) = (child.io.clone(), child.token.clone());
+    let (_, child, _) = ReapableChild::from_child(child);
     Ok((io, child, token))
 }
 

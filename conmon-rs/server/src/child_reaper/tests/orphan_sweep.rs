@@ -5,11 +5,10 @@ use super::*;
 /// Spawn a child which exits right away with `code` and is never waited
 /// for.
 fn spawn_zombie(code: i32) -> Result<Pid> {
-    let child = Command::new("sh")
-        .args(["-c", &format!("exit {code}")])
-        .spawn()?;
-    let pid = child_pid(child.id())?;
-    std::mem::forget(child);
+    // The guard signals it at the end of this function, once it is a
+    // zombie, which ignores the signal.
+    let sh = spawn_sh(&format!("exit {code}"))?;
+    let pid = sh.pid;
     let start = Instant::now();
     while !is_zombie(pid) {
         assert!(

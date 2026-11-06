@@ -1,26 +1,15 @@
 use super::*;
 use crate::{
     child_reaper::ReapableChild, config::Config, conmon_capnp::conmon::CgroupManager,
-    streaming_server::DEFAULT_CAPACITY,
+    streaming_server::DEFAULT_CAPACITY, test_util::container_child,
 };
-use nix::unistd::Pid;
 use std::{process::Stdio, sync::Arc};
 use tokio::{process::Command, task::LocalSet, time};
 
 #[tokio::test]
 async fn too_many_streaming_sessions_fail_with_the_bare_message() -> anyhow::Result<()> {
     let config = Arc::new(Config::parse_for_test::<_, &str>([]));
-    let (_, child, _) = ReapableChild::from_child(Child {
-        id: "id".into(),
-        kind: ChildKind::Container,
-        pid: Pid::from_raw(0),
-        exit_paths: vec![],
-        oom_exit_paths: vec![],
-        timeout: None,
-        io: SharedContainerIO::new(ContainerIO::new(false, ContainerLog::new())?),
-        token: CancellationToken::new(),
-        process: None,
-    });
+    let (_, child, _) = ReapableChild::from_child(container_child(false)?);
     let exec = || {
         StreamingRequest::Exec(ExecSession {
             child_reaper: Arc::default(),
@@ -212,6 +201,17 @@ async fn empty_retired_fields_pass() {
     assert_eq!(
         failure(request.send().promise).await,
         r#"bundle path "bundle" is not absolute"#
+    );
+
+    let mut request = client.exec_sync_container_request();
+    let mut req = request.get().init_request();
+    // Fails after the retired fields got checked.
+    req.set_id("--help");
+    req.reborrow().init_command(1).set(0, "true");
+    req.init_env_vars_old(0);
+    assert_eq!(
+        failure(request.send().promise).await,
+        r#"invalid container ID "--help""#
     );
 }
 
@@ -426,7 +426,11 @@ async fn exec_sync_output_kills_the_process_of_a_lost_watcher() -> anyhow::Resul
         Server::exec_sync_output(&io, &token, exit_rx, || killed = child.start_kill().is_ok()),
     )
     .await?;
-    assert!(res.is_err());
+    let err = res.err().map(|e| format!("{e:#}"));
+    assert_eq!(
+        err.as_deref(),
+        Some("receive the exit of the exec: channel closed")
+    );
     assert!(killed);
     assert!(token.is_cancelled());
     time::timeout(Duration::from_secs(10), child.wait()).await??;

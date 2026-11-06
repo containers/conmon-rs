@@ -1,18 +1,37 @@
 //! Helpers shared by the tests.
 
-use crate::listener::SocketInUse;
-use anyhow::{Context, Result, ensure};
+use crate::{
+    child::{Child, ChildKind},
+    container_io::{ContainerIO, SharedContainerIO},
+    container_log::ContainerLog,
+    listener::SocketInUse,
+    process::{Process, child_pid},
+};
+use anyhow::{Context, Result, ensure, format_err};
+use nix::{
+    sys::{
+        signal::Signal,
+        socket::{self, ControlMessage, MsgFlags},
+    },
+    unistd::Pid,
+};
 use std::{
-    io::Write,
+    io::{self, IoSlice, Write},
     net::Ipv4Addr,
+    os::fd::{AsRawFd, BorrowedFd},
     path::Path,
     process::{Command, Stdio},
+    sync::{Arc, Mutex},
 };
 use tokio::{
-    net::TcpSocket,
+    io::Interest,
+    net::{TcpSocket, UnixStream},
     task,
     time::{self, Duration},
 };
+use tokio_util::sync::CancellationToken;
+use tracing::Dispatch;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// Write an executable shell script running `script`.
 ///
@@ -117,5 +136,114 @@ impl Drop for Guarded {
         // Both do nothing for a child which got waited for already.
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+/// A shell which nobody but the test or a watcher waits for. It gets killed
+/// through a pidfd if a test fails before it ended, which cannot hit a
+/// reused PID.
+pub(crate) struct Spawned {
+    pub(crate) pid: Pid,
+    pub(crate) process: Process,
+}
+
+impl Drop for Spawned {
+    fn drop(&mut self) {
+        let _ = self.process.signal(Signal::SIGKILL);
+    }
+}
+
+/// Spawn a shell running `script`, see [`Spawned`].
+pub(crate) fn spawn_sh(script: &str) -> Result<Spawned> {
+    let pid = child_pid(Command::new("sh").args(["-c", script]).spawn()?.id())?;
+    // Not reaped yet, so the PID is still its own.
+    let process = Process::open(pid);
+    Ok(Spawned { pid, process })
+}
+
+/// A container without a process, exit paths or a timeout, with I/O of
+/// its own, with or without a terminal. The struct update syntax sets the
+/// rest, like `Child { pid, ..container_child(false)? }`.
+pub(crate) fn container_child(terminal: bool) -> Result<Child> {
+    Ok(Child {
+        id: "id".into(),
+        kind: ChildKind::Container,
+        pid: Pid::from_raw(0),
+        exit_paths: vec![],
+        oom_exit_paths: vec![],
+        timeout: None,
+        io: SharedContainerIO::new(ContainerIO::new(terminal, ContainerLog::new())?),
+        token: CancellationToken::new(),
+        process: None,
+    })
+}
+
+/// Send the terminal descriptor with some data, like a runtime does.
+pub(crate) async fn send_fd(stream: &UnixStream, data: &[u8], fd: BorrowedFd<'_>) -> Result<()> {
+    let fds = [fd.as_raw_fd()];
+    stream
+        .async_io(Interest::WRITABLE, || {
+            socket::sendmsg::<()>(
+                stream.as_raw_fd(),
+                &[IoSlice::new(data)],
+                &[ControlMessage::ScmRights(&fds)],
+                MsgFlags::empty(),
+                None,
+            )
+            .map_err(io::Error::from)
+        })
+        .await?;
+    Ok(())
+}
+
+/// The log of a test, see [`Log::capture`].
+#[derive(Clone, Default)]
+pub(crate) struct Log(Arc<Mutex<Vec<u8>>>);
+
+impl Log {
+    /// Collect what gets logged on the current thread at the info level and
+    /// above, without times and targets, until the guard gets dropped. On
+    /// the current thread runtime of a test, that includes its tasks.
+    pub(crate) fn capture() -> (Self, impl Sized) {
+        // With a single subscriber alive, tracing caches whether a callsite
+        // is enabled by the default subscriber of the thread which hits it
+        // first. A test in parallel which has none would disable it for
+        // this one. With another one alive, every subscriber gets asked.
+        let other: Dispatch = tracing_subscriber::fmt()
+            .with_writer(io::sink)
+            .finish()
+            .into();
+        let log = Self::default();
+        let writer = log.clone();
+        let guard = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .set_default();
+        // Creating a subscriber already rebuilds the cache, this covers a
+        // callsite which another thread registered in between.
+        tracing::callsite::rebuild_interest_cache();
+        (log, (guard, other))
+    }
+
+    /// What got logged so far.
+    pub(crate) fn contents(&self) -> Result<String> {
+        let log = self.0.lock().map_err(|_| format_err!("poisoned"))?.clone();
+        Ok(String::from_utf8(log)?)
+    }
+}
+
+impl Write for Log {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("poisoned"))?
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }

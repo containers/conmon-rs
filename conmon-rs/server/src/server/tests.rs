@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_util::Log;
 use std::os::fd::AsRawFd;
 
 #[test]
@@ -68,39 +69,9 @@ async fn shutdown_parts_report_what_did_not_finish() {
     assert!(Server::all_ok([Ok(()), Ok(())]).is_ok());
 }
 
-/// Collects the log of a test.
-#[derive(Clone, Default)]
-struct Log(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl Log {
-    fn contents(&self) -> Result<String> {
-        let log = self.0.lock().map_err(|_| format_err!("poisoned"))?.clone();
-        Ok(String::from_utf8(log)?)
-    }
-}
-
-impl Write for Log {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .map_err(|_| std::io::Error::other("poisoned"))?
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[tokio::test(start_paused = true)]
 async fn unfinished_shutdown_is_logged_and_ends_the_server_with_it() -> Result<()> {
-    let log = Log::default();
-    let writer = log.clone();
-    let _subscriber = tracing_subscriber::fmt()
-        .with_writer(move || writer.clone())
-        .with_ansi(false)
-        .set_default();
+    let (log, _subscriber) = Log::capture();
     let dir = tempfile::tempdir()?;
     // A socket which cannot be removed.
     let socket = dir.path().join("conmon.sock");
@@ -148,14 +119,7 @@ async fn unfinished_shutdown_is_logged_and_ends_the_server_with_it() -> Result<(
 /// after the fork.
 #[tokio::test]
 async fn backend_failures_get_logged() -> Result<()> {
-    let log = Log::default();
-    let writer = log.clone();
-    let _subscriber = tracing_subscriber::fmt()
-        .with_writer(move || writer.clone())
-        .with_ansi(false)
-        .without_time()
-        .with_target(false)
-        .set_default();
+    let (log, _subscriber) = Log::capture();
     let dir = tempfile::tempdir()?;
     let config = Config::parse_for_test([
         "--runtime",

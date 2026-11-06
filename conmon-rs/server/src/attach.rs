@@ -57,7 +57,7 @@ const STDIN_CHANNEL_SIZE: usize = 16;
 /// not buffer output without bound for it either. About what the stdio
 /// channels buffer for exec, as a power of two, which tokio rounds the
 /// capacity of a broadcast channel up to anyway.
-const OUTPUT_CHANNEL_SIZE: usize = 128;
+pub(crate) const OUTPUT_CHANNEL_SIZE: usize = 128;
 
 #[derive(Clone, Debug)]
 /// A shared container attach abstraction.

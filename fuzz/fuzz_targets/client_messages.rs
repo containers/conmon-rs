@@ -5,4 +5,6 @@
 use conmonrs::fuzzing::client_messages;
 use libfuzzer_sys::fuzz_target;
 
-fuzz_target!(|data: &[u8]| client_messages(data));
+fuzz_target!(|data: &[u8]| {
+    client_messages(data);
+});

@@ -69,13 +69,15 @@ impl AsyncWrite for Watched {
 }
 
 /// Parse the query of a channel protocol request, the ports it gives
-/// are the ones a session can forward.
-pub fn query_ports(query: &str) {
-    if let Ok(ports) = PortForward::query_ports(Some(query)) {
-        assert!(!ports.is_empty());
-        assert!(ports.len() <= MAX_CHANNEL_PORTS);
-        assert!(!ports.contains(&0));
-    }
+/// are the ones a session can forward. Returns whether it got parsed.
+pub fn query_ports(query: &str) -> bool {
+    let Ok(ports) = PortForward::query_ports(Some(query)) else {
+        return false;
+    };
+    assert!(!ports.is_empty());
+    assert!(ports.len() <= MAX_CHANNEL_PORTS);
+    assert!(!ports.contains(&0));
+    true
 }
 
 /// Serve a SPDY port forward session to a client which sends the frames

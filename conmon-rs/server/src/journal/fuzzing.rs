@@ -8,10 +8,10 @@ use super::{Entry, Priority, testing::decode};
 /// next bytes as a valid name, a byte for the length of its value and the
 /// value. The first field is the message, its key gets consumed but not
 /// used. A key cut off by the end of the input ends the fields, a value may
-/// be shorter.
-pub fn entry(input: &[u8]) {
+/// be shorter. Returns whether the input gave a message.
+pub fn entry(input: &[u8]) -> bool {
     let Some((&first, mut input)) = input.split_first() else {
-        return;
+        return false;
     };
     let mut fields = vec![];
     let mut take = |len: usize| {
@@ -48,6 +48,7 @@ pub fn entry(input: &[u8]) {
             fields.push((key, value));
         }
     }
+    let has_message = message.is_some();
     let message = message.unwrap_or_default();
     let priority = match first % 5 {
         0 => Priority::Error,
@@ -77,4 +78,5 @@ pub fn entry(input: &[u8]) {
     ];
     expected.extend(fields);
     assert_eq!(decode(entry.as_bytes()), expected);
+    has_message
 }

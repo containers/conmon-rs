@@ -89,24 +89,12 @@ async fn hold(
     logger.clone().lock_owned().await
 }
 
-/// Wait until a read loop has output on its way into the log, failing
-/// if it never does.
-async fn wait_logging(attach: &SharedContainerAttach) -> Result<()> {
-    for _ in 0..1000 {
-        if attach.is_logging() {
-            return Ok(());
-        }
-        task::yield_now().await;
-    }
-    bail!("no output on its way into the log")
-}
-
 #[tokio::test(start_paused = true)]
 async fn exit_files_wait_for_slow_log_drivers() -> Result<()> {
     let mut l = log_loop().await?;
     let held = hold(&l.logger).await;
     l.writer.write_all(b"last line\n").await?;
-    wait_logging(&l.attach).await?;
+    wait_for(|| l.attach.is_logging()).await?;
 
     // The log takes longer than the drain waits for a pause.
     let wait = task::spawn(ReapableChild::wait_for_output(
@@ -134,7 +122,7 @@ async fn exit_files_wait_for_the_last_line() -> Result<()> {
     // The output ended, its last line is on its way into the log.
     let held = hold(&l.logger).await;
     drop(l.writer);
-    wait_logging(&l.attach).await?;
+    wait_for(|| l.attach.is_logging()).await?;
     let wait = task::spawn(ReapableChild::wait_for_output(
         l.attach.clone(),
         Instant::now() + DRAIN_MAX_LOG_WAIT,
@@ -145,7 +133,8 @@ async fn exit_files_wait_for_the_last_line() -> Result<()> {
     drop(held);
     wait.await?;
     assert!(
-        crate::container_log::test_helpers::read(&l.lines)?
+        l.lines
+            .read()?
             .contains(r#""message":"no newline","partial":true"#)
     );
     l.task.await?
@@ -162,7 +151,7 @@ async fn nothing_gets_logged_after_the_output_finished() -> Result<()> {
     // ending. It gets written once the read loop ended.
     ReapableChild::finish_output(l.attach.clone(), &l.logger).await;
     (&mut l.task).await??;
-    let read = || crate::container_log::test_helpers::read(&l.lines);
+    let read = || l.lines.read();
     assert!(read()?.contains(r#""message":"no newline","partial":true"#));
 
     // Its later output does not reach the log anymore.
@@ -229,7 +218,7 @@ async fn finished_output_is_bounded_with_a_hanging_log() -> Result<()> {
     let mut l = log_loop().await?;
     let held = hold(&l.logger).await;
     l.writer.write_all(b"never logged\n").await?;
-    wait_logging(&l.attach).await?;
+    wait_for(|| l.attach.is_logging()).await?;
 
     let start = Instant::now();
     ReapableChild::finish_output(l.attach.clone(), &l.logger).await;
@@ -265,7 +254,7 @@ async fn exit_files_wait_for_log_drivers_bounded() -> Result<()> {
     let mut l = log_loop().await?;
     let held = hold(&l.logger).await;
     l.writer.write_all(b"never logged\n").await?;
-    wait_logging(&l.attach).await?;
+    wait_for(|| l.attach.is_logging()).await?;
 
     let start = Instant::now();
     assert!(!ReapableChild::wait_for_output(l.attach, Instant::now() + DRAIN_MAX_LOG_WAIT).await);

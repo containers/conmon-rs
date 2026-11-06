@@ -2,13 +2,15 @@
 
 use super::*;
 
-#[tokio::test]
+/// On the paused clock, which gets to the timeouts at once and does not
+/// stall like the real one on a loaded machine.
+#[tokio::test(start_paused = true)]
 async fn idle_websocket_sessions_end() -> Result<()> {
     LocalSet::new()
         .run_until(async {
             let timeout = Duration::from_millis(500);
             let (io, _server, mut stream) =
-                attach_session_with(false, true, true, Some(timeout)).await?;
+                attach_session_duplex(true, true, Some(timeout)).await?;
             let attach = io.attach().clone();
 
             // Stdin keeps the session going.
@@ -181,12 +183,14 @@ async fn idle_timeouts_of_stuck_websocket_sessions_send_one_status() -> Result<(
         .await
 }
 
-#[tokio::test]
+/// On the paused clock, like [`idle_websocket_sessions_end`].
+#[tokio::test(start_paused = true)]
 async fn idle_spdy_sessions_end() -> Result<()> {
     LocalSet::new()
         .run_until(async {
             let timeout = Duration::from_millis(500);
-            let (io, _server, mut client) = spdy_attach_with(false, true, Some(timeout)).await?;
+            let (io, mut client) =
+                spdy_attach_duplex(true, Some(timeout), Version::V4, 64 * 1024).await?;
             let attach = io.attach().clone();
 
             // Stdin keeps the session going.

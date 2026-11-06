@@ -1,5 +1,11 @@
 use super::*;
-use crate::{container_log::LineBuffer, journal::testing::decode};
+use crate::{
+    container_log::{
+        LineBuffer,
+        test_helpers::{Journal, receive},
+    },
+    journal::testing::decode,
+};
 use anyhow::bail;
 use std::os::unix::net::UnixDatagram;
 
@@ -9,19 +15,38 @@ fn field(key: &str, value: &str) -> (String, Vec<u8>) {
     (key.to_owned(), value.as_bytes().to_vec())
 }
 
-/// The entries the logger sent to the socket. Writing waits for the
+/// The entries the logger sent to the journal. Writing waits for the
 /// sends, so they are all queued already.
 fn received(socket: &UnixDatagram) -> Result<Vec<Fields>> {
-    socket.set_nonblocking(true)?;
-    let mut entries = vec![];
-    let mut buf = vec![0; 4096];
-    loop {
-        match socket.recv(&mut buf) {
-            Ok(len) => entries.push(decode(&buf[..len])),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(entries),
-            Err(e) => return Err(e.into()),
+    Ok(receive(socket)?.iter().map(|entry| decode(entry)).collect())
+}
+
+/// A journal whose queue is full, so that it takes no entry right away.
+fn full_journal() -> Result<Journal> {
+    let journal = Journal::new()?;
+    let error = journal::tests::fill(Wait::Never, &journal.path);
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    Ok(journal)
+}
+
+/// Wait in a thread of its own until the journal got an entry with the
+/// `message`, after it caught up a little later. The thread keeps the
+/// journal, its directory with the socket stays until then.
+fn catch_up(journal: Journal, message: &'static str) -> std::thread::JoinHandle<Result<bool>> {
+    std::thread::spawn(move || -> Result<bool> {
+        // The whole journal, not only its socket.
+        let journal = &journal;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let socket = &journal.socket;
+        socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+        let mut buf = vec![0; 4096];
+        loop {
+            let len = socket.recv(&mut buf)?;
+            if decode(&buf[..len]).contains(&field("MESSAGE", message)) {
+                return Ok(true);
+            }
         }
-    }
+    })
 }
 
 #[test]
@@ -76,11 +101,6 @@ async fn name_comes_from_the_request() -> Result<()> {
     let mut driver = drivers.reborrow().get(0);
     driver.set_type(Type::Journald);
     driver.set_container_name("k8s_ctr");
-    // Retired, an older client may still send them.
-    driver.set_tag_old("tag");
-    let mut label = driver.init_labels_old(1).get(0);
-    label.set_key("POD");
-    label.set_value("web");
 
     let log = ContainerLog::from_request("abc", drivers.into_reader())?;
     let log = log.lock().await;
@@ -103,10 +123,8 @@ async fn name_comes_from_the_request() -> Result<()> {
 /// container fields and the partial marker of unfinished lines.
 #[tokio::test]
 async fn write_lines_sends_entries() -> Result<()> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("socket");
-    let socket = UnixDatagram::bind(&path)?;
-    let mut logger = JournaldLogger::with_socket("0123456789abcdef", &path);
+    let journal = Journal::new()?;
+    let mut logger = JournaldLogger::with_socket("0123456789abcdef", &journal.path);
     logger.init().await?;
 
     let mut buffer = LineBuffer::default();
@@ -131,7 +149,7 @@ async fn write_lines_sends_entries() -> Result<()> {
         fields
     };
     assert_eq!(
-        received(&socket)?,
+        received(&journal.socket)?,
         [
             entry("6", "Test log message", false),
             entry("3", "and another", true),
@@ -143,16 +161,14 @@ async fn write_lines_sends_entries() -> Result<()> {
 /// The output goes to the journal as it is, like with conmon.
 #[tokio::test]
 async fn binary_output_is_kept() -> Result<()> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("socket");
-    let socket = UnixDatagram::bind(&path)?;
-    let mut logger = JournaldLogger::with_socket("test", &path);
+    let journal = Journal::new()?;
+    let mut logger = JournaldLogger::with_socket("test", &journal.path);
 
     let mut buffer = LineBuffer::default();
     let lines = buffer.push(Pipe::StdOut, b"\xff\xfe\x00bin\n");
     logger.write_lines(Pipe::StdOut, &lines).await?;
 
-    let entries = received(&socket)?;
+    let entries = received(&journal.socket)?;
     assert_eq!(entries.len(), 1);
     assert_eq!(
         entries[0][1],
@@ -164,24 +180,11 @@ async fn binary_output_is_kept() -> Result<()> {
 /// The lines which a busy journal does not take right away wait for it.
 #[tokio::test]
 async fn lines_wait_for_a_busy_journal() -> Result<()> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("socket");
-    let socket = UnixDatagram::bind(&path)?;
-    let error = journal::tests::fill(Wait::Never, &path);
-    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    let journal = full_journal()?;
 
     // The journal catches up a little later.
-    let reader = std::thread::spawn(move || -> Result<bool> {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
-        let mut buf = vec![0; 4096];
-        loop {
-            let len = socket.recv(&mut buf)?;
-            if decode(&buf[..len]).contains(&field("MESSAGE", "late")) {
-                return Ok(true);
-            }
-        }
-    });
+    let path = journal.path.clone();
+    let reader = catch_up(journal, "late");
     let mut logger = JournaldLogger::with_socket("test", &path);
     let mut buffer = LineBuffer::default();
     let lines = buffer.push(Pipe::StdOut, b"late\n");
@@ -198,13 +201,9 @@ async fn lines_wait_for_a_busy_journal() -> Result<()> {
 /// do not wait for a journal which takes nothing.
 #[tokio::test]
 async fn chunks_after_a_timeout_do_not_wait() -> Result<()> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("socket");
-    let socket = UnixDatagram::bind(&path)?;
-    let error = journal::tests::fill(Wait::Never, &path);
-    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    let journal = full_journal()?;
 
-    let mut logger = JournaldLogger::with_socket("test", &path);
+    let mut logger = JournaldLogger::with_socket("test", &journal.path);
     let mut buffer = LineBuffer::default();
     let lines = buffer.push(Pipe::StdOut, b"waits\n");
     logger.write_lines(Pipe::StdOut, &lines).await?;
@@ -220,7 +219,7 @@ async fn chunks_after_a_timeout_do_not_wait() -> Result<()> {
     assert!(lock(&logger.shared.timed_out).is_some());
 
     // The journal catches up.
-    let entries = received(&socket)?;
+    let entries = received(&journal.socket)?;
     assert!(
         !entries
             .iter()
@@ -228,7 +227,7 @@ async fn chunks_after_a_timeout_do_not_wait() -> Result<()> {
     );
     let lines = buffer.push(Pipe::StdOut, b"taken\n");
     logger.write_lines(Pipe::StdOut, &lines).await?;
-    assert_eq!(received(&socket)?.len(), 1);
+    assert_eq!(received(&journal.socket)?.len(), 1);
     Ok(())
 }
 
@@ -236,15 +235,11 @@ async fn chunks_after_a_timeout_do_not_wait() -> Result<()> {
 /// keep up, so the rest of the chunk does not wait for it either.
 #[tokio::test]
 async fn partly_taken_chunks_after_a_timeout_do_not_wait() -> Result<()> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("socket");
-    let socket = UnixDatagram::bind(&path)?;
-    let error = journal::tests::fill(Wait::Never, &path);
-    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    let journal = full_journal()?;
     // Room for a single entry.
-    socket.recv(&mut [0; 4096])?;
+    journal.socket.recv(&mut [0; 4096])?;
 
-    let mut logger = JournaldLogger::with_socket("test", &path);
+    let mut logger = JournaldLogger::with_socket("test", &journal.path);
     *lock(&logger.shared.timed_out) = Some(Instant::now());
     let mut buffer = LineBuffer::default();
     let lines = buffer.push(Pipe::StdOut, b"taken\ndropped\n");
@@ -259,26 +254,13 @@ async fn partly_taken_chunks_after_a_timeout_do_not_wait() -> Result<()> {
 /// stalled, so the rest of a chunk waits for it again.
 #[tokio::test]
 async fn partly_taken_chunks_wait_again() -> Result<()> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("socket");
-    let socket = UnixDatagram::bind(&path)?;
-    let error = journal::tests::fill(Wait::Never, &path);
-    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    let journal = full_journal()?;
     // Room for a single entry.
-    socket.recv(&mut [0; 4096])?;
+    journal.socket.recv(&mut [0; 4096])?;
 
     // The journal catches up a little later.
-    let reader = std::thread::spawn(move || -> Result<bool> {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
-        let mut buf = vec![0; 4096];
-        loop {
-            let len = socket.recv(&mut buf)?;
-            if decode(&buf[..len]).contains(&field("MESSAGE", "waits")) {
-                return Ok(true);
-            }
-        }
-    });
+    let path = journal.path.clone();
+    let reader = catch_up(journal, "waits");
     let mut logger = JournaldLogger::with_socket("test", &path);
     *lock(&logger.shared.timed_out) = Instant::now().checked_sub(CHUNK_TIMEOUT);
     let mut buffer = LineBuffer::default();
@@ -296,10 +278,8 @@ async fn partly_taken_chunks_wait_again() -> Result<()> {
 /// The lines which did not go out by the deadline get dropped.
 #[test]
 fn lines_after_the_deadline_get_dropped() -> Result<()> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("socket");
-    let socket = UnixDatagram::bind(&path)?;
-    let logger = JournaldLogger::with_socket("test", &path);
+    let journal = Journal::new()?;
+    let logger = JournaldLogger::with_socket("test", &journal.path);
     let mut buffer = LineBuffer::default();
     let lines = buffer.push(Pipe::StdOut, b"one\ntwo\n");
     let past = Instant::now();
@@ -307,7 +287,7 @@ fn lines_after_the_deadline_get_dropped() -> Result<()> {
     assert_eq!(handled, 2);
     assert!(logger.shared.failing.load(Ordering::Relaxed));
     assert!(lock(&logger.shared.timed_out).is_some());
-    assert!(received(&socket)?.is_empty());
+    assert!(received(&journal.socket)?.is_empty());
     Ok(())
 }
 
@@ -335,15 +315,11 @@ async fn send_failures_are_not_fatal() -> Result<()> {
 /// A journal which takes some lines of a chunk is not back yet.
 #[test]
 fn partly_sent_chunks_keep_failing() -> Result<()> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("socket");
-    let socket = UnixDatagram::bind(&path)?;
-    let error = journal::tests::fill(Wait::Never, &path);
-    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    let journal = full_journal()?;
     // Room for a single entry.
-    socket.recv(&mut [0; 4096])?;
+    journal.socket.recv(&mut [0; 4096])?;
 
-    let logger = JournaldLogger::with_socket("test", &path);
+    let logger = JournaldLogger::with_socket("test", &journal.path);
     logger.shared.failing.store(true, Ordering::Relaxed);
     let mut buffer = LineBuffer::default();
     let lines = buffer.push(Pipe::StdOut, b"one\ntwo\n");

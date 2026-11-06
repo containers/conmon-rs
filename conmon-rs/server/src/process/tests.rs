@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_util::Guarded;
+use crate::test_util::{Guarded, spawn_sh};
 use std::{
     os::unix::process::{CommandExt, ExitStatusExt},
     process::Stdio,
@@ -268,17 +268,6 @@ async fn wait_for_traced_process_waits_for_the_tracer() -> Result<()> {
     Ok(())
 }
 
-/// Spawn a shell running `script` which is never waited for by the standard
-/// library, the tests reap it themselves.
-fn spawn_unwaited(script: &str) -> Result<Pid> {
-    let child = std::process::Command::new("sh")
-        .args(["-c", script])
-        .spawn()?;
-    let pid = child_pid(child.id())?;
-    std::mem::forget(child);
-    Ok(pid)
-}
-
 /// The first real-time signal of glibc, which nix does not know. The tests of
 /// its exits run on their own: qemu-user, which keeps some real-time signals
 /// for itself, reports them with other numbers, see the test-unit-arch jobs.
@@ -296,7 +285,9 @@ fn wait_exit_reports_real_time_signal_exits() -> Result<()> {
 
 fn check_wait_exit(cases: &[(&str, i32)]) -> Result<()> {
     for &(script, expected) in cases {
-        let pid = spawn_unwaited(script)?;
+        // Never waited for by the standard library, the test reaps it.
+        let sh = spawn_sh(script)?;
+        let pid = sh.pid;
         // Without reaping it, which happens afterwards.
         assert_eq!(
             wait_exit(Id::Pid(pid), WaitPidFlag::WNOWAIT),
@@ -344,11 +335,11 @@ async fn wait_on_thread_reports_real_time_signal_exits() -> Result<()> {
 
 async fn check_wait_on_thread(cases: &[(&str, i32)]) -> Result<()> {
     for &(script, expected) in cases {
-        let pid = spawn_unwaited(script)?;
-        let process = Process::open(pid);
+        let sh = spawn_sh(script)?;
+        let pid = sh.pid;
         let wait = task::spawn(wait_for_exit_code_on_thread(pid));
         if script.contains("sleep") {
-            process.signal(Signal::SIGKILL)?;
+            sh.process.signal(Signal::SIGKILL)?;
         }
         let code = time::timeout(Duration::from_secs(5), wait).await??;
         assert_eq!(code, expected, "{script}");

@@ -5,4 +5,6 @@
 use conmonrs::fuzzing::journal_entry;
 use libfuzzer_sys::fuzz_target;
 
-fuzz_target!(|data: &[u8]| journal_entry(data));
+fuzz_target!(|data: &[u8]| {
+    journal_entry(data);
+});
