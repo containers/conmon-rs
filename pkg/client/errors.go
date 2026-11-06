@@ -14,20 +14,17 @@ var (
 	// that callers which check for the latter detect it as well.
 	ErrUnsupported error = unsupportedError{}
 
-	// ErrMissingNetNsPath gets returned if port forwarding is requested
-	// without the path of the network namespace.
-	ErrMissingNetNsPath = errors.New("network namespace path is empty")
-
 	// ErrMissingConfig gets returned if a function or method gets called
 	// with a nil configuration.
 	ErrMissingConfig = errors.New("config must be specified")
 
 	// ErrInvalidValue gets matched by the error of New and of a method if
 	// the configuration has a value which none of the constants of its type
-	// names, like an unknown CgroupManager or LogDriverType, and
-	// if the server answered with a value the client does not know. New only
-	// checks the LogLevel and LogDriver if it starts a server, they do not
-	// apply to one which runs already. Use errors.Is to check for it.
+	// names, like an unknown CgroupManager or LogDriverType, or lacks a
+	// required one, like the NetNsPath of ServePortForwardContainerConfig,
+	// and if the server answered with a value the client does not know. New
+	// only checks the LogLevel and LogDriver if it starts a server, they do
+	// not apply to one which runs already. Use errors.Is to check for it.
 	ErrInvalidValue = errors.New("invalid value")
 
 	// ErrContainerNotFound gets matched by the error of a method if the
@@ -50,12 +47,11 @@ var (
 	// ErrClientClosed gets returned by the methods of a client after Close.
 	ErrClientClosed = errors.New("client is closed")
 
-	// ErrShutdownTimeout gets returned by ShutdownContext and KillContext if
-	// the server is still running once the wait for it timed out, while an
-	// ended context fails with the error of the context. After
-	// ShutdownContext, KillContext sends SIGKILL, which a server only
-	// survives while it is stuck in the kernel, KillContext returns
-	// ErrShutdownTimeout again then.
+	// ErrShutdownTimeout gets returned by Shutdown and Kill if the server is
+	// still running once the wait for it timed out, while an ended context
+	// fails with the error of the context. After Shutdown, Kill sends
+	// SIGKILL, which a server only survives while it is stuck in the kernel,
+	// Kill returns ErrShutdownTimeout again then.
 	ErrShutdownTimeout = errors.New("timed out waiting for server PID to disappear")
 
 	// ErrServerExited gets matched by the error of New if the server it
@@ -75,19 +71,18 @@ var (
 	// context ended before.
 	ErrServerNotUp = errors.New("server did not accept connections")
 
-	// ErrServerPIDUnknown gets matched by the error of ShutdownContext and
-	// KillContext if the client does not know the PID of the server, which
-	// they do not signal then, for example because the server did not report
-	// it.
+	// ErrServerPIDUnknown gets matched by the error of Shutdown and Kill if
+	// the client does not know the PID of the server, which they do not
+	// signal then, for example because the server did not report it.
 	ErrServerPIDUnknown = errors.New("server PID unknown")
 
 	// ErrServerDisconnected gets matched by the error of a method if the
-	// connection to the server ended during the call, for example because the
-	// server exited, unlike a request which the server rejected. Calls in
-	// flight while Close, ShutdownContext or KillContext reset the connection
-	// match it as well, or fail with ErrClientClosed. The next call connects
-	// again, also to a server which replaced the exited one, after Close it
-	// fails with ErrClientClosed instead. Use errors.Is to check for it.
+	// connection to the server ended during the call, for example because
+	// the server exited, unlike a request which the server rejected. Calls
+	// in flight while Close, Shutdown or Kill reset the connection match it
+	// as well, or fail with ErrClientClosed. The next call connects again,
+	// also to a server which replaced the exited one, after Close it fails
+	// with ErrClientClosed instead. Use errors.Is to check for it.
 	ErrServerDisconnected = errors.New("disconnected from the server")
 
 	// ErrServerUnreachable gets matched by the error of a method if no

@@ -75,7 +75,7 @@ func TestHandlePacket(t *testing.T) {
 
 	c := &ConmonClient{logger: logrus.New()}
 	stdout, stderr := &testOut{}, &testOut{}
-	cfg := &AttachConfig{Streams: AttachStreams{Stdout: &Out{stdout}, Stderr: &Out{stderr}}}
+	cfg := &AttachContainerConfig{Streams: AttachStreams{Stdout: stdout, Stderr: stderr}}
 
 	for _, tc := range []struct {
 		packet []byte
@@ -103,18 +103,18 @@ func TestHandlePacket(t *testing.T) {
 	// Output for a stream which is not attached gets dropped.
 	packet := []byte{attachPipeStdout, 'x'}
 
-	cont, err := c.handlePacket(&AttachConfig{}, packet, len(packet), true)
+	cont, err := c.handlePacket(&AttachContainerConfig{}, packet, len(packet), true)
 	if err != nil || !cont {
 		t.Fatalf("got %v, %v for a missing stream, want to continue", cont, err)
 	}
 
-	cfg = &AttachConfig{Streams: AttachStreams{Stdout: &Out{&testOut{err: io.ErrClosedPipe}}}}
+	cfg = &AttachContainerConfig{Streams: AttachStreams{Stdout: &testOut{err: io.ErrClosedPipe}}}
 
 	if _, err := c.handlePacket(cfg, packet, len(packet), true); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("got error %v, want %v", err, io.ErrClosedPipe)
 	}
 
-	cfg = &AttachConfig{Streams: AttachStreams{Stdout: &Out{shortOut{}}}}
+	cfg = &AttachContainerConfig{Streams: AttachStreams{Stdout: shortOut{}}}
 
 	if _, err := c.handlePacket(cfg, packet, len(packet), true); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("got error %v, want %v", err, io.ErrShortWrite)
@@ -185,7 +185,7 @@ func TestRedirectResponseToOutputStreams(t *testing.T) {
 
 	c := &ConmonClient{logger: logrus.New()}
 	stdout, stderr := &testOut{}, &testOut{}
-	cfg := &AttachConfig{Streams: AttachStreams{Stdout: &Out{stdout}, Stderr: &Out{stderr}}}
+	cfg := &AttachContainerConfig{Streams: AttachStreams{Stdout: stdout, Stderr: stderr}}
 
 	if err := c.redirectResponseToOutputStreams(t.Context(), cfg, client); err != nil {
 		t.Fatalf("redirect: %v", err)
@@ -208,7 +208,7 @@ func TestRedirectResponseToOutputStreams(t *testing.T) {
 	server.Close()
 
 	stdout = &testOut{}
-	cfg = &AttachConfig{Streams: AttachStreams{Stdout: &Out{stdout}}}
+	cfg = &AttachContainerConfig{Streams: AttachStreams{Stdout: stdout}}
 
 	if err := c.redirectResponseToOutputStreams(t.Context(), cfg, client); err != nil {
 		t.Fatalf("redirect after close: %v", err)
@@ -249,7 +249,7 @@ func TestRedirectResponseToOutputStreamsRetriesAndSkips(t *testing.T) {
 	logger, hook := logrustest.NewNullLogger()
 	c := &ConmonClient{logger: logger}
 	stdout := &testOut{}
-	cfg := &AttachConfig{Streams: AttachStreams{Stdout: &Out{stdout}}}
+	cfg := &AttachContainerConfig{Streams: AttachStreams{Stdout: stdout}}
 	conn := &scriptedReader{reads: []scriptedRead{
 		{packet: []byte{attachPipeStdout, 'a'}},
 		// A reset connection gets read again.
@@ -276,7 +276,7 @@ func TestRedirectResponseToOutputStreamsRetriesAndSkips(t *testing.T) {
 
 	// Other errors end the output.
 	stdout = &testOut{}
-	cfg = &AttachConfig{Streams: AttachStreams{Stdout: &Out{stdout}}}
+	cfg = &AttachContainerConfig{Streams: AttachStreams{Stdout: stdout}}
 	conn = &scriptedReader{reads: []scriptedRead{{err: io.ErrUnexpectedEOF}}}
 
 	if err := c.redirectResponseToOutputStreams(
@@ -325,13 +325,13 @@ func TestStdinEOFEndsAttachOnlyWhenOutputCannotEnd(t *testing.T) {
 
 			stdin, stdinWriter := io.Pipe()
 			stdout := &testOut{}
-			cfg := &AttachConfig{
+			cfg := &AttachContainerConfig{
 				ID:                "id",
 				SocketPath:        serveAttachSocket(t),
 				Tty:               tc.tty,
 				StopAfterStdinEOF: tc.stopAfterStdinEOF,
 				ContainerStdin:    tc.containerStdin,
-				Streams:           AttachStreams{Stdin: &In{stdin}, Stdout: &Out{stdout}},
+				Streams:           AttachStreams{Stdin: stdin, Stdout: stdout},
 			}
 
 			ctx, cancel := context.WithCancel(t.Context())
@@ -426,15 +426,15 @@ func TestCloseEndsAttach(t *testing.T) {
 			c := newTestClient(t, t.TempDir(), logrus.New())
 
 			stdout, stdoutWriter := io.Pipe()
-			cfg := &AttachConfig{
+			cfg := &AttachContainerConfig{
 				ID:         "id",
 				SocketPath: serveAttachSocket(t),
-				Streams:    AttachStreams{Stdout: &Out{stdoutWriter}},
+				Streams:    AttachStreams{Stdout: stdoutWriter},
 			}
 
 			if withStdin {
 				stdin, _ := io.Pipe()
-				cfg.Streams.Stdin = &In{stdin}
+				cfg.Streams.Stdin = stdin
 			}
 
 			attachErr := make(chan error, 1)
@@ -487,10 +487,10 @@ func TestClosedFileStdinKeepsAttach(t *testing.T) {
 	t.Cleanup(func() { stdinWriter.Close() })
 
 	stdout, stdoutWriter := io.Pipe()
-	cfg := &AttachConfig{
+	cfg := &AttachContainerConfig{
 		ID:         "id",
 		SocketPath: serveAttachSocket(t),
-		Streams:    AttachStreams{Stdin: &In{stdin}, Stdout: &Out{stdoutWriter}},
+		Streams:    AttachStreams{Stdin: stdin, Stdout: stdoutWriter},
 	}
 
 	attachErr := make(chan error, 1)
@@ -531,10 +531,10 @@ func TestStdinErrorStopsOutput(t *testing.T) {
 	stdin, stdinWriter := io.Pipe()
 	// A slow stream, which is still being written to on the failure.
 	stdout := &testOut{delay: 20 * time.Millisecond}
-	cfg := &AttachConfig{
+	cfg := &AttachContainerConfig{
 		ID:         "id",
 		SocketPath: serveAttachSocket(t),
-		Streams:    AttachStreams{Stdin: &In{stdin}, Stdout: &Out{stdout}},
+		Streams:    AttachStreams{Stdin: stdin, Stdout: stdout},
 	}
 
 	attachErr := make(chan error, 1)
@@ -610,10 +610,10 @@ func TestStdinAfterServerClosedKeepsOutput(t *testing.T) {
 
 	stdin, stdinWriter := io.Pipe()
 	stdout := &testOut{}
-	cfg := &AttachConfig{
+	cfg := &AttachContainerConfig{
 		ID:         "id",
 		SocketPath: path,
-		Streams:    AttachStreams{Stdin: &In{stdin}, Stdout: &Out{stdout}},
+		Streams:    AttachStreams{Stdin: stdin, Stdout: stdout},
 	}
 
 	attachErr := make(chan error, 1)
@@ -650,6 +650,72 @@ func TestStdinAfterServerClosedKeepsOutput(t *testing.T) {
 
 	if out, closed := stdout.state(); out != "ab" || !closed {
 		t.Fatalf("got output %q, closed %v, want %q, closed", out, closed, "ab")
+	}
+}
+
+func TestStdinPacketsBounded(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "attach")
+
+	listener, err := net.ListenUnix("unixpacket", &net.UnixAddr{Name: path, Net: "unixpacket"})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	t.Cleanup(func() { listener.Close() })
+
+	data := bytes.Repeat([]byte("x"), 3*attachStdinPacketSize+1)
+	largest := make(chan int, 1)
+
+	// Receives the packets with room for larger ones, and ends the output
+	// once all of stdin arrived.
+	go func() {
+		conn, err := listener.AcceptUnix()
+		if err != nil {
+			return
+		}
+
+		defer conn.Close()
+
+		buf := make([]byte, 2*len(data))
+		received, maxPacket := 0, 0
+
+		for received < len(data) {
+			n, err := conn.Read(buf)
+			if err != nil || n == 0 {
+				break
+			}
+
+			received += n
+			maxPacket = max(maxPacket, n)
+		}
+
+		largest <- maxPacket
+
+		_, _ = conn.Write([]byte{attachPipeDone}) //nolint:errcheck // checked by the attach
+	}()
+
+	c := newTestClient(t, t.TempDir(), logrus.New())
+	t.Cleanup(func() { c.Close() })
+
+	// The reader of io.NopCloser keeps the io.WriterTo of a bytes.Reader,
+	// which would write all of it at once.
+	cfg := &AttachContainerConfig{
+		ID:         "id",
+		SocketPath: path,
+		Streams: AttachStreams{
+			Stdin:  io.NopCloser(bytes.NewReader(data)),
+			Stdout: &testOut{},
+		},
+	}
+
+	if err := c.attach(t.Context(), cfg); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+
+	if got := <-largest; got > attachStdinPacketSize {
+		t.Fatalf("got a stdin packet of %d bytes, want at most %d", got, attachStdinPacketSize)
 	}
 }
 
@@ -700,35 +766,53 @@ func TestCloseOutputStreams(t *testing.T) {
 	closeOutputStreams(AttachStreams{})
 
 	shared := &countingOut{}
-	out := &Out{shared}
-	closeOutputStreams(AttachStreams{Stdout: out, Stderr: out})
+	closeOutputStreams(AttachStreams{Stdout: shared, Stderr: shared})
 
 	if got := shared.closes.Load(); got != 1 {
 		t.Fatalf("shared stream closed %d times, want once", got)
 	}
 
-	// Each stream wraps the same writer in an Out of its own, like CRI-O
-	// does it.
-	wrapped := &countingOut{}
-	closeOutputStreams(AttachStreams{Stdout: &Out{wrapped}, Stderr: &Out{wrapped}})
-
-	if got := wrapped.closes.Load(); got != 1 {
-		t.Fatalf("wrapped stream closed %d times, want once", got)
-	}
-
 	stdout, stderr := &countingOut{}, &countingOut{}
-	closeOutputStreams(AttachStreams{Stdout: &Out{stdout}, Stderr: &Out{stderr}})
+	closeOutputStreams(AttachStreams{Stdout: stdout, Stderr: stderr})
 
 	if stdout.closes.Load() != 1 || stderr.closes.Load() != 1 {
 		t.Fatalf("got closes %d and %d, want one each", stdout.closes.Load(), stderr.closes.Load())
 	}
 
 	stderrOnly := &countingOut{}
-	closeOutputStreams(AttachStreams{Stderr: &Out{stderrOnly}})
+	closeOutputStreams(AttachStreams{Stderr: stderrOnly})
 
 	if got := stderrOnly.closes.Load(); got != 1 {
 		t.Fatalf("stderr closed %d times, want once", got)
 	}
+}
+
+// sliceOut is a writer whose type is not comparable.
+type sliceOut []byte
+
+func (sliceOut) Write(p []byte) (int, error) { return len(p), nil }
+
+func (sliceOut) Close() error { return nil }
+
+func TestSameWriter(t *testing.T) {
+	t.Parallel()
+
+	w := &countingOut{}
+
+	if !sameWriter(w, w) {
+		t.Error("same writer not detected")
+	}
+
+	if sameWriter(w, &countingOut{}) {
+		t.Error("different writers detected as the same")
+	}
+
+	// Compared without the guard, they would panic.
+	if sameWriter(sliceOut{}, sliceOut{}) {
+		t.Error("writers which are not comparable detected as the same")
+	}
+
+	closeOutputStreams(AttachStreams{Stdout: sliceOut{}, Stderr: sliceOut{}})
 }
 
 func TestForwardResizeEvents(t *testing.T) {
@@ -741,7 +825,7 @@ func TestForwardResizeEvents(t *testing.T) {
 	t.Cleanup(func() { c.Close() })
 
 	// Without a channel nothing gets forwarded.
-	c.forwardResizeEvents(t.Context(), &AttachConfig{ID: "id"}, nil)
+	c.forwardResizeEvents(t.Context(), &AttachContainerConfig{ID: "id"}, nil)
 
 	resizes := make(chan resize.TerminalSize, 3)
 
@@ -757,7 +841,7 @@ func TestForwardResizeEvents(t *testing.T) {
 	close(resizes)
 
 	// Returns once the channel got closed.
-	c.forwardResizeEvents(t.Context(), &AttachConfig{ID: "id", Resize: resizes}, nil)
+	c.forwardResizeEvents(t.Context(), &AttachContainerConfig{ID: "id", Resize: resizes}, nil)
 
 	want := request{
 		method: "SetWindowSizeContainer",
@@ -779,5 +863,5 @@ func TestForwardResizeEvents(t *testing.T) {
 	close(done)
 
 	pending := make(chan resize.TerminalSize)
-	c.forwardResizeEvents(t.Context(), &AttachConfig{ID: "id", Resize: pending}, done)
+	c.forwardResizeEvents(t.Context(), &AttachContainerConfig{ID: "id", Resize: pending}, done)
 }

@@ -12,20 +12,19 @@
 //
 // A client which is not needed anymore has to be closed or shut down,
 // otherwise its connection, goroutines and pidfd of the server leak. Close
-// releases them, the server and its containers keep running.
-// ShutdownContext stops the server, which kills its containers before it
-// exits, and releases them once the server is gone. If the server does not
-// exit in time, ShutdownContext fails with ErrShutdownTimeout, or with the
-// error of its context once that ends first. Either way, the client keeps
-// its pidfd of the server open: KillContext ends the server with SIGKILL and
-// releases them as well, or Close releases them and leaves the server
-// running. Close is safe to call at any time, see its documentation for what
-// it covers.
+// releases them, the server and its containers keep running. Shutdown stops
+// the server, which kills its containers before it exits, and releases them
+// once the server is gone. If the server does not exit in time, Shutdown
+// fails with ErrShutdownTimeout, or with the error of its context once that
+// ends first. Either way, the client keeps its pidfd of the server open:
+// Kill ends the server with SIGKILL and releases them as well, or Close
+// releases them and leaves the server running. Close is safe to call at any
+// time, see its documentation for what it covers.
 //
 // # Features
 //
 // Servers of older releases do not support every method or field. The
-// Features of the response of Version list what the server supports beyond
+// Features of the result of Version list what the server supports beyond
 // what its version tells, see the Feature constants. SupportsFeature checks
 // one of them for the server the client is connected to, which may be older
 // than the binary on disk.

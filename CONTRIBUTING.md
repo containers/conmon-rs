@@ -125,9 +125,9 @@ $ sudo env PATH="$PATH" GOENV="$(go env GOENV)" GOMODCACHE="$(go env GOMODCACHE)
 
 `RUNTIME_PATH` selects the OCI runtime of the integration suite, runc by
 default, CI runs it with crun and on amd64 with the runc release of
-[install-runc](.github/install-runc) as well. `MAX_RSS_KB` and
-`MAX_RSS_ANON_KB` set the memory budgets of the server, see the
-[Makefile](Makefile).
+[install-runc](.github/install-runc) as well. `MAX_RSS_KB`,
+`MAX_RSS_ANON_KB` and `MAX_RSS_GROWTH_KB` set the memory budgets of the
+server, see the [Makefile](Makefile).
 `CONMON_BINARY` selects the server to test, which the target builds
 otherwise, for example the static build of `make release-static`:
 

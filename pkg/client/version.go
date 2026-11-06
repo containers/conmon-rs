@@ -12,12 +12,17 @@ import (
 	"github.com/containers/conmon-rs/internal/proto"
 )
 
-// ServerVersion contains the version data of the server instance.
+// ServerVersion is the version of a server binary, see the Version function,
+// or of a running server, see VersionResult.
 type ServerVersion struct {
 	// The current version.
 	Version string `json:"version"`
 
-	// The tag of the build, see VersionResponse.Tag.
+	// The BUILD_TAG of the build or else what
+	// `git describe --tags --always --dirty` told, like
+	// v1.2.1-44-gb172f5bd. It is empty for the static binaries and the
+	// Copr RPMs, releases included, whose builds pass no tag. Use Version
+	// and Commit to identify a build.
 	Tag string `json:"tag"`
 
 	// The git commit SHA of the build.
@@ -101,55 +106,13 @@ func versionContext(ctx context.Context, binaryPath string) (res *ServerVersion,
 	return res, nil
 }
 
-// VersionConfig is the configuration for calling the Version method.
-type VersionConfig struct {
-	// Verbose specifies verbose version output.
-	Verbose bool
-}
+// VersionResult is the result for calling the Version method of a client.
+type VersionResult struct {
+	ServerVersion
 
-// VersionResponse is the response of the Version method.
-type VersionResponse struct {
 	// ProcessID is the PID of the server.
 	ProcessID uint32
-
-	// Version is the actual version string of the server.
-	Version string
-
-	// Tag is the BUILD_TAG of the build or else what
-	// `git describe --tags --always --dirty` told, like
-	// v1.2.1-44-gb172f5bd. It is empty for the static binaries and the
-	// Copr RPMs, releases included, whose builds pass no tag. Use Version
-	// and Commit to identify a build.
-	Tag string
-
-	// Commit is git commit SHA of the build.
-	Commit string
-
-	// BuildDate is the date of build.
-	BuildDate string
-
-	// Target is the build triple.
-	Target string
-
-	// RustVersion is the used Rust version.
-	RustVersion string
-
-	// CargoVersion is the used Cargo version.
-	CargoVersion string
-
-	// CargoTree is the used dependency tree.
-	// Only set if request was in verbose mode.
-	CargoTree string
-
-	// Features are the optional features the server supports, see the
-	// Feature constants like [FeaturePortForward].
-	Features []string
 }
-
-// FeatureSdNotify was reported by the servers from v1.1.0 to before
-// unreleased, which relayed the sd_notify messages of a container. Later
-// servers do not report it, and the client has no field to request it.
-const FeatureSdNotify = "sdnotify"
 
 // FeaturePortForward is reported by servers which forward ports, see
 // ServePortForwardContainer. Since v1.2.0.
@@ -293,37 +256,32 @@ func featureSet(list []string) map[string]bool {
 	return features
 }
 
-// Version can be used to retrieve all available version information. A nil
-// config asks for the version without the verbose fields.
-func (c *ConmonClient) Version(
-	ctx context.Context, cfg *VersionConfig,
-) (_ *VersionResponse, retErr error) {
+// Version asks the server for its version and features.
+func (c *ConmonClient) Version(ctx context.Context) (_ *VersionResult, retErr error) {
 	ctx, span := c.startSpan(ctx, "Version")
 	defer endSpan(span, &retErr)
 
-	return call(ctx, c, proto.Conmon.Version, versionRequest(cfg), readVersionResponse)
+	return call(ctx, c, proto.Conmon.Version, versionRequest, readVersionResponse)
 }
 
-// version asks the server for its version on the RPC client, without the
-// verbose fields.
+// version asks the server for its version on the RPC client.
 func (c *ConmonClient) version(
 	ctx context.Context,
 	rpcClient proto.Conmon,
-) (*VersionResponse, error) {
-	return callOn(ctx, c, rpcClient, proto.Conmon.Version, versionRequest(nil), readVersionResponse)
+) (*VersionResult, error) {
+	return callOn(ctx, c, rpcClient, proto.Conmon.Version, versionRequest, readVersionResponse)
 }
 
-// versionRequest fills the request of a Version call.
-func versionRequest(cfg *VersionConfig) func(proto.Conmon_VersionRequest) error {
-	return func(req proto.Conmon_VersionRequest) error {
-		req.SetVerbose(cfg != nil && cfg.Verbose)
+// versionRequest fills the request of a Version call, without the verbose
+// fields, which only add the dependency tree of the server.
+func versionRequest(req proto.Conmon_VersionRequest) error {
+	req.SetVerbose(false)
 
-		return nil
-	}
+	return nil
 }
 
 // readVersionResponse converts the response of a Version call.
-func readVersionResponse(response proto.Conmon_VersionResponse) (*VersionResponse, error) {
+func readVersionResponse(response proto.Conmon_VersionResponse) (*VersionResult, error) {
 	version, err := response.Version()
 	if err != nil {
 		return nil, fmt.Errorf("get version: %w", err)
@@ -359,11 +317,6 @@ func readVersionResponse(response proto.Conmon_VersionResponse) (*VersionRespons
 		return nil, fmt.Errorf("get cargo version: %w", err)
 	}
 
-	cargoTree, err := response.CargoTree()
-	if err != nil {
-		return nil, fmt.Errorf("get cargo tree: %w", err)
-	}
-
 	featureList, err := response.Features()
 	if err != nil {
 		return nil, fmt.Errorf("get features: %w", err)
@@ -380,8 +333,7 @@ func readVersionResponse(response proto.Conmon_VersionResponse) (*VersionRespons
 		features = append(features, feature)
 	}
 
-	return &VersionResponse{
-		ProcessID:    response.ProcessId(),
+	return &VersionResult{
 		Version:      version,
 		Tag:          tag,
 		Commit:       commit,
@@ -389,7 +341,7 @@ func readVersionResponse(response proto.Conmon_VersionResponse) (*VersionRespons
 		Target:       target,
 		RustVersion:  rustVersion,
 		CargoVersion: cargoVersion,
-		CargoTree:    cargoTree,
 		Features:     features,
+		ProcessID:    response.ProcessId(),
 	}, nil
 }

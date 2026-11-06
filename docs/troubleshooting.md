@@ -68,7 +68,7 @@ the error of the failed call.
 A server which fails before it forks, for example because the runtime does not
 exist, makes `client.New` fail with what the server wrote to stderr. With the
 `stdout` server log driver, also when `CONMON_LOG_DRIVER` in the `Env` of the
-configuration selects it, the `Stderr` writer gets that output instead. A
+configuration selects it, the `Stderr` file gets that output instead. A
 server which exits after it forked, before it accepted connections, makes
 `client.New` fail with an error matching `client.ErrServerExited`, only the
 logs of a server log driver other than `none` tell why.
@@ -104,7 +104,7 @@ that way and should be recreated.
 
 To profile the memory of a server, the Go client attaches
 [heaptrack](https://github.com/KDE/heaptrack) to a server which `client.New`
-starts if its configuration has `Heaptrack: &client.Heaptrack{Enabled: true}`.
+starts if its configuration has `Heaptrack: client.Heaptrack{Enabled: true}`.
 It runs `heaptrack --record-only -p <pid>` from the `BinaryPath` of the
 configuration or the `PATH`, as a child of the client process, with
 `-o <OutputPath>` if that is set, otherwise heaptrack writes the profile to the
@@ -195,7 +195,7 @@ The static release binaries and the RPMs get built without it, they accept
 `--enable-tracing` and `--tracing-endpoint` and ignore them. With the feature,
 `--enable-tracing` exports to `--tracing-endpoint`, `http://127.0.0.1:4317` by
 default. The Go client starts the server with these flags if its
-configuration has `Tracing: &client.Tracing{Enabled: true}`. It then passes the
+configuration has `Tracing: client.Tracing{Enabled: true}`. It then passes the
 span of the context of a call along with the RPC, if there is one, through the
 global propagator of OpenTelemetry (`otel.SetTextMapPropagator`), which does
 nothing unless the caller registers one, like CRI-O does. The server reads the

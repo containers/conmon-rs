@@ -23,6 +23,7 @@ var _ = Describe("ConmonClient", func() {
 	)
 
 	registerSpecHooks(&tr, &sut)
+	newServer := serverStarter(&tr, &sut)
 	runContainer := containerRunner(&tr, &sut)
 
 	Describe("New", func() {
@@ -34,10 +35,10 @@ var _ = Describe("ConmonClient", func() {
 
 			// The container of the server can be used through the new
 			// client.
-			result, err := sut2.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+			result, err := sut2.ExecSyncContainer(ctx, &client.ExecSyncContainerConfig{
 				ID:      tr.ctrID,
 				Command: []string{"/busybox", "echo", "hello"},
-				Timeout: 10,
+				Timeout: 10 * time.Second,
 			})
 			Expect(err).To(Succeed())
 			Expect(result.ExitCode).To(BeZero())
@@ -49,53 +50,18 @@ var _ = Describe("ConmonClient", func() {
 			// Only the client goes away.
 			Expect(sut2.Close()).To(Succeed())
 
-			_, err = sut.Version(ctx, &client.VersionConfig{})
+			_, err = sut.Version(ctx)
 			Expect(err).To(Succeed())
 
 			// Another one stops the server, which stops the container.
 			sut3 := tr.configGivenEnv()
 			DeferCleanup(sut3.Close)
 			DeferCleanup(sut.Close)
-			Expect(sut3.ShutdownContext(ctx)).To(Succeed())
+			Expect(sut3.Shutdown(ctx)).To(Succeed())
 
 			sut = nil
 
 			tr.expectContainerStoppedOrGone()
-		}, SpecTimeout(specTimeout))
-
-		It("should start with an output writer which is no file", func(_ SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfig(false)
-
-			// The server outlives New and keeps writing to it.
-			output := &syncBuffer{}
-			started := make(chan *client.ConmonClient, 1)
-			finished := make(chan struct{})
-
-			go func() {
-				defer GinkgoRecover()
-				defer close(finished)
-
-				started <- tr.configGivenEnvWith(func(cfg *client.ConmonServerConfig) {
-					cfg.Stdout = output
-					cfg.Stderr = output
-				})
-			}()
-
-			// A client which New returns once the wait below gave up still
-			// has a server to stop. New itself gives up after 20 seconds.
-			DeferCleanup(func() {
-				Eventually(finished, 30*time.Second).Should(BeClosed())
-
-				select {
-				case late := <-started:
-					cleanupSpec(nil, late)
-				default:
-				}
-			})
-
-			Eventually(started, 10*time.Second).Should(Receive(&sut))
-			Eventually(output.String, 10*time.Second).ShouldNot(BeEmpty())
 		}, SpecTimeout(specTimeout))
 
 		It("should start the server with the given environment", func(_ SpecContext) {
@@ -128,9 +94,7 @@ var _ = Describe("ConmonClient", func() {
 		}, SpecTimeout(specTimeout))
 
 		It("should start a new server once the old one got killed", func(ctx SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfig(false)
-			sut = tr.configGivenEnv()
+			newServer()
 
 			old := sut
 			oldPID := old.PID()
@@ -151,7 +115,7 @@ var _ = Describe("ConmonClient", func() {
 			// The client of the old server fails fast, it does not wait for
 			// an answer.
 			start := time.Now()
-			_, err := old.Version(ctx, &client.VersionConfig{})
+			_, err := old.Version(ctx)
 			Expect(err).To(HaveOccurred())
 			Expect(time.Since(start)).To(BeNumerically("<", time.Second))
 
@@ -165,11 +129,11 @@ var _ = Describe("ConmonClient", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(os.SameFile(oldInfo, newInfo)).To(BeFalse(), "stale socket not replaced")
 
-			_, err = sut.Version(ctx, &client.VersionConfig{})
+			_, err = sut.Version(ctx)
 			Expect(err).To(Succeed())
 
 			Expect(old.Close()).To(Succeed())
-			_, err = old.Version(ctx, &client.VersionConfig{})
+			_, err = old.Version(ctx)
 			Expect(err).To(MatchError(client.ErrClientClosed))
 		}, SpecTimeout(specTimeout))
 	})
@@ -209,7 +173,7 @@ var _ = Describe("ConmonClient", func() {
 					pid := startServer(ctx, terminal)
 
 					// Shutdown should kill the container and clean up
-					Expect(sut.ShutdownContext(ctx)).To(Succeed())
+					Expect(sut.Shutdown(ctx)).To(Succeed())
 					sut = nil
 
 					expectServerGone(pid)
@@ -232,13 +196,15 @@ var _ = Describe("ConmonClient", func() {
 		}, SpecTimeout(specTimeout))
 
 		// startTerminable starts a server with a started container which
-		// runs the process, and returns the PID and the output of the
-		// server. The container shares the PID namespace of the host, so
-		// that its process gets the default action of SIGTERM, which the
-		// init of a PID namespace of its own ignores. Its /proc is a bind
-		// mount of the one of the host, a rootless runtime cannot mount a
-		// new one for that namespace.
-		startTerminable := func(ctx context.Context, processArgs []string) (uint32, *syncBuffer) {
+		// runs the process, and returns the PID of the server and a function
+		// which reads its output. The container shares the PID namespace of
+		// the host, so that its process gets the default action of SIGTERM,
+		// which the init of a PID namespace of its own ignores. Its /proc is
+		// a bind mount of the one of the host, a rootless runtime cannot
+		// mount a new one for that namespace.
+		startTerminable := func(
+			ctx context.Context, processArgs []string,
+		) (uint32, func() (string, error)) {
 			tr = newTestRunner()
 			tr.createRuntimeConfigWithProcessArgs(false, processArgs, func(g generate.Generator) {
 				Expect(g.RemoveLinuxNamespace(string(specs.PIDNamespace))).To(Succeed())
@@ -251,8 +217,7 @@ var _ = Describe("ConmonClient", func() {
 				})
 			})
 
-			// The server outlives New and keeps writing to it.
-			output := &syncBuffer{}
+			output, readOutput := serverOutput(tr.tmpDir)
 			sut = tr.configGivenEnvWith(func(cfg *client.ConmonServerConfig) {
 				cfg.Stdout = output
 				cfg.Stderr = output
@@ -260,7 +225,7 @@ var _ = Describe("ConmonClient", func() {
 			tr.createContainer(ctx, sut, false)
 			tr.startContainer()
 
-			return sut.PID(), output
+			return sut.PID(), readOutput
 		}
 
 		It("should terminate the containers on SIGTERM", func(ctx SpecContext) {
@@ -284,7 +249,7 @@ var _ = Describe("ConmonClient", func() {
 			// The shell ignores SIGTERM before it runs sleep, which keeps
 			// ignoring it.
 			sleep := []string{"/busybox", "sleep", "1001"}
-			pid, output := startTerminable(ctx, []string{
+			pid, readOutput := startTerminable(ctx, []string{
 				"/busybox", "sh", "-c", "trap '' TERM; exec " + strings.Join(sleep, " "),
 			})
 			Eventually(pidsWithCmdline, 10*time.Second).
@@ -301,7 +266,7 @@ var _ = Describe("ConmonClient", func() {
 			// A signal which arrives before the server took the first one
 			// would count as the same. The wait counts towards the 4 seconds
 			// below, so a slow log fails here.
-			Eventually(output.String, 2*time.Second).Should(
+			Eventually(readOutput, 2*time.Second).Should(
 				ContainSubstring("Received SIGTERM"),
 				"the server did not log the first SIGTERM within 2 seconds",
 			)
@@ -315,7 +280,7 @@ var _ = Describe("ConmonClient", func() {
 			}, 4*time.Second).Should(MatchError(syscall.ESRCH))
 			Expect(time.Since(start)).To(BeNumerically("<", 4*time.Second))
 			expectServerGone(pid)
-			Expect(output.String()).To(ContainSubstring("Received another SIGTERM"))
+			Expect(readOutput()).To(ContainSubstring("Received another SIGTERM"))
 			Expect(fileContents(tr.exitPath())).To(Equal("137"))
 		}, SpecTimeout(specTimeout))
 
@@ -325,7 +290,7 @@ var _ = Describe("ConmonClient", func() {
 			// Closing the client of the killed server is safe. A failed kill
 			// leaves the server to the cleanup.
 			DeferCleanup(sut.Close)
-			Expect(sut.KillContext(ctx)).To(Succeed())
+			Expect(sut.Kill(ctx)).To(Succeed())
 
 			sut = nil
 
@@ -352,43 +317,25 @@ var _ = Describe("ConmonClient", func() {
 	})
 
 	Describe("Version", func() {
-		for _, verbose := range []bool{false, true} {
-			name := "should succeed"
-			if verbose {
-				name += " with verbose output"
-			}
+		It("should succeed", func(ctx SpecContext) {
+			newServer()
 
-			It(name, func(ctx SpecContext) {
-				tr = newTestRunner()
-				tr.createRuntimeConfig(false)
-				sut = tr.configGivenEnv()
+			version, err := sut.Version(ctx)
+			Expect(err).To(Succeed())
 
-				version, err := sut.Version(
-					ctx,
-					&client.VersionConfig{Verbose: verbose},
-				)
-				Expect(err).To(Succeed())
-
-				Expect(version.ProcessID).NotTo(BeZero())
-				Expect(version.Version).NotTo(BeEmpty())
-				Expect(version.Commit).NotTo(BeEmpty())
-				Expect(version.BuildDate).NotTo(BeEmpty())
-				Expect(version.Target).NotTo(BeEmpty())
-				Expect(version.RustVersion).NotTo(BeEmpty())
-				Expect(version.CargoVersion).NotTo(BeEmpty())
-				// Every feature of the server has a constant of the client.
-				Expect(version.Features).To(ConsistOf(
-					client.FeaturePortForward,
-					client.FeatureIdleTimeout,
-					client.FeatureStreamingProtocols,
-				))
-
-				if verbose {
-					Expect(version.CargoTree).NotTo(BeEmpty())
-				} else {
-					Expect(version.CargoTree).To(BeEmpty())
-				}
-			}, SpecTimeout(specTimeout))
-		}
+			Expect(version.ProcessID).To(Equal(sut.PID()))
+			Expect(version.Version).NotTo(BeEmpty())
+			Expect(version.Commit).NotTo(BeEmpty())
+			Expect(version.BuildDate).NotTo(BeEmpty())
+			Expect(version.Target).NotTo(BeEmpty())
+			Expect(version.RustVersion).NotTo(BeEmpty())
+			Expect(version.CargoVersion).NotTo(BeEmpty())
+			// Every feature of the server has a constant of the client.
+			Expect(version.Features).To(ConsistOf(
+				client.FeaturePortForward,
+				client.FeatureIdleTimeout,
+				client.FeatureStreamingProtocols,
+			))
+		}, SpecTimeout(specTimeout))
 	})
 })

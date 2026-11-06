@@ -22,10 +22,10 @@ import (
 // client returns a reference of the RPC client, which the caller releases
 // once its call is done. A connection which got unusable gets replaced by a
 // new one, which records the features of the server again. A connection
-// which gets reset during the call, like by Close or ShutdownContext, fails
-// it as disconnected, see ErrServerDisconnected. A dial without a server
-// fails with ErrServerUnreachable, one to a socket whose backlog is full
-// with ErrServerNotResponding.
+// which gets reset during the call, like by Close or Shutdown, fails it as
+// disconnected, see ErrServerDisconnected. A dial without a server fails
+// with ErrServerUnreachable, one to a socket whose backlog is full with
+// ErrServerNotResponding.
 func (c *ConmonClient) client(ctx context.Context) (proto.Conmon, error) {
 	_, rpcClient, err := c.clientConn(ctx)
 
@@ -181,15 +181,15 @@ func noResponse[T any](T) (struct{}, error) {
 }
 
 // refreshServer records the PID and the features of the server on a new
-// connection, which may be another server than before, for example one
-// which got restarted. ShutdownContext and KillContext stop that one then.
-// If the server does not tell them within serverProbeTimeout, the recorded
-// ones stay for SupportsFeature and the call which dialed the connection
-// goes on, requireServerFeature asks the server again. The peer credentials
-// of the socket are no replacement: they name the process which called
-// listen at that time, which may have exited by the time the PID gets used,
-// and the PID may belong to another process by then. Only the PID which the
-// server reports itself is trusted.
+// connection, which may be another server than before, for example one which
+// got restarted. Shutdown and Kill stop that one then. If the server does
+// not tell them within serverProbeTimeout, the recorded ones stay for
+// SupportsFeature and the call which dialed the connection goes on,
+// requireServerFeature asks the server again. The peer credentials of the
+// socket are no replacement: they name the process which called listen at
+// that time, which may have exited by the time the PID gets used, and the
+// PID may belong to another process by then. Only the PID which the server
+// reports itself is trusted.
 func (c *ConmonClient) refreshServer(ctx context.Context, conn *rpcConn, rpcClient proto.Conmon) {
 	ctx, cancel := context.WithTimeout(ctx, c.serverTimeouts().probe)
 	defer cancel()

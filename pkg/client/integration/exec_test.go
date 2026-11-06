@@ -26,6 +26,7 @@ var _ = Describe("ConmonClient", func() {
 	)
 
 	registerSpecHooks(&tr, &sut)
+	newServer := serverStarter(&tr, &sut)
 	runContainer := containerRunner(&tr, &sut)
 
 	Describe("ExecSync Stress", func() {
@@ -68,7 +69,7 @@ var _ = Describe("ConmonClient", func() {
 					execEcho(i)
 				}
 
-				rssBefore := vmRSSGivenPID(pid)
+				rssBefore := statusKBGivenPID(pid, "VmRSS")
 				GinkgoWriter.Printf("VmRSS before: %d\n", rssBefore)
 				logMemoryDetails(pid, "before")
 				mappingsBefore := mappingRSS(pid)
@@ -78,7 +79,7 @@ var _ = Describe("ConmonClient", func() {
 					execEcho(warmUps + i)
 				}
 
-				rssAfter := vmRSSGivenPID(pid)
+				rssAfter := statusKBGivenPID(pid, "VmRSS")
 				GinkgoWriter.Printf("VmRSS after: %d\n", rssAfter)
 				logMemoryDetails(pid, "after")
 				logGrownMappings(mappingsBefore, mappingRSS(pid))
@@ -96,7 +97,7 @@ var _ = Describe("ConmonClient", func() {
 
 			const size = 1 << 20
 
-			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncContainerConfig{
 				ID: tr.ctrID,
 				Command: []string{
 					"/busybox",
@@ -107,7 +108,7 @@ var _ = Describe("ConmonClient", func() {
 						size, size,
 					),
 				},
-				Timeout: 30,
+				Timeout: 30 * time.Second,
 			})
 			Expect(err).To(Succeed())
 			Expect(result.ExitCode).To(BeEquivalentTo(0), string(result.Stderr))
@@ -124,7 +125,7 @@ var _ = Describe("ConmonClient", func() {
 			// process still runs to its end.
 			const limit = 16 << 20
 
-			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncContainerConfig{
 				ID: tr.ctrID,
 				Command: []string{
 					"/busybox",
@@ -132,7 +133,7 @@ var _ = Describe("ConmonClient", func() {
 					"-c",
 					fmt.Sprintf("/busybox head -c %d /dev/zero && echo -n done >&2", limit+(1<<20)),
 				},
-				Timeout: 30,
+				Timeout: 30 * time.Second,
 			})
 			Expect(err).To(Succeed())
 			Expect(result.ExitCode).To(BeEquivalentTo(0), string(result.Stderr))
@@ -145,20 +146,45 @@ var _ = Describe("ConmonClient", func() {
 		}, SpecTimeout(specTimeout))
 
 		It("should not start a command in an unknown container", func(ctx SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfig(false)
-			sut = tr.configGivenEnv()
+			newServer()
 
 			// The runtime fails, which the result tells, not an error.
-			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncContainerConfig{
 				ID:      "unknown",
 				Command: []string{"/busybox", "true"},
-				Timeout: 10,
+				Timeout: 10 * time.Second,
 			})
 			Expect(err).To(Succeed())
 			Expect(result.ExitCode).To(Equal(client.ExecExitCodeNotStarted))
 			Expect(result.TimedOut).To(BeFalse())
 			Expect(result.Stderr).NotTo(BeEmpty())
+		}, SpecTimeout(specTimeout))
+
+		It("should not pass a command with a leading dash as an option", func(ctx SpecContext) {
+			runContainer(ctx, false, []string{"/busybox", "sleep", "10"})
+
+			exec := func(command string) *client.ExecSyncContainerResult {
+				result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncContainerConfig{
+					ID:      tr.ctrID,
+					Command: []string{command},
+					Timeout: 10 * time.Second,
+				})
+				Expect(err).To(Succeed())
+				GinkgoWriter.Printf("%s: exit code %d, stdout %q, stderr %q\n",
+					command, result.ExitCode, result.Stdout, result.Stderr)
+
+				return result
+			}
+
+			// The runtime takes it for the executable, which does not exist,
+			// rather than for its option, which would print its version.
+			Expect(exec("/does-not-exist").ExitCode).To(Equal(client.ExecExitCodeNotStarted))
+
+			result := exec("--version")
+			Expect(result.ExitCode).To(Equal(client.ExecExitCodeNotStarted))
+			Expect(string(result.Stderr)).To(ContainSubstring("--version"))
+			Expect(string(result.Stdout) + string(result.Stderr)).
+				NotTo(ContainSubstring("commit:"))
 		}, SpecTimeout(specTimeout))
 
 		It("should pass the cgroup manager of the client to the runtime", func(ctx SpecContext) {
@@ -194,10 +220,10 @@ var _ = Describe("ConmonClient", func() {
 			DeferCleanup(systemd.Close)
 
 			for _, c := range []*client.ConmonClient{sut, systemd} {
-				result, err := c.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+				result, err := c.ExecSyncContainer(ctx, &client.ExecSyncContainerConfig{
 					ID:      tr.ctrID,
 					Command: []string{"/busybox", "true"},
-					Timeout: 10,
+					Timeout: 10 * time.Second,
 				})
 				Expect(err).To(Succeed())
 				Expect(result.ExitCode).To(BeEquivalentTo(0), string(result.Stderr))
@@ -247,10 +273,10 @@ var _ = Describe("ConmonClient", func() {
 			// The server turns them off for itself only.
 			Expect(thpEnabled(strconv.FormatUint(uint64(sut.PID()), 10))).To(Equal("0"))
 
-			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncContainerConfig{
 				ID:      tr.ctrID,
 				Command: []string{"/busybox", "grep", "THP_enabled", "/proc/self/status"},
-				Timeout: 10,
+				Timeout: 10 * time.Second,
 			})
 			Expect(err).To(Succeed())
 			Expect(result.ExitCode).To(BeEquivalentTo(0))
@@ -291,10 +317,10 @@ var _ = Describe("ConmonClient", func() {
 			Expect(oomScoreAdj(strconv.FormatUint(uint64(sut.PID()), 10))).To(Equal(server))
 			Expect(oomScoreAdj(strconv.FormatUint(uint64(resp.PID), 10))).To(Equal(own))
 
-			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+			result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncContainerConfig{
 				ID:      tr.ctrID,
 				Command: []string{"/busybox", "cat", "/proc/self/oom_score_adj"},
-				Timeout: 10,
+				Timeout: 10 * time.Second,
 			})
 			Expect(err).To(Succeed())
 			Expect(result.ExitCode).To(BeEquivalentTo(0))
@@ -305,12 +331,15 @@ var _ = Describe("ConmonClient", func() {
 			It(testName("should succeed without timeout", terminal), func(ctx SpecContext) {
 				runContainer(ctx, terminal, []string{"/busybox", "sleep", "10"})
 
-				result, err := sut.ExecSyncContainer(withoutDeadline(ctx), &client.ExecSyncConfig{
-					ID:       tr.ctrID,
-					Command:  []string{"/busybox", "echo", "-n", "hello", "world"},
-					Timeout:  timeoutUnlimited,
-					Terminal: terminal,
-				})
+				result, err := sut.ExecSyncContainer(
+					withoutDeadline(ctx),
+					&client.ExecSyncContainerConfig{
+						ID:       tr.ctrID,
+						Command:  []string{"/busybox", "echo", "-n", "hello", "world"},
+						Timeout:  timeoutUnlimited,
+						Terminal: terminal,
+					},
+				)
 
 				Expect(err).To(Succeed())
 				Expect(result.ExitCode).To(BeEquivalentTo(0))
@@ -331,10 +360,10 @@ var _ = Describe("ConmonClient", func() {
 			It(testName("should succeed with timeout", terminal), func(ctx SpecContext) {
 				runContainer(ctx, terminal, []string{"/busybox", "sleep", "10"})
 
-				result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+				result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncContainerConfig{
 					ID:       tr.ctrID,
 					Command:  []string{"/busybox", "echo", "-n", "hello", "world"},
-					Timeout:  10,
+					Timeout:  10 * time.Second,
 					Terminal: terminal,
 				})
 
@@ -347,12 +376,15 @@ var _ = Describe("ConmonClient", func() {
 			It(testName("should set the correct exit code", terminal), func(ctx SpecContext) {
 				runContainer(ctx, terminal, []string{"/busybox", "sleep", "10"})
 
-				result, err := sut.ExecSyncContainer(withoutDeadline(ctx), &client.ExecSyncConfig{
-					ID:       tr.ctrID,
-					Command:  []string{"/busybox", "invalid"},
-					Timeout:  timeoutUnlimited,
-					Terminal: terminal,
-				})
+				result, err := sut.ExecSyncContainer(
+					withoutDeadline(ctx),
+					&client.ExecSyncContainerConfig{
+						ID:       tr.ctrID,
+						Command:  []string{"/busybox", "invalid"},
+						Timeout:  timeoutUnlimited,
+						Terminal: terminal,
+					},
+				)
 
 				Expect(err).To(Succeed())
 				Expect(result.ExitCode).To(BeEquivalentTo(127))
@@ -376,15 +408,16 @@ var _ = Describe("ConmonClient", func() {
 				runContainer(ctx, terminal, []string{"/busybox", "sleep", "20"})
 
 				start := time.Now()
-				result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncConfig{
+				result, err := sut.ExecSyncContainer(ctx, &client.ExecSyncContainerConfig{
 					ID:       tr.ctrID,
 					Command:  []string{"/busybox", "sleep", "10"},
-					Timeout:  3,
+					Timeout:  3 * time.Second,
 					Terminal: terminal,
 				})
 
 				Expect(err).To(Succeed())
-				Expect(time.Since(start)).To(BeNumerically("<", 5*time.Second))
+				// Well before the sleep would end, with slack for a loaded host.
+				Expect(time.Since(start)).To(BeNumerically("<", 7*time.Second))
 				Expect(result).NotTo(BeNil())
 				Expect(result.TimedOut).To(BeTrue())
 				// The killed command reports no exit code of its own.
@@ -401,7 +434,7 @@ var _ = Describe("ConmonClient", func() {
 
 					// The server usually reports the timeout before the context
 					// ends the call.
-					result, err := sut.ExecSyncContainer(execCtx, &client.ExecSyncConfig{
+					result, err := sut.ExecSyncContainer(execCtx, &client.ExecSyncContainerConfig{
 						ID:       tr.ctrID,
 						Command:  []string{"/busybox", "sleep", "30"},
 						Terminal: terminal,
@@ -416,10 +449,10 @@ var _ = Describe("ConmonClient", func() {
 					Eventually(func(g Gomega) string {
 						result, err := sut.ExecSyncContainer(
 							ctx,
-							&client.ExecSyncConfig{
+							&client.ExecSyncContainerConfig{
 								ID:      tr.ctrID,
 								Command: []string{"/busybox", "ps"},
-								Timeout: 10,
+								Timeout: 10 * time.Second,
 							},
 						)
 						g.Expect(err).To(Succeed())

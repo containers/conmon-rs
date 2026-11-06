@@ -83,8 +83,8 @@ const (
 	LogDriverTypeJournald LogDriverType = 2
 )
 
-// CreateContainerResponse is the response of the CreateContainer method.
-type CreateContainerResponse struct {
+// CreateContainerResult is the result for calling the CreateContainer method.
+type CreateContainerResult struct {
 	// PID is the container process identifier.
 	PID uint32
 }
@@ -103,7 +103,7 @@ type CreateContainerResponse struct {
 // and fails the call.
 func (c *ConmonClient) CreateContainer(
 	ctx context.Context, cfg *CreateContainerConfig,
-) (_ *CreateContainerResponse, retErr error) {
+) (_ *CreateContainerResult, retErr error) {
 	ctx, span := c.startSpan(ctx, "CreateContainer")
 	defer endSpan(span, &retErr)
 
@@ -149,15 +149,15 @@ func (c *ConmonClient) CreateContainer(
 
 			return nil
 		},
-		func(response proto.Conmon_CreateContainerResponse) (*CreateContainerResponse, error) {
-			return &CreateContainerResponse{PID: response.ContainerPid()}, nil
+		func(response proto.Conmon_CreateContainerResponse) (*CreateContainerResult, error) {
+			return &CreateContainerResult{PID: response.ContainerPid()}, nil
 		},
 	)
 }
 
-// ExecSyncConfig is the configuration for calling the ExecSyncContainer
-// method.
-type ExecSyncConfig struct {
+// ExecSyncContainerConfig is the configuration for calling the
+// ExecSyncContainer method.
+type ExecSyncContainerConfig struct {
 	// ID is the container identifier. Servers since v1.2.1 reject one which
 	// CreateContainerConfig.ID does not allow.
 	ID string
@@ -165,28 +165,32 @@ type ExecSyncConfig struct {
 	// Command is a slice of command line arguments.
 	Command []string
 
-	// Timeout is the maximum time the command can run in seconds, 0 for no
-	// limit. A deadline of the context limits it further, to the whole
-	// seconds left minus one: the server answers once it killed the command
-	// and collected the output still in flight, which takes up to another
-	// second if a background process keeps writing it, so that it usually
-	// reports the timeout before the context ends the call. With less than
-	// two seconds left, the command gets the minimum of one second the
-	// server needs, and may outlive the caller by up to a second. A context
-	// which already ended fails the call without running the command.
+	// Timeout is the maximum time the command can run, rounded up to whole
+	// seconds, zero for no limit. A negative one fails the call with an
+	// error matching ErrInvalidValue, for example one computed from a
+	// deadline which already passed. A deadline of the context limits
+	// it further, to the whole seconds left minus one: the server answers
+	// once it killed the command and collected the output still in flight,
+	// which takes up to another second if a background process keeps writing
+	// it, so that it usually reports the timeout before the context ends the
+	// call. With less than two seconds left, the command gets the minimum of
+	// one second the server needs, and may outlive the caller by up to a
+	// second. A context which already ended fails the call without running
+	// the command.
 	//
 	// A context which ends without a deadline, for example because it got
 	// cancelled, only ends the call: the server does not stop the command,
 	// which runs until it exits or reaches the Timeout. Set a Timeout or a
 	// deadline to bound it.
-	Timeout uint64
+	Timeout time.Duration
 
 	// Terminal specifies if a tty should be used.
 	Terminal bool
 }
 
-// ExecContainerResult is the result for calling the ExecSyncContainer method.
-type ExecContainerResult struct {
+// ExecSyncContainerResult is the result for calling the ExecSyncContainer
+// method.
+type ExecSyncContainerResult struct {
 	// ExitCode specifies the returned exit status, 128 plus the number of
 	// the signal which killed the command, like a shell reports it, also
 	// for real-time signals since v1.2.2, which gave -1 before. Since
@@ -224,17 +228,23 @@ const (
 
 // ExecSyncContainer can be used to execute a command within a running
 // container. It returns once the command exited and its output got
-// collected, see ExecSyncConfig.Timeout for how long that may take. The
-// command running but failing is no error, see ExecContainerResult.ExitCode.
+// collected, see ExecSyncContainerConfig.Timeout for how long that may take.
+// The command running but failing is no error, see
+// ExecSyncContainerResult.ExitCode.
 func (c *ConmonClient) ExecSyncContainer(
 	ctx context.Context,
-	cfg *ExecSyncConfig,
-) (_ *ExecContainerResult, retErr error) {
+	cfg *ExecSyncContainerConfig,
+) (_ *ExecSyncContainerResult, retErr error) {
 	ctx, span := c.startSpan(ctx, "ExecSyncContainer")
 	defer endSpan(span, &retErr)
 
 	if cfg == nil {
 		return nil, ErrMissingConfig
+	}
+
+	// It would mean no limit on the wire.
+	if cfg.Timeout < 0 {
+		return nil, fmt.Errorf("%w: exec timeout %v", ErrInvalidValue, cfg.Timeout)
 	}
 
 	// The command would get at least the minimum timeout of the server.
@@ -259,7 +269,7 @@ func (c *ConmonClient) ExecSyncContainer(
 
 			return nil
 		},
-		func(resp proto.Conmon_ExecSyncContainerResponse) (*ExecContainerResult, error) {
+		func(resp proto.Conmon_ExecSyncContainerResponse) (*ExecSyncContainerResult, error) {
 			stdout, err := resp.Stdout()
 			if err != nil {
 				return nil, fmt.Errorf("get stdout: %w", err)
@@ -270,7 +280,7 @@ func (c *ConmonClient) ExecSyncContainer(
 				return nil, fmt.Errorf("get stderr: %w", err)
 			}
 
-			return &ExecContainerResult{
+			return &ExecSyncContainerResult{
 				ExitCode: resp.ExitCode(),
 				// The release of the answer zeroes the slices.
 				Stdout:   bytes.Clone(stdout),
@@ -282,11 +292,13 @@ func (c *ConmonClient) ExecSyncContainer(
 }
 
 // execTimeout returns the timeout of an exec in seconds, see
-// ExecSyncConfig.Timeout.
-func execTimeout(ctx context.Context, timeout uint64) uint64 {
+// ExecSyncContainerConfig.Timeout.
+func execTimeout(ctx context.Context, timeout time.Duration) uint64 {
+	seconds := timeoutSeconds(timeout)
+
 	deadline, ok := ctx.Deadline()
 	if !ok {
-		return timeout
+		return seconds
 	}
 
 	// The whole seconds left minus a margin, as the server answers only
@@ -299,11 +311,11 @@ func execTimeout(ctx context.Context, timeout uint64) uint64 {
 	secondsLeft := uint64(max(time.Until(deadline), 0) / time.Second)
 	remaining := max(secondsLeft, margin+1) - margin
 
-	if timeout == 0 {
+	if seconds == 0 {
 		return remaining
 	}
 
-	return min(timeout, remaining)
+	return min(seconds, remaining)
 }
 
 // logDriverTypes maps the log driver types to their protocol values.

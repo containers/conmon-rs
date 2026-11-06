@@ -1,26 +1,36 @@
 # The incompatible changes of the Go client which are intended against one
-# release, like removed API which CRI-O does not use. The first line which is
-# no comment is the tag of that release, the others are lines of the
-# "## incompatible changes" section of the report of gorelease. make
-# verify-go-api prints the whole report and fails as usual, unless it compares
-# with that tag, gorelease found no errors or diagnostics and every
-# incompatible change it reports is one of the lines below. Once the next
-# release got tagged, gorelease compares with that one, the file is a no-op
-# then and gets deleted afterwards, see release.md.
+# release, like removing or renaming API, which CRI-O adapts to when it bumps
+# the module. The first line which is no comment is the tag of that release,
+# the others are lines of the "## incompatible changes" section of the report
+# of gorelease. make verify-go-api prints the whole report and fails as usual,
+# unless it compares with that tag, gorelease found no errors or diagnostics
+# and every incompatible change it reports is one of the lines below. Once the
+# next release got tagged, gorelease compares with that one, the file is a
+# no-op then and gets deleted afterwards, see release.md, which also tells
+# when a patch release needs the tag below replaced.
 v1.2.2
-AttachConfig.DetachKeys: removed
-AttachConfig.ExecSession: removed
-AttachConfig.Passthrough: removed
-AttachConfig.PostAttachFunc: removed
-AttachConfig.PreAttachFunc: removed
-CgroupManagerPerCommand: removed
+(*ConmonClient).AttachContainer: changed from func(context.Context, *AttachConfig) error to func(context.Context, *AttachContainerConfig) error
+(*ConmonClient).CreateContainer: changed from func(context.Context, *CreateContainerConfig) (*CreateContainerResponse, error) to func(context.Context, *CreateContainerConfig) (*CreateContainerResult, error)
 (*ConmonClient).CreateNamespaces: removed
-(*ConmonClient).Kill: removed
+(*ConmonClient).ExecSyncContainer: changed from func(context.Context, *ExecSyncConfig) (*ExecContainerResult, error) to func(context.Context, *ExecSyncContainerConfig) (*ExecSyncContainerResult, error)
+(*ConmonClient).Kill: changed from func() error to func(context.Context) error
+(*ConmonClient).KillContext: removed
 (*ConmonClient).RemoteFDs: removed
 (*ConmonClient).SetWindowSizeContainer: removed
-(*ConmonClient).Shutdown: removed
+(*ConmonClient).Shutdown: changed from func() error to func(context.Context) error
+(*ConmonClient).ShutdownContext: removed
+(*ConmonClient).Version: changed from func(context.Context, *VersionConfig) (*VersionResponse, error) to func(context.Context) (*VersionResult, error)
+AttachConfig: removed
+AttachStreams.Stderr: changed from *Out to io.WriteCloser
+AttachStreams.Stdin: changed from *In to io.ReadCloser
+AttachStreams.Stdout: changed from *Out to io.WriteCloser
+CgroupManagerPerCommand: removed
 ConmonServerConfig.ClientFieldLogger: removed
 ConmonServerConfig.ClientLogger: removed
+ConmonServerConfig.Heaptrack: changed from *Heaptrack to Heaptrack
+ConmonServerConfig.Stderr: changed from io.Writer to *os.File
+ConmonServerConfig.Stdout: changed from io.Writer to *os.File
+ConmonServerConfig.Tracing: changed from *Tracing to Tracing
 ContainerLogDriver.Labels: removed
 ContainerLogDriver.Tag: removed
 CreateContainerConfig.AdditionalFDs: removed
@@ -30,33 +40,39 @@ CreateContainerConfig.EnvVars: removed
 CreateContainerConfig.GlobalArgs: removed
 CreateContainerConfig.LeakFDs: removed
 CreateContainerConfig.SdNotifySocket: removed
-CreateContainerResponse.NamespacesPath: removed
+CreateContainerResponse: removed
 CreateNamespacesConfig: removed
 CreateNamespacesResponse: removed
 DialLongSocket: removed
 ErrCgroupManagerPerCommand: removed
 ErrMissingIDMappings: removed
+ErrMissingNetNsPath: removed
 ErrRemoteFDsBroken: removed
 ErrTerminalSizeNil: removed
 ErrTooManyFileDescriptors: removed
-ExecSyncConfig.CgroupManager: removed
-ExecSyncConfig.EnvVars: removed
+ExecContainerResult: removed
+ExecSyncConfig: removed
 FeatureJournaldFields: removed
+FeatureSdNotify: removed
+In: removed
 LogDriverTypeJSONLogger: removed
+Namespace: removed
 NamespaceIPC: removed
 NamespaceNet: removed
 NamespacePID: removed
-Namespace: removed
-NamespacesResponse: removed
-NamespaceUser: removed
 NamespaceUTS: removed
+NamespaceUser: removed
+NamespacesResponse: removed
 NewConmonServerConfig: removed
 NewContext: removed
 NewRemoteFDs: removed
+Out: removed
 RemoteFD: removed
 RemoteFDs: removed
 ServeAttachContainerConfig.CgroupManager: removed
 ServeExecContainerConfig.CgroupManager: removed
 ServerVersion.CargoTree: removed
 SetWindowSizeContainerConfig: removed
+VersionConfig: removed
 VersionContext: removed
+VersionResponse: removed

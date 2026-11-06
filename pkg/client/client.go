@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -92,22 +91,16 @@ type ConmonServerConfig struct {
 	// at runtime.
 	ServerRunDir string
 
-	// Stdout is the standard output stream of the server when the log driver
-	// "stdout" is being used, os.Stdout if nil.
-	//
-	// An *os.File is passed to the server as it is. Any other writer gets fed
-	// through a pipe by a goroutine of the client process, as long as any
-	// process holds the pipe open, which is the server. Such a writer has to
-	// stay usable for that time and must be safe to write to from another
-	// goroutine. It does not get closed. The output is then tied to the
-	// client process: once it exits, for example on a restart, the output is
-	// lost silently.
-	Stdout io.Writer
+	// Stdout is the standard output of the server when the log driver
+	// "stdout" is being used, os.Stdout if nil. The server and the processes
+	// it starts which inherit it keep writing to it once New returned, also
+	// after the client process exited. It does not get closed.
+	Stdout *os.File
 
-	// Stderr is the standard error stream of the server when the log driver
+	// Stderr is the standard error of the server when the log driver
 	// "stdout" is being used, os.Stderr if nil. It works like Stdout, the same
-	// writer can be used for both.
-	Stderr io.Writer
+	// file can be used for both.
+	Stderr *os.File
 
 	// CgroupManager can be used to select the cgroup manager. The zero value
 	// is CgroupManagerSystemd. It is a client side setting: the client sends
@@ -120,10 +113,10 @@ type ConmonServerConfig struct {
 	// side settings, which also apply to a server which was already running
 	// when New connected to it. Endpoint, and Enabled for the server itself,
 	// only apply to a server New starts.
-	Tracing *Tracing
+	Tracing Tracing
 
 	// Heaptrack can be used to memory profile the server.
-	Heaptrack *Heaptrack
+	Heaptrack Heaptrack
 
 	// Env is the environment of the server, in the form of "key=value". The
 	// server passes it on to the OCI runtime and its hooks, so callers should
@@ -361,16 +354,10 @@ func newContext(
 	// Heaptrack follows the server, also if it reports another PID than the
 	// file named. Its goroutines get a copy of the configuration, which the
 	// caller may change once New returned.
-	heaptrackEnabled := config.Heaptrack != nil && config.Heaptrack.Enabled
-
-	var heaptrack Heaptrack
-	if heaptrackEnabled {
-		heaptrack = *config.Heaptrack
-	}
-
+	heaptrack := config.Heaptrack
 	heaptrackPID := cl.PID()
 
-	if heaptrackEnabled && heaptrackPID != 0 {
+	if heaptrack.Enabled && heaptrackPID != 0 {
 		go cl.attachHeaptrack(context.WithoutCancel(ctx), heaptrack, heaptrackPID)
 	}
 
@@ -393,7 +380,7 @@ func newContext(
 
 	cl.setFeatures(resp.Features)
 
-	if heaptrackEnabled && heaptrackPID != resp.ProcessID {
+	if heaptrack.Enabled && heaptrackPID != resp.ProcessID {
 		go cl.attachHeaptrack(context.WithoutCancel(ctx), heaptrack, resp.ProcessID)
 	}
 
@@ -449,11 +436,6 @@ func (c *ConmonServerConfig) toClient() (*ConmonClient, error) {
 		return nil, fmt.Errorf("%w: %w", errRunDirNotCreated, err)
 	}
 
-	var tracer trace.Tracer
-	if c.Tracing != nil && c.Tracing.Tracer != nil {
-		tracer = c.Tracing.Tracer
-	}
-
 	// A copy, which the configuration cannot change afterwards.
 	var timeouts *serverTimeouts
 	if c.timeouts != nil {
@@ -468,8 +450,8 @@ func (c *ConmonServerConfig) toClient() (*ConmonClient, error) {
 		attachSessions: map[uint64]*attachSession{},
 		// Also set if New connects to a running server, which gets started
 		// with the same configuration.
-		tracingEnabled: c.Tracing != nil && c.Tracing.Enabled,
-		tracer:         tracer,
+		tracingEnabled: c.Tracing.Enabled,
+		tracer:         c.Tracing.Tracer,
 		cgroupManager:  c.CgroupManager,
 	}, nil
 }
@@ -558,7 +540,7 @@ func (c *ConmonClient) toArgs(
 		args = append(args, "--log-driver", string(config.LogDriver))
 	}
 
-	if config.Tracing != nil && config.Tracing.Enabled {
+	if config.Tracing.Enabled {
 		args = append(args, "--enable-tracing")
 
 		if config.Tracing.Endpoint != "" {
@@ -613,7 +595,7 @@ func validCgroupManager(manager CgroupManager) bool {
 
 // PID returns the server process ID. It changes once the client connects to
 // another server, for example one which got restarted on the same
-// ServerRunDir, which ShutdownContext and KillContext then stop.
+// ServerRunDir, which Shutdown and Kill then stop.
 func (c *ConmonClient) PID() uint32 {
 	if server := c.currentServer(); server != nil {
 		return server.pid

@@ -21,16 +21,15 @@ var _ = Describe("ConmonClient", func() {
 	)
 
 	registerSpecHooks(&tr, &sut)
+	newServer := serverStarter(&tr, &sut)
 	runContainer := containerRunner(&tr, &sut)
 
 	Describe("Attach", func() {
 		It("should fail to attach to an unknown container", func(ctx SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfig(false)
-			sut = tr.configGivenEnv()
+			newServer()
 
 			socketPath := filepath.Join(tr.tmpDir, "attach")
-			Expect(sut.AttachContainer(ctx, &client.AttachConfig{
+			Expect(sut.AttachContainer(ctx, &client.AttachContainerConfig{
 				ID:         "unknown",
 				SocketPath: socketPath,
 			})).To(MatchError(client.ErrContainerNotFound))
@@ -91,19 +90,19 @@ var _ = Describe("ConmonClient", func() {
 				stdinReader, stdinWriter := io.Pipe()
 				stdReader, stdWriter := io.Pipe()
 
-				cfg := &client.AttachConfig{
+				cfg := &client.AttachContainerConfig{
 					ID:                tr.ctrID,
 					SocketPath:        filepath.Join(tr.tmpDir, "attach"),
 					ContainerStdin:    true,
 					StopAfterStdinEOF: !leaveStdinOpen,
 					Streams: client.AttachStreams{
-						Stdin: &client.In{ReadCloser: stdinReader},
+						Stdin: stdinReader,
 					},
 				}
 				if pipe == "stdout" {
-					cfg.Streams.Stdout = &client.Out{WriteCloser: stdWriter}
+					cfg.Streams.Stdout = stdWriter
 				} else {
-					cfg.Streams.Stderr = &client.Out{WriteCloser: stdWriter}
+					cfg.Streams.Stderr = stdWriter
 				}
 
 				testAttach(ctx, sut, cfg, stdinWriter, stdReader, pipe, pipe == "stderr", terminal)
@@ -136,16 +135,16 @@ var _ = Describe("ConmonClient", func() {
 			stdoutReader, stdoutWriter := io.Pipe()
 			stderrReader, stderrWriter := io.Pipe()
 
-			cfg := &client.AttachConfig{
+			cfg := &client.AttachContainerConfig{
 				ID:                tr.ctrID,
 				SocketPath:        filepath.Join(tr.tmpDir, "attach"),
 				Tty:               terminal,
 				StopAfterStdinEOF: stopAfterStdinEOF,
 				ContainerStdin:    true,
 				Streams: client.AttachStreams{
-					Stdin:  &client.In{ReadCloser: stdinReader},
-					Stdout: &client.Out{WriteCloser: stdoutWriter},
-					Stderr: &client.Out{WriteCloser: stderrWriter},
+					Stdin:  stdinReader,
+					Stdout: stdoutWriter,
+					Stderr: stderrWriter,
 				},
 			}
 
@@ -278,13 +277,13 @@ var _ = Describe("ConmonClient", func() {
 					attachErr := make(chan error, 1)
 
 					go func() {
-						attachErr <- sut.AttachContainer(ctx, &client.AttachConfig{
+						attachErr <- sut.AttachContainer(ctx, &client.AttachContainerConfig{
 							ID:             tr.ctrID,
 							SocketPath:     socketPath,
 							ContainerStdin: true,
 							Streams: client.AttachStreams{
-								Stdin:  &client.In{ReadCloser: stdinReader},
-								Stdout: &client.Out{WriteCloser: stdoutWriter},
+								Stdin:  stdinReader,
+								Stdout: stdoutWriter,
 							},
 						})
 					}()
@@ -326,12 +325,12 @@ var _ = Describe("ConmonClient", func() {
 			attachErr := make(chan error, 1)
 
 			go func() {
-				attachErr <- sut.AttachContainer(attachCtx, &client.AttachConfig{
+				attachErr <- sut.AttachContainer(attachCtx, &client.AttachContainerConfig{
 					ID:         tr.ctrID,
 					SocketPath: filepath.Join(tr.tmpDir, "attach"),
 					Tty:        true,
 					Resize:     resizeEvents,
-					Streams:    client.AttachStreams{Stdout: &client.Out{WriteCloser: stdoutWriter}},
+					Streams:    client.AttachStreams{Stdout: stdoutWriter},
 				})
 			}()
 
@@ -364,14 +363,14 @@ var _ = Describe("ConmonClient", func() {
 			attachErr := make(chan error, 1)
 
 			go func() {
-				attachErr <- sut.AttachContainer(attachCtx, &client.AttachConfig{
+				attachErr <- sut.AttachContainer(attachCtx, &client.AttachContainerConfig{
 					ID:                tr.ctrID,
 					SocketPath:        filepath.Join(tr.tmpDir, "attach"),
 					ContainerStdin:    true,
 					StopAfterStdinEOF: true,
 					Streams: client.AttachStreams{
-						Stdin:  &client.In{ReadCloser: stdinReader},
-						Stdout: &client.Out{WriteCloser: stdoutWriter},
+						Stdin:  stdinReader,
+						Stdout: stdoutWriter,
 					},
 				})
 			}()

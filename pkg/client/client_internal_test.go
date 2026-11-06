@@ -323,9 +323,16 @@ func TestMissingConfig(t *testing.T) {
 		}
 	}
 
-	// A nil port forward config always failed with the missing path.
-	if _, err := c.ServePortForwardContainer(ctx, nil); !errors.Is(err, ErrMissingNetNsPath) {
-		t.Errorf("got error %v, want %v", err, ErrMissingNetNsPath)
+	// Checked without asking the server, like the missing config.
+	_, err := c.ServePortForwardContainer(ctx, &ServePortForwardContainerConfig{})
+	if !errors.Is(err, ErrInvalidValue) ||
+		!strings.Contains(err.Error(), "network namespace path") {
+		t.Errorf("got error %v, want %v for the network namespace path", err, ErrInvalidValue)
+	}
+
+	_, err = c.ExecSyncContainer(ctx, &ExecSyncContainerConfig{Timeout: -time.Second})
+	if !errors.Is(err, ErrInvalidValue) || !strings.Contains(err.Error(), "exec timeout") {
+		t.Errorf("got error %v, want %v for the exec timeout", err, ErrInvalidValue)
 	}
 }
 
@@ -512,13 +519,13 @@ func TestToArgs(t *testing.T) {
 		},
 		{
 			name:   "tracing",
-			config: ConmonServerConfig{Tracing: &Tracing{Enabled: true}},
+			config: ConmonServerConfig{Tracing: Tracing{Enabled: true}},
 			want:   append(slices.Clone(base), "--enable-tracing"),
 		},
 		{
 			name: "tracing endpoint",
 			config: ConmonServerConfig{
-				Tracing: &Tracing{Enabled: true, Endpoint: "http://localhost:4317"},
+				Tracing: Tracing{Enabled: true, Endpoint: "http://localhost:4317"},
 			},
 			want: append(
 				slices.Clone(base),
@@ -528,7 +535,7 @@ func TestToArgs(t *testing.T) {
 		{
 			// The endpoint only applies to enabled tracing.
 			name:   "tracing endpoint without tracing",
-			config: ConmonServerConfig{Tracing: &Tracing{Endpoint: "http://localhost:4317"}},
+			config: ConmonServerConfig{Tracing: Tracing{Endpoint: "http://localhost:4317"}},
 			want:   base,
 		},
 		{

@@ -55,9 +55,9 @@ of the server `--log-level=debug`, for `warn` `--log-level=warning` and for
 `error` `--log-level=error`. crun keeps its default for `info` and `off`.
 
 On SIGTERM or SIGINT, the server kills the containers and removes `conmon.sock`
-within 9.5 seconds, before `ShutdownContext` of the Go client, which sends
-SIGINT, gives up after 10 with `ErrShutdownTimeout`. If any of that fails or
-does not finish in time, the server logs it as an error and exits with status 1.
+within 9.5 seconds, before `Shutdown` of the Go client, which sends SIGINT,
+gives up after 10 with `ErrShutdownTimeout`. If any of that fails or does not
+finish in time, the server logs it as an error and exits with status 1.
 A server which cannot listen for these signals does the same cleanup right away
 and exits with status 1.
 

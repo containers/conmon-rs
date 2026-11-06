@@ -17,7 +17,7 @@ network, and waits for its OTLP gRPC port 4317, the default
 ```
 
 The Jaeger UI listens on <http://localhost:16686>. With the Go client, set
-`Tracing: &client.Tracing{Enabled: true}` in the `ConmonServerConfig` to start
+`Tracing: client.Tracing{Enabled: true}` in the `ConmonServerConfig` to start
 the server with tracing. The client passes the span of a call along only with
 an OpenTelemetry propagator registered, see
 [docs/troubleshooting.md](../../docs/troubleshooting.md#tracing).

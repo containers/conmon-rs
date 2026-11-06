@@ -24,12 +24,11 @@ var _ = Describe("StreamingServer", func() {
 	)
 
 	registerSpecHooks(&tr, &sut)
+	newServer := serverStarter(&tr, &sut)
 
 	Describe("ServePortForwardContainer", func() {
 		It("should forward concurrent connections", func(ctx SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfig(false)
-			sut = tr.configGivenEnv()
+			newServer()
 
 			listener, port := echoServer(0)
 			defer listener.Close()
@@ -78,9 +77,7 @@ var _ = Describe("StreamingServer", func() {
 		}, SpecTimeout(specTimeout))
 
 		It("should fail requests beyond the limit of waiting URLs", func(ctx SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfig(false)
-			sut = tr.configGivenEnv()
+			newServer()
 
 			// The server only checks that the path is absolute before it
 			// returns the URL, it enters the namespace once a client
@@ -98,9 +95,7 @@ var _ = Describe("StreamingServer", func() {
 		}, SpecTimeout(specTimeout))
 
 		It("should forward connections through a WebSocket tunnel", func(ctx SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfig(false)
-			sut = tr.configGivenEnv()
+			newServer()
 
 			listener, port := echoServer(0)
 			defer listener.Close()
@@ -141,9 +136,7 @@ var _ = Describe("StreamingServer", func() {
 					base64Codec,
 				),
 				func(ctx SpecContext) {
-					tr = newTestRunner()
-					tr.createRuntimeConfig(false)
-					sut = tr.configGivenEnv()
+					newServer()
 
 					payload := strings.Repeat("x", 100*1024)
 					listener, port := echoServer(int64(len(payload)))
@@ -167,9 +160,7 @@ var _ = Describe("StreamingServer", func() {
 		}
 
 		It("should report a closed port on the WebSocket error channel", func(ctx SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfig(false)
-			sut = tr.configGivenEnv()
+			newServer()
 
 			port := closedPort()
 
@@ -187,23 +178,8 @@ var _ = Describe("StreamingServer", func() {
 			Expect(errs).To(ContainSubstring("failed to connect to localhost:%d", port))
 		}, SpecTimeout(specTimeout))
 
-		It("should reject a missing network namespace path", func(ctx SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfig(false)
-			sut = tr.configGivenEnv()
-
-			// Also without a config.
-			for _, cfg := range []*client.ServePortForwardContainerConfig{nil, {}} {
-				result, err := sut.ServePortForwardContainer(ctx, cfg)
-				Expect(err).To(MatchError(client.ErrMissingNetNsPath))
-				Expect(result).To(BeNil())
-			}
-		}, SpecTimeout(specTimeout))
-
 		It("should report a closed port on the error stream", func(ctx SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfig(false)
-			sut = tr.configGivenEnv()
+			newServer()
 
 			port := closedPort()
 

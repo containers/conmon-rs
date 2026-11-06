@@ -10,7 +10,7 @@ import (
 	logrustest "github.com/sirupsen/logrus/hooks/test"
 )
 
-func TestIdleTimeoutSeconds(t *testing.T) {
+func TestTimeoutSeconds(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
@@ -28,8 +28,8 @@ func TestIdleTimeoutSeconds(t *testing.T) {
 		// for the rounding would overflow.
 		{timeout: math.MaxInt64, want: math.MaxInt64/uint64(time.Second) + 1},
 	} {
-		if got := idleTimeoutSeconds(tc.timeout); got != tc.want {
-			t.Errorf("idleTimeoutSeconds(%d) = %d, want %d", tc.timeout, got, tc.want)
+		if got := timeoutSeconds(tc.timeout); got != tc.want {
+			t.Errorf("timeoutSeconds(%d) = %d, want %d", tc.timeout, got, tc.want)
 		}
 	}
 }

@@ -22,6 +22,7 @@ var _ = Describe("StreamingServer", func() {
 	)
 
 	registerSpecHooks(&tr, &sut)
+	newServer := serverStarter(&tr, &sut)
 	runContainer := containerRunner(&tr, &sut)
 
 	for _, transport := range streamTransports {
@@ -143,39 +144,6 @@ var _ = Describe("StreamingServer", func() {
 					Expect(errors.As(err, &exitErr)).To(BeTrue(), "error %v", err)
 					Expect(exitErr.Code).To(Equal(3))
 				}, SpecTimeout(specTimeout))
-
-				It(
-					testName("should fail if container does not exist", terminal),
-					func(ctx SpecContext) {
-						tr = newTestRunner()
-						tr.createRuntimeConfigWithProcessArgs(
-							terminal,
-							[]string{"/busybox", "sleep", "10"},
-							nil,
-						)
-						sut = tr.configGivenEnv()
-
-						result, err := sut.ServeExecContainer(
-							ctx,
-							&client.ServeExecContainerConfig{
-								ID: "wrong",
-								Command: []string{
-									"/busybox",
-									"sh",
-									"-c",
-									"echo -n stdout && echo -n stderr >&2",
-								},
-								Tty:    terminal,
-								Stdout: true,
-								Stderr: true,
-							},
-						)
-
-						Expect(err).To(MatchError(client.ErrContainerNotFound))
-						Expect(result).To(BeNil())
-					},
-					SpecTimeout(specTimeout),
-				)
 
 				It(
 					testName("should not keep the PID file of a failed exec", terminal),
@@ -561,32 +529,41 @@ var _ = Describe("StreamingServer", func() {
 				})).To(Succeed())
 				Expect(stdout.String()).To(ContainSubstring("hello"))
 			}, SpecTimeout(specTimeout))
-
-			It(
-				testName("should fail if container does not exist", terminal),
-				func(ctx SpecContext) {
-					tr = newTestRunner()
-					tr.createRuntimeConfigWithProcessArgs(
-						terminal,
-						[]string{"/busybox", "sleep", "10"},
-						nil,
-					)
-					sut = tr.configGivenEnv()
-
-					result, err := sut.ServeAttachContainer(
-						ctx,
-						&client.ServeAttachContainerConfig{
-							ID: "wrong",
-						},
-					)
-
-					Expect(err).To(MatchError(client.ErrContainerNotFound))
-					Expect(result).To(BeNil())
-				},
-				SpecTimeout(specTimeout),
-			)
 		})
 	}
+
+	// The server looks the container up before it hands out a URL, whatever
+	// the transport of the client.
+	Describe("for a container which does not exist", func() {
+		It("should fail to serve an exec", func(ctx SpecContext) {
+			newServer()
+
+			result, err := sut.ServeExecContainer(
+				ctx,
+				&client.ServeExecContainerConfig{
+					ID:      "wrong",
+					Command: []string{"/busybox", "true"},
+					Stdout:  true,
+					Stderr:  true,
+				},
+			)
+
+			Expect(err).To(MatchError(client.ErrContainerNotFound))
+			Expect(result).To(BeNil())
+		}, SpecTimeout(specTimeout))
+
+		It("should fail to serve an attach", func(ctx SpecContext) {
+			newServer()
+
+			result, err := sut.ServeAttachContainer(
+				ctx,
+				&client.ServeAttachContainerConfig{ID: "wrong", Stdout: true},
+			)
+
+			Expect(err).To(MatchError(client.ErrContainerNotFound))
+			Expect(result).To(BeNil())
+		}, SpecTimeout(specTimeout))
+	})
 
 	Describe("through the proxy of the kubelet", func() {
 		It("should exec over SPDY", func(ctx SpecContext) {
@@ -632,9 +609,7 @@ var _ = Describe("StreamingServer", func() {
 		}, SpecTimeout(specTimeout))
 
 		It("should forward a port over SPDY", func(ctx SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfig(false)
-			sut = tr.configGivenEnv()
+			newServer()
 
 			listener, port := echoServer(0)
 			defer listener.Close()

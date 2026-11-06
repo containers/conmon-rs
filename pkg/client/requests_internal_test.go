@@ -178,7 +178,7 @@ func lastRequest(t *testing.T, requests <-chan request) request {
 
 // attachWithoutSocket sends the attach request, the attach to the socket
 // afterwards fails, there is none.
-func attachWithoutSocket(ctx context.Context, c *ConmonClient, cfg *AttachConfig) error {
+func attachWithoutSocket(ctx context.Context, c *ConmonClient, cfg *AttachContainerConfig) error {
 	if err := c.AttachContainer(ctx, cfg); err == nil {
 		return errors.New("attached without a socket") //nolint:err113 // test only
 	}
@@ -198,22 +198,10 @@ type requestCase struct {
 func containerRequestCases() []requestCase {
 	return []requestCase{
 		{
+			// Without the verbose fields.
 			name: "Version",
 			call: func(ctx context.Context, c *ConmonClient) error {
-				_, err := c.Version(ctx, &VersionConfig{Verbose: true})
-
-				return err
-			},
-			want: request{
-				method: "Version",
-				text:   `(verbose = true, metadataOld = void, metadata = [])`,
-			},
-		},
-		{
-			// A nil config asks without the verbose fields.
-			name: "Version without config",
-			call: func(ctx context.Context, c *ConmonClient) error {
-				_, err := c.Version(ctx, nil)
+				_, err := c.Version(ctx)
 
 				return err
 			},
@@ -321,10 +309,10 @@ func execRequestCases() []requestCase {
 				ctx, cancel := context.WithTimeout(ctx, 1990*time.Millisecond)
 				defer cancel()
 
-				_, err := c.ExecSyncContainer(ctx, &ExecSyncConfig{
+				_, err := c.ExecSyncContainer(ctx, &ExecSyncContainerConfig{
 					ID:       "id",
 					Command:  []string{"command", "arg"},
-					Timeout:  30,
+					Timeout:  30 * time.Second,
 					Terminal: true,
 				})
 
@@ -340,9 +328,9 @@ func execRequestCases() []requestCase {
 		{
 			name: "ExecSyncContainer without deadline",
 			call: func(ctx context.Context, c *ConmonClient) error {
-				_, err := c.ExecSyncContainer(ctx, &ExecSyncConfig{
+				_, err := c.ExecSyncContainer(ctx, &ExecSyncContainerConfig{
 					ID:      "id",
-					Timeout: 30,
+					Timeout: 30 * time.Second,
 				})
 
 				return err
@@ -357,7 +345,7 @@ func execRequestCases() []requestCase {
 		{
 			name: "AttachContainer",
 			call: func(ctx context.Context, c *ConmonClient) error {
-				return attachWithoutSocket(ctx, c, &AttachConfig{
+				return attachWithoutSocket(ctx, c, &AttachContainerConfig{
 					ID:                "id",
 					SocketPath:        "/attach.sock",
 					StopAfterStdinEOF: true,
@@ -373,7 +361,7 @@ func execRequestCases() []requestCase {
 		{
 			name: "AttachContainer without stdin once",
 			call: func(ctx context.Context, c *ConmonClient) error {
-				return attachWithoutSocket(ctx, c, &AttachConfig{
+				return attachWithoutSocket(ctx, c, &AttachContainerConfig{
 					ID:         "id",
 					SocketPath: "/attach.sock",
 				})
