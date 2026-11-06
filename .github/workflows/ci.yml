@@ -934,8 +934,8 @@ jobs:
             websockets: true
           # CRI-O v1.37.2 vendors a v1.0 client, which serves exec and attach
           # with stream_websockets as well, with requests that lack the fields
-          # of newer clients. Its later releases vendor the client of main,
-          # see dependencies.yaml. The releases up to 1.36 vendor a v0.7 client,
+          # of newer clients. The later 1.37 releases vendor v1.2.1, see
+          # dependencies.yaml. The releases up to 1.36 vendor a v0.7 client,
           # which passes the --cgroup-manager that v1 rejects, so they cannot
           # run a v1 server at all.
           # CRI-O starts the servers with the log driver none by default,
@@ -1030,6 +1030,7 @@ jobs:
           # CRI-O logs these only if conmon-rs served the sessions. CRI-O
           # main hands port forwarding over as well, and serves it itself if
           # the server does not support it, which critest does not notice.
+          # Without stream_websockets, CRI-O serves all of them itself.
           if [[ $STREAM_WEBSOCKETS == true ]]; then
             KINDS=(exec attach)
             if [[ -z $CRIO_VERSION ]]; then
@@ -1041,6 +1042,9 @@ jobs:
                 TEST_RC=1
               fi
             done
+          elif grep -qE "Using .+ URL from container monitor" journal.log; then
+            echo "::error::CRI-O handed sessions to conmon-rs without stream_websockets"
+            TEST_RC=1
           fi
           exit $TEST_RC
       - name: Report flaky specs

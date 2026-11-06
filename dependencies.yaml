@@ -97,9 +97,10 @@ dependencies:
 
   # The CRI-O release of the test-critest-crio-1.37 jobs, the latest one
   # which vendors a v1.0 client of conmon-rs (v1.0.1), whose requests lack
-  # the fields of newer clients. The releases after it vendor v1.2.1 like
-  # main, so the pin stays until v1.0 clients are no longer supported, see
-  # docs/cri-o.md. Check that its bundle exists before a bump, with
+  # the fields of newer clients. Its later releases vendor v1.2.1, CRI-O
+  # main and release-1.38 v1.2.2, so the pin stays until v1.0 clients are
+  # no longer supported, see docs/cri-o.md. Check that its bundle exists
+  # before a bump, with
   # `curl -I https://storage.googleapis.com/cri-o/artifacts/cri-o.amd64.vX.Y.Z.tar.gz`.
   - name: cri-o-1.37
     version: 1.37.2

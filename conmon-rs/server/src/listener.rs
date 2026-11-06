@@ -104,10 +104,10 @@ pub(crate) fn private_socket(typ: SockType) -> io::Result<OwnedFd> {
     Ok(fd)
 }
 
-/// Listen on a socket at `path` which only its owner can connect to, see
-/// [`private_socket`].
-pub(crate) fn listen_private(path: &Path, typ: SockType) -> io::Result<OwnedFd> {
-    let fd = private_socket(typ)?;
+/// Listen on a stream socket at `path` which only its owner can connect to,
+/// see [`private_socket`].
+pub(crate) fn listen_private(path: &Path) -> io::Result<OwnedFd> {
+    let fd = private_socket(SockType::Stream)?;
     bind(fd.as_raw_fd(), &UnixAddr::new(path)?)?;
     listen(&fd, Backlog::MAXCONN)?;
     Ok(fd)
@@ -227,7 +227,7 @@ mod tests {
     async fn listen_private_binds_private_listeners() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("socket");
-        let fd = bind_long_path(&path, |path| listen_private(&path, SockType::Stream))?;
+        let fd = bind_long_path(&path, |path| listen_private(&path))?;
         assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o077, 0);
         let listener = UnixListener::from_std(fd.into())?;
         let _client = tokio::net::UnixStream::connect(&path).await?;

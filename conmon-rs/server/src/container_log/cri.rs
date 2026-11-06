@@ -127,7 +127,6 @@ impl Logger for CriLogger {
                 if partial {
                     buf.push(b'\n');
                 }
-                Ok(())
             })
             .await
     }

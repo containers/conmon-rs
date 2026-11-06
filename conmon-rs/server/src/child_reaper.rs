@@ -260,10 +260,17 @@ impl ChildReaper {
         call: InFlight,
     ) -> Result<Receiver<ExitChannelData>> {
         let pid = child.pid;
-        let (id, reapable_grandchild, exit) = ReapableChild::from_child(child);
+        let (id, reapable_grandchild, mut exit) = ReapableChild::from_child(child);
         let seq = reapable_grandchild.seq;
 
         let mut map = lock(&self.grandchildren);
+        // A child registered after the shutdown took its snapshot, under this
+        // lock, is in the map as well, which the shutdown waits to empty. Its
+        // call fails below, so it writes no exit files.
+        let shutting_down = self.shutting_down.load(Ordering::SeqCst);
+        if shutting_down {
+            exit.drop_exit_paths();
+        }
         // Under the lock, so that the child is registered before it can be
         // forgotten. A task which never runs, like one spawned while the
         // runtime shuts down, does not forget it, see `watch`.
@@ -273,9 +280,6 @@ impl ChildReaper {
             Self::forget_grandchild(&grandchildren, &key, seq);
             forgotten.notify_waiters();
         });
-        // A child registered after the shutdown took its snapshot is in the
-        // map as well, which the shutdown waits to empty.
-        let shutting_down = self.shutting_down.load(Ordering::SeqCst);
         map.entry(id).or_default().push(reapable_grandchild);
         // Ends the pending mark only once registered, so it is claimed all
         // the time, see `is_claimed`.

@@ -32,8 +32,8 @@ use tracing_subscriber::fmt::writer::MakeWriter;
 pub(crate) const SOCKET_PATH: &str = "/run/systemd/journal/socket";
 
 /// The SYSLOG_IDENTIFIER of the entries of the server, so that
-/// `journalctl -t conmonrs` finds them, and of containers without a tag, a
-/// name and an ID.
+/// `journalctl -t conmonrs` finds them, and of containers with neither a
+/// name nor an ID.
 pub(crate) const IDENTIFIER: &str = "conmonrs";
 
 /// The syslog priorities used for the `PRIORITY` field.
@@ -89,7 +89,7 @@ impl Entry {
 
     /// Whether the key is a valid journal field name, see [`Entry::field`],
     /// at most 64 characters.
-    pub(crate) fn valid_key(key: &str) -> bool {
+    fn valid_key(key: &str) -> bool {
         (1..=64).contains(&key.len())
             && !key.starts_with(|c: char| c == '_' || c.is_ascii_digit())
             && key

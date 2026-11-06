@@ -757,7 +757,6 @@ async fn buffer_is_held_only_during_a_chunk() -> Result<()> {
         buf.extend_from_slice(&[b' '; 45]);
         buf.extend_from_slice(line);
         grown = grown.max(buf.capacity());
-        Ok(())
     })
     .await?;
     assert!(grown > LogFile::BUF_CAPACITY, "{grown}");
