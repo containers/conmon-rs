@@ -253,7 +253,7 @@ func TestCallOnResetConnectionIsDisconnected(t *testing.T) {
 	}
 
 	// The next call connects again.
-	if _, err := c.Version(t.Context(), nil); err != nil {
+	if _, err := c.Version(t.Context()); err != nil {
 		t.Fatalf("version after the reset: %v", err)
 	}
 }
@@ -331,7 +331,7 @@ func TestCallWithoutServerMatchesErrServerUnreachable(t *testing.T) {
 	t.Cleanup(func() { c.Close() })
 
 	// No socket at all, like after the server exited and removed it.
-	if _, err := c.Version(t.Context(), &VersionConfig{}); !errors.Is(err, ErrServerUnreachable) {
+	if _, err := c.Version(t.Context()); !errors.Is(err, ErrServerUnreachable) {
 		t.Fatalf("got error %v, want %v", err, ErrServerUnreachable)
 	}
 
@@ -339,7 +339,7 @@ func TestCallWithoutServerMatchesErrServerUnreachable(t *testing.T) {
 	// connection.
 	bindTestSocket(t, dir)
 
-	_, err := c.Version(t.Context(), &VersionConfig{})
+	_, err := c.Version(t.Context())
 	if !errors.Is(err, ErrServerUnreachable) || !errors.Is(err, syscall.ECONNREFUSED) {
 		t.Fatalf("got error %v, want %v and %v", err, ErrServerUnreachable, syscall.ECONNREFUSED)
 	}

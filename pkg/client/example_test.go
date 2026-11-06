@@ -29,7 +29,7 @@ func ExampleNew() {
 }
 
 // Stops the server, with SIGKILL if it does not exit on its own.
-func ExampleConmonClient_ShutdownContext() {
+func ExampleConmonClient_Shutdown() {
 	conmon, err := client.New(&client.ConmonServerConfig{
 		Runtime:      "/usr/bin/crun",
 		ServerRunDir: "/run/conmonrs/pod",
@@ -42,9 +42,9 @@ func ExampleConmonClient_ShutdownContext() {
 
 	ctx := context.Background()
 
-	err = conmon.ShutdownContext(ctx)
+	err = conmon.Shutdown(ctx)
 	if errors.Is(err, client.ErrShutdownTimeout) {
-		err = conmon.KillContext(ctx)
+		err = conmon.Kill(ctx)
 	}
 
 	if err != nil {
@@ -65,7 +65,7 @@ func ExampleConmonClient_Version() {
 	}
 	defer conmon.Close()
 
-	version, err := conmon.Version(context.Background(), &client.VersionConfig{})
+	version, err := conmon.Version(context.Background())
 	if err != nil {
 		fmt.Println("get version:", err)
 
@@ -111,10 +111,10 @@ func ExampleConmonClient_ExecSyncContainer() {
 	}
 	defer conmon.Close()
 
-	result, err := conmon.ExecSyncContainer(context.Background(), &client.ExecSyncConfig{
+	result, err := conmon.ExecSyncContainer(context.Background(), &client.ExecSyncContainerConfig{
 		ID:      "container",
 		Command: []string{"/bin/true"},
-		Timeout: 10,
+		Timeout: 10 * time.Second,
 	})
 
 	switch {

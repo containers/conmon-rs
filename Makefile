@@ -21,13 +21,14 @@ TEST_FLAGS ?=
 CONMON_BINARY ?=
 # The resident set size every spec checks the server against, and how much it
 # may grow over the execs of the memory leak specs. A dynamically linked
-# release build stays well below 10 MiB, the static glibc builds CI tests get
-# 5500 KiB (see .github/workflows/ci.yml). Most of it is the mapped binary
-# and libraries (RssFile), an idle server has about 0.5 MiB of private
-# anonymous memory (RssAnon), which every spec checks against its own budget,
-# so that a regression of a few MiB does not hide in the slack of the total.
-# The RssAnon budget is a first guess, it gets tightened once CI printed the
-# values of every spec per architecture.
+# release build stays well below 10 MB, the static glibc builds CI tests get
+# 5500 kB on amd64 and 6400 kB on arm64 (see .github/workflows/ci.yml).
+# Most of it is the mapped binary and libraries (RssFile), an idle server has
+# about 0.5 MB of private anonymous memory (RssAnon), which every spec checks
+# against its own budget, so that a regression of a few MB does not hide in
+# the slack of the total. The specs of the CI runs on main stayed below
+# 750 kB of RssAnon on amd64 and 2.5 MB on arm64, which CI checks against
+# 2048 and 4096 kB. The default here is the loose one for other hosts.
 MAX_RSS_KB ?= 10240
 MAX_RSS_ANON_KB ?= 4096
 MAX_RSS_GROWTH_KB ?= 2000
@@ -278,6 +279,9 @@ verify-schema-layout: schema-layout ## Verify that the Cap'n Proto schema keeps 
 # its report, its failure only gets forgiven for that tag, with the verdict on
 # the incompatible changes, which gorelease only gives without errors of the
 # packages, no diagnostics of the module and only listed incompatible changes.
+# Otherwise the target tells which of these failed. It warns about listed
+# changes which gorelease no longer reports, a stale line would forgive the
+# same change once it comes back by accident.
 GO_API_BREAK := .github/go-api-break
 
 .PHONY: verify-go-api
@@ -294,15 +298,38 @@ verify-go-api: .install.gorelease ## Verify that the Go client is compatible wit
 	STATUS=0 && "$(abspath $(GOTOOLS_BINDIR))/gorelease" -base="$$BASE" >"$$TMP/report" 2>&1 || STATUS=$$? ; \
 	cat "$$TMP/report" ; \
 	sed -n '/^## incompatible changes$$/,/^#/{/^#/d;/^$$/d;p}' "$$TMP/report" | sort >"$$TMP/found" ; \
-	if [ "$$STATUS" = 1 ] && [ -n "$$ALLOWED" ] && [ "$$ALLOWED" = "$$BASE" ] && \
-		[ -s "$$TMP/found" ] && [ -z "$$(comm -23 "$$TMP/found" "$$TMP/allowed")" ] && \
-		grep -qx 'Incompatible changes were detected.' "$$TMP/report" && \
-		! grep -qx '# diagnostics' "$$TMP/report"; then \
-		echo "The incompatible changes against $$BASE are intended, see $(GO_API_BREAK)" ; \
-		STATUS=0 ; \
-	elif [ "$$STATUS" != 0 ] && [ "$$ALLOWED" = "$$BASE" ]; then \
-		echo "Incompatible changes against $$BASE which $(GO_API_BREAK) does not list:" ; \
-		comm -23 "$$TMP/found" "$$TMP/allowed" ; \
+	comm -23 "$$TMP/found" "$$TMP/allowed" >"$$TMP/unlisted" ; \
+	comm -13 "$$TMP/found" "$$TMP/allowed" >"$$TMP/stale" ; \
+	SUMMARY=0 ; grep -qx 'Incompatible changes were detected.' "$$TMP/report" && SUMMARY=1 ; \
+	DIAGNOSTICS=0 ; grep -qx '# diagnostics' "$$TMP/report" && DIAGNOSTICS=1 ; \
+	if [ -n "$$ALLOWED" ] && [ "$$ALLOWED" = "$$BASE" ] && [ "$$DIAGNOSTICS" = 0 ] && \
+		{ [ "$$STATUS" = 0 ] || [ "$$SUMMARY" = 1 ]; } && [ -s "$$TMP/stale" ]; then \
+		echo "Warning: $(GO_API_BREAK) lists changes which gorelease no longer reports against $$BASE, remove them:" ; \
+		cat "$$TMP/stale" ; \
+	fi ; \
+	if [ "$$STATUS" != 0 ] && [ -n "$$ALLOWED" ] && [ "$$ALLOWED" != "$$BASE" ]; then \
+		echo "$(GO_API_BREAK) names $$ALLOWED, not $$BASE which gorelease compares with, see release.md" ; \
+	elif [ "$$STATUS" != 0 ] && [ -n "$$ALLOWED" ]; then \
+		FORGIVE=1 ; \
+		if [ "$$STATUS" != 1 ]; then \
+			echo "Not forgiven: gorelease exited with $$STATUS" ; FORGIVE=0 ; \
+		fi ; \
+		if [ "$$SUMMARY" = 0 ]; then \
+			echo "Not forgiven: the report lacks the line 'Incompatible changes were detected.'" ; FORGIVE=0 ; \
+		fi ; \
+		if [ "$$DIAGNOSTICS" = 1 ]; then \
+			echo "Not forgiven: the report has diagnostics" ; FORGIVE=0 ; \
+		fi ; \
+		if [ ! -s "$$TMP/found" ]; then \
+			echo "Not forgiven: the report lists no incompatible changes" ; FORGIVE=0 ; \
+		fi ; \
+		if [ -s "$$TMP/unlisted" ]; then \
+			echo "Not forgiven: incompatible changes against $$BASE which $(GO_API_BREAK) does not list:" ; \
+			cat "$$TMP/unlisted" ; FORGIVE=0 ; \
+		fi ; \
+		if [ "$$FORGIVE" = 1 ]; then \
+			echo "The incompatible changes against $$BASE are intended, see $(GO_API_BREAK)" ; STATUS=0 ; \
+		fi ; \
 	fi ; \
 	exit "$$STATUS"
 

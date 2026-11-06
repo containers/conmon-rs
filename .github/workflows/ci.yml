@@ -779,10 +779,10 @@ jobs:
       RUNTIME: ${{ matrix.runtime }}
       # The resident set size every spec checks the server against, its
       # private anonymous part, and how much it may grow in the memory leak
-      # specs, see the Makefile. The RssAnon budget gets tightened once the
-      # values the suite prints for every spec are known per architecture.
+      # specs, see the Makefile. The specs of the runs on main stayed below
+      # 750 kB of RssAnon on amd64.
       MAX_RSS_KB: 5500
-      MAX_RSS_ANON_KB: 4096
+      MAX_RSS_ANON_KB: 2048
       MAX_RSS_GROWTH_KB: 2000
     steps: &test-integration-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -837,7 +837,12 @@ jobs:
     env:
       ARCH: arm64
       RUNTIME: crun
-      MAX_RSS_KB: 5500
+      # The runs on main peaked at 4696 kB of VmRSS, with a spread of 1.6 MB
+      # between runs of the same spec, which the budget leaves on top of the
+      # peak, and below 2.5 MB of RssAnon. The RssAnon budget catches a
+      # regression of the memory of the server itself, which the slack of
+      # the total would hide.
+      MAX_RSS_KB: 6400
       MAX_RSS_ANON_KB: 4096
       MAX_RSS_GROWTH_KB: 2000
     steps: *test-integration-steps

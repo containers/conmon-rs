@@ -18,6 +18,7 @@ var _ = Describe("ConmonClient", func() {
 	)
 
 	registerSpecHooks(&tr, &sut)
+	newServer := serverStarter(&tr, &sut)
 	runContainer := containerRunner(&tr, &sut)
 
 	Describe("CreateContainer", func() {
@@ -213,16 +214,14 @@ var _ = Describe("ConmonClient", func() {
 		}
 
 		It("should fail for an unknown container", func(ctx SpecContext) {
-			tr = newTestRunner()
-			tr.createRuntimeConfig(false)
-			sut = tr.configGivenEnv()
+			newServer()
 
 			Expect(sut.ReopenLogContainer(ctx, &client.ReopenLogContainerConfig{
 				ID: "unknown",
 			})).To(MatchError(client.ErrContainerNotFound))
 
 			// The failed request keeps the server usable.
-			_, err := sut.Version(ctx, &client.VersionConfig{})
+			_, err := sut.Version(ctx)
 			Expect(err).To(Succeed())
 		}, SpecTimeout(specTimeout))
 	})

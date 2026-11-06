@@ -79,7 +79,8 @@ var (
 	maxRSSKB = 10240
 	// The budget of the private anonymous memory of the server (RssAnon),
 	// which the mapped binary and libraries do not count towards,
-	// MAX_RSS_ANON_KB overrides it. The same first guess as the Makefile.
+	// MAX_RSS_ANON_KB overrides it. The loose default of the Makefile, CI
+	// sets a tighter one on amd64.
 	maxRSSAnonKB = 4096
 	// How much the resident set of the server may grow over the execs of the
 	// memory leak specs, MAX_RSS_GROWTH_KB overrides it.
@@ -370,7 +371,7 @@ func (tr *testRunner) execEcho(
 ) {
 	result, err := sut.ExecSyncContainer(
 		ctx,
-		&client.ExecSyncConfig{
+		&client.ExecSyncContainerConfig{
 			ID: tr.ctrID,
 			Command: []string{
 				"/busybox",
@@ -520,6 +521,32 @@ func containerRunner(
 	}
 }
 
+// serverStarter returns a function which starts a server for a container
+// which runs ls without a terminal, for the specs whose hooks
+// registerSpecHooks registered with tr and sut. The runner gets set before
+// the steps which may fail, so that the hooks clean up what got created.
+func serverStarter(tr **testRunner, sut **client.ConmonClient) func() {
+	return func() {
+		runner := newTestRunner()
+		*tr = runner
+		runner.createRuntimeConfig(false)
+		*sut = runner.configGivenEnv()
+	}
+}
+
+// serverOutput returns a file in the directory for the output of a server,
+// which keeps writing to it once New returned, and a function which reads
+// what got written so far.
+func serverOutput(dir string) (file *os.File, read func() (string, error)) {
+	file, err := os.CreateTemp(dir, "server-output-")
+	Expect(err).To(Succeed())
+	DeferCleanup(file.Close)
+
+	return file, func() (string, error) {
+		return fileContents(file.Name())
+	}
+}
+
 // cleanupSpec deletes the container, shuts the server down, or kills it if
 // it does not exit in time, closes the client and removes the temp dir of a
 // spec, whatever the spec got around to create.
@@ -536,13 +563,13 @@ func cleanupSpec(tr *testRunner, sut *client.ConmonClient) {
 	}
 
 	if sut != nil {
-		if err := sut.ShutdownContext(context.Background()); err != nil {
+		if err := sut.Shutdown(context.Background()); err != nil {
 			errs = append(errs, fmt.Errorf("shutdown server: %w", err))
 
 			// Like CRI-O does it, a server which does not exit in time
 			// gets killed.
 			if errors.Is(err, client.ErrShutdownTimeout) {
-				if err := sut.KillContext(context.Background()); err != nil {
+				if err := sut.Kill(context.Background()); err != nil {
 					errs = append(errs, fmt.Errorf("kill server: %w", err))
 				}
 			}
@@ -604,9 +631,7 @@ func (tr *testRunner) configGivenEnvWith(
 		Stderr:           os.Stderr,
 	}
 
-	if tr.enableTracing {
-		cfg.Tracing = &client.Tracing{Enabled: true}
-	}
+	cfg.Tracing.Enabled = tr.enableTracing
 
 	if changeConfig != nil {
 		changeConfig(cfg)
@@ -680,14 +705,9 @@ func logGrownMappings(before, after map[string]int) {
 	}
 }
 
-// vmRSSGivenPID returns the resident set size of the process in kB, as an
-// int, so that the difference of two values cannot wrap.
-func vmRSSGivenPID(pid uint32) int {
-	return statusKBGivenPID(pid, "VmRSS")
-}
-
 // statusKBGivenPID returns the value in kB of the field of the status of the
-// process in /proc, like VmRSS or RssAnon.
+// process in /proc, like VmRSS or RssAnon, as an int, so that the difference
+// of two values cannot wrap.
 func statusKBGivenPID(pid uint32, field string) int {
 	const procPath = "/proc"
 
@@ -1081,7 +1101,7 @@ func testName(testName string, terminal bool) string {
 func testAttach(
 	ctx context.Context,
 	sut *client.ConmonClient,
-	cfg *client.AttachConfig,
+	cfg *client.AttachContainerConfig,
 	stdinWriter io.Writer,
 	reader *io.PipeReader,
 	testString string,

@@ -203,64 +203,35 @@ func TestNewStartsServerOnlyWithoutListener(t *testing.T) {
 		}
 	}
 
-	if os.Geteuid() == 0 {
-		return
-	}
-
 	// A socket which cannot be dialed for other reasons is no reason to
 	// start another server either.
-	locked := t.TempDir()
-	if err := os.Chmod(locked, 0); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
+	t.Run("permission denied", func(t *testing.T) {
+		t.Parallel()
 
-	t.Cleanup(func() {
-		if err := os.Chmod(locked, 0o700); err != nil {
-			t.Errorf("chmod: %v", err)
+		// Root ignores the missing permission.
+		if os.Geteuid() == 0 {
+			t.Skip("root has the search permission anyway")
+		}
+
+		locked := t.TempDir()
+		if err := os.Chmod(locked, 0); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+
+		t.Cleanup(func() {
+			if err := os.Chmod(locked, 0o700); err != nil {
+				t.Errorf("chmod: %v", err)
+			}
+		})
+
+		runDir := filepath.Join(locked, "run")
+		cl := &ConmonClient{runDir: runDir, logger: logrus.New()}
+
+		_, err := cl.connectRunningServer(t.Context())
+		if !errors.Is(err, os.ErrPermission) || errors.Is(err, ErrServerNotResponding) {
+			t.Fatalf("got error %v, want a permission error", err)
 		}
 	})
-
-	runDir := filepath.Join(locked, "run")
-	cl := &ConmonClient{runDir: runDir, logger: logrus.New()}
-
-	_, err := cl.connectRunningServer(t.Context())
-	if !errors.Is(err, os.ErrPermission) || errors.Is(err, ErrServerNotResponding) {
-		t.Fatalf("got error %v, want a permission error", err)
-	}
-}
-
-// chanWriter sends every write to a channel.
-type chanWriter chan string
-
-func (w chanWriter) Write(p []byte) (int, error) {
-	w <- string(p)
-
-	return len(p), nil
-}
-
-// sliceWriter is a writer whose type is not comparable.
-type sliceWriter []byte
-
-func (sliceWriter) Write(p []byte) (int, error) {
-	return len(p), nil
-}
-
-func TestSameWriter(t *testing.T) {
-	t.Parallel()
-
-	w := make(chanWriter)
-
-	if !sameWriter(w, w) {
-		t.Error("same writer not detected")
-	}
-
-	if sameWriter(w, make(chanWriter)) {
-		t.Error("different writers detected as the same")
-	}
-
-	if sameWriter(sliceWriter{}, sliceWriter{}) {
-		t.Error("writers which are not comparable detected as the same")
-	}
 }
 
 func TestPidGivenFile(t *testing.T) {
@@ -298,50 +269,6 @@ func TestPidGivenFile(t *testing.T) {
 
 	if _, err := pidGivenFile(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Error("missing pid file parsed")
-	}
-}
-
-func TestServerOutputFile(t *testing.T) {
-	t.Parallel()
-
-	logger := logrus.New()
-
-	file, release, err := serverOutputFile(logger, os.Stdout)
-	if err != nil || file != os.Stdout {
-		t.Fatalf("a file is not passed as it is: %v, %v", file, err)
-	}
-
-	release()
-
-	output := make(chanWriter, 1)
-
-	file, release, err = serverOutputFile(logger, output)
-	if err != nil {
-		t.Fatalf("create server output file: %v", err)
-	}
-
-	// The copy outlives the release of the parent's end, like the server
-	// keeps writing after it got launched.
-	cmd := exec.CommandContext(context.Background(), "sh", "-c", "sleep 0.1; echo -n hello")
-	cmd.Stdout = file
-
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start command: %v", err)
-	}
-
-	release()
-
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("wait for command: %v", err)
-	}
-
-	select {
-	case got := <-output:
-		if got != "hello" {
-			t.Errorf("got output %q, want %q", got, "hello")
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("timed out waiting for the output")
 	}
 }
 
@@ -491,11 +418,11 @@ func TestShutdown(t *testing.T) {
 			cmd := startTestServer(t, false)
 			c := newClient(cmd.Process.Pid)
 
-			if err := c.ShutdownContext(context.Background()); err != nil {
+			if err := c.Shutdown(context.Background()); err != nil {
 				t.Fatalf("shutdown: %v", err)
 			}
 
-			if err := c.ShutdownContext(context.Background()); err != nil {
+			if err := c.Shutdown(context.Background()); err != nil {
 				t.Fatalf("shutdown again: %v", err)
 			}
 
@@ -556,7 +483,7 @@ func TestShutdownServerWhichExited(t *testing.T) {
 		t.Fatalf("wait: %v", err)
 	}
 
-	if err := c.ShutdownContext(context.Background()); err != nil {
+	if err := c.Shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 }
@@ -582,7 +509,7 @@ func TestSetServerPID(t *testing.T) {
 		t.Fatal("pidfd of the old PID still open")
 	}
 
-	if err := c.ShutdownContext(context.Background()); err != nil {
+	if err := c.Shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 
@@ -616,7 +543,7 @@ func TestSetServerPID(t *testing.T) {
 		t.Fatalf("got error %v, want %v", err, syscall.ESRCH)
 	}
 
-	if err := c.ShutdownContext(context.Background()); err != nil {
+	if err := c.Shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 }
@@ -790,7 +717,7 @@ func TestNewTakesPIDFromServer(t *testing.T) {
 		t.Fatalf("PID file not removed: %v", err)
 	}
 
-	if err := cl.ShutdownContext(context.Background()); err != nil {
+	if err := cl.Shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 
@@ -852,8 +779,8 @@ func TestShutdownWithoutPID(t *testing.T) {
 
 	stdin, _ := io.Pipe()
 
-	_, session, err := c.startAttachSession(t.Context(), &AttachConfig{
-		Streams: AttachStreams{Stdin: &In{stdin}},
+	_, session, err := c.startAttachSession(t.Context(), &AttachContainerConfig{
+		Streams: AttachStreams{Stdin: stdin},
 	})
 	if err != nil {
 		t.Fatalf("start attach session: %v", err)
@@ -862,8 +789,8 @@ func TestShutdownWithoutPID(t *testing.T) {
 	// A zero PID would signal the process group of the caller. Nothing gets
 	// stopped then, the attach sessions keep their stdin.
 	for name, stop := range map[string]func() error{
-		"ShutdownContext": func() error { return c.ShutdownContext(t.Context()) },
-		"KillContext":     func() error { return c.KillContext(t.Context()) },
+		"Shutdown": func() error { return c.Shutdown(t.Context()) },
+		"Kill":     func() error { return c.Kill(t.Context()) },
 	} {
 		if err := stop(); !errors.Is(err, ErrServerPIDUnknown) {
 			t.Fatalf("%s: got error %v, want %v", name, err, ErrServerPIDUnknown)
@@ -923,7 +850,7 @@ func TestReplacementWithTheSamePIDGetsPickedUp(t *testing.T) {
 		// Only with recorded features, the first call asks for them.
 		c.setFeatures(nil)
 
-		if _, err := c.Version(t.Context(), nil); err != nil {
+		if _, err := c.Version(t.Context()); err != nil {
 			t.Fatalf("version: %v", err)
 		}
 
@@ -951,7 +878,7 @@ func TestRecordedServerWhichRunsStays(t *testing.T) {
 
 	c.pickUpReplacement(t.Context())
 
-	if _, err := c.Version(t.Context(), nil); err != nil {
+	if _, err := c.Version(t.Context()); err != nil {
 		t.Fatalf("version: %v", err)
 	}
 
@@ -1071,7 +998,7 @@ func TestShutdownAfterReconnectToAnotherServer(t *testing.T) {
 
 	serveVersionSocket(t, dir, versionConmon{pid: uint32(second.Process.Pid)})
 
-	if _, err := c.Version(t.Context(), nil); err != nil {
+	if _, err := c.Version(t.Context()); err != nil {
 		t.Fatalf("version after reconnect: %v", err)
 	}
 
@@ -1084,7 +1011,7 @@ func TestShutdownAfterReconnectToAnotherServer(t *testing.T) {
 	}
 
 	// Shutdown stops the server the client talks to.
-	if err := c.ShutdownContext(context.Background()); err != nil {
+	if err := c.Shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 
@@ -1155,9 +1082,9 @@ func TestShutdownPicksUpReplacement(t *testing.T) {
 
 			serveVersionSocket(t, dir, versionConmon{pid: uint32(second.Process.Pid)})
 
-			stop := func() error { return c.ShutdownContext(t.Context()) }
+			stop := func() error { return c.Shutdown(t.Context()) }
 			if kill {
-				stop = func() error { return c.KillContext(t.Context()) }
+				stop = func() error { return c.Kill(t.Context()) }
 			}
 
 			if err := stop(); err != nil {
@@ -1246,12 +1173,12 @@ func TestClose(t *testing.T) {
 	c := newTestClient(t, dir, logrus.New())
 	c.setServerPID(uint32(server.Process.Pid))
 
-	if _, err := c.Version(t.Context(), nil); err != nil {
+	if _, err := c.Version(t.Context()); err != nil {
 		t.Fatalf("version: %v", err)
 	}
 
 	// An attach session in progress ends.
-	sessionCtx, _, err := c.startAttachSession(t.Context(), &AttachConfig{})
+	sessionCtx, _, err := c.startAttachSession(t.Context(), &AttachContainerConfig{})
 	if err != nil {
 		t.Fatalf("start attach session: %v", err)
 	}
@@ -1267,7 +1194,7 @@ func TestClose(t *testing.T) {
 	}
 
 	// One which gets set up after Close fails.
-	_, _, err = c.startAttachSession(t.Context(), &AttachConfig{})
+	_, _, err = c.startAttachSession(t.Context(), &AttachContainerConfig{})
 	if !errors.Is(err, ErrClientClosed) {
 		t.Fatalf("got error %v starting an attach session, want %v", err, ErrClientClosed)
 	}
@@ -1284,13 +1211,13 @@ func TestClose(t *testing.T) {
 		t.Fatal("pidfd still open")
 	}
 
-	if _, err := c.Version(t.Context(), nil); !errors.Is(err, ErrClientClosed) {
+	if _, err := c.Version(t.Context()); !errors.Is(err, ErrClientClosed) {
 		t.Fatalf("got error %v, want %v", err, ErrClientClosed)
 	}
 
 	for name, stop := range map[string]func(context.Context) error{
-		"ShutdownContext": c.ShutdownContext,
-		"KillContext":     c.KillContext,
+		"Shutdown": c.Shutdown,
+		"Kill":     c.Kill,
 	} {
 		if err := stop(t.Context()); !errors.Is(err, ErrClientClosed) {
 			t.Fatalf("%s: got error %v, want %v", name, err, ErrClientClosed)
@@ -1321,7 +1248,7 @@ func TestCloseFailsCallInProgress(t *testing.T) {
 	versionErr := make(chan error, 1)
 
 	go func() {
-		_, err := c.Version(t.Context(), nil)
+		_, err := c.Version(t.Context())
 		versionErr <- err
 	}()
 
@@ -1356,14 +1283,14 @@ func TestShutdownClosesAttachStdin(t *testing.T) {
 
 	sessionCtx, session, err := c.startAttachSession(
 		t.Context(),
-		&AttachConfig{Streams: AttachStreams{Stdin: &In{stdin}}},
+		&AttachContainerConfig{Streams: AttachStreams{Stdin: stdin}},
 	)
 	if err != nil {
 		t.Fatalf("start attach session: %v", err)
 	}
 	defer c.endAttachSession(session)
 
-	if err := c.ShutdownContext(context.Background()); err != nil {
+	if err := c.Shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 
@@ -1378,7 +1305,7 @@ func TestShutdownClosesAttachStdin(t *testing.T) {
 	}
 }
 
-func TestKillContext(t *testing.T) {
+func TestKill(t *testing.T) {
 	t.Parallel()
 
 	// A server which ignores SIGINT outlives the shutdown, the kill ends it.
@@ -1399,7 +1326,7 @@ func TestKillContext(t *testing.T) {
 		t.Fatalf("got error %v, want %v", err, ErrShutdownTimeout)
 	}
 
-	if err := c.KillContext(t.Context()); err != nil {
+	if err := c.Kill(t.Context()); err != nil {
 		t.Fatalf("kill: %v", err)
 	}
 
@@ -1408,13 +1335,13 @@ func TestKillContext(t *testing.T) {
 	}
 
 	// A server which is gone already is no error.
-	if err := c.KillContext(context.Background()); err != nil {
+	if err := c.Kill(context.Background()); err != nil {
 		t.Fatalf("kill again: %v", err)
 	}
 
 	// A zero PID would signal the process group of the caller.
 	c = &ConmonClient{runDir: t.TempDir(), logger: logrus.New()}
-	if err := c.KillContext(t.Context()); !errors.Is(err, ErrServerPIDUnknown) {
+	if err := c.Kill(t.Context()); !errors.Is(err, ErrServerPIDUnknown) {
 		t.Fatalf("got error %v, want %v", err, ErrServerPIDUnknown)
 	}
 }
@@ -1503,7 +1430,7 @@ func TestCloseWhileWaitingForServer(t *testing.T) {
 
 	stopErr := make(chan error, 1)
 
-	go func() { stopErr <- c.ShutdownContext(ctx) }()
+	go func() { stopErr <- c.Shutdown(ctx) }()
 
 	waitFor(t, "shutdown did not start", func() bool {
 		c.pidfdMu.Lock()
@@ -1792,8 +1719,6 @@ func TestErrorTailKeepsCharactersWhole(t *testing.T) {
 func TestSetServerOutput(t *testing.T) {
 	t.Parallel()
 
-	c := &ConmonClient{logger: logrus.New()}
-
 	file, err := os.Create(filepath.Join(t.TempDir(), "output"))
 	if err != nil {
 		t.Fatalf("create file: %v", err)
@@ -1801,118 +1726,22 @@ func TestSetServerOutput(t *testing.T) {
 
 	t.Cleanup(func() { file.Close() })
 
-	shared := make(chanWriter, 2)
-
 	for _, tc := range []struct {
-		name           string
-		stdout, stderr io.Writer
-		// wantStdout and wantStderr are the files the command gets, nil for
-		// a pipe.
+		name                   string
+		stdout, stderr         *os.File
 		wantStdout, wantStderr *os.File
-		// samePipe tells that both get the same pipe.
-		samePipe bool
 	}{
-		{
-			name:       "defaults",
-			wantStdout: os.Stdout,
-			wantStderr: os.Stderr,
-		},
-		{
-			name:       "files",
-			stdout:     file,
-			stderr:     file,
-			wantStdout: file,
-			wantStderr: file,
-		},
-		{
-			name:       "writer and file",
-			stdout:     make(chanWriter),
-			stderr:     file,
-			wantStderr: file,
-		},
-		{
-			name:     "same writer",
-			stdout:   shared,
-			stderr:   shared,
-			samePipe: true,
-		},
-		{
-			name:   "other writers",
-			stdout: make(chanWriter),
-			stderr: make(chanWriter),
-		},
+		{name: "defaults", wantStdout: os.Stdout, wantStderr: os.Stderr},
+		{name: "same file", stdout: file, stderr: file, wantStdout: file, wantStderr: file},
+		{name: "stderr only", stderr: file, wantStdout: os.Stdout, wantStderr: file},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+		cmd := exec.CommandContext(t.Context(), "true")
+		setServerOutput(cmd, &ConmonServerConfig{Stdout: tc.stdout, Stderr: tc.stderr})
 
-			cmd := exec.CommandContext(t.Context(), "true")
-
-			release, outputErr := c.setServerOutput(cmd, &ConmonServerConfig{
-				Stdout: tc.stdout,
-				Stderr: tc.stderr,
-			})
-			if outputErr != nil {
-				t.Fatalf("set server output: %v", outputErr)
-			}
-
-			defer release()
-
-			for _, out := range []struct {
-				name string
-				got  io.Writer
-				want *os.File
-			}{
-				{"stdout", cmd.Stdout, tc.wantStdout},
-				{"stderr", cmd.Stderr, tc.wantStderr},
-			} {
-				got, ok := out.got.(*os.File)
-				if !ok {
-					t.Fatalf("%s is no file: %T", out.name, out.got)
-				}
-
-				if out.want != nil && got != out.want {
-					t.Errorf("%s got %s, want %s", out.name, got.Name(), out.want.Name())
-				}
-
-				if out.want == nil && (got == os.Stdout || got == os.Stderr || got == file) {
-					t.Errorf("%s got %s, want a pipe", out.name, got.Name())
-				}
-			}
-
-			if pipes := tc.wantStdout == nil && tc.wantStderr == nil; pipes &&
-				(cmd.Stdout == cmd.Stderr) != tc.samePipe {
-				t.Errorf("got the same pipe %v, want %v", cmd.Stdout == cmd.Stderr, tc.samePipe)
-			}
-		})
-	}
-
-	// Both streams end up in the shared writer through the one pipe, in the
-	// order of the writes.
-	cmd := exec.CommandContext(t.Context(), "sh", "-c", "printf out; printf err >&2")
-
-	release, err := c.setServerOutput(cmd, &ConmonServerConfig{Stdout: shared, Stderr: shared})
-	if err != nil {
-		t.Fatalf("set server output: %v", err)
-	}
-
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("run command: %v", err)
-	}
-
-	release()
-
-	// The copy may get both writes with one read.
-	const want = "outerr"
-
-	for got := ""; got != want; {
-		select {
-		case chunk := <-shared:
-			got += chunk
-			if !strings.HasPrefix(want, got) {
-				t.Fatalf("got output %q, want %q", got, want)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatalf("got output %q, timed out waiting for %q", got, want)
+		// Passed as they are, the command copies nothing.
+		if cmd.Stdout != tc.wantStdout || cmd.Stderr != tc.wantStderr {
+			t.Errorf("%s: got %v and %v, want %v and %v",
+				tc.name, cmd.Stdout, cmd.Stderr, tc.wantStdout, tc.wantStderr)
 		}
 	}
 }
@@ -1967,7 +1796,7 @@ func TestCallFullBacklog(t *testing.T) {
 
 	c := newTestClient(t, dir, logrus.New())
 
-	_, err := c.Version(t.Context(), &VersionConfig{})
+	_, err := c.Version(t.Context())
 	if !errors.Is(err, ErrServerNotResponding) || !errors.Is(err, syscall.EAGAIN) {
 		t.Fatalf("got error %v, want %v", err, ErrServerNotResponding)
 	}

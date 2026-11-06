@@ -98,14 +98,17 @@ func TestExecTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		deadline time.Duration // none if 0
-		timeout  uint64
+		timeout  time.Duration
 		want     uint64
 	}{
-		{"explicit timeout below deadline", time.Hour, 5, 5},
-		{"explicit timeout limited by deadline", 10500 * time.Millisecond, 3600, 9},
-		{"explicit timeout a second below deadline", 10500 * time.Millisecond, 9, 9},
-		{"explicit timeout at deadline", 10500 * time.Millisecond, 10, 9},
-		{"explicit timeout without deadline", 0, 7, 7},
+		{"explicit timeout below deadline", time.Hour, 5 * time.Second, 5},
+		{"explicit timeout limited by deadline", 10500 * time.Millisecond, time.Hour, 9},
+		{"explicit timeout a second below deadline", 10500 * time.Millisecond, 9 * time.Second, 9},
+		{"explicit timeout at deadline", 10500 * time.Millisecond, 10 * time.Second, 9},
+		{"explicit timeout without deadline", 0, 7 * time.Second, 7},
+		{"explicit timeout rounded up", 0, 1500 * time.Millisecond, 2},
+		{"short explicit timeout", 0, time.Millisecond, 1},
+		{"negative timeout", 0, -time.Second, 0},
 		{"no deadline", 0, 0, 0},
 		{"deadline rounded down minus a second", 10500 * time.Millisecond, 0, 9},
 		{"two seconds left", 2500 * time.Millisecond, 0, 1},

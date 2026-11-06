@@ -85,7 +85,7 @@ func (c *ConmonClient) ServeExecContainer(
 			req.SetStdin(cfg.Stdin)
 			req.SetStdout(cfg.Stdout)
 			req.SetStderr(cfg.Stderr)
-			req.SetIdleTimeoutSec(idleTimeoutSeconds(cfg.IdleTimeout))
+			req.SetIdleTimeoutSec(timeoutSeconds(cfg.IdleTimeout))
 			c.warnIgnoredIdleTimeout(cfg.IdleTimeout)
 			req.SetCgroupManager(proto.Conmon_CgroupManager(c.cgroupManager))
 
@@ -168,7 +168,7 @@ func (c *ConmonClient) ServeAttachContainer(
 			req.SetStdout(cfg.Stdout)
 			req.SetStderr(cfg.Stderr)
 			req.SetStopAfterStdinEof(cfg.StopAfterStdinEOF)
-			req.SetIdleTimeoutSec(idleTimeoutSeconds(cfg.IdleTimeout))
+			req.SetIdleTimeoutSec(timeoutSeconds(cfg.IdleTimeout))
 			c.warnIgnoredIdleTimeout(cfg.IdleTimeout)
 
 			return nil
@@ -223,13 +223,12 @@ func (c *ConmonClient) ServePortForwardContainer(
 	ctx, span := c.startSpan(ctx, "ServePortForwardContainer")
 	defer endSpan(span, &retErr)
 
-	// Both errors, a nil config always failed with the latter.
 	if cfg == nil {
-		return nil, fmt.Errorf("%w: %w", ErrMissingConfig, ErrMissingNetNsPath)
+		return nil, ErrMissingConfig
 	}
 
 	if cfg.NetNsPath == "" {
-		return nil, ErrMissingNetNsPath
+		return nil, fmt.Errorf("%w: network namespace path is empty", ErrInvalidValue)
 	}
 
 	// The request goes to the checked server.
@@ -245,7 +244,7 @@ func (c *ConmonClient) ServePortForwardContainer(
 				return fmt.Errorf("set network namespace path: %w", setErr)
 			}
 
-			req.SetIdleTimeoutSec(idleTimeoutSeconds(cfg.IdleTimeout))
+			req.SetIdleTimeoutSec(timeoutSeconds(cfg.IdleTimeout))
 
 			return nil
 		},
@@ -268,10 +267,10 @@ func readURL[T interface{ Url() (string, error) }](response T) (string, error) {
 	return url, nil
 }
 
-// idleTimeoutSeconds converts an idle timeout to seconds, rounded up so that a
-// short timeout does not disable it. Rounded without adding a second first,
-// which would overflow close to the largest duration.
-func idleTimeoutSeconds(timeout time.Duration) uint64 {
+// timeoutSeconds converts a timeout to seconds, rounded up so that a short
+// timeout does not disable it, zero or less for none. Rounded without adding
+// a second first, which would overflow close to the largest duration.
+func timeoutSeconds(timeout time.Duration) uint64 {
 	if timeout <= 0 {
 		return 0
 	}
