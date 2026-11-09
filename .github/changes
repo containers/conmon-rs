@@ -24,21 +24,28 @@ set -euo pipefail
 # sources count as code: rustdoc, the linters and the generated Go code
 # check them.
 #
+# go: whether the API of the Go client may have changed, which make
+# verify-go-api compares with the latest release: the client module (its
+# sources, go.mod and go.sum), the generated code of the schema, the allowed
+# breaks and the Makefile which runs the comparison. The integration suite
+# is a module of its own and not part of the API.
+#
 # Anything this cannot tell, like a commit without a parent, or one which
-# changes no file, prints true for both: when in doubt, run.
+# changes no file, prints true for all: when in doubt, run.
 REV=${1:-HEAD}
 
 # Without the rename detection, a rename lists the old path as well, so that
 # moving a file into docs counts as a change of code.
 if ! FILES=$(git -c core.quotePath=false diff --name-only --no-renames "$REV^1" "$REV" --) || [[ -z $FILES ]]; then
     echo "::warning::Unable to list the changed files of $REV, running all jobs" >&2
-    printf 'fuzz=true\ncode=true\n'
+    printf 'fuzz=true\ncode=true\ngo=true\n'
     exit 0
 fi
 
 echo "Changed files of $REV:" >&2
 FUZZ=false
 CODE=false
+GO=false
 while IFS= read -r FILE; do
     echo "  $FILE" >&2
     case $FILE in
@@ -56,6 +63,12 @@ while IFS= read -r FILE; do
         CODE=true
         ;;
     esac
+    case $FILE in
+    pkg/client/integration/*) ;;
+    pkg/client/* | internal/proto/* | go.mod | go.sum | .github/go-api-break | Makefile)
+        GO=true
+        ;;
+    esac
 done <<<"$FILES"
 
-printf 'fuzz=%s\ncode=%s\n' "$FUZZ" "$CODE"
+printf 'fuzz=%s\ncode=%s\ngo=%s\n' "$FUZZ" "$CODE" "$GO"

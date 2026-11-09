@@ -32,6 +32,17 @@ dependencies:
       - path: Makefile
         match: "GOLANGCI_LINT_VERSION :="
 
+  - name: cargo-deny
+    version: 0.20.2
+    upstream:
+      flavour: github
+      url: EmbarkStudios/cargo-deny
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: "tool: cargo-deny@"
+      - path: .github/workflows/advisories.yml
+        match: "tool: cargo-deny@"
+
   - name: prettier
     version: 3.9.10
     upstream:
@@ -222,10 +233,8 @@ dependencies:
   - name: govulncheck
     version: 1.9.0
     refPaths:
-      - path: .github/workflows/advisories.yml
-        match: govulncheck@v
-      - path: .github/workflows/ci.yml
-        match: govulncheck@v
+      - path: .github/govulncheck
+        match: GOVULNCHECK_VERSION=v
 
   - name: grype
     version: 0.121.1

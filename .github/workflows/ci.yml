@@ -45,7 +45,9 @@ jobs:
   # targets may have changed, which build-fuzz and test-fuzz check with about
   # half of the runner minutes of a pull request, code whether anything
   # besides the documentation changed, which all jobs besides lint-files
-  # check. The jobs which need a skipped one skip as well, like
+  # check, and go whether the API of the Go client may have changed, which
+  # the verify-go-api step of lint-go compares with the latest release. The
+  # jobs which need a skipped one skip as well, like
   # verify-vulnerabilities, the test-integration and the test-critest jobs.
   # The checkout of a pull request is the merge commit which GitHub tests,
   # with its first parent, the branch it merges into, so git lists the files
@@ -65,6 +67,7 @@ jobs:
     outputs:
       fuzz: ${{ github.event_name != 'pull_request' || steps.changes.outputs.fuzz != 'false' }}
       code: ${{ github.event_name != 'pull_request' || steps.changes.outputs.code != 'false' }}
+      go: ${{ github.event_name != 'pull_request' || steps.changes.outputs.go != 'false' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'pull_request'
@@ -127,8 +130,11 @@ jobs:
             CGO_ENABLED=0 GOOS=$GOOS go build ./pkg/client/
           done
       # CRI-O vendors the client, which has to stay compatible within a major
-      # version, see release.md.
+      # version, see release.md. gorelease takes minutes and is the longest
+      # step of the workflow, so pull requests which cannot change the API
+      # skip it, see .github/changes.
       - name: Verify the API of the Go client
+        if: needs.changes.outputs.go == 'true'
         run: make verify-go-api
       # The sources are lint clean, so all issues fail, not only new ones.
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
@@ -275,7 +281,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      # A checksum verified release binary, like the other tools, instead of
+      # the cargo-deny action, which downloads one unverified on every run.
+      # cargo deny only reads the metadata of the workspace, which the cargo
+      # of the runner image does.
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+        with:
+          tool: cargo-deny@0.20.2
+          fallback: none
+      - run: make verify-deny
 
   # Scans the SBOMs of the static binaries with grype and the VEX document, see
   # make scan, which covers the GitHub advisories of the crates which got built
@@ -345,34 +360,8 @@ jobs:
         with:
           go-version: stable
           cache: false
-      # Without a cache, the module proxy fails the job now and then, like
-      # with an INTERNAL_ERROR, so the downloads get retried before the scan.
-      # go run would turn the exit code of govulncheck into 1.
-      - name: Download govulncheck and the Go modules
-        run: |
-          for ATTEMPT in 1 2 3; do
-            if GOBIN=$RUNNER_TEMP go install golang.org/x/vuln/cmd/govulncheck@v1.9.0 &&
-              go mod download; then
-              exit 0
-            fi
-            if ((ATTEMPT < 3)); then
-              echo "::warning::Downloading the Go modules failed, retrying"
-              sleep $((ATTEMPT * 15))
-            fi
-          done
-          exit 1
       - name: govulncheck
-        run: |
-          STATUS=0
-          "$RUNNER_TEMP/govulncheck" ./... >govulncheck.txt 2>&1 || STATUS=$?
-          cat govulncheck.txt
-          # 3 means vulnerabilities found.
-          if ((STATUS == 3)); then
-            echo "::warning::govulncheck reported vulnerabilities, see the summary"
-            printf '### govulncheck\n\n~~~\n%s\n~~~\n' "$(cat govulncheck.txt)" >>"$GITHUB_STEP_SUMMARY"
-          elif ((STATUS != 0)); then
-            exit "$STATUS"
-          fi
+        run: .github/govulncheck warn
 
   # The architectures are the packages of flake.nix, .github/release-files and
   # scripts/get list them as well. Every architecture gets its own build and
@@ -840,6 +829,20 @@ jobs:
           restore-test-files: ${{ env.ARCH == 'amd64' }}
           save-test-files: ${{ env.ARCH == 'amd64' && env.RUNTIME == 'crun' && env.SAVE_CACHE == 'true' }}
           save-cache: ${{ env.RUNTIME == 'crun' && env.SAVE_CACHE || 'false' }}
+      # The checkpoint and restore specs skip without criu, which only this
+      # job installs, so a broken install would go unnoticed otherwise.
+      - name: Check that the checkpoint specs ran
+        if: env.RUNTIME == 'runc'
+        run: |
+          STATES=$(jq -r '
+            [.[] | (.SpecReports // [])[] | select(.LeafNodeText | test("restore a container from a checkpoint")) | .State] |
+            if length == 0 then "none" else join(" ") end
+          ' .build/report/report.json)
+          echo "Checkpoint specs: $STATES"
+          if [[ $STATES == none || $STATES == *skipped* ]]; then
+            echo "::error::The checkpoint and restore specs did not run, is criu installed?"
+            exit 1
+          fi
 
   # The same suite on a native arm64 runner, the build-static jobs only run the
   # other architectures once under emulation.
@@ -1130,14 +1133,16 @@ jobs:
           test -x .build/unverified/conmonrs
 
   # The release workflow publishes the marker of a tag. The marker of main
-  # only moves to a commit whose binaries got published and whose tests
-  # passed, all of these jobs run for every main commit. Like the publish
-  # jobs, it does not wait for the scans: CRI-O CI installs the binaries of
-  # the marker, which a new advisory against older code must not hold back.
-  # Neither for the coverage, whose integration tests may fail, nor for the
-  # unit tests of the other architectures, the test-unit-arch jobs of arm64,
-  # ppc64le and s390x, which a timing sensitive test fails more often, under
-  # qemu above all. A release waits for them, see release.md.
+  # only moves to a commit whose binaries got published, whose tests passed
+  # and whose schema and generated code passed verify-proto, all of these
+  # jobs run for every main commit. Like the publish jobs, it does not wait
+  # for the scans and verify-deny: CRI-O CI installs the binaries of the
+  # marker, which a new advisory against older code must not hold back.
+  # Neither for the linters, whose findings do not break the binaries, for
+  # the coverage, whose integration tests may fail, nor for the unit tests of
+  # the other architectures, the test-unit-arch jobs of arm64, ppc64le and
+  # s390x, which a timing sensitive test fails more often, under qemu above
+  # all. A release waits for them, see release.md.
   publish-marker:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1147,6 +1152,7 @@ jobs:
       - publish-static-arm64
       - publish-static-ppc64le
       - publish-static-s390x
+      - verify-proto
       - test-unit
       - test-unit-go
       - test-integration-amd64

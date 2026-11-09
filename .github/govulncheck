@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Run govulncheck over the Go module, with the vulnerabilities it found in the
+# step summary. MODE says what a finding does. "warn" only warns, like the ci
+# workflow does for pull requests: the Go dependencies follow CRI-O, which
+# vendors the client. "fail" fails, like the advisories workflow does every
+# day to notify. Other errors of govulncheck always fail.
+#
+# The downloads get retried: without a cache, the module proxy fails now and
+# then, like with an INTERNAL_ERROR. govulncheck runs as a binary, go run
+# would turn its exit code into 1.
+MODE=${1:?usage: $0 warn|fail}
+if [[ $MODE != warn && $MODE != fail ]]; then
+    echo "usage: $0 warn|fail" >&2
+    exit 1
+fi
+GOVULNCHECK_VERSION=v1.9.0
+BIN=${RUNNER_TEMP:-$(mktemp -d)}
+
+for ATTEMPT in 1 2 3; do
+    if GOBIN=$BIN go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" &&
+        go mod download; then
+        break
+    fi
+    if ((ATTEMPT == 3)); then
+        echo "Unable to download govulncheck and the Go modules" >&2
+        exit 1
+    fi
+    echo "::warning::Downloading the Go modules failed, retrying"
+    sleep $((ATTEMPT * 15))
+done
+
+STATUS=0
+"$BIN/govulncheck" ./... >govulncheck.txt 2>&1 || STATUS=$?
+cat govulncheck.txt
+# 3 means vulnerabilities found.
+if ((STATUS == 3)); then
+    printf '### govulncheck\n\n~~~\n%s\n~~~\n' "$(cat govulncheck.txt)" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
+    if [[ $MODE == warn ]]; then
+        echo "::warning::govulncheck reported vulnerabilities, see the summary"
+        exit 0
+    fi
+    echo "::error::govulncheck reported vulnerabilities, see the summary"
+    exit 1
+fi
+exit "$STATUS"

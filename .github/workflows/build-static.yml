@@ -41,7 +41,7 @@ jobs:
       ARCH: ${{ inputs.arch }}
       # The images of the smoke test and of qemu, pinned by the digest of their
       # index, see dependencies.yaml and make verify-digests.
-      ALPINE_IMAGE: docker.io/library/alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+      ALPINE_IMAGE: docker.io/library/alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
       BINFMT_IMAGE: docker.io/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
