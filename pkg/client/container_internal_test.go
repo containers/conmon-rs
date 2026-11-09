@@ -92,6 +92,42 @@ func TestCreateContainerValidatesWithoutServer(t *testing.T) {
 	}
 }
 
+// A restore on a server without the feature fails instead of creating a new
+// container, a create does not need the feature.
+func TestCreateContainerRestoreNeedsTheFeature(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	requests, _ := serveRecording(t, dir, FeatureIdleTimeout)
+
+	c := newTestClient(t, dir, logrus.New())
+	t.Cleanup(func() { c.Close() })
+
+	if _, err := c.CreateContainer(t.Context(), &CreateContainerConfig{
+		ID:          "id",
+		BundlePath:  "/bundle",
+		RestorePath: "/checkpoint",
+	}); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("got error %v, want %v", err, ErrUnsupported)
+	}
+
+	// Only the version got asked, the server got no create request.
+	if got := lastRequest(t, requests); got.method != "Version" {
+		t.Fatalf("got request %s %s, want Version", got.method, got.text)
+	}
+
+	if _, err := c.CreateContainer(t.Context(), &CreateContainerConfig{
+		ID:         "id",
+		BundlePath: "/bundle",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if got := lastRequest(t, requests); got.method != "CreateContainer" {
+		t.Fatalf("got request %s %s, want CreateContainer", got.method, got.text)
+	}
+}
+
 func TestExecTimeout(t *testing.T) {
 	t.Parallel()
 

@@ -2,11 +2,13 @@ package client_test
 
 import (
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/containers/conmon-rs/pkg/client"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/types"
 	"github.com/opencontainers/runtime-tools/generate"
 	"go.podman.io/storage/pkg/unshare"
 )
@@ -222,6 +224,99 @@ var _ = Describe("ConmonClient", func() {
 
 			// The failed request keeps the server usable.
 			_, err := sut.Version(ctx)
+			Expect(err).To(Succeed())
+		}, SpecTimeout(specTimeout))
+	})
+
+	Describe("CreateContainer with RestorePath", func() {
+		It("should restore a container from a checkpoint", func(ctx SpecContext) {
+			skipWithoutCheckpointSupport(ctx)
+
+			runContainer(ctx, false, []string{
+				"/busybox",
+				"sh",
+				"-c",
+				"i=0; while true; do echo line $i; i=$((i+1)); /busybox sleep 0.1; done",
+			})
+			Expect(sut.SupportsFeature(client.FeatureRestore)).To(BeTrue())
+
+			atLeastLines := func(n int) types.GomegaMatcher {
+				return WithTransform(
+					func(lines []int) int { return len(lines) },
+					BeNumerically(">=", n),
+				)
+			}
+			Eventually(
+				func(g Gomega) []int { return logLineNumbers(g, tr.logPath()) },
+				10*time.Second,
+			).
+				Should(atLeastLines(3))
+
+			// The checkpoint stops the container, like CRI-O's does, so the
+			// server writes its exit file, which tells that its log is
+			// complete. The runtime keeps the stopped container until it
+			// gets deleted.
+			imagePath := MustDirInTempDir(tr.tmpDir, "checkpoint")
+			Expect(tr.rr.RunCommand(
+				"checkpoint", "--image-path", imagePath, "--work-path", imagePath, tr.ctrID,
+			)).To(Succeed())
+			Eventually(tr.exitPath, 10*time.Second).Should(BeAnExistingFile())
+			tr.expectContainerStoppedOrGone()
+			Expect(tr.rr.RunCommand("delete", "-f", tr.ctrID)).To(Succeed())
+
+			// The restore logs to the same file, like CRI-O restores to the
+			// log path of the container, and the server appends to it. The
+			// exit file of the checkpointed container stays, so the restored
+			// one gets its own.
+			oldLines := logLineNumbers(Default, tr.logPath())
+			Expect(oldLines).To(atLeastLines(3))
+			Expect(oldLines[0]).To(Equal(0))
+
+			cfg := tr.defaultConfig(false)
+			cfg.RestorePath = imagePath
+			cfg.ExitPaths = []string{filepath.Join(tr.tmpDir, "exit-restored")}
+			resp, err := sut.CreateContainer(ctx, cfg)
+			Expect(err).To(Succeed())
+			Expect(resp.PID).NotTo(BeEquivalentTo(0))
+
+			// The restored container runs without a start, and the server
+			// monitors it: it logs its output and writes its exit file.
+			Eventually(func() error {
+				return tr.rr.RunCommandCheckOutput("running", "list")
+			}, 10*time.Second).Should(Succeed())
+			Eventually(
+				func(g Gomega) []int { return logLineNumbers(g, tr.logPath()) },
+				10*time.Second,
+			).
+				Should(atLeastLines(len(oldLines) + 3))
+
+			// The same process continues where the checkpoint stopped it: the
+			// lines of the restored container follow the ones from before
+			// the checkpoint in the same file, without a gap or a repeat.
+			lines := logLineNumbers(Default, tr.logPath())
+			for i := 1; i < len(lines); i++ {
+				Expect(lines[i]).To(Equal(lines[i-1]+1), "lines %v", lines)
+			}
+
+			Expect(tr.rr.RunCommand("kill", tr.ctrID, "KILL")).To(Succeed())
+			// Killed by SIGKILL, like a shell reports it.
+			Eventually(fileContents, 10*time.Second).
+				WithArguments(cfg.ExitPaths[0]).
+				Should(Equal("137"))
+		}, SpecTimeout(specTimeout))
+
+		It("should fail for a relative checkpoint path", func(ctx SpecContext) {
+			newServer()
+
+			cfg := tr.defaultConfig(false)
+			cfg.RestorePath = "checkpoint"
+			_, err := sut.CreateContainer(ctx, cfg)
+			Expect(err).To(MatchError(
+				ContainSubstring(`restore path "checkpoint" is not absolute`),
+			))
+
+			// The failed request keeps the server usable.
+			_, err = sut.Version(ctx)
 			Expect(err).To(Succeed())
 		}, SpecTimeout(specTimeout))
 	})

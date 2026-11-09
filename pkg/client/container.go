@@ -46,8 +46,21 @@ type CreateContainerConfig struct {
 	LogDrivers []ContainerLogDriver
 
 	// CommandArgs are the additional arguments passed to the create runtime call
-	// after the command. e.g: crun create --runtime-opt
+	// after the command. e.g: crun create --runtime-opt. With a RestorePath,
+	// they are the options of the restore command, like --no-pivot or the
+	// SELinux options of runc.
 	CommandArgs []string
+
+	// RestorePath is the absolute path of the checkpoint to restore the
+	// container from, like the --restore of conmon. With one, the server
+	// runs the restore command of the runtime instead of create, detached,
+	// with the checkpoint as its image path and the bundle as its work path,
+	// and monitors the restored container like a created one. The container
+	// runs once CreateContainer returns, the caller does not start it. A
+	// server without FeatureRestore fails the call with an error matching
+	// ErrUnsupported, it would create a new container instead. Since
+	// unreleased. Empty for a create.
+	RestorePath string
 }
 
 // ContainerLogDriver specifies a selected logging mechanism.
@@ -95,12 +108,17 @@ type CreateContainerResult struct {
 // command of the container. The server writes the exit and OOM files once the
 // container exited.
 //
+// With a RestorePath, it restores the container from the checkpoint with the
+// restore command of the runtime instead, the container runs once the call
+// returns. This needs FeatureRestore, see CreateContainerConfig.RestorePath.
+//
 // A context which ends only ends the wait of the client. A server since
 // v1.1.0 finishes the create in a task of its own and keeps watching the
 // container, which may exist although the call failed with the error of the
-// context, so the caller deletes it with the runtime. A server since v1.2.0
-// kills a runtime which takes longer than 10 minutes to create the container
-// and fails the call.
+// context, so the caller deletes it with the runtime, and kills it first
+// after a restore, as a restored container runs. A server since v1.2.0 kills
+// a runtime which takes longer than 10 minutes to create or restore the
+// container and fails the call.
 func (c *ConmonClient) CreateContainer(
 	ctx context.Context, cfg *CreateContainerConfig,
 ) (_ *CreateContainerResult, retErr error) {
@@ -116,43 +134,64 @@ func (c *ConmonClient) CreateContainer(
 		return nil, err
 	}
 
-	return call(ctx, c, proto.Conmon.CreateContainer,
-		func(req proto.Conmon_CreateContainerRequest) error {
-			if err := req.SetId(cfg.ID); err != nil {
-				return fmt.Errorf("set ID: %w", err)
-			}
+	// An older server would ignore the path and create a new container, so a
+	// restore goes to the server which got checked for the feature.
+	var rpcClient proto.Conmon
+	if cfg.RestorePath == "" {
+		rpcClient, err = c.client(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("create RPC client: %w", err)
+		}
+	} else {
+		rpcClient, err = c.requireServerFeature(ctx, FeatureRestore, "restoring a checkpoint")
+		if err != nil {
+			return nil, err
+		}
+	}
+	defer rpcClient.Release()
 
-			if err := req.SetBundlePath(cfg.BundlePath); err != nil {
-				return fmt.Errorf("set bundle path: %w", err)
-			}
+	fill := func(req proto.Conmon_CreateContainerRequest) error {
+		if err := req.SetId(cfg.ID); err != nil {
+			return fmt.Errorf("set ID: %w", err)
+		}
 
-			req.SetTerminal(cfg.Terminal)
-			req.SetStdin(cfg.Stdin)
+		if err := req.SetBundlePath(cfg.BundlePath); err != nil {
+			return fmt.Errorf("set bundle path: %w", err)
+		}
 
-			if err := stringSliceToTextList(cfg.ExitPaths, req.NewExitPaths); err != nil {
-				return fmt.Errorf("convert exit paths string slice to text list: %w", err)
-			}
+		req.SetTerminal(cfg.Terminal)
+		req.SetStdin(cfg.Stdin)
 
-			if err := stringSliceToTextList(cfg.OOMExitPaths, req.NewOomExitPaths); err != nil {
-				return fmt.Errorf("convert oom exit paths string slice to text list: %w", err)
-			}
+		if err := stringSliceToTextList(cfg.ExitPaths, req.NewExitPaths); err != nil {
+			return fmt.Errorf("convert exit paths string slice to text list: %w", err)
+		}
 
-			if err := initLogDrivers(&req, cfg.LogDrivers, driverTypes); err != nil {
-				return fmt.Errorf("init log drivers: %w", err)
-			}
+		if err := stringSliceToTextList(cfg.OOMExitPaths, req.NewOomExitPaths); err != nil {
+			return fmt.Errorf("convert oom exit paths string slice to text list: %w", err)
+		}
 
-			if err := stringSliceToTextList(cfg.CommandArgs, req.NewCommandArgs); err != nil {
-				return fmt.Errorf("convert command arguments string slice to text list: %w", err)
-			}
+		if err := initLogDrivers(&req, cfg.LogDrivers, driverTypes); err != nil {
+			return fmt.Errorf("init log drivers: %w", err)
+		}
 
-			req.SetCgroupManager(proto.Conmon_CgroupManager(c.cgroupManager))
+		if err := stringSliceToTextList(cfg.CommandArgs, req.NewCommandArgs); err != nil {
+			return fmt.Errorf("convert command arguments string slice to text list: %w", err)
+		}
 
-			return nil
-		},
-		func(response proto.Conmon_CreateContainerResponse) (*CreateContainerResult, error) {
-			return &CreateContainerResult{PID: response.ContainerPid()}, nil
-		},
-	)
+		req.SetCgroupManager(proto.Conmon_CgroupManager(c.cgroupManager))
+
+		if err := req.SetRestorePath(cfg.RestorePath); err != nil {
+			return fmt.Errorf("set restore path: %w", err)
+		}
+
+		return nil
+	}
+
+	read := func(response proto.Conmon_CreateContainerResponse) (*CreateContainerResult, error) {
+		return &CreateContainerResult{PID: response.ContainerPid()}, nil
+	}
+
+	return callOn(ctx, c, rpcClient, proto.Conmon.CreateContainer, fill, read)
 }
 
 // ExecSyncContainerConfig is the configuration for calling the

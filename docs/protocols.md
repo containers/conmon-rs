@@ -15,6 +15,17 @@ without one (since v1.2.0), as the runtime only starts the exec process. Each
 runtime runs in a process group of its own, which gets killed with it, so the
 helpers it started do not stay behind.
 
+With a `restorePath` (since unreleased, see the `restore`
+[feature](#features)), `createContainer` restores the container from the
+checkpoint at that path instead, like conmon with `--restore`: it runs the
+`restore` command of the runtime with `--detach`, the checkpoint as
+`--image-path` and the bundle as `--work-path`, where CRIU writes its logs,
+and monitors the restored container like a created one. The container runs
+once the call returns, so the caller does not start it. The options of the
+restore, like `--no-pivot` or the SELinux options of runc, go through
+`commandArgs` like for a create. The path has to be absolute. The call takes
+the same time limit as a create.
+
 `execSyncContainer` returns at most 16 MiB less 64 KiB of output (since
 unreleased), stdout and stderr together, like conmon, so that the response
 fits into the 16 MiB gRPC messages of CRI-O and the kubelet. Each stream keeps
@@ -270,11 +281,12 @@ Beyond its version, `version` reports the optional features of a server,
 which clients check before they rely on them. `conmonrs --version-json` prints
 them as well, and so does `conmonrs --version` since v1.2.2:
 
-| Feature              | Since  | What the server does                                                                                                       |
-| -------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------- |
-| `portforward`        | v1.2.0 | `servePortForwardContainer` forwards ports, see [Port forwarding](#port-forwarding).                                       |
-| `idletimeout`        | v1.2.0 | Exec and attach sessions apply their `idleTimeoutSec`, every server with `portforward` applies the one of port forwarding. |
-| `streamingprotocols` | v1.2.0 | Exec and attach sessions speak SPDY/3.1 and the WebSocket protocols before `v5.channel.k8s.io`.                            |
+| Feature              | Since      | What the server does                                                                                                                                               |
+| -------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `portforward`        | v1.2.0     | `servePortForwardContainer` forwards ports, see [Port forwarding](#port-forwarding).                                                                               |
+| `idletimeout`        | v1.2.0     | Exec and attach sessions apply their `idleTimeoutSec`, every server with `portforward` applies the one of port forwarding.                                         |
+| `streamingprotocols` | v1.2.0     | Exec and attach sessions speak SPDY/3.1 and the WebSocket protocols before `v5.channel.k8s.io`.                                                                    |
+| `restore`            | unreleased | `createContainer` restores the container from its `restorePath`, see [Cap'n Proto RPC](#capn-proto-rpc). Older servers ignore the path and create a new container. |
 
 How to rely on them:
 
@@ -290,6 +302,11 @@ How to rely on them:
 
 ## Changes
 
+- unreleased: `createContainer` restores a container from a checkpoint with the
+  `restore` command of the runtime if the request sets a `restorePath`, which
+  the `restore` feature tells. Before, the server only created containers, and
+  the restore of CRI-O ran the `monitor_path` binary with the arguments of
+  conmon, which the server rejects.
 - unreleased: `execSyncContainer` and `serveExecContainer` pass the container
   ID and the command to the runtime after `--`, so that a runtime cannot take a
   command whose first element starts with `-` for its own options. Before, a

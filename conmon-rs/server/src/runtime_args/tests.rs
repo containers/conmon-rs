@@ -32,7 +32,15 @@ where
 }
 
 fn create(args: GenerateRuntimeArgs) -> Result<Vec<String>> {
-    args.create_args(Path::new("/bundle"), ["--command"])
+    args.create_args(Path::new("/bundle"), None, ["--command"])
+}
+
+fn restore(args: GenerateRuntimeArgs) -> Result<Vec<String>> {
+    args.create_args(
+        Path::new("/bundle"),
+        Some(Path::new("/checkpoint")),
+        ["--command"],
+    )
 }
 
 #[test]
@@ -56,6 +64,66 @@ fn create_args_for_runc() {
     );
 }
 
+/// A restore runs the `restore` command of the runtime instead of `create`,
+/// like conmon with `--restore`: detached, as the container runs once it got
+/// restored, with the checkpoint as the image path and the bundle as the
+/// work path. The rest stays like for a create, the command args carry the
+/// options of the restore.
+#[test]
+fn restore_args_for_runc() {
+    let args = runtime_args(
+        &["--runtime", "/usr/bin/runc"],
+        CgroupManager::Cgroupfs,
+        restore,
+    );
+    assert_eq!(
+        args,
+        [
+            "restore",
+            "--bundle",
+            "/bundle",
+            "--pid-file",
+            "/pidfile",
+            "--detach",
+            "--image-path",
+            "/checkpoint",
+            "--work-path",
+            "/bundle",
+            "--command",
+            "id"
+        ]
+    );
+}
+
+#[test]
+fn restore_args_for_crun_with_root_and_systemd() {
+    let args = runtime_args(
+        &["--runtime", "/usr/bin/crun", "--runtime-root", "/run/crun"],
+        CgroupManager::Systemd,
+        restore,
+    );
+    assert_eq!(
+        args,
+        [
+            "--log=journald:id",
+            "--root=/run/crun",
+            "--systemd-cgroup",
+            "restore",
+            "--bundle",
+            "/bundle",
+            "--pid-file",
+            "/pidfile",
+            "--detach",
+            "--image-path",
+            "/checkpoint",
+            "--work-path",
+            "/bundle",
+            "--command",
+            "id"
+        ]
+    );
+}
+
 #[test]
 fn ids_which_look_like_options_are_rejected() {
     let config = Config::parse_for_test(["--runtime", "/usr/bin/runc"]);
@@ -70,6 +138,7 @@ fn ids_which_look_like_options_are_rejected() {
         };
         assert!(args.exec_args(["true"]).is_err(), "{id}");
         assert!(create(args).is_err(), "{id}");
+        assert!(restore(args).is_err(), "{id}");
     }
 }
 
@@ -229,6 +298,39 @@ async fn exec_and_create_args_with_terminal() {
             "/bundle",
             "--pid-file",
             "/pidfile",
+            "--command",
+            console_socket.as_str(),
+            "id"
+        ]
+    );
+
+    // A restore connects the terminal the same way.
+    let mut socket = None;
+    let restore = runtime_args_with_io(
+        &["--runtime", "/usr/bin/runc"],
+        CgroupManager::Cgroupfs,
+        true,
+        |args| {
+            if let Some(terminal) = args.container_io.terminal() {
+                socket = Some(terminal.path().display().to_string());
+            }
+            restore(args)
+        },
+    );
+    let console_socket = format!("--console-socket={}", socket.expect("terminal socket"));
+    assert_eq!(
+        restore,
+        [
+            "restore",
+            "--bundle",
+            "/bundle",
+            "--pid-file",
+            "/pidfile",
+            "--detach",
+            "--image-path",
+            "/checkpoint",
+            "--work-path",
+            "/bundle",
             "--command",
             console_socket.as_str(),
             "id"

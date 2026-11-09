@@ -791,7 +791,7 @@ jobs:
       # The busybox of the tests only runs on x86, the other architectures
       # use the static one of the nixpkgs of flake.lock, which behaves the same.
       - uses: ./.github/actions/setup-nix
-        if: env.ARCH != 'amd64'
+        if: env.ARCH != 'amd64' || env.RUNTIME == 'runc'
       - name: Install busybox
         if: env.ARCH != 'amd64'
         run: |
@@ -805,6 +805,19 @@ jobs:
       - name: Install runc
         if: env.RUNTIME == 'runc'
         run: .github/install-runc
+      # The checkpoint and restore spec needs criu, which Ubuntu 24.04 does not
+      # package, so it comes from the nixpkgs of flake.lock. Only runc runs it,
+      # the static release binaries of crun lack CRIU support and skip it. The
+      # criu 4.1.1 of nixpkgs works on the kernel of the runners, which is older
+      # than 7.1. A runner kernel of 7.1 or later, which dropped UDP-Lite,
+      # breaks the spec until nixpkgs ships a criu with
+      # checkpoint-restore/criu@f19777c.
+      - name: Install criu
+        if: env.RUNTIME == 'runc'
+        run: |
+          nix build --inputs-from . nixpkgs#criu --out-link .build/criu
+          sudo ln -sf "$PWD/.build/criu/bin/criu" /usr/local/bin/criu
+          criu --version
       # What the memory budget of the server depends on.
       - name: System info
         run: |

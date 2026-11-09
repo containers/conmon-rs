@@ -31,7 +31,8 @@
 //
 // A request fails with ErrUnsupported on a server without the feature it
 // needs if dropping it would change what the container or the session does:
-// ServePortForwardContainer needs FeaturePortForward. Best effort fields get
+// ServePortForwardContainer needs FeaturePortForward, and CreateContainer
+// with a RestorePath needs FeatureRestore. Best effort fields get
 // dropped by an older server instead, the request succeeds without them:
 // the IdleTimeout of ServeExecContainerConfig and ServeAttachContainerConfig
 // without FeatureIdleTimeout, which the client logs a warning about once, and

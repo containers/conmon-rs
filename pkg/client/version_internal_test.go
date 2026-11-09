@@ -172,6 +172,7 @@ func TestSupportsFeature(t *testing.T) {
 			FeaturePortForward,
 			FeatureIdleTimeout,
 			FeatureStreamingProtocols,
+			FeatureRestore,
 		} {
 			want := slices.Contains(features, feature)
 			if got := c.SupportsFeature(feature); got != want {

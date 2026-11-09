@@ -108,9 +108,17 @@ finishes on the server, which keeps watching the container. The
 `platform_runtime_paths` of a runtime handler only apply to some of the runtime
 calls which CRI-O makes itself, like update and checkpoint: the server runs the
 `runtime_path` of the handler for the containers it creates and the commands
-it executes in them. Restoring a checkpoint does not work with a `pod` runtime
-handler, CRI-O runs the `monitor_path` binary with the arguments of conmon for
-it, which conmon-rs rejects.
+it executes in them. Restoring a checkpoint with a `pod` runtime handler needs
+a server with the `restore` [feature](protocols.md#features) (since unreleased)
+and a CRI-O which restores through the client, with the `RestorePath` of
+`CreateContainerConfig`: CRI-O so far, including `main`, runs the
+`monitor_path` binary with the arguments of conmon for it, which conmon-rs
+rejects, so the restore fails before the runtime starts. Checkpointing works
+with every version, CRI-O runs the runtime for it itself. Like for a create,
+the server runs the `runtime_path` of the handler for the restore, with the
+options CRI-O passes, like `--no-pivot` and the SELinux options of runc. The
+checkpoint and the restore need criu and a runtime built with CRIU support on
+the node.
 
 ## Compatibility
 

@@ -130,6 +130,12 @@ const FeatureIdleTimeout = "idletimeout"
 // v5.channel.k8s.io. Since v1.2.0.
 const FeatureStreamingProtocols = "streamingprotocols"
 
+// FeatureRestore is reported by servers which restore a container from the
+// RestorePath of CreateContainerConfig with the restore command of the
+// runtime. Others ignore the path and create a new container, so
+// CreateContainer fails with ErrUnsupported on them. Since unreleased.
+const FeatureRestore = "restore"
+
 // SupportsFeature reports whether the server reports the feature, see the
 // Feature constants. New records the features of the server it starts or
 // connects to, which can be older than the binary on disk: a server keeps
