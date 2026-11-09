@@ -91,7 +91,7 @@ async fn failed_rotation_keeps_the_rest_of_the_chunk() -> Result<()> {
     let path = dir.path().join("log");
     let mut sut = CriLogger::new(&path, Some(max_size));
     sut.freeze_timestamp(TIMESTAMP);
-    sut.init().await?;
+    sut.file().open().await?;
 
     // Keep the open file reachable, then make the rotation fail by putting
     // a directory in its place.
@@ -124,7 +124,7 @@ async fn failed_rotation_keeps_the_rest_of_the_chunk() -> Result<()> {
 async fn timestamp_is_rfc3339() -> Result<()> {
     let file = NamedTempFile::new()?;
     let mut sut = CriLogger::new(file.path(), None);
-    sut.init().await?;
+    sut.file().open().await?;
 
     sut.write_chunk(Pipe::StdOut, b"line\n").await?;
 
@@ -157,7 +157,7 @@ async fn timestamps_are_taken_per_chunk() -> Result<()> {
 #[tokio::test]
 async fn init_failure() -> Result<()> {
     let mut sut = CriLogger::new("/file/does/not/exist", None);
-    assert!(sut.init().await.is_err());
+    assert!(sut.file().open().await.is_err());
     Ok(())
 }
 
@@ -180,7 +180,7 @@ async fn cri_log_is_readable_by_the_group() -> Result<()> {
     let mode = || -> Result<u32> { Ok(std::fs::metadata(&path)?.permissions().mode() & 0o777) };
     let mut sut = CriLogger::new(&path, Some(entry("stdout", "F", "a").len()));
     sut.freeze_timestamp(TIMESTAMP);
-    sut.init().await?;
+    sut.file().open().await?;
     assert_eq!(mode()?, expected);
 
     // Also the file which replaces it on rotation.

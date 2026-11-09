@@ -4,7 +4,7 @@ use crate::{
     child_reaper::ReapableChild,
     container_io::SharedContainerIO,
     streaming_server::{
-        ADDR, AttachSession, Session, StreamingServer, remotecommand::Version,
+        ADDR, AttachSession, Session, SessionCommon, StreamingServer, remotecommand::Version,
         spdy::testing::Client, web::CloseCode,
     },
     test_util::container_child,
@@ -380,13 +380,15 @@ pub(super) fn attach_config(
     idle_timeout: Option<Duration>,
 ) -> AttachSession {
     AttachSession {
-        container_id: "id".into(),
         child,
-        stdin,
-        stdout: true,
-        stderr: false,
         stop_after_stdin_eof,
-        idle_timeout,
+        common: SessionCommon {
+            container_id: "id".into(),
+            stdin,
+            stdout: true,
+            stderr: false,
+            idle_timeout,
+        },
     }
 }
 

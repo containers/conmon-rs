@@ -63,7 +63,7 @@ const DRAIN_LIMIT: usize = 64 * 1024 * 1024;
 /// The buffer a WebSocket reads into, which it allocates up front. Clients
 /// mostly send small stdin and resize events, larger messages grow it while
 /// they get read. Tungstenite allocates 128 KiB otherwise, for every session.
-const READ_BUFFER_SIZE: usize = 16 * 1024;
+const WEBSOCKET_READ_BUFFER_SIZE: usize = 16 * 1024;
 
 /// The close of the server once it is done, or after the client sent a
 /// message larger than the server takes, see [`is_too_large`], which tells
@@ -609,7 +609,7 @@ impl WebSocketUpgrade {
             key,
             on_upgrade,
             protocol: None,
-            config: WebSocketConfig::default().read_buffer_size(READ_BUFFER_SIZE),
+            config: WebSocketConfig::default().read_buffer_size(WEBSOCKET_READ_BUFFER_SIZE),
         })
     }
 

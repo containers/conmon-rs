@@ -1,8 +1,10 @@
 //! The setup of the server process before it serves: umask, environment, OOM
-//! score, open files limit, malloc and transparent huge pages, and giving the
-//! runtime calls the OOM score, huge pages setting and open files limits the
-//! server started with.
+//! score, open files limit, malloc and transparent huge pages, the standard
+//! streams and the descriptors it inherited, its working directory and the
+//! subreaper flag, and giving the runtime calls the OOM score, huge pages
+//! setting and open files limits the server started with.
 
+use crate::config::LogDriver;
 use anyhow::{Context, Result};
 use nix::{
     errno::Errno,
@@ -12,12 +14,13 @@ use nix::{
         resource::{Resource, getrlimit, rlim_t, setrlimit},
         stat::{Mode, umask},
     },
-    unistd::write,
+    unistd::{chdir, dup2_stderr, dup2_stdin, dup2_stdout, write},
 };
 use std::{
     env,
     fs::OpenOptions,
     io::{ErrorKind, Write},
+    os::fd::{AsRawFd, IntoRawFd, RawFd},
     path::Path,
     sync::{
         OnceLock,
@@ -29,9 +32,124 @@ use tokio::process::Command;
 /// The OOM score adjustment of the server.
 const OOM_SCORE_ADJ: &str = "/proc/self/oom_score_adj";
 
+/// Set up the process before it forks: drop the notify socket, remember the
+/// OOM score and raise the open files limit for the runtimes, configure
+/// malloc and protect the server from the OOM killer. The server keeps the C
+/// locale, unlike conmon, so that the errors it returns to CRI-O do not
+/// depend on the environment. The umask is set before the configuration
+/// prepares the runtime directories, see `crate::run`.
+pub(crate) fn set_up_process() -> Result<()> {
+    unset_notify_socket();
+    save_oom_score();
+    raise_nofile_limit();
+    configure_malloc();
+    // While we could configure this, standard practice has it as -1000, so
+    // it may be YAGNI to add configuration.
+    set_oom_score("-1000")
+}
+
+/// Like a daemon, do not keep the standard streams of the caller, like the
+/// file the Go client reads the launch errors from, see `startServer` in
+/// `pkg/client`. The processes the server starts, like the runtimes, would
+/// write into it otherwise. Only the stdout log driver writes to them.
+pub(crate) fn redirect_stdio(log_driver: LogDriver) -> Result<()> {
+    if log_driver == LogDriver::Stdout {
+        return Ok(());
+    }
+    let null = open(c"/dev/null", OFlag::O_RDWR, Mode::empty()).context("open /dev/null")?;
+    dup2_stdin(&null).context("redirect stdin")?;
+    dup2_stdout(&null).context("redirect stdout")?;
+    dup2_stderr(&null).context("redirect stderr")?;
+    // A closed standard stream got it, which has to stay.
+    if null.as_raw_fd() <= libc::STDERR_FILENO {
+        let _: RawFd = null.into_raw_fd();
+    }
+    Ok(())
+}
+
+/// Close file descriptors inherited from whatever started us.
+///
+/// conmon-rs daemonizes and outlives the process that spawned it, so any
+/// descriptor it inherits stays open for the lifetime of the server. If the
+/// spawning process was itself started with extra descriptors open, holding
+/// them can keep that process tree from ever finishing, for example a test
+/// harness waiting for its own pipe to close.
+///
+/// conmon does the same thing, see `close_all_fds_ge_than(3)` there. Any
+/// descriptor conmon-rs actually needs is created after this point, so
+/// nothing above stderr is worth keeping.
+#[expect(unsafe_code, reason = "closing descriptors which may be gone")]
+pub(crate) fn close_inherited_fds() {
+    for fd in inherited_fds() {
+        // The descriptor used to enumerate them is already closed by now, so
+        // check before closing to avoid closing an unrelated descriptor that
+        // reused the number. This runs before tokio starts, so nothing else
+        // can be opening descriptors concurrently.
+        //
+        // These are raw libc calls rather than the `nix` wrappers on purpose:
+        // `BorrowedFd`/`OwnedFd` require the descriptor to be open for the
+        // duration of the borrow, and whether it is still open is exactly
+        // what is unknown here. `fcntl(2)` and `close(2)` take a plain
+        // integer with no such precondition and report `EBADF`.
+        //
+        // SAFETY: both calls are defined for any integer; a stale or invalid
+        // descriptor number fails with `EBADF` rather than affecting anything
+        // else.
+        if unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1 {
+            // SAFETY: as above.
+            unsafe { libc::close(fd) };
+        }
+    }
+}
+
+/// Every open descriptor above stderr. Split out from `close_inherited_fds`
+/// so it can be tested without closing the test runner's own descriptors.
+///
+/// This is Linux only: it enumerates `/proc/self/fd` and would report nothing
+/// at all where that is unavailable, silently leaking the inherited
+/// descriptors. conmon-rs already requires Linux elsewhere (`prctl`, epoll,
+/// journald), so the assertion below just makes a port fail here loudly
+/// rather than lose the behaviour quietly. A log line would not work,
+/// `close_inherited_fds` runs well before the logging got set up.
+fn inherited_fds() -> Vec<RawFd> {
+    const {
+        assert!(
+            cfg!(target_os = "linux"),
+            "inherited fds are enumerated through /proc/self/fd, which is Linux only"
+        );
+    };
+
+    let mut fds = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
+        for entry in entries.flatten() {
+            if let Some(fd) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<RawFd>().ok())
+                && fd > 2
+            {
+                fds.push(fd);
+            }
+        }
+    }
+
+    fds
+}
+
+/// Set up the process to serve, once the logging is: do not keep the working
+/// directory of the caller busy, like a mount which then cannot be unmounted
+/// (the paths of the configuration are absolute, see `Config::make_absolute`,
+/// and so are the ones of the requests), and make the container processes
+/// get reparented to the server once their runtime exits.
+pub(crate) fn set_up_serving() -> Result<()> {
+    chdir("/").context("change into the root directory")?;
+    prctl::set_child_subreaper(true).context("set child subreaper")
+}
+
 /// Adjust the OOM score of the server, best effort without the privileges
 /// to lower it.
-pub(crate) fn set_oom_score(score: &str) -> Result<()> {
+fn set_oom_score(score: &str) -> Result<()> {
     set_oom_score_at(Path::new(OOM_SCORE_ADJ), score)
 }
 
@@ -60,7 +178,7 @@ pub(crate) fn set_default_umask() {
 /// inherit the socket: the runtime then adds its own notify socket mount
 /// and `NOTIFY_SOCKET` to the container.
 #[expect(unsafe_code, reason = "changing the environment")]
-pub(crate) fn unset_notify_socket() {
+fn unset_notify_socket() {
     // SAFETY: the server is still single threaded, the runtime and its
     // threads start later.
     unsafe { env::remove_var("NOTIFY_SOCKET") }
@@ -91,7 +209,7 @@ const MALLOC_THRESHOLD: libc::c_int = 128 * 1024;
 /// the process has a single thread. The runtimes and containers keep the
 /// defaults, an exec starts their allocator anew.
 #[cfg_attr(target_env = "gnu", expect(unsafe_code, reason = "mallopt"))]
-pub(crate) fn configure_malloc() {
+fn configure_malloc() {
     #[cfg(target_env = "gnu")]
     for (param, value, name) in [
         (libc::M_ARENA_MAX, MALLOC_ARENAS, "arenas"),
@@ -149,7 +267,7 @@ static INHERITED_NOFILE: OnceLock<(rlim_t, rlim_t)> = OnceLock::new();
 /// sessions of the streaming server, while Go programs like CRI-O start it
 /// with the soft limit they started with, often 1024. The runtimes get the
 /// limits the server started with, see [`reset_inherited`].
-pub(crate) fn raise_nofile_limit() {
+fn raise_nofile_limit() {
     let (soft, hard) = match getrlimit(Resource::RLIMIT_NOFILE) {
         Ok(limits) => limits,
         Err(e) => {
@@ -171,7 +289,7 @@ pub(crate) fn raise_nofile_limit() {
 
 /// Remember the OOM score adjustment the server started with, before it
 /// protects itself with [`set_oom_score`].
-pub(crate) fn save_oom_score() {
+fn save_oom_score() {
     match std::fs::read(OOM_SCORE_ADJ) {
         Ok(score) => {
             let _ = INHERITED_OOM_SCORE.set(score.trim_ascii().into());
@@ -231,6 +349,25 @@ fn restore_nofile(limits: Option<(rlim_t, rlim_t)>) {
 mod tests {
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn inherited_fds_reports_descriptors_above_stderr() -> Result<()> {
+        let file = tempfile::tempfile()?;
+        let fd = file.as_raw_fd();
+
+        let fds = inherited_fds();
+
+        assert!(
+            fds.contains(&fd),
+            "expected an open descriptor {fd} to be reported, got {fds:?}"
+        );
+        // stdin, stdout and stderr are never reported, they are not ours to close.
+        assert!(!fds.contains(&0));
+        assert!(!fds.contains(&1));
+        assert!(!fds.contains(&2));
+
+        Ok(())
+    }
 
     #[test]
     fn oom_score_gets_written() -> Result<()> {

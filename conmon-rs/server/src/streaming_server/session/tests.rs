@@ -6,7 +6,7 @@ use crate::{
         AttachSession, MAX_MESSAGE_SIZE, StreamingServer,
         idle::STALL_TIMEOUT,
         remotecommand::{
-            ClientEvent, MESSAGE_TOO_LARGE, STDIN_BYTE, STDOUT_BYTE, STREAM_ERR_BYTE, Status, Stdin,
+            ClientEvent, MESSAGE_TOO_LARGE, STDIN_BYTE, STREAM_ERR_BYTE, Status, Stdin,
         },
         session::PENDING_STDIN_MAX_BYTES,
         spdy::testing::{Client, Frame},

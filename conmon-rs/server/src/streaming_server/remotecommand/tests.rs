@@ -278,7 +278,7 @@ async fn late_resize_streams_survive_a_cancelled_next() -> Result<()> {
 
     // The client does not read, the data queue of the connection fills.
     let data = Bytes::from(vec![0; 32 * 1024]);
-    let fill = async { while output.data(STDOUT_BYTE, &data).await.is_ok() {} };
+    let fill = async { while output.data(Pipe::StdOut, &data).await.is_ok() {} };
     assert!(
         time::timeout(Duration::from_millis(500), fill)
             .await
@@ -434,7 +434,7 @@ async fn reset_output_after_the_stdin_close_fails_the_session() -> Result<()> {
         .await?;
     let data = Bytes::from_static(b"out");
     time::timeout(Duration::from_secs(5), async {
-        while output.data(STDOUT_BYTE, &data).await.is_ok() {
+        while output.data(Pipe::StdOut, &data).await.is_ok() {
             time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -467,7 +467,7 @@ async fn closing_a_session_of_a_client_which_does_not_read_ends() -> Result<()> 
     // The client does not read, the output backs up until the session ends
     // for its idle timeout.
     let data = Bytes::from(vec![0; 32 * 1024]);
-    let backed_up = async { while output.data(STDOUT_BYTE, &data).await.is_ok() {} };
+    let backed_up = async { while output.data(Pipe::StdOut, &data).await.is_ok() {} };
     assert!(time::timeout(idle_timeout, backed_up).await.is_err());
 
     // The end of the session does not wait for the client forever, nor for
@@ -510,7 +510,7 @@ async fn paused_clients_get_the_status_within_the_idle_timeout() -> Result<()> {
     });
 
     let data = Bytes::from(vec![7; 32 * 1024]);
-    output.data(STDOUT_BYTE, &data).await?;
+    output.data(Pipe::StdOut, &data).await?;
     output.status(&Status::Success).await?;
     assert!(output.close().await);
     drop(output);
@@ -560,7 +560,7 @@ async fn slow_clients_get_all_output_and_the_status() -> Result<()> {
     // The process writes 1 MiB and exits.
     let data = Bytes::from(vec![7; 8 * 1024]);
     for _ in 0..128 {
-        output.data(STDOUT_BYTE, &data).await?;
+        output.data(Pipe::StdOut, &data).await?;
     }
     let start = time::Instant::now();
     output.status(&Status::Success).await?;

@@ -124,7 +124,7 @@ fn early_stream_is_bounded_without_gaps() {
         stream.push(&vec![i; 1024]);
     }
     let end = stream.end();
-    assert_eq!(end.len(), EarlyStream::TAIL_SIZE);
+    assert_eq!(end.len(), STDERR_TAIL_SIZE);
     assert_eq!(end.last(), Some(&99));
 }
 
@@ -137,7 +137,7 @@ fn early_stream_end_spans_kept_and_dropped_output() {
     assert!(stream.truncated);
 
     let end = stream.end();
-    assert_eq!(end.len(), EarlyStream::TAIL_SIZE);
+    assert_eq!(end.len(), STDERR_TAIL_SIZE);
     assert!(end.ends_with(b"a0123456789abcdefghij"));
 }
 
@@ -560,7 +560,7 @@ async fn runtime_errors_carry_the_end_of_stderr() -> Result<()> {
         e.starts_with("failed: xxx") && e.ends_with("xoops"),
         "{e:.20}"
     );
-    assert_eq!(e.len(), "failed: ".len() + EarlyStream::TAIL_SIZE);
+    assert_eq!(e.len(), "failed: ".len() + STDERR_TAIL_SIZE);
     Ok(())
 }
 

@@ -1,35 +1,26 @@
 //! Attach sessions, which connect their client to the container process.
 
 use super::{
-    StreamingServer,
+    SessionCommon, StreamingServer,
     session::{ClientRx, InputEvent, SessionInput},
 };
 use crate::{
     attach::SharedContainerAttach,
     child_reaper::ReapableChild,
     container_io::{Drain, Lag, Message as IOMessage, Pipe},
-    streaming_server::remotecommand::{
-        MESSAGE_TOO_LARGE, Output, STDERR_BYTE, STDOUT_BYTE, Status,
-    },
+    streaming_server::remotecommand::{MESSAGE_TOO_LARGE, Output, Status},
 };
 use anyhow::{Result, bail};
-use tokio::{
-    sync::broadcast::{self, error::RecvError},
-    time::Duration,
-};
+use tokio::sync::broadcast::{self, error::RecvError};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-#[derive(Debug)]
 /// Required attach session data.
+#[derive(Debug)]
 pub(crate) struct AttachSession {
-    pub(crate) container_id: Box<str>,
     pub(crate) child: ReapableChild,
-    pub(crate) stdin: bool,
-    pub(crate) stdout: bool,
-    pub(crate) stderr: bool,
     pub(crate) stop_after_stdin_eof: bool,
-    pub(crate) idle_timeout: Option<Duration>,
+    pub(crate) common: SessionCommon,
 }
 
 impl StreamingServer {
@@ -44,11 +35,14 @@ impl StreamingServer {
     ) -> Result<()> {
         let AttachSession {
             child,
-            stdin: stdin_enabled,
-            stdout: stdout_enabled,
-            stderr: stderr_enabled,
             stop_after_stdin_eof,
-            ..
+            common:
+                SessionCommon {
+                    stdin: stdin_enabled,
+                    stdout: stdout_enabled,
+                    stderr: stderr_enabled,
+                    ..
+                },
         } = session;
         let io = child.io().clone();
         let token = child.token().clone();
@@ -139,11 +133,11 @@ impl StreamingServer {
         sender: &mut Output,
     ) -> Result<()> {
         match message {
-            IOMessage::Data(data, Pipe::StdOut) if stdout_enabled => {
-                sender.data(STDOUT_BYTE, &data).await
+            IOMessage::Data(data, pipe @ Pipe::StdOut) if stdout_enabled => {
+                sender.data(pipe, &data).await
             }
-            IOMessage::Data(data, Pipe::StdErr) if stderr_enabled => {
-                sender.data(STDERR_BYTE, &data).await
+            IOMessage::Data(data, pipe @ Pipe::StdErr) if stderr_enabled => {
+                sender.data(pipe, &data).await
             }
             IOMessage::Data(..) | IOMessage::Done => Ok(()),
         }

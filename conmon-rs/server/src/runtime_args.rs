@@ -42,7 +42,7 @@ impl GenerateRuntimeArgs<'_> {
     /// the `command_args`, which carry the options of the restore, like the
     /// `--runtime-opt` of conmon.
     pub(crate) fn create_args(
-        self,
+        &self,
         bundle_path: &Path,
         restore_path: Option<&Path>,
         command_args: impl IntoIterator<Item = impl AsRef<str>>,
@@ -50,23 +50,26 @@ impl GenerateRuntimeArgs<'_> {
         let mut args = Vec::with_capacity(16);
         args.extend(self.default_args());
 
-        args.push(if restore_path.is_some() {
-            "restore".into()
-        } else {
-            "create".into()
-        });
+        let bundle_path = bundle_path.display().to_string();
+        let (command, restore_flags) = match restore_path {
+            Some(restore_path) => (
+                "restore",
+                vec![
+                    "--detach".into(),
+                    "--image-path".into(),
+                    restore_path.display().to_string(),
+                    "--work-path".into(),
+                    bundle_path.clone(),
+                ],
+            ),
+            None => ("create", vec![]),
+        };
+        args.push(command.into());
         args.push("--bundle".into());
-        args.push(bundle_path.display().to_string());
+        args.push(bundle_path);
         args.push("--pid-file".into());
         args.push(self.pidfile.display().to_string());
-
-        if let Some(restore_path) = restore_path {
-            args.push("--detach".into());
-            args.push("--image-path".into());
-            args.push(restore_path.display().to_string());
-            args.push("--work-path".into());
-            args.push(bundle_path.display().to_string());
-        }
+        args.extend(restore_flags);
 
         args.extend(command_args.into_iter().map(|arg| arg.as_ref().into()));
 

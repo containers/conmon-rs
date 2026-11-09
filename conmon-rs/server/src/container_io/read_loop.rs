@@ -1,16 +1,15 @@
 //! The read loops of the output and the stdin of the process.
 
-use super::{ContainerIO, Message, Pipe, StdioSender};
+use super::{ContainerIO, Message, Pipe, READ_BUFFER_SIZE, StdioSender};
 use crate::{
     attach::{AttachOutput, SharedContainerAttach},
     container_log::SharedContainerLog,
-    util::sleep_until,
+    util::{sleep_until, with_scratch},
 };
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use nix::errno::Errno;
 use std::{
-    cell::RefCell,
     future,
     io::{self, ErrorKind},
     pin::Pin,
@@ -25,36 +24,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error, info, trace};
-
-/// The most a read of a container I/O stream takes at once. The read loops
-/// read into the scratch buffer of their thread and copy each chunk out of
-/// it, see [`with_scratch`], so an idle container holds no read buffer. 8 KiB
-/// halves the reads and log writes of 4 KiB for bulk output, the log files
-/// start the buffer of each chunk with as much, see `LogFile::BUF_CAPACITY`.
-pub(crate) const READ_BUFFER_SIZE: usize = 8 * 1024;
-
-thread_local! {
-    /// See [`with_scratch`].
-    static SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Run `f` on a buffer of `len` bytes which the thread keeps for all reads
-/// which copy what they got out of it right away. The read loops of all
-/// containers and attach clients and the runtime calls share it, instead of
-/// keeping a buffer each while they wait. It grows to the largest `len`
-/// asked for and holds what the last use left in it.
-pub(crate) fn with_scratch<R>(len: usize, f: impl FnOnce(&mut [u8]) -> R) -> R {
-    SCRATCH.with(|scratch| match scratch.try_borrow_mut() {
-        Ok(mut scratch) => {
-            if scratch.len() < len {
-                scratch.resize(len, 0);
-            }
-            f(&mut scratch[..len])
-        }
-        // Only if `f` used it again, which none of the reads does.
-        Err(_) => f(&mut vec![0; len]),
-    })
-}
 
 /// Logs a failing log driver once until it works again. A full disk would
 /// otherwise log an error for every chunk of output.

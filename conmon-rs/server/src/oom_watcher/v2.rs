@@ -195,23 +195,20 @@ impl CgroupV2 {
             .parent()
             .is_none_or(OOMWatcher::file_not_found);
         let Some((path, baseline)) = &self.outer else {
-            debug!(
-                leaf_gone,
-                "Leaf cgroup without memory events or outer counters"
-            );
+            debug!("Leaf cgroup without memory events or outer counters, gone: {leaf_gone}");
             return OOMEvent::possible(leaf_gone);
         };
         match OOMWatcher::read_oom_counters(path) {
             Ok(counters) => {
                 debug!(
-                    leaf_gone,
-                    "No leaf memory events, OOM counters of {}: {counters:?} since {baseline:?}",
+                    "No leaf memory events, leaf gone: {leaf_gone}, OOM counters of {}: \
+                     {counters:?} since {baseline:?}",
                     path.display(),
                 );
                 OOMEvent::possible(counters.increased_since(baseline))
             }
             Err(e) => {
-                debug!(leaf_gone, "Unable to read outer OOM counters: {e:#}");
+                debug!("Unable to read outer OOM counters, leaf gone: {leaf_gone}: {e:#}");
                 OOMEvent::possible(leaf_gone)
             }
         }
@@ -286,7 +283,7 @@ impl MemoryEvents {
             }
             Ok(_) => false,
             Err(e) => {
-                debug!("Checking {} for OOM failed: {:#}", self.path.display(), e);
+                debug!("Checking {} for OOM failed: {e:#}", self.path.display());
                 false
             }
         }
@@ -350,8 +347,10 @@ impl OOMWatcher {
     async fn watch_cgroup_v2(token: &CancellationToken, leaf: &Path) -> OOMEvent {
         let mut cgroup = CgroupV2::new(leaf);
 
-        let path = cgroup.events.path.to_str();
-        debug!(path, "Setup cgroup v2 handling");
+        debug!(
+            "Setup cgroup v2 handling of {}",
+            cgroup.events.path.display()
+        );
 
         let mut subscriptions = match cgroup.subscribe() {
             Ok(subscriptions) => subscriptions,
@@ -381,23 +380,26 @@ impl OOMWatcher {
                     let Some(event) = event else {
                         // All watches ended, their files got removed, or the
                         // watcher stopped reading events.
-                        let path = cgroup.events.path.to_str();
+                        let path = cgroup.events.path.display();
                         if !subscriptions.watcher_failed() {
-                            debug!(path, "Watches ended, checking once the process exited");
+                            debug!("Watches of {path} ended, checking once the process exited");
                             break;
                         }
                         if restarts >= Self::MAX_WATCHER_RESTARTS {
-                            let message = "Watcher of the memory events stopped again, checking on exit only";
+                            let message = format!(
+                                "Watcher of the memory events {path} stopped again after \
+                                 {restarts} restarts, checking on exit only"
+                            );
                             if subscriptions.subscription.give_up() {
-                                warn!(path, restarts, "{message}");
+                                warn!("{message}");
                             } else {
-                                debug!(path, restarts, "{message}");
+                                debug!("{message}");
                             }
                             break;
                         }
                         restarts += 1;
                         // The reader logged why already, once for all watchers.
-                        debug!(path, "Watcher of the memory events stopped, watching again");
+                        debug!("Watcher of the memory events {path} stopped, watching again");
                         match cgroup.subscribe() {
                             Ok(new) => subscriptions = new,
                             Err(e) => {
@@ -413,7 +415,7 @@ impl OOMWatcher {
                         }
                         continue;
                     };
-                    debug!("Got OOM file event: {:?}", event);
+                    debug!("Got OOM file event: {event:?}");
 
                     // The shared watcher dispatches the events which came
                     // meanwhile at once, at most every
@@ -484,9 +486,8 @@ impl OOMWatcher {
             }
             Err(e) => {
                 debug!(
-                    "Could not read initial OOM counters of {}: {:#}, starting from 0",
-                    path.display(),
-                    e
+                    "Could not read initial OOM counters of {}: {e:#}, starting from 0",
+                    path.display()
                 );
                 OomCounters::default()
             }
@@ -511,7 +512,7 @@ impl OOMWatcher {
     fn read_oom_counters(path: &Path) -> Result<OomCounters> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("read memory events file: {}", path.display()))?;
-        trace!(content);
+        trace!("Memory events: {content}");
         Self::parse_oom_counters(&content)
             .with_context(|| format!("parse memory events file: {}", path.display()))
     }

@@ -2,7 +2,7 @@
 
 use crate::{
     container_io::Pipe,
-    container_log::{Line, Logger},
+    container_log::Line,
     journal::{self, Entry, Priority, Wait},
     mutex::lock,
 };
@@ -202,15 +202,14 @@ impl JournaldLogger {
 /// retried only until it.
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(1);
 
-impl Logger for JournaldLogger {
-    const BUFFERS_LINES: bool = true;
-
-    /// A journal which keeps up takes the lines right away. The ones it does
-    /// not take are sent from a single blocking task, which waits for it a
-    /// bounded time, instead of one per line, unless the last wait timed
-    /// out, see [`Shared::timed_out`]. The lines which borrow the chunk get
-    /// copied for it, the others share their buffer.
-    async fn write_lines(&mut self, pipe: Pipe, lines: &[Line<'_>]) -> Result<()> {
+impl JournaldLogger {
+    /// Write whole lines of output of the pipe, one entry each. A journal
+    /// which keeps up takes the lines right away. The ones it does not take
+    /// are sent from a single blocking task, which waits for it a bounded
+    /// time, instead of one per line, unless the last wait timed out, see
+    /// [`Shared::timed_out`]. The lines which borrow the chunk get copied for
+    /// it, the others share their buffer.
+    pub(super) async fn write_lines(&self, pipe: Pipe, lines: &[Line<'_>]) -> Result<()> {
         let sent = Self::send(&self.shared, pipe, lines, Wait::Never);
         let Some(rest) = lines.get(sent..).filter(|rest| !rest.is_empty()) else {
             return Ok(());

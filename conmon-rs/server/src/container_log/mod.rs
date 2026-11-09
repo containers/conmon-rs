@@ -36,21 +36,36 @@ use tracing::{debug, error, trace};
 /// and the log reopening.
 pub(crate) type SharedContainerLog = Arc<Mutex<ContainerLog>>;
 
-/// A destination for the output of a container.
+/// The configured log drivers. An enum rather than trait objects, because
+/// async trait methods are not dyn compatible without boxing every call.
 ///
 /// A driver either takes the raw chunks as they are read, like the CRI log
 /// which writes partial lines right away, or whole lines which
 /// [`ContainerLog`] collects across chunks once for all such drivers.
-trait Logger {
+#[derive(Debug)]
+enum Driver {
+    Cri(CriLogger),
+    Journald(JournaldLogger),
+}
+
+impl Driver {
     /// Whether the driver takes whole lines instead of raw chunks.
-    const BUFFERS_LINES: bool;
+    fn buffers_lines(&self) -> bool {
+        match self {
+            Driver::Cri(_) => false,
+            Driver::Journald(_) => true,
+        }
+    }
 
     /// The log file of the driver, none for one which writes elsewhere.
     fn file(&mut self) -> Option<&mut LogFile> {
-        None
+        match self {
+            Driver::Cri(logger) => Some(logger.file()),
+            Driver::Journald(_) => None,
+        }
     }
 
-    /// Prepare the logger, open its file.
+    /// Prepare the driver, open its file.
     async fn init(&mut self) -> Result<()> {
         match self.file() {
             Some(file) => file.open().await,
@@ -66,61 +81,22 @@ trait Logger {
         }
     }
 
-    /// Write a raw chunk of output of the given pipe.
-    async fn write_chunk(&mut self, _: Pipe, _: &[u8]) -> Result<()> {
-        Ok(())
-    }
-
-    /// Write whole lines of output of the given pipe.
-    async fn write_lines(&mut self, _: Pipe, _: &[Line<'_>]) -> Result<()> {
-        Ok(())
-    }
-}
-
-/// The configured log drivers. An enum rather than trait objects, because
-/// async trait methods are not dyn compatible without boxing every call.
-#[derive(Debug)]
-enum Driver {
-    Cri(CriLogger),
-    Journald(JournaldLogger),
-}
-
-/// Call a [`Logger`] method on whichever driver this is.
-macro_rules! dispatch {
-    ($self:expr, $logger:ident => $call:expr) => {
-        match $self {
-            Driver::Cri($logger) => $call,
-            Driver::Journald($logger) => $call,
-        }
-    };
-}
-
-impl Driver {
-    fn buffers_lines(&self) -> bool {
-        match self {
-            Driver::Cri(_) => CriLogger::BUFFERS_LINES,
-            Driver::Journald(_) => JournaldLogger::BUFFERS_LINES,
-        }
-    }
-
-    fn file(&mut self) -> Option<&mut LogFile> {
-        dispatch!(self, logger => logger.file())
-    }
-
-    async fn init(&mut self) -> Result<()> {
-        dispatch!(self, logger => logger.init().await)
-    }
-
-    async fn reopen(&mut self) -> Result<()> {
-        dispatch!(self, logger => logger.reopen().await)
-    }
-
+    /// Write a raw chunk of output of the given pipe, if the driver takes
+    /// chunks.
     async fn write_chunk(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {
-        dispatch!(self, logger => logger.write_chunk(pipe, bytes).await)
+        match self {
+            Driver::Cri(logger) => logger.write_chunk(pipe, bytes).await,
+            Driver::Journald(_) => Ok(()),
+        }
     }
 
+    /// Write whole lines of output of the given pipe, if the driver takes
+    /// lines.
     async fn write_lines(&mut self, pipe: Pipe, lines: &[Line<'_>]) -> Result<()> {
-        dispatch!(self, logger => logger.write_lines(pipe, lines).await)
+        match self {
+            Driver::Cri(_) => Ok(()),
+            Driver::Journald(logger) => logger.write_lines(pipe, lines).await,
+        }
     }
 }
 

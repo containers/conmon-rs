@@ -1,23 +1,18 @@
 //! Exec sessions, which start a process in the container for their client.
 
 use super::{
-    StreamingServer,
+    SessionCommon, StreamingServer,
     session::{ClientRx, InputEvent, ResizeRx, SessionInput},
 };
 use crate::conmon_capnp::conmon::CgroupManager;
 use crate::{
     attach::{SharedContainerAttach, StopOutput},
     channel::Receiver as IOReceiver,
-    child_reaper::{ChildReaper, ExitChannelData, RuntimeCall, WatchedExec},
+    child_reaper::{ChildReaper, ExecStart, ExitChannelData, WatchedExec},
     config::Config,
-    container_io::{ContainerIO, Drain, EarlyStdio, Message as IOMessage, SharedContainerIO},
-    container_log::ContainerLog,
+    container_io::{ContainerIO, Drain, EarlyStdio, Message as IOMessage, Pipe, SharedContainerIO},
     process::Process,
-    runtime_args::GenerateRuntimeArgs,
-    server::Server,
-    streaming_server::remotecommand::{
-        MESSAGE_TOO_LARGE, Operation, Output, STDERR_BYTE, STDOUT_BYTE, Status,
-    },
+    streaming_server::remotecommand::{MESSAGE_TOO_LARGE, Operation, Output, Status},
     terminal::{Terminal, TerminalResizer},
 };
 use anyhow::{Context, Result, bail};
@@ -31,10 +26,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::{
-    sync::broadcast::{self, error::RecvError},
-    time::Duration,
-};
+use tokio::sync::broadcast::{self, error::RecvError};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -51,12 +43,8 @@ pub(crate) struct ExecSession {
     pub(crate) tty: bool,
     pub(crate) server_config: Arc<Config>,
     pub(crate) cgroup_manager: CgroupManager,
-    pub(crate) container_id: Box<str>,
     pub(crate) command: Vec<String>,
-    pub(crate) stdin: bool,
-    pub(crate) stdout: bool,
-    pub(crate) stderr: bool,
-    pub(crate) idle_timeout: Option<Duration>,
+    pub(crate) common: SessionCommon,
 }
 
 impl StreamingServer {
@@ -64,30 +52,28 @@ impl StreamingServer {
     /// started. A terminal gets the sizes of the client from `resize`
     /// meanwhile.
     pub(super) async fn start_exec(session: ExecSession, resize: ResizeRx) -> Result<StartedExec> {
-        let mut container_io =
-            ContainerIO::new(session.tty, ContainerLog::new()).context("create container IO")?;
-        let pidfile = ContainerIO::temp_file(
-            Some(session.server_config.runtime_dir()),
+        let SessionCommon {
+            container_id,
+            stdin,
+            stdout,
+            stderr,
+            ..
+        } = session.common;
+        let mut exec = ExecStart::new(
+            &session.server_config,
+            &container_id,
+            session.tty,
+            &session.command,
+            session.cgroup_manager,
             "exec_streaming",
-            ".pid",
-        );
-
-        let args = GenerateRuntimeArgs {
-            config: &session.server_config,
-            id: &session.container_id,
-            container_io: &container_io,
-            pidfile: pidfile.path(),
-            cgroup_manager: session.cgroup_manager,
-        };
-        let args = args
-            .exec_args(&session.command)
-            .context("generate exec args")?;
+        )?;
 
         // Read while the runtime runs, see `ContainerIO::collect_stdio`.
-        container_io
-            .collect_stdio(session.stdout, session.stderr)
+        exec.container_io
+            .collect_stdio(stdout, stderr)
             .context("collect exec output")?;
-        let stdio = container_io
+        let stdio = exec
+            .container_io
             .stdio()
             .context("retrieve stdout and stderr channels")?;
 
@@ -95,32 +81,19 @@ impl StreamingServer {
         // terminal before it starts the command, so applying the size while
         // it runs gives the command its size from the start, usually, like
         // with CRI-O, not only once the loop of the session runs.
-        let resizer = container_io.terminal().map(Terminal::resizer);
-        let create = session.child_reaper.create_child(
-            RuntimeCall {
-                command_start: Some(args.command_start),
-                stdin: session.stdin,
-                ..RuntimeCall::new(
-                    session.server_config.runtime(),
-                    &args.args,
-                    pidfile.path(),
-                    // The process has no timeout, a runtime which hangs
-                    // still gets killed.
-                    Server::exec_runtime_deadline(None),
-                )
-            },
-            &mut container_io,
-        );
+        let resizer = exec.container_io.terminal().map(Terminal::resizer);
+        // The process has no timeout, a runtime which hangs still gets
+        // killed.
+        let deadline = ChildReaper::exec_runtime_deadline(None);
+        let create = exec.run(&session.child_reaper, stdin, deadline);
         let res = Self::resizing(create, resize, resizer).await;
         let started = match res {
             Ok(started) => started,
             Err(e) => {
-                let e = container_io.runtime_error(e).await;
+                let e = exec.runtime_error(e).await;
                 return Err(e.context("create new child process"));
             }
         };
-        // The runtime wrote the PID, the file served its purpose.
-        drop(pidfile);
 
         let WatchedExec {
             io,
@@ -128,10 +101,9 @@ impl StreamingServer {
             process,
             exit_rx,
             stop_output,
-        } = session
-            .child_reaper
-            .watch_exec(session.container_id, started, None, container_io)
-            .context("watch grandchild for pid")?;
+        } = exec
+            .watch(&session.child_reaper, container_id, started, None)
+            .context("watch exec process")?;
         let teardown = ExecTeardown {
             stdio,
             _stop_output: stop_output,
@@ -145,9 +117,9 @@ impl StreamingServer {
             io,
             early_stdio,
             exit_rx,
-            stdin_enabled: session.stdin,
-            stdout_enabled: session.stdout,
-            stderr_enabled: session.stderr,
+            stdin_enabled: stdin,
+            stdout_enabled: stdout,
+            stderr_enabled: stderr,
             teardown,
         })
     }
@@ -217,23 +189,23 @@ impl StreamingServer {
         loop {
             tokio::select! {
                 () = future::ready(()), if !early_stdout.is_empty() || !early_stderr.is_empty() => {
-                    for (frames, stream_byte) in [(&mut early_stdout, STDOUT_BYTE), (&mut early_stderr, STDERR_BYTE)] {
+                    for (frames, pipe) in [(&mut early_stdout, Pipe::StdOut), (&mut early_stderr, Pipe::StdErr)] {
                         if let Some(frame) = frames.pop_front() {
-                            sender.data(stream_byte, &frame).await?;
+                            sender.data(pipe, &frame).await?;
                         }
                     }
                 },
 
                 res = stdout_rx.recv(), if !stdout_done && early_stdout.is_empty() => match res {
                     Ok(IOMessage::Data(data, _)) => {
-                        sender.data(STDOUT_BYTE, &data).await?;
+                        sender.data(Pipe::StdOut, &data).await?;
                     }
                     Ok(IOMessage::Done) | Err(_) => stdout_done = true,
                 },
 
                 res = stderr_rx.recv(), if !stderr_done && early_stderr.is_empty() => match res {
                     Ok(IOMessage::Data(data, _)) => {
-                        sender.data(STDERR_BYTE, &data).await?;
+                        sender.data(Pipe::StdErr, &data).await?;
                     }
                     Ok(IOMessage::Done) | Err(_) => stderr_done = true,
                 },
@@ -258,16 +230,16 @@ impl StreamingServer {
                     }
                     *status = Some(Self::exit_status(res, truncated));
                     // Forward what the read loops still deliver before closing.
-                    for (frames, stream_byte) in [(&mut early_stdout, STDOUT_BYTE), (&mut early_stderr, STDERR_BYTE)] {
+                    for (frames, pipe) in [(&mut early_stdout, Pipe::StdOut), (&mut early_stderr, Pipe::StdErr)] {
                         for frame in frames.drain(..) {
-                            sender.data(stream_byte, &frame).await?;
+                            sender.data(pipe, &frame).await?;
                         }
                     }
                     if !stdout_done {
-                        Self::drain_stdio(&stdout_rx, STDOUT_BYTE, sender).await?;
+                        Self::drain_stdio(&stdout_rx, Pipe::StdOut, sender).await?;
                     }
                     if !stderr_done {
-                        Self::drain_stdio(&stderr_rx, STDERR_BYTE, sender).await?;
+                        Self::drain_stdio(&stderr_rx, Pipe::StdErr, sender).await?;
                     }
                     break
                 },
@@ -342,18 +314,18 @@ impl StreamingServer {
         frames
     }
 
-    /// Forward the remaining output of an exec stdio channel after the process
+    /// Forward the remaining output of the `pipe` of an exec after the process
     /// exited, until the read loop signals that it is done or the [`Drain`]
     /// gives up.
     async fn drain_stdio(
         rx: &IOReceiver<IOMessage>,
-        stream_byte: u8,
+        pipe: Pipe,
         sender: &mut Output,
     ) -> Result<()> {
         let mut drain = Drain::default();
         while let Some(message) = drain.recv_stdio(rx).await {
             if let IOMessage::Data(data, _) = message {
-                sender.data(stream_byte, &data).await?;
+                sender.data(pipe, &data).await?;
             }
         }
         Ok(())

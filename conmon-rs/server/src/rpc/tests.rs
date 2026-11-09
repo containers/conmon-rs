@@ -4,7 +4,7 @@ use crate::{
     config::Config,
     conmon_capnp::conmon::CgroupManager,
     process::Process,
-    streaming_server::DEFAULT_CAPACITY,
+    streaming_server::{DEFAULT_CAPACITY, StreamingServer},
     test_util::{Spawned, container_child, write_script},
 };
 use nix::unistd::Pid;
@@ -15,53 +15,50 @@ use tokio::{process::Command, task::LocalSet, time};
 async fn too_many_streaming_sessions_fail_with_the_bare_message() -> anyhow::Result<()> {
     let config = Arc::new(Config::parse_for_test::<_, &str>([]));
     let (_, child, _) = ReapableChild::from_child(container_child(false)?);
+    let streaming_server = StreamingServer::default();
+    let common = || SessionCommon {
+        container_id: "id".into(),
+        stdin: false,
+        stdout: true,
+        stderr: false,
+        idle_timeout: None,
+    };
     let exec = || {
-        StreamingRequest::Exec(ExecSession {
+        streaming_server.exec_url(ExecSession {
             child_reaper: Arc::default(),
             tty: false,
             server_config: config.clone(),
             cgroup_manager: CgroupManager::Cgroupfs,
-            container_id: "id".into(),
             command: vec!["true".into()],
-            stdin: false,
-            stdout: true,
-            stderr: false,
-            idle_timeout: None,
+            common: common(),
         })
     };
     let attach = || {
-        StreamingRequest::Attach(AttachSession {
-            container_id: "id".into(),
+        streaming_server.attach_url(AttachSession {
             child: child.clone(),
-            stdin: false,
-            stdout: true,
-            stderr: false,
             stop_after_stdin_eof: false,
-            idle_timeout: None,
+            common: common(),
         })
     };
-    let port_forward = || StreamingRequest::PortForward {
-        netns_path: PathBuf::new(),
-        idle_timeout: None,
-    };
+    let port_forward = || streaming_server.port_forward_url(PathBuf::new(), None);
 
     LocalSet::new()
         .run_until(async {
-            let streaming_server = StreamingServer::default();
             // Exec and attach sessions count together.
             for i in 0..DEFAULT_CAPACITY {
-                let request = if i % 2 == 0 { exec() } else { attach() };
-                Server::streaming_url(&streaming_server, request).await?;
-                Server::streaming_url(&streaming_server, port_forward()).await?;
+                if i % 2 == 0 {
+                    streaming_result(exec().await)?;
+                } else {
+                    streaming_result(attach().await)?;
+                }
+                streaming_result(port_forward().await)?;
             }
-            for (kind, request) in [
-                ("exec", exec()),
-                ("attach", attach()),
-                ("port forward", port_forward()),
+            for (kind, res) in [
+                ("exec", exec().await),
+                ("attach", attach().await),
+                ("port forward", port_forward().await),
             ] {
-                let err = Server::streaming_url(&streaming_server, request)
-                    .await
-                    .expect_err(kind);
+                let err = streaming_result(res).expect_err(kind);
                 // The message alone reaches the client, the start of it
                 // matches `ErrTooManyRequests` of the Go client.
                 assert_eq!(err.kind, capnp::ErrorKind::Failed, "{kind}");
@@ -515,27 +512,12 @@ async fn failed_create_reports_the_runtime_and_registers_nothing() -> anyhow::Re
 }
 
 #[test]
-fn exec_deadline() {
-    assert!(Server::exec_deadline(0).is_none());
+fn exec_deadlines() {
+    assert!(exec_deadline(0).is_none());
     // Too far in the future to represent, which is no timeout either.
-    assert!(Server::exec_deadline(u64::MAX).is_none());
-    let deadline = Server::exec_deadline(10).expect("deadline");
+    assert!(exec_deadline(u64::MAX).is_none());
+    let deadline = exec_deadline(10).expect("deadline");
     assert!(deadline > Instant::now() + Duration::from_secs(9));
-}
-
-#[tokio::test(start_paused = true)]
-async fn exec_runtimes_always_get_a_deadline() {
-    let now = Instant::now();
-    let timeout = now + Duration::from_secs(10);
-    assert_eq!(
-        Server::exec_runtime_deadline(Some(timeout)),
-        timeout + Server::EXEC_RUNTIME_GRACE
-    );
-    // Without a timeout of the process, the runtime still gets one.
-    assert_eq!(
-        Server::exec_runtime_deadline(None),
-        now + Server::EXEC_RUNTIME_GRACE
-    );
 }
 
 /// The IO of an exec which runs `script`, its process and the token which
@@ -579,10 +561,8 @@ async fn exec_sync_output_takes_the_result_from_the_watcher() -> anyhow::Result<
             })?;
             anyhow::Ok(())
         };
-        let (output, watched) = tokio::join!(
-            Server::exec_sync_output(&io, &token, exit_rx, || {}),
-            watcher
-        );
+        let (output, watched) =
+            tokio::join!(exec_sync_output(&io, &token, exit_rx, || {}), watcher);
         watched?;
         let output = output?;
         assert_eq!(output.stdout, b"last\n");
@@ -601,7 +581,7 @@ async fn exec_sync_output_kills_the_process_of_a_lost_watcher() -> anyhow::Resul
     let mut killed = false;
     let res = time::timeout(
         Duration::from_secs(10),
-        Server::exec_sync_output(&io, &token, exit_rx, || killed = child.start_kill().is_ok()),
+        exec_sync_output(&io, &token, exit_rx, || killed = child.start_kill().is_ok()),
     )
     .await?;
     let err = res.err().map(|e| format!("{e:#}"));
@@ -648,10 +628,7 @@ async fn exec_sync_output_of_both_pipes_fits_a_response() -> anyhow::Result<()> 
         })?;
         anyhow::Ok(())
     };
-    let (output, watched) = tokio::join!(
-        Server::exec_sync_output(&io, &token, exit_rx, || {}),
-        watcher
-    );
+    let (output, watched) = tokio::join!(exec_sync_output(&io, &token, exit_rx, || {}), watcher);
     watched?;
     let output = output?;
     let half = ExecSyncOutput::MAX_SIZE / 2;

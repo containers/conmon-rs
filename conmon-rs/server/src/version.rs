@@ -90,11 +90,6 @@ impl Version {
         self.features
     }
 
-    /// Whether verbose output is enabled.
-    pub(crate) fn verbose(&self) -> bool {
-        self.verbose
-    }
-
     /// The current crate version.
     pub(crate) fn version(&self) -> &'static str {
         self.version
@@ -152,7 +147,7 @@ impl Version {
             self.cargo_version(),
             self.features().join(", "),
         );
-        if self.verbose() {
+        if self.verbose {
             text.push_str(&format!("\ncargo tree: {}\n", self.cargo_tree()));
         }
         text

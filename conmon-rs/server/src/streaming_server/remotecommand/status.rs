@@ -92,9 +92,9 @@ impl Status {
     }
 }
 
-#[derive(Debug, Serialize)]
 /// The status of a failed session in JSON, the fields in the order of
 /// k8s.io/cri-streaming.
+#[derive(Debug, Serialize)]
 pub(super) struct ErrorMessage {
     status: &'static str,
     message: String,
@@ -139,14 +139,14 @@ impl ErrorMessage {
     }
 }
 
-#[derive(Debug, Serialize)]
 /// Error details for the ErrorMessage.
+#[derive(Debug, Serialize)]
 struct ErrorDetails {
     causes: Vec<ErrorCause>,
 }
 
-#[derive(Debug, Serialize)]
 /// Error cause for the ErrorDetails.
+#[derive(Debug, Serialize)]
 struct ErrorCause {
     reason: &'static str,
     message: String,

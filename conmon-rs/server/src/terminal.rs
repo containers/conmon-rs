@@ -98,7 +98,7 @@ impl TerminalResizer {
     /// it does, before the process usually started, see
     /// [`Terminal::connect`].
     pub(crate) fn resize(&self, width: u16, height: u16) -> Result<()> {
-        debug!("Resizing terminal to width {} and height {}", width, height);
+        debug!("Resizing terminal to width {width} and height {height}");
         let mut tty = lock(&self.0);
         match &*tty {
             Tty::Pending(_) => {
@@ -266,7 +266,7 @@ impl Terminal {
 
     async fn accept(listener: UnixListener, config: Config) -> Result<()> {
         let stream = listener.accept().await?.0;
-        debug!("Got terminal socket stream: {:?}", stream);
+        debug!("Got terminal socket stream: {stream:?}");
 
         Self::handle_fd_receive(stream, config).await
     }

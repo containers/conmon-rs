@@ -1,8 +1,7 @@
 //! Setup shared by the tests of the log drivers.
 
 use super::{
-    ContainerLog, Driver, LineBuffer, Logger, SharedContainerLog, cri::CriLogger,
-    journald::JournaldLogger,
+    ContainerLog, Driver, LineBuffer, SharedContainerLog, cri::CriLogger, journald::JournaldLogger,
 };
 use crate::{container_io::Pipe, journal::testing::decode, mutex::lock};
 use anyhow::{Context, Result};
@@ -27,7 +26,7 @@ pub(crate) async fn cri_logger(max_size: Option<usize>) -> Result<(NamedTempFile
     let file = NamedTempFile::new()?;
     let mut logger = CriLogger::new(file.path(), max_size);
     logger.freeze_timestamp(TIMESTAMP);
-    logger.init().await?;
+    logger.file().open().await?;
     Ok((file, logger))
 }
 
