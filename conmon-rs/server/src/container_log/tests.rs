@@ -195,7 +195,44 @@ fn line_buffer_cuts_long_lines() {
     let out = buffer.push(Pipe::StdOut, &invalid);
     assert_eq!(out[0].text.len(), invalid.len());
     assert!(!buffer.has_pending(Pipe::StdOut));
-    assert!(buffer.stdout.capacity() <= LineBuffer::MAX_LINE);
+    assert!(buffer.stdout.capacity() <= READ_BUFFER_SIZE);
+}
+
+/// The buffer of a line longer than a read chunk gets released once drained,
+/// an idle container keeps at most a chunk of it.
+#[test]
+fn line_buffer_shrinks_after_long_lines() {
+    for capacity in [0, 1, READ_BUFFER_SIZE] {
+        let mut tail = BytesMut::with_capacity(capacity);
+        LineBuffer::shrink(&mut tail);
+        assert_eq!(tail.capacity(), capacity);
+    }
+    let mut tail = BytesMut::with_capacity(READ_BUFFER_SIZE + 1);
+    LineBuffer::shrink(&mut tail);
+    assert_eq!(tail.capacity(), 0);
+    // Not while a line waits for its ending.
+    let mut tail = BytesMut::with_capacity(2 * READ_BUFFER_SIZE);
+    tail.extend_from_slice(b"line");
+    LineBuffer::shrink(&mut tail);
+    assert_eq!(tail.capacity(), 2 * READ_BUFFER_SIZE);
+
+    // A short line in a buffer which grew for a long one before, completed,
+    // cut or finished, leaves the buffer behind, which gets released.
+    let ends: [&dyn Fn(&mut LineBuffer) -> usize; 3] = [
+        &|buffer| buffer.push(Pipe::StdOut, b"\n").len(),
+        &|buffer| buffer.finish(Pipe::StdOut).len(),
+        &|buffer| buffer.flush(Pipe::StdOut).len(),
+    ];
+    for end in ends {
+        let mut buffer = LineBuffer {
+            stdout: BytesMut::with_capacity(2 * READ_BUFFER_SIZE),
+            ..LineBuffer::default()
+        };
+        assert!(buffer.push(Pipe::StdOut, b"short").is_empty());
+        assert!(buffer.stdout.capacity() >= 2 * READ_BUFFER_SIZE);
+        assert_eq!(end(&mut buffer), 1);
+        assert_eq!(buffer.stdout.capacity(), 0);
+    }
 }
 
 /// A small deterministic random number generator (xorshift), so that a

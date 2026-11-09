@@ -351,14 +351,12 @@ impl StreamingServer {
         sender: &mut Output,
     ) -> Result<()> {
         let mut drain = Drain::default();
-        loop {
-            match drain.recv(rx.recv()).await {
-                Some(Ok(IOMessage::Data(data, _))) => {
-                    sender.data(stream_byte, &data).await?;
-                }
-                Some(Ok(IOMessage::Done)) | Some(Err(_)) | None => return Ok(()),
+        while let Some(message) = drain.recv_stdio(rx).await {
+            if let IOMessage::Data(data, _) = message {
+                sender.data(stream_byte, &data).await?;
             }
         }
+        Ok(())
     }
 }
 

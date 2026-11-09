@@ -181,7 +181,13 @@ async fn done_after_output_ended() -> Result<()> {
     assert!(output_ended);
     timeout(
         Duration::from_secs(5),
-        Attach::write_loop(server, rx, output_ended, CancellationToken::new()),
+        Attach::write_loop(
+            server,
+            attach.clone(),
+            rx,
+            output_ended,
+            CancellationToken::new(),
+        ),
     )
     .await??;
 
@@ -200,6 +206,7 @@ async fn write_loop_stops_on_broken_pipe() -> Result<()> {
     let (rx, _) = attach.subscribe();
     let mut write_loop = task::spawn(Attach::write_loop(
         server,
+        attach.clone(),
         rx,
         false,
         CancellationToken::new(),
@@ -234,6 +241,7 @@ async fn write_loop_sends_full_reads_in_one_packet() -> Result<()> {
     let (rx, _) = attach.subscribe();
     let _write_loop = task::spawn(Attach::write_loop(
         server,
+        attach.clone(),
         rx,
         false,
         CancellationToken::new(),
@@ -255,6 +263,7 @@ async fn write_loop_stops_on_hangup() -> Result<()> {
     let (rx, _) = attach.subscribe();
     let write_loop = task::spawn(Attach::write_loop(
         server.clone(),
+        attach.clone(),
         rx,
         false,
         CancellationToken::new(),
@@ -309,6 +318,7 @@ async fn write_loop_skips_the_oldest_output_for_a_slow_client() -> Result<()> {
     let (rx, _) = attach.subscribe();
     let write_loop = task::spawn(Attach::write_loop(
         server,
+        attach.clone(),
         rx,
         false,
         CancellationToken::new(),
@@ -351,7 +361,13 @@ async fn write_loop_drains_after_exit() -> Result<()> {
     let (server, client) = seqpacket_pair()?;
     let (rx, _) = attach.subscribe();
     let token = CancellationToken::new();
-    let write_loop = task::spawn(Attach::write_loop(server, rx, false, token.clone()));
+    let write_loop = task::spawn(Attach::write_loop(
+        server,
+        attach.clone(),
+        rx,
+        false,
+        token.clone(),
+    ));
 
     attach.write(Message::Data(Bytes::from_static(b"out"), Pipe::StdOut));
     token.cancel();
@@ -371,7 +387,13 @@ async fn write_loop_gives_up_on_stuck_client_after_exit() -> Result<()> {
     let (server, _client) = seqpacket_pair()?;
     let (rx, _) = attach.subscribe();
     let token = CancellationToken::new();
-    let write_loop = task::spawn(Attach::write_loop(server, rx, false, token.clone()));
+    let write_loop = task::spawn(Attach::write_loop(
+        server,
+        attach.clone(),
+        rx,
+        false,
+        token.clone(),
+    ));
 
     // A client which does not read, until its socket takes no more.
     let data = Bytes::from(vec![0; Attach::PACKET_BUF_SIZE]);
@@ -408,7 +430,13 @@ async fn write_loop_drains_after_exit_with_busy_output() -> Result<()> {
             }
         }
     });
-    let write_loop = task::spawn(Attach::write_loop(server, rx, false, token.clone()));
+    let write_loop = task::spawn(Attach::write_loop(
+        server,
+        attach.clone(),
+        rx,
+        false,
+        token.clone(),
+    ));
     tokio::time::sleep(Duration::from_millis(10)).await;
     token.cancel();
 
@@ -899,4 +927,51 @@ async fn stdin_without_dropping() -> Result<()> {
 
     read_loop.await??;
     Ok(())
+}
+
+/// The last output of a container, which the log drivers still hold when it
+/// exits, reaches the attach client, also if the log takes longer than the
+/// drain waits for a pause of the output.
+#[tokio::test(start_paused = true)]
+async fn write_loop_waits_for_slow_log_after_exit() -> Result<()> {
+    use crate::container_log::test_helpers;
+    use tokio::io::AsyncWriteExt;
+
+    let (_cri, _journal, logger) = test_helpers::container_log(true).await?;
+    let attach = SharedContainerAttach::default();
+    let (mut writer, reader) = tokio::io::duplex(1024);
+    let read_loop = task::spawn(ContainerIO::read_loop(
+        reader,
+        Pipe::StdOut,
+        logger.clone(),
+        None,
+        attach.clone(),
+        attach.output(),
+    ));
+    // The loop looks up the drivers first, which a held log would block.
+    task::yield_now().await;
+    let (server, client) = seqpacket_pair()?;
+    let (rx, _) = attach.subscribe();
+    let token = CancellationToken::new();
+    let write_loop = task::spawn(Attach::write_loop(
+        server,
+        attach.clone(),
+        rx,
+        false,
+        token.clone(),
+    ));
+
+    let held = logger.clone().lock_owned().await;
+    writer.write_all(b"last").await?;
+    wait_for(|| attach.is_logging()).await?;
+    token.cancel();
+    tokio::time::sleep(2 * DRAIN_MAX_WAIT).await;
+    assert!(!write_loop.is_finished());
+
+    drop(held);
+    assert_eq!(recv_packet(&client).await?, b"\x02last");
+    drop(writer);
+    assert_eq!(recv_packet(&client).await?, Attach::DONE_PACKET);
+    timeout(Duration::from_secs(5), write_loop).await???;
+    read_loop.await?
 }

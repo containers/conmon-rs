@@ -725,6 +725,9 @@ impl SessionInput {
     /// reading lines sees the end of its input then, one after a line
     /// without its ending needs a second one, like a user would type it.
     pub(super) fn close_container_stdin(&mut self) {
+        // Right after `next` returned `StdinClosed`, which it only does while
+        // no stdin waits, so the end of file character replaces nothing.
+        debug_assert!(self.pending.is_none(), "stdin waits for the container");
         match self.io.terminal_eof() {
             Some(eof) => self.pending = Some(Bytes::from(vec![eof])),
             None => {

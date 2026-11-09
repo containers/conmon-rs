@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_util::{Guarded, spawn_sh};
+use crate::test_util::{Guarded, spawn_sh, wait_for_real_blocking};
 use std::{
     os::unix::process::{CommandExt, ExitStatusExt},
     process::Stdio,
@@ -357,5 +357,50 @@ async fn wait_on_thread_for_reaped_process_fails() -> Result<()> {
     let code = time::timeout(Duration::from_secs(5), wait_for_exit_code_on_thread(pid)).await?;
     // The same value as a timeout, for compatibility.
     assert_eq!(code, EXIT_CODE_WAIT_FAILED);
+    Ok(())
+}
+
+/// The wait works with the pidfd of the process and without one. Whether
+/// it opens a pidfd of its own cannot be told from here.
+#[tokio::test]
+async fn wait_for_exit_with_and_without_a_pidfd() -> Result<()> {
+    for use_pidfd in [true, false] {
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 3"])
+            .spawn()?;
+        let pid = child_pid(child.id())?;
+        let mut process = Process::open(pid);
+        assert!(process.pidfd.is_some());
+        if !use_pidfd {
+            process.pidfd = None;
+        }
+        let code = time::timeout(Duration::from_secs(5), wait_for_exit(&process)).await?;
+        assert_eq!(code, 3, "pidfd: {use_pidfd}");
+        // Reaped by the wait, the pidfd still refers to it.
+        assert_eq!(
+            process.signal(None),
+            Err(if use_pidfd {
+                Errno::ESRCH
+            } else {
+                Errno::ECHILD
+            })
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn children_are_told_apart_from_other_processes() -> Result<()> {
+    let mut child = Guarded::spawn(std::process::Command::new("sleep").arg("60"))?;
+    let pid = child_pid(child.0.id())?;
+    assert!(is_child(pid));
+    // A zombie is still a child, a reaped one is not anymore.
+    child.0.kill()?;
+    wait_for_real_blocking(|| is_zombie(pid));
+    assert!(is_child(pid));
+    child.0.wait()?;
+    assert!(!is_child(pid));
+    assert!(!is_child(Pid::from_raw(1)));
+    assert!(!is_child(getpid()));
     Ok(())
 }

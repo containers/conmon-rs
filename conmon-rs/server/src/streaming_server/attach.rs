@@ -120,7 +120,7 @@ impl StreamingServer {
                 () = token.cancelled() => {
                     debug!("Exiting streaming attach because token cancelled");
                     if !done {
-                        Self::drain_attach(&mut attach_rx, &mut lag, stdout_enabled, stderr_enabled, sender).await?;
+                        Self::drain_attach(&attach, &mut attach_rx, &mut lag, stdout_enabled, stderr_enabled, sender).await?;
                     }
                     break
                 }
@@ -150,8 +150,10 @@ impl StreamingServer {
     }
 
     /// Forward the output which is still queued or arrives shortly after the
-    /// container exited, until the output ended or the [`Drain`] gives up.
+    /// container exited, until the output ended or the [`Drain`] gives up,
+    /// see [`Drain::recv_attach`].
     async fn drain_attach(
+        attach: &SharedContainerAttach,
         attach_rx: &mut broadcast::Receiver<IOMessage>,
         lag: &mut Lag,
         stdout_enabled: bool,
@@ -159,7 +161,7 @@ impl StreamingServer {
         sender: &mut Output,
     ) -> Result<()> {
         let mut drain = Drain::default();
-        while let Some(message) = drain.recv_output(attach_rx, Some(lag)).await {
+        while let Some(message) = drain.recv_attach(attach, attach_rx, Some(lag)).await {
             Self::forward_output(message, stdout_enabled, stderr_enabled, sender).await?;
         }
         Ok(())

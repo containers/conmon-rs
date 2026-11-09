@@ -378,27 +378,28 @@ impl ContainerIO {
                 res = Self::next_message(receiver, drain.as_mut()) => res,
             };
             match res {
-                Some(Ok(Message::Data(data, _))) => match stdio.len().checked_add(data.len()) {
+                Some(Message::Data(data, _)) => match stdio.len().checked_add(data.len()) {
                     Some(len) if len < Self::MAX_STDIO_STREAM_SIZE => {
                         stdio.extend_from_slice(&data);
                     }
                     _ => break,
                 },
-                // A closed channel ends the output as well.
-                Some(Ok(Message::Done) | Err(RecvError)) | None => break,
+                Some(Message::Done) | None => break,
             }
         }
         stdio
     }
 
-    /// The next message, bounded by the drain once the process exited.
+    /// The next message, bounded by the drain once the process exited. None
+    /// once the output ended or the drain gave up, a closed channel ends the
+    /// output as well.
     async fn next_message(
         receiver: &Receiver<Message>,
         drain: Option<&mut Drain>,
-    ) -> Option<Result<Message, RecvError>> {
+    ) -> Option<Message> {
         match drain {
-            Some(drain) => drain.recv(receiver.recv()).await,
-            None => Some(receiver.recv().await),
+            Some(drain) => drain.recv_stdio(receiver).await,
+            None => receiver.recv().await.ok(),
         }
     }
 }

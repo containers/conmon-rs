@@ -9,6 +9,16 @@ use anyhow::{Result, bail};
 use std::{fmt, path::Path};
 use tracing::debug;
 
+/// Check a container ID, which the runtimes take as a positional argument.
+/// One which starts with a dash would be taken for an option. The requests
+/// check it before they set anything up.
+pub(crate) fn check_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.starts_with('-') {
+        bail!("invalid container ID {id:?}")
+    }
+    Ok(())
+}
+
 /// What the command line of the OCI runtime gets generated from.
 #[derive(Clone, Copy)]
 pub(crate) struct GenerateRuntimeArgs<'a> {
@@ -103,12 +113,10 @@ impl GenerateRuntimeArgs<'_> {
         })
     }
 
-    /// The container ID, which the runtimes take as a positional argument.
-    /// One which starts with a dash would be taken for an option.
+    /// The container ID, which the runtimes take as a positional argument,
+    /// see [`check_id`].
     fn checked_id(&self) -> Result<&str> {
-        if self.id.is_empty() || self.id.starts_with('-') {
-            bail!("invalid container ID {:?}", self.id)
-        }
+        check_id(self.id)?;
         Ok(self.id)
     }
 

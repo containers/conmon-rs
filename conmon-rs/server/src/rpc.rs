@@ -13,7 +13,7 @@ use crate::{
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     random_id::RandomId,
-    runtime_args::GenerateRuntimeArgs,
+    runtime_args::{GenerateRuntimeArgs, check_id},
     server::Server,
     streaming_server::{AttachSession, ExecSession, StreamingServer},
     util::sleep_until,
@@ -348,10 +348,11 @@ impl conmon::Server for Server {
                 ],
             ));
         }
-        let container_log = pry_err!(ContainerLog::from_request(&id, log_drivers));
-        let mut container_io =
-            pry_err!(ContainerIO::new(req.get_terminal(), container_log.clone()));
 
+        // The request gets checked before anything gets set up for it: a
+        // rejected one must not bind a console socket and spawn its listener
+        // for nothing.
+        pry_err!(check_id(&id));
         let bundle_path = Path::new(pry!(pry!(req.get_bundle_path()).to_str()));
         pry_err!(capnp_util::check_absolute("bundle path", bundle_path));
         let pidfile = bundle_path.join("pidfile");
@@ -369,6 +370,18 @@ impl conmon::Server for Server {
             }
         };
 
+        let exit_paths: Vec<PathBuf> = pry!(text_list(req.get_exit_paths()));
+        let oom_exit_paths: Vec<PathBuf> = pry!(text_list(req.get_oom_exit_paths()));
+        for path in &exit_paths {
+            pry_err!(capnp_util::check_absolute("exit path", path));
+        }
+        for path in &oom_exit_paths {
+            pry_err!(capnp_util::check_absolute("OOM exit path", path));
+        }
+        let container_log = pry_err!(ContainerLog::from_request(&id, log_drivers));
+
+        let mut container_io =
+            pry_err!(ContainerIO::new(req.get_terminal(), container_log.clone()));
         let child_reaper = self.reaper().clone();
         let command_args: Vec<String> = pry!(text_list(req.get_command_args()));
         let cgroup_manager = pry!(req.get_cgroup_manager());
@@ -382,14 +395,6 @@ impl conmon::Server for Server {
         let args = pry_err!(args.create_args(bundle_path, restore_path, &command_args));
         let stdin = req.get_stdin();
         let runtime = self.config().runtime().to_path_buf();
-        let exit_paths: Vec<PathBuf> = pry!(text_list(req.get_exit_paths()));
-        let oom_exit_paths: Vec<PathBuf> = pry!(text_list(req.get_oom_exit_paths()));
-        for path in &exit_paths {
-            pry_err!(capnp_util::check_absolute("exit path", path));
-        }
-        for path in &oom_exit_paths {
-            pry_err!(capnp_util::check_absolute("OOM exit path", path));
-        }
 
         let runtime_deadline = Instant::now() + Self::CREATE_RUNTIME_TIMEOUT;
         Promise::from_future(
@@ -467,6 +472,9 @@ impl conmon::Server for Server {
             "execSyncContainer",
             [("envVars", pry!(req.get_env_vars_old()).is_empty())],
         ));
+        // Before the PID file and the console socket of a terminal get
+        // created, see create_container.
+        pry_err!(check_id(&id));
 
         // The timeout starts now, the runtime may hang before the process
         // even starts.
@@ -483,11 +491,11 @@ impl conmon::Server for Server {
         let runtime = self.config().runtime().to_path_buf();
         let child_reaper = self.reaper().clone();
 
-        let logger = ContainerLog::new();
-        let mut container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger));
-
         let command: Vec<String> = pry!(text_list(req.get_command()));
         let cgroup_manager = pry!(req.get_cgroup_manager());
+
+        let logger = ContainerLog::new();
+        let mut container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger));
 
         let args = GenerateRuntimeArgs {
             config: self.config(),
@@ -526,13 +534,15 @@ impl conmon::Server for Server {
                             &mut container_io,
                         )
                         .await;
-                    let _ = started_tx.send(());
+                    // The client got its timeout response once nothing
+                    // receives this anymore, see below.
+                    let awaited = started_tx.send(()).is_ok();
                     let started = match res {
                         Ok(started) => started,
                         Err(e) => {
                             let timed_out = time_to_timeout.is_some_and(|t| Instant::now() >= t);
                             let e = container_io.runtime_error(e).await;
-                            error!("Unable to create child: {e:#}");
+                            error!("Unable to start exec: {e:#}");
                             // The client only sees the response, tell it why.
                             return Ok(ExecSyncOutput {
                                 stdout: vec![],
@@ -550,18 +560,32 @@ impl conmon::Server for Server {
                     drop(pidfile);
 
                     // A timeout which already passed kills it right away.
+                    let watched = child_reaper.watch_exec(
+                        id.into(),
+                        started,
+                        time_to_timeout,
+                        container_io,
+                    )?;
+                    // Nobody takes the output of an exec whose client got
+                    // its timeout response already, so it does not get
+                    // collected. Dropping the exec stops the output once
+                    // the process exited, which the watcher kills.
+                    if !awaited {
+                        debug!("Not collecting the output of the exec, the client got its timeout");
+                        return Ok(ExecSyncOutput {
+                            stdout: vec![],
+                            stderr: vec![],
+                            exit_code: EXIT_CODE_TIMED_OUT,
+                            timed_out: true,
+                        });
+                    }
                     let WatchedExec {
                         io,
                         token,
                         process,
                         exit_rx,
                         stop_output: _stop_output,
-                    } = child_reaper.watch_exec(
-                        id.into(),
-                        started,
-                        time_to_timeout,
-                        container_io,
-                    )?;
+                    } = watched;
                     Self::exec_sync_output(&io, &token, exit_rx, || {
                         if let Err(e) = process.signal_group(Signal::SIGKILL) {
                             debug!("Not killing exec process {}: {e}", process.pid());
@@ -574,6 +598,10 @@ impl conmon::Server for Server {
                     _ = &mut started_rx => true,
                     () = sleep_until(time_to_timeout) => false,
                 };
+                // Tells the task that the client gets its response now, see
+                // above. Nothing after this yields to the task before it
+                // went out.
+                drop(started_rx);
                 let output = if started {
                     task_result(exec).await?
                 } else {

@@ -246,6 +246,20 @@ async fn requests_get_validated() -> anyhow::Result<()> {
         failure(create("--help", "/bundle", "/exit", "/oom")).await,
         r#"invalid container ID "--help""#
     );
+    // The request gets checked before anything gets set up for it, the ID
+    // first, then the paths in the order above.
+    assert_eq!(
+        failure(create("--help", "bundle", "exit", "oom")).await,
+        r#"invalid container ID "--help""#
+    );
+    assert_eq!(
+        failure(create("id", "bundle", "exit", "oom")).await,
+        r#"bundle path "bundle" is not absolute"#
+    );
+    assert_eq!(
+        failure(create("id", "/bundle", "exit", "oom")).await,
+        r#"exit path "exit" is not absolute"#
+    );
 
     // The checkpoint of a restore has to be absolute like the other paths,
     // an empty one is a create.

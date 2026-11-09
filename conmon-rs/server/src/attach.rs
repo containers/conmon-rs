@@ -211,7 +211,7 @@ impl SharedContainerAttach {
     pub(crate) fn write(&self, m: Message) {
         let sent = self.output.tx.get().is_some_and(|tx| tx.send(m).is_ok());
         if !sent {
-            trace!("No attach clients left for the output");
+            trace!("No attach clients for the output");
         }
     }
 
@@ -300,11 +300,13 @@ impl SharedContainerAttach {
         }
     }
 
-    /// Check if there are any active attach readers.
+    /// Whether an attach client receives the output.
+    #[cfg(test)]
     pub(crate) fn has_readers(&self) -> bool {
         self.receiver_count() > 0
     }
 
+    #[cfg(test)]
     fn receiver_count(&self) -> usize {
         self.output.tx.get().map_or(0, Sender::receiver_count)
     }
@@ -641,12 +643,18 @@ impl Attach {
                     );
 
                     let (write_half_rx, output_ended) = attach.subscribe();
+                    let attach_clone = attach.clone();
                     let token_clone = token.clone();
                     task::spawn(
                         async move {
-                            if let Err(e) =
-                                Self::write_loop(write, write_half_rx, output_ended, token_clone)
-                                    .await
+                            if let Err(e) = Self::write_loop(
+                                write,
+                                attach_clone,
+                                write_half_rx,
+                                output_ended,
+                                token_clone,
+                            )
+                            .await
                             {
                                 error!("Attach write loop failure: {e:#}");
                             }
@@ -745,12 +753,14 @@ impl Attach {
         matches!(e.kind(), ErrorKind::BrokenPipe | ErrorKind::ConnectionReset)
     }
 
-    /// Forward the container output to a client until the output ended or
-    /// the client went away. Once the container exited, which cancels
-    /// `token`, a process left behind may keep the output open, so forward
-    /// only what arrives shortly after the exit.
+    /// Forward the container output of `attach` to a client until the output
+    /// ended or the client went away. Once the container exited, which
+    /// cancels `token`, a process left behind may keep the output open, so
+    /// forward only what arrives shortly after the exit, see
+    /// [`Drain::recv_attach`].
     async fn write_loop(
         socket: Arc<UnixSeqpacket>,
+        attach: SharedContainerAttach,
         mut rx: Receiver<Message>,
         output_ended: bool,
         token: CancellationToken,
@@ -778,7 +788,7 @@ impl Attach {
                         debug!("Exiting because the client hung up");
                         return Ok(());
                     }
-                    res = Self::next_message(&mut rx, drain.as_mut(), &mut lag) => res,
+                    res = Self::next_message(&attach, &mut rx, drain.as_mut(), &mut lag) => res,
                 };
                 match res {
                     Ok(message) => message,
@@ -870,13 +880,14 @@ impl Attach {
     /// exited. If the output did not end after the exit, the client gets
     /// the done packet anyway.
     async fn next_message(
+        attach: &SharedContainerAttach,
         rx: &mut Receiver<Message>,
         drain: Option<&mut Drain>,
         lag: &mut Lag,
     ) -> Result<Message, RecvError> {
         match drain {
             Some(drain) => Ok(drain
-                .recv_output(rx, Some(lag))
+                .recv_attach(attach, rx, Some(lag))
                 .await
                 .unwrap_or(Message::Done)),
             None => {

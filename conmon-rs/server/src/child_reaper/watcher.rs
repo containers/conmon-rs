@@ -6,13 +6,15 @@ use crate::{
     child::{Child, ChildKind},
     container_io::{DRAIN_MAX_LOG_WAIT, Drain, Message},
     container_log::{ContainerLog, SharedContainerLog},
+    fs_util,
     oom_watcher::{OOMEvent, OOMWatcher},
     process::{self, Process},
 };
 use anyhow::{Context, Result};
-use nix::{sys::signal::Signal, unistd::Pid};
+use nix::sys::signal::Signal;
 use std::{
     ffi::OsString,
+    io,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -21,6 +23,7 @@ use std::{
 };
 use tokio::{
     fs,
+    io::AsyncWriteExt,
     sync::broadcast::{self, Receiver},
     task,
     time::{self, Instant},
@@ -184,13 +187,15 @@ impl ReapableChild {
         )
     }
 
-    /// Wait for the exit of the process, or kill it at the `timeout`, and
-    /// return its exit code and whether it timed out. The wait gets dropped
-    /// on the timeout, the process gets reaped in the background once the
-    /// SIGKILL took effect. A process stuck in the kernel keeps only a pidfd
-    /// busy then, not a thread.
-    async fn wait_or_kill(pid: Pid, timeout: Option<Instant>) -> (i32, bool) {
-        let wait = process::wait_for_exit_code(pid).instrument(debug_span!("wait_for_exit_code"));
+    /// Wait for the exit of the process through the pidfd of its
+    /// registration, or kill it at the `timeout`, and return its exit code
+    /// and whether it timed out. The wait gets dropped on the timeout, the
+    /// process gets reaped in the background once the SIGKILL took effect. A
+    /// process stuck in the kernel keeps only a pidfd busy then, not a
+    /// thread.
+    async fn wait_or_kill(process: &Process, timeout: Option<Instant>) -> (i32, bool) {
+        let pid = process.pid();
+        let wait = process::wait_for_exit(process).instrument(debug_span!("wait_for_exit"));
         let Some(timeout) = timeout else {
             return (wait.await, false);
         };
@@ -219,6 +224,7 @@ impl ReapableChild {
             timeout,
         } = exit;
         let pid = self.pid();
+        let process = self.process.clone();
         // Only one exit code will be written.
         let (exit_tx, exit_rx) = broadcast::channel(1);
         let token = self.token().clone();
@@ -240,7 +246,7 @@ impl ReapableChild {
                         .await
                 };
                 let wait = async {
-                    let exit = Self::wait_or_kill(pid, timeout).await;
+                    let exit = Self::wait_or_kill(&process, timeout).await;
                     // Tells the users of the token that the process is gone,
                     // which ends the OOM watcher.
                     token.cancel();
@@ -296,14 +302,16 @@ impl ReapableChild {
 
     /// Write the exit file at once, like conmon does. CRI-O reads it as soon
     /// as it gets created, which must not find it empty. CRI-O ignores the
-    /// temporary file, which is not named like a container.
+    /// temporary file, which is not named like a container. A symlink in its
+    /// place does not get followed, like for the log files, the file gets
+    /// created new.
     pub(super) async fn write_exit_file(path: &Path, contents: &str) -> Result<()> {
         let name = path.file_name().context("exit path has no file name")?;
         let mut tmp_name = OsString::from(".");
         tmp_name.push(name);
         tmp_name.push(".tmp");
         let tmp = path.with_file_name(tmp_name);
-        let result = match fs::write(&tmp, contents).await {
+        let result = match Self::write_new_file(&tmp, contents).await {
             Ok(()) => fs::rename(&tmp, path)
                 .await
                 .with_context(|| format!("rename to {}", path.display())),
@@ -315,5 +323,21 @@ impl ReapableChild {
             debug!("Unable to remove {}: {e}", tmp.display());
         }
         result
+    }
+
+    /// Create the file new with the contents. One left behind at the path,
+    /// like by a crash, gets removed first, a symlink is not followed.
+    async fn write_new_file(path: &Path, contents: &str) -> io::Result<()> {
+        fs_util::remove_file(path)?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .await?;
+        file.write_all(contents.as_bytes()).await?;
+        // The write runs in the background until flushed, the rename must
+        // not come first.
+        file.flush().await
     }
 }

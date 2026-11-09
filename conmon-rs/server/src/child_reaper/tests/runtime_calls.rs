@@ -178,7 +178,7 @@ async fn hanging_runtime_gets_killed_at_its_deadline() -> Result<()> {
         let res =
             time::timeout(Duration::from_secs(20), reaper.create_child(call, &mut io)).await?;
         let err = format!("{:#}", res.err().context("runtime failure expected")?);
-        assert!(err.contains("did not finish in time"), "{err}");
+        assert!(err.contains("did not finish within"), "{err}");
         assert!(start.elapsed() < Duration::from_secs(10));
         // The call ended with it.
         assert!(!reaper.calls_in_progress());
@@ -212,7 +212,7 @@ async fn hanging_runtime_gets_killed_with_its_group() -> Result<()> {
         let res =
             time::timeout(Duration::from_secs(20), reaper.create_child(call, &mut io)).await?;
         let err = format!("{:#}", res.err().context("runtime failure expected")?);
-        assert!(err.contains("did not finish in time"), "{err}");
+        assert!(err.contains("did not finish within"), "{err}");
         // Reparented to the init or a subreaper above the tests.
         let helper = read_pid_file(&helper_pidfile)?;
         wait_for_real(|| is_gone(helper) || is_zombie(helper)).await;
@@ -270,5 +270,78 @@ async fn dropped_runtime_gets_killed_with_its_group() -> Result<()> {
     }
     let helper = read_pid_file(&helper_pidfile)?;
     wait_for_real(|| is_gone(helper) || is_zombie(helper)).await;
+    Ok(())
+}
+
+#[test]
+fn runtime_timeouts_get_formatted() {
+    for (secs, expected) in [
+        (600, "10m"),
+        (90, "1m 30s"),
+        (60, "1m"),
+        (45, "45s"),
+        (0, "0s"),
+    ] {
+        assert_eq!(
+            runtime_call::format_duration(Duration::from_secs(secs)),
+            expected
+        );
+    }
+    // A deadline measured from now is short of a whole second.
+    assert_eq!(
+        runtime_call::format_duration(Duration::from_millis(59_900)),
+        "1m"
+    );
+}
+
+#[tokio::test]
+async fn runtime_with_terminal_gets_no_stdin_pipe() -> Result<()> {
+    let reaper = ChildReaper::default();
+    let dir = tempfile::tempdir()?;
+    let (pidfile, stdin) = (dir.path().join("pid"), dir.path().join("stdin"));
+    // The process gets the terminal as its stdin, the runtime none. The
+    // runtime fails, so the call does not wait for the terminal.
+    let script = format!("readlink /proc/self/fd/0 > {}; exit 1", stdin.display());
+    let args = ["-c".into(), script];
+    let mut io = ContainerIO::new(true, ContainerLog::new())?;
+    let call = RuntimeCall {
+        stdin: true,
+        ..RuntimeCall::new(Path::new("sh"), &args, &pidfile, distant_deadline())
+    };
+    let res = time::timeout(Duration::from_secs(20), reaper.create_child(call, &mut io)).await?;
+    let err = format!("{:#}", res.err().context("runtime failure expected")?);
+    assert!(err.contains("runtime exited with status 1"), "{err}");
+    assert_eq!(std::fs::read_to_string(stdin)?.trim(), "/dev/null");
+    Ok(())
+}
+
+/// The tests are no subreaper, so the processes of their runtimes are no
+/// children of theirs, see `abandoned_call_releases_its_process`. The check
+/// of the server gets its flag.
+#[test]
+fn reported_pids_have_to_be_children() -> Result<()> {
+    let mut child = Guarded::spawn(Command::new("sleep").arg("60"))?;
+    let pid = child_pid(child.0.id())?;
+    ChildReaper::check_reported_pid(pid, true)?;
+
+    // Like a runtime which names a process of somebody else, which must not
+    // get registered and signalled later.
+    let foreign = Pid::from_raw(1);
+    let err = ChildReaper::check_reported_pid(foreign, true)
+        .err()
+        .map(|e| format!("{e:#}"));
+    assert_eq!(
+        err.as_deref(),
+        Some("runtime reported PID 1, which is not a child")
+    );
+    // A server without the flag never gets the processes as children.
+    ChildReaper::check_reported_pid(foreign, false)?;
+
+    // A child which exited is still one until it got reaped.
+    child.0.kill()?;
+    wait_for_real_blocking(|| is_zombie(pid));
+    ChildReaper::check_reported_pid(pid, true)?;
+    child.0.wait()?;
+    assert!(ChildReaper::check_reported_pid(pid, true).is_err());
     Ok(())
 }

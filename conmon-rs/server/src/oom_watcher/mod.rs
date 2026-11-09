@@ -22,7 +22,7 @@ use std::{
     path::{Path, PathBuf},
     sync::LazyLock,
 };
-use tokio::{fs::File, io::ErrorKind};
+use tokio::{fs::OpenOptions, io::ErrorKind};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
 
@@ -120,11 +120,19 @@ impl OOMWatcher {
     }
 
     /// Create the empty OOM files, like conmon does. A failure is only
-    /// logged, the exit gets reported either way, only without the OOM.
+    /// logged, the exit gets reported either way, only without the OOM. A
+    /// symlink at the path does not get followed, like for the log files.
     pub(crate) async fn write_oom_files(exit_paths: &[PathBuf]) {
         for path in exit_paths {
             debug!("Writing OOM file: {}", path.display());
-            if let Err(e) = File::create(path).await {
+            let created = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(path)
+                .await;
+            if let Err(e) = created {
                 error!("Unable to create OOM file {}: {e:#}", path.display());
             }
         }
@@ -146,5 +154,23 @@ mod tests {
         assert!(ancestor.is_oom(137));
         assert!(!ancestor.is_oom(143));
         assert!(!ancestor.is_oom(1));
+    }
+
+    #[tokio::test]
+    async fn oom_files_do_not_follow_symlinks() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let target = dir.path().join("target");
+        std::fs::write(&target, "untouched")?;
+        let link = dir.path().join("oom");
+        std::os::unix::fs::symlink(&target, &link)?;
+        let plain = dir.path().join("plain");
+
+        // The failure for the symlink does not keep the other file from
+        // getting created.
+        OOMWatcher::write_oom_files(&[link.clone(), plain.clone()]).await;
+        assert_eq!(std::fs::read_to_string(&target)?, "untouched");
+        assert!(std::fs::symlink_metadata(&link)?.is_symlink());
+        assert!(plain.is_file());
+        Ok(())
     }
 }
