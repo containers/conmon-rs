@@ -406,7 +406,19 @@ async fn failed_rotation_writes_old_file() -> Result<()> {
     sut.buf.extend_from_slice(b"first\n");
     sut.commit_entry(0).await?;
     sut.buf.extend_from_slice(b"second\n");
-    assert!(sut.commit_entry(6).await.is_err());
+    let err = sut
+        .commit_entry(6)
+        .await
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_default();
+    assert!(
+        err.starts_with(&format!(
+            "reopen log file because of exceeded size: rename log file to '{}': ",
+            path.display()
+        )),
+        "{err}"
+    );
 
     assert!(sut.buf.is_empty());
     assert_eq!(sut.bytes_written, 6);
@@ -556,7 +568,13 @@ async fn torn_entries_get_ended() -> Result<()> {
     let entry = [vec![b'a'; 1024 * 1024], b"\n".to_vec()].concat();
     sut.buf.extend_from_slice(&entry);
     // A large entry gets written right away.
-    assert!(sut.commit_entry(0).await.is_err());
+    let err = sut
+        .commit_entry(0)
+        .await
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_default();
+    assert!(err.starts_with("write log chunk: "), "{err}");
     assert!(sut.buf.is_empty());
     assert!(sut.torn);
     let mut written = vec![];
@@ -592,7 +610,8 @@ async fn failed_flush_drops_chunk() -> Result<()> {
     // Not opened yet, so the write fails.
     sut.buf.extend_from_slice(b"lost\n");
     sut.commit_entry(0).await?;
-    assert!(sut.flush().await.is_err());
+    let err = sut.flush().await.err().map(|e| format!("{e:#}"));
+    assert_eq!(err.as_deref(), Some(LogFile::ERR_UNINITIALIZED));
     assert!(sut.buf.is_empty());
     assert_eq!(sut.bytes_written, 0);
 
@@ -658,7 +677,16 @@ async fn reopen_reopens_all_drivers() -> Result<()> {
     fs::remove_file(cri.path())?;
     fs::create_dir(cri.path())?;
 
-    assert!(log.reopen().await.is_err());
+    let err = log
+        .reopen()
+        .await
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_default();
+    assert!(
+        err.starts_with(&format!("rename log file to '{}': ", cri.path().display())),
+        "{err}"
+    );
     assert!(test_helpers::read(&other)?.is_empty());
     fs::remove_dir(cri.path())?;
     Ok(())
@@ -692,7 +720,16 @@ async fn open_does_not_follow_symlinks() -> Result<()> {
     std::os::unix::fs::symlink(&target, &link)?;
 
     let mut sut = LogFile::new(&link, Some(0o600), None);
-    assert!(sut.open().await.is_err());
+    let err = sut
+        .open()
+        .await
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_default();
+    assert!(
+        err.starts_with(&format!("open log file path '{}': ", link.display())),
+        "{err}"
+    );
     assert_eq!(fs::read_to_string(&target)?, "keep");
     Ok(())
 }

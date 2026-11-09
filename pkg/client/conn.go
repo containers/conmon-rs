@@ -121,12 +121,45 @@ func call[
 	fill func(Q) error,
 	read func(T) (R, error),
 ) (R, error) {
-	rpcClient, err := c.client(ctx)
+	return callRequiring(ctx, c, "", "", method, fill, read)
+}
+
+// callRequiring runs a method of the server like call, on the connection
+// which got checked for the feature, see requireServerFeature, whose error
+// names the usage. An empty feature skips the check.
+//
+//nolint:ireturn // R is the result of the call, not an interface
+func callRequiring[
+	P paramsWithRequest[Q], Q requestWithMetadata,
+	F resultsFuture[S], S resultsWithResponse[T], T, R any,
+](
+	ctx context.Context,
+	c *ConmonClient,
+	feature, usage string,
+	method func(proto.Conmon, context.Context, func(P) error) (F, capnp.ReleaseFunc),
+	fill func(Q) error,
+	read func(T) (R, error),
+) (R, error) {
+	var (
+		rpcClient proto.Conmon
+		err       error
+	)
+
+	if feature == "" {
+		rpcClient, err = c.client(ctx)
+		if err != nil {
+			err = fmt.Errorf("create RPC client: %w", err)
+		}
+	} else {
+		rpcClient, err = c.requireServerFeature(ctx, feature, usage)
+	}
+
 	if err != nil {
 		var zero R
 
-		return zero, fmt.Errorf("create RPC client: %w", err)
+		return zero, err
 	}
+
 	defer rpcClient.Release()
 
 	return callOn(ctx, c, rpcClient, method, fill, read)

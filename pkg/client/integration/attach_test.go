@@ -416,16 +416,7 @@ var _ = Describe("ConmonClient", func() {
 			}
 
 			attachErr, _, _ := attachAll(
-				ctx,
-				"/busybox cat; /busybox tail /dev/zero", false, true, "", true,
-				func(g generate.Generator) {
-					// Pin the swap limit as well, otherwise the cgroup swaps
-					// on hosts with swap instead of being killed.
-					const limit = 16 * 1024 * 1024
-					g.SetLinuxResourcesMemoryLimit(limit)
-					g.SetLinuxResourcesMemorySwap(limit)
-				},
-				nil,
+				ctx, "/busybox cat; /busybox tail /dev/zero", false, true, "", true, oomSpec, nil,
 			)
 
 			Eventually(attachErr, 10*time.Second).Should(Receive(Succeed()))

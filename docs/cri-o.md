@@ -116,9 +116,12 @@ and a CRI-O which restores through the client, with the `RestorePath` of
 rejects, so the restore fails before the runtime starts. Checkpointing works
 with every version, CRI-O runs the runtime for it itself. Like for a create,
 the server runs the `runtime_path` of the handler for the restore, with the
-options CRI-O passes, like `--no-pivot` and the SELinux options of runc. The
-checkpoint and the restore need criu and a runtime built with CRIU support on
-the node.
+options CRI-O passes, like `--no-pivot` and the SELinux options of runc. A
+CRI-O which restores through the client takes the PID of the restored init
+process from the response of `CreateContainer`, like after a create: the
+server writes no conmon PID file into the bundle, which the conmon path of
+CRI-O reads after a restore with `ReadConmonPidFile`. The checkpoint and the
+restore need criu and a runtime built with CRIU support on the node.
 
 ## Compatibility
 

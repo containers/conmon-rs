@@ -260,21 +260,18 @@ var _ = Describe("ConmonClient", func() {
 
 			sut = nil
 
+			Expect(syscall.Kill(int(pid), syscall.SIGTERM)).To(Succeed())
+			// A signal which arrives before the server took the first one
+			// would count as the same.
+			Eventually(readOutput, 10*time.Second).Should(ContainSubstring("Received SIGTERM"))
+
 			start := time.Now()
 
 			Expect(syscall.Kill(int(pid), syscall.SIGTERM)).To(Succeed())
-			// A signal which arrives before the server took the first one
-			// would count as the same. The wait counts towards the 4 seconds
-			// below, so a slow log fails here.
-			Eventually(readOutput, 2*time.Second).Should(
-				ContainSubstring("Received SIGTERM"),
-				"the server did not log the first SIGTERM within 2 seconds",
-			)
-			Expect(syscall.Kill(int(pid), syscall.SIGTERM)).To(Succeed())
 
-			// The server killed the container right away instead of
-			// waiting for the grace of 5 seconds, the time includes the
-			// wait for the first SIGTERM to arrive.
+			// The shutdown does not wait for the containers after the second
+			// signal. The log line below proves that the second signal ended
+			// the wait, the grace would kill with 137 as well.
 			Eventually(func() error {
 				return syscall.Kill(int(pid), 0)
 			}, 4*time.Second).Should(MatchError(syscall.ESRCH))

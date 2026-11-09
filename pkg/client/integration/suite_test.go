@@ -32,6 +32,7 @@ import (
 	"github.com/gorilla/websocket"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/types"
 	"github.com/opencontainers/runc/libcontainer/specconv"
 	"github.com/opencontainers/runtime-tools/generate"
 	"github.com/sirupsen/logrus"
@@ -57,6 +58,10 @@ const (
 	// sttyLoop prints the size of the terminal, the rows and then the
 	// columns, until it gets killed.
 	sttyLoop = "while true; do /busybox stty size; /busybox sleep 0.1; done"
+
+	// countingLoop prints "line <n>", counting from 0, ten times a second
+	// until it gets killed, see logLineNumbers.
+	countingLoop = "i=0; while true; do echo line $i; i=$((i+1)); /busybox sleep 0.1; done"
 
 	// sttyAwait waits until the terminal has 40 rows and 30 columns, then
 	// prints its size.
@@ -314,6 +319,16 @@ func logLineNumbers(g Gomega, path string) []int {
 	return numbers
 }
 
+// atLeastLines matches at least n log line numbers, see logLineNumbers.
+//
+//nolint:ireturn // a matcher, like the ones of gomega
+func atLeastLines(n int) types.GomegaMatcher {
+	return WithTransform(
+		func(lines []int) int { return len(lines) },
+		BeNumerically(">=", n),
+	)
+}
+
 // fileContents reads a file, also for polling with Eventually: a file which
 // does not exist yet gets read again, any other error stops the polling right
 // away.
@@ -340,6 +355,17 @@ func (tr *testRunner) defaultConfig(terminal bool) *client.CreateContainerConfig
 		}},
 		CommandArgs: []string{},
 	}
+}
+
+// oomSpec limits the memory of the container to 32 MiB, so that a process
+// which keeps allocating, like tail /dev/zero, gets OOM killed. The swap
+// gets pinned as well, otherwise the cgroup swaps on hosts with swap instead
+// of being killed. 32 MiB fit the init of runc, a Go program; tail grows
+// beyond any limit.
+func oomSpec(g generate.Generator) {
+	const limit = 32 * 1024 * 1024
+	g.SetLinuxResourcesMemoryLimit(limit)
+	g.SetLinuxResourcesMemorySwap(limit)
 }
 
 func (tr *testRunner) createContainer(
@@ -418,10 +444,16 @@ func (tr *testRunner) startContainer() {
 	}, time.Second*10).Should(Succeed())
 }
 
+// runtimeVersion is the output of the version command of the runtime, which
+// runs once for all specs.
+var runtimeVersion = sync.OnceValues(func() ([]byte, error) {
+	return exec.Command(runtimePath, "--version").CombinedOutput()
+})
+
 // skipWithoutCheckpointSupport skips the spec if the runtime cannot checkpoint
 // containers here: rootless, without criu, or with a crun which got built
 // without CRIU support, like its static release binaries.
-func skipWithoutCheckpointSupport(ctx context.Context) {
+func skipWithoutCheckpointSupport() {
 	if unshare.IsRootless() {
 		Skip("does not run rootless")
 	}
@@ -430,11 +462,25 @@ func skipWithoutCheckpointSupport(ctx context.Context) {
 		Skip("criu is not installed")
 	}
 
-	version, err := exec.CommandContext(ctx, runtimePath, "--version").CombinedOutput()
+	version, err := runtimeVersion()
 	Expect(err).To(Succeed(), string(version))
 
 	if strings.HasPrefix(string(version), "crun") && !strings.Contains(string(version), "+CRIU") {
 		Skip("crun got built without CRIU support")
+	}
+}
+
+// skipWithoutJournald skips the spec if no journal runs here, like in a
+// container or a nix sandbox: journalctl is missing or the socket of the
+// journal, which the server and the drivers log to, does not exist. CI
+// always has one.
+func skipWithoutJournald(ctx context.Context) {
+	if err := exec.CommandContext(ctx, "journalctl", "--version").Run(); err != nil {
+		Skip("journalctl does not work: " + err.Error())
+	}
+
+	if _, err := os.Stat("/run/systemd/journal/socket"); err != nil {
+		Skip("no journal runs: " + err.Error())
 	}
 }
 

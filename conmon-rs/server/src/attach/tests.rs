@@ -128,7 +128,11 @@ async fn done_after_failed_read_loop() -> Result<()> {
         stderr,
     )
     .await;
-    assert!(res.is_err());
+    let err = res.err().map(|e| format!("{e:#}")).unwrap_or_default();
+    assert!(
+        err.starts_with("read from container file descriptor: "),
+        "{err}"
+    );
     assert!(rx.try_recv().is_err());
 
     ContainerIO::read_loop(
