@@ -8,8 +8,11 @@ pub(crate) mod test_helpers;
 
 use crate::conmon_capnp::conmon::log_driver::{self, Owned, Type};
 use crate::{
-    capnp_util::check_absolute, container_io::Pipe, container_log::cri::CriLogger,
-    container_log::journald::JournaldLogger, fs_util, server::Server,
+    capnp_util::check_absolute,
+    container_io::{Pipe, READ_BUFFER_SIZE},
+    container_log::{cri::CriLogger, journald::JournaldLogger},
+    fs_util,
+    server::Server,
 };
 use anyhow::{Context, Result, bail};
 use bytes::{Bytes, BytesMut};
@@ -482,9 +485,10 @@ impl LineBuffer {
         }
     }
 
-    /// A long line leaves a large buffer behind, release it once drained.
+    /// A line longer than a read chunk leaves a large buffer behind, release
+    /// it once drained. An idle container keeps at most a chunk of it.
     fn shrink(tail: &mut BytesMut) {
-        if tail.is_empty() && tail.capacity() > Self::MAX_LINE {
+        if tail.is_empty() && tail.capacity() > READ_BUFFER_SIZE {
             *tail = BytesMut::new();
         }
     }

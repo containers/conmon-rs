@@ -311,11 +311,11 @@ impl ContainerIO {
                         };
                     }
 
-                    // Bytes::clone() is just a refcount increment, no data copy
-                    let attached = attach.has_readers();
-                    if attached {
-                        attach.write(Message::Data(data.clone(), pipe));
-                    }
+                    // Bytes::clone() is just a refcount increment, no data
+                    // copy. Without clients the send fails cheaply, a check
+                    // before it would miss a client which subscribes in
+                    // between.
+                    attach.write(Message::Data(data.clone(), pipe));
                     drop(logging);
 
                     Self::forward(&mut message_tx, Message::Data(data, pipe)).await;

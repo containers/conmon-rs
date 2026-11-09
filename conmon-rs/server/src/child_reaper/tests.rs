@@ -7,7 +7,10 @@ use crate::{
         Process, child_pid, children_by_scan, has_zombie, is_zombie, read_pid_file,
         wait_for_exit_code, zombie_children,
     },
-    test_util::{Guarded, Spawned, container_child, spawn_sh, wait_for, wait_for_real},
+    test_util::{
+        Guarded, Spawned, container_child, spawn_sh, wait_for, wait_for_real,
+        wait_for_real_blocking,
+    },
 };
 use futures::FutureExt;
 use nix::sys::{

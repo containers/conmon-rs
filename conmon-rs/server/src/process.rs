@@ -9,13 +9,14 @@ use anyhow::{Context, Result, bail};
 use nix::{
     errno::Errno,
     sys::{
+        prctl,
         signal::{Signal, kill},
         wait::{Id, WaitPidFlag},
     },
     unistd::{Pid, getpgid, getpid},
 };
 use std::{
-    os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
+    os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
     path::Path,
     sync::{Arc, LazyLock, Mutex, RwLock, RwLockWriteGuard},
     thread,
@@ -296,6 +297,21 @@ fn peek_exit(id: Id<'_>) -> nix::Result<Option<i32>> {
     wait_exit(id, WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT)
 }
 
+/// Whether the process is a child of the server which was not reaped yet, a
+/// zombie included. Only such a PID is safe to register, see
+/// `ChildReaper::create_child`.
+pub(crate) fn is_child(pid: Pid) -> bool {
+    peek_exit(Id::Pid(pid)) != Err(Errno::ECHILD)
+}
+
+/// Whether the processes which the children of the server leave behind get
+/// reparented to it, which the server sets up at its start, see
+/// `Server::init_process`. The tests do not. One which cannot tell counts
+/// as a subreaper.
+pub(crate) fn is_subreaper() -> bool {
+    prctl::get_child_subreaper().unwrap_or(true)
+}
+
 /// Whether a child of any thread of this process exited and was not
 /// reaped yet, without reaping it.
 pub(crate) fn has_zombie() -> bool {
@@ -443,7 +459,38 @@ pub(crate) fn wait_child(id: Id<'_>, flags: WaitPidFlag) -> nix::Result<Option<(
 pub(crate) async fn wait_for_exit_code(pid: Pid) -> i32 {
     debug!("Waiting for exit code of pid {pid}");
 
-    if let Some(code) = try_pidfd_wait(pid).await {
+    // Gone already, the blocking wait would only learn the same.
+    let pidfd = match pidfd_open(pid) {
+        Ok(pidfd) => Some(pidfd),
+        Err(Errno::ESRCH) => {
+            debug!("PID {pid} got reaped already");
+            return EXIT_CODE_UNKNOWN;
+        }
+        Err(_) => None,
+    };
+    wait_for_exit_with(pid, pidfd.as_ref().map(AsFd::as_fd)).await
+}
+
+/// Wait for the exit of a registered child like [`wait_for_exit_code`],
+/// through the pidfd it holds already, so that the wait opens none of its
+/// own. Without one, on kernels before 5.3, the wait falls back like for a
+/// PID.
+pub(crate) async fn wait_for_exit(process: &Process) -> i32 {
+    match &process.pidfd {
+        Some(pidfd) => {
+            debug!("Waiting for exit code of pid {}", process.pid);
+            wait_for_exit_with(process.pid, Some(pidfd.as_fd())).await
+        }
+        None => wait_for_exit_code(process.pid).await,
+    }
+}
+
+/// Wait for the exit of `pid` through its `pidfd`, or on a thread without
+/// one, see [`wait_for_exit_code`].
+async fn wait_for_exit_with(pid: Pid, pidfd: Option<BorrowedFd<'_>>) -> i32 {
+    if let Some(pidfd) = pidfd
+        && let Some(code) = try_pidfd_wait(pid, pidfd).await
+    {
         return code;
     }
     debug!("Pidfd not available, falling back to blocking waitpid");
@@ -500,21 +547,12 @@ fn spawn_waitpid_thread<F: FnOnce() + Send + 'static>(f: F) {
 const PIDFD_RETRY_MIN: Duration = Duration::from_millis(10);
 const PIDFD_RETRY_MAX: Duration = Duration::from_secs(1);
 
-/// Try to use pidfd_open + async polling. Returns None if pidfd is unavailable.
-async fn try_pidfd_wait(pid: Pid) -> Option<i32> {
+/// Wait for the exit of `pid` through its `pidfd` with async polling. None if
+/// the pidfd cannot be waited for.
+async fn try_pidfd_wait(pid: Pid, pidfd: BorrowedFd<'_>) -> Option<i32> {
     // The readiness comes from epoll and the wait uses WNOHANG, so the
     // descriptor itself does not need to be non-blocking.
-    let owned_fd = match pidfd_open(pid) {
-        Ok(fd) => fd,
-        // Gone already, the blocking wait would only learn the same.
-        Err(Errno::ESRCH) => {
-            debug!("PID {pid} got reaped already");
-            return Some(EXIT_CODE_UNKNOWN);
-        }
-        Err(_) => return None,
-    };
-
-    let async_fd = match async_fd::register(owned_fd, Interest::READABLE) {
+    let async_fd = match async_fd::register(pidfd, Interest::READABLE) {
         Ok(fd) => fd,
         Err(e) => {
             error!("Unable to create AsyncFd from pidfd: {e:#}");

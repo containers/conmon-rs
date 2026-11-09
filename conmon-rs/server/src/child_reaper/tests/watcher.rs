@@ -105,3 +105,21 @@ async fn watch_kills_on_timeout() -> Result<()> {
     wait_for_real(|| is_gone(pid)).await;
     Ok(())
 }
+
+#[tokio::test]
+async fn write_exit_file_does_not_follow_symlinks() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let target = dir.path().join("target");
+    std::fs::write(&target, "untouched")?;
+    // A symlink in place of the temporary file gets replaced, one in place
+    // of the exit file as well.
+    let path = dir.path().join("id");
+    std::os::unix::fs::symlink(&target, dir.path().join(".id.tmp"))?;
+    std::os::unix::fs::symlink(&target, &path)?;
+    ReapableChild::write_exit_file(&path, "1").await?;
+    assert_eq!(std::fs::read_to_string(&target)?, "untouched");
+    assert!(std::fs::symlink_metadata(&path)?.is_file());
+    assert_eq!(std::fs::read_to_string(&path)?, "1");
+    assert_eq!(std::fs::read_dir(dir.path())?.count(), 2);
+    Ok(())
+}

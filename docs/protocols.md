@@ -64,6 +64,13 @@ skips the oldest output, which the server logs as a warning, once until the
 client caught up again. The same applies to the attach sessions of the
 streaming server.
 
+Once the container exited, the clients get the output it left behind, until
+it ends or pauses for 100 ms, for at most a second. Output which the log
+drivers still hold at that point, like the last chunk of a container on a
+slow disk, counts as no pause for up to 5 seconds (since unreleased), the
+clients get it as well. A process the container left behind which keeps
+writing gets cut off.
+
 ## Streaming server
 
 `serveExecContainer`, `serveAttachContainer` and `servePortForwardContainer`
@@ -302,6 +309,14 @@ How to rely on them:
 
 ## Changes
 
+- unreleased: the attach clients get the output which the log drivers still
+  held when the container exited, for up to 5 seconds. Before, output which
+  the log did not take within 100 ms after the exit got cut off for them.
+- unreleased: `createContainer` and `serveExecContainer` fail, and
+  `execSyncContainer` answers with exit code -2 and the error on stderr like
+  for a runtime which failed, if the runtime reports a PID which is not a
+  child of the server. Before, the server took it for the process it started
+  and signalled it later.
 - unreleased: `createContainer` restores a container from a checkpoint with the
   `restore` command of the runtime if the request sets a `restorePath`, which
   the `restore` feature tells. Before, the server only created containers, and

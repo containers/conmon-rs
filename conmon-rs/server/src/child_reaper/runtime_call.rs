@@ -6,12 +6,14 @@ use crate::{
     container_io::{ContainerIO, READ_BUFFER_SIZE, with_scratch},
     fs_util, init,
     mutex::lock,
-    process::{Process, child_pid, read_pid_file, signal_name, wait_for_exit_code},
+    process::{
+        Process, child_pid, is_child, is_subreaper, read_pid_file, signal_name, wait_for_exit_code,
+    },
     runtime_args::LoggedArgs,
     tail::Tail,
     util::with_stderr,
 };
-use anyhow::{Context, Result, format_err};
+use anyhow::{Context, Result, bail, format_err};
 use nix::{
     sys::signal::{Signal, killpg},
     unistd::Pid,
@@ -128,7 +130,7 @@ pub(crate) struct RuntimeCall<'a> {
     /// logged, see [`LoggedArgs`].
     pub(crate) command_start: Option<usize>,
 
-    /// Whether the process gets a stdin pipe.
+    /// Whether the process gets stdin, through a pipe or its terminal.
     pub(crate) stdin: bool,
 
     /// Where the runtime writes the PID of the process it started.
@@ -210,6 +212,8 @@ impl ChildReaper {
             deadline: runtime_deadline,
         } = call;
         let mut in_flight = self.begin_call(runtime_deadline)?;
+        // How long the runtime gets, for the error of one which takes longer.
+        let runtime_timeout = runtime_deadline.saturating_duration_since(Instant::now());
         // A PID file left from before, like of a container created in the
         // same bundle earlier, would name a process which the cleanup of a
         // failed call kills, see `cleanup_failed_grandchild`.
@@ -222,7 +226,11 @@ impl ChildReaper {
                 command_start
             }
         );
-        let child = Self::spawn_runtime(runtime, args, stdin).context("spawn child process")?;
+        // With a terminal, the process gets the terminal as its stdin, the
+        // pipe would stay unused.
+        let stdin_pipe = stdin && container_io.terminal().is_none();
+        let child =
+            Self::spawn_runtime(runtime, args, stdin_pipe).context("spawn child process")?;
 
         // Not waited for yet, so it has its PID. Dropping it on a failure
         // kills it.
@@ -246,17 +254,14 @@ impl ChildReaper {
             .is_some()
             .then(|| RuntimeOutput::spawn(child.stdout.take(), child.stderr.take()));
 
-        let connected = Self::connect_io(
-            &mut child,
-            container_io,
-            stdin,
-            &token,
-            runtime_deadline,
-            &stop,
-        )
-        .await;
+        let deadline = RuntimeDeadline {
+            at: runtime_deadline,
+            timeout: runtime_timeout,
+        };
+        let connected =
+            Self::connect_io(&mut child, container_io, stdin, &token, deadline, &stop).await;
         let status = match connected {
-            Ok(()) => Self::wait_runtime(&mut child, runtime_deadline, &stop).await,
+            Ok(()) => Self::wait_runtime(&mut child, deadline, &stop).await,
             Err(e) => Err(e),
         };
         let status = match status {
@@ -282,7 +287,12 @@ impl ChildReaper {
         let stderr = RuntimeOutput::finish_unless_stopped(output, &stop).await;
 
         let error = match grandchild_pid {
-            Some(Ok(pid)) => return Ok((pid, token, in_flight)),
+            // Claimed above, so the cleanup of the failure below leaves a
+            // foreign PID alone, see `cleanup_failed_grandchild`.
+            Some(Ok(pid)) => match Self::check_reported_pid(pid, is_subreaper()) {
+                Ok(()) => return Ok((pid, token, in_flight)),
+                Err(e) => e,
+            },
             Some(Err(e)) => e,
             None => match status.code() {
                 Some(code) => format_err!("runtime exited with status {code}"),
@@ -300,6 +310,27 @@ impl ChildReaper {
         Err(self.fail_create(pidfile, error, &stderr))
     }
 
+    /// Fail for a PID the runtime reported which is no child of this server,
+    /// see [`is_child`]. Only a child gets registered and signalled later,
+    /// its PID cannot get reused before its watcher reaped it. A runtime
+    /// which reports the PID of another process, by a bug or on purpose,
+    /// must not make the server signal that process. A process which exited
+    /// already is still a child until reaped, like a restored container may
+    /// have. The processes get reparented to the server as their
+    /// `subreaper`, without that flag, like in the tests, they are never its
+    /// children, so there is nothing to check.
+    ///
+    /// The call claims the PID before it checks it, so the cleanup of the
+    /// failed call finds it claimed and does not signal it, see
+    /// [`ChildReaper::cleanup_failed_grandchild`]. The signal through
+    /// [`Process::child`] would refuse a PID which is no child anyway.
+    pub(super) fn check_reported_pid(pid: Pid, subreaper: bool) -> Result<()> {
+        if subreaper && !is_child(pid) {
+            bail!("runtime reported PID {pid}, which is not a child")
+        }
+        Ok(())
+    }
+
     /// Connect the I/O of the process which the runtime starts: wait until
     /// the runtime connected the terminal, or read the pipes of the runtime,
     /// which the process shares. Fails once the `deadline` passed or the
@@ -309,7 +340,7 @@ impl ChildReaper {
         container_io: &mut ContainerIO,
         stdin: bool,
         token: &CancellationToken,
-        deadline: Instant,
+        deadline: RuntimeDeadline,
         stop: &CancellationToken,
     ) -> Result<(), RuntimeFailure> {
         if container_io.terminal().is_none() {
@@ -326,7 +357,7 @@ impl ChildReaper {
                 res.context("wait for terminal socket connection")
                     .map_err(RuntimeFailure::new)
             }
-            () = time::sleep_until(deadline) => Err(RuntimeFailure::timed_out()),
+            () = time::sleep_until(deadline.at) => Err(RuntimeFailure::timed_out(deadline.timeout)),
             () = stop.cancelled() => Err(RuntimeFailure::stopped()),
             status = child.reap() => match status.context("wait for child") {
                 // The runtime succeeded, so it did connect and the descriptor
@@ -360,7 +391,7 @@ impl ChildReaper {
     /// [`ChildReaper::kill_pending`].
     async fn wait_runtime(
         child: &mut Runtime,
-        deadline: Instant,
+        deadline: RuntimeDeadline,
         stop: &CancellationToken,
     ) -> Result<ExitStatus, RuntimeFailure> {
         select! {
@@ -369,7 +400,7 @@ impl ChildReaper {
             status = child.reap() => status
                 .context("wait for runtime")
                 .map_err(RuntimeFailure::new),
-            () = time::sleep_until(deadline) => Err(RuntimeFailure::timed_out()),
+            () = time::sleep_until(deadline.at) => Err(RuntimeFailure::timed_out(deadline.timeout)),
             () = stop.cancelled() => Err(RuntimeFailure::stopped()),
         }
     }
@@ -495,6 +526,26 @@ async fn wait_unless_stopped<T>(
         .ok()
 }
 
+/// When the runtime of a call gets killed, and how long it got for the
+/// error of one which took longer.
+#[derive(Clone, Copy)]
+struct RuntimeDeadline {
+    at: Instant,
+    timeout: Duration,
+}
+
+/// A duration in whole seconds, with the minutes apart, like `10m`,
+/// `1m 30s` or `45s`, for the errors.
+pub(super) fn format_duration(duration: Duration) -> String {
+    // Rounded, a deadline measured from now is short of a whole second.
+    let secs = (duration + Duration::from_millis(500)).as_secs();
+    match (secs / 60, secs % 60) {
+        (0, secs) => format!("{secs}s"),
+        (mins, 0) => format!("{mins}m"),
+        (mins, secs) => format!("{mins}m {secs}s"),
+    }
+}
+
 /// A runtime call which failed before its runtime exited, see
 /// [`ChildReaper::stop_runtime`].
 struct RuntimeFailure {
@@ -513,9 +564,10 @@ impl RuntimeFailure {
         }
     }
 
-    fn timed_out() -> Self {
+    /// The runtime did not finish within its `timeout`.
+    fn timed_out(timeout: Duration) -> Self {
         Self {
-            error: format_err!("runtime did not finish in time"),
+            error: format_err!("runtime did not finish within {}", format_duration(timeout)),
             grace: Duration::ZERO,
         }
     }

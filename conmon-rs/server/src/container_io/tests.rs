@@ -3,6 +3,7 @@ use crate::{
     channel::Receiver,
     container_log::{ContainerLog, test_helpers},
     tail::Tail,
+    test_util::wait_for,
 };
 use tokio::{
     io::{AsyncWriteExt, DuplexStream, duplex},
@@ -712,4 +713,157 @@ async fn drain_keeps_the_lag_of_the_client() -> Result<()> {
     assert!(drain.recv_output(&mut rx, Some(&mut lag)).await.is_none());
     assert_eq!(lag.skipped, Some(5));
     Ok(())
+}
+
+/// A read loop whose log drivers hang while the guard holds the log, with
+/// the attach output of its container.
+async fn held_log_loop() -> Result<(
+    DuplexStream,
+    SharedContainerAttach,
+    SharedContainerLog,
+    JoinHandle<Result<()>>,
+)> {
+    let (_cri, _journal, logger) = test_helpers::container_log(true).await?;
+    let attach = SharedContainerAttach::default();
+    let (writer, reader) = duplex(1024);
+    let read_loop = task::spawn(ContainerIO::read_loop(
+        reader,
+        Pipe::StdOut,
+        logger.clone(),
+        None,
+        attach.clone(),
+        attach.output(),
+    ));
+    // The loop looks up the drivers first, which a held log would block.
+    task::yield_now().await;
+    Ok((writer, attach, logger, read_loop))
+}
+
+#[tokio::test(start_paused = true)]
+async fn drain_waits_for_the_log_after_the_exit() -> Result<()> {
+    let (mut writer, attach, logger, read_loop) = held_log_loop().await?;
+    let (mut rx, _) = attach.subscribe();
+
+    // The log takes the last chunk slower than the drain waits for a pause
+    // of the output.
+    let held = logger.clone().lock_owned().await;
+    writer.write_all(b"last").await?;
+    wait_for(|| attach.is_logging()).await?;
+    let recv = task::spawn({
+        let attach = attach.clone();
+        async move {
+            let mut drain = Drain::default();
+            let message = drain.recv_attach(&attach, &mut rx, None).await;
+            (drain, rx, message)
+        }
+    });
+    time::sleep(2 * DRAIN_MAX_WAIT).await;
+    assert!(!recv.is_finished());
+
+    drop(held);
+    let (mut drain, mut rx, message) = recv.await?;
+    assert_eq!(data(message.context("last chunk")?), "last");
+
+    // The output ends with the pipe.
+    drop(writer);
+    assert!(drain.recv_attach(&attach, &mut rx, None).await.is_none());
+    read_loop.await?
+}
+
+#[tokio::test(start_paused = true)]
+async fn drain_forwards_queued_output_before_waiting_for_the_log() -> Result<()> {
+    let (mut writer, attach, logger, read_loop) = held_log_loop().await?;
+    let (mut rx, _) = attach.subscribe();
+    // Output which the client did not take yet when the container exited,
+    // while the log holds the chunk after it.
+    attach.write(Message::Data("queued".into(), Pipe::StdOut));
+    let held = logger.clone().lock_owned().await;
+    writer.write_all(b"held").await?;
+    wait_for(|| attach.is_logging()).await?;
+
+    let start = Instant::now();
+    let mut drain = Drain::default();
+    let message = drain.recv_attach(&attach, &mut rx, None).await;
+    assert_eq!(data(message.context("queued chunk")?), "queued");
+    assert_eq!(start.elapsed(), Duration::ZERO);
+
+    // The held chunk still gets its wait.
+    let recv = task::spawn({
+        let attach = attach.clone();
+        async move {
+            let message = drain.recv_attach(&attach, &mut rx, None).await;
+            (drain, rx, message)
+        }
+    });
+    time::sleep(2 * DRAIN_MAX_WAIT).await;
+    assert!(!recv.is_finished());
+    drop(held);
+    let (_, _, message) = recv.await?;
+    assert_eq!(data(message.context("held chunk")?), "held");
+    drop(writer);
+    read_loop.await?
+}
+
+#[tokio::test(start_paused = true)]
+async fn drain_takes_output_broadcast_while_waiting_for_the_log() -> Result<()> {
+    let (mut writer, attach, logger, read_loop) = held_log_loop().await?;
+    let (mut rx, _) = attach.subscribe();
+    let held = logger.clone().lock_owned().await;
+    writer.write_all(b"held").await?;
+    wait_for(|| attach.is_logging()).await?;
+
+    // The other read loop of the container broadcasts a chunk while this
+    // one holds the log, which must not wait for the log either.
+    let start = Instant::now();
+    let recv = task::spawn({
+        let attach = attach.clone();
+        async move {
+            let mut drain = Drain::default();
+            let message = drain.recv_attach(&attach, &mut rx, None).await;
+            (drain, rx, message)
+        }
+    });
+    time::sleep(Duration::from_secs(1)).await;
+    attach.write(Message::Data("other".into(), Pipe::StdErr));
+    let (mut drain, mut rx, message) = recv.await?;
+    assert_eq!(data(message.context("other chunk")?), "other");
+    assert_eq!(start.elapsed(), Duration::from_secs(1));
+
+    // The held chunk still gets the rest of the wait.
+    let recv = task::spawn({
+        let attach = attach.clone();
+        async move {
+            let message = drain.recv_attach(&attach, &mut rx, None).await;
+            (drain, rx, message)
+        }
+    });
+    time::sleep(2 * DRAIN_MAX_WAIT).await;
+    assert!(!recv.is_finished());
+    drop(held);
+    let (_, _, message) = recv.await?;
+    assert_eq!(data(message.context("held chunk")?), "held");
+    drop(writer);
+    read_loop.await?
+}
+
+#[tokio::test(start_paused = true)]
+async fn drain_waits_for_the_log_bounded() -> Result<()> {
+    let (mut writer, attach, logger, read_loop) = held_log_loop().await?;
+    let (mut rx, _) = attach.subscribe();
+    let held = logger.clone().lock_owned().await;
+    writer.write_all(b"never").await?;
+    wait_for(|| attach.is_logging()).await?;
+
+    // A log which hangs does not keep the client waiting for good.
+    let start = Instant::now();
+    let mut drain = Drain::default();
+    assert!(drain.recv_attach(&attach, &mut rx, None).await.is_none());
+    assert_eq!(start.elapsed(), DRAIN_MAX_LOG_WAIT);
+    // Nor does it get another wait from the same drain.
+    assert!(drain.recv_attach(&attach, &mut rx, None).await.is_none());
+    assert_eq!(start.elapsed(), DRAIN_MAX_LOG_WAIT);
+
+    drop(held);
+    drop(writer);
+    read_loop.await?
 }

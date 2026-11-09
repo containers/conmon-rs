@@ -95,6 +95,18 @@ pub(crate) async fn wait_for_real(condition: impl Fn() -> bool) {
     panic!("condition never became true");
 }
 
+/// Wait in real time until `condition` holds, like [`wait_for_real`], for
+/// tests without a runtime.
+pub(crate) fn wait_for_real_blocking(condition: impl Fn() -> bool) {
+    for _ in 0..1000 {
+        if condition() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("condition never became true");
+}
+
 /// Call `f` again for up to 5s while it fails because a socket is in use. A
 /// process which a parallel test forks holds the sockets of this one until
 /// it execs.
