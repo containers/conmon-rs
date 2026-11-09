@@ -45,10 +45,10 @@ type CreateContainerConfig struct {
 	// LogDrivers is a slice of selected log drivers.
 	LogDrivers []ContainerLogDriver
 
-	// CommandArgs are the additional arguments passed to the create runtime call
-	// after the command. e.g: crun create --runtime-opt. With a RestorePath,
-	// they are the options of the restore command, like --no-pivot or the
-	// SELinux options of runc.
+	// CommandArgs are the values of the --runtime-opt flag of conmon, like
+	// --no-pivot or the SELinux options of runc: the server appends them to
+	// the create command of the runtime after its own options, or to the
+	// restore command with a RestorePath.
 	CommandArgs []string
 
 	// RestorePath is the absolute path of the checkpoint to restore the
@@ -98,7 +98,9 @@ const (
 
 // CreateContainerResult is the result for calling the CreateContainer method.
 type CreateContainerResult struct {
-	// PID is the container process identifier.
+	// PID is the container process identifier: of the process which the
+	// runtime created but did not start yet, or which it restored from the
+	// RestorePath and which runs already.
 	PID uint32
 }
 
@@ -117,8 +119,8 @@ type CreateContainerResult struct {
 // container, which may exist although the call failed with the error of the
 // context, so the caller deletes it with the runtime, and kills it first
 // after a restore, as a restored container runs. A server since v1.2.0 kills
-// a runtime which takes longer than 10 minutes to create or restore the
-// container and fails the call.
+// a runtime which takes longer than 10 minutes to create the container (or to
+// restore it, since unreleased) and fails the call.
 func (c *ConmonClient) CreateContainer(
 	ctx context.Context, cfg *CreateContainerConfig,
 ) (_ *CreateContainerResult, retErr error) {
@@ -136,19 +138,10 @@ func (c *ConmonClient) CreateContainer(
 
 	// An older server would ignore the path and create a new container, so a
 	// restore goes to the server which got checked for the feature.
-	var rpcClient proto.Conmon
-	if cfg.RestorePath == "" {
-		rpcClient, err = c.client(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("create RPC client: %w", err)
-		}
-	} else {
-		rpcClient, err = c.requireServerFeature(ctx, FeatureRestore, "restoring a checkpoint")
-		if err != nil {
-			return nil, err
-		}
+	var feature, usage string
+	if cfg.RestorePath != "" {
+		feature, usage = FeatureRestore, "restoring a checkpoint"
 	}
-	defer rpcClient.Release()
 
 	fill := func(req proto.Conmon_CreateContainerRequest) error {
 		if err := req.SetId(cfg.ID); err != nil {
@@ -191,7 +184,7 @@ func (c *ConmonClient) CreateContainer(
 		return &CreateContainerResult{PID: response.ContainerPid()}, nil
 	}
 
-	return callOn(ctx, c, rpcClient, proto.Conmon.CreateContainer, fill, read)
+	return callRequiring(ctx, c, feature, usage, proto.Conmon.CreateContainer, fill, read)
 }
 
 // ExecSyncContainerConfig is the configuration for calling the

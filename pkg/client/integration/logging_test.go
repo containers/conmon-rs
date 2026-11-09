@@ -21,6 +21,8 @@ var _ = Describe("JournaldLogger", func() {
 	Describe("Logging", func() {
 		for _, terminal := range []bool{true, false} {
 			It(testName("should log to journald", terminal), func(ctx SpecContext) {
+				skipWithoutJournald(ctx)
+
 				tr = newTestRunner()
 				// Unique markers, other specs may log to the journal at the same time.
 				marker := uuid.New().String()
@@ -65,6 +67,8 @@ var _ = Describe("JournaldLogger", func() {
 		}
 
 		It("should log the server with the systemd driver", func(ctx SpecContext) {
+			skipWithoutJournald(ctx)
+
 			tr = newTestRunner()
 			tr.createRuntimeConfig(false)
 
@@ -85,6 +89,8 @@ var _ = Describe("JournaldLogger", func() {
 		}, SpecTimeout(specTimeout))
 
 		It("should write the container name", func(ctx SpecContext) {
+			skipWithoutJournald(ctx)
+
 			tr = newTestRunner()
 			marker := uuid.New().String()
 			tr.createRuntimeConfigWithProcessArgs(

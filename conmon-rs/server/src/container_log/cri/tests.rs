@@ -100,8 +100,19 @@ async fn failed_rotation_keeps_the_rest_of_the_chunk() -> Result<()> {
     std::fs::remove_file(&path)?;
     std::fs::create_dir(&path)?;
 
-    let res = sut.write_chunk(Pipe::StdOut, b"abcd\nabcd\na\n").await;
-    assert!(res.is_err());
+    let err = sut
+        .write_chunk(Pipe::StdOut, b"abcd\nabcd\na\n")
+        .await
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_default();
+    assert!(
+        err.starts_with(&format!(
+            "reopen log file because of exceeded size: rename log file to '{}': ",
+            path.display()
+        )),
+        "{err}"
+    );
     assert_eq!(
         std::fs::read_to_string(&old)?,
         entry("stdout", "F", "abcd") + &entry("stdout", "F", "a")

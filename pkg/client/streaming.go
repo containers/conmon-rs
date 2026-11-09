@@ -232,13 +232,8 @@ func (c *ConmonClient) ServePortForwardContainer(
 	}
 
 	// The request goes to the checked server.
-	rpcClient, err := c.requireServerFeature(ctx, FeaturePortForward, "port forwarding")
-	if err != nil {
-		return nil, err
-	}
-	defer rpcClient.Release()
-
-	url, err := callOn(ctx, c, rpcClient, proto.Conmon.ServePortForwardContainer,
+	url, err := callRequiring(ctx, c, FeaturePortForward, "port forwarding",
+		proto.Conmon.ServePortForwardContainer,
 		func(req proto.Conmon_ServePortForwardContainerRequest) error {
 			if setErr := req.SetNetNsPath(cfg.NetNsPath); setErr != nil {
 				return fmt.Errorf("set network namespace path: %w", setErr)

@@ -107,12 +107,16 @@ generated code or the Makefile, see the `changes` job of
 
 The unit tests run as a regular user, and so do most integration tests. The OOM
 specs need elevated permissions for the cgroups, like the port forward specs for
-the network namespaces, and skip otherwise. Like CI, build the server, download
-the Go modules and install ginkgo as your user first, so that `target` and
-`.build` do not end up owned by root. Then run the suite as root with the `PATH`
-which finds `go`, your Go settings like `GOPROXY` (`GOENV`), your module cache
-and your Go toolchain. Leave out `GOCACHE`, root would leave files of its own in
-your build cache:
+the network namespaces, and skip otherwise. The specs which restore a
+checkpoint skip rootless as well, without criu on the `PATH`, and with a crun
+built without CRIU support, like the static release binaries: to run them,
+install criu and use runc or a crun of your distribution, whose `crun --version`
+lists `+CRIU`. The journald specs skip without a running journal, like in a
+container. Like CI, build the server, download the Go modules and install
+ginkgo as your user first, so that `target` and `.build` do not end up owned by
+root. Then run the suite as root with the `PATH` which finds `go`, your Go
+settings like `GOPROXY` (`GOENV`), your module cache and your Go toolchain.
+Leave out `GOCACHE`, root would leave files of its own in your build cache:
 
 ```console
 $ make unit unit-go

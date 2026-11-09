@@ -1,9 +1,14 @@
 use super::*;
 use crate::{
-    child_reaper::ReapableChild, config::Config, conmon_capnp::conmon::CgroupManager,
-    streaming_server::DEFAULT_CAPACITY, test_util::container_child,
+    child_reaper::ReapableChild,
+    config::Config,
+    conmon_capnp::conmon::CgroupManager,
+    process::Process,
+    streaming_server::DEFAULT_CAPACITY,
+    test_util::{Spawned, container_child, write_script},
 };
-use std::{process::Stdio, sync::Arc};
+use nix::unistd::Pid;
+use std::{fs, process::Stdio, sync::Arc};
 use tokio::{process::Command, task::LocalSet, time};
 
 #[tokio::test]
@@ -343,6 +348,153 @@ async fn exec_sync_reports_runtimes_which_do_not_start_the_process() -> anyhow::
                 stderr.contains("timed out waiting for the runtime"),
                 "{stderr}"
             );
+            Ok(())
+        })
+        .await
+}
+
+/// A bundle with a runtime of its own, for the creates through the RPC, see
+/// [`Bundle::with_runtime`].
+struct Bundle {
+    dir: tempfile::TempDir,
+    client: conmon::Client,
+}
+
+impl Bundle {
+    /// A bundle whose runtime records the arguments it got in the file
+    /// `args` of the bundle, one per line, takes the `--pid-file` argument
+    /// into `$PIDFILE` and runs `script` then.
+    fn with_runtime(script: &str) -> anyhow::Result<Self> {
+        let dir = tempfile::tempdir()?;
+        let runtime = dir.path().join("runtime");
+        let prelude = format!(
+            "printf '%s\\n' \"$@\" > {}\nwhile [ $# -gt 0 ] && [ \"$1\" != --pid-file ]; do shift; done\nPIDFILE=$2",
+            dir.path().join("args").display()
+        );
+        write_script(&runtime, &format!("{prelude}\n{script}"))?;
+        let config = Config::parse_for_test([
+            "--runtime",
+            runtime.to_str().context("runtime")?,
+            "--runtime-dir",
+            dir.path().to_str().context("runtime dir")?,
+        ]);
+        let client = capnp_rpc::new_client(Server::with_config(config));
+        Ok(Self { dir, client })
+    }
+
+    fn path(&self) -> String {
+        self.dir.path().display().to_string()
+    }
+
+    /// The PID file which the runtime gets.
+    fn pidfile(&self) -> PathBuf {
+        self.dir.path().join("pidfile")
+    }
+
+    /// The arguments the runtime got.
+    fn args(&self) -> anyhow::Result<Vec<String>> {
+        let args = fs::read_to_string(self.dir.path().join("args"))?;
+        Ok(args.lines().map(Into::into).collect())
+    }
+
+    /// Create the container `id` in the bundle with two command args, or
+    /// restore it from the `restore_path` if that is not empty, and return
+    /// the PID of the response.
+    fn create(&self, id: &str, restore_path: &str) -> impl Future<Output = capnp::Result<Pid>> {
+        let mut request = self.client.create_container_request();
+        let mut req = request.get().init_request();
+        req.set_id(id);
+        req.set_bundle_path(self.path());
+        req.set_restore_path(restore_path);
+        req.set_cgroup_manager(CgroupManager::Cgroupfs);
+        let mut command_args = req.init_command_args(2);
+        command_args.set(0, "--no-pivot");
+        command_args.set(1, "--opt=1");
+        let promise = request.send().promise;
+        async move {
+            let reply = promise.await?;
+            let pid = reply.get()?.get_response()?.get_container_pid();
+            let pid = i32::try_from(pid).map_err(|e| Error::failed(e.to_string()))?;
+            Ok(Pid::from_raw(pid))
+        }
+    }
+
+    /// Reopen the log of the container `id`, which fails for one the server
+    /// does not know.
+    async fn reopen_log(&self, id: &str) -> capnp::Result<()> {
+        let mut request = self.client.reopen_log_container_request();
+        request.get().init_request().set_id(id);
+        request.send().promise.await?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn create_runs_the_runtime_and_registers_the_container() -> anyhow::Result<()> {
+    LocalSet::new()
+        .run_until(async {
+            // The process which the runtime starts outlives it, like a
+            // container process which got reparented to the server.
+            let bundle = Bundle::with_runtime("sleep 60 & echo $! > \"$PIDFILE\"")?;
+            let dir = bundle.path();
+            let pidfile = bundle.pidfile().display().to_string();
+            let create = ["create", "--bundle", &dir, "--pid-file", &pidfile];
+            let restore = [
+                "restore",
+                "--bundle",
+                &dir,
+                "--pid-file",
+                &pidfile,
+                "--detach",
+                "--image-path",
+                "/ckpt",
+                "--work-path",
+                &dir,
+            ];
+            for (id, restore_path, command) in [
+                ("created", "", &create[..]),
+                ("restored", "/ckpt", &restore[..]),
+            ] {
+                let pid = bundle.create(id, restore_path).await?;
+                // Kills the process once done with it.
+                let _process = Spawned {
+                    pid,
+                    process: Process::open(pid),
+                };
+
+                // The command args follow the options of the server, the ID
+                // comes last.
+                let mut expected: Vec<String> = command.iter().map(|arg| arg.to_string()).collect();
+                expected.extend(["--no-pivot".into(), "--opt=1".into(), id.into()]);
+                assert_eq!(bundle.args()?, expected, "{id}");
+
+                // The response carries the PID the runtime wrote.
+                let written = fs::read_to_string(bundle.pidfile())?
+                    .trim()
+                    .parse::<i32>()?;
+                assert_eq!(pid.as_raw(), written, "{id}");
+
+                // The server knows the container, its log can be reopened.
+                bundle.reopen_log(id).await?;
+            }
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
+async fn failed_create_reports_the_runtime_and_registers_nothing() -> anyhow::Result<()> {
+    LocalSet::new()
+        .run_until(async {
+            let bundle = Bundle::with_runtime("echo boom >&2; exit 1")?;
+            let err = failure(bundle.create("ctr", "")).await;
+            assert!(err.starts_with("runtime exited with status 1"), "{err}");
+            // The stderr of the runtime tells why.
+            assert!(err.contains("boom"), "{err}");
+
+            // Nothing got registered under the ID.
+            let err = failure(bundle.reopen_log("ctr")).await;
+            assert!(err.starts_with("container not found"), "{err}");
             Ok(())
         })
         .await

@@ -10,6 +10,9 @@ import (
 	"github.com/containers/conmon-rs/pkg/client"
 )
 
+// The examples have no "// Output:" comments on purpose: they need a server
+// to run against, so go test only compiles them.
+
 // Starts or connects to the server of a run directory and releases the
 // client again, the server keeps running.
 func ExampleNew() {
