@@ -247,6 +247,18 @@ async fn requests_get_validated() -> anyhow::Result<()> {
         r#"invalid container ID "--help""#
     );
 
+    // The checkpoint of a restore has to be absolute like the other paths,
+    // an empty one is a create.
+    let mut request = client.create_container_request();
+    let mut req = request.get().init_request();
+    req.set_id("id");
+    req.set_bundle_path("/bundle");
+    req.set_restore_path("checkpoint");
+    assert_eq!(
+        failure(request.send().promise).await,
+        r#"restore path "checkpoint" is not absolute"#
+    );
+
     let mut request = client.attach_container_request();
     let mut req = request.get().init_request();
     req.set_id("id");

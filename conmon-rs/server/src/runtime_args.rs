@@ -1,4 +1,4 @@
-//! The command line of the OCI runtime for a create or an exec.
+//! The command line of the OCI runtime for a create, a restore or an exec.
 
 use crate::{
     config::{Config, LogLevel},
@@ -10,6 +10,7 @@ use std::{fmt, path::Path};
 use tracing::debug;
 
 /// What the command line of the OCI runtime gets generated from.
+#[derive(Clone, Copy)]
 pub(crate) struct GenerateRuntimeArgs<'a> {
     pub(crate) config: &'a Config,
     pub(crate) id: &'a str,
@@ -22,20 +23,40 @@ impl GenerateRuntimeArgs<'_> {
     const SYSTEMD_CGROUP_ARG: &'static str = "--systemd-cgroup";
     const LOG_LEVEL_FLAG_CRUN: &'static str = "--log-level";
 
-    /// Generate the OCI runtime CLI arguments from the provided parameters.
+    /// Generate the OCI runtime CLI arguments of a create, or of a restore
+    /// from the checkpoint at `restore_path`, like conmon with `--restore`:
+    /// the `restore` command takes the place of `create`, with `--detach`,
+    /// as the container runs once it got restored, the checkpoint as
+    /// `--image-path` and the bundle as `--work-path`, where CRIU runs and
+    /// writes its logs. The bundle and the PID file stay the same, and so do
+    /// the `command_args`, which carry the options of the restore, like the
+    /// `--runtime-opt` of conmon.
     pub(crate) fn create_args(
         self,
         bundle_path: &Path,
+        restore_path: Option<&Path>,
         command_args: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<Vec<String>> {
         let mut args = Vec::with_capacity(16);
         args.extend(self.default_args());
 
-        args.push("create".into());
+        args.push(if restore_path.is_some() {
+            "restore".into()
+        } else {
+            "create".into()
+        });
         args.push("--bundle".into());
         args.push(bundle_path.display().to_string());
         args.push("--pid-file".into());
         args.push(self.pidfile.display().to_string());
+
+        if let Some(restore_path) = restore_path {
+            args.push("--detach".into());
+            args.push("--image-path".into());
+            args.push(restore_path.display().to_string());
+            args.push("--work-path".into());
+            args.push(bundle_path.display().to_string());
+        }
 
         args.extend(command_args.into_iter().map(|arg| arg.as_ref().into()));
 

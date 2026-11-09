@@ -13,7 +13,8 @@ The server is started once per pod by the client, forks into the background and
 listens on a UNIX domain socket for RPCs. The client runs the following
 operations against it:
 
-- **Create container**: the server runs the OCI runtime's `create`, keeps the
+- **Create container**: the server runs the OCI runtime's `create`, or its
+  `restore` for a request with a checkpoint to restore from, keeps the
   container's standard streams (pipes or a pseudo terminal received over the
   runtime's console socket), writes the output to the configured log drivers
   (CRI format or journald) and watches the container's cgroup for out of

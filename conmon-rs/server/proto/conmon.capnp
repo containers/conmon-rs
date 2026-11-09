@@ -59,11 +59,12 @@ interface Conmon {
         # `servePortForwardContainer`; `idletimeout`, the `idleTimeoutSec` of
         # the exec and attach serve requests, which older servers ignore;
         # `streamingprotocols`, exec and attach sessions over SPDY and the
-        # WebSocket protocols before `v5.channel.k8s.io`. Servers before
-        # unreleased also reported `sdnotify`, the relay of sd_notify
-        # messages requested by `sdnotifySocketOld`, and `journaldfields`,
-        # the `containerName`, `tagOld` and `labelsOld` of the journald
-        # logger, which got retired.
+        # WebSocket protocols before `v5.channel.k8s.io`; `restore`, the
+        # `restorePath` of `createContainer`, which older servers ignore and
+        # create a new container instead. Servers before unreleased also
+        # reported `sdnotify`, the relay of sd_notify messages requested by
+        # `sdnotifySocketOld`, and `journaldfields`, the `containerName`,
+        # `tagOld` and `labelsOld` of the journald logger, which got retired.
         features @10 :List(Text);
     }
 
@@ -135,6 +136,16 @@ interface Conmon {
         # not report the `sdnotify` feature, which clients since v1.1.0
         # check first.
         sdnotifySocketOld @16 :Text;
+        # Since unreleased, the checkpoint to restore the container from, an
+        # absolute path, like conmon's `--restore`. With one, the server runs
+        # the `restore` command of the runtime instead of `create`, with
+        # `--detach`, `--image-path` set to it and `--work-path` set to the
+        # bundle, and monitors the restored container like a created one.
+        # Options of the restore, like `--no-pivot` or the SELinux options of
+        # runc, go through `commandArgs`. Older servers ignore the field and
+        # create a new container, so clients check the `restore` feature
+        # first. Empty for a create.
+        restorePath @17 :Text;
     }
 
     struct LogDriver {
@@ -184,13 +195,17 @@ interface Conmon {
 
     struct CreateContainerResponse {
         # The PID of the container process, which the runtime created but did
-        # not start yet.
+        # not start yet, or which it restored from the `restorePath` and
+        # which runs already.
         containerPid @0 :UInt32;
     }
 
     # Create a container with the runtime and monitor it until it exited:
     # write its output to the log drivers and its exit code to the exit
-    # files. The container gets started with the runtime by the caller.
+    # files. The container gets started with the runtime by the caller. With
+    # a `restorePath`, restore the container from the checkpoint instead
+    # (since unreleased, see the `restore` feature), it runs once the call
+    # returns.
     createContainer @1 (request: CreateContainerRequest) -> (response: CreateContainerResponse);
 
     ###############################################

@@ -418,6 +418,26 @@ func (tr *testRunner) startContainer() {
 	}, time.Second*10).Should(Succeed())
 }
 
+// skipWithoutCheckpointSupport skips the spec if the runtime cannot checkpoint
+// containers here: rootless, without criu, or with a crun which got built
+// without CRIU support, like its static release binaries.
+func skipWithoutCheckpointSupport(ctx context.Context) {
+	if unshare.IsRootless() {
+		Skip("does not run rootless")
+	}
+
+	if _, err := exec.LookPath("criu"); err != nil {
+		Skip("criu is not installed")
+	}
+
+	version, err := exec.CommandContext(ctx, runtimePath, "--version").CombinedOutput()
+	Expect(err).To(Succeed(), string(version))
+
+	if strings.HasPrefix(string(version), "crun") && !strings.Contains(string(version), "+CRIU") {
+		Skip("crun got built without CRIU support")
+	}
+}
+
 // expectContainerStoppedOrGone waits until the runtime reports the killed
 // container as stopped, or not at all once it got deleted.
 func (tr *testRunner) expectContainerStoppedOrGone() {

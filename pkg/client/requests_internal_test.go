@@ -251,7 +251,29 @@ func containerRequestCases() []requestCase {
 					`commandArgs = ["--command"], metadataOld = void, ` +
 					`metadata = [], envVarsOld = [], ` +
 					`cgroupManager = cgroupfs, additionalFdsOld = [], ` +
-					`leakFdsOld = [], sdnotifySocketOld = "")`,
+					`leakFdsOld = [], sdnotifySocketOld = "", restorePath = "")`,
+			},
+		},
+		{
+			name: "CreateContainer with restore path",
+			call: func(ctx context.Context, c *ConmonClient) error {
+				_, err := c.CreateContainer(ctx, &CreateContainerConfig{
+					ID:          "id",
+					BundlePath:  "/bundle",
+					CommandArgs: []string{"--no-pivot"},
+					RestorePath: "/checkpoint",
+				})
+
+				return err
+			},
+			want: request{
+				method: "CreateContainer",
+				text: `(id = "id", bundlePath = "/bundle", terminal = false, ` +
+					`stdin = false, exitPaths = [], oomExitPaths = [], ` +
+					`logDrivers = [], cleanupCmdOld = [], globalArgsOld = [], ` +
+					`commandArgs = ["--no-pivot"], metadataOld = void, metadata = [], ` +
+					`envVarsOld = [], cgroupManager = cgroupfs, additionalFdsOld = [], ` +
+					`leakFdsOld = [], sdnotifySocketOld = "", restorePath = "/checkpoint")`,
 			},
 		},
 		{
@@ -271,7 +293,7 @@ func containerRequestCases() []requestCase {
 					`logDrivers = [], cleanupCmdOld = [], globalArgsOld = [], ` +
 					`commandArgs = [], metadataOld = void, metadata = [], ` +
 					`envVarsOld = [], cgroupManager = cgroupfs, additionalFdsOld = [], ` +
-					`leakFdsOld = [], sdnotifySocketOld = "")`,
+					`leakFdsOld = [], sdnotifySocketOld = "", restorePath = "")`,
 			},
 		},
 		{
@@ -545,7 +567,7 @@ func TestRequestsCarryTheConfig(t *testing.T) {
 			t.Parallel()
 
 			dir := t.TempDir()
-			requests, _ := serveRecording(t, dir, FeaturePortForward)
+			requests, _ := serveRecording(t, dir, FeaturePortForward, FeatureRestore)
 
 			// Not the zero value, so that every request has to carry it.
 			c := newTestClient(t, dir, logrus.New())

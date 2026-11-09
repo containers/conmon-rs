@@ -335,6 +335,7 @@ var _ = Describe("ConmonClient", func() {
 				client.FeaturePortForward,
 				client.FeatureIdleTimeout,
 				client.FeatureStreamingProtocols,
+				client.FeatureRestore,
 			))
 		}, SpecTimeout(specTimeout))
 	})

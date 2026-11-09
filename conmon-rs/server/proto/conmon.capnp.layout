@@ -32,7 +32,7 @@ interface Conmon @0xb737e899dd6633f1 {
     metadataOld @9 :Void;  # bits[0, 0)
     features @10 :List(Text);  # ptr[8]
   }
-  struct CreateContainerRequest @0xba77e3fa3aa9b6ca {  # 8 bytes, 13 ptrs
+  struct CreateContainerRequest @0xba77e3fa3aa9b6ca {  # 8 bytes, 14 ptrs
     id @0 :Text;  # ptr[0]
     bundlePath @1 :Text;  # ptr[1]
     terminal @2 :Bool;  # bits[0, 1)
@@ -50,6 +50,7 @@ interface Conmon @0xb737e899dd6633f1 {
     additionalFdsOld @14 :List(UInt64);  # ptr[10]
     leakFdsOld @15 :List(UInt64);  # ptr[11]
     sdnotifySocketOld @16 :Text;  # ptr[12]
+    restorePath @17 :Text;  # ptr[13]
   }
   struct LogDriver @0xae78ee8eb6b3a134 {  # 16 bytes, 4 ptrs
     type @0 :Type;  # bits[0, 16)

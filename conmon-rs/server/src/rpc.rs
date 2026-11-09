@@ -357,6 +357,18 @@ impl conmon::Server for Server {
         let pidfile = bundle_path.join("pidfile");
         debug!("PID file is {}", pidfile.display());
 
+        // An empty one, which the older clients send, is a create. A client
+        // checks the `restore` feature before it sets one, see the schema.
+        let (restore_path, action) = match pry!(pry!(req.get_restore_path()).to_str()) {
+            "" => (None, "create container"),
+            path => {
+                let path = Path::new(path);
+                pry_err!(capnp_util::check_absolute("restore path", path));
+                debug!("Restoring from checkpoint {}", path.display());
+                (Some(path), "restore container")
+            }
+        };
+
         let child_reaper = self.reaper().clone();
         let command_args: Vec<String> = pry!(text_list(req.get_command_args()));
         let cgroup_manager = pry!(req.get_cgroup_manager());
@@ -367,7 +379,7 @@ impl conmon::Server for Server {
             pidfile: &pidfile,
             cgroup_manager,
         };
-        let args = pry_err!(args.create_args(bundle_path, &command_args));
+        let args = pry_err!(args.create_args(bundle_path, restore_path, &command_args));
         let stdin = req.get_stdin();
         let runtime = self.config().runtime().to_path_buf();
         let exit_paths: Vec<PathBuf> = pry!(text_list(req.get_exit_paths()));
@@ -383,10 +395,11 @@ impl conmon::Server for Server {
         Promise::from_future(
             async move {
                 // capnp-rpc drops this future once the client disconnects or
-                // gives up on the call. The runtime may be creating the
-                // container right then, so finish and register it in a task of
-                // its own, otherwise nothing would watch the container.
-                let create = spawn_logged("create container", async move {
+                // gives up on the call. The runtime may be creating or
+                // restoring the container right then, so finish and register
+                // it in a task of its own, otherwise nothing would watch the
+                // container.
+                let create = spawn_logged(action, async move {
                     container_log.lock().await.init().await?;
 
                     let (grandchild_pid, token, call) = match child_reaper
