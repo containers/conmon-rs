@@ -1,6 +1,6 @@
 //! The stdio channels and the collector of the output of an exec.
 
-use super::{ContainerIO, Drain, Message};
+use super::{ContainerIO, Drain, Message, STDERR_TAIL_SIZE};
 use crate::{
     channel::{Receiver, RecvError, Sender},
     mutex::lock,
@@ -124,13 +124,11 @@ pub(crate) struct EarlyStream {
     pub(crate) truncated: bool,
 
     /// The end of the output which got dropped, where the error of a runtime
-    /// which failed is, up to [`EarlyStream::TAIL_SIZE`].
-    pub(super) tail: Tail<{ EarlyStream::TAIL_SIZE }>,
+    /// which failed is, up to [`STDERR_TAIL_SIZE`].
+    pub(super) tail: Tail<STDERR_TAIL_SIZE>,
 }
 
 impl EarlyStream {
-    pub(super) const TAIL_SIZE: usize = 64 * 1024;
-
     pub(super) fn push(&mut self, data: &[u8]) {
         let len = self.data.len() + data.len();
         if self.truncated || len >= ContainerIO::MAX_STDIO_STREAM_SIZE {
@@ -148,12 +146,12 @@ impl EarlyStream {
         self.data.extend_from_slice(data);
     }
 
-    /// The last [`EarlyStream::TAIL_SIZE`] bytes of the output, also of the
+    /// The last [`STDERR_TAIL_SIZE`] bytes of the output, also of the
     /// part which got dropped. The dropped part continues the kept data, a
     /// short one gets completed by the end of the data.
     pub(super) fn end(&self) -> Vec<u8> {
         let tail = if self.truncated { self.tail.end() } else { &[] };
-        let from_data = Self::TAIL_SIZE.saturating_sub(tail.len());
+        let from_data = STDERR_TAIL_SIZE.saturating_sub(tail.len());
         let data = &self.data[self.data.len().saturating_sub(from_data)..];
         [data, tail].concat()
     }
@@ -304,7 +302,7 @@ impl ContainerIO {
                         // Only the end, like of truncated output, the error
                         // must not carry up to the size limit.
                         Ok((_, mut stderr)) => {
-                            stderr.drain(..stderr.len().saturating_sub(EarlyStream::TAIL_SIZE));
+                            stderr.drain(..stderr.len().saturating_sub(STDERR_TAIL_SIZE));
                             stderr
                         }
                         Err(read_err) => {

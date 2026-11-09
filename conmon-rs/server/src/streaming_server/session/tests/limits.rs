@@ -77,7 +77,7 @@ async fn too_large_sessions_end_without_the_idle_timeout() -> Result<()> {
 
     // The client does not read, the output backs up.
     let data = Bytes::from(vec![0; 32 * 1024]);
-    let backed_up = async { while output.data(STDOUT_BYTE, &data).await.is_ok() {} };
+    let backed_up = async { while output.data(Pipe::StdOut, &data).await.is_ok() {} };
     assert!(
         time::timeout(Duration::from_secs(1), backed_up)
             .await

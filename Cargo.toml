@@ -33,6 +33,7 @@ needless_pass_by_ref_mut = "warn"
 redundant_clone = "warn"
 semicolon_if_nothing_returned = "warn"
 undocumented_unsafe_blocks = "warn"
+uninlined_format_args = "warn"
 unused_async = "warn"
 
 [profile.release]

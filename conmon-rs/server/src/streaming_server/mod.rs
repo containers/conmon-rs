@@ -138,8 +138,10 @@ const TOO_MANY_REQUESTS: &str = "maximum number of in-flight requests exceeded";
 /// while sessions wait.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Serves the exec, attach and port forward sessions over HTTP on the
+/// loopback address, each under a one time URL, see
+/// [`StreamingServer::exec_url`].
 #[derive(Debug, Default)]
-/// The main streaming server structure of this module.
 pub(crate) struct StreamingServer {
     /// The port the server listens on, once it got started for the first
     /// session.
@@ -164,6 +166,16 @@ struct State {
 enum Session {
     Exec(Box<ExecSession>),
     Attach(AttachSession),
+}
+
+/// What the exec and attach sessions have in common.
+#[derive(Debug)]
+pub(crate) struct SessionCommon {
+    pub(crate) container_id: Box<str>,
+    pub(crate) stdin: bool,
+    pub(crate) stdout: bool,
+    pub(crate) stderr: bool,
+    pub(crate) idle_timeout: Option<Duration>,
 }
 
 impl StreamingServer {
@@ -408,7 +420,7 @@ impl StreamingServer {
         info!(
             "Got valid {} session for container {} and token {token:?}",
             session.typ(),
-            session.container_id()
+            session.common().container_id
         );
         Some(session)
     }
@@ -434,38 +446,11 @@ impl Session {
         }
     }
 
-    fn container_id(&self) -> &str {
+    /// What both kinds of sessions have.
+    fn common(&self) -> &SessionCommon {
         match self {
-            Session::Exec(s) => &s.container_id,
-            Session::Attach(s) => &s.container_id,
-        }
-    }
-
-    fn stdin(&self) -> bool {
-        match self {
-            Session::Exec(s) => s.stdin,
-            Session::Attach(s) => s.stdin,
-        }
-    }
-
-    fn stdout(&self) -> bool {
-        match self {
-            Session::Exec(s) => s.stdout,
-            Session::Attach(s) => s.stdout,
-        }
-    }
-
-    fn stderr(&self) -> bool {
-        match self {
-            Session::Exec(s) => s.stderr,
-            Session::Attach(s) => s.stderr,
-        }
-    }
-
-    fn idle_timeout(&self) -> Option<Duration> {
-        match self {
-            Session::Exec(s) => s.idle_timeout,
-            Session::Attach(s) => s.idle_timeout,
+            Session::Exec(s) => &s.common,
+            Session::Attach(s) => &s.common,
         }
     }
 

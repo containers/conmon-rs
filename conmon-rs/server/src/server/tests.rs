@@ -1,25 +1,5 @@
 use super::*;
 use crate::test_util::Log;
-use std::os::fd::AsRawFd;
-
-#[test]
-fn inherited_fds_reports_descriptors_above_stderr() -> Result<()> {
-    let file = tempfile::tempfile()?;
-    let fd = file.as_raw_fd();
-
-    let fds = Server::inherited_fds();
-
-    assert!(
-        fds.contains(&fd),
-        "expected an open descriptor {fd} to be reported, got {fds:?}"
-    );
-    // stdin, stdout and stderr are never reported, they are not ours to close.
-    assert!(!fds.contains(&0));
-    assert!(!fds.contains(&1));
-    assert!(!fds.contains(&2));
-
-    Ok(())
-}
 
 #[tokio::test]
 async fn cleanup_removes_the_socket() -> Result<()> {

@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    container_io::{ContainerIO, StdioSender},
+    container_io::{ContainerIO, Pipe, StdioSender},
     container_log::ContainerLog,
     test_util::{Log, wait_for},
 };
@@ -37,7 +37,7 @@ fn spawn_read_loop(
     token: &CancellationToken,
 ) -> Result<(UnixSeqpacket, JoinHandle<Result<()>>)> {
     let (server, client) = seqpacket_pair()?;
-    let task = task::spawn(Attach::read_loop(server, attach.clone(), token.clone()));
+    let task = task::spawn(read_loop(server, attach.clone(), token.clone()));
     Ok((client, task))
 }
 
@@ -185,7 +185,7 @@ async fn done_after_output_ended() -> Result<()> {
     assert!(output_ended);
     timeout(
         Duration::from_secs(5),
-        Attach::write_loop(
+        write_loop(
             server,
             attach.clone(),
             rx,
@@ -197,7 +197,7 @@ async fn done_after_output_ended() -> Result<()> {
 
     let mut buf = [1];
     assert_eq!(client.recv(&mut buf).await?.bytes_read(), 1);
-    assert_eq!(&buf, Attach::DONE_PACKET);
+    assert_eq!(&buf, DONE_PACKET);
     Ok(())
 }
 
@@ -208,7 +208,7 @@ async fn write_loop_stops_on_broken_pipe() -> Result<()> {
     drop(client);
 
     let (rx, _) = attach.subscribe();
-    let mut write_loop = task::spawn(Attach::write_loop(
+    let mut write_loop = task::spawn(write_loop(
         server,
         attach.clone(),
         rx,
@@ -229,11 +229,11 @@ async fn write_loop_stops_on_broken_pipe() -> Result<()> {
 /// Receive a packet of the attach protocol, which fits what CRI-O and the
 /// Go client read.
 async fn recv_packet(client: &UnixSeqpacket) -> Result<Vec<u8>> {
-    let mut buf = vec![0; 2 * Attach::PACKET_BUF_SIZE];
+    let mut buf = vec![0; 2 * PACKET_BUF_SIZE];
     let n = timeout(Duration::from_secs(5), client.recv(&mut buf))
         .await??
         .bytes_read();
-    assert!(n <= Attach::PACKET_BUF_SIZE + 1, "packet of {n} bytes");
+    assert!(n <= PACKET_BUF_SIZE + 1, "packet of {n} bytes");
     buf.truncate(n);
     Ok(buf)
 }
@@ -243,7 +243,7 @@ async fn write_loop_sends_full_reads_in_one_packet() -> Result<()> {
     let attach = SharedContainerAttach::default();
     let (server, client) = seqpacket_pair()?;
     let (rx, _) = attach.subscribe();
-    let _write_loop = task::spawn(Attach::write_loop(
+    let _write_loop = task::spawn(write_loop(
         server,
         attach.clone(),
         rx,
@@ -265,7 +265,7 @@ async fn write_loop_stops_on_hangup() -> Result<()> {
     let attach = SharedContainerAttach::default();
     let (server, client) = seqpacket_pair()?;
     let (rx, _) = attach.subscribe();
-    let write_loop = task::spawn(Attach::write_loop(
+    let write_loop = task::spawn(write_loop(
         server.clone(),
         attach.clone(),
         rx,
@@ -320,7 +320,7 @@ async fn write_loop_skips_the_oldest_output_for_a_slow_client() -> Result<()> {
     // waits for the client long before it caught up.
     setsockopt(&*server, sockopt::SndBuf, &1)?;
     let (rx, _) = attach.subscribe();
-    let write_loop = task::spawn(Attach::write_loop(
+    let write_loop = task::spawn(write_loop(
         server,
         attach.clone(),
         rx,
@@ -365,13 +365,7 @@ async fn write_loop_drains_after_exit() -> Result<()> {
     let (server, client) = seqpacket_pair()?;
     let (rx, _) = attach.subscribe();
     let token = CancellationToken::new();
-    let write_loop = task::spawn(Attach::write_loop(
-        server,
-        attach.clone(),
-        rx,
-        false,
-        token.clone(),
-    ));
+    let write_loop = task::spawn(write_loop(server, attach.clone(), rx, false, token.clone()));
 
     attach.write(Message::Data(Bytes::from_static(b"out"), Pipe::StdOut));
     token.cancel();
@@ -379,7 +373,7 @@ async fn write_loop_drains_after_exit() -> Result<()> {
 
     assert_eq!(recv_packet(&client).await?, b"\x02out");
     assert_eq!(recv_packet(&client).await?, b"\x03err");
-    assert_eq!(recv_packet(&client).await?, Attach::DONE_PACKET);
+    assert_eq!(recv_packet(&client).await?, DONE_PACKET);
     timeout(Duration::from_secs(5), write_loop).await???;
     Ok(())
 }
@@ -391,16 +385,10 @@ async fn write_loop_gives_up_on_stuck_client_after_exit() -> Result<()> {
     let (server, _client) = seqpacket_pair()?;
     let (rx, _) = attach.subscribe();
     let token = CancellationToken::new();
-    let write_loop = task::spawn(Attach::write_loop(
-        server,
-        attach.clone(),
-        rx,
-        false,
-        token.clone(),
-    ));
+    let write_loop = task::spawn(write_loop(server, attach.clone(), rx, false, token.clone()));
 
     // A client which does not read, until its socket takes no more.
-    let data = Bytes::from(vec![0; Attach::PACKET_BUF_SIZE]);
+    let data = Bytes::from(vec![0; PACKET_BUF_SIZE]);
     for _ in 0..OUTPUT_CHANNEL_SIZE {
         attach.write(Message::Data(data.clone(), Pipe::StdOut));
         task::yield_now().await;
@@ -434,18 +422,12 @@ async fn write_loop_drains_after_exit_with_busy_output() -> Result<()> {
             }
         }
     });
-    let write_loop = task::spawn(Attach::write_loop(
-        server,
-        attach.clone(),
-        rx,
-        false,
-        token.clone(),
-    ));
+    let write_loop = task::spawn(write_loop(server, attach.clone(), rx, false, token.clone()));
     tokio::time::sleep(Duration::from_millis(10)).await;
     token.cancel();
 
     let res = timeout(Duration::from_secs(10), async {
-        while recv_packet(&client).await? != Attach::DONE_PACKET {}
+        while recv_packet(&client).await? != DONE_PACKET {}
         Ok::<_, anyhow::Error>(())
     })
     .await;
@@ -508,9 +490,9 @@ async fn read_loop_forwards_large_packets() -> Result<()> {
 
     let packets = [
         vec![1],
-        vec![2; Attach::PACKET_BUF_SIZE],
-        vec![3; 4 * Attach::PACKET_BUF_SIZE],
-        vec![4; Attach::STDIN_PACKET_MAX_SIZE],
+        vec![2; PACKET_BUF_SIZE],
+        vec![3; 4 * PACKET_BUF_SIZE],
+        vec![4; STDIN_PACKET_MAX_SIZE],
     ];
     for packet in &packets {
         client.send(packet).await?;
@@ -521,11 +503,9 @@ async fn read_loop_forwards_large_packets() -> Result<()> {
     }
 
     // Larger packets get truncated.
-    client
-        .send(&vec![5; Attach::STDIN_PACKET_MAX_SIZE + 1])
-        .await?;
+    client.send(&vec![5; STDIN_PACKET_MAX_SIZE + 1]).await?;
     let data = timeout(Duration::from_secs(5), attach.read()).await??;
-    assert_eq!(data, vec![5; Attach::STDIN_PACKET_MAX_SIZE]);
+    assert_eq!(data, vec![5; STDIN_PACKET_MAX_SIZE]);
 
     token.cancel();
     task.await??;
@@ -772,7 +752,7 @@ async fn paths_which_are_no_sockets_stay() -> Result<()> {
     let file = dir.path().join("file");
     fs::write(&file, b"")?;
     let err = attach
-        .add(file.join("attach"), CancellationToken::new(), false)
+        .add(&file.join("attach"), CancellationToken::new(), false)
         .err()
         .map(|e| format!("{e:#}"))
         .unwrap_or_default();
@@ -872,7 +852,7 @@ async fn read_loop_stops_on_eof() -> Result<()> {
 
         timeout(
             Duration::from_secs(5),
-            Attach::read_loop(server, attach.clone(), CancellationToken::new()),
+            read_loop(server, attach.clone(), CancellationToken::new()),
         )
         .await??;
         assert_eq!(
@@ -895,11 +875,7 @@ async fn read_loop_forwards_stdin_after_reset() -> Result<()> {
     client.send(b"x").await?;
     drop(client);
 
-    let task = task::spawn(Attach::read_loop(
-        server,
-        attach.clone(),
-        CancellationToken::new(),
-    ));
+    let task = task::spawn(read_loop(server, attach.clone(), CancellationToken::new()));
     let data = timeout(Duration::from_secs(5), attach.read()).await??;
     assert_eq!(data, &b"x"[..]);
     timeout(Duration::from_secs(5), task).await???;
@@ -957,13 +933,7 @@ async fn write_loop_waits_for_slow_log_after_exit() -> Result<()> {
     let (server, client) = seqpacket_pair()?;
     let (rx, _) = attach.subscribe();
     let token = CancellationToken::new();
-    let write_loop = task::spawn(Attach::write_loop(
-        server,
-        attach.clone(),
-        rx,
-        false,
-        token.clone(),
-    ));
+    let write_loop = task::spawn(write_loop(server, attach.clone(), rx, false, token.clone()));
 
     let held = logger.clone().lock_owned().await;
     writer.write_all(b"last").await?;
@@ -975,7 +945,7 @@ async fn write_loop_waits_for_slow_log_after_exit() -> Result<()> {
     drop(held);
     assert_eq!(recv_packet(&client).await?, b"\x02last");
     drop(writer);
-    assert_eq!(recv_packet(&client).await?, Attach::DONE_PACKET);
+    assert_eq!(recv_packet(&client).await?, DONE_PACKET);
     timeout(Duration::from_secs(5), write_loop).await???;
     read_loop.await?
 }

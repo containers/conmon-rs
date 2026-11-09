@@ -2,14 +2,16 @@
 
 use crate::{
     container_io::Pipe,
-    container_log::{LogFile, Logger, lines},
+    container_log::{LogFile, lines},
 };
 use anyhow::{Context, Result};
 use std::{fmt::Write, path::Path};
 use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
+/// Writes the container output in the CRI log format, one entry per line
+/// with its timestamp, pipe and partial marker, to a file which gets rotated
+/// at its maximum size.
 #[derive(Debug)]
-/// The main structure used for container log handling.
 pub(crate) struct CriLogger {
     /// The log file on disk.
     file: LogFile,
@@ -102,15 +104,15 @@ impl Timestamp {
     }
 }
 
-impl Logger for CriLogger {
-    /// Partial lines are written right away with the `P` marker.
-    const BUFFERS_LINES: bool = false;
-
-    fn file(&mut self) -> Option<&mut LogFile> {
-        Some(&mut self.file)
+impl CriLogger {
+    /// The log file on disk.
+    pub(super) fn file(&mut self) -> &mut LogFile {
+        &mut self.file
     }
 
-    async fn write_chunk(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {
+    /// Write a raw chunk of output of the pipe, partial lines right away
+    /// with the `P` marker.
+    pub(super) async fn write_chunk(&mut self, pipe: Pipe, bytes: &[u8]) -> Result<()> {
         let timestamp = self.timestamp.update()?;
 
         let pipe_tag: &[u8] = match pipe {

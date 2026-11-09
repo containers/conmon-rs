@@ -64,11 +64,8 @@ fn create_args_for_runc() {
     );
 }
 
-/// A restore runs the `restore` command of the runtime instead of `create`,
-/// like conmon with `--restore`: detached, as the container runs once it got
-/// restored, with the checkpoint as the image path and the bundle as the
-/// work path. The rest stays like for a create, the command args carry the
-/// options of the restore.
+/// A restore runs `restore` with its flags in place of `create`, see
+/// [`GenerateRuntimeArgs::create_args`].
 #[test]
 fn restore_args_for_runc() {
     let args = runtime_args(

@@ -66,7 +66,7 @@ const STDIN_ENTRY_OVERHEAD: usize = 64;
 /// How many entries of stdin wait for the session loop. Each is at most
 /// [`STDIN_CHUNK_SIZE`], more of them would only hold more stdin which the
 /// container did not take.
-const STDIN_CHANNEL_SIZE: usize = 1;
+const STDIN_QUEUE_SIZE: usize = 1;
 
 /// How often a session pings the client, to notice a client which went away
 /// also while its stdin waits for the container. A WebSocket session pings
@@ -129,7 +129,7 @@ impl ClientRx {
     /// The input of a client which sends nothing while the returned senders
     /// live.
     pub(super) fn idle() -> (Self, (MpscSender<Stdin>, watch::Sender<Option<Bytes>>)) {
-        let (stdin_tx, stdin) = mpsc::channel(STDIN_CHANNEL_SIZE);
+        let (stdin_tx, stdin) = mpsc::channel(STDIN_QUEUE_SIZE);
         let (resize_tx, resize) = watch::channel(None);
         let client = Self {
             stdin,
@@ -209,11 +209,14 @@ impl StreamingServer {
             framing,
             activity.clone(),
             written.clone(),
-            session.idle_timeout(),
+            session.common().idle_timeout,
         );
         // A client which went away already ends the session in its loop,
         // which tears it down.
-        if let Err(e) = output.announce(session.stdout(), session.stderr()).await {
+        if let Err(e) = output
+            .announce(session.common().stdout, session.common().stderr)
+            .await
+        {
             debug!("Unable to announce the session: {e:#}");
         }
         let input = WebSocketInput {
@@ -237,9 +240,9 @@ impl StreamingServer {
         // A terminal merges stderr into stdout, Kubernetes clients do not
         // open a stream for it then.
         let expected = ExpectedStreams {
-            stdin: session.stdin(),
-            stdout: session.stdout(),
-            stderr: session.stderr() && !terminal,
+            stdin: session.common().stdin,
+            stdout: session.common().stdout,
+            stderr: session.common().stderr && !terminal,
         };
         // The session ends the connection once it was idle, which reports
         // the timeout to the client first.
@@ -256,7 +259,7 @@ impl StreamingServer {
             }
         };
         let (input, output) = streams.into_parts(connection, version).await;
-        let output = Output::spdy(output, session.idle_timeout());
+        let output = Output::spdy(output, session.common().idle_timeout);
         Self::run_session(output, input, session, activity).await;
         info!("Closing SPDY connection");
     }
@@ -271,7 +274,7 @@ impl StreamingServer {
         activity: Activity,
     ) {
         let peer_closed = output.peer_closed();
-        let (stdin_tx, stdin_rx) = mpsc::channel(STDIN_CHANNEL_SIZE);
+        let (stdin_tx, stdin_rx) = mpsc::channel(STDIN_QUEUE_SIZE);
         // Resize events go through their own channel, so that they do not
         // queue behind stdin the container does not read. Only the latest
         // size matters.
@@ -387,7 +390,7 @@ impl StreamingServer {
         session: Session,
         activity: Activity,
     ) -> JoinHandle<Option<Output>> {
-        let idle_timeout = session.idle_timeout();
+        let idle_timeout = session.common().idle_timeout;
         let too_large = client.too_large.clone();
         task::spawn(async move {
             let mut sender = sender;
@@ -409,7 +412,7 @@ impl StreamingServer {
                         // pending stdin waits for the runtime as well then,
                         // the process gets torn down in order afterwards.
                         // Without stdin, nothing waits.
-                        let stdin = s.stdin;
+                        let stdin = s.common.stdin;
                         let mut start = task::spawn(Self::start_exec(*s, client.resize.clone()));
                         let period = STDIN_FLUSH_TIMEOUT / 2;
                         let mut starting = time::interval_at(time::Instant::now() + period, period);

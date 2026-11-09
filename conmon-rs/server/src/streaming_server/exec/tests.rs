@@ -4,7 +4,7 @@ use crate::{
     config::Config,
     conmon_capnp::conmon::CgroupManager,
     container_log::ContainerLog,
-    streaming_server::{ExecSession, MAX_MESSAGE_SIZE, StreamingServer, testing::*},
+    streaming_server::{ExecSession, MAX_MESSAGE_SIZE, SessionCommon, StreamingServer, testing::*},
 };
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -83,12 +83,14 @@ async fn exec_websocket_with(
             tty: false,
             server_config: Arc::new(config),
             cgroup_manager: CgroupManager::Cgroupfs,
-            container_id: "id".into(),
             command: vec!["true".into()],
-            stdin,
-            stdout: true,
-            stderr: false,
-            idle_timeout,
+            common: SessionCommon {
+                container_id: "id".into(),
+                stdin,
+                stdout: true,
+                stderr: false,
+                idle_timeout,
+            },
         })
         .await?;
     let (response, stream) = upgrade(&server, &url, "GET", &websocket_headers(PROTOCOL_V5)).await?;

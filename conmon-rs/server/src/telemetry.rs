@@ -18,62 +18,56 @@ use tracing_opentelemetry::{OpenTelemetrySpanExt, SetParentError};
 const HOST_NAME: &str = "host.name";
 const PROCESS_PID: &str = "process.pid";
 
-/// The main structure of this module.
-pub(crate) struct Telemetry;
+/// Build the tracer provider which exports the spans to the OTLP endpoint.
+pub(crate) fn tracer_provider(endpoint: &str) -> Result<SdkTracerProvider> {
+    global::set_text_map_propagator(TraceContextPropagator::new());
 
-impl Telemetry {
-    /// Build the tracer provider which exports the spans to the OTLP
-    /// endpoint.
-    pub(crate) fn tracer_provider(endpoint: &str) -> Result<SdkTracerProvider> {
-        global::set_text_map_propagator(TraceContextPropagator::new());
+    let exporter = SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint)
+        .build()
+        .context("build exporter")?;
 
-        let exporter = SpanExporter::builder()
-            .with_tonic()
-            .with_endpoint(endpoint)
-            .build()
-            .context("build exporter")?;
+    let hostname = gethostname()
+        .context("get hostname")?
+        .to_str()
+        .context("convert hostname to string")?
+        .to_string();
 
-        let hostname = gethostname()
-            .context("get hostname")?
-            .to_str()
-            .context("convert hostname to string")?
-            .to_string();
+    let tracer = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(
+            Resource::builder()
+                .with_service_name(env!("CARGO_PKG_NAME"))
+                .with_attributes([
+                    KeyValue::new(PROCESS_PID, i64::from(process::id())),
+                    KeyValue::new(HOST_NAME, hostname),
+                ])
+                .build(),
+        )
+        .build();
 
-        let tracer = SdkTracerProvider::builder()
-            .with_batch_exporter(exporter)
-            .with_resource(
-                Resource::builder()
-                    .with_service_name(env!("CARGO_PKG_NAME"))
-                    .with_attributes([
-                        KeyValue::new(PROCESS_PID, i64::from(process::id())),
-                        KeyValue::new(HOST_NAME, hostname),
-                    ])
-                    .build(),
-            )
-            .build();
+    Ok(tracer)
+}
 
-        Ok(tracer)
+/// Set the parent context of a span from the provided slice data. It has to
+/// happen before the span got entered the first time, which starts it.
+pub(crate) fn set_parent_context(
+    span: &Span,
+    reader: Reader<conmon::text_text_map_entry::Owned>,
+) -> Result<()> {
+    if reader.is_empty() {
+        // Make it a noop if no data is provided.
+        return Ok(());
     }
 
-    /// Set the parent context of a span from the provided slice data. It has
-    /// to happen before the span got entered the first time, which starts it.
-    pub(crate) fn set_parent_context(
-        span: &Span,
-        reader: Reader<conmon::text_text_map_entry::Owned>,
-    ) -> Result<()> {
-        if reader.is_empty() {
-            // Make it a noop if no data is provided.
-            return Ok(());
-        }
-
-        let metadata = Metadata(into_map(reader)?);
-        let ctx = global::get_text_map_propagator(|prop| prop.extract(&metadata));
-        // Without the telemetry layer, which only exists with tracing
-        // enabled, there is nothing to set.
-        match span.set_parent(ctx) {
-            Ok(()) | Err(SetParentError::LayerNotFound | SetParentError::SpanDisabled) => Ok(()),
-            Err(e) => Err(e).context("set parent context"),
-        }
+    let metadata = Metadata(into_map(reader)?);
+    let ctx = global::get_text_map_propagator(|prop| prop.extract(&metadata));
+    // Without the telemetry layer, which only exists with tracing enabled,
+    // there is nothing to set.
+    match span.set_parent(ctx) {
+        Ok(()) | Err(SetParentError::LayerNotFound | SetParentError::SpanDisabled) => Ok(()),
+        Err(e) => Err(e).context("set parent context"),
     }
 }
 

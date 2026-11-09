@@ -3,12 +3,12 @@
 
 use crate::conmon_capnp::conmon::{self};
 #[cfg(feature = "tracing")]
-use crate::telemetry::Telemetry;
+use crate::telemetry;
 use crate::{
     child_reaper::ChildReaper,
     config::{Config, LogDriver},
     container_io::DRAIN_MAX_WAIT,
-    fs_util, init,
+    init,
     journal::{self, Journal},
     listener,
     streaming_server::StreamingServer,
@@ -21,13 +21,8 @@ use futures::{
 };
 use libc::_exit;
 use nix::{
-    fcntl::{OFlag, open},
-    sys::{
-        prctl,
-        signal::{Signal, kill},
-        stat::Mode,
-    },
-    unistd::{ForkResult, Pid, chdir, dup2_stderr, dup2_stdin, dup2_stdout, fork},
+    sys::signal::{Signal, kill},
+    unistd::{ForkResult, Pid, fork},
 };
 #[cfg(feature = "tracing")]
 use opentelemetry::trace::{FutureExt as OpenTelemetryFutureExt, TracerProvider};
@@ -35,8 +30,7 @@ use opentelemetry::trace::{FutureExt as OpenTelemetryFutureExt, TracerProvider};
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use std::{
     fs::File,
-    io::Write,
-    os::fd::{AsRawFd, IntoRawFd, RawFd},
+    io::{ErrorKind, Write},
     path::Path,
     sync::Arc,
 };
@@ -85,42 +79,39 @@ const _: () = assert!(
             + ChildReaper::STOP_BUDGET.as_nanos()
 );
 
+/// The conmonrs process: it serves the RPCs of its configuration and holds
+/// what the calls share, the reaper of the containers and execs and the
+/// streaming server.
 #[derive(Debug)]
-/// The main server structure.
 pub(crate) struct Server {
-    /// Server configuration.
     config: Arc<Config>,
-
-    /// Child reaper instance.
     reaper: Arc<ChildReaper>,
 
-    /// OpenTelemetry tracer instance.
+    /// The tracer provider which exports the spans, if tracing is enabled.
     #[cfg(feature = "tracing")]
     tracer: Option<SdkTracerProvider>,
-
-    /// Streaming server instance.
     streaming_server: Arc<StreamingServer>,
 }
 
 impl Server {
-    /// Server configuration.
+    /// The configuration of the server.
     pub(crate) fn config(&self) -> &Arc<Config> {
         &self.config
     }
 
-    /// Child reaper instance.
+    /// The reaper of the containers and execs.
     pub(crate) fn reaper(&self) -> &Arc<ChildReaper> {
         &self.reaper
     }
 
-    /// Streaming server instance.
+    /// The streaming server of the exec, attach and port forward sessions.
     pub(crate) fn streaming_server(&self) -> &Arc<StreamingServer> {
         &self.streaming_server
     }
 
     /// Create a new server for a validated and prepared configuration.
     pub(crate) fn new(config: Config) -> Result<Self> {
-        Self::init().context("init self")?;
+        init::set_up_process().context("set up process")?;
         Ok(Self::with_config(config))
     }
 
@@ -134,76 +125,6 @@ impl Server {
             tracer: Default::default(),
             streaming_server: Default::default(),
         }
-    }
-
-    /// Close file descriptors inherited from whatever started us.
-    ///
-    /// conmon-rs daemonizes and outlives the process that spawned it, so any
-    /// descriptor it inherits stays open for the lifetime of the server. If
-    /// the spawning process was itself started with extra descriptors open,
-    /// holding them can keep that process tree from ever finishing, for
-    /// example a test harness waiting for its own pipe to close.
-    ///
-    /// conmon does the same thing, see `close_all_fds_ge_than(3)` there. Any
-    /// descriptor conmon-rs actually needs is created after this point, so
-    /// nothing above stderr is worth keeping.
-    #[expect(unsafe_code, reason = "closing descriptors which may be gone")]
-    fn close_inherited_fds() {
-        for fd in Self::inherited_fds() {
-            // The descriptor used to enumerate them is already closed by now,
-            // so check before closing to avoid closing an unrelated descriptor
-            // that reused the number. This runs before tokio starts, so nothing
-            // else can be opening descriptors concurrently.
-            //
-            // These are raw libc calls rather than the `nix` wrappers on
-            // purpose: `BorrowedFd`/`OwnedFd` require the descriptor to be open
-            // for the duration of the borrow, and whether it is still open is
-            // exactly what is unknown here. `fcntl(2)` and `close(2)` take a
-            // plain integer with no such precondition and report `EBADF`.
-            //
-            // SAFETY: both calls are defined for any integer; a stale or
-            // invalid descriptor number fails with `EBADF` rather than
-            // affecting anything else.
-            if unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1 {
-                // SAFETY: as above.
-                unsafe { libc::close(fd) };
-            }
-        }
-    }
-
-    /// Every open descriptor above stderr. Split out from `close_inherited_fds`
-    /// so it can be tested without closing the test runner's own descriptors.
-    ///
-    /// This is Linux only: it enumerates `/proc/self/fd` and would report
-    /// nothing at all where that is unavailable, silently leaking the inherited
-    /// descriptors. conmon-rs already requires Linux elsewhere (`prctl`, epoll,
-    /// journald), so the assertion below just makes a port fail here loudly
-    /// rather than lose the behaviour quietly. A log line would not work,
-    /// `close_inherited_fds` runs well before `init_logging`.
-    fn inherited_fds() -> Vec<RawFd> {
-        const {
-            assert!(
-                cfg!(target_os = "linux"),
-                "inherited fds are enumerated through /proc/self/fd, which is Linux only"
-            );
-        };
-
-        let mut fds = Vec::new();
-
-        if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
-            for entry in entries.flatten() {
-                if let Some(fd) = entry
-                    .file_name()
-                    .to_str()
-                    .and_then(|name| name.parse::<RawFd>().ok())
-                    && fd > 2
-                {
-                    fds.push(fd);
-                }
-            }
-        }
-
-        fds
     }
 
     /// Upper bound for the threads of the blocking pool, which serve file
@@ -233,7 +154,8 @@ impl Server {
             // thread pool. The parent only writes the PID file and exits.
             match unsafe { fork()? } {
                 ForkResult::Parent { child, .. } => self.exit_parent(child),
-                ForkResult::Child => self.redirect_stdio().map_err(|e| self.log_early(e))?,
+                ForkResult::Child => init::redirect_stdio(self.config().log_driver())
+                    .map_err(|e| self.log_early(e))?,
             }
             // The default hook prints the message of a panic to stderr,
             // which goes nowhere now with a driver other than stdout. Also
@@ -248,7 +170,7 @@ impl Server {
 
         // Deliberately outside the `skip_fork` check above: the server outlives
         // its parent either way, so the descriptors have to go either way.
-        Self::close_inherited_fds();
+        init::close_inherited_fds();
 
         let rt = match Self::build_runtime() {
             Ok(rt) => rt,
@@ -294,26 +216,6 @@ impl Server {
         unsafe { _exit(0) };
     }
 
-    /// Like a daemon, do not keep the standard streams of the caller, like
-    /// the file the Go client reads the launch errors from, see
-    /// `startServer` in `pkg/client`. The processes the server starts, like
-    /// the runtimes, would write into it otherwise. Only the stdout log driver
-    /// writes to them.
-    fn redirect_stdio(&self) -> Result<()> {
-        if self.config().log_driver() == LogDriver::Stdout {
-            return Ok(());
-        }
-        let null = open(c"/dev/null", OFlag::O_RDWR, Mode::empty()).context("open /dev/null")?;
-        dup2_stdin(&null).context("redirect stdin")?;
-        dup2_stdout(&null).context("redirect stdout")?;
-        dup2_stderr(&null).context("redirect stderr")?;
-        // A closed standard stream got it, which has to stay.
-        if null.as_raw_fd() <= libc::STDERR_FILENO {
-            let _: RawFd = null.into_raw_fd();
-        }
-        Ok(())
-    }
-
     /// The runtime of the server, see [`Server::MAX_BLOCKING_THREADS`].
     fn build_runtime() -> Result<Runtime> {
         Builder::new_current_thread()
@@ -327,7 +229,7 @@ impl Server {
 
     /// Log an error from before the logging got set up, and return it. The
     /// systemd driver still gets it into the journal, the standard streams
-    /// are gone after the fork, see [`Server::redirect_stdio`]. With the
+    /// are gone after the fork, see [`init::redirect_stdio`]. With the
     /// stdout driver, `main` prints it to the stderr of the caller.
     fn log_early(&self, e: anyhow::Error) -> anyhow::Error {
         if self.config().log_driver() == LogDriver::Systemd
@@ -340,10 +242,11 @@ impl Server {
         e
     }
 
-    /// Set up the process and serve until the server ends. Its failures get
-    /// logged, also the one of the backend, see [`Server::logged`].
+    /// Set up the process to serve, once the logging is, and serve until the
+    /// server ends. Its failures get logged, also the one of the backend, see
+    /// [`Server::logged`].
     async fn serve(self) -> Result<()> {
-        let result = match Self::init_process() {
+        let result = match init::set_up_serving() {
             Ok(()) => self.run_tasks().await,
             Err(e) => Err(e),
         };
@@ -358,19 +261,6 @@ impl Server {
             error!("{e:#}");
             Err(e)
         })
-    }
-
-    /// Set up the process to serve, once the logging is.
-    fn init_process() -> Result<()> {
-        // Do not keep the working directory of the caller busy, like a mount
-        // which then cannot be unmounted. The paths of the configuration are
-        // absolute, see `Config::make_absolute`, and so are the ones of the
-        // requests.
-        chdir("/").context("change into the root directory")?;
-
-        // The container processes get reparented to the server once their
-        // runtime exits.
-        prctl::set_child_subreaper(true).context("set child subreaper")
     }
 
     /// Export the remaining spans. That needs the runtime the exporter was
@@ -424,20 +314,6 @@ impl Server {
     /// cleanup, through a blocking pool which stuck threads may fill up.
     const SOCKET_REMOVAL_TIMEOUT: Duration = Duration::from_millis(500);
 
-    fn init() -> Result<()> {
-        // The server keeps the C locale, unlike conmon, so that the errors
-        // it returns to CRI-O do not depend on the environment. The umask is
-        // set before the configuration prepares the runtime directories, see
-        // `crate::run`.
-        init::unset_notify_socket();
-        init::save_oom_score();
-        init::raise_nofile_limit();
-        init::configure_malloc();
-        // While we could configure this, standard practice has it as -1000,
-        // so it may be YAGNI to add configuration.
-        init::set_oom_score("-1000")
-    }
-
     #[cfg_attr(
         not(feature = "tracing"),
         expect(
@@ -450,7 +326,7 @@ impl Server {
 
         #[cfg(feature = "tracing")]
         let telemetry_layer = if self.config().enable_tracing() {
-            let tracer = Telemetry::tracer_provider(self.config().tracing_endpoint())
+            let tracer = telemetry::tracer_provider(self.config().tracing_endpoint())
                 .context("build tracer provider")?;
 
             self.tracer = Some(tracer.clone());
@@ -500,7 +376,8 @@ impl Server {
                 info!("Using systemd/journald logger");
             }
         }
-        info!("Set log level to: {}", self.config().log_level());
+        let level = self.config().log_level();
+        info!("Set log level to: {level}");
         Ok(())
     }
 
@@ -662,7 +539,12 @@ impl Server {
 
         debug!("Removing socket file {}", socket.as_ref().display());
         let socket_removed = Self::until(deadline, async {
-            fs_util::removed(fs::remove_file(socket).await).map_err(Into::into)
+            // One which got removed already, like with its directory, is
+            // fine.
+            match fs::remove_file(socket).await {
+                Err(e) if e.kind() != ErrorKind::NotFound => Err(e.into()),
+                _ => Ok(()),
+            }
         })
         .await
         .context("remove socket file");

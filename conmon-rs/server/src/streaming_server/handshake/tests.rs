@@ -2,7 +2,8 @@ use super::*;
 use crate::{
     random_id::RandomId,
     streaming_server::{
-        ADDR, ATTACH_PATH, AttachSession, EXEC_PATH, PORT_FORWARD_PATH, StreamingServer,
+        ADDR, ATTACH_PATH, AttachSession, EXEC_PATH, PORT_FORWARD_PATH, SessionCommon,
+        StreamingServer,
         remotecommand::SPDY_PROTOCOLS,
         spdy::testing::{Client, Frame, Headers},
         testing::*,
@@ -183,13 +184,15 @@ async fn port_forward_rejects_other_upgrades() -> Result<()> {
             let (_, child, _) = attach_child(false)?;
             let url = server
                 .attach_url(AttachSession {
-                    container_id: "id".into(),
                     child,
-                    stdin: false,
-                    stdout: true,
-                    stderr: false,
                     stop_after_stdin_eof: false,
-                    idle_timeout: None,
+                    common: SessionCommon {
+                        container_id: "id".into(),
+                        stdin: false,
+                        stdout: true,
+                        stderr: false,
+                        idle_timeout: None,
+                    },
                 })
                 .await?
                 .replace(ATTACH_PATH, PORT_FORWARD_PATH);
@@ -208,13 +211,15 @@ async fn sessions_work_on_their_path_only() -> Result<()> {
             let (_, child, _token) = attach_child(false)?;
             let url = server
                 .attach_url(AttachSession {
-                    container_id: "id".into(),
                     child,
-                    stdin: false,
-                    stdout: true,
-                    stderr: false,
                     stop_after_stdin_eof: false,
-                    idle_timeout: None,
+                    common: SessionCommon {
+                        container_id: "id".into(),
+                        stdin: false,
+                        stdout: true,
+                        stderr: false,
+                        idle_timeout: None,
+                    },
                 })
                 .await?;
 
@@ -247,13 +252,15 @@ async fn spdy_upgrades_get_negotiated() -> Result<()> {
                 let (_, child, _token) = attach_child(false)?;
                 let url = server
                     .attach_url(AttachSession {
-                        container_id: "id".into(),
                         child,
-                        stdin: false,
-                        stdout: true,
-                        stderr: false,
                         stop_after_stdin_eof: false,
-                        idle_timeout: None,
+                        common: SessionCommon {
+                            container_id: "id".into(),
+                            stdin: false,
+                            stdout: true,
+                            stderr: false,
+                            idle_timeout: None,
+                        },
                     })
                     .await?;
                 let (response, _) = upgrade(&server, &url, "POST", headers).await?;
@@ -286,13 +293,15 @@ async fn rejected_upgrades_keep_the_token() -> Result<()> {
             let (_, child, _token) = attach_child(false)?;
             let url = server
                 .attach_url(AttachSession {
-                    container_id: "id".into(),
                     child,
-                    stdin: false,
-                    stdout: true,
-                    stderr: false,
                     stop_after_stdin_eof: false,
-                    idle_timeout: None,
+                    common: SessionCommon {
+                        container_id: "id".into(),
+                        stdin: false,
+                        stdout: true,
+                        stderr: false,
+                        idle_timeout: None,
+                    },
                 })
                 .await?;
             let unknown = url.replace(
@@ -320,13 +329,15 @@ async fn rejected_upgrades_keep_the_token() -> Result<()> {
                 let (_, child, _token) = attach_child(false)?;
                 let url = server
                     .attach_url(AttachSession {
-                        container_id: "id".into(),
                         child,
-                        stdin: false,
-                        stdout: true,
-                        stderr: false,
                         stop_after_stdin_eof: false,
-                        idle_timeout: None,
+                        common: SessionCommon {
+                            container_id: "id".into(),
+                            stdin: false,
+                            stdout: true,
+                            stderr: false,
+                            idle_timeout: None,
+                        },
                     })
                     .await?;
                 let (response, _) = upgrade(&server, &url, "POST", &rejected).await?;

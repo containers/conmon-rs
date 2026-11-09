@@ -58,7 +58,7 @@ where
 
         let (_, inserted, value) = entry?;
         if now - inserted > self.max_duration {
-            debug!("Max duration expired for key: {:?}", k);
+            debug!("Max duration expired for key: {k:?}");
             None
         } else {
             Some(value)
@@ -103,7 +103,7 @@ where
         }
 
         if expired_count > 0 {
-            debug!("Removed {} timed out elements", expired_count);
+            debug!("Removed {expired_count} timed out elements");
         }
     }
 
@@ -125,14 +125,17 @@ where
 /// until the elements expire.
 pub(crate) const DEFAULT_CAPACITY: usize = 1000;
 
+/// How long an element waits for its client by default. A client connects
+/// right after it got the URL, the kubelet keeps its streaming requests for
+/// a minute as well.
+const MAX_AGE: Duration = Duration::from_secs(60);
+
 impl<K, V> Default for BoundedMap<K, V> {
     fn default() -> Self {
         Self {
             entries: VecDeque::new(),
             capacity: DEFAULT_CAPACITY,
-            // A client connects right after it got the URL, the kubelet
-            // keeps its streaming requests for a minute as well.
-            max_duration: Duration::from_secs(60),
+            max_duration: MAX_AGE,
         }
     }
 }

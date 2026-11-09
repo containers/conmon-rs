@@ -1,7 +1,7 @@
 //! The streams of a SPDY session.
 
 use super::*;
-use crate::streaming_server::stream_protocol::STREAM_CREATION_TIMEOUT;
+use crate::streaming_server::{SessionCommon, stream_protocol::STREAM_CREATION_TIMEOUT};
 
 /// A client which does not open all the streams of its session gets its
 /// connection ended after [`STREAM_CREATION_TIMEOUT`], the session does not
@@ -86,13 +86,15 @@ async fn late_output_streams_end_instead_of_failing() -> Result<()> {
                 let server = StreamingServer::default();
                 let url = server
                     .attach_url(AttachSession {
-                        container_id: "id".into(),
                         child,
-                        stdin: true,
-                        stdout: true,
-                        stderr: true,
                         stop_after_stdin_eof: false,
-                        idle_timeout: None,
+                        common: SessionCommon {
+                            container_id: "id".into(),
+                            stdin: true,
+                            stdout: true,
+                            stderr: true,
+                            idle_timeout: None,
+                        },
                     })
                     .await?;
                 let (response, stream) = upgrade(

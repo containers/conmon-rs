@@ -3,7 +3,7 @@
 
 use super::{ChildReaper, InFlight, PendingPid};
 use crate::{
-    container_io::{ContainerIO, READ_BUFFER_SIZE, with_scratch},
+    container_io::{ContainerIO, READ_BUFFER_SIZE, STDERR_TAIL_SIZE},
     fs_util, init,
     mutex::lock,
     process::{
@@ -11,7 +11,7 @@ use crate::{
     },
     runtime_args::LoggedArgs,
     tail::Tail,
-    util::with_stderr,
+    util::{with_scratch, with_stderr},
 };
 use anyhow::{Context, Result, bail, format_err};
 use nix::{
@@ -46,12 +46,9 @@ pub(crate) struct RuntimeOutput {
     task: JoinHandle<()>,
 }
 
-type StderrTail = Tail<{ RuntimeOutput::MAX_STDERR }>;
+type StderrTail = Tail<STDERR_TAIL_SIZE>;
 
 impl RuntimeOutput {
-    /// How much of the end of stderr is kept.
-    pub(super) const MAX_STDERR: usize = 64 * 1024;
-
     /// Start reading the pipes of a runtime in the background.
     pub(crate) fn spawn(stdout: Option<ChildStdout>, stderr: Option<ChildStderr>) -> Self {
         let buf = Arc::<Mutex<StderrTail>>::default();
@@ -159,7 +156,41 @@ impl<'a> RuntimeCall<'a> {
     }
 }
 
+/// The process a runtime started, see [`ChildReaper::create_child`].
+pub(crate) struct StartedChild {
+    /// The PID the runtime reported, a child of the server.
+    pub(crate) pid: Pid,
+
+    /// Cancelled once the process exited, or once its call failed.
+    pub(crate) token: CancellationToken,
+
+    /// The call, which ends with the registration of the process.
+    pub(crate) call: InFlight,
+}
+
 impl ChildReaper {
+    /// How long the runtime of a create may take before it gets killed, well
+    /// above the time CRI-O gives the creation of a container, so that a
+    /// runtime which hangs does not keep its call in progress forever.
+    pub(crate) const CREATE_RUNTIME_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+    /// How long the runtime of an exec may take beyond its timeout before it
+    /// gets killed. It only starts the process, so this bounds an exec
+    /// without a timeout as well.
+    pub(super) const EXEC_RUNTIME_GRACE: Duration = Duration::from_secs(60);
+
+    /// When the runtime of an exec with the `timeout` gets killed. A runtime
+    /// which hangs must not keep its call in progress forever, which defers
+    /// the reaping of orphans and delays the shutdown.
+    pub(crate) fn exec_runtime_deadline(timeout: Option<Instant>) -> Instant {
+        let timeout = timeout.unwrap_or_else(Instant::now);
+        // A timeout too far in the future to add the grace to is never
+        // reached either.
+        timeout
+            .checked_add(Self::EXEC_RUNTIME_GRACE)
+            .unwrap_or(timeout)
+    }
+
     /// Spawn the runtime, see [`ChildReaper::create_child`].
     fn spawn_runtime(runtime: &Path, args: &[String], stdin: bool) -> Result<RuntimeChild> {
         let mut cmd = Command::new(runtime);
@@ -196,13 +227,13 @@ impl ChildReaper {
     pub(super) const STOPPED_OUTPUT_WAIT: Duration = Duration::from_millis(250);
 
     /// Run the runtime with the I/O of the process it starts, and return the
-    /// PID of the process once the runtime exited. The caller registers it
-    /// through [`ChildReaper::watch_grandchild`].
+    /// process once the runtime exited. The caller registers it through
+    /// [`ChildReaper::watch_grandchild`].
     pub(crate) async fn create_child(
         &self,
         call: RuntimeCall<'_>,
         container_io: &mut ContainerIO,
-    ) -> Result<(Pid, CancellationToken, InFlight)> {
+    ) -> Result<StartedChild> {
         let RuntimeCall {
             runtime,
             args,
@@ -218,14 +249,11 @@ impl ChildReaper {
         // same bundle earlier, would name a process which the cleanup of a
         // failed call kills, see `cleanup_failed_grandchild`.
         fs_util::remove_file(pidfile).context("remove stale PID file")?;
-        debug!(
-            "Running: {:?} {:?}",
-            runtime,
-            LoggedArgs {
-                args,
-                command_start
-            }
-        );
+        let logged_args = LoggedArgs {
+            args,
+            command_start,
+        };
+        debug!("Running: {runtime:?} {logged_args:?}");
         // With a terminal, the process gets the terminal as its stdin, the
         // pipe would stay unused.
         let stdin_pipe = stdin && container_io.terminal().is_none();
@@ -234,7 +262,7 @@ impl ChildReaper {
 
         // Not waited for yet, so it has its PID. Dropping it on a failure
         // kills it.
-        let runtime_pid = child_pid(child.id()).context("PID of runtime")?;
+        let runtime_pid = child_pid(child.id()).context("get PID of runtime")?;
         let mut child = Runtime {
             child,
             pending: Some(PendingPid::new(&self.pending, runtime_pid)),
@@ -290,7 +318,13 @@ impl ChildReaper {
             // Claimed above, so the cleanup of the failure below leaves a
             // foreign PID alone, see `cleanup_failed_grandchild`.
             Some(Ok(pid)) => match Self::check_reported_pid(pid, is_subreaper()) {
-                Ok(()) => return Ok((pid, token, in_flight)),
+                Ok(()) => {
+                    return Ok(StartedChild {
+                        pid,
+                        token,
+                        call: in_flight,
+                    });
+                }
                 Err(e) => e,
             },
             Some(Err(e)) => e,

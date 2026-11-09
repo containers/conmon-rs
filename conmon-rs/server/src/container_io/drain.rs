@@ -32,9 +32,11 @@ enum Logging {
 pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Upper bound for the messages forwarded per drain after the process exited.
-/// The output written before the exit is at most what the channels (up to
-/// 128 messages) and the pipe buffers hold. With the default pipe-max-size of
-/// 1 MiB in 8 KiB reads, that is 128 messages per pipe, and small writes
+/// The output written before the exit is at most what the channels, the
+/// [`STDIO_CHANNEL_SIZE`](super::STDIO_CHANNEL_SIZE) of the stdio ones or
+/// the [`OUTPUT_CHANNEL_SIZE`](crate::attach::OUTPUT_CHANNEL_SIZE) of the
+/// attach broadcast, and the pipe buffers hold. With the default pipe-max-size
+/// of 1 MiB in 8 KiB reads, that is 128 messages per pipe, and small writes
 /// read one by one do not fill a pipe of that size either, so this is well
 /// above. It is a heuristic though, a process with CAP_SYS_RESOURCE can grow
 /// its pipes further. More output stems from a grandchild which keeps the

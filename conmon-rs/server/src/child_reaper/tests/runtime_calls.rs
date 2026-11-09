@@ -67,7 +67,7 @@ async fn abandoned_call_releases_its_process() -> Result<()> {
     let script = format!("sleep 60 & echo $! > {}", pidfile.display());
     let args = ["-c".into(), script];
     let mut io = ContainerIO::new(false, ContainerLog::new())?;
-    let (pid, token, call) = reaper
+    let StartedChild { pid, token, call } = reaper
         .create_child(
             RuntimeCall::new(Path::new("sh"), &args, &pidfile, distant_deadline()),
             &mut io,
@@ -100,7 +100,9 @@ async fn runtime_without_stdin_gets_dev_null() -> Result<()> {
     );
     let args = ["-c".into(), script];
     let mut io = ContainerIO::new(false, ContainerLog::new())?;
-    let (_, token, _call) = reaper
+    let StartedChild {
+        token, call: _call, ..
+    } = reaper
         .create_child(
             RuntimeCall::new(Path::new("sh"), &args, &pidfile, distant_deadline()),
             &mut io,
@@ -133,7 +135,7 @@ async fn runtime_output_with_terminal_does_not_block() -> Result<()> {
     let err = format!("{:#}", res.err().context("runtime failure expected")?);
     assert!(err.contains("runtime exited with status 1"), "{err}");
     assert!(err.trim_end().ends_with("the-error"));
-    assert!(err.len() < 2 * runtime_call::RuntimeOutput::MAX_STDERR);
+    assert!(err.len() < 2 * STDERR_TAIL_SIZE);
     assert!(start.elapsed() < Duration::from_secs(10));
     Ok(())
 }
@@ -344,4 +346,19 @@ fn reported_pids_have_to_be_children() -> Result<()> {
     child.0.wait()?;
     assert!(ChildReaper::check_reported_pid(pid, true).is_err());
     Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn exec_runtimes_always_get_a_deadline() {
+    let now = Instant::now();
+    let timeout = now + Duration::from_secs(10);
+    assert_eq!(
+        ChildReaper::exec_runtime_deadline(Some(timeout)),
+        timeout + ChildReaper::EXEC_RUNTIME_GRACE
+    );
+    // Without a timeout of the process, the runtime still gets one.
+    assert_eq!(
+        ChildReaper::exec_runtime_deadline(None),
+        now + ChildReaper::EXEC_RUNTIME_GRACE
+    );
 }

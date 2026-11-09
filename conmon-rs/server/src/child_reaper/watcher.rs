@@ -1,9 +1,10 @@
 //! Watching a registered child until it exited, and what follows.
 
-use super::{EXIT_CODE_TIMED_OUT, ExitChannelData, ReapableChild, kill_grandchild};
+use super::{
+    Child, ChildKind, EXIT_CODE_TIMED_OUT, ExitChannelData, ReapableChild, kill_grandchild,
+};
 use crate::{
     attach::SharedContainerAttach,
-    child::{Child, ChildKind},
     container_io::{DRAIN_MAX_LOG_WAIT, Drain, Message},
     container_log::{ContainerLog, SharedContainerLog},
     fs_util,
@@ -235,7 +236,6 @@ impl ReapableChild {
             async move {
                 // Only created on the first poll, see above.
                 let _forget = OnDrop(Some(forget));
-                debug!("Running task");
                 // Nobody learns about an OOM without the files, like an exec.
                 let oom = async {
                     if oom_exit_paths.is_empty() {
@@ -254,6 +254,7 @@ impl ReapableChild {
                 };
                 let ((exit_code, timed_out), event) = tokio::join!(wait, oom);
                 let oomed = Self::handle_oom(event, exit_code, &oom_exit_paths).await;
+                debug!("Exited with code {exit_code}, timed out: {timed_out}, OOM killed: {oomed}");
 
                 // The exit file tells that the log is complete, so let the read
                 // loops write what the process left in the pipes, and stop
@@ -267,16 +268,13 @@ impl ReapableChild {
                     exit_code,
                     timed_out,
                 };
-                debug!(?exit_paths, oomed, "Write to exit paths");
                 Self::write_to_exit_paths(exit_code, &exit_paths).await;
 
-                debug!("Sending exit struct to channel: {:?}", exit_channel_data);
                 // Only the consumer of an exec receives it, nobody of a
                 // container.
                 if exit_tx.send(exit_channel_data).is_err() {
                     trace!("Nobody receives the exit status");
                 }
-                debug!("Task done");
             }
             .instrument(debug_span!("watch", %pid)),
         );
@@ -290,7 +288,7 @@ impl ReapableChild {
         for path_buf in paths {
             let span = debug_span!("write_exit_path", path = %path_buf.display());
             async {
-                debug!(code, "Writing exit code to file");
+                debug!("Writing exit code {code} to file");
                 if let Err(e) = Self::write_exit_file(path_buf, &code_str).await {
                     error!("Unable to write exit file: {e:#}");
                 }

@@ -3,19 +3,19 @@
 
 use crate::conmon_capnp::conmon;
 #[cfg(feature = "tracing")]
-use crate::telemetry::Telemetry;
+use crate::telemetry;
 use crate::{
     capnp_util,
-    child::{Child, ChildKind},
     child_reaper::{
-        EXIT_CODE_NOT_STARTED, EXIT_CODE_TIMED_OUT, ExitChannelData, RuntimeCall, WatchedExec,
+        Child, ChildKind, ChildReaper, EXIT_CODE_NOT_STARTED, EXIT_CODE_TIMED_OUT, ExecStart,
+        ExitChannelData, RuntimeCall, StartedChild, WatchedExec,
     },
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     random_id::RandomId,
     runtime_args::{GenerateRuntimeArgs, check_id},
     server::Server,
-    streaming_server::{AttachSession, ExecSession, StreamingServer},
+    streaming_server::{AttachSession, ExecSession, SessionCommon},
     util::sleep_until,
     version::Version,
 };
@@ -80,7 +80,7 @@ fn set_parent_context(
     span: &Span,
     metadata: capnp::Result<capnp::struct_list::Reader<'_, conmon::text_text_map_entry::Owned>>,
 ) -> anyhow::Result<()> {
-    Telemetry::set_parent_context(span, metadata?)
+    telemetry::set_parent_context(span, metadata?)
 }
 
 #[cfg(not(feature = "tracing"))]
@@ -144,10 +144,14 @@ struct ExecSyncOutput {
 }
 
 impl ExecSyncOutput {
+    /// What the response keeps free for the framing of the gRPC message
+    /// which carries it, see [`ExecSyncOutput::MAX_SIZE`].
+    const FRAMING_HEADROOM: usize = 64 * 1024;
+
     /// The most output an exec_sync returns, stdout and stderr together,
     /// like conmon. The response has to fit into the 16 MiB gRPC messages of
     /// CRI-O and the kubelet, which also carry the framing.
-    const MAX_SIZE: usize = ContainerIO::MAX_STDIO_STREAM_SIZE - 64 * 1024;
+    const MAX_SIZE: usize = ContainerIO::MAX_STDIO_STREAM_SIZE - Self::FRAMING_HEADROOM;
 
     /// Cut the output to [`ExecSyncOutput::MAX_SIZE`]. Each stream keeps up
     /// to half of it, and more of what the other one leaves, so that a large
@@ -160,107 +164,61 @@ impl ExecSyncOutput {
     }
 }
 
-impl Server {
-    /// The deadline of an exec_sync, none without a timeout or if it does not
-    /// fit, which is no timeout either.
-    fn exec_deadline(timeout_sec: u64) -> Option<Instant> {
-        if timeout_sec == 0 {
-            return None;
-        }
-        Instant::now().checked_add(Duration::from_secs(timeout_sec))
+/// The deadline of an exec_sync, none without a timeout or if it does not
+/// fit, which is no timeout either.
+fn exec_deadline(timeout_sec: u64) -> Option<Instant> {
+    if timeout_sec == 0 {
+        return None;
     }
-
-    /// Read the output of an exec while waiting for its exit, and take the
-    /// result from the watcher alone. The watcher cancels the `token` once
-    /// it reaped the process or killed it at its timeout, the drain bounds
-    /// the reading after that. A deadline of the reading on its own would
-    /// race the one of the watcher, and report a timeout with the exit code
-    /// of a process which exited right at it, without its last output. A
-    /// watcher which got lost never cancels the token, nothing ends the
-    /// process and its output otherwise, like for a streaming exec, so it
-    /// gets killed with `kill`. Cancelling the token then stops the output,
-    /// see [`StopOutput`](crate::attach::StopOutput).
-    async fn exec_sync_output(
-        io: &SharedContainerIO,
-        token: &CancellationToken,
-        mut exit_rx: broadcast::Receiver<ExitChannelData>,
-        kill: impl FnOnce(),
-    ) -> anyhow::Result<ExecSyncOutput> {
-        let exit = async move {
-            let res = exit_rx.recv().await;
-            if res.is_err() {
-                kill();
-                token.cancel();
-            }
-            res.context("receive the exit of the exec")
-        };
-        // Reads until the output ended or the drain after the exit gave up,
-        // the read loops get stopped only after that.
-        let ((mut stdout, mut stderr), exit_data) = tokio::try_join!(io.read_all(token), exit)?;
-        ExecSyncOutput::cap(&mut stdout, &mut stderr);
-        Ok(ExecSyncOutput {
-            stdout,
-            stderr,
-            exit_code: exit_data.exit_code,
-            timed_out: exit_data.timed_out,
-        })
-    }
-
-    /// How long the runtime of an exec may take beyond its timeout before it
-    /// gets killed. It only starts the process, so this bounds an exec
-    /// without a timeout as well.
-    const EXEC_RUNTIME_GRACE: Duration = Duration::from_secs(60);
-
-    /// When the runtime of an exec with the `timeout` gets killed. A runtime
-    /// which hangs must not keep its call in progress forever, which defers
-    /// the reaping of orphans and delays the shutdown.
-    pub(crate) fn exec_runtime_deadline(timeout: Option<Instant>) -> Instant {
-        let timeout = timeout.unwrap_or_else(Instant::now);
-        // A timeout too far in the future to add the grace to is never
-        // reached either.
-        timeout
-            .checked_add(Self::EXEC_RUNTIME_GRACE)
-            .unwrap_or(timeout)
-    }
-
-    /// How long the runtime of a create may take before it gets killed, well
-    /// above the time CRI-O gives the creation of a container, so that a
-    /// runtime which hangs does not keep its call in progress forever.
-    const CREATE_RUNTIME_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-
-    /// The idle timeout of a streaming connection, none for 0.
-    fn idle_timeout(timeout_sec: u64) -> Option<Duration> {
-        (timeout_sec != 0).then(|| Duration::from_secs(timeout_sec))
-    }
-
-    /// Start the streaming server if required and return the URL of the
-    /// session.
-    async fn streaming_url(
-        server: &StreamingServer,
-        request: StreamingRequest,
-    ) -> Result<String, Error> {
-        // Without a context: clients match the start of the message, like the
-        // one of too many waiting sessions, see `ErrTooManyRequests` of the Go
-        // client.
-        capnp_err!(match request {
-            StreamingRequest::Exec(session) => server.exec_url(session).await,
-            StreamingRequest::Attach(session) => server.attach_url(session).await,
-            StreamingRequest::PortForward {
-                netns_path,
-                idle_timeout,
-            } => server.port_forward_url(netns_path, idle_timeout).await,
-        })
-    }
+    Instant::now().checked_add(Duration::from_secs(timeout_sec))
 }
 
-/// A session for the streaming server, see [`Server::streaming_url`].
-enum StreamingRequest {
-    Exec(ExecSession),
-    Attach(AttachSession),
-    PortForward {
-        netns_path: PathBuf,
-        idle_timeout: Option<Duration>,
-    },
+/// Read the output of an exec while waiting for its exit, and take the
+/// result from the watcher alone. The watcher cancels the `token` once it
+/// reaped the process or killed it at its timeout, the drain bounds the
+/// reading after that. A deadline of the reading on its own would race the
+/// one of the watcher, and report a timeout with the exit code of a process
+/// which exited right at it, without its last output. A watcher which got
+/// lost never cancels the token, nothing ends the process and its output
+/// otherwise, like for a streaming exec, so it gets killed with `kill`.
+/// Cancelling the token then stops the output, see
+/// [`StopOutput`](crate::attach::StopOutput).
+async fn exec_sync_output(
+    io: &SharedContainerIO,
+    token: &CancellationToken,
+    mut exit_rx: broadcast::Receiver<ExitChannelData>,
+    kill: impl FnOnce(),
+) -> anyhow::Result<ExecSyncOutput> {
+    let exit = async move {
+        let res = exit_rx.recv().await;
+        if res.is_err() {
+            kill();
+            token.cancel();
+        }
+        res.context("receive the exit of the exec")
+    };
+    // Reads until the output ended or the drain after the exit gave up, the
+    // read loops get stopped only after that.
+    let ((mut stdout, mut stderr), exit_data) = tokio::try_join!(io.read_all(token), exit)?;
+    ExecSyncOutput::cap(&mut stdout, &mut stderr);
+    Ok(ExecSyncOutput {
+        stdout,
+        stderr,
+        exit_code: exit_data.exit_code,
+        timed_out: exit_data.timed_out,
+    })
+}
+
+/// The idle timeout of a streaming connection, none for 0.
+fn idle_timeout(timeout_sec: u64) -> Option<Duration> {
+    (timeout_sec != 0).then(|| Duration::from_secs(timeout_sec))
+}
+
+/// The result of a request for the URL of a streaming session. Without a
+/// context: clients match the start of the message, like the one of too many
+/// waiting sessions, see `ErrTooManyRequests` of the Go client.
+fn streaming_result(res: anyhow::Result<String>) -> Result<String, Error> {
+    capnp_err!(res)
 }
 
 #[expect(
@@ -396,7 +354,7 @@ impl conmon::Server for Server {
         let stdin = req.get_stdin();
         let runtime = self.config().runtime().to_path_buf();
 
-        let runtime_deadline = Instant::now() + Self::CREATE_RUNTIME_TIMEOUT;
+        let runtime_deadline = Instant::now() + ChildReaper::CREATE_RUNTIME_TIMEOUT;
         Promise::from_future(
             async move {
                 // capnp-rpc drops this future once the client disconnects or
@@ -407,7 +365,7 @@ impl conmon::Server for Server {
                 let create = spawn_logged(action, async move {
                     container_log.lock().await.init().await?;
 
-                    let (grandchild_pid, token, call) = match child_reaper
+                    let started = child_reaper
                         .create_child(
                             RuntimeCall {
                                 stdin,
@@ -415,9 +373,13 @@ impl conmon::Server for Server {
                             },
                             &mut container_io,
                         )
-                        .await
-                    {
-                        Ok(res) => res,
+                        .await;
+                    let StartedChild {
+                        pid: grandchild_pid,
+                        token,
+                        call,
+                    } = match started {
+                        Ok(started) => started,
                         Err(e) => return Err(container_io.runtime_error(e).await),
                     };
 
@@ -478,33 +440,24 @@ impl conmon::Server for Server {
 
         // The timeout starts now, the runtime may hang before the process
         // even starts.
-        let time_to_timeout = Self::exec_deadline(req.get_timeout_sec());
-
-        let pidfile =
-            ContainerIO::temp_file(Some(self.config().runtime_dir()), "exec_sync", ".pid");
+        let time_to_timeout = exec_deadline(req.get_timeout_sec());
 
         debug!(
             "Got exec sync container request with timeout {}",
             req.get_timeout_sec()
         );
 
-        let runtime = self.config().runtime().to_path_buf();
         let child_reaper = self.reaper().clone();
-
         let command: Vec<String> = pry!(text_list(req.get_command()));
         let cgroup_manager = pry!(req.get_cgroup_manager());
-
-        let logger = ContainerLog::new();
-        let mut container_io = pry_err!(ContainerIO::new(req.get_terminal(), logger));
-
-        let args = GenerateRuntimeArgs {
-            config: self.config(),
-            id: &id,
-            container_io: &container_io,
-            pidfile: pidfile.path(),
+        let mut exec = pry_err!(ExecStart::new(
+            self.config(),
+            &id,
+            req.get_terminal(),
+            &command,
             cgroup_manager,
-        };
-        let args = pry_err!(args.exec_args(&command));
+            "exec_sync",
+        ));
 
         Promise::from_future(
             async move {
@@ -514,26 +467,13 @@ impl conmon::Server for Server {
                 // the timeout, or after the grace without one. The client gets
                 // its timeout right away, the task kills the process the
                 // runtime started once it finished.
-                let runtime_deadline = Self::exec_runtime_deadline(time_to_timeout);
+                let runtime_deadline = ChildReaper::exec_runtime_deadline(time_to_timeout);
                 let (started_tx, mut started_rx) = oneshot::channel();
-                let exec = spawn_logged("run exec", async move {
+                let exec_task = spawn_logged("run exec", async move {
                     // Read while the runtime runs, see
                     // `ContainerIO::collect_stdio`.
-                    container_io.collect_stdio(true, true)?;
-                    let res = child_reaper
-                        .create_child(
-                            RuntimeCall {
-                                command_start: Some(args.command_start),
-                                ..RuntimeCall::new(
-                                    &runtime,
-                                    &args.args,
-                                    pidfile.path(),
-                                    runtime_deadline,
-                                )
-                            },
-                            &mut container_io,
-                        )
-                        .await;
+                    exec.container_io.collect_stdio(true, true)?;
+                    let res = exec.run(&child_reaper, false, runtime_deadline).await;
                     // The client got its timeout response once nothing
                     // receives this anymore, see below.
                     let awaited = started_tx.send(()).is_ok();
@@ -541,7 +481,7 @@ impl conmon::Server for Server {
                         Ok(started) => started,
                         Err(e) => {
                             let timed_out = time_to_timeout.is_some_and(|t| Instant::now() >= t);
-                            let e = container_io.runtime_error(e).await;
+                            let e = exec.runtime_error(e).await;
                             error!("Unable to start exec: {e:#}");
                             // The client only sees the response, tell it why.
                             return Ok(ExecSyncOutput {
@@ -556,16 +496,9 @@ impl conmon::Server for Server {
                             });
                         }
                     };
-                    // The runtime wrote the PID, the file served its purpose.
-                    drop(pidfile);
 
                     // A timeout which already passed kills it right away.
-                    let watched = child_reaper.watch_exec(
-                        id.into(),
-                        started,
-                        time_to_timeout,
-                        container_io,
-                    )?;
+                    let watched = exec.watch(&child_reaper, id.into(), started, time_to_timeout)?;
                     // Nobody takes the output of an exec whose client got
                     // its timeout response already, so it does not get
                     // collected. Dropping the exec stops the output once
@@ -586,7 +519,7 @@ impl conmon::Server for Server {
                         exit_rx,
                         stop_output: _stop_output,
                     } = watched;
-                    Self::exec_sync_output(&io, &token, exit_rx, || {
+                    exec_sync_output(&io, &token, exit_rx, || {
                         if let Err(e) = process.signal_group(Signal::SIGKILL) {
                             debug!("Not killing exec process {}: {e}", process.pid());
                         }
@@ -603,7 +536,7 @@ impl conmon::Server for Server {
                 // went out.
                 drop(started_rx);
                 let output = if started {
-                    task_result(exec).await?
+                    task_result(exec_task).await?
                 } else {
                     debug!("Runtime did not start the exec before its timeout");
                     ExecSyncOutput {
@@ -638,11 +571,8 @@ impl conmon::Server for Server {
 
         debug!("Got an attach container request");
 
-        let socket_path = pry!(pry!(req.get_socket_path()).to_string());
-        pry_err!(capnp_util::check_absolute(
-            "socket path",
-            Path::new(&socket_path)
-        ));
+        let socket_path = PathBuf::from(pry!(pry!(req.get_socket_path()).to_str()));
+        pry_err!(capnp_util::check_absolute("socket path", &socket_path));
         let child = pry_err!(self.reaper().get(id));
         let stop_after_stdin_eof = req.get_stop_after_stdin_eof();
 
@@ -754,7 +684,7 @@ impl conmon::Server for Server {
             req.get_stdout(),
             req.get_stderr(),
         );
-        let idle_timeout = Server::idle_timeout(req.get_idle_timeout_sec());
+        let idle_timeout = idle_timeout(req.get_idle_timeout_sec());
 
         let streaming_server = self.streaming_server().clone();
         let child_reaper = self.reaper().clone();
@@ -763,22 +693,21 @@ impl conmon::Server for Server {
 
         Promise::from_future(
             async move {
-                let url = Self::streaming_url(
-                    &streaming_server,
-                    StreamingRequest::Exec(ExecSession {
-                        child_reaper,
-                        tty,
-                        server_config: config,
-                        cgroup_manager,
+                let session = ExecSession {
+                    child_reaper,
+                    tty,
+                    server_config: config,
+                    cgroup_manager,
+                    command,
+                    common: SessionCommon {
                         container_id: id.into_boxed_str(),
-                        command,
                         stdin,
                         stdout,
                         stderr,
                         idle_timeout,
-                    }),
-                )
-                .await?;
+                    },
+                };
+                let url = streaming_result(streaming_server.exec_url(session).await)?;
 
                 results.get().init_response().set_url(&url);
                 Ok(())
@@ -802,7 +731,7 @@ impl conmon::Server for Server {
 
         let (stdin, stdout, stderr) = (req.get_stdin(), req.get_stdout(), req.get_stderr());
         let stop_after_stdin_eof = req.get_stop_after_stdin_eof();
-        let idle_timeout = Server::idle_timeout(req.get_idle_timeout_sec());
+        let idle_timeout = idle_timeout(req.get_idle_timeout_sec());
 
         let streaming_server = self.streaming_server().clone();
         let child = pry_err!(self.reaper().get(id));
@@ -810,19 +739,18 @@ impl conmon::Server for Server {
 
         Promise::from_future(
             async move {
-                let url = Self::streaming_url(
-                    &streaming_server,
-                    StreamingRequest::Attach(AttachSession {
+                let session = AttachSession {
+                    child,
+                    stop_after_stdin_eof,
+                    common: SessionCommon {
                         container_id: id,
-                        child,
                         stdin,
                         stdout,
                         stderr,
-                        stop_after_stdin_eof,
                         idle_timeout,
-                    }),
-                )
-                .await?;
+                    },
+                };
+                let url = streaming_result(streaming_server.attach_url(session).await)?;
 
                 results.get().init_response().set_url(&url);
                 Ok(())
@@ -848,19 +776,16 @@ impl conmon::Server for Server {
             "network namespace path",
             &netns_path
         ));
-        let idle_timeout = Server::idle_timeout(req.get_idle_timeout_sec());
+        let idle_timeout = idle_timeout(req.get_idle_timeout_sec());
         let streaming_server = self.streaming_server().clone();
 
         Promise::from_future(
             async move {
-                let url = Self::streaming_url(
-                    &streaming_server,
-                    StreamingRequest::PortForward {
-                        netns_path,
-                        idle_timeout,
-                    },
-                )
-                .await?;
+                let url = streaming_result(
+                    streaming_server
+                        .port_forward_url(netns_path, idle_timeout)
+                        .await,
+                )?;
 
                 results.get().init_response().set_url(&url);
                 Ok(())

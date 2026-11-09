@@ -1,4 +1,4 @@
-//! Configuration related structures
+//! Configuration related structures.
 use crate::{fs_util, listener, process::is_zombie};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
@@ -207,8 +207,8 @@ impl Config {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 /// Available log levels.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub(crate) enum LogLevel {
     /// Trace level, the most verbose one.
     Trace,
@@ -230,8 +230,8 @@ pub(crate) enum LogLevel {
     Off,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 /// Available verbosity levels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum Verbosity {
     /// The default output verbosity.
     Default,
@@ -240,8 +240,8 @@ pub(crate) enum Verbosity {
     Full,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 /// Available log drivers.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub(crate) enum LogDriver {
     /// Use no log driver.
     None,
@@ -305,7 +305,7 @@ impl Config {
             .trim()
             .is_empty()
         {
-            bail!("{} flag not set", RUNTIME_FLAG)
+            bail!("{RUNTIME_FLAG} flag not set")
         }
 
         const RUNTIME_DIR_FLAG: &str = "--runtime-dir";
@@ -316,7 +316,7 @@ impl Config {
             .trim()
             .is_empty()
         {
-            bail!("{} flag not set", RUNTIME_DIR_FLAG)
+            bail!("{RUNTIME_DIR_FLAG} flag not set")
         }
 
         // The file name tells whether the runtime is crun, a path like "/"
@@ -453,10 +453,12 @@ impl Config {
         let pid = Pid::from_raw(pid);
         kill(pid, None) != Err(Errno::ESRCH) && !is_zombie(pid)
     }
+
     /// The socket the server serves the RPCs on.
     pub(crate) fn socket(&self) -> PathBuf {
         self.runtime_dir().join(SOCKET)
     }
+
     /// The PID file the parent writes for the forked server.
     pub(crate) fn conmon_pidfile(&self) -> PathBuf {
         self.runtime_dir().join(PIDFILE)

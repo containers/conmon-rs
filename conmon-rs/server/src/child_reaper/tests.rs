@@ -1,7 +1,9 @@
 use super::*;
 use crate::{
     attach::SharedContainerAttach,
-    container_io::{ContainerIO, DRAIN_MAX_LOG_WAIT, DRAIN_MAX_WAIT, DRAIN_TIMEOUT, Message},
+    container_io::{
+        ContainerIO, DRAIN_MAX_LOG_WAIT, DRAIN_MAX_WAIT, DRAIN_TIMEOUT, Message, STDERR_TAIL_SIZE,
+    },
     container_log::ContainerLog,
     process::{
         Process, child_pid, children_by_scan, has_zombie, is_zombie, read_pid_file,

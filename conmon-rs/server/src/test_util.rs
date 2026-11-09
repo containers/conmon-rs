@@ -1,7 +1,7 @@
 //! Helpers shared by the tests.
 
 use crate::{
-    child::{Child, ChildKind},
+    child_reaper::{Child, ChildKind},
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     listener::SocketInUse,

@@ -25,7 +25,7 @@ fn spans_continue_the_trace_of_the_client() -> Result<()> {
 
     tracing::subscriber::with_default(subscriber, || {
         let span = debug_span!("request");
-        Telemetry::set_parent_context(&span, metadata)?;
+        set_parent_context(&span, metadata)?;
         let _enter = span.enter();
         assert_eq!(
             span.context().span().span_context().trace_id(),
@@ -34,7 +34,7 @@ fn spans_continue_the_trace_of_the_client() -> Result<()> {
 
         let entered = debug_span!("entered");
         let _enter = entered.enter();
-        let err = Telemetry::set_parent_context(&entered, metadata).unwrap_err();
+        let err = set_parent_context(&entered, metadata).unwrap_err();
         assert!(
             format!("{err:#}").contains("already been started"),
             "{err:#}"

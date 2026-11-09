@@ -1,7 +1,6 @@
 //! Child process reaping and management.
 use crate::{
     attach::StopOutput,
-    child::{Child, ChildKind},
     container_io::{ContainerIO, SharedContainerIO},
     mutex::lock,
     process::{Process, pidfd_open},
@@ -10,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use nix::{errno::Errno, sys::signal::Signal, unistd::Pid};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    path::PathBuf,
     pin::pin,
     str,
     sync::{
@@ -24,11 +24,40 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span};
 
+mod exec_start;
 mod orphan_sweep;
 mod runtime_call;
 mod watcher;
 
-pub(crate) use runtime_call::RuntimeCall;
+pub(crate) use exec_start::ExecStart;
+pub(crate) use runtime_call::{RuntimeCall, StartedChild};
+
+/// What kind of process a child is. Execs are registered under the id of
+/// their container, but only the container itself is the target of
+/// container level operations like attach or log reopening.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChildKind {
+    Container,
+    Exec,
+}
+
+/// A container or exec, as it gets registered with the child reaper.
+#[derive(Debug)]
+pub(crate) struct Child {
+    pub(crate) id: Box<str>,
+    pub(crate) kind: ChildKind,
+    pub(crate) pid: Pid,
+    pub(crate) exit_paths: Vec<PathBuf>,
+    pub(crate) oom_exit_paths: Vec<PathBuf>,
+    pub(crate) timeout: Option<Instant>,
+    pub(crate) io: SharedContainerIO,
+    pub(crate) token: CancellationToken,
+
+    /// The process, if the caller holds it already, like an exec, so that
+    /// the registration does not open a second pidfd for it. The
+    /// registration opens it otherwise.
+    pub(crate) process: Option<Arc<Process>>,
+}
 
 /// Watches the containers and execs of the server until they exit and
 /// reaps them.
@@ -106,7 +135,7 @@ impl InFlight {
             });
         }
         if self.stop.is_cancelled() {
-            debug!(%pid, "Killing process of a runtime call stopped by the shutdown");
+            debug!("Killing process {pid} of a runtime call stopped by the shutdown");
             kill_grandchild(pid, Signal::SIGKILL);
         }
     }
@@ -210,13 +239,11 @@ impl ChildReaper {
     /// their container and are skipped. The error starts with
     /// [`CONTAINER_NOT_FOUND`] if there is none.
     pub(crate) fn get(&self, id: &str) -> Result<ReapableChild> {
-        let lock = lock(&self.grandchildren);
-        let r = lock
+        lock(&self.grandchildren)
             .get(id)
             .and_then(|v| v.iter().find(|c| c.kind == ChildKind::Container))
-            .with_context(|| format!("{CONTAINER_NOT_FOUND}: {id}"))?
-            .clone();
-        Ok(r)
+            .cloned()
+            .with_context(|| format!("{CONTAINER_NOT_FOUND}: {id}"))
     }
 
     /// Start a runtime call whose runtime gets killed at the `deadline`,
@@ -300,10 +327,11 @@ impl ChildReaper {
     pub(crate) fn watch_exec(
         &self,
         id: Box<str>,
-        (pid, token, call): (Pid, CancellationToken, InFlight),
+        started: StartedChild,
         timeout: Option<Instant>,
         io: ContainerIO,
     ) -> Result<WatchedExec> {
+        let StartedChild { pid, token, call } = started;
         // Not reaped before the registration below, so the PID is still its
         // own. Shared with the registration, one pidfd per exec.
         let process = Arc::new(Process::open(pid));
@@ -344,7 +372,7 @@ impl ChildReaper {
     /// see [`kill_grandchild`].
     fn kill_late_grandchild(pid: Pid) -> bool {
         if matches!(pidfd_open(pid), Err(Errno::ESRCH)) {
-            debug!(%pid, "Not killing grandchild, it got reaped already");
+            debug!("Not killing grandchild {pid}, it got reaped already");
             return false;
         }
         kill_grandchild(pid, Signal::SIGKILL);
@@ -386,7 +414,7 @@ impl ChildReaper {
             .filter(|gc| gc.kind == ChildKind::Container)
             .inspect(|gc| {
                 if let Err(e) = gc.process.signal(Signal::SIGTERM) {
-                    debug!(pid = %gc.pid, "Not signalling container, it is gone: {e}");
+                    debug!("Not signalling container {}, it is gone: {e}", gc.pid);
                 }
             })
             .map(|gc| gc.seq)
@@ -509,7 +537,7 @@ impl ChildReaper {
         let _map = lock(&self.grandchildren);
         let calls = self.in_flight.borrow();
         for pid in calls.in_progress.values().filter_map(|call| call.process) {
-            debug!(%pid, "Killing process of a runtime call in progress");
+            debug!("Killing process {pid} of a runtime call in progress");
             kill_grandchild(pid, Signal::SIGKILL);
         }
     }
@@ -548,7 +576,7 @@ impl ChildReaper {
 /// subreaper, so the PID refers to a child.
 pub(crate) fn kill_grandchild(pid: Pid, s: Signal) {
     if let Err(e) = Process::child(pid).signal_group(s) {
-        debug!(%pid, "Not signalling grandchild, it is gone: {e}");
+        debug!("Not signalling grandchild {pid}, it is gone: {e}");
     }
 }
 

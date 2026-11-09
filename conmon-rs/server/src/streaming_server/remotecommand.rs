@@ -8,9 +8,12 @@
 //! and [`Output`] sends the output of a session the way its protocol needs
 //! it.
 
-use crate::streaming_server::{
-    idle::{Activity, STALL_TIMEOUT},
-    web::{self, Message, WebSocket},
+use crate::{
+    container_io::Pipe,
+    streaming_server::{
+        idle::{Activity, STALL_TIMEOUT},
+        web::{self, Message, WebSocket},
+    },
 };
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
@@ -46,6 +49,12 @@ pub(super) const STREAM_ERR_BYTE: u8 = 3;
 pub(super) const RESIZE_BYTE: u8 = 4;
 /// The channel which closes another one, since `v5.channel.k8s.io`.
 pub(super) const CLOSE_BYTE: u8 = 255;
+
+// The channels of the pipes, see `Pipe::remotecommand_channel`.
+const _: () = assert!(
+    Pipe::StdOut.remotecommand_channel() == STDOUT_BYTE
+        && Pipe::StdErr.remotecommand_channel() == STDERR_BYTE
+);
 
 /// The status of a session which succeeded. The kubelet sends it as well,
 /// some clients take an empty error stream for a failure.
@@ -266,18 +275,17 @@ impl Output {
         self.send(message).await
     }
 
-    /// Send output of the process, `stream_byte` selects stdout or stderr.
-    pub(super) async fn data(&mut self, stream_byte: u8, data: &Bytes) -> Result<()> {
+    /// Send output of the `pipe` of the process.
+    pub(super) async fn data(&mut self, pipe: Pipe, data: &Bytes) -> Result<()> {
         let result = match &mut self.transport {
             Transport::WebSocket { framing, .. } => {
-                let message = framing.message(stream_byte, data);
+                let message = framing.message(pipe.remotecommand_channel(), data);
                 return self.send(message).await;
             }
             Transport::Spdy(output) => {
-                let stream = if stream_byte == STDOUT_BYTE {
-                    &mut output.stdout
-                } else {
-                    &mut output.stderr
+                let stream = match pipe {
+                    Pipe::StdOut => &mut output.stdout,
+                    Pipe::StdErr => &mut output.stderr,
                 };
                 match stream {
                     Some(stream) if !self.failed => stream.send(data.clone()).await,

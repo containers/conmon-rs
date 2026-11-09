@@ -124,13 +124,11 @@ async fn name_comes_from_the_request() -> Result<()> {
 #[tokio::test]
 async fn write_lines_sends_entries() -> Result<()> {
     let journal = Journal::new()?;
-    let mut logger = JournaldLogger::with_socket("0123456789abcdef", &journal.path);
-    logger.init().await?;
+    let logger = JournaldLogger::with_socket("0123456789abcdef", &journal.path);
 
     let mut buffer = LineBuffer::default();
     let lines = buffer.push(Pipe::StdOut, b"Test log message\nand another");
     logger.write_lines(Pipe::StdOut, &lines).await?;
-    logger.reopen().await?;
     let lines = buffer.finish(Pipe::StdOut);
     assert!(lines[0].partial);
     logger.write_lines(Pipe::StdErr, &lines).await?;
@@ -162,7 +160,7 @@ async fn write_lines_sends_entries() -> Result<()> {
 #[tokio::test]
 async fn binary_output_is_kept() -> Result<()> {
     let journal = Journal::new()?;
-    let mut logger = JournaldLogger::with_socket("test", &journal.path);
+    let logger = JournaldLogger::with_socket("test", &journal.path);
 
     let mut buffer = LineBuffer::default();
     let lines = buffer.push(Pipe::StdOut, b"\xff\xfe\x00bin\n");
@@ -185,7 +183,7 @@ async fn lines_wait_for_a_busy_journal() -> Result<()> {
     // The journal catches up a little later.
     let path = journal.path.clone();
     let reader = catch_up(journal, "late");
-    let mut logger = JournaldLogger::with_socket("test", &path);
+    let logger = JournaldLogger::with_socket("test", &path);
     let mut buffer = LineBuffer::default();
     let lines = buffer.push(Pipe::StdOut, b"late\n");
     logger.write_lines(Pipe::StdOut, &lines).await?;
@@ -203,7 +201,7 @@ async fn lines_wait_for_a_busy_journal() -> Result<()> {
 async fn chunks_after_a_timeout_do_not_wait() -> Result<()> {
     let journal = full_journal()?;
 
-    let mut logger = JournaldLogger::with_socket("test", &journal.path);
+    let logger = JournaldLogger::with_socket("test", &journal.path);
     let mut buffer = LineBuffer::default();
     let lines = buffer.push(Pipe::StdOut, b"waits\n");
     logger.write_lines(Pipe::StdOut, &lines).await?;
@@ -239,7 +237,7 @@ async fn partly_taken_chunks_after_a_timeout_do_not_wait() -> Result<()> {
     // Room for a single entry.
     journal.socket.recv(&mut [0; 4096])?;
 
-    let mut logger = JournaldLogger::with_socket("test", &journal.path);
+    let logger = JournaldLogger::with_socket("test", &journal.path);
     *lock(&logger.shared.timed_out) = Some(Instant::now());
     let mut buffer = LineBuffer::default();
     let lines = buffer.push(Pipe::StdOut, b"taken\ndropped\n");
@@ -261,7 +259,7 @@ async fn partly_taken_chunks_wait_again() -> Result<()> {
     // The journal catches up a little later.
     let path = journal.path.clone();
     let reader = catch_up(journal, "waits");
-    let mut logger = JournaldLogger::with_socket("test", &path);
+    let logger = JournaldLogger::with_socket("test", &path);
     *lock(&logger.shared.timed_out) = Instant::now().checked_sub(CHUNK_TIMEOUT);
     let mut buffer = LineBuffer::default();
     let lines = buffer.push(Pipe::StdOut, b"taken\nwaits\n");
@@ -296,7 +294,7 @@ fn lines_after_the_deadline_get_dropped() -> Result<()> {
 async fn send_failures_are_not_fatal() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("socket");
-    let mut logger = JournaldLogger::with_socket("test", &path);
+    let logger = JournaldLogger::with_socket("test", &path);
     let mut buffer = LineBuffer::default();
     let lines = buffer.push(Pipe::StdOut, b"lost\n");
     logger.write_lines(Pipe::StdOut, &lines).await?;

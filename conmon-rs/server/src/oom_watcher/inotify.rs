@@ -358,7 +358,7 @@ impl SharedWatcher {
         };
         if let Err(e) = self.inotify.rm_watch(wd) {
             // The watch is gone already if the cgroup got removed.
-            trace!("Unable to unwatch {}: {:#}", watch.path.display(), e);
+            trace!("Unable to unwatch {}: {e:#}", watch.path.display());
         }
     }
 }

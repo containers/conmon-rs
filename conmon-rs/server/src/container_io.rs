@@ -22,12 +22,24 @@ mod stdio;
 #[cfg(test)]
 pub(crate) use drain::DRAIN_TIMEOUT;
 pub(crate) use drain::{DRAIN_MAX_LOG_WAIT, DRAIN_MAX_WAIT, Drain, Lag};
-pub(crate) use read_loop::{READ_BUFFER_SIZE, with_scratch};
 pub(crate) use stdio::{EarlyStdio, StdioSender};
 use stdio::{StdioChannel, StdioCollector};
 
 /// How many read chunks the stdio and terminal channels buffer per pipe.
 pub(crate) const STDIO_CHANNEL_SIZE: usize = 100;
+
+/// The most a read of a container I/O stream takes at once. The read loops
+/// read into the scratch buffer of their thread and copy each chunk out of
+/// it, see [`with_scratch`](crate::util::with_scratch), so an idle container
+/// holds no read buffer. 8 KiB halves the reads and log writes of 4 KiB for
+/// bulk output, the log files start the buffer of each chunk with as much,
+/// see `LogFile::BUF_CAPACITY`.
+pub(crate) const READ_BUFFER_SIZE: usize = 8 * 1024;
+
+/// How much of the end of a stderr gets kept for the error of a runtime
+/// which failed, with pipes of its own or on the stderr of the process. The
+/// last lines hold the reason, a runtime with debug logging writes far more.
+pub(crate) const STDERR_TAIL_SIZE: usize = 64 * 1024;
 
 /// A container IO shared by its users, like the watcher, the attach
 /// endpoints and the consumer of the output of an exec.
@@ -125,8 +137,8 @@ pub(crate) enum Message {
     Done,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Available pipe types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Pipe {
     /// Standard output.
     StdOut,
@@ -141,6 +153,24 @@ impl Pipe {
         match self {
             Self::StdOut => "stdout",
             Self::StdErr => "stderr",
+        }
+    }
+
+    /// The first byte of a packet to an attach client which carries output
+    /// of the pipe, see the attach socket section of docs/protocols.md.
+    pub(crate) const fn attach_packet_byte(self) -> u8 {
+        match self {
+            Self::StdOut => 2,
+            Self::StdErr => 3,
+        }
+    }
+
+    /// The channel of the pipe in the remote command protocols of the
+    /// streaming server, the first byte of a WebSocket message.
+    pub(crate) const fn remotecommand_channel(self) -> u8 {
+        match self {
+            Self::StdOut => 1,
+            Self::StdErr => 2,
         }
     }
 }
