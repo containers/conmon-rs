@@ -24,12 +24,10 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span};
 
-mod exec_start;
 mod orphan_sweep;
 mod runtime_call;
 mod watcher;
 
-pub(crate) use exec_start::ExecStart;
 pub(crate) use runtime_call::{RuntimeCall, StartedChild};
 
 /// What kind of process a child is. Execs are registered under the id of
@@ -135,7 +133,7 @@ impl InFlight {
             });
         }
         if self.stop.is_cancelled() {
-            debug!("Killing process {pid} of a runtime call stopped by the shutdown");
+            debug!(%pid, "Killing process of a runtime call stopped by the shutdown");
             kill_grandchild(pid, Signal::SIGKILL);
         }
     }
@@ -372,7 +370,7 @@ impl ChildReaper {
     /// see [`kill_grandchild`].
     fn kill_late_grandchild(pid: Pid) -> bool {
         if matches!(pidfd_open(pid), Err(Errno::ESRCH)) {
-            debug!("Not killing grandchild {pid}, it got reaped already");
+            debug!(%pid, "Not killing grandchild, it got reaped already");
             return false;
         }
         kill_grandchild(pid, Signal::SIGKILL);
@@ -414,7 +412,7 @@ impl ChildReaper {
             .filter(|gc| gc.kind == ChildKind::Container)
             .inspect(|gc| {
                 if let Err(e) = gc.process.signal(Signal::SIGTERM) {
-                    debug!("Not signalling container {}, it is gone: {e}", gc.pid);
+                    debug!(pid = %gc.pid, "Not signalling container, it is gone: {e}");
                 }
             })
             .map(|gc| gc.seq)
@@ -537,7 +535,7 @@ impl ChildReaper {
         let _map = lock(&self.grandchildren);
         let calls = self.in_flight.borrow();
         for pid in calls.in_progress.values().filter_map(|call| call.process) {
-            debug!("Killing process {pid} of a runtime call in progress");
+            debug!(%pid, "Killing process of a runtime call in progress");
             kill_grandchild(pid, Signal::SIGKILL);
         }
     }
@@ -576,7 +574,7 @@ impl ChildReaper {
 /// subreaper, so the PID refers to a child.
 pub(crate) fn kill_grandchild(pid: Pid, s: Signal) {
     if let Err(e) = Process::child(pid).signal_group(s) {
-        debug!("Not signalling grandchild {pid}, it is gone: {e}");
+        debug!(%pid, "Not signalling grandchild, it is gone: {e}");
     }
 }
 

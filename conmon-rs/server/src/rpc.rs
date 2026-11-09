@@ -7,11 +7,12 @@ use crate::telemetry;
 use crate::{
     capnp_util,
     child_reaper::{
-        Child, ChildKind, ChildReaper, EXIT_CODE_NOT_STARTED, EXIT_CODE_TIMED_OUT, ExecStart,
-        ExitChannelData, RuntimeCall, StartedChild, WatchedExec,
+        Child, ChildKind, ChildReaper, EXIT_CODE_NOT_STARTED, EXIT_CODE_TIMED_OUT, ExitChannelData,
+        RuntimeCall, StartedChild, WatchedExec,
     },
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
+    exec_start::ExecStart,
     random_id::RandomId,
     runtime_args::{GenerateRuntimeArgs, check_id},
     server::Server,
@@ -472,7 +473,7 @@ impl conmon::Server for Server {
                 let exec_task = spawn_logged("run exec", async move {
                     // Read while the runtime runs, see
                     // `ContainerIO::collect_stdio`.
-                    exec.container_io.collect_stdio(true, true)?;
+                    exec.collect_stdio(true, true)?;
                     let res = exec.run(&child_reaper, false, runtime_deadline).await;
                     // The client got its timeout response once nothing
                     // receives this anymore, see below.

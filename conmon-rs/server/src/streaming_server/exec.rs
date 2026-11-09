@@ -8,9 +8,10 @@ use crate::conmon_capnp::conmon::CgroupManager;
 use crate::{
     attach::{SharedContainerAttach, StopOutput},
     channel::Receiver as IOReceiver,
-    child_reaper::{ChildReaper, ExecStart, ExitChannelData, WatchedExec},
+    child_reaper::{ChildReaper, ExitChannelData, WatchedExec},
     config::Config,
     container_io::{ContainerIO, Drain, EarlyStdio, Message as IOMessage, Pipe, SharedContainerIO},
+    exec_start::ExecStart,
     process::Process,
     streaming_server::remotecommand::{MESSAGE_TOO_LARGE, Operation, Output, Status},
     terminal::{Terminal, TerminalResizer},
@@ -69,11 +70,9 @@ impl StreamingServer {
         )?;
 
         // Read while the runtime runs, see `ContainerIO::collect_stdio`.
-        exec.container_io
-            .collect_stdio(stdout, stderr)
+        exec.collect_stdio(stdout, stderr)
             .context("collect exec output")?;
         let stdio = exec
-            .container_io
             .stdio()
             .context("retrieve stdout and stderr channels")?;
 
@@ -81,7 +80,7 @@ impl StreamingServer {
         // terminal before it starts the command, so applying the size while
         // it runs gives the command its size from the start, usually, like
         // with CRI-O, not only once the loop of the session runs.
-        let resizer = exec.container_io.terminal().map(Terminal::resizer);
+        let resizer = exec.terminal().map(Terminal::resizer);
         // The process has no timeout, a runtime which hangs still gets
         // killed.
         let deadline = ChildReaper::exec_runtime_deadline(None);

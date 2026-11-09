@@ -88,6 +88,7 @@ mod child_reaper;
 mod config;
 mod container_io;
 mod container_log;
+mod exec_start;
 mod fs_util;
 mod init;
 mod journal;
