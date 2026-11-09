@@ -100,8 +100,10 @@ function. It checks the committed changes, uncommitted ones are left out.
 
 For a PR which only changes Markdown files and the documents in [docs](docs),
 CI only runs the checks of the files, like prettier, typos and the links. It
-skips the fuzzing of a PR which does not change the Rust sources, see the
-`changes` job of [ci.yml](.github/workflows/ci.yml).
+skips the fuzzing of a PR which does not change the Rust sources, and `make
+verify-go-api` for one which does not change the Go client module, its
+generated code or the Makefile, see the `changes` job of
+[ci.yml](.github/workflows/ci.yml).
 
 The unit tests run as a regular user, and so do most integration tests. The OOM
 specs need elevated permissions for the cgroups, like the port forward specs for

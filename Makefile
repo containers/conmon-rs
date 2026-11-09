@@ -50,7 +50,7 @@ GOLANGCI_LINT_VERSION := v2.15.0
 # version updates as well, see dependencies.yaml and verify-digests.
 PRETTIER_VERSION := 3.9.10
 NODE_VERSION := 26.13.0
-NODE_DIGEST := sha256:e4db4c914bf8ad241bd24804fc25d272d89bad97e68cdc8a1414862790a02c39
+NODE_DIGEST := sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072
 NODE_IMAGE := docker.io/library/node:$(NODE_VERSION)-slim@$(NODE_DIGEST)
 PRETTIER = $(CONTAINER_RUNTIME) run --rm -v $(CURDIR):/w:z -w /w --entrypoint npx \
 	$(NODE_IMAGE) --yes prettier@$(PRETTIER_VERSION)
@@ -76,6 +76,8 @@ GRYPE_IMAGE := docker.io/anchore/grype:$(GRYPE_VERSION)@$(GRYPE_DIGEST)
 # The SPDX SBOMs make scan checks, like the conmonrs.$ARCH.spdx.json files of
 # the bucket.
 SBOMS ?=
+# The checks make verify-deny runs, like advisories, all of them if empty.
+DENY_CHECKS ?=
 
 COLOR:=\\033[36m
 NOCOLOR:=\\033[0m
@@ -334,8 +336,8 @@ verify-go-api: .install.gorelease ## Verify that the Go client is compatible wit
 	exit "$$STATUS"
 
 .PHONY: verify-deny
-verify-deny: ## Check the dependencies with cargo-deny, which has to be installed.
-	cargo deny check
+verify-deny: ## Check the dependencies with cargo-deny (has to be installed), all checks or only $DENY_CHECKS.
+	cargo deny check $(DENY_CHECKS)
 
 .PHONY: verify-spec
 verify-spec: ## Verify that the RPM spec version and cargo requirement match the crate.
