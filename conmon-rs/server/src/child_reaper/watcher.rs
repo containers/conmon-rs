@@ -254,7 +254,6 @@ impl ReapableChild {
                 };
                 let ((exit_code, timed_out), event) = tokio::join!(wait, oom);
                 let oomed = Self::handle_oom(event, exit_code, &oom_exit_paths).await;
-                debug!("Exited with code {exit_code}, timed out: {timed_out}, OOM killed: {oomed}");
 
                 // The exit file tells that the log is complete, so let the read
                 // loops write what the process left in the pipes, and stop
@@ -268,6 +267,7 @@ impl ReapableChild {
                     exit_code,
                     timed_out,
                 };
+                debug!(exit_code, timed_out, oomed, ?exit_paths, "Process exited");
                 Self::write_to_exit_paths(exit_code, &exit_paths).await;
 
                 // Only the consumer of an exec receives it, nobody of a
@@ -288,7 +288,7 @@ impl ReapableChild {
         for path_buf in paths {
             let span = debug_span!("write_exit_path", path = %path_buf.display());
             async {
-                debug!("Writing exit code {code} to file");
+                debug!(code, "Writing exit code to file");
                 if let Err(e) = Self::write_exit_file(path_buf, &code_str).await {
                     error!("Unable to write exit file: {e:#}");
                 }

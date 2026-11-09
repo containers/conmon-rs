@@ -2,13 +2,15 @@
 //! process, the PID file of its runtime and the runtime call, up to the
 //! registration of the process.
 
-use super::{ChildReaper, RuntimeCall, StartedChild, WatchedExec};
 use crate::{
+    channel::Receiver,
+    child_reaper::{ChildReaper, RuntimeCall, StartedChild, WatchedExec},
     config::Config,
     conmon_capnp::conmon::CgroupManager,
-    container_io::{ContainerIO, TempFile},
+    container_io::{ContainerIO, Message, TempFile},
     container_log::ContainerLog,
     runtime_args::{ExecArgs, GenerateRuntimeArgs},
+    terminal::Terminal,
 };
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -19,7 +21,7 @@ use tokio::time::Instant;
 /// take the output, see [`ExecStart::run`] and [`ExecStart::watch`].
 pub(crate) struct ExecStart {
     /// The IO of the process, with the console socket of a terminal.
-    pub(crate) container_io: ContainerIO,
+    container_io: ContainerIO,
 
     /// Where the runtime writes the PID of the process. Removed once the
     /// runtime wrote the PID, see [`ExecStart::watch`], or with a start which
@@ -59,6 +61,24 @@ impl ExecStart {
             args,
             runtime: config.runtime().to_path_buf(),
         })
+    }
+
+    /// Read the output while the runtime runs, see
+    /// [`ContainerIO::collect_stdio`].
+    pub(crate) fn collect_stdio(&self, stdout: bool, stderr: bool) -> Result<()> {
+        self.container_io.collect_stdio(stdout, stderr)
+    }
+
+    /// The stdout and stderr channels of the process, see
+    /// [`ContainerIO::stdio`].
+    pub(crate) fn stdio(&self) -> Result<(Receiver<Message>, Receiver<Message>)> {
+        self.container_io.stdio()
+    }
+
+    /// The terminal of the process, none with pipes, see
+    /// [`ContainerIO::terminal`].
+    pub(crate) fn terminal(&self) -> Option<&Terminal> {
+        self.container_io.terminal()
     }
 
     /// Run the runtime, with `stdin` for the process, and kill it at the

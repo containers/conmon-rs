@@ -195,20 +195,23 @@ impl CgroupV2 {
             .parent()
             .is_none_or(OOMWatcher::file_not_found);
         let Some((path, baseline)) = &self.outer else {
-            debug!("Leaf cgroup without memory events or outer counters, gone: {leaf_gone}");
+            debug!(
+                leaf_gone,
+                "Leaf cgroup without memory events or outer counters"
+            );
             return OOMEvent::possible(leaf_gone);
         };
         match OOMWatcher::read_oom_counters(path) {
             Ok(counters) => {
                 debug!(
-                    "No leaf memory events, leaf gone: {leaf_gone}, OOM counters of {}: \
-                     {counters:?} since {baseline:?}",
-                    path.display(),
+                    leaf_gone,
+                    path = %path.display(),
+                    "No leaf memory events, OOM counters: {counters:?} since {baseline:?}",
                 );
                 OOMEvent::possible(counters.increased_since(baseline))
             }
             Err(e) => {
-                debug!("Unable to read outer OOM counters, leaf gone: {leaf_gone}: {e:#}");
+                debug!(leaf_gone, "Unable to read outer OOM counters: {e:#}");
                 OOMEvent::possible(leaf_gone)
             }
         }
@@ -347,10 +350,7 @@ impl OOMWatcher {
     async fn watch_cgroup_v2(token: &CancellationToken, leaf: &Path) -> OOMEvent {
         let mut cgroup = CgroupV2::new(leaf);
 
-        debug!(
-            "Setup cgroup v2 handling of {}",
-            cgroup.events.path.display()
-        );
+        debug!(path = %cgroup.events.path.display(), "Setup cgroup v2 handling");
 
         let mut subscriptions = match cgroup.subscribe() {
             Ok(subscriptions) => subscriptions,
@@ -382,24 +382,21 @@ impl OOMWatcher {
                         // watcher stopped reading events.
                         let path = cgroup.events.path.display();
                         if !subscriptions.watcher_failed() {
-                            debug!("Watches of {path} ended, checking once the process exited");
+                            debug!(%path, "Watches ended, checking once the process exited");
                             break;
                         }
                         if restarts >= Self::MAX_WATCHER_RESTARTS {
-                            let message = format!(
-                                "Watcher of the memory events {path} stopped again after \
-                                 {restarts} restarts, checking on exit only"
-                            );
+                            let message = "Watcher of the memory events stopped again, checking on exit only";
                             if subscriptions.subscription.give_up() {
-                                warn!("{message}");
+                                warn!(%path, restarts, "{message}");
                             } else {
-                                debug!("{message}");
+                                debug!(%path, restarts, "{message}");
                             }
                             break;
                         }
                         restarts += 1;
                         // The reader logged why already, once for all watchers.
-                        debug!("Watcher of the memory events {path} stopped, watching again");
+                        debug!(%path, "Watcher of the memory events stopped, watching again");
                         match cgroup.subscribe() {
                             Ok(new) => subscriptions = new,
                             Err(e) => {
@@ -512,7 +509,7 @@ impl OOMWatcher {
     fn read_oom_counters(path: &Path) -> Result<OomCounters> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("read memory events file: {}", path.display()))?;
-        trace!("Memory events: {content}");
+        trace!(content, "Memory events");
         Self::parse_oom_counters(&content)
             .with_context(|| format!("parse memory events file: {}", path.display()))
     }

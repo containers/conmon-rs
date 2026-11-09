@@ -36,8 +36,7 @@ use tracing::{debug, error, trace};
 /// and the log reopening.
 pub(crate) type SharedContainerLog = Arc<Mutex<ContainerLog>>;
 
-/// The configured log drivers. An enum rather than trait objects, because
-/// async trait methods are not dyn compatible without boxing every call.
+/// A configured log driver.
 ///
 /// A driver either takes the raw chunks as they are read, like the CRI log
 /// which writes partial lines right away, or whole lines which
