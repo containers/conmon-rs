@@ -69,8 +69,10 @@ var _ = Describe("ConmonClient", func() {
 					execEcho(i)
 				}
 
-				rssBefore := statusKBGivenPID(pid, "VmRSS")
-				GinkgoWriter.Printf("VmRSS before: %d\n", rssBefore)
+				// The private anonymous memory of the server, which a leak
+				// grows, unlike the mapped binary and libraries.
+				anonBefore := anonymousKBGivenPID(pid)
+				GinkgoWriter.Printf("Anonymous before: %d\n", anonBefore)
 				logMemoryDetails(pid, "before")
 				mappingsBefore := mappingRSS(pid)
 				resources := resourcesOf(pid)
@@ -79,12 +81,13 @@ var _ = Describe("ConmonClient", func() {
 					execEcho(warmUps + i)
 				}
 
-				rssAfter := statusKBGivenPID(pid, "VmRSS")
-				GinkgoWriter.Printf("VmRSS after: %d\n", rssAfter)
+				anonAfter := anonymousKBGivenPID(pid)
+				growth := anonAfter - anonBefore
+				GinkgoWriter.Printf("Anonymous after: %d\n", anonAfter)
 				logMemoryDetails(pid, "after")
 				logGrownMappings(mappingsBefore, mappingRSS(pid))
-				GinkgoWriter.Printf("VmRSS diff: %d\n", rssAfter-rssBefore)
-				Expect(rssAfter - rssBefore).To(BeNumerically("<", maxRSSGrowthKB))
+				GinkgoWriter.Printf("Anonymous diff: %d\n", growth)
+				Expect(growth).To(BeNumerically("<", maxAnonGrowthKB), "Anonymous growth in kB")
 
 				expectNoResourceLeak(pid, resources)
 			}, SpecTimeout(specTimeout))

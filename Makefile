@@ -19,19 +19,24 @@ GINKGO_FLAGS ?= -vv --trace --race --randomize-all --show-node-events --timeout 
 TEST_FLAGS ?=
 # The integration tests build and use the release binary if this is unset.
 CONMON_BINARY ?=
-# The resident set size every spec checks the server against, and how much it
-# may grow over the execs of the memory leak specs. A dynamically linked
-# release build stays well below 10 MB, the static glibc builds CI tests get
-# 5500 kB on amd64 and 6400 kB on arm64 (see .github/workflows/ci.yml).
-# Most of it is the mapped binary and libraries (RssFile), an idle server has
-# about 0.5 MB of private anonymous memory (RssAnon), which every spec checks
-# against its own budget, so that a regression of a few MB does not hide in
-# the slack of the total. The specs of the CI runs on main stayed below
-# 750 kB of RssAnon on amd64 and 2.5 MB on arm64, which CI checks against
-# 2048 and 4096 kB. The default here is the loose one for other hosts.
+# The resident set size every spec checks the server against, its private
+# anonymous memory, and how much that may grow over the execs of the memory
+# leak specs. The private anonymous memory is the exact Anonymous of the
+# smaps_rollup of the server, RssAnon of its status can be off by hundreds of
+# kB on kernels since 6.2. A dynamically linked release build stays well below
+# 10 MB, the static glibc builds CI tests get 5500 kB on amd64 and 6400 kB on
+# arm64 (see .github/workflows/ci.yml). Most of it is the mapped binary and
+# libraries (RssFile), an idle server has about 0.5 MB of private anonymous
+# memory, which every spec checks against its own budget, so that a regression
+# of a few MB does not hide in the slack of the total. The specs of the CI runs
+# on main stayed below 750 kB of private anonymous memory on amd64 and 2.5 MB
+# on arm64, which CI checks against 2048 and 4096 kB. The default here is the
+# loose one for other hosts. The growth stayed below about 70 kB over the 25
+# execs after the warm-up in the CI runs, on both architectures and with
+# coverage.
 MAX_RSS_KB ?= 10240
 MAX_RSS_ANON_KB ?= 4096
-MAX_RSS_GROWTH_KB ?= 2000
+MAX_RSS_GROWTH_KB ?= 256
 # The generated Go code embeds a schema which differs between capnp versions,
 # use the one pinned by flake.lock. Set CAPNP=capnp to use the local one.
 CAPNP ?= nix shell --inputs-from . nixpkgs\#capnproto --command capnp

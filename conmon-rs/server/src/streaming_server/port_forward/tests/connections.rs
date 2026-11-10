@@ -1,6 +1,7 @@
 //! Connecting to the pod, and the input which arrives meanwhile.
 
 use super::*;
+use crate::test_util::pattern;
 
 #[tokio::test]
 async fn connections_send_without_delay() -> Result<()> {
@@ -96,11 +97,6 @@ async fn input_gets_taken_while_connecting() -> Result<()> {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "a wrapping byte pattern"
-)]
 async fn small_input_while_connecting_gets_collected() -> Result<()> {
     let connect_budget = Budget::new(CONNECT_BUDGET);
     let (input_tx, mut input) = mpsc::channel(CHANNEL_QUEUE);
@@ -108,8 +104,8 @@ async fn small_input_while_connecting_gets_collected() -> Result<()> {
     let send = task::spawn({
         let budget = Budget::new(1000);
         async move {
-            for i in 0..1000 {
-                let data = budget.hold(Bytes::from(vec![i as u8])).await;
+            for byte in pattern(1000) {
+                let data = budget.hold(Bytes::from(vec![byte])).await;
                 input_tx.send(data).await?;
             }
             // Connected once all of it moved into the connect budget.
@@ -128,10 +124,7 @@ async fn small_input_while_connecting_gets_collected() -> Result<()> {
     )
     .await?;
     time::timeout(Duration::from_secs(5), send).await???;
-    assert_eq!(
-        &early.data[..],
-        (0..1000).map(|i| i as u8).collect::<Vec<_>>()
-    );
+    assert_eq!(early.data[..], pattern(1000));
     assert!(early.last.is_none());
     // The buffer counts as a whole.
     assert!(connect_budget.available() <= CONNECT_BUDGET as usize - 1000);

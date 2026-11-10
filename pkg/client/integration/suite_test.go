@@ -82,14 +82,14 @@ var (
 	// The budget of the Makefile for a dynamically linked release build,
 	// MAX_RSS_KB overrides it. See the Makefile for the budgets.
 	maxRSSKB = 10240
-	// The budget of the private anonymous memory of the server (RssAnon),
-	// which the mapped binary and libraries do not count towards,
-	// MAX_RSS_ANON_KB overrides it. The loose default of the Makefile, CI
-	// sets a tighter one on amd64.
-	maxRSSAnonKB = 4096
-	// How much the resident set of the server may grow over the execs of the
-	// memory leak specs, MAX_RSS_GROWTH_KB overrides it.
-	maxRSSGrowthKB = 2000
+	// The budget of the private anonymous memory of the server (Anonymous of
+	// its smaps_rollup), which the mapped binary and libraries do not count
+	// towards, MAX_RSS_ANON_KB overrides it. The loose default of the
+	// Makefile, CI sets a tighter one on amd64.
+	maxAnonKB = 4096
+	// How much the private anonymous memory of the server may grow over the
+	// execs of the memory leak specs, MAX_RSS_GROWTH_KB overrides it.
+	maxAnonGrowthKB = 256
 )
 
 // TestConmonClient runs the created specs.
@@ -109,7 +109,7 @@ func TestConmonClient(t *testing.T) {
 			t.Fatalf("parse MAX_RSS_ANON_KB: %v", err)
 		}
 
-		maxRSSAnonKB = anonInt
+		maxAnonKB = anonInt
 	}
 
 	if growthStr := os.Getenv("MAX_RSS_GROWTH_KB"); growthStr != "" {
@@ -118,7 +118,7 @@ func TestConmonClient(t *testing.T) {
 			t.Fatalf("parse MAX_RSS_GROWTH_KB: %v", err)
 		}
 
-		maxRSSGrowthKB = growthInt
+		maxAnonGrowthKB = growthInt
 	}
 
 	if binary := os.Getenv("BUSYBOX_BINARY"); binary != "" {
@@ -544,8 +544,8 @@ func registerSpecHooks(tr **testRunner, sut **client.ConmonClient) {
 }
 
 // expectRSSBelowCeiling checks the resident set size of the server of a
-// spec, if it got one, against maxRSSKB, and its private anonymous part
-// against maxRSSAnonKB. Most of the resident set are the mapped binary and
+// spec, if it got one, against maxRSSKB, and its private anonymous memory
+// against maxAnonKB. Most of the resident set are the mapped binary and
 // libraries, a regression of the memory the server allocates would hide in
 // the slack of the total.
 func expectRSSBelowCeiling(sut *client.ConmonClient) {
@@ -556,17 +556,17 @@ func expectRSSBelowCeiling(sut *client.ConmonClient) {
 	pid := sut.PID()
 	Expect(pid).To(BeNumerically(">", 0))
 	rss := statusKBGivenPID(pid, "VmRSS")
-	anon := statusKBGivenPID(pid, "RssAnon")
+	anon := anonymousKBGivenPID(pid)
 	// Named after the spec, so that a value can be attributed in the
 	// verbose output of a whole run.
 	GinkgoWriter.Printf(
-		"VmRSS for server is %d kB, RssAnon %d kB in %q\n",
+		"VmRSS for server is %d kB, Anonymous %d kB in %q\n",
 		rss,
 		anon,
 		CurrentSpecReport().FullText(),
 	)
 	Expect(rss).To(BeNumerically("<", maxRSSKB), "VmRSS of the server in kB")
-	Expect(anon).To(BeNumerically("<", maxRSSAnonKB), "RssAnon of the server in kB")
+	Expect(anon).To(BeNumerically("<", maxAnonKB), "Anonymous of the server in kB")
 }
 
 // containerRunner returns a function which starts a server with a started
@@ -772,12 +772,26 @@ func logGrownMappings(before, after map[string]int) {
 }
 
 // statusKBGivenPID returns the value in kB of the field of the status of the
-// process in /proc, like VmRSS or RssAnon, as an int, so that the difference
-// of two values cannot wrap.
+// process in /proc, like VmRSS.
 func statusKBGivenPID(pid uint32, field string) int {
+	return procKBGivenPID(pid, "status", field)
+}
+
+// anonymousKBGivenPID returns the private anonymous memory of the process in
+// kB, summed up from its mappings. Unlike RssAnon of the status, which many
+// kernels since 6.2 take from per CPU counters which can be off by hundreds
+// of kB, it is exact. An int, so that the difference of two values cannot
+// wrap.
+func anonymousKBGivenPID(pid uint32) int {
+	return procKBGivenPID(pid, "smaps_rollup", "Anonymous")
+}
+
+// procKBGivenPID returns the value in kB of the field of a file of the process
+// in /proc with lines like "VmRSS: 1024 kB", as an int.
+func procKBGivenPID(pid uint32, file, field string) int {
 	const procPath = "/proc"
 
-	procEntry := filepath.Join(procPath, strconv.Itoa(int(pid)), "status")
+	procEntry := filepath.Join(procPath, strconv.Itoa(int(pid)), file)
 
 	f, err := os.Open(procEntry)
 	Expect(err).To(Succeed())

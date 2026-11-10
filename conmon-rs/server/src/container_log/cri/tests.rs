@@ -154,6 +154,27 @@ async fn timestamps_are_taken_per_chunk() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn timestamps_get_formatted_per_second() -> Result<()> {
+    let mut sut = Timestamp::default();
+    let parse = |timestamp: &str| OffsetDateTime::parse(timestamp, &Rfc3339);
+
+    // The last nanosecond of a second, then the first one of the next,
+    // within the same minute.
+    let first = OffsetDateTime::from_unix_timestamp_nanos(1_792_497_601_999_999_999)?;
+    assert_eq!(parse(sut.update_at(first)?)?, first);
+    let next = first + time::Duration::nanoseconds(2);
+    assert_eq!(parse(sut.update_at(next)?)?, next);
+
+    // Within the second only the fraction gets formatted, the date, time of
+    // day and offset are the cached ones.
+    sut.date_time = "2000-01-01T00:00:00".into();
+    let later = next + time::Duration::nanoseconds(5);
+    let expected = format!("2000-01-01T00:00:00.000000006{}", sut.offset);
+    assert_eq!(sut.update_at(later)?, expected);
+    Ok(())
+}
+
 #[tokio::test]
 async fn init_failure() -> Result<()> {
     let mut sut = CriLogger::new("/file/does/not/exist", None);

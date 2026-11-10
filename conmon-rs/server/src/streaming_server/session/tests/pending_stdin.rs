@@ -4,6 +4,7 @@ use super::*;
 use crate::streaming_server::session::pending_stdin::{
     STDIN_CHUNK_SIZE, STDIN_ENTRY_OVERHEAD, STDIN_MERGE_SIZE,
 };
+use crate::test_util::pattern;
 
 #[test]
 fn resize_events_bypass_pending_stdin() {
@@ -85,11 +86,11 @@ fn pending_stdin_drops_what_carries_nothing() {
 }
 
 #[test]
-#[expect(clippy::cast_possible_truncation, reason = "a wrapping byte pattern")]
 fn small_stdin_gets_merged() {
     let mut pending = PendingStdin::default();
-    for i in 0..2 * STDIN_CHUNK_SIZE {
-        pending.push(Stdin::Data(Bytes::from(vec![i as u8])));
+    let expected = pattern(2 * STDIN_CHUNK_SIZE);
+    for byte in &expected {
+        pending.push(Stdin::Data(Bytes::from(vec![*byte])));
     }
     // Two full entries, not one per byte.
     assert_eq!(pending.len(), 2 * (STDIN_CHUNK_SIZE + STDIN_ENTRY_OVERHEAD));
@@ -99,11 +100,11 @@ fn small_stdin_gets_merged() {
     while let Stdin::Data(chunk) = pending.pop() {
         data.extend_from_slice(&chunk);
     }
-    assert_eq!(
-        data,
-        (0..2 * STDIN_CHUNK_SIZE)
-            .map(|i| i as u8)
-            .collect::<Vec<_>>()
+    assert!(
+        data == expected,
+        "got {} of {} bytes",
+        data.len(),
+        expected.len()
     );
     assert!(pending.is_empty());
 }

@@ -72,7 +72,11 @@ impl Timestamp {
         if self.frozen {
             return Ok(&self.formatted);
         }
-        let now = OffsetDateTime::now_utc();
+        self.update_at(OffsetDateTime::now_utc())
+    }
+
+    /// Return the timestamp of `now`.
+    fn update_at(&mut self, now: OffsetDateTime) -> Result<&str> {
         let second = now.unix_timestamp();
         if self.second != Some(second) {
             let offset = UtcOffset::local_offset_at(now).unwrap_or(UtcOffset::UTC);

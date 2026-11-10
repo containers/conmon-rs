@@ -19,12 +19,12 @@ inputs:
     required: true
   max-rss-anon-kb:
     description: >-
-      The private anonymous part of the resident set size (RssAnon) every spec
+      The private anonymous memory (Anonymous of smaps_rollup) every spec
       checks the server against, see the Makefile, whose loose default this
       is. The test-integration jobs set the budget of their architecture.
     default: "4096"
   max-rss-growth-kb:
-    description: How much the resident set size may grow in the memory leak specs, the one of the Makefile if empty.
+    description: How much the private anonymous memory (Anonymous of smaps_rollup) of the server may grow in the memory leak specs, the one of the Makefile if empty.
     default: ""
   test-flags:
     description: Additional flags of ginkgo.
