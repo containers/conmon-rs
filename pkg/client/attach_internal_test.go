@@ -294,7 +294,7 @@ func TestStdinEOFEndsAttachOnlyWhenOutputCannotEnd(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		tty, stopAfterStdinEOF, containerStdin bool
+		terminal, stopAfterStdinEOF, containerStdin bool
 		// Whether the attach returns on the EOF of its stdin, otherwise it
 		// keeps receiving the output until it ends.
 		returns bool
@@ -308,14 +308,14 @@ func TestStdinEOFEndsAttachOnlyWhenOutputCannotEnd(t *testing.T) {
 		{stopAfterStdinEOF: true},
 		{},
 		// A terminal never gets closed.
-		{tty: true, stopAfterStdinEOF: true, returns: true},
-		{tty: true, stopAfterStdinEOF: true, containerStdin: true, returns: true},
-		{tty: true},
-		{tty: true, containerStdin: true},
+		{terminal: true, stopAfterStdinEOF: true, returns: true},
+		{terminal: true, stopAfterStdinEOF: true, containerStdin: true, returns: true},
+		{terminal: true},
+		{terminal: true, containerStdin: true},
 	} {
 		name := fmt.Sprintf(
-			"tty %v stop after stdin EOF %v container stdin %v",
-			tc.tty, tc.stopAfterStdinEOF, tc.containerStdin,
+			"terminal %v stop after stdin EOF %v container stdin %v",
+			tc.terminal, tc.stopAfterStdinEOF, tc.containerStdin,
 		)
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -328,7 +328,7 @@ func TestStdinEOFEndsAttachOnlyWhenOutputCannotEnd(t *testing.T) {
 			cfg := &AttachContainerConfig{
 				ID:                "id",
 				SocketPath:        serveAttachSocket(t),
-				Tty:               tc.tty,
+				Terminal:          tc.terminal,
 				StopAfterStdinEOF: tc.stopAfterStdinEOF,
 				ContainerStdin:    tc.containerStdin,
 				Streams:           AttachStreams{Stdin: stdin, Stdout: stdout},

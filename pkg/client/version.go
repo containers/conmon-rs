@@ -262,7 +262,8 @@ func featureSet(list []string) map[string]bool {
 	return features
 }
 
-// Version asks the server for its version and features.
+// Version asks the server for its version and features. SupportsFeature
+// checks a feature without a call, with the ones the client recorded.
 func (c *ConmonClient) Version(ctx context.Context) (_ *VersionResult, retErr error) {
 	ctx, span := c.startSpan(ctx, "Version")
 	defer endSpan(span, &retErr)

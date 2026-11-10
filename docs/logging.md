@@ -112,6 +112,15 @@ does not count.
 
 ## Changes
 
+- unreleased: a `createContainer` request with the retired `json` log driver
+  fails with
+  `the json log driver of createContainer is not supported by this server`,
+  one which sets the `tag` or `labels` of a log driver with
+  `the tag of a log driver of createContainer is not supported by this server`
+  or the same message for the `labels`, empty ones pass. Before, the `json`
+  driver wrote one JSON object per line, and the `journald` driver wrote the
+  `tag` as `CONTAINER_TAG` and `SYSLOG_IDENTIFIER` and the `labels` as fields
+  of their own.
 - unreleased: the server keeps a terminal open itself until the process
   exited. Before, the output ended once the terminal got closed the first
   time, and without stdin the server closed it as well.

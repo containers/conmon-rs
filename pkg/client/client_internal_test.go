@@ -266,17 +266,18 @@ func TestNewInvalidConfig(t *testing.T) {
 		t.Fatalf("got error %v, want %v", err, ErrMissingConfig)
 	}
 
-	if _, err := New(&ConmonServerConfig{}); !errors.Is(err, errRunDirUnspecified) {
-		t.Fatalf("got error %v, want %v", err, errRunDirUnspecified)
+	_, err := New(&ConmonServerConfig{})
+	if !errors.Is(err, errRunDirUnspecified) || !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("got error %v, want %v and %v", err, errRunDirUnspecified, ErrInvalidValue)
 	}
 
 	// The cause of a run directory which cannot be created is kept.
 	file := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(file, nil, 0o600); err != nil {
+	if err = os.WriteFile(file, nil, 0o600); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
 
-	_, err := New(&ConmonServerConfig{ServerRunDir: filepath.Join(file, "run")})
+	_, err = New(&ConmonServerConfig{ServerRunDir: filepath.Join(file, "run")})
 	if !errors.Is(err, errRunDirNotCreated) || !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("got error %v, want %v and %v", err, errRunDirNotCreated, syscall.ENOTDIR)
 	}
@@ -576,8 +577,10 @@ func TestToArgs(t *testing.T) {
 
 			entrypoint, args, err := (&ConmonClient{runDir: "/run/dir"}).toArgs(&config)
 			if tc.wantErr != nil {
-				if !errors.Is(err, tc.wantErr) || args != nil {
-					t.Fatalf("got error %v and args %q, want %v", err, args, tc.wantErr)
+				// Every invalid configuration matches ErrInvalidValue.
+				if !errors.Is(err, tc.wantErr) || !errors.Is(err, ErrInvalidValue) || args != nil {
+					t.Fatalf("got error %v and args %q, want %v and %v",
+						err, args, tc.wantErr, ErrInvalidValue)
 				}
 
 				return
@@ -658,6 +661,19 @@ func TestServerEnv(t *testing.T) {
 				t.Errorf("environment of the config changed to %q", env)
 			}
 		})
+	}
+}
+
+//nolint:paralleltest // changes the environment of the process
+func TestToArgsRuntimeBeforeLookup(t *testing.T) {
+	// No conmonrs to find, an empty Runtime still matches ErrInvalidValue.
+	t.Setenv("PATH", t.TempDir())
+
+	c := &ConmonClient{runDir: "/run/dir"}
+
+	_, _, err := c.toArgs(&ConmonServerConfig{ServerRunDir: "/run/dir"})
+	if !errors.Is(err, errRuntimeUnspecified) || !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("got error %v, want %v and %v", err, errRuntimeUnspecified, ErrInvalidValue)
 	}
 }
 

@@ -78,6 +78,12 @@ server exits with status 1.
 
 ## Changes
 
+- unreleased: the server has neither the `pause` subcommand nor the fd socket
+  anymore, and removes the `conmon-fd.sock` of an older server from the runtime
+  directory when it starts. The `createNamespaces` and `startFdSocket` requests
+  which used them fail with `... is not supported by this server`, see the
+  [protocol changes](protocols.md#changes). Before, `conmonrs pause` created
+  the pod namespaces and the fd socket passed file descriptors to the runtime.
 - unreleased: on SIGTERM, the server forwards the SIGTERM to the containers
   and gives them up to 5 seconds to exit on it, before it killed them right
   away.

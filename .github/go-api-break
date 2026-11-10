@@ -71,6 +71,7 @@ RemoteFD: removed
 RemoteFDs: removed
 ServeAttachContainerConfig.CgroupManager: removed
 ServeExecContainerConfig.CgroupManager: removed
+ServeExecContainerConfig.Tty: removed
 ServerVersion.CargoTree: removed
 SetWindowSizeContainerConfig: removed
 VersionConfig: removed

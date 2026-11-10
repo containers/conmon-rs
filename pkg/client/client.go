@@ -27,9 +27,9 @@ const (
 )
 
 var (
-	errRuntimeUnspecified = errors.New("runtime must be specified")
-	errRunDirUnspecified  = errors.New("RunDir must be specified")
-	errRunDirNotCreated   = errors.New("could not create RunDir")
+	errRuntimeUnspecified = fmt.Errorf("%w: Runtime must be specified", ErrInvalidValue)
+	errRunDirUnspecified  = fmt.Errorf("%w: ServerRunDir must be specified", ErrInvalidValue)
+	errRunDirNotCreated   = errors.New("could not create ServerRunDir")
 )
 
 // ConmonClient is the main client structure of this package, see the package
@@ -428,7 +428,7 @@ func (c *ConmonServerConfig) toClient() (*ConmonClient, error) {
 	// working directory.
 	runDir, err := filepath.Abs(c.ServerRunDir)
 	if err != nil {
-		return nil, fmt.Errorf("make RunDir absolute: %w", err)
+		return nil, fmt.Errorf("make ServerRunDir absolute: %w", err)
 	}
 
 	const perm = 0o755
@@ -502,6 +502,12 @@ func endSpan(span trace.Span, err *error) {
 func (c *ConmonClient) toArgs(
 	config *ConmonServerConfig,
 ) (entrypoint string, args []string, err error) {
+	// Before the lookup of the binary, which fails without a match of
+	// ErrInvalidValue.
+	if config.Runtime == "" {
+		return "", nil, errRuntimeUnspecified
+	}
+
 	entrypoint = config.ConmonServerPath
 	if entrypoint == "" {
 		path, err := exec.LookPath(binaryName)
@@ -510,10 +516,6 @@ func (c *ConmonClient) toArgs(
 		}
 
 		entrypoint = path
-	}
-
-	if config.Runtime == "" {
-		return "", nil, errRuntimeUnspecified
 	}
 
 	// The absolute path of the client, which a later change of its working

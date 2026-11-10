@@ -138,7 +138,7 @@ var _ = Describe("ConmonClient", func() {
 			cfg := &client.AttachContainerConfig{
 				ID:                tr.ctrID,
 				SocketPath:        filepath.Join(tr.tmpDir, "attach"),
-				Tty:               terminal,
+				Terminal:          terminal,
 				StopAfterStdinEOF: stopAfterStdinEOF,
 				ContainerStdin:    true,
 				Streams: client.AttachStreams{
@@ -328,7 +328,7 @@ var _ = Describe("ConmonClient", func() {
 				attachErr <- sut.AttachContainer(attachCtx, &client.AttachContainerConfig{
 					ID:         tr.ctrID,
 					SocketPath: filepath.Join(tr.tmpDir, "attach"),
-					Tty:        true,
+					Terminal:   true,
 					Resize:     resizeEvents,
 					Streams:    client.AttachStreams{Stdout: stdoutWriter},
 				})
