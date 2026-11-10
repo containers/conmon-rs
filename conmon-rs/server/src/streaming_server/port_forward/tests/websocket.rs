@@ -207,6 +207,52 @@ async fn port_forward_over_websocket_ends_with_its_forwards() -> Result<()> {
         .await
 }
 
+/// Data which the pod sends keeps the session active, also while the client
+/// sends nothing, like for a download.
+#[tokio::test]
+async fn port_forward_over_websocket_output_keeps_sessions_active() -> Result<()> {
+    const CHUNKS: usize = 80;
+    LocalSet::new()
+        .run_until(async {
+            let server = StreamingServer::default();
+            let timeout = Duration::from_millis(500);
+            // A pod which sends a chunk every 12.5ms for twice the idle
+            // timeout, then closes the connection.
+            let listener = tokio::net::TcpListener::bind((ADDR, 0)).await?;
+            let port = listener.local_addr()?.port();
+            let pod = task::spawn(async move {
+                let (mut connection, _) = listener.accept().await?;
+                for _ in 0..CHUNKS {
+                    time::sleep(timeout / 40).await;
+                    connection.write_all(b"chunk").await?;
+                }
+                anyhow::Ok(())
+            });
+
+            let (response, mut stream) =
+                port_forward_websocket_with(&server, &format!("?port={port}"), "", Some(timeout))
+                    .await?;
+            assert!(response.starts_with("http/1.1 101"), "{response}");
+            server_frame(&mut stream).await?;
+            server_frame(&mut stream).await?;
+
+            // All of it arrives before the session ends with the forward.
+            let mut received = 0;
+            loop {
+                match server_frame(&mut stream).await? {
+                    (0x8, _) => break,
+                    (opcode, payload) => {
+                        assert_eq!((opcode, payload[0]), (2, 0));
+                        received += payload.len() - 1;
+                    }
+                }
+            }
+            assert_eq!(received, CHUNKS * b"chunk".len());
+            pod.await?
+        })
+        .await
+}
+
 #[tokio::test]
 async fn port_forward_over_websocket_waits_for_the_close_answer() -> Result<()> {
     LocalSet::new()

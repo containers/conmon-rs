@@ -94,6 +94,32 @@ async fn unfinished_shutdown_is_logged_and_ends_the_server_with_it() -> Result<(
     Ok(())
 }
 
+/// The signal handler sends its failures and those of the shutdown to the
+/// backend, also when it cannot listen for signals.
+#[tokio::test(start_paused = true)]
+async fn signal_handler_sends_the_failures_to_the_backend() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    // A socket which cannot be removed.
+    let socket = dir.path().join("conmon.sock");
+    std::fs::create_dir(&socket)?;
+
+    let (tx, rx) = oneshot::channel();
+    Server::start_signal_handler(
+        Err(format_err!("no signals")),
+        Arc::new(ChildReaper::default()),
+        &socket,
+        tx,
+    )
+    .await;
+    let err = rx
+        .await?
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_default();
+    assert!(err.starts_with("no signals, remove socket file: "), "{err}");
+    Ok(())
+}
+
 /// The server logs a backend which fails, like one which cannot bind its
 /// socket. With the journal as log driver, the standard streams are gone
 /// after the fork.

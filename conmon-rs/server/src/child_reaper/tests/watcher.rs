@@ -20,7 +20,13 @@ async fn check_watch(cases: &[(&str, i32)]) -> Result<()> {
     for &(script, expected) in cases {
         let exit_path = dir.path().join("exit");
         let sh = spawn_sh(script)?;
-        let (_, reapable, exit) = ReapableChild::from_child(child(sh.pid, None, &exit_path)?);
+        let mut child = child(sh.pid, None, &exit_path)?;
+        // CRI-O passes two exit paths, one which cannot be written does
+        // not keep the exit code from the others.
+        child
+            .exit_paths
+            .insert(0, dir.path().join("missing").join("exit"));
+        let (_, reapable, exit) = ReapableChild::from_child(child);
         let mut exit_rx = reapable.watch(exit, || {});
 
         let exit = exit_rx.recv().await?;
