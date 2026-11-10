@@ -700,12 +700,12 @@ jobs:
       ARCH: amd64
       RUNTIME: ${{ matrix.runtime }}
       # The resident set size every spec checks the server against, its
-      # private anonymous part, and how much it may grow in the memory leak
-      # specs, see the Makefile. The specs of the runs on main stayed below
-      # 750 kB of RssAnon on amd64.
+      # private anonymous part, and how much that private anonymous memory
+      # may grow in the memory leak specs, see the Makefile. The specs of the
+      # runs on main stayed below 750 kB of private anonymous memory on amd64.
       MAX_RSS_KB: 5500
       MAX_RSS_ANON_KB: 2048
-      MAX_RSS_GROWTH_KB: 2000
+      MAX_RSS_GROWTH_KB: 256
     steps: &test-integration-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -788,12 +788,12 @@ jobs:
       RUNTIME: crun
       # The runs on main peaked at 4696 kB of VmRSS, with a spread of 1.6 MB
       # between runs of the same spec, which the budget leaves on top of the
-      # peak, and below 2.5 MB of RssAnon. The RssAnon budget catches a
-      # regression of the memory of the server itself, which the slack of
-      # the total would hide.
+      # peak, and below 2.5 MB of private anonymous memory. That budget
+      # catches a regression of the memory of the server itself, which the
+      # slack of the total would hide.
       MAX_RSS_KB: 6400
       MAX_RSS_ANON_KB: 4096
-      MAX_RSS_GROWTH_KB: 2000
+      MAX_RSS_GROWTH_KB: 256
     steps: *test-integration-steps
 
   # Runs the integration tests once more against a coverage instrumented debug
@@ -831,10 +831,12 @@ jobs:
           cargo llvm-cov clean --workspace
           cargo build --locked
           echo "profile-file=$LLVM_PROFILE_FILE" >>"$GITHUB_OUTPUT"
-      # The memory budget does not apply to an instrumented debug build. A
-      # failure only costs the coverage, the job stays green and uploads what
-      # got covered, which shows as a drop of the coverage. A failing job would
-      # fail the check, even if allowed to. The test files are the ones the
+      # The budgets of the resident set size and its private anonymous part
+      # are lifted for an instrumented debug build, the limit of the growth in
+      # the memory leak specs of the Makefile still applies. A failure only
+      # costs the coverage, the job stays green and uploads what got covered,
+      # which shows as a drop of the coverage. A failing job would fail the
+      # check, even if allowed to. The test files are the ones the
       # crun job of test-integration-amd64 saved.
       - name: Integration tests
         id: integration

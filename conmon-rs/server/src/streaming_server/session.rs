@@ -71,7 +71,11 @@ pub(super) const PING_INTERVAL: Duration = if cfg!(test) {
 /// the container to take a part of it, see [`ClientRx::stdin_taken`]. A slow
 /// container gets all of it, only one which stopped reading its stdin holds
 /// up the end of the session this long.
-pub(super) const STDIN_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const STDIN_FLUSH_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(5)
+};
 
 /// The latest resize event of a client, older ones are replaced.
 pub(super) type ResizeRx = watch::Receiver<Option<Bytes>>;

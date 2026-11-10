@@ -369,6 +369,8 @@ async fn exec_sync_reports_runtimes_which_do_not_start_the_process() -> anyhow::
 struct Bundle {
     dir: tempfile::TempDir,
     client: conmon::Client,
+    /// The children the server registered.
+    reaper: Arc<ChildReaper>,
 }
 
 impl Bundle {
@@ -389,8 +391,14 @@ impl Bundle {
             "--runtime-dir",
             dir.path().to_str().context("runtime dir")?,
         ]);
-        let client = capnp_rpc::new_client(Server::with_config(config));
-        Ok(Self { dir, client })
+        let server = Server::with_config(config);
+        let reaper = server.reaper().clone();
+        let client = capnp_rpc::new_client(server);
+        Ok(Self {
+            dir,
+            client,
+            reaper,
+        })
     }
 
     fn path(&self) -> String {
@@ -487,6 +495,13 @@ async fn create_runs_the_runtime_and_registers_the_container() -> anyhow::Result
 
                 // The server knows the container, its log can be reopened.
                 bundle.reopen_log(id).await?;
+
+                // Nothing consumes the stdio channels of a created container,
+                // they do not keep its output.
+                let Err(err) = bundle.reaper.get(id)?.io().stdio() else {
+                    panic!("{id}: stdio channels still there");
+                };
+                assert_eq!(err.to_string(), "stdio channels have been dropped", "{id}");
             }
             Ok(())
         })

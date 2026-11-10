@@ -173,6 +173,16 @@ pub(crate) fn spawn_sh(script: &str) -> Result<Spawned> {
     Ok(Spawned { pid, process })
 }
 
+/// Distinct bytes, so that a lost or reordered chunk is noticed. Built from
+/// whole blocks, byte by byte takes long in emulated tests. The block length
+/// is a prime, so that the pattern does not line up with buffer sizes.
+pub(crate) fn pattern(len: usize) -> Vec<u8> {
+    let block: Vec<u8> = (0..251).collect();
+    let mut pattern = block.repeat(len.div_ceil(block.len()));
+    pattern.truncate(len);
+    pattern
+}
+
 /// A container without a process, exit paths or a timeout, with I/O of
 /// its own, with or without a terminal. The struct update syntax sets the
 /// rest, like `Child { pid, ..container_child(false)? }`.

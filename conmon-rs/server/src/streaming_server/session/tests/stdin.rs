@@ -126,20 +126,19 @@ async fn stdin_before_close_waits_for_stalled_containers_in_bounds() -> Result<(
     // pending stdin, so that the server reads the close.
     let (input, _) = stdin_and_close(40);
 
+    // Each part within the timeout, both together take longer.
+    let pause = STDIN_FLUSH_TIMEOUT * 3 / 5;
     let attach = io.attach().clone();
     let reader = task::spawn(async move {
         for _ in 0..2 {
-            time::sleep(Duration::from_secs(3)).await;
+            time::sleep(pause).await;
             attach.read().await?;
         }
         anyhow::Ok(())
     });
     let start = time::Instant::now();
     StreamingServer::run_session(output, input, session, Activity::new()).await;
-    assert_eq!(
-        start.elapsed(),
-        Duration::from_secs(6) + STDIN_FLUSH_TIMEOUT
-    );
+    assert_eq!(start.elapsed(), 2 * pause + STDIN_FLUSH_TIMEOUT);
     reader.await??;
     Ok(())
 }
@@ -164,8 +163,8 @@ async fn closes_after_stdin_stalled_containers_get_answered() -> Result<()> {
             frames.extend(client_frame(0x8, &normal));
             stream.write_all(&frames).await?;
 
-            // Before the flush gives up, generous for emulated test runs.
-            // Pings of the server may come first.
+            // Before the flush gives up, about twice what emulated test runs
+            // need. Pings of the server may come first.
             let answer = time::timeout(STDIN_FLUSH_TIMEOUT * 4 / 5, async {
                 loop {
                     let frame = server_frame(&mut stream).await?;

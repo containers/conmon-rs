@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_util::pattern;
 use flate2::{Compress, Compression, FlushCompress};
 
 /// Frames moby/spdystream v0.5.1 wrote, as a Kubernetes port forward
@@ -239,13 +240,13 @@ async fn oversized_control_frames_are_rejected() -> Result<()> {
 }
 
 #[tokio::test]
-#[expect(clippy::cast_possible_truncation, reason = "a wrapping byte pattern")]
 async fn large_data_frames_come_in_parts() -> Result<()> {
     // The largest frame the protocol allows, with FIN, then a ping.
     let len = MAX_DATA_FRAME_LEN;
+    let payload = pattern(len);
     let mut bytes = vec![0, 0, 0, 1, FLAG_FIN];
     bytes.extend_from_slice(&u32::try_from(len)?.to_be_bytes()[1..]);
-    bytes.extend((0..len).map(|i| i as u8));
+    bytes.extend_from_slice(&payload);
     bytes.extend(hex(GO_PING));
 
     let frames = decode_all(&mut Decoder::default(), &bytes).await?;
@@ -265,8 +266,8 @@ async fn large_data_frames_come_in_parts() -> Result<()> {
         assert_eq!(*fin, i == frames.len() - 2);
         received.extend_from_slice(data);
     }
-    assert!(received.iter().enumerate().all(|(i, b)| *b == i as u8));
-    assert_eq!(received.len(), len);
+    // Not `assert_eq!`, which would print megabytes on a failure.
+    assert!(received == payload, "got {} of {len} bytes", received.len());
     assert_eq!(frames.last(), Some(&Frame::Ping { id: 1 }));
 
     // A frame which ends within its payload is an error.

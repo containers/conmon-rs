@@ -3,7 +3,7 @@ use crate::{
     channel::Receiver,
     container_log::{ContainerLog, testing},
     tail::Tail,
-    test_util::wait_for,
+    test_util::{pattern, wait_for},
 };
 use tokio::{
     io::{AsyncWriteExt, DuplexStream, duplex},
@@ -44,15 +44,6 @@ fn data(message: Message) -> Bytes {
         Message::Data(data, _) => data,
         Message::Done => panic!("unexpected done"),
     }
-}
-
-/// Distinct output, so that a lost or reordered chunk is noticed. Built
-/// from whole blocks, byte by byte takes long in emulated tests.
-fn pattern(len: usize) -> Vec<u8> {
-    let block: Vec<u8> = (0..251).collect();
-    let mut pattern = block.repeat(len.div_ceil(block.len()));
-    pattern.truncate(len);
-    pattern
 }
 
 #[tokio::test]

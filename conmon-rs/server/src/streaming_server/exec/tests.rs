@@ -21,6 +21,7 @@ use crate::{
         session::ClientRx,
         spdy::{Connection, testing::Client},
     },
+    test_util::pattern,
 };
 use std::{
     os::unix::{process::CommandExt, process::ExitStatusExt},
@@ -330,9 +331,8 @@ fn truncated_early_output_fails_the_session() {
 }
 
 #[test]
-#[expect(clippy::cast_possible_truncation, reason = "a wrapping byte pattern")]
 fn early_output_gets_split_into_frames() {
-    let data: Vec<u8> = (0..2 * EARLY_FRAME_SIZE + 10).map(|i| i as u8).collect();
+    let data = pattern(2 * EARLY_FRAME_SIZE + 10);
     let frames = StreamingServer::early_frames(data.clone());
     assert_eq!(
         frames.iter().map(Bytes::len).collect::<Vec<_>>(),
