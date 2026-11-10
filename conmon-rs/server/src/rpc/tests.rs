@@ -15,6 +15,7 @@ use tokio::{process::Command, task::LocalSet, time};
 async fn too_many_streaming_sessions_fail_with_the_bare_message() -> anyhow::Result<()> {
     let config = Arc::new(Config::parse_for_test::<_, &str>([]));
     let (_, child, _) = ReapableChild::from_child(container_child(false)?);
+    let child = child.container().context("container")?;
     let streaming_server = StreamingServer::default();
     let common = || SessionCommon {
         container_id: "id".into(),
@@ -356,7 +357,7 @@ async fn exec_sync_reports_runtimes_which_do_not_start_the_process() -> anyhow::
             assert!(hung.timed_out);
             let stderr = String::from_utf8_lossy(&hung.stderr);
             assert!(
-                stderr.contains("timed out waiting for the runtime"),
+                stderr.contains("timed out after 1s waiting for the runtime"),
                 "{stderr}"
             );
             Ok(())

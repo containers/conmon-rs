@@ -152,7 +152,8 @@ pub(super) fn create_listener(
         .context("duplicate attach socket")
         .map_err(remove)?;
     let setup = || -> Result<(fs::Metadata, UnixSeqpacketListener)> {
-        let metadata = path.metadata().context("get attach socket metadata")?;
+        // Without following a symlink, like `FileId::is_at`.
+        let metadata = fs::symlink_metadata(path).context("get attach socket metadata")?;
         listen(&fd, Backlog::MAXCONN).context("listen on socket fd")?;
         let listener = UnixSeqpacketListener::try_from(fd).context("create seqpacket listener")?;
         Ok((metadata, listener))

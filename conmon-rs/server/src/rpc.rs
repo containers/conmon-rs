@@ -17,7 +17,7 @@ use crate::{
     runtime_args::{GenerateRuntimeArgs, check_id},
     server::Server,
     streaming_server::{AttachSession, ExecSession, SessionCommon},
-    util::sleep_until,
+    util::{format_duration, sleep_until},
     version::Version,
 };
 use anyhow::Context;
@@ -441,12 +441,10 @@ impl conmon::Server for Server {
 
         // The timeout starts now, the runtime may hang before the process
         // even starts.
-        let time_to_timeout = exec_deadline(req.get_timeout_sec());
+        let timeout_sec = req.get_timeout_sec();
+        let time_to_timeout = exec_deadline(timeout_sec);
 
-        debug!(
-            "Got exec sync container request with timeout {}",
-            req.get_timeout_sec()
-        );
+        debug!("Got exec sync container request with timeout {timeout_sec}");
 
         let child_reaper = self.reaper().clone();
         let command: Vec<String> = pry!(text_list(req.get_command()));
@@ -540,9 +538,14 @@ impl conmon::Server for Server {
                     task_result(exec_task).await?
                 } else {
                     debug!("Runtime did not start the exec before its timeout");
+                    // Only reached with a timeout, see `exec_deadline`.
+                    let timeout = format_duration(Duration::from_secs(timeout_sec));
                     ExecSyncOutput {
                         stdout: vec![],
-                        stderr: b"timed out waiting for the runtime to start the process".to_vec(),
+                        stderr: format!(
+                            "timed out after {timeout} waiting for the runtime to start the process"
+                        )
+                        .into_bytes(),
                         exit_code: EXIT_CODE_TIMED_OUT,
                         timed_out: true,
                     }

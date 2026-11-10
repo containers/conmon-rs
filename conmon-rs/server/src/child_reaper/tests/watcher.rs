@@ -34,7 +34,7 @@ async fn check_watch(cases: &[(&str, i32)]) -> Result<()> {
         assert!(!exit.timed_out);
         assert_eq!(std::fs::read_to_string(&exit_path)?, expected.to_string());
         // The token tells about the exit also without an OOM watcher.
-        assert!(reapable.token().is_cancelled());
+        assert!(reapable.token.is_cancelled());
     }
     // No temporary exit file is left behind.
     assert_eq!(std::fs::read_dir(dir.path())?.count(), 1);

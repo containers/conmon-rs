@@ -1,8 +1,6 @@
 //! Watching a registered child until it exited, and what follows.
 
-use super::{
-    Child, ChildKind, EXIT_CODE_TIMED_OUT, ExitChannelData, ReapableChild, kill_grandchild,
-};
+use super::{Child, ChildKind, EXIT_CODE_TIMED_OUT, ExitChannelData, ReapableChild};
 use crate::{
     attach::SharedContainerAttach,
     container_io::{DRAIN_MAX_LOG_WAIT, Drain, Message},
@@ -17,6 +15,7 @@ use std::{
     ffi::OsString,
     io,
     path::{Path, PathBuf},
+    pin::{Pin, pin},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -173,11 +172,10 @@ impl ReapableChild {
             id,
             Self {
                 seq: NEXT_SEQ.fetch_add(1, Ordering::Relaxed),
-                kind,
                 pid,
                 // Not reaped before its watcher runs, the PID is its own.
                 process: process.unwrap_or_else(|| Arc::new(Process::open(pid))),
-                io,
+                io: (kind == ChildKind::Container).then_some(io),
                 token,
             },
             ExitHandling {
@@ -188,32 +186,48 @@ impl ReapableChild {
         )
     }
 
-    /// Wait for the exit of the process through the pidfd of its
-    /// registration, or kill it at the `timeout`, and return its exit code
-    /// and whether it timed out. The wait gets dropped on the timeout, the
-    /// process gets reaped in the background once the SIGKILL took effect. A
-    /// process stuck in the kernel keeps only a pidfd busy then, not a
-    /// thread.
-    async fn wait_or_kill(process: &Process, timeout: Option<Instant>) -> (i32, bool) {
-        let pid = process.pid();
-        let wait = process::wait_for_exit(process).instrument(debug_span!("wait_for_exit"));
+    /// Wait for the exit of the process with `wait`, or kill it at the
+    /// `timeout`, and return its exit code and whether it timed out. The
+    /// wait stays pending on the timeout, the watcher reaps the process with
+    /// it once the exit went out, see [`ReapableChild::reap_killed`].
+    async fn wait_or_kill(
+        process: &Process,
+        mut wait: Pin<&mut impl Future<Output = i32>>,
+        timeout: Option<Instant>,
+    ) -> (i32, bool) {
         let Some(timeout) = timeout else {
             return (wait.await, false);
         };
-        if let Ok(code) = time::timeout_at(timeout, wait).await {
+        if let Ok(code) = time::timeout_at(timeout, wait.as_mut()).await {
             return (code, false);
         }
-        kill_grandchild(pid, Signal::SIGKILL);
-        task::spawn(process::wait_for_exit_code(pid));
+        if let Err(e) = process.signal_group(Signal::SIGKILL) {
+            debug!("Not killing timed out process, it is gone: {e}");
+        }
         (EXIT_CODE_TIMED_OUT, true)
+    }
+
+    /// Reap the process which got killed at its timeout through the `wait`
+    /// which timed out, once the SIGKILL took effect. A second wait would
+    /// register the pidfd again, or race this one, whose blocking wait still
+    /// runs without a pidfd, and could take the exit of another child which
+    /// reused the PID. A process stuck in the kernel, like on a hung network
+    /// mount, may take long, it keeps only a pidfd busy meanwhile, not a
+    /// thread. The process stays registered until then, so that the orphan
+    /// sweep leaves it to this wait and the shutdown waits for it and
+    /// reports it if it does not exit in time.
+    async fn reap_killed(wait: Pin<&mut impl Future<Output = i32>>) {
+        let code = wait.await;
+        debug!(code, "Timed out process got reaped");
     }
 
     /// Watch the process and return the receiver for its exit, which exists
     /// before the task starts, a receiver subscribed after the exit would
-    /// miss it. `forget` runs once the exit got sent, or the task ended
-    /// otherwise, like with a panic. A task which never ran, which tokio
-    /// drops right in `spawn` while the runtime shuts down, does not run it,
-    /// so the caller may hold a lock which `forget` takes.
+    /// miss it. `forget` runs once the exit got sent and the process got
+    /// reaped, which comes later for one killed at its timeout, or the task
+    /// ended otherwise, like with a panic. A task which never ran, which
+    /// tokio drops right in `spawn` while the runtime shuts down, does not
+    /// run it, so the caller may hold a lock which `forget` takes.
     pub(super) fn watch(
         &self,
         exit: ExitHandling,
@@ -228,9 +242,9 @@ impl ReapableChild {
         let process = self.process.clone();
         // Only one exit code will be written.
         let (exit_tx, exit_rx) = broadcast::channel(1);
-        let token = self.token().clone();
+        let token = self.token.clone();
+        // None for an exec, see `io`.
         let io = self.io.clone();
-        let kind = self.kind;
 
         task::spawn(
             async move {
@@ -245,8 +259,10 @@ impl ReapableChild {
                         .instrument(debug_span!("cgroup_handling", %pid))
                         .await
                 };
+                let mut reap =
+                    pin!(process::wait_for_exit(&process).instrument(debug_span!("wait_for_exit")));
                 let wait = async {
-                    let exit = Self::wait_or_kill(&process, timeout).await;
+                    let exit = Self::wait_or_kill(&process, reap.as_mut(), timeout).await;
                     // Tells the users of the token that the process is gone,
                     // which ends the OOM watcher.
                     token.cancel();
@@ -259,7 +275,7 @@ impl ReapableChild {
                 // loops write what the process left in the pipes, and stop
                 // them, see `stop_output`. The output of an exec gets stopped
                 // by its consumer, see `StopOutput`.
-                if kind == ChildKind::Container {
+                if let Some(io) = &io {
                     Self::finish_output(io.attach().clone(), io.logger()).await;
                 }
 
@@ -274,6 +290,11 @@ impl ReapableChild {
                 // container.
                 if exit_tx.send(exit_channel_data).is_err() {
                     trace!("Nobody receives the exit status");
+                }
+                // Only after the exit went out, so that the client gets its
+                // timeout right away.
+                if timed_out {
+                    Self::reap_killed(reap).await;
                 }
             }
             .instrument(debug_span!("watch", %pid)),

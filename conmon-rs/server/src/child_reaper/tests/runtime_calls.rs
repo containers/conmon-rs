@@ -1,6 +1,7 @@
 //! Running a runtime for a call and the cleanup after a failure.
 
 use super::*;
+use crate::util::format_duration;
 
 #[tokio::test]
 async fn failed_create_cleanup_spares_claimed_pid() -> Result<()> {
@@ -284,16 +285,10 @@ fn runtime_timeouts_get_formatted() {
         (45, "45s"),
         (0, "0s"),
     ] {
-        assert_eq!(
-            runtime_call::format_duration(Duration::from_secs(secs)),
-            expected
-        );
+        assert_eq!(format_duration(Duration::from_secs(secs)), expected);
     }
     // A deadline measured from now is short of a whole second.
-    assert_eq!(
-        runtime_call::format_duration(Duration::from_millis(59_900)),
-        "1m"
-    );
+    assert_eq!(format_duration(Duration::from_millis(59_900)), "1m");
 }
 
 #[tokio::test]

@@ -61,7 +61,11 @@ const _: () = assert!(Server::SHUTDOWN_TIMEOUT.as_nanos() < CLIENT_STOP_TIMEOUT.
 
 // The cleanup gets what the tracer and the runtime leave of the shutdown.
 // That leaves the killed grandchildren time to drain their output after the
-// grace of the containers on SIGTERM and what the socket takes.
+// grace of the containers on SIGTERM and what the socket takes. It does not
+// cover the DRAIN_MAX_LOG_WAIT for a slow log driver, which the watchers of
+// the containers wait for as well: one which needs longer than the rest of
+// the deadline gets reported as not exited, and the server may stop before
+// it wrote the exit file.
 const _: () = assert!(
     Server::CLEANUP_TIMEOUT.as_nanos()
         > Server::TERMINATE_GRACE.as_nanos()
@@ -497,7 +501,9 @@ impl Server {
     /// does not make the shutdown take longer. Those which exited wrote
     /// their exit files by then. The rest of the cleanup kills the others,
     /// whose watchers then drain their output within [`DRAIN_MAX_WAIT`],
-    /// unless a log driver is stuck.
+    /// unless a log driver is slow, which they wait for up to
+    /// [`DRAIN_MAX_LOG_WAIT`](crate::container_io::DRAIN_MAX_LOG_WAIT),
+    /// more than the rest of the cleanup leaves.
     const TERMINATE_GRACE: Duration = Duration::from_secs(5);
 
     /// Clean up until the `deadline`, and report what did not finish.

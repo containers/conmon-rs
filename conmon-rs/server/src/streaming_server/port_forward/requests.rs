@@ -193,6 +193,9 @@ impl PortForward {
         match stream.headers().get(REQUEST_ID_HEADER) {
             Some(id) if !id.is_empty() => id.into(),
             _ if Self::is_error_stream(stream) => stream.id().to_string().into(),
+            // Only a key of the pending requests, like the kubelet does
+            // it. The -1 of stream 1, which has no error stream before it,
+            // matches none, so it waits alone until its deadline.
             _ => (i64::from(stream.id()) - 2).to_string().into(),
         }
     }

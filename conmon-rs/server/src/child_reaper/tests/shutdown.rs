@@ -245,6 +245,52 @@ async fn shutdown_does_not_wait_forever_for_a_watcher() -> Result<()> {
 }
 
 #[tokio::test]
+async fn shutdown_waits_for_timed_out_execs() -> Result<()> {
+    let reaper = ChildReaper::default();
+    let exec = spawn_sh("exec sleep 60")?;
+    let registered = Child {
+        kind: ChildKind::Exec,
+        pid: exec.pid,
+        timeout: Some(Instant::now() + Duration::from_millis(100)),
+        ..container_child(false)?
+    };
+    // Only the consumer of the exec holds its stdio, the test holds none.
+    let io = Arc::downgrade(&registered.io);
+    let mut exit_rx = reaper.watch_grandchild(registered, InFlight::default())?;
+    let exit = exit_rx.recv().await?;
+    assert_eq!(exit.exit_code, EXIT_CODE_TIMED_OUT);
+    assert!(exit.timed_out);
+
+    // Covers the window between the exit, which goes out at the timeout,
+    // and the reap of the killed process, which one stuck in the kernel
+    // would not leave. The current thread runtime runs this test before the
+    // watcher gets polled again, which waits for the reactor, so nothing
+    // below yields to it before the checks. The orphan sweep leaves the
+    // process to the watcher, and the shutdown reports it. Its pipes or its
+    // terminal do not stay open meanwhile.
+    //
+    // This relies on the pidfd of the process. Without one (Linux before
+    // 5.3), a thread of its own reaps the process and wakes the watcher from
+    // outside the runtime, which may poll the watcher before this test. The
+    // watcher may forget the exec then, and the claim and the report fail.
+    // The released stdio does not depend on it. CI kernels have pidfds.
+    assert!(reaper.is_claimed(exec.pid));
+    assert!(io.upgrade().is_none());
+    let err = reaper
+        .kill_grandchildren(Instant::now())
+        .await
+        .err()
+        .map(|e| format!("{e:#}"));
+    assert_eq!(err, Some(format!("PIDs [{}] did not exit", exec.pid)));
+    // And waits for it until it got reaped.
+    reaper
+        .kill_grandchildren(Instant::now() + Duration::from_secs(10))
+        .await?;
+    assert!(is_gone(exec.pid));
+    Ok(())
+}
+
+#[tokio::test]
 async fn terminate_signals_the_containers_only() -> Result<()> {
     let reaper = ChildReaper::default();
     let dir = tempfile::tempdir()?;
