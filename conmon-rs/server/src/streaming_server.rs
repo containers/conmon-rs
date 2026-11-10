@@ -55,9 +55,9 @@ pub(crate) use exec::ExecSession;
 #[cfg(any(test, feature = "fuzzing"))]
 pub(crate) mod fuzzing {
     pub use super::{
-        channel::fuzzing::channel,
+        channel::fuzzing::channel as channel_decode,
         handshake::fuzzing::upgrade_headers,
-        port_forward::fuzzing::{query_ports, spdy as port_forward_spdy},
+        port_forward::fuzzing::{query_ports as port_forward_query, spdy as port_forward_spdy},
         remotecommand::fuzzing::{resize_events, spdy as remotecommand_spdy},
         session::fuzzing::{client_messages, pending_stdin},
         spdy::fuzzing::{

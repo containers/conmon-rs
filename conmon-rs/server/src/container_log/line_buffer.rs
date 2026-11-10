@@ -14,7 +14,7 @@ use bytes::BytesMut;
 /// as a partial one, cut at a character boundary, and so is a line which
 /// waits too long for its ending, see [`LineBuffer::flush`].
 #[derive(Debug, Default)]
-pub(crate) struct LineBuffer {
+pub(super) struct LineBuffer {
     pub(super) stdout: BytesMut,
     stderr: BytesMut,
 }
@@ -31,7 +31,7 @@ impl LineBuffer {
     }
 
     /// Whether a line of the pipe waits for its ending.
-    pub(crate) fn has_pending(&self, pipe: Pipe) -> bool {
+    pub(super) fn has_pending(&self, pipe: Pipe) -> bool {
         !match pipe {
             Pipe::StdOut => &self.stdout,
             Pipe::StdErr => &self.stderr,
@@ -43,7 +43,7 @@ impl LineBuffer {
     /// chunk borrow it, only the end of a line which started in an earlier
     /// chunk and the start of one which continues in a later one get copied
     /// into the buffer of the pipe.
-    pub(crate) fn push<'a>(&mut self, pipe: Pipe, bytes: &'a [u8]) -> Vec<Line<'a>> {
+    pub(super) fn push<'a>(&mut self, pipe: Pipe, bytes: &'a [u8]) -> Vec<Line<'a>> {
         let mut lines = vec![];
         let mut ends = memchr::memchr_iter(b'\n', bytes).map(|end| end + 1);
         let mut start = 0;
@@ -125,7 +125,7 @@ impl LineBuffer {
     /// Return the line which waits for its ending as a partial one. The
     /// output paused, a prompt or progress output without a newline would
     /// otherwise stay invisible.
-    pub(crate) fn flush(&mut self, pipe: Pipe) -> Vec<Line<'static>> {
+    pub(super) fn flush(&mut self, pipe: Pipe) -> Vec<Line<'static>> {
         // Like a long line, it keeps an unfinished multi byte character and
         // a "\r" back for the next chunk, see [`LineBuffer::cut`].
         let tail = self.tail(pipe);
@@ -142,7 +142,7 @@ impl LineBuffer {
 
     /// The output of the pipe ended, return the line which still waits for
     /// its ending as a partial one.
-    pub(crate) fn finish(&mut self, pipe: Pipe) -> Vec<Line<'static>> {
+    pub(super) fn finish(&mut self, pipe: Pipe) -> Vec<Line<'static>> {
         let tail = self.tail(pipe);
         if tail.is_empty() {
             return vec![];

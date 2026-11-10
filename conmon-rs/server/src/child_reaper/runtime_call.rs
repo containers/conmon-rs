@@ -41,7 +41,7 @@ use tracing::{debug, warn};
 /// The stdout and stderr of a runtime with pipes of its own, read in the
 /// background until they end. Only the end of stderr is kept, it holds the
 /// error, stdout is not of interest.
-pub(crate) struct RuntimeOutput {
+struct RuntimeOutput {
     stderr: Arc<Mutex<StderrTail>>,
     task: JoinHandle<()>,
 }
@@ -50,7 +50,7 @@ type StderrTail = Tail<STDERR_TAIL_SIZE>;
 
 impl RuntimeOutput {
     /// Start reading the pipes of a runtime in the background.
-    pub(crate) fn spawn(stdout: Option<ChildStdout>, stderr: Option<ChildStderr>) -> Self {
+    fn spawn(stdout: Option<ChildStdout>, stderr: Option<ChildStderr>) -> Self {
         let buf = Arc::<Mutex<StderrTail>>::default();
         let stderr_buf = buf.clone();
         let task = task::spawn(async move {
@@ -218,7 +218,7 @@ impl ChildReaper {
     /// to exit on its own and one which got killed to exit. The helpers of a
     /// runtime which exited get it to close its output, see
     /// [`RuntimeOutput::finish_unless_stopped`].
-    pub(crate) const RUNTIME_GRACE: Duration = Duration::from_secs(5);
+    pub(super) const RUNTIME_GRACE: Duration = Duration::from_secs(5);
 
     /// How long a call which the shutdown stopped waits for the exit of its
     /// killed runtime, and then for the output of the runtime, instead of

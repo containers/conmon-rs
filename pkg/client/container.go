@@ -360,10 +360,16 @@ func execTimeout(ctx context.Context, timeout time.Duration) uint64 {
 	return min(seconds, remaining)
 }
 
-// logDriverTypes maps the log driver types to their protocol values.
-var logDriverTypes = enumTable[LogDriverType, proto.Conmon_LogDriver_Type]{
-	{LogDriverTypeContainerRuntimeInterface, proto.Conmon_LogDriver_Type_containerRuntimeInterface},
-	{LogDriverTypeJournald, proto.Conmon_LogDriver_Type_journald},
+// logDriverTypeToProto maps the log driver type to its protocol value.
+func logDriverTypeToProto(typ LogDriverType) (proto.Conmon_LogDriver_Type, error) {
+	switch typ {
+	case LogDriverTypeContainerRuntimeInterface:
+		return proto.Conmon_LogDriver_Type_containerRuntimeInterface, nil
+	case LogDriverTypeJournald:
+		return proto.Conmon_LogDriver_Type_journald, nil
+	default:
+		return 0, fmt.Errorf("%w: %v", ErrInvalidValue, typ)
+	}
 }
 
 // validateLogDrivers checks the types of the log drivers before the request
@@ -373,7 +379,7 @@ func validateLogDrivers(logDrivers []ContainerLogDriver) ([]proto.Conmon_LogDriv
 	types := make([]proto.Conmon_LogDriver_Type, 0, len(logDrivers))
 
 	for _, logDriver := range logDrivers {
-		typ, err := logDriverTypes.toProto(logDriver.Type)
+		typ, err := logDriverTypeToProto(logDriver.Type)
 		if err != nil {
 			return nil, fmt.Errorf("log driver type: %w", err)
 		}

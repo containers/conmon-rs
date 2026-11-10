@@ -26,7 +26,7 @@ use tracing::{debug, error, trace};
 /// an async file, which copies every write into a buffer of its own that
 /// keeps the size of the largest one.
 #[derive(Debug)]
-pub(crate) struct LogFile {
+pub(super) struct LogFile {
     path: PathBuf,
 
     /// The mode of a file this creates, an existing one keeps its own.
@@ -69,7 +69,7 @@ impl LogFile {
     /// A log file at `path`, created with `mode`, which gets replaced once
     /// it grows beyond `max_size`. Nothing gets opened before
     /// [`LogFile::open`].
-    pub(crate) fn new(path: impl AsRef<Path>, mode: Option<u32>, max_size: Option<usize>) -> Self {
+    pub(super) fn new(path: impl AsRef<Path>, mode: Option<u32>, max_size: Option<usize>) -> Self {
         Self {
             path: path.as_ref().into(),
             mode,
@@ -99,7 +99,7 @@ impl LogFile {
     /// log is not followed, the writes would hit its target. A temporary file
     /// which a crashed server left behind gets removed, the kubelet would
     /// never clean it up.
-    pub(crate) async fn open(&mut self) -> Result<()> {
+    pub(super) async fn open(&mut self) -> Result<()> {
         debug!("Open log file {}", self.path.display());
         let options = self.open_options(false);
         let path = self.path.clone();
@@ -382,7 +382,7 @@ impl LogFile {
     /// A failed flush dropped the buffer already, failing the reopen would
     /// not bring it back but stop the rotation of the kubelet, which moves
     /// the rotated file back then.
-    pub(crate) async fn reopen(&mut self) -> Result<()> {
+    pub(super) async fn reopen(&mut self) -> Result<()> {
         debug!("Reopen log file {}", self.path.display());
         if let Err(e) = self.flush().await {
             error!("Unable to flush log file before reopen: {e:#}");

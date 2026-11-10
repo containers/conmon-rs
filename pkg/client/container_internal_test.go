@@ -18,7 +18,7 @@ func TestLogDriverTypes(t *testing.T) {
 		LogDriverTypeContainerRuntimeInterface: proto.Conmon_LogDriver_Type_containerRuntimeInterface,
 		LogDriverTypeJournald:                  proto.Conmon_LogDriver_Type_journald,
 	} {
-		got, err := logDriverTypes.toProto(typ)
+		got, err := logDriverTypeToProto(typ)
 		if err != nil || got != want {
 			t.Errorf("type %d: got %v, %v, want %v", typ, got, err, want)
 		}

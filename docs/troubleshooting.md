@@ -176,9 +176,12 @@ slice that names, `system.slice` by default, or of the slice of the pod with
 An idle server of the static binaries has a resident set of about 3 MiB, most
 of it the mapped pages of its binary (`RssFile` in `/proc/<pid>/status`, or
 `RssShmem` for a binary on tmpfs), which the servers of all pods share, and
-about 0.5 MiB of memory of its own (`RssAnon`). Each container adds its
-buffers on top, see [Architecture](architecture.md). Every spec of the
-integration tests checks the server against the budgets `MAX_RSS_KB` and
+about 0.5 MiB of memory of its own (`Anonymous` in
+`/proc/<pid>/smaps_rollup`, which is exact, while `RssAnon` can be off by
+hundreds of kB on kernels since 6.2). Each container adds its buffers on top,
+see [Architecture](architecture.md). Every spec of the integration tests
+checks the resident set of the server (`VmRSS` in `/proc/<pid>/status`)
+against the budget `MAX_RSS_KB` and its private anonymous memory against
 `MAX_RSS_ANON_KB`, see the [Makefile](../Makefile). [Memory
 profiling](#memory-profiling) shows where a server which grows spends it.
 

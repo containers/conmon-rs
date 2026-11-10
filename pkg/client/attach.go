@@ -22,8 +22,9 @@ const (
 	attachPipeStderr    = 3
 
 	// attachStdinPacketSize bounds the stdin packets, below the
-	// Attach::STDIN_PACKET_MAX_SIZE of the server, which truncates larger
-	// ones. The default buffer size of io.Copy, passed explicitly.
+	// STDIN_PACKET_MAX_SIZE of conmon-rs/server/src/attach/socket.rs, which
+	// truncates larger ones. The default buffer size of io.Copy, passed
+	// explicitly.
 	attachStdinPacketSize = 32 * 1024
 
 	// attachOutputStopTimeout bounds the wait for the output to stop once
@@ -323,7 +324,8 @@ func (c *ConmonClient) redirectResponseToOutputStreams(
 	_, span := c.startSpan(ctx, "redirectResponseToOutputStreams")
 	defer endSpan(span, &err)
 
-	buf := make([]byte, attachPacketBufSize+1) /* Sync with conmonrs Attach::PACKET_BUF_SIZE */
+	// Sync with PACKET_BUF_SIZE of conmon-rs/server/src/attach/socket.rs.
+	buf := make([]byte, attachPacketBufSize+1)
 
 	defer closeOutputStreams(cfg.Streams)
 

@@ -34,8 +34,8 @@ runs:
     - name: Install capnproto
       shell: bash
       run: |
-        sudo apt-get update
-        sudo apt-get install -y capnproto
+        sudo apt-get -o Acquire::Retries=5 update
+        sudo apt-get -o Acquire::Retries=5 install -y capnproto
     - name: Select Toolchain
       shell: bash
       env:

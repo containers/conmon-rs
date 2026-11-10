@@ -275,7 +275,7 @@ impl ContainerLog {
 /// Split a chunk into its lines. Every line but the last ends with a newline,
 /// the last one is partial if the chunk does not end with one. An empty chunk
 /// has no lines.
-pub(crate) fn lines(bytes: &[u8]) -> impl Iterator<Item = (&[u8], bool)> {
+fn lines(bytes: &[u8]) -> impl Iterator<Item = (&[u8], bool)> {
     let mut ends = memchr::memchr_iter(b'\n', bytes);
     let mut start = 0;
     std::iter::from_fn(move || {
@@ -301,14 +301,14 @@ fn strip_line_ending(line: &[u8]) -> &[u8] {
 /// had no ending yet: it continues in the next entry, paused, or the output
 /// ended without one, the same as the `P` marker of the CRI log.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Line<'a> {
-    pub(crate) text: Text<'a>,
-    pub(crate) partial: bool,
+struct Line<'a> {
+    text: Text<'a>,
+    partial: bool,
 }
 
 impl Line<'_> {
     /// The line with a text of its own, for a task which outlives the chunk.
-    pub(crate) fn into_owned(self) -> Line<'static> {
+    fn into_owned(self) -> Line<'static> {
         Line {
             text: self.text.into_owned(),
             partial: self.partial,
@@ -319,7 +319,7 @@ impl Line<'_> {
 /// The text of a [`Line`]: borrowed from the chunk which held all of it, or
 /// collected across chunks in the buffer of its pipe.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Text<'a> {
+enum Text<'a> {
     Chunk(&'a [u8]),
     Buffered(Bytes),
 }

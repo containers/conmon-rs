@@ -12,7 +12,7 @@ use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 /// with its timestamp, pipe and partial marker, to a file which gets rotated
 /// at its maximum size.
 #[derive(Debug)]
-pub(crate) struct CriLogger {
+pub(super) struct CriLogger {
     /// The log file on disk.
     file: LogFile,
 
@@ -22,7 +22,7 @@ pub(crate) struct CriLogger {
 
 impl CriLogger {
     /// Create a new file logger instance.
-    pub(crate) fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> CriLogger {
+    pub(super) fn new<T: AsRef<Path>>(path: T, max_log_size: Option<usize>) -> CriLogger {
         Self {
             // Created readable by the group as well, like by conmon.
             file: LogFile::new(path, Some(0o640), max_log_size),
@@ -33,7 +33,7 @@ impl CriLogger {
     /// Use a fixed timestamp for every entry, so that tests can compare the
     /// written bytes.
     #[cfg(test)]
-    pub(crate) fn freeze_timestamp(&mut self, timestamp: &str) {
+    pub(super) fn freeze_timestamp(&mut self, timestamp: &str) {
         self.timestamp.formatted = timestamp.into();
         self.timestamp.frozen = true;
     }

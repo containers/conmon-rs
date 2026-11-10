@@ -151,10 +151,7 @@ pub(super) async fn attach_session_duplex(
 /// a task serves with the routes of the server, without the limits of
 /// `serve`, so that the session runs with a paused clock as well, which a
 /// TCP connection does not keep up with.
-pub(super) async fn upgrade_duplex(
-    server: &StreamingServer,
-    url: &str,
-) -> Result<(String, DuplexStream)> {
+async fn upgrade_duplex(server: &StreamingServer, url: &str) -> Result<(String, DuplexStream)> {
     let path = url
         .strip_prefix(&format!("http://{ADDR}:{}", server.port()))
         .context("url")?;

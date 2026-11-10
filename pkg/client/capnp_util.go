@@ -60,22 +60,3 @@ func stringStringMapToMapEntryList(
 
 	return nil
 }
-
-// enumTable maps the values of a client enum to the ones of the protocol.
-type enumTable[C, P comparable] []struct {
-	client C
-	proto  P
-}
-
-//nolint:ireturn // the type parameters are enums, not interfaces
-func (t enumTable[C, P]) toProto(value C) (P, error) {
-	for _, entry := range t {
-		if entry.client == value {
-			return entry.proto, nil
-		}
-	}
-
-	var zero P
-
-	return zero, fmt.Errorf("%w: %v", ErrInvalidValue, value)
-}
