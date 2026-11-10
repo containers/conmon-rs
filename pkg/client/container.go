@@ -198,17 +198,20 @@ type ExecSyncContainerConfig struct {
 	Command []string
 
 	// Timeout is the maximum time the command can run, rounded up to whole
-	// seconds, zero for no limit. A negative one fails the call with an
-	// error matching ErrInvalidValue, for example one computed from a
-	// deadline which already passed. A deadline of the context limits
-	// it further, to the whole seconds left minus one: the server answers
-	// once it killed the command and collected the output still in flight,
-	// which takes up to another second if a background process keeps writing
-	// it, so that it usually reports the timeout before the context ends the
-	// call. With less than two seconds left, the command gets the minimum of
-	// one second the server needs, and may outlive the caller by up to a
-	// second. A context which already ended fails the call without running
-	// the command.
+	// seconds, zero for no limit. A timeout in seconds, like the one of the
+	// CRI ExecSyncRequest, needs time.Duration(timeout) * time.Second: a
+	// plain time.Duration(timeout) counts nanoseconds, which round up to one
+	// second. A negative Timeout fails the call with an error matching
+	// ErrInvalidValue, for example one computed from a deadline which
+	// already passed. A deadline of the context limits it further, to the
+	// whole seconds left minus one: the server answers once it killed the
+	// command and collected the output still in flight, which takes up to
+	// another second if a background process keeps writing it, so that it
+	// usually reports the timeout before the context ends the call. With
+	// less than two seconds left, the command gets the minimum of one second
+	// the server needs, and may outlive the caller by up to a second. A
+	// context which already ended fails the call without running the
+	// command.
 	//
 	// A context which ends without a deadline, for example because it got
 	// cancelled, only ends the call: the server does not stop the command,
@@ -229,7 +232,8 @@ type ExecSyncContainerResult struct {
 	// unreleased, also a traced process, like one under strace, gets its
 	// exit code instead of -1. It is ExecExitCodeNotStarted if the server
 	// could not start the command, ExecExitCodeTimedOut if it timed out,
-	// and -1 if the server could not tell how the command ended.
+	// and ExecExitCodeUnknown if the server could not tell how the command
+	// ended.
 	ExitCode int32
 
 	// Stdout contains the stdout stream result. Since unreleased, Stdout
@@ -246,6 +250,12 @@ type ExecSyncContainerResult struct {
 }
 
 const (
+	// ExecExitCodeUnknown is the exit code of an exec whose exit status the
+	// server could not tell, because the command neither exited nor got
+	// killed by a signal, or the wait for it failed. A server without pidfd
+	// support reports a failed wait as ExecExitCodeTimedOut instead.
+	ExecExitCodeUnknown int32 = -1
+
 	// ExecExitCodeNotStarted is the exit code of an exec which the server
 	// could not start, for example because the runtime failed or does not
 	// know the container. Stderr tells why.

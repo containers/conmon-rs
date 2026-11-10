@@ -295,6 +295,14 @@ them as well, and so does `conmonrs --version` since v1.2.2:
 | `streamingprotocols` | v1.2.0     | Exec and attach sessions speak SPDY/3.1 and the WebSocket protocols before `v5.channel.k8s.io`.                                                                    |
 | `restore`            | unreleased | `createContainer` restores the container from its `restorePath`, see [Cap'n Proto RPC](#capn-proto-rpc). Older servers ignore the path and create a new container. |
 
+Servers from v1.1.0 to v1.2.2 also report `sdnotify`, the relay of the
+`sd_notify` messages of a container to the `sdnotifySocket` of
+`createContainer`, and v1.2.1 and v1.2.2 `journaldfields`, the `containerName`,
+`tag` and `labels` of the `journald` log driver. Both got retired in unreleased,
+see [Changes](#changes). Servers since unreleased still write the
+`containerName`, like every server since v1.2.1, but no longer report
+`journaldfields`.
+
 How to rely on them:
 
 - Servers before v1.1.0 report an empty list, they do not know the field.
@@ -322,6 +330,22 @@ How to rely on them:
   the `restore` feature tells. Before, the server only created containers, and
   the restore of CRI-O ran the `monitor_path` binary with the arguments of
   conmon, which the server rejects.
+- unreleased: `createNamespaces` and `startFdSocket` fail with
+  `createNamespaces is not supported by this server` and
+  `startFdSocket is not supported by this server`. A request which sets one of
+  the retired fields, the `cleanupCmd`, `globalArgs`, `envVars`,
+  `additionalFds`, `leakFds` or `sdnotifySocket` of `createContainer` or the
+  `envVars` of `execSyncContainer`, fails with
+  `the <field> of <method> is not supported by this server`, like
+  `the envVars of execSyncContainer is not supported by this server`, empty
+  ones pass. The schema keeps the fields in their slots with an `Old` suffix.
+  `version` no longer reports the `sdnotify` and `journaldfields` features, and
+  the server ignores the `execSessionId` of `attachContainer`. Before, the
+  server created the pod namespaces with its `pause` subcommand, took file
+  descriptors for the runtime through its fd socket, ran the cleanup command
+  once the container exited, passed the global arguments and environment
+  variables to the runtime and relayed the `sd_notify` messages of the
+  container, and logged the `execSessionId`.
 - unreleased: `execSyncContainer` and `serveExecContainer` pass the container
   ID and the command to the runtime after `--`, so that a runtime cannot take a
   command whose first element starts with `-` for its own options. Before, a

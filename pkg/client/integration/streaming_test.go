@@ -43,9 +43,9 @@ var _ = Describe("StreamingServer", func() {
 								"-c",
 								"echo -n stdout && echo -n stderr >&2",
 							},
-							Tty:    terminal,
-							Stdout: true,
-							Stderr: true,
+							Terminal: terminal,
+							Stdout:   true,
+							Stderr:   true,
 						},
 					)
 
@@ -92,10 +92,10 @@ var _ = Describe("StreamingServer", func() {
 						result, err := sut.ServeExecContainer(
 							ctx,
 							&client.ServeExecContainerConfig{
-								ID:      tr.ctrID,
-								Command: []string{"/busybox", "sh", "-c", sttyAwait},
-								Tty:     terminal,
-								Stdout:  true,
+								ID:       tr.ctrID,
+								Command:  []string{"/busybox", "sh", "-c", sttyAwait},
+								Terminal: terminal,
+								Stdout:   true,
 							},
 						)
 						Expect(err).To(Succeed())
@@ -120,11 +120,11 @@ var _ = Describe("StreamingServer", func() {
 					result, err := sut.ServeExecContainer(
 						ctx,
 						&client.ServeExecContainerConfig{
-							ID:      tr.ctrID,
-							Command: []string{"/busybox", "sh", "-c", "exit 3"},
-							Tty:     terminal,
-							Stdout:  true,
-							Stderr:  true,
+							ID:       tr.ctrID,
+							Command:  []string{"/busybox", "sh", "-c", "exit 3"},
+							Terminal: terminal,
+							Stdout:   true,
+							Stderr:   true,
 						},
 					)
 					Expect(err).To(Succeed())
@@ -153,11 +153,11 @@ var _ = Describe("StreamingServer", func() {
 						result, err := sut.ServeExecContainer(
 							ctx,
 							&client.ServeExecContainerConfig{
-								ID:      tr.ctrID,
-								Command: []string{"/does/not/exist"},
-								Tty:     terminal,
-								Stdout:  true,
-								Stderr:  true,
+								ID:       tr.ctrID,
+								Command:  []string{"/does/not/exist"},
+								Terminal: terminal,
+								Stdout:   true,
+								Stderr:   true,
 							},
 						)
 						Expect(err).To(Succeed())
@@ -287,9 +287,9 @@ var _ = Describe("StreamingServer", func() {
 							"-c",
 							"read -r l; echo \"got $l\"; /busybox cat >/dev/null; echo eof",
 						},
-						Tty:    true,
-						Stdin:  true,
-						Stdout: true,
+						Terminal: true,
+						Stdin:    true,
+						Stdout:   true,
 					},
 				)
 				Expect(err).To(Succeed())

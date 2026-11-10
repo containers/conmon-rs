@@ -409,7 +409,7 @@ func serveExecRequestCases() []requestCase {
 				_, err := c.ServeExecContainer(ctx, &ServeExecContainerConfig{
 					ID:          "id",
 					Command:     []string{"command", "arg"},
-					Tty:         true,
+					Terminal:    true,
 					Stdin:       false,
 					Stdout:      false,
 					Stderr:      true,
@@ -429,11 +429,11 @@ func serveExecRequestCases() []requestCase {
 			name: "ServeExecContainer with stdin",
 			call: func(ctx context.Context, c *ConmonClient) error {
 				_, err := c.ServeExecContainer(ctx, &ServeExecContainerConfig{
-					ID:     "id",
-					Tty:    false,
-					Stdin:  true,
-					Stdout: false,
-					Stderr: true,
+					ID:       "id",
+					Terminal: false,
+					Stdin:    true,
+					Stdout:   false,
+					Stderr:   true,
 				})
 
 				return err
@@ -449,11 +449,11 @@ func serveExecRequestCases() []requestCase {
 			name: "ServeExecContainer with stdout",
 			call: func(ctx context.Context, c *ConmonClient) error {
 				_, err := c.ServeExecContainer(ctx, &ServeExecContainerConfig{
-					ID:     "id",
-					Tty:    false,
-					Stdin:  false,
-					Stdout: true,
-					Stderr: false,
+					ID:       "id",
+					Terminal: false,
+					Stdin:    false,
+					Stdout:   true,
+					Stderr:   false,
 				})
 
 				return err

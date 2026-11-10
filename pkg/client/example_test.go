@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/containers/conmon-rs/pkg/client"
@@ -55,7 +54,8 @@ func ExampleConmonClient_Shutdown() {
 	}
 }
 
-// Asks the server whether it supports a feature before using it.
+// Asks the server for its version, like for a log line. Check the features
+// with SupportsFeature, see its example.
 func ExampleConmonClient_Version() {
 	conmon, err := client.New(&client.ConmonServerConfig{
 		Runtime:      "/usr/bin/crun",
@@ -75,9 +75,8 @@ func ExampleConmonClient_Version() {
 		return
 	}
 
-	if slices.Contains(version.Features, client.FeaturePortForward) {
-		fmt.Println("port forwarding is supported")
-	}
+	fmt.Printf("conmon-rs %s (commit %s), PID %d\n",
+		version.Version, version.Commit, version.ProcessID)
 }
 
 // Checks a feature of the running server, which may be older than the
@@ -149,7 +148,7 @@ func ExampleConmonClient_ServeExecContainer() {
 	result, err := conmon.ServeExecContainer(context.Background(), &client.ServeExecContainerConfig{
 		ID:          "container",
 		Command:     []string{"/bin/sh"},
-		Tty:         true,
+		Terminal:    true,
 		Stdin:       true,
 		Stdout:      true,
 		IdleTimeout: 4 * time.Hour,

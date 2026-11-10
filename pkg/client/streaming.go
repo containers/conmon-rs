@@ -18,8 +18,8 @@ type ServeExecContainerConfig struct {
 	// Command is the command to be run.
 	Command []string
 
-	// Tty indicates if a tty should be used or not.
-	Tty bool
+	// Whether the command runs with a terminal.
+	Terminal bool
 
 	// Stdin indicates if stdin should be available or not. The stdin of the
 	// process gets closed once the client closed its stdin, which only SPDY
@@ -81,7 +81,7 @@ func (c *ConmonClient) ServeExecContainer(
 				return fmt.Errorf("convert command to text list: %w", err)
 			}
 
-			req.SetTty(cfg.Tty)
+			req.SetTty(cfg.Terminal)
 			req.SetStdin(cfg.Stdin)
 			req.SetStdout(cfg.Stdout)
 			req.SetStderr(cfg.Stderr)

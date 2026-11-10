@@ -65,7 +65,7 @@ type AttachContainerConfig struct {
 	SocketPath string
 
 	// Whether a terminal was setup for the command this is attaching to.
-	Tty bool
+	Terminal bool
 
 	// Whether the container stdin should be closed once the attach stdin
 	// reaches EOF (stdin once). Without a terminal, the output is still
@@ -548,8 +548,8 @@ func (c *ConmonClient) readStdio(
 		// only ends this attach session, so stop receiving the output as
 		// well, so that nothing gets written to the output streams after the
 		// attach returned.
-		if (cfg.Tty && cfg.StopAfterStdinEOF) ||
-			(!cfg.Tty && cfg.ContainerStdin && !cfg.StopAfterStdinEOF) {
+		if (cfg.Terminal && cfg.StopAfterStdinEOF) ||
+			(!cfg.Terminal && cfg.ContainerStdin && !cfg.StopAfterStdinEOF) {
 			closeRead()
 
 			if err := c.waitForOutput(ctx, closeRead, receiveStdoutError); err != nil {
