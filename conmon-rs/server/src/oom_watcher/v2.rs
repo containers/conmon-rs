@@ -543,6 +543,11 @@ impl OOMWatcher {
         }
         Ok(counters)
     }
+
+    /// Checks if a file does not exist on disk.
+    fn file_not_found(f: impl AsRef<Path>) -> bool {
+        std::fs::metadata(f).is_err_and(|e| e.kind() == ErrorKind::NotFound)
+    }
 }
 
 #[cfg(test)]

@@ -61,20 +61,20 @@ impl Version {
     }
 
     /// Forwarding ports by `servePortForwardContainer`.
-    pub(crate) const FEATURE_PORT_FORWARD: &'static str = "portforward";
+    const FEATURE_PORT_FORWARD: &'static str = "portforward";
 
     /// The `idleTimeoutSec` of the exec and attach serve requests, which
     /// older servers ignore. Port forwarding always applies its own.
-    pub(crate) const FEATURE_IDLE_TIMEOUT: &'static str = "idletimeout";
+    const FEATURE_IDLE_TIMEOUT: &'static str = "idletimeout";
 
     /// Exec and attach sessions over SPDY and the WebSocket protocols before
     /// `v5.channel.k8s.io`.
-    pub(crate) const FEATURE_STREAMING_PROTOCOLS: &'static str = "streamingprotocols";
+    const FEATURE_STREAMING_PROTOCOLS: &'static str = "streamingprotocols";
 
     /// The `restorePath` of `createContainer`, which restores the container
     /// from a checkpoint with the `restore` command of the runtime. Older
     /// servers ignore the field and create a new container instead.
-    pub(crate) const FEATURE_RESTORE: &'static str = "restore";
+    const FEATURE_RESTORE: &'static str = "restore";
 
     /// The features of this build. Earlier servers also reported `sdnotify`
     /// and `journaldfields`, whose fields got retired, see the schema.

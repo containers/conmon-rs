@@ -5,7 +5,6 @@ use crate::conmon_capnp::conmon;
 #[cfg(feature = "tracing")]
 use crate::telemetry;
 use crate::{
-    capnp_util,
     child_reaper::{
         Child, ChildKind, ChildReaper, EXIT_CODE_NOT_STARTED, EXIT_CODE_TIMED_OUT, ExitChannelData,
         RuntimeCall, StartedChild, WatchedExec,
@@ -13,6 +12,7 @@ use crate::{
     container_io::{ContainerIO, SharedContainerIO},
     container_log::ContainerLog,
     exec_start::ExecStart,
+    fs_util,
     random_id::RandomId,
     runtime_args::{GenerateRuntimeArgs, check_id},
     server::Server,
@@ -229,7 +229,7 @@ fn streaming_result(res: anyhow::Result<String>) -> Result<String, Error> {
 impl conmon::Server for Server {
     /// Retrieve version information from the server.
     fn version(
-        self: Rc<Server>,
+        self: Rc<Self>,
         params: conmon::VersionParams,
         mut results: conmon::VersionResults,
     ) -> Promise<(), capnp::Error> {
@@ -261,7 +261,7 @@ impl conmon::Server for Server {
 
     /// Create a new container for the provided parameters.
     fn create_container(
-        self: Rc<Server>,
+        self: Rc<Self>,
         params: conmon::CreateContainerParams,
         mut results: conmon::CreateContainerResults,
     ) -> Promise<(), capnp::Error> {
@@ -313,7 +313,7 @@ impl conmon::Server for Server {
         // for nothing.
         pry_err!(check_id(&id));
         let bundle_path = Path::new(pry!(pry!(req.get_bundle_path()).to_str()));
-        pry_err!(capnp_util::check_absolute("bundle path", bundle_path));
+        pry_err!(fs_util::check_absolute("bundle path", bundle_path));
         let pidfile = bundle_path.join("pidfile");
         debug!("PID file is {}", pidfile.display());
 
@@ -323,7 +323,7 @@ impl conmon::Server for Server {
             "" => (None, "create container"),
             path => {
                 let path = Path::new(path);
-                pry_err!(capnp_util::check_absolute("restore path", path));
+                pry_err!(fs_util::check_absolute("restore path", path));
                 debug!("Restoring from checkpoint {}", path.display());
                 (Some(path), "restore container")
             }
@@ -332,10 +332,10 @@ impl conmon::Server for Server {
         let exit_paths: Vec<PathBuf> = pry!(text_list(req.get_exit_paths()));
         let oom_exit_paths: Vec<PathBuf> = pry!(text_list(req.get_oom_exit_paths()));
         for path in &exit_paths {
-            pry_err!(capnp_util::check_absolute("exit path", path));
+            pry_err!(fs_util::check_absolute("exit path", path));
         }
         for path in &oom_exit_paths {
-            pry_err!(capnp_util::check_absolute("OOM exit path", path));
+            pry_err!(fs_util::check_absolute("OOM exit path", path));
         }
         let container_log = pry_err!(ContainerLog::from_request(&id, log_drivers));
 
@@ -422,7 +422,7 @@ impl conmon::Server for Server {
 
     /// Execute a command in sync inside of a container.
     fn exec_sync_container(
-        self: Rc<Server>,
+        self: Rc<Self>,
         params: conmon::ExecSyncContainerParams,
         mut results: conmon::ExecSyncContainerResults,
     ) -> Promise<(), capnp::Error> {
@@ -561,7 +561,7 @@ impl conmon::Server for Server {
 
     /// Attach to a running container.
     fn attach_container(
-        self: Rc<Server>,
+        self: Rc<Self>,
         params: conmon::AttachContainerParams,
         _: conmon::AttachContainerResults,
     ) -> Promise<(), capnp::Error> {
@@ -573,7 +573,7 @@ impl conmon::Server for Server {
         debug!("Got an attach container request");
 
         let socket_path = PathBuf::from(pry!(pry!(req.get_socket_path()).to_str()));
-        pry_err!(capnp_util::check_absolute("socket path", &socket_path));
+        pry_err!(fs_util::check_absolute("socket path", &socket_path));
         let child = pry_err!(self.reaper().get(id));
         let stop_after_stdin_eof = req.get_stop_after_stdin_eof();
 
@@ -591,7 +591,7 @@ impl conmon::Server for Server {
 
     /// Rotate all log drivers for a running container.
     fn reopen_log_container(
-        self: Rc<Server>,
+        self: Rc<Self>,
         params: conmon::ReopenLogContainerParams,
         _: conmon::ReopenLogContainerResults,
     ) -> Promise<(), capnp::Error> {
@@ -619,7 +619,7 @@ impl conmon::Server for Server {
 
     /// Adjust the window size of a container running inside of a terminal.
     fn set_window_size_container(
-        self: Rc<Server>,
+        self: Rc<Self>,
         params: conmon::SetWindowSizeContainerParams,
         _: conmon::SetWindowSizeContainerResults,
     ) -> Promise<(), capnp::Error> {
@@ -642,7 +642,7 @@ impl conmon::Server for Server {
 
     /// Retired, the pause process which created the namespaces is gone.
     fn create_namespaces_old(
-        self: Rc<Server>,
+        self: Rc<Self>,
         _: conmon::CreateNamespacesOldParams,
         _: conmon::CreateNamespacesOldResults,
     ) -> Promise<(), capnp::Error> {
@@ -653,7 +653,7 @@ impl conmon::Server for Server {
 
     /// Retired, the fd socket is gone.
     fn start_fd_socket_old(
-        self: Rc<Server>,
+        self: Rc<Self>,
         _: conmon::StartFdSocketOldParams,
         _: conmon::StartFdSocketOldResults,
     ) -> Promise<(), capnp::Error> {
@@ -663,7 +663,7 @@ impl conmon::Server for Server {
     }
 
     fn serve_exec_container(
-        self: Rc<Server>,
+        self: Rc<Self>,
         params: conmon::ServeExecContainerParams,
         mut results: conmon::ServeExecContainerResults,
     ) -> Promise<(), capnp::Error> {
@@ -718,7 +718,7 @@ impl conmon::Server for Server {
     }
 
     fn serve_attach_container(
-        self: Rc<Server>,
+        self: Rc<Self>,
         params: conmon::ServeAttachContainerParams,
         mut results: conmon::ServeAttachContainerResults,
     ) -> Promise<(), capnp::Error> {
@@ -761,7 +761,7 @@ impl conmon::Server for Server {
     }
 
     fn serve_port_forward_container(
-        self: Rc<Server>,
+        self: Rc<Self>,
         params: conmon::ServePortForwardContainerParams,
         mut results: conmon::ServePortForwardContainerResults,
     ) -> Promise<(), capnp::Error> {
@@ -773,7 +773,7 @@ impl conmon::Server for Server {
 
         // An empty one is not absolute either.
         let netns_path = PathBuf::from(pry!(pry!(req.get_net_ns_path()).to_str()));
-        pry_err!(capnp_util::check_absolute(
+        pry_err!(fs_util::check_absolute(
             "network namespace path",
             &netns_path
         ));

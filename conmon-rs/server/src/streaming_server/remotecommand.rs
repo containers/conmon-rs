@@ -42,11 +42,11 @@ pub(super) const STDIN_BYTE: u8 = 0;
 /// The channel of stdout.
 pub(super) const STDOUT_BYTE: u8 = 1;
 /// The channel of stderr.
-pub(super) const STDERR_BYTE: u8 = 2;
+const STDERR_BYTE: u8 = 2;
 /// The channel of the status of the session.
 pub(super) const STREAM_ERR_BYTE: u8 = 3;
 /// The channel of the resize events.
-pub(super) const RESIZE_BYTE: u8 = 4;
+const RESIZE_BYTE: u8 = 4;
 /// The channel which closes another one, since `v5.channel.k8s.io`.
 pub(super) const CLOSE_BYTE: u8 = 255;
 
@@ -80,7 +80,7 @@ impl Version {
 
     /// Whether a SPDY client with a terminal opens a stream for resize
     /// events.
-    pub(super) fn spdy_resize(self) -> bool {
+    fn spdy_resize(self) -> bool {
         self >= Self::V3
     }
 }

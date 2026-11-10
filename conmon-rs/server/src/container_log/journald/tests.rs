@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     container_log::{
         LineBuffer,
-        test_helpers::{Journal, receive},
+        testing::{Journal, receive},
     },
     journal::testing::decode,
 };

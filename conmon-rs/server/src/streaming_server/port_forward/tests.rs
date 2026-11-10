@@ -30,6 +30,7 @@ mod connections;
 mod namespace;
 mod requests;
 mod tunnel;
+mod websocket;
 
 /// The network namespace of the tests, which needs no privileges to
 /// connect in.

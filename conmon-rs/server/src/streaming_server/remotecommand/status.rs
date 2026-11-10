@@ -128,7 +128,7 @@ impl ErrorMessage {
 
     /// An error of the session itself, for example a command which could not
     /// be started, see [`Status::failed`].
-    pub(super) fn internal(message: String) -> Self {
+    fn internal(message: String) -> Self {
         Self {
             status: "Failure",
             message,

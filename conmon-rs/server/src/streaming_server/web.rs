@@ -418,7 +418,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ClientIo<T> {
 /// Dropping its handle would leave it running, a writer to a client which
 /// does not read would hold the connection. The output of the writer, `None`
 /// if it did not end.
-pub(super) async fn join_or_abort<T>(mut writer: JoinHandle<T>, written: &Activity) -> Option<T> {
+async fn join_or_abort<T>(mut writer: JoinHandle<T>, written: &Activity) -> Option<T> {
     if let Some(output) = written
         .until_stalled(Instant::now(), STALL_TIMEOUT, &mut writer)
         .await

@@ -1,7 +1,7 @@
 use super::{drain::DRAIN_MAX_MESSAGES, stdio::EarlyStream, *};
 use crate::{
     channel::Receiver,
-    container_log::{ContainerLog, test_helpers},
+    container_log::{ContainerLog, testing},
     tail::Tail,
     test_util::wait_for,
 };
@@ -263,7 +263,7 @@ async fn read_stream_after_exit_is_bounded_in_time() {
 
 #[tokio::test(start_paused = true)]
 async fn read_loop_flushes_paused_line() -> Result<()> {
-    let (cri, lines, logger) = test_helpers::container_log(true).await?;
+    let (cri, lines, logger) = testing::container_log(true).await?;
     let (mut writer, _rx, read_loop) = spawn_loop(logger, false);
 
     writer.write_all(b"prompt> ").await?;
@@ -282,8 +282,8 @@ async fn read_loop_flushes_paused_line() -> Result<()> {
     }
     assert!(flushed, "paused line not flushed");
     assert_eq!(
-        test_helpers::read(&cri)?,
-        format!("{} stdout P prompt> \n", test_helpers::TIMESTAMP)
+        testing::read(&cri)?,
+        format!("{} stdout P prompt> \n", testing::TIMESTAMP)
     );
 
     // The continuation is a line of its own and nothing is written twice.
@@ -298,7 +298,7 @@ async fn read_loop_flushes_paused_line() -> Result<()> {
 
 #[tokio::test(start_paused = true)]
 async fn read_loop_flushes_trickling_line() -> Result<()> {
-    let (_cri, lines, logger) = test_helpers::container_log(true).await?;
+    let (_cri, lines, logger) = testing::container_log(true).await?;
     let (mut writer, _rx, read_loop) = spawn_loop(logger, false);
 
     // Progress output which never pauses as long as the line waits.
@@ -319,7 +319,7 @@ async fn read_loop_flushes_trickling_line() -> Result<()> {
 
 #[tokio::test]
 async fn last_line_is_logged_before_the_output_ends() -> Result<()> {
-    let (_cri, lines, logger) = test_helpers::container_log(true).await?;
+    let (_cri, lines, logger) = testing::container_log(true).await?;
     let attach = SharedContainerAttach::default();
     let (mut rx, _) = attach.subscribe();
     let (mut writer, reader) = duplex(1024);
@@ -349,7 +349,7 @@ async fn last_line_is_logged_before_the_output_ends() -> Result<()> {
 #[tokio::test]
 async fn log_errors_do_not_stop_the_loop() -> Result<()> {
     // The drivers are not opened, so every write fails.
-    let (_cri, _lines, logger) = test_helpers::container_log(false).await?;
+    let (_cri, _lines, logger) = testing::container_log(false).await?;
     let (mut writer, rx, read_loop) = spawn_loop(logger, true);
 
     writer.write_all(b"first\n").await?;
@@ -461,7 +461,7 @@ async fn terminal_output_continues_once_the_slave_got_reopened() -> Result<()> {
         },
     };
 
-    let (_cri, lines, logger) = test_helpers::container_log(true).await?;
+    let (_cri, lines, logger) = testing::container_log(true).await?;
     let mut io = ContainerIO::new(true, logger)?;
     let (mut rx, _) = io.attach().subscribe();
     let pty = nix::pty::openpty(None, None)?;
@@ -723,7 +723,7 @@ async fn held_log_loop() -> Result<(
     SharedContainerLog,
     JoinHandle<Result<()>>,
 )> {
-    let (_cri, _journal, logger) = test_helpers::container_log(true).await?;
+    let (_cri, _journal, logger) = testing::container_log(true).await?;
     let attach = SharedContainerAttach::default();
     let (writer, reader) = duplex(1024);
     let read_loop = task::spawn(ContainerIO::read_loop(

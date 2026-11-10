@@ -142,7 +142,7 @@ fn group_has_child(pgid: Pid) -> bool {
 /// of this server would kill it as well. A container process which did not
 /// get a group of its own shares the one of its runtime, which runs in a
 /// group of its own.
-pub(crate) fn signals_group(pgid: Pid, own_pgid: Option<Pid>) -> bool {
+fn signals_group(pgid: Pid, own_pgid: Option<Pid>) -> bool {
     pgid.as_raw() > 1 && Some(pgid) != own_pgid
 }
 
@@ -162,7 +162,7 @@ pub(crate) fn pidfd_open(pid: Pid) -> nix::Result<OwnedFd> {
 /// Send a signal through a pidfd, none only checks that the process still
 /// exists.
 #[expect(unsafe_code, reason = "a system call nix does not wrap")]
-pub(crate) fn pidfd_send_signal(pidfd: impl AsFd, signal: Option<Signal>) -> nix::Result<()> {
+fn pidfd_send_signal(pidfd: impl AsFd, signal: Option<Signal>) -> nix::Result<()> {
     let signal = signal.map_or(0, |signal| signal as libc::c_int);
     // SAFETY: the descriptor is open for the duration of the call, the null
     // siginfo makes the kernel fill in the same as kill(2) does.
@@ -365,7 +365,7 @@ fn children() -> (Vec<Pid>, bool) {
 /// The exit code of a process whose exit status is not known, because it did
 /// neither exit nor get killed by a signal, or waitpid failed after its pidfd
 /// got readable.
-pub(crate) const EXIT_CODE_UNKNOWN: i32 = -1;
+const EXIT_CODE_UNKNOWN: i32 = -1;
 
 /// The exit code of a process whose exit status the blocking wait, used
 /// without pidfds, could not get, for example because it got reaped already.
@@ -391,7 +391,7 @@ pub(crate) fn signal_name(signal: i32) -> String {
 
 /// How a child exited, see [`wait_child`].
 #[derive(Clone, Copy)]
-pub(crate) enum ChildExit {
+enum ChildExit {
     Exited(i32),
     Signaled(i32),
     Unknown,
@@ -421,7 +421,7 @@ impl ChildExit {
 /// The waitid(2) behind [`wait_exit`], which also reports real-time
 /// signals, along with the PID of the child.
 #[expect(unsafe_code, reason = "nix does not convert real-time signals")]
-pub(crate) fn wait_child(id: Id<'_>, flags: WaitPidFlag) -> nix::Result<Option<(Pid, ChildExit)>> {
+fn wait_child(id: Id<'_>, flags: WaitPidFlag) -> nix::Result<Option<(Pid, ChildExit)>> {
     let (idtype, id) = match id {
         Id::All => (libc::P_ALL, 0),
         Id::Pid(pid) => (libc::P_PID, pid.as_raw().cast_unsigned()),

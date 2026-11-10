@@ -1,5 +1,5 @@
 use super::*;
-use crate::container_log::test_helpers::{TIMESTAMP, cri_logger, read};
+use crate::container_log::testing::{TIMESTAMP, cri_logger, read};
 use anyhow::Context;
 use tempfile::NamedTempFile;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
