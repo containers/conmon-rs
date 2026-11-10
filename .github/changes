@@ -11,11 +11,12 @@ set -euo pipefail
 # commit on main shows what its run got.
 #
 # fuzz: whether the fuzz targets may build or behave differently, which the
-# build-fuzz and test-fuzz jobs check. They build from the server crate, the
-# fuzz crate and the workspace, with the FUZZ_TOOLCHAIN of ci.yml, the
-# setup-rust action and .github/run-fuzz, and a rust-toolchain file or the
-# cargo configuration could change how they build. The files of .config, like
-# the nextest profile, only matter for the unit tests.
+# build-fuzz and test-fuzz jobs of fuzz.yml check. They build from the server
+# crate, the fuzz crate and the workspace, with the toolchain and cargo-fuzz
+# of fuzz.yml, the setup-rust action and .github/run-fuzz, and a
+# rust-toolchain file or the cargo configuration could change how they build.
+# The other jobs of ci.yml, which calls fuzz.yml, do not matter for them. The
+# files of .config, like the nextest profile, only matter for the unit tests.
 #
 # code: whether anything besides the documentation changed, which all jobs
 # besides lint-files check. The documentation is the Markdown files and
@@ -50,7 +51,7 @@ while IFS= read -r FILE; do
     echo "  $FILE" >&2
     case $FILE in
     *.md) ;;
-    conmon-rs/* | fuzz/* | Cargo.toml | Cargo.lock | rust-toolchain | rust-toolchain.toml | .cargo/* | .github/workflows/ci.yml | .github/actions/setup-rust/* | .github/run-fuzz)
+    conmon-rs/* | fuzz/* | Cargo.toml | Cargo.lock | rust-toolchain | rust-toolchain.toml | .cargo/* | .github/workflows/fuzz.yml | .github/actions/setup-rust/* | .github/run-fuzz)
         FUZZ=true
         ;;
     esac

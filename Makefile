@@ -70,8 +70,8 @@ ZIZMOR_FLAGS ?=
 # gorelease has no releases, the version is a commit of golang.org/x/exp,
 # see dependencies.yaml.
 GORELEASE_VERSION := v0.0.0-20261014143641-f0251eb4aa3e
-GRYPE_VERSION := v0.121.1
-GRYPE_DIGEST := sha256:6b06708b036f74b2cd70e94b706b4586af96d1932e6ac46255940b2e39dd44a9
+GRYPE_VERSION := v0.121.3
+GRYPE_DIGEST := sha256:13113eeceab017260370cf540e1d25442c59665fd07d1b09b66d63bb0c282887
 GRYPE_IMAGE := docker.io/anchore/grype:$(GRYPE_VERSION)@$(GRYPE_DIGEST)
 # The SPDX SBOMs make scan checks, like the conmonrs.$ARCH.spdx.json files of
 # the bucket.
@@ -175,9 +175,12 @@ lint-msrv: ## Check the Rust sources with the rust-version toolchain of Cargo.to
 	MSRV=$$(sed -n 's/^rust-version = "\(.*\)"$$/\1/p' Cargo.toml) && \
 	cargo "+$$MSRV" check --locked --all-targets --all-features
 
+# Both modules use the .golangci.yml of the root, which config verify checks
+# against the JSON schema of the version, like the lint-go job of CI does.
 .PHONY: lint-go
 lint-go: .install.golangci-lint ## Lint the Go sources.
 	$(GOTOOLS_BINDIR)/golangci-lint version
+	$(GOTOOLS_BINDIR)/golangci-lint config verify
 	$(GOTOOLS_BINDIR)/golangci-lint run
 	cd $(INTEGRATION_DIR) && $(abspath $(GOTOOLS_BINDIR))/golangci-lint run
 
@@ -228,15 +231,17 @@ verify-dependencies-upstream: .install.zeitgeist ## Check the dependencies for n
 
 # zeitgeist only checks the tags, which a pull ignores next to a digest. The
 # images of the smoke test and of qemu are the ones of the build-static
-# workflow, a variable which is missing there gets passed empty and fails. A
-# tag which moved fails as well, so the advisories workflow runs it, not the
-# pull requests.
+# workflow, the one of jaeger the one of contrib/tracing/start, a variable
+# which is missing there gets passed empty and fails. A tag which moved fails
+# as well, so the advisories workflow runs it, not the pull requests.
 BUILD_STATIC_IMAGE = $(shell sed -n 's/^ *$(1): //p' .github/workflows/build-static.yml)
+JAEGER_IMAGE = $(shell sed -n 's/^JAEGER_IMG="\(.*\)"$$/\1/p' contrib/tracing/start)
 
 .PHONY: verify-digests
 verify-digests: ## Verify that the pinned images have the current digests of their tags.
 	.github/verify-digests "$(NODE_IMAGE)" "$(ZIZMOR_IMAGE)" "$(GRYPE_IMAGE)" \
-		"$(call BUILD_STATIC_IMAGE,ALPINE_IMAGE)" "$(call BUILD_STATIC_IMAGE,BINFMT_IMAGE)"
+		"$(call BUILD_STATIC_IMAGE,ALPINE_IMAGE)" "$(call BUILD_STATIC_IMAGE,BINFMT_IMAGE)" \
+		"$(JAEGER_IMAGE)"
 
 # Also catches new generated files. make removes the intermediate
 # internal/proto/conmon.capnp only after this recipe.

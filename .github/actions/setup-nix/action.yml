@@ -8,9 +8,25 @@ description: >-
 runs:
   using: composite
   steps:
+    # install-nix-action runs the install script of its URL unverified. The
+    # script embeds the sha256 of the binary tarballs of its release, which it
+    # checks, so the pinned sha256 of the script covers the whole install. A
+    # bump of the version updates it as well, which the install.sha256 file
+    # next to the script has. The action fetches the verified copy with curl.
+    - name: Download the nix install script
+      id: install
+      shell: bash
+      env:
+        NIX_INSTALL_URL: https://releases.nixos.org/nix/nix-2.35.3/install
+        NIX_INSTALL_SHA256: 69d0fe8fba8fe88f94c98b09964691ac9950abc7ecbf2ba861dc0533cfd901e9
+      run: |
+        SCRIPT=$RUNNER_TEMP/nix-install
+        curl -sSfL --proto '=https' --retry 6 --retry-all-errors -o "$SCRIPT" "$NIX_INSTALL_URL"
+        echo "$NIX_INSTALL_SHA256  $SCRIPT" | sha256sum -c -
+        echo "url=file://$SCRIPT" >>"$GITHUB_OUTPUT"
     - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
       with:
-        install_url: https://releases.nixos.org/nix/nix-2.35.3/install
+        install_url: ${{ steps.install.outputs.url }}
         extra_nix_config: |
           connect-timeout = 10
           stalled-download-timeout = 30

@@ -256,7 +256,7 @@ server writes.
 [fuzz/fuzz_targets](./fuzz/fuzz_targets) tells what its target covers. They
 need a nightly toolchain, for example `cargo +nightly fuzz run spdy_frames`, CI
 pins the one of `FUZZ_TOOLCHAIN` in
-[ci.yml](.github/workflows/ci.yml). [fuzz/seeds](./fuzz/seeds) holds a few
+[fuzz.yml](.github/workflows/fuzz.yml). [fuzz/seeds](./fuzz/seeds) holds a few
 valid inputs per target to start from, pass the directory after the corpus,
 which libFuzzer does not create:
 

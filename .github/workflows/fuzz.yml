@@ -1,0 +1,122 @@
+name: fuzz
+# The build-fuzz and test-fuzz jobs of the ci workflow, which calls this one
+# only if a change may affect the fuzz targets, see .github/changes. A file of
+# its own, so that a change of the other jobs of ci.yml does not start them.
+# The checks show as "fuzz / build-fuzz" and "fuzz / test-fuzz (TARGET)", main
+# has no required checks. The github context is the one of the ci run.
+on:
+  workflow_call: {}
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+  # cargo-fuzz needs a nightly toolchain, a pinned one keeps new lints and
+  # compiler changes out of unrelated pull requests.
+  FUZZ_TOOLCHAIN: "nightly-2026-10-15"
+  # Built from the crate of the release, see build-fuzz.
+  CARGO_FUZZ_VERSION: "0.13.2"
+  # Like SAVE_CACHE of the ci workflow, only main saves the build caches.
+  SAVE_CACHE: ${{ github.ref == 'refs/heads/main' }}
+jobs:
+  # Builds all fuzz targets once, so that they keep compiling, for test-fuzz
+  # to run one per job, and on main for the advisories workflow, which fuzzes
+  # the targets of the latest passed run of main. A new target gets fuzzed
+  # without a change here. Pull requests only build them if they change what
+  # the targets build from, see the changes job of the ci workflow, main always
+  # does.
+  # The shipped release profile would strip the symbols and take long to
+  # build, the fuzz build overrides it.
+  build-fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
+    env:
+      CARGO_PROFILE_RELEASE_STRIP: "false"
+      CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: "3"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+          key: fuzz
+          save-if: ${{ env.SAVE_CACHE }}
+      # cargo-fuzz resolves the dependencies itself, a lock file which does
+      # not fit fails here instead.
+      - name: Check the lock file
+        run: cargo fetch --locked
+      # Built from its crate, which cargo checks against the checksum of the
+      # index, with the dependencies of its lock file. There is no checksum
+      # verified release binary: install-action has no manifest of it and
+      # would fall back to cargo-binstall. rust-cache keeps the binary in
+      # ~/.cargo/bin, cargo install skips an installed one of the version.
+      - name: Install cargo-fuzz
+        run: cargo install --locked "cargo-fuzz@$CARGO_FUZZ_VERSION"
+      # cargo-fuzz defaults to the target it got built for, the host one for
+      # this build. The explicit one keeps the path of the binaries below.
+      - name: Build fuzz targets
+        run: |
+          cargo fuzz build --target x86_64-unknown-linux-gnu --target-dir target/fuzz
+          mkdir fuzz-targets
+          for target in $(cargo fuzz list); do
+            cp "target/fuzz/x86_64-unknown-linux-gnu/release/$target" fuzz-targets/
+          done
+      - name: List fuzz targets
+        id: list
+        run: echo "targets=$(cargo fuzz list | jq -Rnc '[inputs]')" >>"$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-targets
+          path: fuzz-targets
+
+  # Runs a fuzz target of a pull request for two minutes. A crash, hang or
+  # allocation above the limit leaves its input in the artifacts,
+  # `cargo fuzz run <target> <input> -- -timeout=10 -malloc_limit_mb=256`
+  # reproduces it, see .github/run-fuzz. The run starts from the seeds in
+  # fuzz/seeds and the corpus collected so far, which the daily runs of the
+  # advisories workflow save. They fuzz main for half an hour, a run of main
+  # here would only repeat the one of its pull request. Skipped jobs count as
+  # passed for a release, see .github/release-files. The jobs keep the default
+  # names of a matrix, like publish-cache of the ci workflow and the test-fuzz
+  # jobs of the advisories workflow, which forks skip.
+  test-fuzz:
+    if: github.event_name == 'pull_request'
+    needs: build-fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.build-fuzz.outputs.targets) }}
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fuzz-targets
+          path: fuzz-targets
+      # Every run of the advisories workflow saves a new entry, the restore
+      # picks the latest one.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      # See .github/run-fuzz, which the advisories workflow uses as well. A
+      # run which hangs past its time fails the step, so that the upload
+      # below has its input.
+      - name: Fuzz
+        run: .github/run-fuzz run "$TARGET" 120
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: fuzz-${{ matrix.target }}-artifacts
+          path: artifacts
