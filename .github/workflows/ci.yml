@@ -28,9 +28,6 @@ env:
   # version, see make lint-links.
   LYCHEE_VERSION: "0.24.2"
   LYCHEE_SHA256: "73657a111819a30c47c08352896796f23d64e4eb2b3ed39b6d32149241566fc5"
-  # cargo-fuzz needs a nightly toolchain, a pinned one keeps new lints and
-  # compiler changes out of unrelated pull requests.
-  FUZZ_TOOLCHAIN: "nightly-2026-10-15"
   # Only main saves the build caches, which pull requests restore. One per
   # pull request would push the caches of main out of the 10 GB of the
   # repository.
@@ -42,13 +39,13 @@ env:
 jobs:
   # Lists the files a pull request changes, see .github/changes, for the jobs
   # which only run if their files changed: fuzz tells whether the fuzz
-  # targets may have changed, which build-fuzz and test-fuzz check with about
-  # half of the runner minutes of a pull request, code whether anything
-  # besides the documentation changed, which all jobs besides lint-files
-  # check, and go whether the API of the Go client may have changed, which
-  # the verify-go-api step of lint-go compares with the latest release. The
-  # jobs which need a skipped one skip as well, like
-  # verify-vulnerabilities, the test-integration and the test-critest jobs.
+  # targets may have changed, which the fuzz job checks with about half of
+  # the runner minutes of a pull request, code whether anything besides the
+  # documentation changed, which all jobs besides lint-files check, and go
+  # whether the API of the Go client may have changed, which the
+  # verify-go-api step of lint-go compares with the latest release. The jobs
+  # which need a skipped one skip as well, like verify-vulnerabilities, the
+  # test-integration and the test-critest jobs.
   # The checkout of a pull request is the merge commit which GitHub tests,
   # with its first parent, the branch it merges into, so git lists the files
   # without the limit on their number of the API. The steps may fail without
@@ -136,16 +133,35 @@ jobs:
       - name: Verify the API of the Go client
         if: needs.changes.outputs.go == 'true'
         run: make verify-go-api
-      # The sources are lint clean, so all issues fail, not only new ones.
-      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+      # The analysis cache of golangci-lint, for its version, the Go of the
+      # Go caches and their go.sum files. Like those, only main saves it, once
+      # per key. Most of the analysis is the one of the dependencies, which
+      # stays valid until a go.sum changes.
+      - name: golangci-lint cache key
+        id: lint-key
+        env:
+          GO_KEY: ${{ steps.go.outputs.key }}
+        run: |
+          VERSION=$(sed -n 's/^GOLANGCI_LINT_VERSION := //p' Makefile)
+          PREFIX="golangci-lint-$VERSION-${GO_KEY#setup-go-}"
+          PREFIX=${PREFIX%-*}-
+          echo "prefix=$PREFIX" >>"$GITHUB_OUTPUT"
+          echo "key=$PREFIX${GO_KEY##*-}" >>"$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: lint-cache
         with:
-          version: v2.15.0
-          skip-save-cache: ${{ env.SAVE_CACHE != 'true' }}
-      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+          path: ~/.cache/golangci-lint
+          key: ${{ steps.lint-key.outputs.key }}
+          restore-keys: ${{ steps.lint-key.outputs.prefix }}
+      # The checksum verified release binary of the Makefile, for both Go
+      # modules. The sources are lint clean, so all issues fail, not only new
+      # ones.
+      - run: make lint-go
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: env.SAVE_CACHE == 'true' && steps.lint-cache.outputs.cache-hit != 'true'
         with:
-          version: v2.15.0
-          working-directory: pkg/client/integration
-          skip-save-cache: ${{ env.SAVE_CACHE != 'true' }}
+          path: ~/.cache/golangci-lint
+          key: ${{ steps.lint-key.outputs.key }}
       - uses: ./.github/actions/save-go
         if: env.SAVE_CACHE == 'true' && steps.go.outputs.cache-hit != 'true'
         with:
@@ -206,7 +222,7 @@ jobs:
       - name: Install shellcheck
         id: shellcheck
         run: |
-          curl -sSfL -o shellcheck.tar.xz \
+          curl -sSfL --retry 6 --retry-all-errors -o shellcheck.tar.xz \
             "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
           echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
           sudo tar -xJf shellcheck.tar.xz --strip-components=1 -C /usr/local/bin "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
@@ -247,7 +263,7 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: |
           NAME=lychee-x86_64-unknown-linux-musl
-          curl -sSfL -o lychee.tar.gz \
+          curl -sSfL --retry 6 --retry-all-errors -o lychee.tar.gz \
             "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/$NAME.tar.gz"
           echo "${LYCHEE_SHA256}  lychee.tar.gz" | sha256sum -c -
           sudo tar -xzf lychee.tar.gz --strip-components=1 -C /usr/local/bin "$NAME/lychee"
@@ -508,10 +524,16 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           components: llvm-tools-preview
           save-if: ${{ env.SAVE_CACHE }}
+      # The checksum verified release binaries of the manifests of
+      # install-action, a version without one fails instead of falling back to
+      # cargo-binstall. See dependencies.yaml.
       - name: Install cargo-llvm-cov and cargo-nextest
         uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         with:
-          tool: cargo-llvm-cov,cargo-nextest
+          tool: |
+            cargo-llvm-cov@0.9.1
+            cargo-nextest@0.9.150
+          fallback: none
       # The default features are what gets shipped, the tracing feature covers
       # the optional tracing code. The coverage of both runs gets merged. The
       # fuzzing feature is not needed, the tests build the fuzz entry points.
@@ -604,7 +626,8 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.150
+          fallback: none
       # Under qemu-user, the first skipped test fails to find the reaped leader
       # of a process group through the children of the test process. qemu-user
       # keeps some real-time signals for itself and reports the exits by the
@@ -649,104 +672,14 @@ jobs:
           key: ${{ steps.go.outputs.key }}
           paths: ${{ steps.go.outputs.paths }}
 
-  # Builds all fuzz targets once, so that they keep compiling, for test-fuzz
-  # to run one per job, and on main for the advisories workflow, which fuzzes
-  # the targets of the latest passed run of main. A new target gets fuzzed
-  # without a change here. Pull requests only build them if they change what
-  # the targets build from, see changes, main always does.
-  # cargo-fuzz needs a nightly toolchain. The shipped release profile would
-  # strip the symbols and take long to build, the fuzz build overrides it.
-  build-fuzz:
+  # Builds the fuzz targets, and fuzzes the ones of a pull request, see
+  # fuzz.yml. Pull requests only call it if they change what the targets build
+  # from, see changes, main always does: the advisories workflow fuzzes the
+  # targets of the latest passed run of main.
+  fuzz:
     needs: changes
     if: needs.changes.outputs.fuzz == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    outputs:
-      targets: ${{ steps.list.outputs.targets }}
-    env:
-      CARGO_PROFILE_RELEASE_STRIP: "false"
-      CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
-      CARGO_PROFILE_RELEASE_LTO: "false"
-      CARGO_PROFILE_RELEASE_OPT_LEVEL: "3"
-      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
-          key: fuzz
-          save-if: ${{ env.SAVE_CACHE }}
-      # cargo-fuzz resolves the dependencies itself, a lock file which does
-      # not fit fails here instead.
-      - name: Check the lock file
-        run: cargo fetch --locked
-      - name: Install cargo-fuzz
-        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
-        with:
-          tool: cargo-fuzz
-      # The prebuilt cargo-fuzz defaults to the musl target it got built for,
-      # which the sanitizers do not support.
-      - name: Build fuzz targets
-        run: |
-          cargo fuzz build --target x86_64-unknown-linux-gnu --target-dir target/fuzz
-          mkdir fuzz-targets
-          for target in $(cargo fuzz list); do
-            cp "target/fuzz/x86_64-unknown-linux-gnu/release/$target" fuzz-targets/
-          done
-      - name: List fuzz targets
-        id: list
-        run: echo "targets=$(cargo fuzz list | jq -Rnc '[inputs]')" >>"$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: fuzz-targets
-          path: fuzz-targets
-
-  # Runs a fuzz target of a pull request for two minutes. A crash, hang or
-  # allocation above the limit leaves its input in the artifacts,
-  # `cargo fuzz run <target> <input> -- -timeout=10 -malloc_limit_mb=256`
-  # reproduces it, see .github/run-fuzz. The run starts from the seeds in
-  # fuzz/seeds and the corpus collected so far, which the daily runs of the
-  # advisories workflow save. They fuzz main for half an hour, a run of main
-  # here would only repeat the one of its pull request. Skipped jobs count as
-  # passed for a release, see .github/release-files. The jobs keep the default
-  # names of a matrix, like publish-cache and the test-fuzz jobs of the
-  # advisories workflow, which forks skip.
-  test-fuzz:
-    if: github.event_name == 'pull_request'
-    needs: build-fuzz
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        target: ${{ fromJSON(needs.build-fuzz.outputs.targets) }}
-    env:
-      TARGET: ${{ matrix.target }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: fuzz-targets
-          path: fuzz-targets
-      # Every run of the advisories workflow saves a new entry, the restore
-      # picks the latest one.
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: corpus
-          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: fuzz-corpus-${{ matrix.target }}-
-      # See .github/run-fuzz, which the advisories workflow uses as well.
-      - name: Fuzz
-        run: .github/run-fuzz run "$TARGET" 120
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: failure()
-        with:
-          name: fuzz-${{ matrix.target }}-artifacts
-          path: artifacts
+    uses: ./.github/workflows/fuzz.yml
 
   # The jobs which run the server pin the same Ubuntu release for every
   # architecture, the kernel and the memory budget depend on it, see
@@ -885,7 +818,8 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.9.1
+          fallback: none
       # The environment makes the build instrumented and every server process
       # write its profile on exit, into the target directory. The servers of
       # the tests run as root, which the report gives the profiles back from.

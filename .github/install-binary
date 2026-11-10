@@ -34,8 +34,9 @@ ASSET=${URL##*/}
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 # Retries transient failures, also the ones curl does not retry by default,
-# like a reset connection.
-CURL=(curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors)
+# like a reset connection. Without --retry-delay, curl doubles the wait from
+# one second on, about a minute in total.
+CURL=(curl -fsSL --retry 6 --retry-all-errors)
 "${CURL[@]}" "$CHECKSUMS" -o "$TMPDIR/checksums.txt"
 
 if [[ -n $CHECKSUMS_SHA256 ]] &&

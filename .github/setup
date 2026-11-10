@@ -10,9 +10,10 @@ main() {
     start_crio
 }
 
-# Only over HTTPS, redirects included.
+# Only over HTTPS, redirects included. Without --retry-delay, curl doubles the
+# wait between the retries from one second on, about a minute in total.
 curl_retry() {
-    curl -sSfL --proto =https --retry 5 --retry-delay 3 "$@"
+    curl -sSfL --proto =https --retry 6 "$@"
 }
 
 # Write the journal for the Upload logs step of the job if the setup fails,

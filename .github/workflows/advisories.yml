@@ -105,10 +105,11 @@ jobs:
   # once the jobs here which save caches are done, also if they failed. Every
   # run of this workflow saves a corpus per fuzz target, a newer
   # vulnerability database gets saved as well, and a change of a lock file, a
-  # toolchain or the Go version starts new Rust, Go and ginkgo caches, which
-  # would push the current ones out of the 10 GB of the repository. It keeps
-  # the newest entry by creation time of the vulnerability database, of the
-  # corpus of each fuzz target and of each Rust, Go and ginkgo cache key
+  # toolchain or the Go version starts new Rust, Go, golangci-lint and ginkgo
+  # caches, which would push the current ones out of the 10 GB of the
+  # repository. It keeps the newest entry by creation time of the
+  # vulnerability database, of the golangci-lint cache of the lint-go job, of
+  # the corpus of each fuzz target and of each Rust, Go and ginkgo cache key
   # without its hashes and Go version: the jobs only restore the entries of
   # their current toolchain and Go version, which the newest one has. An
   # entry saved while it runs is newer than the listed ones and stays. Every
@@ -139,6 +140,7 @@ jobs:
               map(.kind = (.key |
                 if test("^fuzz-corpus-.+-[0-9]+-[0-9]+$") then sub("-[0-9]+-[0-9]+$"; "")
                 elif test("^grype-db-") then "grype-db"
+                elif test("^golangci-lint-") then "golangci-lint"
                 elif test("^v0-rust-.+-[0-9a-f]{8}-[0-9a-f]{8}$") then sub("-[0-9a-f]{8}-[0-9a-f]{8}$"; "")
                 elif test("^setup-go-.+-go-[^-]+-[0-9a-f]{64}$") then sub("-go-[^-]+-[0-9a-f]{64}$"; "")
                 elif test("^ginkgo-.+-[0-9a-f]{64}$") then sub("(-go[^-]+)?-[0-9a-f]{64}$"; "")
@@ -194,12 +196,13 @@ jobs:
           persist-credentials: false
       - run: make verify-digests
 
-  # Fuzzes every target for half an hour, the test-fuzz jobs of the ci
-  # workflow only the ones of pull requests for two minutes, with the same
-  # .github/run-fuzz. The targets are the ones of the latest passed ci run of
-  # main, the corpus the one of the run before, which the run extends and
-  # saves. The jobs keep the default names of a matrix, see test-fuzz of the
-  # ci workflow.
+  # Fuzzes every target for half an hour, the test-fuzz jobs of fuzz.yml,
+  # which the ci workflow calls, only the ones of pull requests for two
+  # minutes, with the same .github/run-fuzz. The targets are the ones which
+  # the build-fuzz job of fuzz.yml built in the latest passed ci run of main,
+  # instead of a build of their own, the corpus the one of the run before,
+  # which the run extends and saves. The jobs keep the default names of a
+  # matrix, see test-fuzz of fuzz.yml.
   list-fuzz-targets:
     if: github.repository == 'containers/conmon-rs'
     runs-on: ubuntu-latest

@@ -10,7 +10,8 @@ source "$DIR"/env
 # A container of an earlier run would keep the name taken.
 "$DIR"/stop
 
-JAEGER_IMG="cr.jaegertracing.io/jaegertracing/jaeger:2.22.0"
+# Pinned by the digest of its index, see dependencies.yaml.
+JAEGER_IMG="cr.jaegertracing.io/jaegertracing/jaeger:2.23.0@sha256:3823829974ccfc2485d2e48b165579091f32295022ae80ca49704e2f4834116e"
 
 echo "Starting $JAEGER_CTR"
 "$CONTAINER_RUNTIME" run -d --rm --network host --name "$JAEGER_CTR" "$JAEGER_IMG"

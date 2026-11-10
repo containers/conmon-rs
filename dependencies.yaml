@@ -1,8 +1,8 @@
 ---
-# The container images of alpine, binfmt, grype, node and zizmor are pinned by
-# the digest of their index as well, which a bump of the version updates, see
-# `skopeo inspect --format '{{.Digest}}' docker://<image>:<tag>`. make
-# verify-digests checks them, the advisories workflow every day.
+# The container images of alpine, binfmt, grype, jaeger, node and zizmor are
+# pinned by the digest of their index as well, which a bump of the version
+# updates, see `skopeo inspect --format '{{.Digest}}' docker://<image>:<tag>`.
+# make verify-digests checks them, the advisories workflow every day.
 dependencies:
   # The version of conmon-rs itself, bumped for a release.
   - name: conmon-rs
@@ -27,8 +27,6 @@ dependencies:
       flavour: github
       url: golangci/golangci-lint
     refPaths:
-      - path: .github/workflows/ci.yml
-        match: "version: v"
       - path: Makefile
         match: "GOLANGCI_LINT_VERSION :="
 
@@ -42,6 +40,42 @@ dependencies:
         match: "tool: cargo-deny@"
       - path: .github/workflows/advisories.yml
         match: "tool: cargo-deny@"
+
+  # cargo-nextest and cargo-llvm-cov are release binaries of install-action,
+  # which checks them against the checksums of its manifests. A version which
+  # the pinned install-action has no manifest entry for fails, a bump may have
+  # to wait for a newer install-action. The tags of nextest are named
+  # cargo-nextest-X.Y.Z, which zeitgeist cannot match, see
+  # https://github.com/nextest-rs/nextest/releases.
+  - name: cargo-nextest
+    version: 0.9.150
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: "tool: cargo-nextest@"
+      - path: .github/workflows/ci.yml
+        match: "^ +cargo-nextest@"
+
+  - name: cargo-llvm-cov
+    version: 0.9.1
+    upstream:
+      flavour: github
+      url: taiki-e/cargo-llvm-cov
+    refPaths:
+      - path: .github/workflows/ci.yml
+        match: "tool: cargo-llvm-cov@"
+      - path: .github/workflows/ci.yml
+        match: "^ +cargo-llvm-cov@"
+
+  # Built from its crate by the build-fuzz job, install-action has no binary
+  # of it.
+  - name: cargo-fuzz
+    version: 0.13.2
+    upstream:
+      flavour: github
+      url: rust-fuzz/cargo-fuzz
+    refPaths:
+      - path: .github/workflows/fuzz.yml
+        match: "CARGO_FUZZ_VERSION:"
 
   - name: prettier
     version: 3.9.10
@@ -74,7 +108,7 @@ dependencies:
     version: 2026-10-15
     scheme: alpha
     refPaths:
-      - path: .github/workflows/ci.yml
+      - path: .github/workflows/fuzz.yml
         match: "FUZZ_TOOLCHAIN:"
 
   - name: shellcheck
@@ -98,7 +132,7 @@ dependencies:
         match: "ZEITGEIST_VERSION :="
 
   - name: jaeger
-    version: 2.22.0
+    version: 2.23.0
     upstream:
       flavour: github
       url: jaegertracing/jaeger
@@ -132,6 +166,8 @@ dependencies:
       - path: .github/setup
         match: CRI_TOOLS_VERSION=
 
+  # A bump updates NIX_INSTALL_SHA256 of the action as well, the sha256 of the
+  # install script of the release, which its install.sha256 file has.
   - name: nix
     version: 2.35.3
     refPaths:
@@ -237,7 +273,7 @@ dependencies:
         match: GOVULNCHECK_VERSION=v
 
   - name: grype
-    version: 0.121.1
+    version: 0.121.3
     upstream:
       flavour: github
       url: anchore/grype
