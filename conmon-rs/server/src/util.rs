@@ -3,7 +3,7 @@
 
 use anyhow::format_err;
 use std::cell::RefCell;
-use tokio::time::Instant;
+use tokio::time::{Duration, Instant};
 
 thread_local! {
     /// See [`with_scratch`].
@@ -26,6 +26,18 @@ pub(crate) fn with_scratch<R>(len: usize, f: impl FnOnce(&mut [u8]) -> R) -> R {
         // Only if `f` used it again, which none of the reads does.
         Err(_) => f(&mut vec![0; len]),
     })
+}
+
+/// A duration in whole seconds, with the minutes apart, like `10m`,
+/// `1m 30s` or `45s`, for the errors.
+pub(crate) fn format_duration(duration: Duration) -> String {
+    // Rounded, a deadline measured from now is short of a whole second.
+    let secs = (duration + Duration::from_millis(500)).as_secs();
+    match (secs / 60, secs % 60) {
+        (0, secs) => format!("{secs}s"),
+        (mins, 0) => format!("{mins}m"),
+        (mins, secs) => format!("{mins}m {secs}s"),
+    }
 }
 
 /// Sleep until the deadline, forever without one.

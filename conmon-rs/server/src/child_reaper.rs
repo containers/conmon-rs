@@ -236,11 +236,10 @@ impl ChildReaper {
     /// Retrieve the container registered under `id`. Execs share the id of
     /// their container and are skipped. The error starts with
     /// [`CONTAINER_NOT_FOUND`] if there is none.
-    pub(crate) fn get(&self, id: &str) -> Result<ReapableChild> {
+    pub(crate) fn get(&self, id: &str) -> Result<RegisteredContainer> {
         lock(&self.grandchildren)
             .get(id)
-            .and_then(|v| v.iter().find(|c| c.kind == ChildKind::Container))
-            .cloned()
+            .and_then(|v| v.iter().find_map(ReapableChild::container))
             .with_context(|| format!("{CONTAINER_NOT_FOUND}: {id}"))
     }
 
@@ -409,7 +408,7 @@ impl ChildReaper {
         let containers: HashSet<_> = lock(&self.grandchildren)
             .values()
             .flatten()
-            .filter(|gc| gc.kind == ChildKind::Container)
+            .filter(|gc| gc.is_container())
             .inspect(|gc| {
                 if let Err(e) = gc.process.signal(Signal::SIGTERM) {
                     debug!(pid = %gc.pid, "Not signalling container, it is gone: {e}");
@@ -426,7 +425,8 @@ impl ChildReaper {
     }
 
     /// Kill every grandchild and wait for their watchers and the runtime
-    /// calls in progress until the `deadline` of the shutdown. A process
+    /// calls in progress until the `deadline` of the shutdown, also for the
+    /// execs killed at their timeout which were not reaped yet. A process
     /// which does not exit on SIGKILL, like one stuck in the kernel, must not
     /// keep the server from stopping. It fails if they did not end in time.
     pub(crate) async fn kill_grandchildren(&self, deadline: Instant) -> Result<()> {
@@ -600,16 +600,22 @@ pub(crate) struct WatchedExec {
 pub(crate) struct ReapableChild {
     /// Tells the registrations apart, unlike the PID, which gets reused.
     seq: u64,
-    kind: ChildKind,
     pid: Pid,
 
     /// Opened at the registration, before the watcher could reap the child.
-    /// The watcher reaps it before it cancels the token, the PID may belong
-    /// to another process in between, which the signals through the pidfd
-    /// do not reach. Kernels without pidfds (before 5.3) only get the check
-    /// of the PID, see [`Process::open`].
+    /// The watcher reaps it before it cancels the token, or after that for
+    /// one killed at its timeout. Once it got reaped, the PID may belong to
+    /// another process, which the signals through the pidfd do not reach.
+    /// Kernels without pidfds (before 5.3) only get the check of the PID,
+    /// see [`Process::open`].
     process: Arc<Process>,
-    io: SharedContainerIO,
+
+    /// The stdio of a container, which container level operations use, see
+    /// [`ChildReaper::get`]. None for an exec, only its consumer holds its
+    /// stdio, which also tells the kinds apart. One killed at its timeout stays registered until it got
+    /// reaped, which may take until the server stops, but its pipes or its
+    /// terminal get released with the consumer.
+    io: Option<SharedContainerIO>,
     token: CancellationToken,
 }
 
@@ -619,12 +625,34 @@ impl ReapableChild {
         self.pid
     }
 
-    /// The stdio of the child.
+    /// Whether the child is a container, not an exec, see [`Self::io`].
+    fn is_container(&self) -> bool {
+        self.io.is_some()
+    }
+
+    /// The container, none for an exec.
+    pub(crate) fn container(&self) -> Option<RegisteredContainer> {
+        Some(RegisteredContainer {
+            io: self.io.clone()?,
+            token: self.token.clone(),
+        })
+    }
+}
+
+/// A registered container, see [`ChildReaper::get`].
+#[derive(Clone, Debug)]
+pub(crate) struct RegisteredContainer {
+    io: SharedContainerIO,
+    token: CancellationToken,
+}
+
+impl RegisteredContainer {
+    /// The stdio of the container.
     pub(crate) fn io(&self) -> &SharedContainerIO {
         &self.io
     }
 
-    /// Cancelled once the child exited.
+    /// Cancelled once the container exited.
     pub(crate) fn token(&self) -> &CancellationToken {
         &self.token
     }

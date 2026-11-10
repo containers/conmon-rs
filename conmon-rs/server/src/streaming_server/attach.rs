@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     attach::SharedContainerAttach,
-    child_reaper::ReapableChild,
+    child_reaper::RegisteredContainer,
     container_io::{Drain, Lag, Message as IOMessage, Pipe},
     streaming_server::remotecommand::{MESSAGE_TOO_LARGE, Output, Status},
 };
@@ -18,7 +18,7 @@ use tracing::debug;
 /// Required attach session data.
 #[derive(Debug)]
 pub(crate) struct AttachSession {
-    pub(crate) child: ReapableChild,
+    pub(crate) child: RegisteredContainer,
     pub(crate) stop_after_stdin_eof: bool,
     pub(crate) common: SessionCommon,
 }

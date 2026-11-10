@@ -1,7 +1,7 @@
 //! What the tests of the streaming server share.
 
 use crate::{
-    child_reaper::ReapableChild,
+    child_reaper::{ReapableChild, RegisteredContainer},
     container_io::SharedContainerIO,
     streaming_server::{
         ADDR, AttachSession, Session, SessionCommon, StreamingServer, remotecommand::Version,
@@ -244,10 +244,11 @@ pub(super) async fn close_first(stream: &mut TcpStream) -> Result<()> {
 /// A container and its child, the token ends the container.
 pub(super) fn attach_child(
     terminal: bool,
-) -> Result<(SharedContainerIO, ReapableChild, CancellationToken)> {
+) -> Result<(SharedContainerIO, RegisteredContainer, CancellationToken)> {
     let child = container_child(terminal)?;
     let (io, token) = (child.io.clone(), child.token.clone());
     let (_, child, _) = ReapableChild::from_child(child);
+    let child = child.container().context("container")?;
     Ok((io, child, token))
 }
 
@@ -371,7 +372,7 @@ pub(super) async fn spdy_attach_duplex(
 
 /// An attach session of the child with stdout and maybe stdin.
 pub(super) fn attach_config(
-    child: ReapableChild,
+    child: RegisteredContainer,
     stdin: bool,
     stop_after_stdin_eof: bool,
     idle_timeout: Option<Duration>,

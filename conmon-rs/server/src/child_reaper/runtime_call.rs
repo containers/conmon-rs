@@ -11,7 +11,7 @@ use crate::{
     },
     runtime_args::LoggedArgs,
     tail::Tail,
-    util::{with_scratch, with_stderr},
+    util::{format_duration, with_scratch, with_stderr},
 };
 use anyhow::{Context, Result, bail, format_err};
 use nix::{
@@ -566,18 +566,6 @@ async fn wait_unless_stopped<T>(
 struct RuntimeDeadline {
     at: Instant,
     timeout: Duration,
-}
-
-/// A duration in whole seconds, with the minutes apart, like `10m`,
-/// `1m 30s` or `45s`, for the errors.
-pub(super) fn format_duration(duration: Duration) -> String {
-    // Rounded, a deadline measured from now is short of a whole second.
-    let secs = (duration + Duration::from_millis(500)).as_secs();
-    match (secs / 60, secs % 60) {
-        (0, secs) => format!("{secs}s"),
-        (mins, 0) => format!("{mins}m"),
-        (mins, secs) => format!("{mins}m {secs}s"),
-    }
 }
 
 /// A runtime call which failed before its runtime exited, see
