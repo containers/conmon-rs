@@ -47,10 +47,11 @@ async fn exit_files_wait_for_quiet_output() -> Result<()> {
     Ok(())
 }
 
-/// A read loop over a pipe, whose log drivers hang while a guard from
-/// [`hold`] holds the log.
+/// A read loop over a pipe of a container, whose log drivers hang while a
+/// guard from [`hold`] holds the log.
 struct LogLoop {
     writer: tokio::io::DuplexStream,
+    io: SharedContainerIO,
     attach: SharedContainerAttach,
     logger: crate::container_log::SharedContainerLog,
     cri: tempfile::NamedTempFile,
@@ -60,7 +61,8 @@ struct LogLoop {
 
 async fn log_loop() -> Result<LogLoop> {
     let (cri, lines, logger) = crate::container_log::testing::container_log(true).await?;
-    let attach = SharedContainerAttach::default();
+    let io = SharedContainerIO::new(ContainerIO::new(false, logger.clone())?);
+    let attach = io.attach().clone();
     let (writer, reader) = tokio::io::duplex(1024);
     let task = task::spawn(ContainerIO::read_loop(
         reader,
@@ -74,6 +76,7 @@ async fn log_loop() -> Result<LogLoop> {
     task::yield_now().await;
     Ok(LogLoop {
         writer,
+        io,
         attach,
         logger,
         cri,
@@ -102,6 +105,29 @@ async fn exit_files_wait_for_slow_log_drivers() -> Result<()> {
         Instant::now() + DRAIN_MAX_LOG_WAIT,
     ));
     time::sleep(2 * DRAIN_MAX_WAIT).await;
+    assert!(!wait.is_finished());
+
+    drop(held);
+    drop(l.writer);
+    assert!(wait.await?);
+    assert!(crate::container_log::testing::read(&l.cri)?.contains("last line"));
+    l.task.await?
+}
+
+/// Output which a read loop got while the drain waited for a pause, and
+/// which takes longer to log than the pause, gets waited for as well.
+#[tokio::test(start_paused = true)]
+async fn exit_files_wait_for_output_logged_during_the_pause() -> Result<()> {
+    let mut l = log_loop().await?;
+    let wait = task::spawn(ReapableChild::wait_for_output(
+        l.attach.clone(),
+        Instant::now() + DRAIN_MAX_LOG_WAIT,
+    ));
+    time::sleep(DRAIN_TIMEOUT / 2).await;
+    let held = hold(&l.logger).await;
+    l.writer.write_all(b"last line\n").await?;
+    wait_for(|| l.attach.is_logging()).await?;
+    time::sleep(2 * DRAIN_TIMEOUT).await;
     assert!(!wait.is_finished());
 
     drop(held);
@@ -158,6 +184,48 @@ async fn nothing_gets_logged_after_the_output_finished() -> Result<()> {
     assert!(l.writer.write_all(b"late\n").await.is_err());
     assert!(!read()?.contains("late"));
     Ok(())
+}
+
+/// The exit file of a container tells that its log is complete: what the
+/// process wrote before it exited, also a last line without its ending, is
+/// in the log once the exit file appears, and nothing reaches the log after.
+#[tokio::test(start_paused = true)]
+async fn container_exit_files_come_after_the_complete_log() -> Result<()> {
+    let mut l = log_loop().await?;
+    let (mut rx, _) = l.attach.subscribe();
+    // A process left behind keeps the pipe open.
+    l.writer.write_all(b"line\nno newline").await?;
+    rx.recv().await?;
+
+    // The process wrote its output and exited. Wait for the exit before the
+    // watch, otherwise the paused clock passes the flush of the paused line
+    // while the process exits.
+    let dir = tempfile::tempdir()?;
+    let exit_path = dir.path().join("exit");
+    let sh = spawn_sh("exit 0")?;
+    wait_for_real(|| is_zombie(sh.pid)).await;
+    let child = Child {
+        io: l.io.clone(),
+        ..child(sh.pid, None, &exit_path)?
+    };
+    let (_, reapable, exit) = ReapableChild::from_child(child);
+    let mut exit_rx = reapable.watch(exit, || {});
+
+    // The log as the exit file appears, which gets renamed into place. Polled
+    // more often than the drain waits for a pause, so an exit file written
+    // before the drain is caught before the log completes.
+    wait_for(|| exit_path.exists()).await?;
+    let lines = l.lines.read()?;
+    exit_rx.recv().await?;
+    assert_eq!(std::fs::read_to_string(&exit_path)?, "0");
+    assert!(lines.contains(r#""message":"line""#), "{lines}");
+    assert!(
+        lines.contains(r#""message":"no newline","partial":true"#),
+        "{lines}"
+    );
+    // The read loops ended, later output does not reach the log.
+    assert!(l.writer.write_all(b"late\n").await.is_err());
+    l.task.await?
 }
 
 /// The output of an exec whose consumer is slower than the drain after
