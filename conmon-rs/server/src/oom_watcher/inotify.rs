@@ -173,7 +173,7 @@ impl SharedWatcher {
     pub(super) fn get() -> Result<Arc<Self>> {
         // The reader of the events is a task of the runtime.
         let runtime = Handle::try_current().context("get runtime")?;
-        Self::get_in(Self::slot(&runtime)?)
+        Self::get_in(Self::slot(&runtime))
     }
 
     /// Retrieve the watcher kept in the slot, or create one there.
@@ -191,21 +191,21 @@ impl SharedWatcher {
     }
 
     #[cfg(not(test))]
-    fn slot(_: &Handle) -> Result<&'static Slot> {
-        Ok(&SHARED_WATCHER)
+    fn slot(_: &Handle) -> &'static Slot {
+        &SHARED_WATCHER
     }
 
     #[cfg(test)]
-    fn slot(runtime: &Handle) -> Result<&'static Slot> {
+    fn slot(runtime: &Handle) -> &'static Slot {
         let id = runtime.id();
         let mut shared = lock(&SHARED_WATCHERS);
         if let Some((_, slot)) = shared.iter().find(|(i, _)| *i == id) {
-            return Ok(slot);
+            return slot;
         }
         // One per test, which lives as long as the static.
         let slot = Box::leak(Box::default());
         shared.push((id, slot));
-        Ok(slot)
+        slot
     }
 
     fn new() -> Result<Self> {

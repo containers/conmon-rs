@@ -1,4 +1,7 @@
-use super::{PendingStdin, ResizeEvent, STDIN_CHUNK_SIZE, STDIN_MERGE_SIZE, Stdin};
+use super::{
+    PendingStdin, ResizeEvent, Stdin,
+    pending_stdin::{STDIN_CHUNK_SIZE, STDIN_MERGE_SIZE},
+};
 use crate::streaming_server::remotecommand::{ClientEvent, fuzzing::messages};
 use bytes::Bytes;
 use std::sync::LazyLock;

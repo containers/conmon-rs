@@ -274,7 +274,7 @@ impl ContainerIO {
 
     /// Apply backpressure to the read loops from now on, see
     /// [`StdioSender`].
-    pub(crate) fn consume_stdio(&self) {
+    fn consume_stdio(&self) {
         self.consumed.store(true, Ordering::Release);
     }
 

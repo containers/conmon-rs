@@ -17,12 +17,8 @@ use nix::{
     },
     unistd::Pid,
 };
-use std::{
-    num::ParseIntError,
-    path::{Path, PathBuf},
-    sync::LazyLock,
-};
-use tokio::{fs::OpenOptions, io::ErrorKind};
+use std::{num::ParseIntError, path::PathBuf, sync::LazyLock};
+use tokio::fs::OpenOptions;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
 
@@ -112,11 +108,6 @@ impl OOMWatcher {
             .lines()
             .filter_map(|line| line.split_once(' '))
             .map(|(key, value)| (key, value.trim().parse()))
-    }
-
-    /// Checks if a file does not exist on disk.
-    fn file_not_found(f: impl AsRef<Path>) -> bool {
-        std::fs::metadata(f).is_err_and(|e| e.kind() == ErrorKind::NotFound)
     }
 
     /// Create the empty OOM files, like conmon does. A failure is only

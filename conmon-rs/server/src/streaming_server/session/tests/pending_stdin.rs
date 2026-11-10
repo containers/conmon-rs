@@ -1,6 +1,9 @@
 //! The stdin which waits for the container, and the events around it.
 
 use super::*;
+use crate::streaming_server::session::pending_stdin::{
+    STDIN_CHUNK_SIZE, STDIN_ENTRY_OVERHEAD, STDIN_MERGE_SIZE,
+};
 
 #[test]
 fn resize_events_bypass_pending_stdin() {

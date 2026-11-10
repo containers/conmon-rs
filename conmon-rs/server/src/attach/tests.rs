@@ -1,18 +1,26 @@
-use super::*;
+use super::{
+    socket::{DONE_PACKET, PACKET_BUF_SIZE, STDIN_PACKET_MAX_SIZE, read_loop, write_loop},
+    *,
+};
 use crate::{
-    container_io::{ContainerIO, Pipe, StdioSender},
+    container_io::{ContainerIO, DRAIN_MAX_WAIT, Pipe, READ_BUFFER_SIZE, StdioSender},
     container_log::ContainerLog,
     test_util::{Log, wait_for},
 };
-use nix::sys::socket::{
-    AddressFamily, MsgFlags, SockFlag, connect, send, setsockopt, socket, sockopt,
+use anyhow::bail;
+use nix::{
+    errno::Errno,
+    sys::socket::{
+        AddressFamily, MsgFlags, SockFlag, SockType, UnixAddr, connect, send, setsockopt, socket,
+        sockopt,
+    },
 };
 use std::os::{
-    fd::OwnedFd,
+    fd::{AsRawFd, OwnedFd},
     unix::fs::{MetadataExt, PermissionsExt},
 };
 use std::{
-    io,
+    fs, io,
     net::Shutdown,
     pin::Pin,
     task::{Context as TaskContext, Poll},
@@ -22,6 +30,7 @@ use tokio::{
     task::JoinHandle,
     time::{Duration, timeout},
 };
+use tokio_seqpacket::UnixSeqpacket;
 
 /// A connected pair of packet sockets, like the attach clients use. The
 /// first one is the server side.
@@ -914,10 +923,10 @@ async fn stdin_without_dropping() -> Result<()> {
 /// drain waits for a pause of the output.
 #[tokio::test(start_paused = true)]
 async fn write_loop_waits_for_slow_log_after_exit() -> Result<()> {
-    use crate::container_log::test_helpers;
+    use crate::container_log::testing;
     use tokio::io::AsyncWriteExt;
 
-    let (_cri, _journal, logger) = test_helpers::container_log(true).await?;
+    let (_cri, _journal, logger) = testing::container_log(true).await?;
     let attach = SharedContainerAttach::default();
     let (mut writer, reader) = tokio::io::duplex(1024);
     let read_loop = task::spawn(ContainerIO::read_loop(

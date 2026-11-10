@@ -292,32 +292,30 @@ const PIDFILE: &str = "pidfile";
 /// The fd socket of older servers, see [`Config::prepare`].
 const OLD_FD_SOCKET: &str = "conmon-fd.sock";
 
+// The flags which the errors of `Config::validate` name.
+const RUNTIME_FLAG: &str = "--runtime";
+const RUNTIME_DIR_FLAG: &str = "--runtime-dir";
+const RUNTIME_ROOT_FLAG: &str = "--runtime-root";
+
+/// Fail for a runtime flag which is blank or not UTF-8. The runtime flags
+/// default to a blank, so that `--version` works without them.
+fn require_set(flag: &str, path: &Path) -> Result<()> {
+    if path
+        .to_str()
+        .with_context(|| format!("{flag} does not parse as string"))?
+        .trim()
+        .is_empty()
+    {
+        bail!("{flag} flag not set")
+    }
+    Ok(())
+}
+
 impl Config {
     /// Validate the configuration integrity.
     pub(crate) fn validate(&self) -> Result<()> {
-        // The runtime flags default to a blank, so that `--version` works
-        // without them.
-        const RUNTIME_FLAG: &str = "--runtime";
-        if self
-            .runtime()
-            .to_str()
-            .with_context(|| format!("{RUNTIME_FLAG} does not parse as string"))?
-            .trim()
-            .is_empty()
-        {
-            bail!("{RUNTIME_FLAG} flag not set")
-        }
-
-        const RUNTIME_DIR_FLAG: &str = "--runtime-dir";
-        if self
-            .runtime_dir()
-            .to_str()
-            .with_context(|| format!("{RUNTIME_DIR_FLAG} does not parse as string"))?
-            .trim()
-            .is_empty()
-        {
-            bail!("{RUNTIME_DIR_FLAG} flag not set")
-        }
+        require_set(RUNTIME_FLAG, self.runtime())?;
+        require_set(RUNTIME_DIR_FLAG, self.runtime_dir())?;
 
         // The file name tells whether the runtime is crun, a path like "/"
         // would only fail every runtime call later.
@@ -337,7 +335,6 @@ impl Config {
             )
         }
 
-        const RUNTIME_ROOT_FLAG: &str = "--runtime-root";
         if let Some(rr) = self.runtime_root()
             && rr.exists()
             && !rr.is_dir()

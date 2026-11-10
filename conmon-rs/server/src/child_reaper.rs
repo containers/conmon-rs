@@ -572,7 +572,7 @@ impl ChildReaper {
 /// Signal a grandchild and its process group, unless it got reaped already,
 /// see [`Process::signal_group`]. The grandchildren got reparented to this
 /// subreaper, so the PID refers to a child.
-pub(crate) fn kill_grandchild(pid: Pid, s: Signal) {
+fn kill_grandchild(pid: Pid, s: Signal) {
     if let Err(e) = Process::child(pid).signal_group(s) {
         debug!(%pid, "Not signalling grandchild, it is gone: {e}");
     }

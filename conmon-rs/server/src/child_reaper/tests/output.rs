@@ -54,12 +54,12 @@ struct LogLoop {
     attach: SharedContainerAttach,
     logger: crate::container_log::SharedContainerLog,
     cri: tempfile::NamedTempFile,
-    lines: crate::container_log::test_helpers::Journal,
+    lines: crate::container_log::testing::Journal,
     task: JoinHandle<Result<()>>,
 }
 
 async fn log_loop() -> Result<LogLoop> {
-    let (cri, lines, logger) = crate::container_log::test_helpers::container_log(true).await?;
+    let (cri, lines, logger) = crate::container_log::testing::container_log(true).await?;
     let attach = SharedContainerAttach::default();
     let (writer, reader) = tokio::io::duplex(1024);
     let task = task::spawn(ContainerIO::read_loop(
@@ -107,7 +107,7 @@ async fn exit_files_wait_for_slow_log_drivers() -> Result<()> {
     drop(held);
     drop(l.writer);
     assert!(wait.await?);
-    assert!(crate::container_log::test_helpers::read(&l.cri)?.contains("last line"));
+    assert!(crate::container_log::testing::read(&l.cri)?.contains("last line"));
     l.task.await?
 }
 

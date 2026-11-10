@@ -354,6 +354,3 @@ pub(super) mod fuzzing;
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod websocket_tests;
