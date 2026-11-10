@@ -17,7 +17,7 @@ const TARGETS: [(&str, Target); 15] = [
     }),
     ("channel_decode", |data| {
         let (&base64, message) = data.split_first()?;
-        Some(channel(base64 & 1 == 1, message))
+        Some(channel_decode(base64 & 1 == 1, message))
     }),
     ("client_messages", |data| Some(client_messages(data))),
     ("journal_entry", |data| Some(journal_entry(data))),
@@ -30,7 +30,7 @@ const TARGETS: [(&str, Target); 15] = [
         None
     }),
     ("port_forward_query", |data| {
-        Some(query_ports(&String::from_utf8_lossy(data)))
+        Some(port_forward_query(&String::from_utf8_lossy(data)))
     }),
     ("port_forward_spdy", |data| {
         port_forward_spdy(data);

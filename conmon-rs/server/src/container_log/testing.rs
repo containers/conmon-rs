@@ -22,7 +22,7 @@ use tempfile::{NamedTempFile, TempDir};
 pub(crate) const TIMESTAMP: &str = "2026-10-20T12:00:00.123456789+02:00";
 
 /// A CRI logger writing to a new temporary file, with a frozen timestamp.
-pub(crate) async fn cri_logger(max_size: Option<usize>) -> Result<(NamedTempFile, CriLogger)> {
+pub(super) async fn cri_logger(max_size: Option<usize>) -> Result<(NamedTempFile, CriLogger)> {
     let file = NamedTempFile::new()?;
     let mut logger = CriLogger::new(file.path(), max_size);
     logger.freeze_timestamp(TIMESTAMP);

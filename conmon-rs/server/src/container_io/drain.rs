@@ -41,7 +41,7 @@ pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 /// above. It is a heuristic though, a process with CAP_SYS_RESOURCE can grow
 /// its pipes further. More output stems from a grandchild which keeps the
 /// pipe open and writing, which would otherwise keep the drain going forever.
-pub(crate) const DRAIN_MAX_MESSAGES: usize = 1024;
+pub(super) const DRAIN_MAX_MESSAGES: usize = 1024;
 
 /// Upper bound for the time a drain waits for output after the process
 /// exited in total. A grandchild which keeps writing just often enough for

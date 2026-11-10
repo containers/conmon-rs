@@ -77,7 +77,7 @@ const ACCEPT_QUEUE: usize = 16;
 /// uses two per forwarded connection. A stream counts until the server let
 /// go of it, also after the client reset it, so that a client which opens
 /// and resets streams cannot make the server hold more of them.
-pub(crate) const MAX_STREAMS: usize = 1024;
+pub(super) const MAX_STREAMS: usize = 1024;
 
 /// How many bytes the writer collects before writing them to the connection.
 const WRITE_BUFFER: usize = 64 * 1024;

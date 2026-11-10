@@ -686,7 +686,7 @@ fn header_eq(headers: &HeaderMap, name: HeaderName, value: &str) -> bool {
 /// The comma separated tokens of all values of the header, without the
 /// empty ones, like `keep-alive` and `Upgrade` of
 /// `Connection: keep-alive, Upgrade`.
-pub(crate) fn header_tokens(headers: &HeaderMap, name: HeaderName) -> impl Iterator<Item = &str> {
+pub(super) fn header_tokens(headers: &HeaderMap, name: HeaderName) -> impl Iterator<Item = &str> {
     headers
         .get_all(name)
         .into_iter()
@@ -698,7 +698,7 @@ pub(crate) fn header_tokens(headers: &HeaderMap, name: HeaderName) -> impl Itera
 
 /// Whether one of the tokens of the header is `token`, ignoring the case,
 /// see [`header_tokens`].
-pub(crate) fn header_has_token(headers: &HeaderMap, name: HeaderName, token: &str) -> bool {
+pub(super) fn header_has_token(headers: &HeaderMap, name: HeaderName, token: &str) -> bool {
     header_tokens(headers, name).any(|t| t.eq_ignore_ascii_case(token))
 }
 

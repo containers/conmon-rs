@@ -621,8 +621,8 @@ jobs:
           PACKAGES: ${{ matrix.packages }}
         run: |
           read -ra PACKAGES <<<"$PACKAGES"
-          sudo apt-get update
-          sudo apt-get install -y "${PACKAGES[@]}" qemu-user-binfmt
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y "${PACKAGES[@]}" qemu-user-binfmt
       - name: Install cargo-nextest
         uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         with:

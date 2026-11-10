@@ -306,8 +306,8 @@ pub(crate) fn is_child(pid: Pid) -> bool {
 
 /// Whether the processes which the children of the server leave behind get
 /// reparented to it, which the server sets up at its start, see
-/// `Server::init_process`. The tests do not. One which cannot tell counts
-/// as a subreaper.
+/// [`init::set_up_serving`](crate::init::set_up_serving). The tests do not.
+/// One which cannot tell counts as a subreaper.
 pub(crate) fn is_subreaper() -> bool {
     prctl::get_child_subreaper().unwrap_or(true)
 }
