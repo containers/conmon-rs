@@ -302,7 +302,7 @@ jobs:
       # cargo deny only reads the metadata of the workspace, which the cargo
       # of the runner image does.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
           tool: cargo-deny@0.20.2
           fallback: none
@@ -528,7 +528,7 @@ jobs:
       # install-action, a version without one fails instead of falling back to
       # cargo-binstall. See dependencies.yaml.
       - name: Install cargo-llvm-cov and cargo-nextest
-        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
           tool: |
             cargo-llvm-cov@0.9.1
@@ -624,7 +624,7 @@ jobs:
           sudo apt-get -o Acquire::Retries=5 update
           sudo apt-get -o Acquire::Retries=5 install -y "${PACKAGES[@]}" qemu-user-binfmt
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
           tool: cargo-nextest@0.9.150
           fallback: none
@@ -816,7 +816,7 @@ jobs:
           components: llvm-tools-preview
           save-if: ${{ env.SAVE_CACHE }}
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
           tool: cargo-llvm-cov@0.9.1
           fallback: none
@@ -924,7 +924,7 @@ jobs:
           name: build-static-amd64
           path: .build/static
       # Verifies the signatures of the CRI-O bundle, see .github/setup.
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
           cosign-release: v3.1.4
       - run: .github/setup
@@ -1030,7 +1030,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         if: matrix.cosign
         with:
           cosign-release: v3.1.4
