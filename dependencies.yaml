@@ -189,8 +189,10 @@ dependencies:
       - path: .github/workflows/release.yml
         match: "cosign-release: v"
 
+  # A bump checks crun.keyring of the crun repository for new signing keys,
+  # .github/crun.keyring and FINGERPRINTS of .github/install-crun follow it.
   - name: crun
-    version: 1.30.1
+    version: 1.31
     upstream:
       flavour: github
       url: containers/crun
@@ -201,7 +203,7 @@ dependencies:
   # A bump updates RUNC_CHECKSUMS_SHA256 of .github/install-runc as well, the
   # sha256 of runc.sha256sum of the release.
   - name: runc
-    version: 1.5.2
+    version: 1.5.3
     upstream:
       flavour: github
       url: opencontainers/runc

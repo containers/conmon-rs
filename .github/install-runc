@@ -6,8 +6,8 @@ set -euo pipefail
 # match its checksum in runc.sha256sum of the release, whose own sha256 is
 # pinned here, a bump of the version updates it as well. The runc of the
 # containerd.io package of the runner image in /usr/bin stays untouched.
-RUNC_VERSION=1.5.2
-RUNC_CHECKSUMS_SHA256=1922bc06670a35b95f9d9c0e730294482717a2660a538c4ea6d5ccba7eb665af
+RUNC_VERSION=1.5.3
+RUNC_CHECKSUMS_SHA256=65b435cd0d0f6ed1af23f281e5e0f4c418fc1d21b15d948dabba9deaa5bf8519
 OUTPUT=${1:-/usr/local/bin/runc}
 
 case $(uname -m) in
