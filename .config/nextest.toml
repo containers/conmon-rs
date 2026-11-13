@@ -11,5 +11,8 @@ failure-output = "immediate-final"
 # the job until its timeout.
 slow-timeout = { period = "30s", terminate-after = 2 }
 
+# The report keeps the output of the tests which passed as well, which
+# .github/verify-panics searches for panics, see there.
 [profile.ci.junit]
 path = "junit.xml"
+store-success-output = true

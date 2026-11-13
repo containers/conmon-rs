@@ -33,11 +33,9 @@ ASSET=${URL##*/}
 
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
-# Retries transient failures, also the ones curl does not retry by default,
-# like a reset connection. Without --retry-delay, curl doubles the wait from
-# one second on, about a minute in total.
-CURL=(curl -fsSL --retry 6 --retry-all-errors)
-"${CURL[@]}" "$CHECKSUMS" -o "$TMPDIR/checksums.txt"
+# With retries, and through the API of GitHub if GH_TOKEN is set.
+DOWNLOAD=$(dirname "$0")/download-release
+"$DOWNLOAD" "$CHECKSUMS" "$TMPDIR/checksums.txt"
 
 if [[ -n $CHECKSUMS_SHA256 ]] &&
     ! echo "$CHECKSUMS_SHA256  $TMPDIR/checksums.txt" | sha256sum -c --status -; then
@@ -52,7 +50,7 @@ elif [[ ! $SUM =~ ^[0-9a-f]{64}$ ]]; then
     echo "$CHECKSUMS has no single checksum of $ASSET" >&2
     exit 1
 fi
-"${CURL[@]}" "$URL" -o "$TMPDIR/$ASSET"
+"$DOWNLOAD" "$URL" "$TMPDIR/$ASSET"
 if ! echo "$SUM  $TMPDIR/$ASSET" | sha256sum -c --status -; then
     echo "$ASSET does not match its checksum $SUM of $CHECKSUMS" >&2
     exit 1

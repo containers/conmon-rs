@@ -5,6 +5,10 @@ description: >-
   five minutes of the default. A substitute which still fails, like when
   cachix answers a resumed download with HTTP 416, gets built locally instead
   of failing the build.
+inputs:
+  extra-config:
+    description: Additional lines of the nix configuration, like the binary cache of the static builds.
+    default: ""
 runs:
   using: composite
   steps:
@@ -17,8 +21,8 @@ runs:
       id: install
       shell: bash
       env:
-        NIX_INSTALL_URL: https://releases.nixos.org/nix/nix-2.35.3/install
-        NIX_INSTALL_SHA256: 69d0fe8fba8fe88f94c98b09964691ac9950abc7ecbf2ba861dc0533cfd901e9
+        NIX_INSTALL_URL: https://releases.nixos.org/nix/nix-2.35.6/install
+        NIX_INSTALL_SHA256: 6f7bf206efb54cd4941fb274930dbc74fdfc16fcb06757ef261c8d7d69cfd60e
       run: |
         SCRIPT=$RUNNER_TEMP/nix-install
         curl -sSfL --proto '=https' --retry 6 --retry-all-errors -o "$SCRIPT" "$NIX_INSTALL_URL"
@@ -31,3 +35,4 @@ runs:
           connect-timeout = 10
           stalled-download-timeout = 30
           fallback = true
+          ${{ inputs.extra-config }}

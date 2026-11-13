@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Download the asset of a GitHub release from its URL to OUTPUT. The callers
+# check what they get against a checksum or a signature, however it got
+# downloaded.
+#
+# github.com limits the anonymous downloads per address, and the runners of
+# the workflows share theirs: the downloads fail with HTTP 429 at times, or
+# wait for minutes. With GH_TOKEN set, which the workflows pass to the steps
+# that download, gh fetches the asset through the API instead, where the
+# limit is the one of the token. Without the token or gh, like on a
+# developer machine, or if gh fails, curl downloads the URL, like it does for
+# a URL which is not the one of a release asset.
+#
+# Every download through gh takes from the requests of the token, 1000 per
+# hour for the one of a workflow, which other steps need as well, like the
+# online audits of zizmor and the attestations. Nothing replaces the API
+# there, so curl downloads once no more than MIN_REMAINING requests are left.
+MIN_REMAINING=300
+
+if (($# != 2)) || [[ $1 != https://* ]]; then
+    echo "usage: $0 https://URL OUTPUT" >&2
+    exit 1
+fi
+URL=$1
+OUTPUT=$2
+
+# https://github.com/OWNER/REPO/releases/download/TAG/ASSET. gh takes the
+# name of the asset as a glob pattern and the URL may encode it, so only
+# names which mean themselves either way go to gh, and none which it could
+# take for an option.
+NAME='[A-Za-z0-9][A-Za-z0-9_.+-]*'
+RELEASE_ASSET="^https://github\\.com/($NAME/$NAME)/releases/download/($NAME)/($NAME)\$"
+
+if [[ -n ${GH_TOKEN:-} && $URL =~ $RELEASE_ASSET ]] && command -v gh >/dev/null; then
+    REPO=${BASH_REMATCH[1]}
+    TAG=${BASH_REMATCH[2]}
+    ASSET=${BASH_REMATCH[3]}
+    # The query itself does not count against the budget. Without an answer,
+    # the budget is unknown and stays untouched.
+    REMAINING=$(gh api rate_limit --jq .resources.core.remaining 2>/dev/null) || REMAINING=
+    if [[ ! $REMAINING =~ ^[0-9]+$ ]]; then
+        echo "Unable to read the API rate limit of the token, downloading $URL with curl" >&2
+    elif ((REMAINING <= MIN_REMAINING)); then
+        echo "$REMAINING API requests of the token remain, downloading $URL with curl" >&2
+    else
+        echo "Downloading $ASSET of $REPO $TAG with gh, $REMAINING API requests of the token remain" >&2
+        # gh does not retry, a release without the asset fails as well.
+        for ATTEMPT in 1 2 3; do
+            if gh release download --repo "$REPO" --pattern "$ASSET" --output "$OUTPUT" --clobber -- "$TAG"; then
+                exit 0
+            fi
+            if ((ATTEMPT < 3)); then
+                sleep $((ATTEMPT * 2))
+            fi
+        done
+        echo "gh failed to download $URL, trying curl" >&2
+    fi
+fi
+
+# Only over HTTPS, redirects included. Retries transient failures, also the
+# ones curl does not retry by default, like a reset connection. Without
+# --retry-delay, curl doubles the wait from one second on, about a minute in
+# total.
+exec curl -fsSL --proto '=https' --retry 6 --retry-all-errors "$URL" -o "$OUTPUT"

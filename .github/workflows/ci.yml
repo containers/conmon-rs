@@ -20,7 +20,7 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   # The toolchain of the Rust jobs. A new stable release brings new lints,
   # which a bump of this version picks up instead of unrelated pull requests.
-  RUST_VERSION: "1.99.1"
+  RUST_VERSION: "1.100.0"
   # The checksum belongs to the x86_64 Linux release of this version.
   SHELLCHECK_VERSION: "0.11.0"
   SHELLCHECK_SHA256: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
@@ -120,11 +120,13 @@ jobs:
             go -C "$DIR" mod tidy -diff
             go -C "$DIR" mod verify
           done
-      # CRI-O builds the client for FreeBSD as well.
+      # CRI-O builds the client for FreeBSD as well. go vet builds the tests
+      # of the package there too, which nothing else does.
       - name: Build the Go client for other platforms
         run: |
           for GOOS in freebsd darwin; do
             CGO_ENABLED=0 GOOS=$GOOS go build ./pkg/client/
+            CGO_ENABLED=0 GOOS=$GOOS go vet ./pkg/client/
           done
       # CRI-O vendors the client, which has to stay compatible within a major
       # version, see release.md. gorelease takes minutes and is the longest
@@ -153,9 +155,14 @@ jobs:
           path: ~/.cache/golangci-lint
           key: ${{ steps.lint-key.outputs.key }}
           restore-keys: ${{ steps.lint-key.outputs.prefix }}
-      # The checksum verified release binary of the Makefile, for both Go
-      # modules. The sources are lint clean, so all issues fail, not only new
-      # ones.
+      # The checksum verified release binary of the Makefile. Only its
+      # download gets the token, see .github/download-release.
+      - name: Install golangci-lint
+        run: make .install.golangci-lint
+        env:
+          GH_TOKEN: ${{ github.token }}
+      # For both Go modules. The sources are lint clean, so all issues fail,
+      # not only new ones.
       - run: make lint-go
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: env.SAVE_CACHE == 'true' && steps.lint-cache.outputs.cache-hit != 'true'
@@ -219,11 +226,17 @@ jobs:
         id: checkout
         with:
           persist-credentials: false
+      # The steps which download from the releases of GitHub get the token
+      # of the job, anonymous downloads fail with HTTP 429 at times, see
+      # .github/download-release.
       - name: Install shellcheck
         id: shellcheck
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl -sSfL --retry 6 --retry-all-errors -o shellcheck.tar.xz \
-            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          .github/download-release \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            shellcheck.tar.xz
           echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
           sudo tar -xJf shellcheck.tar.xz --strip-components=1 -C /usr/local/bin "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
           rm shellcheck.tar.xz
@@ -249,22 +262,25 @@ jobs:
         id: node
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         with:
-          node-version: 26.13.0
+          node-version: 26.13.1
       # prettier has no dependencies, npm checks it against the integrity of
       # the registry.
       - name: Prettier
         if: ${{ !cancelled() && steps.node.outcome == 'success' }}
         run: npx --yes "prettier@$PRETTIER_VERSION" --check .
         env:
-          PRETTIER_VERSION: 3.9.10
+          PRETTIER_VERSION: 3.10.1
       # The static binary, which the tarball has in a directory of its name.
       - name: Install lychee
         id: lychee
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           NAME=lychee-x86_64-unknown-linux-musl
-          curl -sSfL --retry 6 --retry-all-errors -o lychee.tar.gz \
-            "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/$NAME.tar.gz"
+          .github/download-release \
+            "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/$NAME.tar.gz" \
+            lychee.tar.gz
           echo "${LYCHEE_SHA256}  lychee.tar.gz" | sha256sum -c -
           sudo tar -xzf lychee.tar.gz --strip-components=1 -C /usr/local/bin "$NAME/lychee"
           rm lychee.tar.gz
@@ -276,6 +292,8 @@ jobs:
       - name: Verify dependencies
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: make verify-dependencies
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Verify the RPM spec
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: make verify-spec
@@ -532,13 +550,14 @@ jobs:
         with:
           tool: |
             cargo-llvm-cov@0.9.1
-            cargo-nextest@0.9.150
+            cargo-nextest@0.9.151
           fallback: none
       # The default features are what gets shipped, the tracing feature covers
       # the optional tracing code. The coverage of both runs gets merged. The
       # fuzzing feature is not needed, the tests build the fuzz entry points.
       # The ci profile of .config/nextest.toml retries failed tests and writes
-      # a JUnit report, which lists the ones which passed on a retry.
+      # a JUnit report, which lists the ones which passed on a retry and keeps
+      # the output of the ones which passed.
       - name: Generate code coverage
         env:
           NEXTEST_PROFILE: ci
@@ -565,6 +584,11 @@ jobs:
           # Required for uploads from the protected main branch, pull requests
           # from forks fall back to tokenless uploads.
           token: ${{ secrets.CODECOV_TOKEN }}
+      # A test passes if a task which it does not wait for panics, the
+      # release build of the server aborts, see .github/verify-panics. After
+      # the upload, so that the coverage of the run does not get lost.
+      - name: Check the passed tests for panics
+        run: .github/verify-panics junit-default.xml junit-tracing.xml
 
   # The unit tests on the other architectures of the static binaries, whose
   # build-static jobs only run the binary once. arm64 runs natively, where the
@@ -573,9 +597,13 @@ jobs:
   # protocols of the server encode their integers by hand. Tests which depend
   # on timing show up under qemu as well, it is many times slower. nextest
   # runs the tests through qemu, the binfmt registration of qemu-user-binfmt
-  # the test binary which a test starts itself. Their caches are not worth a
-  # place in the 10 GB of the repository, which would push out the ones of
-  # the other jobs, they build in less than a minute without them.
+  # the test binary which a test starts itself. They restore no build caches,
+  # they build in less than a minute without them. The packages of the cross
+  # toolchain and qemu get cached, about 70 MB per architecture of the 10 GB
+  # of the repository, which its caches use less than a third of: the mirror
+  # of the runners takes minutes for them at times, see .github/install-debs,
+  # which checks every cached package against the signed package index. Like
+  # the build caches, only main saves them, once per set of packages.
   test-unit-arch:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -615,18 +643,42 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.target }}
           cache: false
+      # The key names the architecture and the runner image, the release of
+      # Ubuntu the packages belong to, and ends with the checksum of the
+      # packages of the install, which the install step knows. The restore
+      # takes the newest entry of the architecture and the image. The
+      # directory is outside of the home of the runner user, which the user
+      # apt-get downloads as cannot enter.
+      - name: Package cache key
+        id: debs-key
+        if: matrix.target
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: echo "prefix=apt-debs-$ARCH-$ImageOS-" >>"$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: debs
+        if: matrix.target
+        with:
+          path: /tmp/conmon-apt-debs
+          key: ${{ steps.debs-key.outputs.prefix }}
+          restore-keys: ${{ steps.debs-key.outputs.prefix }}
       - name: Install the cross toolchain and qemu
+        id: install
         if: matrix.target
         env:
           PACKAGES: ${{ matrix.packages }}
         run: |
           read -ra PACKAGES <<<"$PACKAGES"
-          sudo apt-get -o Acquire::Retries=5 update
-          sudo apt-get -o Acquire::Retries=5 install -y "${PACKAGES[@]}" qemu-user-binfmt
+          .github/install-debs /tmp/conmon-apt-debs "${PACKAGES[@]}" qemu-user-binfmt
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: matrix.target && env.SAVE_CACHE == 'true' && steps.install.outputs.debs && format('{0}{1}', steps.debs-key.outputs.prefix, steps.install.outputs.debs) != steps.debs.outputs.cache-matched-key
+        with:
+          path: /tmp/conmon-apt-debs
+          key: ${{ steps.debs-key.outputs.prefix }}${{ steps.install.outputs.debs }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
-          tool: cargo-nextest@0.9.150
+          tool: cargo-nextest@0.9.151
           fallback: none
       # Under qemu-user, the first skipped test fails to find the reaped leader
       # of a process group through the children of the test process. qemu-user
@@ -643,6 +695,9 @@ jobs:
       - name: Report flaky tests
         if: ${{ !cancelled() }}
         run: .github/report-flakes target/nextest/ci/junit.xml
+      # See the test-unit job.
+      - name: Check the passed tests for panics
+        run: .github/verify-panics target/nextest/ci/junit.xml
 
   # The tests of the Go client which need no server and no root. The
   # integration suite, the module in pkg/client/integration, runs in the
@@ -724,9 +779,12 @@ jobs:
           name: build-static-${{ env.ARCH }}
           path: .build/static
       - run: chmod +x .build/static/conmonrs
+      # The token is the one of the download, see .github/download-release.
       - name: Install runc
         if: env.RUNTIME == 'runc'
         run: .github/install-runc
+        env:
+          GH_TOKEN: ${{ github.token }}
       # The checkpoint and restore spec needs criu, which Ubuntu 24.04 does not
       # package, so it comes from the nixpkgs of flake.lock. Only runc runs it,
       # the static release binaries of crun lack CRIU support and skip it. The
@@ -762,19 +820,24 @@ jobs:
           restore-test-files: ${{ env.ARCH == 'amd64' }}
           save-test-files: ${{ env.ARCH == 'amd64' && env.RUNTIME == 'crun' && env.SAVE_CACHE == 'true' }}
           save-cache: ${{ env.RUNTIME == 'crun' && env.SAVE_CACHE || 'false' }}
-      # The checkpoint and restore specs skip without criu, which only this
-      # job installs, so a broken install would go unnoticed otherwise.
-      - name: Check that the checkpoint specs ran
-        if: env.RUNTIME == 'runc'
+      # The specs skip themselves without what they need, like criu, a
+      # journal or transparent huge pages, so a broken install or another
+      # runner image would go unnoticed. Only the specs listed here may skip,
+      # see .github/verify-skips: the shipped binary has no tracing feature,
+      # and the checkpoint and restore specs need the criu which only the runc
+      # job installs. There they have to have passed, which a report without
+      # them fails as well.
+      - name: Check the skipped specs
         run: |
-          STATES=$(jq -r '
-            [.[] | (.SpecReports // [])[] | select(.LeafNodeText | test("restore a container from a checkpoint")) | .State] |
-            if length == 0 then "none" else join(" ") end
-          ' .build/report/report.json)
-          echo "Checkpoint specs: $STATES"
-          if [[ $STATES == none || $STATES == *skipped* ]]; then
-            echo "::error::The checkpoint and restore specs did not run, is criu installed?"
-            exit 1
+          CHECKPOINT=(
+            "ConmonClient CreateContainer with RestorePath should restore a container from a checkpoint"
+            "ConmonClient CreateContainer with RestorePath should restore a container from a checkpoint with terminal"
+          )
+          if [[ $RUNTIME == runc ]]; then
+            .github/verify-skips -p "${CHECKPOINT[0]}" -p "${CHECKPOINT[1]}" \
+              .build/report/report.json "ConmonClient Tracing should succeed"
+          else
+            .github/verify-skips .build/report/report.json "ConmonClient Tracing should succeed" "${CHECKPOINT[@]}"
           fi
 
   # The same suite on a native arm64 runner, the build-static jobs only run the
@@ -927,9 +990,12 @@ jobs:
       - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
           cosign-release: v3.1.4
+      # The token is the one of the download of critest, see
+      # .github/download-release.
       - run: .github/setup
         env:
           CONMONRS_BINARY: .build/static/conmonrs
+          GH_TOKEN: ${{ github.token }}
       # critest runs the parallel specs with ginkgo, which has no binaries.
       - uses: ./.github/actions/setup-ginkgo
         with:

@@ -109,15 +109,16 @@ jobs:
   # caches, which would push the current ones out of the 10 GB of the
   # repository. It keeps the newest entry by creation time of the
   # vulnerability database, of the golangci-lint cache of the lint-go job, of
-  # the corpus of each fuzz target and of each Rust, Go and ginkgo cache key
-  # without its hashes and Go version: the jobs only restore the entries of
-  # their current toolchain and Go version, which the newest one has. An
-  # entry saved while it runs is newer than the listed ones and stays. Every
-  # other entry stays: the caches of pull requests cannot replace the ones of
-  # main, and like the ones of an image which no job uses any more, or of the
-  # keys which rarely change, they expire after a week without access. The
-  # only job which deletes caches, so the only one with write access to them,
-  # it runs no code of the checkout.
+  # the corpus of each fuzz target, of the packages of each architecture and
+  # runner image of the test-unit-arch jobs and of each Rust, Go and ginkgo
+  # cache key without its hashes and Go version: the jobs only restore the
+  # entries of their current toolchain and Go version, which the newest one
+  # has. An entry saved while it runs is newer than the listed ones and
+  # stays. Every other entry stays: the caches of pull requests cannot
+  # replace the ones of main, and like the ones of an image which no job uses
+  # any more, or of the keys which rarely change, they expire after a week
+  # without access. The only job which deletes caches, so the only one with
+  # write access to them, it runs no code of the checkout.
   prune-caches:
     needs:
       - verify-vulnerabilities
@@ -141,6 +142,7 @@ jobs:
                 if test("^fuzz-corpus-.+-[0-9]+-[0-9]+$") then sub("-[0-9]+-[0-9]+$"; "")
                 elif test("^grype-db-") then "grype-db"
                 elif test("^golangci-lint-") then "golangci-lint"
+                elif test("^apt-debs-.+-[0-9a-f]{16}$") then sub("-[0-9a-f]{16}$"; "")
                 elif test("^v0-rust-.+-[0-9a-f]{8}-[0-9a-f]{8}$") then sub("-[0-9a-f]{8}-[0-9a-f]{8}$"; "")
                 elif test("^setup-go-.+-go-[^-]+-[0-9a-f]{64}$") then sub("-go-[^-]+-[0-9a-f]{64}$"; "")
                 elif test("^ginkgo-.+-[0-9a-f]{64}$") then sub("(-go[^-]+)?-[0-9a-f]{64}$"; "")
@@ -172,9 +174,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # zeitgeist reads the API of GitHub with the token, its download
+      # takes it as GH_TOKEN, see .github/download-release.
       - name: Check for updates
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
           make verify-dependencies-upstream | tee upstream.txt

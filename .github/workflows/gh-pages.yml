@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: false
 env:
   CARGO_TERM_COLOR: always
-  RUST_VERSION: "1.99.1"
+  RUST_VERSION: "1.100.0"
 jobs:
   # Runs the build scripts of all dependencies, so it gets no write access.
   # The deploy job only publishes the artifact. Forks have no Pages of the

@@ -47,12 +47,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-nix
       # The cache holds the cross toolchains, which take an hour to build. The
       # build only reads it, the publish-cache job of the ci workflow pushes.
-      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+      # Reading needs no more than the cache as a substituter and the key
+      # which signs its paths, the one https://app.cachix.org/cache/conmon-rs
+      # shows. The cachix action would install the cachix of an unpinned
+      # channel for it, into the job which builds the released binaries.
+      - uses: ./.github/actions/setup-nix
         with:
-          name: conmon-rs
+          extra-config: |
+            extra-substituters = https://conmon-rs.cachix.org
+            extra-trusted-public-keys = conmon-rs.cachix.org-1:xOGcHEHYHocnlIF1C5aZBM7AJJHFNSE8Tjl5q1PYcbc=
       - run: nix build ".#$ARCH"
       - run: file result/bin/conmonrs | grep static | grep stripped
       # The build embeds its dependencies with cargo-auditable, which syft

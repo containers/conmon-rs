@@ -210,7 +210,9 @@ install_critest() {
     CRITEST_SHA256=e39780b83deac72e3d70599a6641f4db7661b63ebe15aa6d9f6d46dde06a4c05
     TARBALL=critest-$CRI_TOOLS_VERSION-linux-amd64.tar.gz
 
-    curl_retry "https://github.com/kubernetes-sigs/cri-tools/releases/download/$CRI_TOOLS_VERSION/$TARBALL" -o "$TARBALL"
+    # With retries, and through the API of GitHub if GH_TOKEN is set.
+    "$(dirname "$0")/download-release" \
+        "https://github.com/kubernetes-sigs/cri-tools/releases/download/$CRI_TOOLS_VERSION/$TARBALL" "$TARBALL"
     echo "$CRITEST_SHA256  $TARBALL" | sha256sum -c
     sudo tar xzf "$TARBALL" -C /usr/local/bin critest
     rm "$TARBALL"

@@ -168,7 +168,7 @@ fn subscribe_racing_the_end_sees_it() -> Result<()> {
         let output = attach.output();
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let subscriber = std::thread::spawn({
-            let (attach, barrier) = (attach.clone(), barrier.clone());
+            let barrier = barrier.clone();
             move || {
                 barrier.wait();
                 attach.subscribe()

@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Fail if a test which passed printed a panic, given the JUnit reports of
+# nextest, whose ci profile keeps the output of the passed tests, see
+# .config/nextest.toml.
+#
+# A release build of the server aborts on a panic. In the tests, tokio
+# catches the panic of a task and hands it to its JoinHandle, which most
+# tasks of the server drop: the task ends, the test goes on and may pass
+# without it. All that is left is the message of the panic hook in the output
+# of the test.
+#
+# A failed test fails the run anyway and is left out, like a skipped one and
+# the failed attempts of a test which passed on a retry. The tests which
+# panic on purpose get listed here by the name of their binary and their
+# own, as in the report, like "conmonrs journal::tests::panics_get_logged".
+# None does so far.
+#
+# A report which cannot tell fails as well: a missing or broken one, one
+# without any passed test, and one which lacks the output of a passed test,
+# which nextest writes for every one of them, even if empty, as long as the
+# profile keeps it.
+ALLOWED=()
+
+if (($# == 0)); then
+    echo "usage: $0 REPORT..." >&2
+    exit 1
+fi
+
+# One line per finding, its kind, a tab and its message: "panic" with the
+# test, where it panicked and the message of the panic, "error" with what is
+# wrong with a report, and "info" with what got checked of one. The default
+# hook writes "thread '<name>' (<id>) panicked at <file>:<line>:<column>:" and
+# the message on the next line.
+FINDINGS=$(
+    python3 -I - "${#ALLOWED[@]}" "${ALLOWED[@]}" "$@" <<'EOF'
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+count = int(sys.argv[1])
+allowed = set(sys.argv[2 : 2 + count])
+for report in sys.argv[2 + count :]:
+    if not os.path.isfile(report):
+        print(f"error\tNo report found at {report}")
+        continue
+    try:
+        cases = list(ET.parse(report).iter("testcase"))
+    except (ET.ParseError, OSError) as error:
+        print(f"error\t{report} is no JUnit report: {error}")
+        continue
+    passed = 0
+    silent = 0
+    for case in cases:
+        if any(case.find(tag) is not None for tag in ("failure", "error", "skipped")):
+            continue
+        passed += 1
+        outputs = case.findall("system-out") + case.findall("system-err")
+        if not outputs:
+            silent += 1
+        name = " ".join(f"{case.get('classname')} {case.get('name')}".split())
+        if name in allowed:
+            continue
+        for output in outputs:
+            lines = (output.text or "").splitlines()
+            for number, line in enumerate(lines):
+                if "panicked at " in line:
+                    panic = " ".join(lines[number : number + 2])
+                    print(f"panic\t{name}: {' '.join(panic.split())}")
+    if passed == 0:
+        print(f"error\t{report} has no passed test")
+    elif silent:
+        print(
+            f"error\t{report} lacks the output of {silent} of its {passed} passed tests,"
+            " did they run without the ci profile of .config/nextest.toml,"
+            " or does its junit section lack store-success-output?"
+        )
+    print(
+        f"info\tChecked the output of {passed} passed tests"
+        f" of {report} ({os.path.getsize(report)} bytes)"
+    )
+EOF
+)
+
+# Print a message, as the error or warning with the title of the workflow
+# there, whose commands need the % escaped.
+annotate() {
+    if [[ -n ${GITHUB_ACTIONS:-} ]]; then
+        echo "::$1 title=$2::${3//%/%25}"
+    else
+        echo "$3"
+    fi
+}
+
+FAILED=0
+PANICS=0
+while IFS=$'\t' read -r KIND MESSAGE; do
+    case $KIND in
+    info)
+        echo "$MESSAGE"
+        ;;
+    panic)
+        annotate error "Panic in a passed test" "$MESSAGE" >&2
+        FAILED=1
+        PANICS=1
+        ;;
+    *)
+        annotate error "Unusable report" "$MESSAGE" >&2
+        FAILED=1
+        ;;
+    esac
+done <<<"$FINDINGS"
+if ((PANICS)); then
+    echo "Tests passed although they printed a panic, of a task whose JoinHandle got dropped for example. Fix the panic, or add a test which panics on purpose to ALLOWED of $0." >&2
+elif ((!FAILED)); then
+    echo "No passed test printed a panic"
+fi
+exit "$FAILED"
