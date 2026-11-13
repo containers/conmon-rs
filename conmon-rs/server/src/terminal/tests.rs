@@ -1,6 +1,9 @@
 use super::*;
-use crate::{attach::SharedContainerAttach, test_util::send_fd};
-use nix::{fcntl::FdFlag, pty};
+use crate::{
+    attach::SharedContainerAttach,
+    test_util::{open_pty, send_fd},
+};
+use nix::fcntl::FdFlag;
 use std::{os::unix::fs::PermissionsExt, time::Duration};
 
 /// The width and height of a terminal.
@@ -30,7 +33,7 @@ async fn new_success() -> Result<()> {
         0
     );
 
-    let res = pty::openpty(None, None)?;
+    let res = open_pty()?;
 
     let mut stream = UnixStream::connect(sut.path()).await?;
     send_fd(&stream, b"test", res.master.as_fd()).await?;
@@ -71,7 +74,7 @@ async fn size_before_the_connection_gets_applied() -> Result<()> {
     resizer.resize(132, 50)?;
     assert_eq!(sut.resizer.pending(), Some((132, 50)));
 
-    let res = pty::openpty(None, None)?;
+    let res = open_pty()?;
     assert_eq!(size(res.slave.as_fd())?, (0, 0));
     let stream = UnixStream::connect(sut.path()).await?;
     send_fd(&stream, b"x", res.master.as_fd()).await?;
@@ -90,7 +93,7 @@ async fn size_before_the_connection_gets_applied() -> Result<()> {
 async fn eof_char_ends_the_input() -> Result<()> {
     let attach = SharedContainerAttach::default();
     let mut sut = Terminal::new()?;
-    let res = pty::openpty(None, None)?;
+    let res = open_pty()?;
     let stream = UnixStream::connect(sut.path()).await?;
     send_fd(&stream, b"x", res.master.as_fd()).await?;
     let io = sut.connect().await?;
@@ -114,6 +117,26 @@ async fn eof_char_ends_the_input() -> Result<()> {
     Ok(())
 }
 
+/// The end of file character is the one of the terminal, which a process
+/// may change.
+#[tokio::test(flavor = "multi_thread")]
+async fn eof_char_follows_the_terminal_settings() -> Result<()> {
+    let mut sut = Terminal::new()?;
+    // The default before the runtime connected the terminal.
+    assert_eq!(sut.eof_char(), 0x04);
+    let res = open_pty()?;
+    let stream = UnixStream::connect(sut.path()).await?;
+    send_fd(&stream, b"x", res.master.as_fd()).await?;
+    let _io = sut.connect().await?;
+    assert_eq!(sut.eof_char(), 0x04);
+
+    let mut term = termios::tcgetattr(&res.slave)?;
+    term.control_chars[SpecialCharacterIndices::VEOF as usize] = 0x1a;
+    termios::tcsetattr(&res.slave, SetArg::TCSANOW, &term)?;
+    assert_eq!(sut.eof_char(), 0x1a);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn removed_socket_does_not_drop_the_terminal() -> Result<()> {
     let mut sut = Terminal::new()?;
@@ -123,7 +146,7 @@ async fn removed_socket_does_not_drop_the_terminal() -> Result<()> {
         "{}",
         sut.path().display()
     );
-    let res = pty::openpty(None, None)?;
+    let res = open_pty()?;
     let stream = UnixStream::connect(sut.path()).await?;
     // Like a cleaner of the directory, the connection is up already.
     std::fs::remove_file(sut.path())?;

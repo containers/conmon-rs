@@ -134,7 +134,8 @@ impl ContainerIO {
                     error!("Read loop of {pipe} failed: {e:#}");
                 }
             }
-            .instrument(debug_span!("read_loop", %pipe)),
+            .instrument(debug_span!("read_loop", %pipe))
+            .in_current_span(),
         );
     }
 
@@ -155,7 +156,8 @@ impl ContainerIO {
                     error!("Stdin read loop failure: {e:#}");
                 }
             }
-            .instrument(debug_span!("read_loop_stdin")),
+            .instrument(debug_span!("read_loop_stdin"))
+            .in_current_span(),
         );
     }
 

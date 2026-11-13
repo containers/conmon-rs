@@ -235,7 +235,10 @@ fn multiple_values_are_split() {
 async fn oversized_control_frames_are_rejected() -> Result<()> {
     let mut control = vec![0x80, 0x03, 0, 1, 0];
     control.extend_from_slice(&u32::try_from(MAX_CONTROL_FRAME_LEN + 1)?.to_be_bytes()[1..]);
-    assert!(Decoder::default().read(&mut &control[..]).await.is_err());
+    // By its header, not for the payload which is missing here.
+    let err = Decoder::default().read(&mut &control[..]).await;
+    let err = err.err().context("frame got accepted")?.to_string();
+    assert!(err.contains("exceeds"), "{err}");
     Ok(())
 }
 

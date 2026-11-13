@@ -38,7 +38,12 @@ use tokio::{
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, Span, debug, debug_span, error};
+use tracing::{
+    Instrument, Level, Span, debug, debug_span, error, error_span,
+    field::{Empty, display},
+    level_filters::LevelFilter,
+    warn,
+};
 
 macro_rules! pry_err {
     ($x:expr) => {
@@ -94,16 +99,36 @@ fn set_parent_context(
 
 /// Enter the root span of a request for the rest of the handler, with the
 /// parent context the client sent.
+///
+/// The span of a request for a container is one of the error level, so
+/// that the log drivers show the container ID at every log level, also for
+/// what the tasks which the request starts log later, like the watcher and
+/// the read loops of a container. The lines of a warning or an error would
+/// not tell which container they are about otherwise. The request ID only
+/// helps to tell the debug lines of concurrent requests apart, so it gets
+/// created and formatted only for them. The level comes from the hint of
+/// the subscriber: asking it whether a debug event is enabled would leave
+/// the state of the per-layer filter of a log driver behind, which the
+/// next line would get dropped for, if no event follows in the request.
 macro_rules! enter_request {
-    ($req:expr, $name:literal $(, $container_id:expr)?) => {
-        let span = debug_span!(
-            $name,
-            $(container_id = $container_id,)?
-            request_id = %RandomId::new()
-        );
+    ($req:expr, $name:literal) => {
+        let span = debug_span!($name, request_id = %RandomId::new());
+        enter_request!(@enter $req, span);
+    };
+    ($req:expr, $name:literal, $container_id:expr) => {
+        // As a string, not through its `Display`: the log drivers escape
+        // it then, the ID of a lookup or of a request which gets rejected
+        // is whatever the client sent.
+        let span = error_span!($name, container_id = $container_id, request_id = Empty);
+        if Level::DEBUG <= LevelFilter::current() {
+            span.record("request_id", display(RandomId::new()));
+        }
+        enter_request!(@enter $req, span);
+    };
+    (@enter $req:expr, $span:ident) => {
         // Entering starts the span, its parent is fixed then.
-        let parent = set_parent_context(&span, $req.get_metadata());
-        let _enter = span.enter();
+        let parent = set_parent_context(&$span, $req.get_metadata());
+        let _enter = $span.enter();
         if let Err(e) = parent {
             debug!("Unable to set the parent context of the request: {e:#}");
         }
@@ -332,10 +357,10 @@ impl conmon::Server for Server {
         let exit_paths: Vec<PathBuf> = pry!(text_list(req.get_exit_paths()));
         let oom_exit_paths: Vec<PathBuf> = pry!(text_list(req.get_oom_exit_paths()));
         for path in &exit_paths {
-            pry_err!(fs_util::check_absolute("exit path", path));
+            pry_err!(fs_util::check_file_path("exit path", path));
         }
         for path in &oom_exit_paths {
-            pry_err!(fs_util::check_absolute("OOM exit path", path));
+            pry_err!(fs_util::check_file_path("OOM exit path", path));
         }
         let container_log = pry_err!(ContainerLog::from_request(&id, log_drivers));
 
@@ -416,7 +441,8 @@ impl conmon::Server for Server {
                     .set_container_pid(capnp_err!(u32::try_from(grandchild_pid.as_raw()))?);
                 Ok(())
             }
-            .instrument(debug_span!("promise")),
+            .instrument(debug_span!("promise"))
+            .in_current_span(),
         )
     }
 
@@ -444,7 +470,7 @@ impl conmon::Server for Server {
         let timeout_sec = req.get_timeout_sec();
         let time_to_timeout = exec_deadline(timeout_sec);
 
-        debug!("Got exec sync container request with timeout {timeout_sec}");
+        debug!("Got an exec sync container request with timeout {timeout_sec}");
 
         let child_reaper = self.reaper().clone();
         let command: Vec<String> = pry!(text_list(req.get_command()));
@@ -481,7 +507,9 @@ impl conmon::Server for Server {
                         Err(e) => {
                             let timed_out = time_to_timeout.is_some_and(|t| Instant::now() >= t);
                             let e = exec.runtime_error(e).await;
-                            error!("Unable to start exec: {e:#}");
+                            // Mostly the client asked for what cannot run,
+                            // like a command the container does not have.
+                            warn!("Unable to start exec: {e:#}");
                             // The client only sees the response, tell it why.
                             return Ok(ExecSyncOutput {
                                 stdout: vec![],
@@ -558,7 +586,8 @@ impl conmon::Server for Server {
                 resp.set_timed_out(output.timed_out);
                 Ok(())
             }
-            .instrument(debug_span!("promise")),
+            .instrument(debug_span!("promise"))
+            .in_current_span(),
         )
     }
 
@@ -588,7 +617,8 @@ impl conmon::Server for Server {
                     stop_after_stdin_eof
                 ))
             }
-            .instrument(debug_span!("promise")),
+            .instrument(debug_span!("promise"))
+            .in_current_span(),
         )
     }
 
@@ -616,7 +646,8 @@ impl conmon::Server for Server {
                 });
                 task_result(reopen).await
             }
-            .instrument(debug_span!("promise")),
+            .instrument(debug_span!("promise"))
+            .in_current_span(),
         )
     }
 
@@ -639,7 +670,8 @@ impl conmon::Server for Server {
 
         Promise::from_future(
             async move { capnp_err!(child.io().resize(width, height)) }
-                .instrument(debug_span!("promise")),
+                .instrument(debug_span!("promise"))
+                .in_current_span(),
         )
     }
 
@@ -716,7 +748,8 @@ impl conmon::Server for Server {
                 results.get().init_response().set_url(&url);
                 Ok(())
             }
-            .instrument(debug_span!("promise")),
+            .instrument(debug_span!("promise"))
+            .in_current_span(),
         )
     }
 
@@ -759,7 +792,8 @@ impl conmon::Server for Server {
                 results.get().init_response().set_url(&url);
                 Ok(())
             }
-            .instrument(debug_span!("promise")),
+            .instrument(debug_span!("promise"))
+            .in_current_span(),
         )
     }
 
@@ -794,7 +828,8 @@ impl conmon::Server for Server {
                 results.get().init_response().set_url(&url);
                 Ok(())
             }
-            .instrument(debug_span!("promise")),
+            .instrument(debug_span!("promise"))
+            .in_current_span(),
         )
     }
 }

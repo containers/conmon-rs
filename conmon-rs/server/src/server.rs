@@ -44,9 +44,7 @@ use tokio::{
     time::{self, Duration, Instant},
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
-#[cfg(feature = "tracing")]
-use tracing::warn;
-use tracing::{Instrument, Span, debug, debug_span, error, info};
+use tracing::{Instrument, Span, debug, debug_span, error, info, warn};
 #[cfg(feature = "tracing")]
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, prelude::*};
@@ -382,6 +380,12 @@ impl Server {
         }
         let level = self.config().log_level();
         info!("Set log level to: {level}");
+        // The client passes the flag along from the configuration of its
+        // user, who would wait for traces which never come otherwise.
+        #[cfg(not(feature = "tracing"))]
+        if self.config().enable_tracing() {
+            warn!("Ignoring --enable-tracing, this build has no tracing feature");
+        }
         Ok(())
     }
 
@@ -426,11 +430,12 @@ impl Server {
         future.instrument(span)
     }
 
-    /// Wait for SIGTERM or SIGINT and clean up, then end the backend with
-    /// the result, which the server exits with. A server which cannot listen
-    /// for the signals ends right away, after the same cleanup.
+    /// Wait for a signal which shuts the server down and clean up, then end
+    /// the backend with the result, which the server exits with. A server
+    /// which cannot listen for the signals ends right away, after the same
+    /// cleanup.
     async fn start_signal_handler<T: AsRef<Path>>(
-        signals: Result<[SignalStream; 2]>,
+        signals: Result<[SignalStream; 3]>,
         reaper: Arc<ChildReaper>,
         socket: T,
         shutdown_tx: oneshot::Sender<Result<()>>,
@@ -452,24 +457,28 @@ impl Server {
         }
     }
 
-    /// Listen for SIGTERM and SIGINT, which shut the server down.
-    fn listen_for_signals() -> Result<[SignalStream; 2]> {
+    /// Listen for SIGTERM, SIGINT and SIGQUIT, which shut the server down.
+    /// SIGQUIT like conmon, whose default action would end the server
+    /// without the cleanup and leave its containers without a monitor. The
+    /// other signals keep their default action.
+    fn listen_for_signals() -> Result<[SignalStream; 3]> {
         Ok([
             signal(SignalKind::terminate()).context("listen for SIGTERM")?,
             signal(SignalKind::interrupt()).context("listen for SIGINT")?,
+            signal(SignalKind::quit()).context("listen for SIGQUIT")?,
         ])
     }
 
-    /// Wait for SIGTERM or SIGINT, see [`Server::listen_for_signals`], and
-    /// return the deadline of the cleanup, counted from the signal. On
-    /// SIGTERM, the containers get the [`Server::TERMINATE_GRACE`] of it to
-    /// exit on it first, unless another SIGTERM or a SIGINT asks for the
-    /// shutdown meanwhile.
+    /// Wait for SIGTERM, SIGINT or SIGQUIT, see
+    /// [`Server::listen_for_signals`], and return the deadline of the
+    /// cleanup, counted from the signal. On SIGTERM, the containers get the
+    /// [`Server::TERMINATE_GRACE`] of it to exit on it first, unless another
+    /// SIGTERM, a SIGINT or a SIGQUIT asks for the shutdown meanwhile.
     async fn wait_for_signal(
-        signals: Result<[SignalStream; 2]>,
+        signals: Result<[SignalStream; 3]>,
         reaper: &ChildReaper,
     ) -> Result<Instant> {
-        let [mut sigterm, mut sigint] = signals?;
+        let [mut sigterm, mut sigint, mut sigquit] = signals?;
 
         let terminated = tokio::select! {
             _ = sigterm.recv() => {
@@ -478,6 +487,10 @@ impl Server {
             }
             _ = sigint.recv() => {
                 info!("Received SIGINT");
+                false
+            }
+            _ = sigquit.recv() => {
+                info!("Received SIGQUIT");
                 false
             }
         };
@@ -490,6 +503,9 @@ impl Server {
                 }
                 _ = sigint.recv() => {
                     info!("Received SIGINT, not waiting for the containers");
+                }
+                _ = sigquit.recv() => {
+                    info!("Received SIGQUIT, not waiting for the containers");
                 }
             }
         }

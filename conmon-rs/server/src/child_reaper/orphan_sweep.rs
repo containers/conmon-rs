@@ -1,6 +1,6 @@
 //! Reaping the zombies nobody claimed.
 
-use super::{Candidate, ChildReaper};
+use super::{Candidate, ChildReaper, ReapableChild};
 use crate::{
     mutex::lock,
     process::{has_zombie, reap_guard, wait_exit, zombie_children},
@@ -179,22 +179,30 @@ impl ChildReaper {
         !self.in_flight.borrow().in_progress.is_empty()
     }
 
-    /// Whether a watcher or a call in progress waits for the child.
+    /// Whether a watcher or a call in progress waits for the child. A
+    /// registered child which its watcher reaped already does not count,
+    /// another child may have its PID by now.
     ///
     /// Both sets get checked under the lock of the grandchildren, which
     /// `watch_grandchild` holds while it moves a child from one to the other.
     pub(super) fn is_claimed(&self, pid: Pid) -> bool {
         let map = lock(&self.grandchildren);
-        map.values().flatten().any(|child| child.pid == pid)
-            || lock(&self.pending).contains_key(&pid)
+        Self::watched(&map).any(|watched| watched == pid) || lock(&self.pending).contains_key(&pid)
     }
 
     /// The children which a watcher or a call in progress waits for, see
     /// [`ChildReaper::is_claimed`].
     fn claimed(&self) -> HashSet<Pid> {
         let map = lock(&self.grandchildren);
-        let mut claimed: HashSet<_> = map.values().flatten().map(|child| child.pid).collect();
+        let mut claimed: HashSet<_> = Self::watched(&map).collect();
         claimed.extend(lock(&self.pending).keys());
         claimed
+    }
+
+    /// The registered children which their watchers did not reap yet.
+    fn watched(map: &HashMap<Box<str>, Vec<ReapableChild>>) -> impl Iterator<Item = Pid> {
+        map.values()
+            .flatten()
+            .filter_map(ReapableChild::claimed_pid)
     }
 }

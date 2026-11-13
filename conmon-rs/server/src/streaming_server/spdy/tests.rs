@@ -174,6 +174,25 @@ async fn closing_the_connection_ends_all_streams() -> Result<()> {
 }
 
 #[tokio::test]
+async fn streams_after_a_goaway_of_the_client_get_refused() -> Result<()> {
+    let (mut client, _connection) = connect(accept_data, None)?;
+    let (last_stream_id, status) = (0, GOAWAY_OK);
+    client
+        .send(Frame::GoAway {
+            last_stream_id,
+            status,
+        })
+        .await?;
+    client.open(1, [("streamtype", "data")].into()).await?;
+    let (stream_id, status) = (1, STATUS_REFUSED_STREAM);
+    assert_eq!(
+        client.frame().await?,
+        Some(Frame::RstStream { stream_id, status })
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn protocol_errors_end_the_connection() -> Result<()> {
     let (mut client, mut connection) = connect(accept_data, None)?;
     client.open(3, [("streamtype", "data")].into()).await?;
@@ -194,6 +213,26 @@ async fn protocol_errors_end_the_connection() -> Result<()> {
     );
     assert_eq!(client.frame().await?, None);
     assert!(connection.accept().await.is_none());
+    Ok(())
+}
+
+/// A connection which ends within a frame is a client which went away, not
+/// one which violated the protocol.
+#[tokio::test]
+async fn connections_which_end_within_a_frame_get_no_goaway() -> Result<()> {
+    // Within the header of a control frame, then within its payload.
+    let frame = [0x80, 0x03, 0, 6, 0, 0, 0, 4, 0, 0, 0, 1];
+    for len in [3, 10] {
+        let (mut client, mut connection) = connect(accept_data, None)?;
+        client.open(1, [("streamtype", "data")].into()).await?;
+        let _stream = connection.accept().await.context("stream")?;
+        client.frame().await?;
+        client.io().write_all(&frame[..len]).await?;
+        // The client still reads what the server sends.
+        client.io().shutdown().await?;
+        assert_eq!(client.frame().await?, None, "{len} bytes");
+        assert!(connection.accept().await.is_none());
+    }
     Ok(())
 }
 
@@ -464,18 +503,26 @@ async fn the_server_pings_its_clients() -> Result<()> {
         bail!("no ping");
     };
     assert_eq!(id % 2, 0);
-    // Its own pings do not keep the connection from being idle.
+    // Neither its own pings nor the echoes of the client keep the
+    // connection from being idle. On the paused clock: pings which did
+    // would come forever.
     client.send(Frame::Ping { id }).await?;
-    loop {
-        match client.frame().await? {
-            Some(Frame::Ping { id }) if id % 2 == 0 => {}
-            frame => {
-                assert!(matches!(frame, Some(Frame::GoAway { .. })), "{frame:?}");
-                break;
+    let idle = async {
+        loop {
+            match client.frame().await? {
+                Some(Frame::Ping { id }) if id % 2 == 0 => {
+                    client.send(Frame::Ping { id }).await?;
+                }
+                frame => {
+                    assert!(matches!(frame, Some(Frame::GoAway { .. })), "{frame:?}");
+                    return anyhow::Ok(());
+                }
             }
         }
-    }
-    Ok(())
+    };
+    time::timeout(Duration::from_secs(60), idle)
+        .await
+        .context("the connection did not go idle")?
 }
 
 #[tokio::test]

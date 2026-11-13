@@ -28,7 +28,7 @@ use tokio::{
     task,
     time::{self, Instant},
 };
-use tracing::{Instrument, debug, debug_span, error, trace, warn};
+use tracing::{Instrument, debug, debug_span, error, info, trace, warn};
 
 /// Runs a closure once dropped, at the end of a task however it ends.
 struct OnDrop<F: FnOnce()>(Option<F>);
@@ -175,6 +175,7 @@ impl ReapableChild {
                 pid,
                 // Not reaped before its watcher runs, the PID is its own.
                 process: process.unwrap_or_else(|| Arc::new(Process::open(pid))),
+                reaped: Arc::default(),
                 io: (kind == ChildKind::Container).then_some(io),
                 token,
             },
@@ -201,8 +202,12 @@ impl ReapableChild {
         if let Ok(code) = time::timeout_at(timeout, wait.as_mut()).await {
             return (code, false);
         }
-        if let Err(e) = process.signal_group(Signal::SIGKILL) {
-            debug!("Not killing timed out process, it is gone: {e}");
+        match process.signal_group(Signal::SIGKILL) {
+            Ok(()) => info!(
+                pid = %process.pid(),
+                "Killed the process, it did not exit before its timeout"
+            ),
+            Err(e) => debug!("Not killing timed out process, it is gone: {e}"),
         }
         (EXIT_CODE_TIMED_OUT, true)
     }
@@ -240,6 +245,7 @@ impl ReapableChild {
         } = exit;
         let pid = self.pid();
         let process = self.process.clone();
+        let reaped = self.reaped.clone();
         // Only one exit code will be written.
         let (exit_tx, exit_rx) = broadcast::channel(1);
         let token = self.token.clone();
@@ -262,11 +268,15 @@ impl ReapableChild {
                 let mut reap =
                     pin!(process::wait_for_exit(&process).instrument(debug_span!("wait_for_exit")));
                 let wait = async {
-                    let exit = Self::wait_or_kill(&process, reap.as_mut(), timeout).await;
+                    let (exit_code, timed_out) =
+                        Self::wait_or_kill(&process, reap.as_mut(), timeout).await;
+                    // One killed at its timeout gets reaped at the end of
+                    // the watcher, which forgets it right after.
+                    reaped.store(!timed_out, Ordering::Release);
                     // Tells the users of the token that the process is gone,
                     // which ends the OOM watcher.
                     token.cancel();
-                    exit
+                    (exit_code, timed_out)
                 };
                 let ((exit_code, timed_out), event) = tokio::join!(wait, oom);
                 let oomed = Self::handle_oom(event, exit_code, &oom_exit_paths).await;
@@ -283,7 +293,14 @@ impl ReapableChild {
                     exit_code,
                     timed_out,
                 };
-                debug!(exit_code, timed_out, oomed, ?exit_paths, "Process exited");
+                // Only of a container: a node runs thousands of execs, like
+                // the ones of probes. With the PID, which the lines of the
+                // shutdown name for the processes which did not exit.
+                if io.is_some() {
+                    info!(%pid, exit_code, oomed, "Container exited");
+                } else {
+                    debug!(exit_code, timed_out, "Exec process exited");
+                }
                 Self::write_to_exit_paths(exit_code, &exit_paths).await;
 
                 // Only the consumer of an exec receives it, nobody of a
@@ -297,7 +314,12 @@ impl ReapableChild {
                     Self::reap_killed(reap).await;
                 }
             }
-            .instrument(debug_span!("watch", %pid)),
+            .instrument(debug_span!("watch", %pid))
+            // The span of the request or the session which started the
+            // process names its container, see `enter_request` of the RPC
+            // interface. Below the debug level, the span above is disabled
+            // and would not hand it on.
+            .in_current_span(),
         );
         exit_rx
     }

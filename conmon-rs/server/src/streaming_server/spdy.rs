@@ -48,7 +48,7 @@ use tokio::{
     time::{self, Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace};
+use tracing::{Instrument, debug, trace};
 
 /// How many control frames wait for the connection.
 const CONTROL_QUEUE: usize = 64;
@@ -137,6 +137,8 @@ impl Connection {
             last_stream_id: AtomicU32::new(0),
             live_streams: AtomicUsize::new(0),
         });
+        // In the span of the caller, like the one of a session, which names
+        // its container in what the tasks log, like a protocol error.
         task::spawn(
             Reader {
                 shared: shared.clone(),
@@ -144,7 +146,8 @@ impl Connection {
                 accept,
                 streams: streams_tx,
             }
-            .run(),
+            .run()
+            .in_current_span(),
         );
         // On its own, the reader may wait for a stream which does not take
         // its data. Ends the connection once it was idle for the timeout.
@@ -156,15 +159,11 @@ impl Connection {
             }
         });
         if let Some(interval) = ping_interval {
-            task::spawn(Self::ping(shared.clone(), interval));
+            task::spawn(Self::ping(shared.clone(), interval).in_current_span());
         }
-        task::spawn(Self::write(
-            shared.clone(),
-            writer,
-            encoder,
-            control_rx,
-            data_rx,
-        ));
+        task::spawn(
+            Self::write(shared.clone(), writer, encoder, control_rx, data_rx).in_current_span(),
+        );
 
         Self {
             streams: streams_rx,

@@ -1,5 +1,9 @@
 use super::*;
-use crate::test_util::Log;
+use crate::{
+    child_reaper::{Child, InFlight},
+    test_util::{Log, container_child, run_in_own_process, spawn_sh, wait_for_real},
+};
+use nix::sys::{prctl, signal::raise};
 
 #[tokio::test]
 async fn cleanup_removes_the_socket() -> Result<()> {
@@ -145,5 +149,104 @@ async fn backend_failures_get_logged() -> Result<()> {
     assert!(format!("{err:#}").starts_with("bind socket "), "{err:#}");
     let log = log.contents()?;
     assert!(log.contains(&format!("ERROR {err:#}")), "{log}");
+    Ok(())
+}
+
+/// Set for the test process which runs the signal test.
+const SIGNAL_TEST_ENV: &str = "CONMONRS_SIGNAL_TEST";
+
+/// SIGTERM, SIGINT and SIGQUIT shut the server down. The test raises them
+/// for its own process, which one the server does not listen for would end,
+/// so it runs in a process of its own.
+#[test]
+fn signals_shut_the_server_down() -> Result<()> {
+    let test = "server::tests::signals_in_own_process";
+    run_in_own_process(test, SIGNAL_TEST_ENV, false)
+}
+
+#[tokio::test]
+#[ignore = "run by signals_shut_the_server_down in a process of its own"]
+async fn signals_in_own_process() -> Result<()> {
+    if std::env::var_os(SIGNAL_TEST_ENV).is_none() {
+        return Ok(());
+    }
+    // A signal which ends the process must not leave a core dump, also
+    // not through a core pattern with a pipe, which no limit stops.
+    prctl::set_dumpable(false)?;
+    let (log, _subscriber) = Log::capture();
+    let wait = Duration::from_secs(60);
+
+    let reaper = ChildReaper::default();
+    for (signal, name) in [
+        (Signal::SIGTERM, "SIGTERM"),
+        (Signal::SIGINT, "SIGINT"),
+        (Signal::SIGQUIT, "SIGQUIT"),
+    ] {
+        let signals = Server::listen_for_signals();
+        let before = Instant::now();
+        raise(signal)?;
+        let deadline = time::timeout(wait, Server::wait_for_signal(signals, &reaper)).await??;
+        assert!(deadline >= before + Server::CLEANUP_TIMEOUT, "{name}");
+        let log = log.contents()?;
+        assert!(log.contains(&format!("Received {name}")), "{name}: {log}");
+    }
+
+    // A container which ignores SIGTERM takes its whole grace, unless
+    // another signal asks for the shutdown meanwhile.
+    let sh = spawn_sh("trap '' TERM; exec sleep 60")?;
+    let comm = format!("/proc/{}/comm", sh.pid);
+    wait_for_real(|| std::fs::read_to_string(&comm).is_ok_and(|c| c == "sleep\n")).await;
+    let container = Child {
+        pid: sh.pid,
+        ..container_child(false)?
+    };
+    reaper.watch_grandchild(container, InFlight::default())?;
+    for (signal, name) in [(Signal::SIGINT, "SIGINT"), (Signal::SIGQUIT, "SIGQUIT")] {
+        // Logged right before the containers get their grace.
+        let terminating = "Received SIGTERM";
+        let count = log.contents()?.matches(terminating).count();
+        let signals = Server::listen_for_signals();
+        raise(Signal::SIGTERM)?;
+        let again = async {
+            wait_for_real(|| {
+                log.contents()
+                    .is_ok_and(|log| log.matches(terminating).count() > count)
+            })
+            .await;
+            raise(signal)
+        };
+        let (deadline, raised) = time::timeout(wait, async {
+            tokio::join!(Server::wait_for_signal(signals, &reaper), again)
+        })
+        .await?;
+        deadline?;
+        raised?;
+        let log = log.contents()?;
+        let expected = format!("Received {name}, not waiting for the containers");
+        assert!(log.contains(&expected), "{name}: {log}");
+    }
+    assert!(sh.process.is_running());
+    Ok(())
+}
+
+/// A build which cannot trace says so, once at its start, instead of
+/// ignoring the flag silently.
+#[cfg(not(feature = "tracing"))]
+#[test]
+fn tracing_without_the_feature_gets_a_warning() -> Result<()> {
+    let (log, _subscriber) = Log::capture();
+    // Without a log driver, the logging sets up nothing for the process.
+    let init = |args: &[&str]| {
+        let config = Config::parse_for_test([&["--log-driver", "none"], args].concat());
+        Server::with_config(config).init_logging()
+    };
+    init(&[])?;
+    let logged = log.contents()?;
+    assert!(!logged.contains("WARN"), "{logged}");
+
+    init(&["--enable-tracing"])?;
+    let logged = log.contents()?;
+    assert_eq!(logged.matches("WARN").count(), 1, "{logged}");
+    assert!(logged.contains("Ignoring --enable-tracing"), "{logged}");
     Ok(())
 }

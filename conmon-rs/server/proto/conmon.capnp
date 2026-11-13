@@ -75,7 +75,8 @@ interface Conmon {
     # CreateContainer
     struct CreateContainerRequest {
         # The ID the runtime gets as an argument, since v1.2.1 an empty one and
-        # one which starts with "-" get rejected.
+        # one which starts with "-" get rejected, since unreleased also one
+        # with a control character, like a line break.
         id @0 :Text;
         # The OCI bundle of the container, an absolute path like all paths
         # of the request.
@@ -90,7 +91,9 @@ interface Conmon {
         # it exited, as decimal text, 128 plus the signal number if a signal
         # killed it, also for real-time signals since v1.2.2, which gave
         # -1 before. Since unreleased, also a traced process, like one under
-        # strace, gets its exit code instead of -1. Absolute paths.
+        # strace, gets its exit code instead of -1. Absolute paths. Since
+        # unreleased, a path here or in `oomExitPaths` which does not name a
+        # file gets rejected, like "/" or one which ends in "..", "/" or "/.".
         exitPaths @4 :List(Text);
         # The files the server creates empty if the container got OOM
         # killed, before it writes the exit files. Absolute paths.

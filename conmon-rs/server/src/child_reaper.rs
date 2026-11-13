@@ -22,7 +22,7 @@ use tokio::{
     time::{self, Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, debug_span};
+use tracing::{debug, debug_span, info};
 
 mod orphan_sweep;
 mod runtime_call;
@@ -416,11 +416,14 @@ impl ChildReaper {
             })
             .map(|gc| gc.seq)
             .collect();
-        debug!("Sent SIGTERM to {} containers", containers.len());
+        // Nothing to tell for a server without containers.
+        if !containers.is_empty() {
+            info!("Sent SIGTERM to {} containers", containers.len());
+        }
         let signalled = |gc: &ReapableChild| containers.contains(&gc.seq);
         let left = self.wait_for_watchers(deadline, signalled).await;
         if !left.is_empty() {
-            debug!("Containers {left:?} did not exit on SIGTERM");
+            info!("Containers with PIDs {left:?} did not exit on SIGTERM");
         }
     }
 
@@ -430,7 +433,6 @@ impl ChildReaper {
     /// which does not exit on SIGKILL, like one stuck in the kernel, must not
     /// keep the server from stopping. It fails if they did not end in time.
     pub(crate) async fn kill_grandchildren(&self, deadline: Instant) -> Result<()> {
-        debug!("Killing grandchildren");
         let processes: Vec<_> = {
             let map = lock(&self.grandchildren);
             // Children registered after this snapshot get killed on their
@@ -441,6 +443,9 @@ impl ChildReaper {
                 .map(|gc| gc.process.clone())
                 .collect()
         };
+        if !processes.is_empty() {
+            info!("Killing {} containers and execs", processes.len());
+        }
         // Signal every grandchild first, their watchers end concurrently, so
         // that the shutdown takes as long as the slowest child instead of the
         // sum of all of them. One which exited, whose watcher still finishes
@@ -610,6 +615,12 @@ pub(crate) struct ReapableChild {
     /// see [`Process::open`].
     process: Arc<Process>,
 
+    /// Set once the watcher reaped the child. It stays registered while the
+    /// watcher finishes its output, its PID may belong to another child by
+    /// then, which the registration must not claim, see
+    /// [`ChildReaper::is_claimed`].
+    reaped: Arc<AtomicBool>,
+
     /// The stdio of a container, which container level operations use, see
     /// [`ChildReaper::get`]. None for an exec, only its consumer holds its
     /// stdio, which also tells the kinds apart. One killed at its timeout stays registered until it got
@@ -623,6 +634,12 @@ impl ReapableChild {
     /// The PID of the child.
     pub(crate) fn pid(&self) -> Pid {
         self.pid
+    }
+
+    /// The PID of the child while its watcher still waits for it, see
+    /// [`Self::reaped`].
+    fn claimed_pid(&self) -> Option<Pid> {
+        (!self.reaped.load(Ordering::Acquire)).then_some(self.pid)
     }
 
     /// Whether the child is a container, not an exec, see [`Self::io`].

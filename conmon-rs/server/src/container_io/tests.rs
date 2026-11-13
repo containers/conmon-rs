@@ -158,7 +158,10 @@ async fn read_stream_does_not_append_to_truncated_output() {
         truncated: true,
         tail: Tail::default(),
     };
-    let stdio = ContainerIO::read_stream(&CancellationToken::new(), &rx, early).await;
+    let token = CancellationToken::new();
+    let stdio = time::timeout(WAIT, ContainerIO::read_stream(&token, &rx, early))
+        .await
+        .expect("the stream is read without waiting for more output");
     assert_eq!(stdio, b"early");
     assert!(rx.is_closed());
 }
@@ -455,7 +458,7 @@ async fn terminal_output_continues_once_the_slave_got_reopened() -> Result<()> {
     let (_cri, lines, logger) = testing::container_log(true).await?;
     let mut io = ContainerIO::new(true, logger)?;
     let (mut rx, _) = io.attach().subscribe();
-    let pty = nix::pty::openpty(None, None)?;
+    let pty = crate::test_util::open_pty()?;
     let name = std::fs::read_link(format!("/proc/self/fd/{}", pty.slave.as_raw_fd()))?;
     let socket = io.terminal().context("no terminal")?.path();
     let stream = tokio::net::UnixStream::connect(socket).await?;
@@ -645,6 +648,37 @@ async fn closed_channel_ends_the_output() -> Result<()> {
         ContainerIO::read_stream(&CancellationToken::new(), &rx, EarlyStream::default()).await;
     assert_eq!(stdout, b"data");
     assert_eq!(start.elapsed(), Duration::ZERO);
+    Ok(())
+}
+
+/// Nothing ever reads the stdin of a process without one, or of a terminal
+/// which the runtime did not connect. The attach clients must not wait for
+/// it: a read of their stdin tells that it got closed.
+#[tokio::test]
+async fn processes_without_stdin_close_the_stdin_of_the_clients() -> Result<()> {
+    use futures::FutureExt;
+    use std::os::fd::AsFd;
+
+    let mut io = ContainerIO::new(false, ContainerLog::new())?;
+    assert!(io.attach().read().now_or_never().is_none());
+    io.connect_streams(None, None, None, CancellationToken::new());
+    assert!(matches!(io.attach().read().now_or_never(), Some(Err(_))));
+
+    // A runtime which sends a descriptor which is no terminal.
+    let mut io = ContainerIO::new(true, ContainerLog::new())?;
+    let socket = io.terminal().context("no terminal")?.path();
+    let stream = tokio::net::UnixStream::connect(socket).await?;
+    let (no_terminal, _peer) = std::os::unix::net::UnixStream::pair()?;
+    crate::test_util::send_fd(&stream, b"x", no_terminal.as_fd()).await?;
+    assert!(io.attach().read().now_or_never().is_none());
+    let connected = time::timeout(WAIT, io.connect_terminal(true, CancellationToken::new()));
+    let err = connected.await?.err().context("connected a socket")?;
+    assert_eq!(
+        err.downcast_ref(),
+        Some(&nix::errno::Errno::ENOTTY),
+        "{err:#}"
+    );
+    assert!(matches!(io.attach().read().now_or_never(), Some(Err(_))));
     Ok(())
 }
 

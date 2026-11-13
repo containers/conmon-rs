@@ -5,8 +5,23 @@
 
 use crate::streaming_server::web::Message;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use data_encoding::BASE64;
+use data_encoding::{BASE64, Encoding};
+use std::sync::LazyLock;
 use tracing::debug;
+
+/// Decodes the base64 payloads of clients like `base64.StdEncoding` of Go,
+/// which the reference implementation of the protocols uses: line breaks
+/// get ignored and the bits of the last symbol which are no data may be
+/// set. Clients which wrap their base64 or encode it less strictly work
+/// with the kubelet, so they have to work here.
+static BASE64_LENIENT: LazyLock<Encoding> = LazyLock::new(|| {
+    let mut spec = BASE64.specification();
+    spec.ignore.push_str("\r\n");
+    spec.check_trailing_bits = false;
+    // The specification of the standard encoding with two options changed
+    // stays valid, the tests would notice the strict one.
+    spec.encoding().unwrap_or(BASE64)
+});
 
 /// A message of the server on a channel.
 pub(super) fn message(base64: bool, channel: u8, data: &[u8]) -> Message {
@@ -31,7 +46,7 @@ pub(super) fn decode(base64: bool, mut message: Bytes) -> Option<(u8, Bytes)> {
         message.advance(1);
         return Some((channel, message));
     }
-    match BASE64.decode(&message[1..]) {
+    match BASE64_LENIENT.decode(&message[1..]) {
         Ok(payload) => Some((channel.wrapping_sub(b'0'), payload.into())),
         Err(e) => {
             debug!("Ignoring message with invalid base64: {e}");
@@ -96,5 +111,27 @@ mod tests {
         );
         assert_eq!(decode(false, Bytes::new()), None);
         assert_eq!(decode(true, Bytes::from_static(b"0!")), None);
+    }
+
+    /// What `base64.StdEncoding.Decode` of Go takes and rejects.
+    #[test]
+    fn base64_gets_decoded_like_go() {
+        let ls = Some((0, Bytes::from_static(b"ls")));
+        // Line breaks anywhere.
+        assert_eq!(decode(true, Bytes::from_static(b"0bH\nM=")), ls);
+        assert_eq!(decode(true, Bytes::from_static(b"0b\r\nHM=\r\n")), ls);
+        assert_eq!(
+            decode(true, Bytes::from_static(b"0\n")),
+            Some((0, Bytes::new()))
+        );
+        // Trailing bits which are not zero.
+        assert_eq!(decode(true, Bytes::from_static(b"0bHN=")), ls);
+        assert_eq!(
+            decode(true, Bytes::from_static(b"0bB==")),
+            Some((0, Bytes::from_static(b"l")))
+        );
+        // Still invalid: other white space, missing padding.
+        assert_eq!(decode(true, Bytes::from_static(b"0bH M=")), None);
+        assert_eq!(decode(true, Bytes::from_static(b"0bHM")), None);
     }
 }

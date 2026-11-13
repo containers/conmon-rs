@@ -10,10 +10,12 @@ use std::{fmt, path::Path};
 use tracing::debug;
 
 /// Check a container ID, which the runtimes take as a positional argument.
-/// One which starts with a dash would be taken for an option. The requests
-/// check it before they set anything up.
+/// One which starts with a dash would be taken for an option. The spans of
+/// the requests show the ID in every log line about the container, one with
+/// control characters, like a line break or an escape sequence, could forge
+/// lines there. The requests check it before they set anything up.
 pub(crate) fn check_id(id: &str) -> Result<()> {
-    if id.is_empty() || id.starts_with('-') {
+    if id.is_empty() || id.starts_with('-') || id.chars().any(char::is_control) {
         bail!("invalid container ID {id:?}")
     }
     Ok(())

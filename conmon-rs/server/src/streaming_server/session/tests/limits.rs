@@ -20,6 +20,29 @@ async fn messages_larger_than_the_limit_fail_the_session() -> Result<()> {
         .await
 }
 
+/// A frame which announces more than the limit fails the session by its
+/// header, the server does not wait for its payload to tell.
+#[tokio::test]
+async fn frames_larger_than_the_limit_fail_by_their_header() -> Result<()> {
+    LocalSet::new()
+        .run_until(async {
+            let (_io, _server, mut stream) = attach_session(true, false).await?;
+            // The header of a masked binary frame, without its payload.
+            let mut header = vec![0x82, 0x80 | 127];
+            header.extend_from_slice(&u64::try_from(MAX_MESSAGE_SIZE + 1)?.to_be_bytes());
+            header.extend_from_slice(&[0; 4]);
+            stream.write_all(&header).await?;
+            loop {
+                let (opcode, payload) = server_frame(&mut stream).await?;
+                if opcode == 8 {
+                    assert_eq!(payload[..2], u16::from(CloseCode::Size).to_be_bytes());
+                    return Ok(());
+                }
+            }
+        })
+        .await
+}
+
 #[tokio::test]
 async fn too_large_messages_of_clients_which_do_not_read_fail_the_session() -> Result<()> {
     LocalSet::new()

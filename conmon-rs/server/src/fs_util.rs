@@ -70,6 +70,23 @@ pub(crate) fn check_absolute(what: &str, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Fail for a path of a request which cannot be a file the server writes:
+/// one which is not absolute, see [`check_absolute`], or one which does not
+/// name a file, like `/` or one which ends in `..`, `/` or `/.`. Writing it
+/// would fail anyway, but only once the container exited, when nobody gets
+/// told anymore. [`Path::file_name`] alone would take the last two for the
+/// file before them.
+pub(crate) fn check_file_path(what: &str, path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    check_absolute(what, path)?;
+    let bytes = path.as_os_str().as_bytes();
+    if path.file_name().is_none() || bytes.ends_with(b"/") || bytes.ends_with(b"/.") {
+        anyhow::bail!("{what} {:?} does not name a file", path.display())
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,6 +110,10 @@ mod tests {
         fs::write(&path, "")?;
         let id = FileId::new(&fs::metadata(&path)?);
         assert!(id.is_at(&path));
+        // A symlink to the file is not the file.
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&path, &link)?;
+        assert!(!id.is_at(&link));
 
         // Replaced by another file, which stays.
         let other = dir.path().join("other");
@@ -127,5 +148,28 @@ mod tests {
             let err = check_absolute("bundle path", Path::new(path)).unwrap_err();
             assert!(err.to_string().contains("is not absolute"), "{err}");
         }
+    }
+
+    #[test]
+    fn file_paths_have_to_name_a_file() {
+        for path in [
+            "/exit",
+            "/dir/exit",
+            "/dir/./exit",
+            "/dir/.exit",
+            "/dir/exit.",
+        ] {
+            assert!(check_file_path("exit path", Path::new(path)).is_ok());
+        }
+        // The last two would fail the rename onto them at the exit.
+        for path in ["/", "/dir/..", "/..", "/dir/exit/", "/dir/exit/."] {
+            let err = check_file_path("exit path", Path::new(path)).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("exit path {path:?} does not name a file")
+            );
+        }
+        let err = check_file_path("exit path", Path::new("exit")).unwrap_err();
+        assert!(err.to_string().contains("is not absolute"), "{err}");
     }
 }

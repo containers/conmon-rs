@@ -36,7 +36,7 @@ use tokio::{
     time::{self, Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{Instrument, debug, info, warn};
 
 /// The stdout and stderr of a runtime with pipes of its own, read in the
 /// background until they end. Only the end of stderr is kept, it holds the
@@ -257,8 +257,10 @@ impl ChildReaper {
         // With a terminal, the process gets the terminal as its stdin, the
         // pipe would stay unused.
         let stdin_pipe = stdin && container_io.terminal().is_none();
-        let child =
-            Self::spawn_runtime(runtime, args, stdin_pipe).context("spawn child process")?;
+        // A runtime which a package update moved fails with a bare "No such
+        // file or directory" otherwise.
+        let child = Self::spawn_runtime(runtime, args, stdin_pipe)
+            .with_context(|| format!("spawn runtime {}", runtime.display()))?;
 
         // Not waited for yet, so it has its PID. Dropping it on a failure
         // kills it.
@@ -457,7 +459,7 @@ impl ChildReaper {
     ) -> Vec<u8> {
         let exited = wait_unless_stopped(child.reap(), grace, stop, Duration::ZERO).await;
         if exited.is_none() {
-            debug!("Runtime did not exit in time, killing it");
+            info!("Runtime did not exit in time, killing it");
             // Its helpers in its process group go with it, like hooks or a
             // runc init which did not set up the container yet, which would
             // be left running otherwise. A container init which started a
@@ -534,7 +536,7 @@ impl ChildReaper {
             return;
         }
         debug!("Cleaning up PID {pid} of failed runtime call");
-        task::spawn(wait_for_exit_code(pid));
+        task::spawn(wait_for_exit_code(pid).in_current_span());
     }
 }
 

@@ -45,7 +45,7 @@ use tokio::{
     time::{self, Duration},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace};
+use tracing::{Instrument, Span, debug, error, error_span, info, trace, warn};
 
 /// How much stdin the read task holds while the container does not take it,
 /// on top of the stdin channel. The socket is still read meanwhile, so that
@@ -192,8 +192,16 @@ impl<'de> Deserialize<'de> for ResizeEvent {
 }
 
 impl StreamingServer {
-    /// Handle a single websocket connection.
+    /// Handle a single WebSocket connection, in the span of its session.
     pub(super) async fn handle_websocket(socket: WebSocket, session: Session, framing: Framing) {
+        let span = Self::session_span(&session);
+        Self::run_websocket(socket, session, framing)
+            .instrument(span)
+            .await;
+    }
+
+    /// Run the session of a WebSocket connection.
+    async fn run_websocket(socket: WebSocket, session: Session, framing: Framing) {
         let discard = socket.get_ref().discarder();
         let written = socket.get_ref().written();
         let (sender, messages) = socket.split();
@@ -221,12 +229,23 @@ impl StreamingServer {
             discard,
         };
         Self::run_session(output, input, session, activity).await;
-        info!("Closing websocket connection");
+        debug!("Closing WebSocket connection");
     }
 
-    /// Handle a connection which got upgraded to SPDY: wait for the streams of
-    /// the client, then run the session on them.
+    /// Handle a connection which got upgraded to SPDY, in the span of its
+    /// session, which the tasks of the connection inherit: a protocol error
+    /// of the client names the container as well.
     pub(super) async fn handle_spdy<T>(io: T, session: Session, version: Version)
+    where
+        T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+    {
+        let span = Self::session_span(&session);
+        Self::run_spdy(io, session, version).instrument(span).await;
+    }
+
+    /// Wait for the streams of the client of a SPDY connection, then run the
+    /// session on them.
+    async fn run_spdy<T>(io: T, session: Session, version: Version)
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
     {
@@ -255,7 +274,14 @@ impl StreamingServer {
         let (input, output) = streams.into_parts(connection, version).await;
         let output = Output::spdy(output, session.common().idle_timeout);
         Self::run_session(output, input, session, activity).await;
-        info!("Closing SPDY connection");
+        debug!("Closing SPDY connection");
+    }
+
+    /// The span of a session and of the tasks it starts, which shows the
+    /// container ID at every log level, like the span of a request for a
+    /// container does, see `enter_request` of the RPC interface.
+    fn session_span(session: &Session) -> Span {
+        error_span!("session", container_id = &*session.common().container_id)
     }
 
     /// Run a session until it ended or the client went away. `activity`
@@ -318,7 +344,7 @@ impl StreamingServer {
                     // The read task forwarded it since the close already, the
                     // wait goes on from the last part the container took.
                     Ok(InputEnd::Closed) => {
-                        info!("Client closed the connection cleanly, or after its stdin ended");
+                        debug!("Client closed the connection cleanly, or after its stdin ended");
                         if stdin_taken
                             .until_stalled(stdin_taken.last(), STDIN_FLUSH_TIMEOUT, &mut send_task)
                             .await
@@ -346,7 +372,7 @@ impl StreamingServer {
                     Ok(InputEnd::Gone) if send_task.is_finished() => {
                         Self::sent((&mut send_task).await);
                     }
-                    Ok(InputEnd::Gone) => info!("Client connection ended"),
+                    Ok(InputEnd::Gone) => debug!("Client connection ended"),
                     Err(e) => error!("Unable to receive messages: {e}"),
                 }
                 send_task.abort();
@@ -359,7 +385,7 @@ impl StreamingServer {
     fn sent(result: Result<Option<Output>, task::JoinError>) -> Option<Output> {
         match result {
             Ok(output) => {
-                info!("All messages sent");
+                debug!("All messages sent");
                 output
             }
             Err(e) => {
@@ -386,7 +412,7 @@ impl StreamingServer {
     ) -> JoinHandle<Option<Output>> {
         let idle_timeout = session.common().idle_timeout;
         let too_large = client.too_large.clone();
-        task::spawn(async move {
+        let task = async move {
             let mut sender = sender;
             let mut status = None;
             let (result, operation) = match session {
@@ -407,7 +433,8 @@ impl StreamingServer {
                         // the process gets torn down in order afterwards.
                         // Without stdin, nothing waits.
                         let stdin = s.common.stdin;
-                        let mut start = task::spawn(Self::start_exec(*s, client.resize.clone()));
+                        let start = Self::start_exec(*s, client.resize.clone());
+                        let mut start = task::spawn(start.in_current_span());
                         let period = STDIN_FLUSH_TIMEOUT / 2;
                         let mut starting = time::interval_at(time::Instant::now() + period, period);
                         let started = loop {
@@ -465,7 +492,8 @@ impl StreamingServer {
                 sender.close_too_large();
             }
             sender.close().await.then_some(sender)
-        })
+        };
+        task::spawn(task.in_current_span())
     }
 
     /// The one status a client gets, out of how the loop of its session
@@ -484,8 +512,11 @@ impl StreamingServer {
                 status
             }
             // Otherwise the client sees a clean close and assumes success.
+            // Mostly the client caused it: a command which the container
+            // does not have, a container which is gone or a connection
+            // which was idle. The span of the session names the container.
             Err(e) => {
-                error!("Unable to run {operation} for container: {e:#}");
+                warn!("Unable to run {operation}: {e:#}");
                 Some(Status::failed(operation, format_args!("{e:#}")))
             }
         }
@@ -516,7 +547,7 @@ impl StreamingServer {
         if let Some(result) = activity.until_idle(timeout, run, on_idle).await {
             result
         } else {
-            info!("Closing idle connection");
+            debug!("Closing idle connection");
             bail!(
                 "no activity on the connection for the idle timeout of {:?}",
                 timeout.unwrap_or_default()
@@ -544,7 +575,7 @@ impl StreamingServer {
     where
         I: ClientInput,
     {
-        task::spawn(async move {
+        let task = async move {
             let mut pending = PendingStdin::default();
             let end = loop {
                 select! {
@@ -600,7 +631,8 @@ impl StreamingServer {
                 Some(EventEnd::TooLarge) => InputEnd::TooLarge(input),
                 None => InputEnd::Gone,
             }
-        })
+        };
+        task::spawn(task.in_current_span())
     }
 
     /// Handle a single event of the client, break once its input ended.

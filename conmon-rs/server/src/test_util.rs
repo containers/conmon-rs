@@ -9,16 +9,19 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure, format_err};
 use nix::{
+    fcntl::{OFlag, open},
+    pty,
     sys::{
         signal::Signal,
         socket::{self, ControlMessage, MsgFlags},
+        stat::Mode,
     },
     unistd::Pid,
 };
 use std::{
     io::{self, IoSlice, Write},
     net::Ipv4Addr,
-    os::fd::{AsRawFd, BorrowedFd},
+    os::fd::{AsRawFd, BorrowedFd, OwnedFd},
     path::Path,
     process::{Command, Stdio},
     sync::{Arc, Mutex},
@@ -134,6 +137,29 @@ pub(crate) fn closed_port() -> Result<(TcpSocket, u16)> {
     Ok((socket, port))
 }
 
+/// Run the ignored test at `path` in a test process of its own, with `env`
+/// set, which the test checks to do nothing in any other run, and with a
+/// pipe as its stdin if asked for. A test which changes its process, or
+/// depends on it, would affect the tests in parallel or be affected by them
+/// otherwise. Fails with the status and the output of the process unless
+/// the test passed, a process which a signal killed tells only there.
+pub(crate) fn run_in_own_process(path: &str, env: &str, piped_stdin: bool) -> Result<()> {
+    let mut command = Command::new(std::env::current_exe()?);
+    command.args(["--exact", path, "--ignored"]).env(env, "1");
+    if piped_stdin {
+        command.stdin(Stdio::piped());
+    }
+    let output = command.output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    ensure!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{path}: {}\nstdout:\n{stdout}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
 /// A child which gets killed and reaped if a test fails before it did.
 pub(crate) struct Guarded(pub std::process::Child);
 
@@ -216,6 +242,28 @@ pub(crate) async fn send_fd(stream: &UnixStream, data: &[u8], fd: BorrowedFd<'_>
         })
         .await?;
     Ok(())
+}
+
+/// The master and the slave of a pseudo terminal, see [`open_pty`].
+pub(crate) struct Pty {
+    pub(crate) master: OwnedFd,
+    pub(crate) slave: OwnedFd,
+}
+
+/// Open a pseudo terminal whose descriptors are close-on-exec from the
+/// start, unlike the ones of `openpty`. A process which a parallel test
+/// forks would inherit the slave otherwise and keep the terminal open until
+/// it exits, so that its master sees no hang-up meanwhile.
+pub(crate) fn open_pty() -> Result<Pty> {
+    let flags = OFlag::O_RDWR | OFlag::O_NOCTTY | OFlag::O_CLOEXEC;
+    let master = pty::posix_openpt(flags)?;
+    pty::grantpt(&master)?;
+    pty::unlockpt(&master)?;
+    let slave = open(pty::ptsname_r(&master)?.as_str(), flags, Mode::empty())?;
+    Ok(Pty {
+        master: master.into(),
+        slave,
+    })
 }
 
 /// The log of a test, see [`Log::capture`].

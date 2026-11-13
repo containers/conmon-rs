@@ -229,6 +229,53 @@ async fn chunks_after_a_timeout_do_not_wait() -> Result<()> {
     Ok(())
 }
 
+/// A chunk which went out as a whole a while after a timeout ends the
+/// back-off: the next time the journal is busy, the lines wait for it
+/// again.
+#[tokio::test]
+async fn whole_chunks_end_the_back_off() -> Result<()> {
+    let journal = Journal::new()?;
+    let logger = JournaldLogger::with_socket("test", &journal.path);
+    *lock(&logger.shared.timed_out) = Instant::now().checked_sub(CHUNK_TIMEOUT);
+    let mut buffer = LineBuffer::default();
+    let lines = buffer.push(Pipe::StdOut, b"taken\n");
+    logger.write_lines(Pipe::StdOut, &lines).await?;
+    assert_eq!(received(&journal.socket)?.len(), 1);
+    assert!(lock(&logger.shared.timed_out).is_none());
+
+    let error = journal::tests::fill(Wait::Never, &journal.path);
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    let reader = catch_up(journal, "waits again");
+    let lines = buffer.push(Pipe::StdOut, b"waits again\n");
+    logger.write_lines(Pipe::StdOut, &lines).await?;
+    assert!(
+        reader
+            .join()
+            .map_err(|_| anyhow::anyhow!("reader panicked"))??
+    );
+    Ok(())
+}
+
+/// A chunk which went out as a whole shortly after a timeout does not end
+/// the back-off, it lasts for at least another `CHUNK_TIMEOUT`.
+#[tokio::test]
+async fn whole_chunks_keep_the_minimum_back_off() -> Result<()> {
+    let journal = Journal::new()?;
+    let logger = JournaldLogger::with_socket("test", &journal.path);
+    *lock(&logger.shared.timed_out) = Some(Instant::now());
+    let mut buffer = LineBuffer::default();
+    let lines = buffer.push(Pipe::StdOut, b"taken\n");
+    logger.write_lines(Pipe::StdOut, &lines).await?;
+    assert_eq!(received(&journal.socket)?.len(), 1);
+    assert!(lock(&logger.shared.timed_out).is_some());
+
+    // Neither does a chunk without lines, whenever it comes.
+    *lock(&logger.shared.timed_out) = Instant::now().checked_sub(CHUNK_TIMEOUT);
+    logger.write_lines(Pipe::StdOut, &[]).await?;
+    assert!(lock(&logger.shared.timed_out).is_some());
+    Ok(())
+}
+
 /// A journal which takes part of a chunk shortly after a timeout does not
 /// keep up, so the rest of the chunk does not wait for it either.
 #[tokio::test]

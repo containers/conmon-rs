@@ -13,7 +13,7 @@ use crate::{
         testing::*,
         web::CloseCode,
     },
-    test_util::wait_for,
+    test_util::{Log, wait_for},
 };
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;

@@ -348,7 +348,14 @@ fn restore_nofile(limits: Option<(rlim_t, rlim_t)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        child_reaper::{ChildReaper, RuntimeCall},
+        container_io::ContainerIO,
+        container_log::ContainerLog,
+        test_util::run_in_own_process,
+    };
     use std::{fs, os::unix::fs::PermissionsExt};
+    use tokio::time::{Duration, Instant};
 
     #[test]
     fn inherited_fds_reports_descriptors_above_stderr() -> Result<()> {
@@ -409,6 +416,77 @@ mod tests {
             inherited.to_string()
         );
         assert_eq!(getrlimit(Resource::RLIMIT_NOFILE)?, limits);
+        Ok(())
+    }
+
+    /// Set for the test process which runs the test of the settings.
+    const SETTINGS_TEST_ENV: &str = "CONMONRS_SETTINGS_TEST";
+
+    /// The server remembers the settings it started with once, and the test
+    /// changes the ones of its process, which the children of the other
+    /// tests would inherit. It runs in a process of its own.
+    #[test]
+    fn runtimes_get_the_settings_the_server_started_with() -> Result<()> {
+        let test = "init::tests::settings_in_own_process";
+        run_in_own_process(test, SETTINGS_TEST_ENV, false)
+    }
+
+    #[tokio::test]
+    #[ignore = "run by runtimes_get_the_settings_the_server_started_with in a process of its own"]
+    async fn settings_in_own_process() -> Result<()> {
+        if std::env::var_os(SETTINGS_TEST_ENV).is_none() {
+            return Ok(());
+        }
+        // Like a server at its start, which then protects itself from the
+        // OOM killer. The test raises its score instead, which needs no
+        // privileges, unless it has the highest one already, like in a
+        // pod of the best effort class.
+        let read_score = || anyhow::Ok(fs::read_to_string(OOM_SCORE_ADJ)?.trim().to_owned());
+        let score = read_score()?;
+        save_oom_score();
+        let raised = (score.parse::<i32>()? + 1).min(1000);
+        set_oom_score(&raised.to_string())?;
+        let own_score = read_score()?;
+        if own_score == score {
+            eprintln!("skipped: unable to change the OOM score, the reset does not show");
+        }
+        // With a soft limit of open files below the hard one, which the
+        // server raises.
+        let (soft, hard) = getrlimit(Resource::RLIMIT_NOFILE)?;
+        let soft = soft.min(hard).min(4096) / 2;
+        setrlimit(Resource::RLIMIT_NOFILE, soft, hard)?;
+        raise_nofile_limit();
+        assert_eq!(getrlimit(Resource::RLIMIT_NOFILE)?, (hard, hard));
+
+        let settings = "cat /proc/self/oom_score_adj; ulimit -Sn";
+        let child = async |reset: bool| -> Result<String> {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", settings]);
+            if reset {
+                reset_inherited(&mut cmd);
+            }
+            Ok(String::from_utf8(cmd.output().await?.stdout)?)
+        };
+        // A child inherits the settings of the server otherwise.
+        assert_eq!(child(false).await?, format!("{own_score}\n{hard}\n"));
+        let inherited = format!("{score}\n{soft}\n");
+        assert_eq!(child(true).await?, inherited);
+
+        // The runtime of a call gets them reset.
+        let dir = tempfile::tempdir()?;
+        let (pidfile, path) = (dir.path().join("pid"), dir.path().join("settings"));
+        let script = format!(
+            "{{ {settings}; }} >{}; echo $$ >{}",
+            path.display(),
+            pidfile.display()
+        );
+        let args = ["-c".into(), script];
+        let mut io = ContainerIO::new(false, ContainerLog::new())?;
+        let deadline = Instant::now() + Duration::from_secs(600);
+        let call = RuntimeCall::new(Path::new("sh"), &args, &pidfile, deadline);
+        let started = ChildReaper::default().create_child(call, &mut io).await?;
+        started.token.cancel();
+        assert_eq!(fs::read_to_string(path)?, inherited);
         Ok(())
     }
 

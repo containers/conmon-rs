@@ -10,7 +10,7 @@ use crate::{
         wait_for_exit_code, zombie_children,
     },
     test_util::{
-        Guarded, Spawned, container_child, spawn_sh, wait_for, wait_for_real,
+        Guarded, Spawned, container_child, run_in_own_process, spawn_sh, wait_for, wait_for_real,
         wait_for_real_blocking,
     },
 };

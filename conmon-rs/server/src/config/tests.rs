@@ -108,6 +108,42 @@ async fn prepare_keeps_the_socket_of_a_running_server() -> Result<()> {
     Ok(())
 }
 
+/// A server whose accept backlog is full is busy, not gone: a second server
+/// must not take its socket away.
+#[test]
+fn prepare_keeps_the_socket_of_a_server_with_a_full_backlog() -> Result<()> {
+    use nix::sys::socket::{Backlog, bind, listen};
+
+    let dir = tempfile::tempdir()?;
+    let runtime_dir = dir.path().to_str().context("utf8 path")?;
+    let config = Config::parse_for_test(["--runtime-dir", runtime_dir]);
+    let (path, _dir) = listener::shorten_path(&config.socket())?;
+    let addr = UnixAddr::new(&path)?;
+    let stream = || {
+        let flags = SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK;
+        socket(AddressFamily::Unix, SockType::Stream, flags, None)
+    };
+    let server = stream()?;
+    bind(server.as_raw_fd(), &addr)?;
+    listen(&server, Backlog::new(1)?)?;
+    // Connections which the server does not accept, until no more fit.
+    let mut clients = vec![];
+    loop {
+        let client = stream()?;
+        match connect(client.as_raw_fd(), &addr) {
+            Ok(()) => clients.push(client),
+            Err(Errno::EAGAIN) => break,
+            Err(e) => return Err(e).context("connect"),
+        }
+        assert!(clients.len() < 1000, "the backlog never filled up");
+    }
+
+    let err = config.prepare().unwrap_err();
+    assert!(err.is::<listener::SocketInUse>(), "{err:#}");
+    assert!(config.socket().exists());
+    Ok(())
+}
+
 #[test]
 fn validate_reports_each_check() {
     let base = Config::parse_for_test::<_, &str>([]);

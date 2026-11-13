@@ -457,7 +457,7 @@ fn wait_child(id: Id<'_>, flags: WaitPidFlag) -> nix::Result<Option<(Pid, ChildE
 /// Wait for a process to exit using pidfd_open for async polling,
 /// with a blocking waitpid fallback for older kernels.
 pub(crate) async fn wait_for_exit_code(pid: Pid) -> i32 {
-    debug!("Waiting for exit code of pid {pid}");
+    debug!("Waiting for exit code of PID {pid}");
 
     // Gone already, the blocking wait would only learn the same.
     let pidfd = match pidfd_open(pid) {
@@ -478,7 +478,7 @@ pub(crate) async fn wait_for_exit_code(pid: Pid) -> i32 {
 pub(crate) async fn wait_for_exit(process: &Process) -> i32 {
     match &process.pidfd {
         Some(pidfd) => {
-            debug!("Waiting for exit code of pid {}", process.pid);
+            debug!("Waiting for exit code of PID {}", process.pid);
             wait_for_exit_with(process.pid, Some(pidfd.as_fd())).await
         }
         None => wait_for_exit_code(process.pid).await,
@@ -631,7 +631,7 @@ fn wait_for_exit_code_blocking(pid: Pid) -> i32 {
                 return EXIT_CODE_WAIT_FAILED;
             }
             Err(err) => {
-                error!("Unable to wait for pid {pid}: {err:#}");
+                error!("Unable to wait for PID {pid}: {err:#}");
                 return EXIT_CODE_WAIT_FAILED;
             }
         }
@@ -644,9 +644,9 @@ fn wait_for_exit_code_blocking(pid: Pid) -> i32 {
                 return exit.code();
             }
             Ok(None) => {}
-            Err(Errno::EINTR) => debug!("Failed to wait for pid on EINTR, retrying"),
+            Err(Errno::EINTR) => debug!("Failed to wait for PID {pid} on EINTR, retrying"),
             Err(err) => {
-                error!("Unable to waitpid on {err:#}");
+                error!("Unable to wait for PID {pid}: {err:#}");
                 return EXIT_CODE_WAIT_FAILED;
             }
         }

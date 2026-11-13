@@ -132,7 +132,7 @@ pub(crate) struct Config {
         value_parser = clap::builder::BoolishValueParser::new(),
     )]
     /// Enable OpenTelemetry tracing. Builds without the `tracing` feature
-    /// ignore it.
+    /// ignore it with a warning.
     enable_tracing: bool,
 
     #[arg(
@@ -195,7 +195,6 @@ impl Config {
     }
 
     /// Enable OpenTelemetry tracing.
-    #[cfg(feature = "tracing")]
     pub(crate) fn enable_tracing(&self) -> bool {
         self.enable_tracing
     }

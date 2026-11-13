@@ -15,14 +15,15 @@ use crate::streaming_server::{
     web,
 };
 use crate::{
-    process::child_pid,
+    process::{child_pid, is_zombie, read_pid_file},
     streaming_server::{
         remotecommand::{ExpectedStreams, SpdyStreams, Version},
         session::ClientRx,
         spdy::{Connection, testing::Client},
     },
-    test_util::pattern,
+    test_util::{pattern, wait_for_real},
 };
+use nix::sys::signal::kill;
 use std::{
     os::unix::{process::CommandExt, process::ExitStatusExt},
     path::Path,
@@ -175,6 +176,47 @@ async fn stdin_before_close_waits_for_slow_exec_starts() -> Result<()> {
                 stdin.len(),
                 expected.len()
             );
+            Ok(())
+        })
+        .await
+}
+
+/// An exec session whose connection was idle for its timeout fails and
+/// kills its process, nothing is left to end it.
+#[tokio::test]
+async fn idle_exec_sessions_kill_their_process() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let pidfile = dir.path().join("process");
+    // Only a SIGKILL ends the process before its minute is over.
+    let config = slow_runtime_with(
+        dir.path(),
+        "0",
+        &format!(
+            "exec sh -c 'trap \"\" HUP INT TERM PIPE; echo $$ >\"{}\"; exec sleep 60'",
+            pidfile.display()
+        ),
+    )?;
+
+    LocalSet::new()
+        .run_until(async {
+            // Long enough for the process to write its PID before, which it
+            // does once the runtime returned, when the timeout starts.
+            let idle_timeout = Duration::from_secs(2);
+            let (_server, mut stream) = exec_websocket(config, Some(idle_timeout)).await?;
+            let mut output = vec![];
+            loop {
+                match server_frame(&mut stream).await? {
+                    (0x8, _) => break,
+                    (_, payload) => output.extend(payload),
+                }
+            }
+            let output = String::from_utf8_lossy(&output);
+            assert!(output.contains("idle timeout"), "{output}");
+
+            // Not a child of the tests, which are no subreaper: whoever it
+            // got reparented to reaps it, or leaves it as a zombie.
+            let pid = read_pid_file(&pidfile)?;
+            wait_for_real(|| is_zombie(pid) || kill(pid, None).is_err()).await;
             Ok(())
         })
         .await

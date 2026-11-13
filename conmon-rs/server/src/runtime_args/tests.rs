@@ -121,11 +121,26 @@ fn restore_args_for_crun_with_root_and_systemd() {
     );
 }
 
+/// IDs which a runtime would take for an option, and ones with control
+/// characters, which the log lines of the container would show as they are.
 #[test]
-fn ids_which_look_like_options_are_rejected() {
+fn invalid_ids_are_rejected() {
     let config = Config::parse_for_test(["--runtime", "/usr/bin/runc"]);
     let container_io = ContainerIO::new(false, ContainerLog::new()).expect("create container IO");
-    for id in ["", "-d", "--help"] {
+    assert_eq!(
+        check_id("id\n\x1b[2J").unwrap_err().to_string(),
+        r#"invalid container ID "id\n\u{1b}[2J""#
+    );
+    check_id("0123abcd_ID.with-dashes").expect("valid ID");
+    for id in [
+        "",
+        "-d",
+        "--help",
+        "id\n",
+        "\x1b[2Jid",
+        "id\u{7f}",
+        "id\u{85}",
+    ] {
         let args = GenerateRuntimeArgs {
             config: &config,
             id,
