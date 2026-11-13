@@ -133,7 +133,7 @@ const FeatureStreamingProtocols = "streamingprotocols"
 // FeatureRestore is reported by servers which restore a container from the
 // RestorePath of CreateContainerConfig with the restore command of the
 // runtime. Others ignore the path and create a new container, so
-// CreateContainer fails with ErrUnsupported on them. Since unreleased.
+// CreateContainer fails with ErrUnsupported on them. Since v1.2.3.
 const FeatureRestore = "restore"
 
 // SupportsFeature reports whether the server reports the feature, see the

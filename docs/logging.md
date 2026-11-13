@@ -44,7 +44,7 @@ ends up as one entry. Like the `P` marker of the CRI log, a partial entry is
 a line which had no ending yet: it grew beyond 16 KiB, the output paused for
 half a second, or the output ended without one.
 
-Since unreleased, the server keeps a terminal open itself until the process
+Since v1.2.3, the server keeps a terminal open itself until the process
 exited, so its output ends at the exit, not once no process has it open. A
 process which closes the terminal and opens it again, like an init system or a
 getty, keeps its output in the log and for attach clients. This takes Linux
@@ -52,7 +52,7 @@ getty, keeps its output in the log and for attach clients. This takes Linux
 process has the terminal open.
 
 The server does not sync the log files to disk on a rotation, the entries sit
-in the page cache like other writes. Since unreleased, it syncs the CRI logs
+in the page cache like other writes. Since v1.2.3, it syncs the CRI logs
 once the container exited and its output ended, before it writes
 the exit files, like conmon without `--no-sync-log`. CRI-O (since v1.31)
 rejects its `no_sync_log` option for a `pod` runtime handler, so the sync
@@ -105,19 +105,19 @@ a watch works again.
 
 Without cgroup v2 at `/sys/fs/cgroup`, like on a host with cgroup v1 or a
 hybrid setup, the containers run, but the server reports no OOM kills (since
-unreleased). Each server logs a warning about that once, with its first
+v1.2.3). Each server logs a warning about that once, with its first
 container which has `oomExitPaths`. With the server log driver `none`, the
 default of CRI-O, nothing shows it, see [Server
 logs](troubleshooting.md#server-logs).
 
 ## Changes
 
-- unreleased: the server reports OOM kills with cgroup v2 only. Before, it
+- v1.2.3: the server reports OOM kills with cgroup v2 only. Before, it
   also watched the `memory.oom_control` of a cgroup v1 memory controller
   through an eventfd. On a host with cgroup v1 or a hybrid setup, the
   containers still run, and the server logs a warning once that it does not
   detect their OOM kills.
-- unreleased: a `createContainer` request with the retired `json` log driver
+- v1.2.3: a `createContainer` request with the retired `json` log driver
   fails with
   `the json log driver of createContainer is not supported by this server`,
   one which sets the `tag` or `labels` of a log driver with
@@ -126,12 +126,12 @@ logs](troubleshooting.md#server-logs).
   driver wrote one JSON object per line, and the `journald` driver wrote the
   `tag` as `CONTAINER_TAG` and `SYSLOG_IDENTIFIER` and the `labels` as fields
   of their own.
-- unreleased: the server keeps a terminal open itself until the process
+- v1.2.3: the server keeps a terminal open itself until the process
   exited. Before, the output ended once the terminal got closed the first
   time, and without stdin the server closed it as well.
-- unreleased: the server syncs the CRI logs once the container exited
+- v1.2.3: the server syncs the CRI logs once the container exited
   and its output ended, before it never synced the container logs.
-- unreleased: the server logs a warning when it cannot watch the memory events
+- v1.2.3: the server logs a warning when it cannot watch the memory events
   of a container for another reason than a cgroup which is gone already.
 - v1.2.2: the OOM check watches the pod cgroup, or the nearest ancestor which
   is no systemd scope, above the leaf of crun. Before, it watched the parent of

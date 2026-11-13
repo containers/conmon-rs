@@ -15,7 +15,7 @@ without one (since v1.2.0), as the runtime only starts the exec process. Each
 runtime runs in a process group of its own, which gets killed with it, so the
 helpers it started do not stay behind.
 
-With a `restorePath` (since unreleased, see the `restore`
+With a `restorePath` (since v1.2.3, see the `restore`
 [feature](#features)), `createContainer` restores the container from the
 checkpoint at that path instead, like conmon with `--restore`: it runs the
 `restore` command of the runtime with `--detach`, the checkpoint as
@@ -27,7 +27,7 @@ restore, like `--no-pivot` or the SELinux options of runc, go through
 the same time limit as a create.
 
 `execSyncContainer` returns at most 16 MiB less 64 KiB of output (since
-unreleased), stdout and stderr together, like conmon, so that the response
+v1.2.3), stdout and stderr together, like conmon, so that the response
 fits into the 16 MiB gRPC messages of CRI-O and the kubelet. Each stream keeps
 up to half of it and more of what the other one leaves, so a large stdout does
 not drop a short error on stderr. Output beyond the limit gets dropped without
@@ -67,7 +67,7 @@ streaming server.
 Once the container exited, the clients get the output it left behind, until
 it ends or pauses for 100 ms, for at most a second. Output which the log
 drivers still hold at that point, like the last chunk of a container on a
-slow disk, counts as no pause for up to 5 seconds (since unreleased), the
+slow disk, counts as no pause for up to 5 seconds (since v1.2.3), the
 clients get it as well. A process the container left behind which keeps
 writing gets cut off.
 
@@ -153,7 +153,7 @@ the server from reading the client, which may then go idle, like a spdystream
 connection whose reader waits. Empty stdin messages do not count towards the
 stdin limit of a session.
 
-Since unreleased, the stdin which a client sent right before a clean close (the
+Since v1.2.3, the stdin which a client sent right before a clean close (the
 WebSocket close, or the end of a SPDY connection after its stdin) reaches the
 process as long as the process keeps taking it. Only a process which takes none
 of it for 5 seconds lets the session end without the rest, counted from the
@@ -184,7 +184,7 @@ WebSocket transport, may tunnel the SPDY connection through binary WebSocket
 messages with the `SPDY/3.1+portforward.k8s.io` subprotocol.
 
 Once the client closed its side of the data stream, the pod gets 30 seconds
-(since unreleased) to answer and to close its side, then the server resets the
+(since v1.2.3) to answer and to close its side, then the server resets the
 stream and closes the connection to the pod. client-go closes the data stream
 the same way when its local application went away, so a pod which never stops
 sending would keep the two streams of the request otherwise. Once the pod
@@ -216,7 +216,7 @@ like `?port=80&port=443`, as CRI-O does.
 | Streams of a SPDY connection                                   | 1024, which count until the server let go of them, also after a reset |
 | Time for a SPDY client to open the streams it needs            | 30 seconds for a session and for the second stream of a port forward  |
 | Time to connect to a forwarded port                            | 10 seconds per address family (IPv4, then IPv6)                       |
-| Answer of the pod once the client closed a forwarded stream    | 30 seconds since unreleased, then the server ends the connection      |
+| Answer of the pod once the client closed a forwarded stream    | 30 seconds since v1.2.3, then the server ends the connection          |
 | Headers of a SPDY stream                                       | 32 in 8 KiB                                                           |
 | Ports of the WebSocket port forward protocol                   | 40                                                                    |
 | Connections which did not get upgraded yet                     | 256, see [Streaming security](#streaming-security)                    |
@@ -224,7 +224,7 @@ like `?port=80&port=443`, as CRI-O does.
 | Request head                                                   | 64 KiB, a larger one gets a 431                                       |
 | Exec output while the runtime starts the process               | 16 MiB per stream, the session fails above, see above                 |
 | End of a session the client takes nothing of                   | 60 seconds or a longer exec or attach idle timeout                    |
-| Stdin before a clean close which the process takes none of     | 5 seconds since unreleased                                            |
+| Stdin before a clean close which the process takes none of     | 5 seconds since v1.2.3                                                |
 | Idle connection                                                | The `idleTimeoutSec` of the request, see below                        |
 
 `idleTimeoutSec` ends a connection which got no frame of the client and no
@@ -299,18 +299,18 @@ Beyond its version, `version` reports the optional features of a server,
 which clients check before they rely on them. `conmonrs --version-json` prints
 them as well, and so does `conmonrs --version` since v1.2.2:
 
-| Feature              | Since      | What the server does                                                                                                                                               |
-| -------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `portforward`        | v1.2.0     | `servePortForwardContainer` forwards ports, see [Port forwarding](#port-forwarding).                                                                               |
-| `idletimeout`        | v1.2.0     | Exec and attach sessions apply their `idleTimeoutSec`, every server with `portforward` applies the one of port forwarding.                                         |
-| `streamingprotocols` | v1.2.0     | Exec and attach sessions speak SPDY/3.1 and the WebSocket protocols before `v5.channel.k8s.io`.                                                                    |
-| `restore`            | unreleased | `createContainer` restores the container from its `restorePath`, see [Cap'n Proto RPC](#capn-proto-rpc). Older servers ignore the path and create a new container. |
+| Feature              | Since  | What the server does                                                                                                                                               |
+| -------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `portforward`        | v1.2.0 | `servePortForwardContainer` forwards ports, see [Port forwarding](#port-forwarding).                                                                               |
+| `idletimeout`        | v1.2.0 | Exec and attach sessions apply their `idleTimeoutSec`, every server with `portforward` applies the one of port forwarding.                                         |
+| `streamingprotocols` | v1.2.0 | Exec and attach sessions speak SPDY/3.1 and the WebSocket protocols before `v5.channel.k8s.io`.                                                                    |
+| `restore`            | v1.2.3 | `createContainer` restores the container from its `restorePath`, see [Cap'n Proto RPC](#capn-proto-rpc). Older servers ignore the path and create a new container. |
 
 Servers from v1.1.0 to v1.2.2 also report `sdnotify`, the relay of the
 `sd_notify` messages of a container to the `sdnotifySocket` of
 `createContainer`, and v1.2.1 and v1.2.2 `journaldfields`, the `containerName`,
-`tag` and `labels` of the `journald` log driver. Both got retired in unreleased,
-see [Changes](#changes). Servers since unreleased still write the
+`tag` and `labels` of the `journald` log driver. Both got retired in v1.2.3,
+see [Changes](#changes). Servers since v1.2.3 still write the
 `containerName`, like every server since v1.2.1, but no longer report
 `journaldfields`.
 
@@ -328,20 +328,20 @@ How to rely on them:
 
 ## Changes
 
-- unreleased: the attach clients get the output which the log drivers still
+- v1.2.3: the attach clients get the output which the log drivers still
   held when the container exited, for up to 5 seconds. Before, output which
   the log did not take within 100 ms after the exit got cut off for them.
-- unreleased: `createContainer` and `serveExecContainer` fail, and
+- v1.2.3: `createContainer` and `serveExecContainer` fail, and
   `execSyncContainer` answers with exit code -2 and the error on stderr like
   for a runtime which failed, if the runtime reports a PID which is not a
   child of the server. Before, the server took it for the process it started
   and signalled it later.
-- unreleased: `createContainer` restores a container from a checkpoint with the
+- v1.2.3: `createContainer` restores a container from a checkpoint with the
   `restore` command of the runtime if the request sets a `restorePath`, which
   the `restore` feature tells. Before, the server only created containers, and
   the restore of CRI-O ran the `monitor_path` binary with the arguments of
   conmon, which the server rejects.
-- unreleased: `createNamespaces` and `startFdSocket` fail with
+- v1.2.3: `createNamespaces` and `startFdSocket` fail with
   `createNamespaces is not supported by this server` and
   `startFdSocket is not supported by this server`. A request which sets one of
   the retired fields, the `cleanupCmd`, `globalArgs`, `envVars`,
@@ -357,38 +357,38 @@ How to rely on them:
   once the container exited, passed the global arguments and environment
   variables to the runtime and relayed the `sd_notify` messages of the
   container, and logged the `execSessionId`.
-- unreleased: `execSyncContainer` and `serveExecContainer` pass the container
+- v1.2.3: `execSyncContainer` and `serveExecContainer` pass the container
   ID and the command to the runtime after `--`, so that a runtime cannot take a
   command whose first element starts with `-` for its own options. Before, a
   runtime could take such a command for options of its own.
-- unreleased: the stdin which a client sent right before a clean close
+- v1.2.3: the stdin which a client sent right before a clean close
   reaches the process as long as it keeps taking it, with 5 seconds for
   a process which takes none of it. Before, the process got about a second
   after the close and the rest got dropped, which cut off the uploads of
   clients which close right after their last write, like the Python client or
   `k8s_cp` of Ansible, once the process took less than about 1 MiB per second.
-- unreleased: a WebSocket client which closes first gets the close of the
+- v1.2.3: a WebSocket client which closes first gets the close of the
   server in answer as soon as the server read it. Before, the connection ended
   without it, which browsers report as code 1006 and which kept the Python
   Kubernetes client waiting for up to 3 seconds in `close()`.
-- unreleased: `execSyncContainer` returns at most 16 MiB less 64 KiB of output,
+- v1.2.3: `execSyncContainer` returns at most 16 MiB less 64 KiB of output,
   stdout and stderr together. Before, stdout and stderr took up to 16 MiB each.
-- unreleased: a forwarded SPDY connection ends 30 seconds after the client
+- v1.2.3: a forwarded SPDY connection ends 30 seconds after the client
   closed its side of the data stream, if the pod did not close its side by
   then. Before, a pod which kept sending held the two streams of the request
   for as long as the connection of the client lasted.
-- unreleased: the base64 channel protocols decode the payloads of the client
+- v1.2.3: the base64 channel protocols decode the payloads of the client
   like the Go implementation of Kubernetes: line breaks get ignored and the
   unused bits of the last symbol may be set. Before, such messages got dropped.
-- unreleased: a SPDY connection which breaks, also within a frame, ends like
+- v1.2.3: a SPDY connection which breaks, also within a frame, ends like
   one the client closed. Before, the server logged a warning about a protocol
   error and queued a GOAWAY for it.
-- unreleased: the error for a runtime which could not be started names it,
+- v1.2.3: the error for a runtime which could not be started names it,
   like `spawn runtime <path>: No such file or directory (os error 2)`.
   `createContainer` fails with it, `execSyncContainer` returns it on stderr
   and an exec session in its status. Before, it read
   `spawn child process: No such file or directory (os error 2)`.
-- unreleased: `createContainer` fails for an exit path or an OOM exit path
+- v1.2.3: `createContainer` fails for an exit path or an OOM exit path
   which does not name a file, like `/` or one ending in `..`, `/` or `/.`,
   with `exit path "/" does not name a file`. Before, the container got created
   and writing the file failed at its exit. `createContainer` and
@@ -429,7 +429,7 @@ How to rely on them:
 - v1.2.1: `createContainer` rejects a bundle path, exit paths, OOM exit paths
   and log paths which are not absolute with `<what> "<path>" is not absolute`,
   like `bundle path "bundle" is not absolute` (an OOM exit path is an
-  `exit path` there up to v1.2.2 and an `OOM exit path` since unreleased), and
+  `exit path` there up to v1.2.2 and an `OOM exit path` since v1.2.3), and
   `createContainer` and `execSyncContainer` reject a container ID which is empty
   or starts with `-` with `invalid container ID "<ID>"`. Before, the server
   resolved such a path in its working directory and passed such an ID on to the

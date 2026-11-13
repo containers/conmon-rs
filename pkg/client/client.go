@@ -183,7 +183,7 @@ type Tracing struct {
 	// The default global propagator passes nothing, the spans of the server
 	// do not join the trace of the call then. Server builds without the
 	// tracing feature ignore it, the static release binaries and the RPMs
-	// are such builds. Since unreleased, such a server logs a warning at its
+	// are such builds. Since v1.2.3, such a server logs a warning at its
 	// start when it runs with it, with a LogDriver other than
 	// LogDriverNone.
 	Enabled bool
