@@ -28,18 +28,8 @@ const SWEEP_TEST_ENV: &str = "CONMONRS_SWEEP_TEST";
 /// flaky. Run it in a process of its own.
 #[test]
 fn sweep_reaps_unclaimed_zombies_after_grace() -> Result<()> {
-    let output = std::process::Command::new(std::env::current_exe()?)
-        .args([
-            "--exact",
-            "child_reaper::tests::orphan_sweep::sweep_in_own_process",
-            "--ignored",
-        ])
-        .env(SWEEP_TEST_ENV, "1")
-        .output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "{stdout}");
-    assert!(stdout.contains("1 passed"), "{stdout}");
-    Ok(())
+    let test = "child_reaper::tests::orphan_sweep::sweep_in_own_process";
+    run_in_own_process(test, SWEEP_TEST_ENV, false)
 }
 
 #[tokio::test]

@@ -17,7 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::task;
-use tracing::{debug, info, warn};
+use tracing::{Span, debug, info, warn};
 
 /// Writes the container output to the journal with the container ID fields
 /// and priorities conmon uses, so that `journalctl CONTAINER_ID=<id>` finds
@@ -53,7 +53,10 @@ struct Shared {
 impl Shared {
     /// Whether the lines which the journal did not take right away get
     /// dropped instead of waiting for it, after `sent` lines went out
-    /// without waiting, see [`Shared::timed_out`].
+    /// without waiting, see [`Shared::timed_out`]. Chunks which went out as
+    /// a whole ask as well: they end the back-off like a partly taken one,
+    /// a journal which recovered would get no bounded wait the next time it
+    /// is busy otherwise.
     fn skip_wait(&self, sent: usize) -> bool {
         let mut timed_out = lock(&self.timed_out);
         match *timed_out {
@@ -211,10 +214,11 @@ impl JournaldLogger {
     /// it, the others share their buffer.
     pub(super) async fn write_lines(&self, pipe: Pipe, lines: &[Line<'_>]) -> Result<()> {
         let sent = Self::send(&self.shared, pipe, lines, Wait::Never);
+        let skip_wait = self.shared.skip_wait(sent);
         let Some(rest) = lines.get(sent..).filter(|rest| !rest.is_empty()) else {
             return Ok(());
         };
-        if self.shared.skip_wait(sent) {
+        if skip_wait {
             // The timeout got logged already, see `Shared::failing`.
             debug!(
                 "Unable to write {} lines to the journal: it did not take the last ones in time",
@@ -224,9 +228,13 @@ impl JournaldLogger {
         }
         let shared = self.shared.clone();
         let rest: Vec<_> = rest.iter().cloned().map(Line::into_owned).collect();
+        // The thread has no span, the one of the read loop names the
+        // container in what the send logs.
+        let span = Span::current();
         // From when a thread of the blocking pool took it, a busy pool must
         // not drop the chunk without trying.
         task::spawn_blocking(move || {
+            let _entered = span.entered();
             let deadline = Instant::now() + CHUNK_TIMEOUT;
             Self::send(&shared, pipe, &rest, Wait::Bounded(deadline))
         })

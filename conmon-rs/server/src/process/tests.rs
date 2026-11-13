@@ -231,7 +231,7 @@ async fn wait_for_traced_process_waits_for_the_tracer() -> Result<()> {
     // Attaches before it runs, detaches from its tracee only when exiting,
     // between the waits after the exit at 1.27 and 2.27 seconds.
     let mut tracer = std::process::Command::new("sleep");
-    tracer.arg("1.5");
+    tracer.arg("1.4");
     // SAFETY: the hook only makes a system call, which does not allocate
     // and gets no memory of ours.
     unsafe {
@@ -262,9 +262,10 @@ async fn wait_for_traced_process_waits_for_the_tracer() -> Result<()> {
     let start = time::Instant::now();
     let code = time::timeout(Duration::from_secs(5), wait_for_exit_code(pid)).await?;
     assert_eq!(code, 7);
-    // Woken up by the kernel once the tracer exited.
+    // Woken up by the kernel once the tracer exited, before the wait at
+    // 2.27 seconds, which would find it as well.
     let elapsed = start.elapsed();
-    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+    assert!(elapsed < Duration::from_millis(2200), "{elapsed:?}");
     Ok(())
 }
 

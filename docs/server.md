@@ -93,20 +93,32 @@ of the request. If the file name of the runtime is `crun`, it also adds
 of the server `--log-level=debug`, for `warn` `--log-level=warning` and for
 `error` `--log-level=error`. crun keeps its default for `info` and `off`.
 
-On SIGTERM or SIGINT, the server kills the containers and removes `conmon.sock`
-within 9.5 seconds, before `Shutdown` of the Go client, which sends SIGINT,
-gives up after 10 with `ErrShutdownTimeout`. If any of that fails or does not
-finish in time, the server logs it as an error and exits with status 1.
-A server which cannot listen for these signals does the same cleanup right away
-and exits with status 1.
+On SIGTERM, SIGINT or SIGQUIT (since unreleased), the server kills the
+containers and removes `conmon.sock` within 9.5 seconds, before `Shutdown` of
+the Go client, which sends SIGINT, gives up after 10 with `ErrShutdownTimeout`.
+If any of that fails or does not finish in time, the server logs it as an error
+and exits with status 1. A server which cannot listen for these signals does
+the same cleanup right away and exits with status 1.
 
 On SIGTERM, the server (since unreleased) first forwards the SIGTERM to the
 containers, like conmon, and gives them up to 5 of the 9.5 seconds to exit on
-it with their own exit codes before it kills them. Another SIGTERM or a SIGINT
-meanwhile kills them right away. Exec processes and containers created
-meanwhile do not get the SIGTERM. A container which ignores it, like the init
-of a PID namespace without a handler for it, delays the shutdown by the full 5
-seconds.
+it with their own exit codes before it kills them. Another SIGTERM, a SIGINT or
+a SIGQUIT meanwhile kills them right away. Exec processes and containers
+created meanwhile do not get the SIGTERM. A container which ignores it, like
+the init of a PID namespace without a handler for it, delays the shutdown by
+the full 5 seconds.
+
+The server handles no other signal which would end it: SIGHUP, SIGUSR1 and
+SIGUSR2 end it at once, without the cleanup, like SIGKILL or a crash does. The
+server keeps what it knows about its containers in memory only, so nothing
+takes them over then. They keep running, but nothing writes their logs and
+exit files or serves their attach sockets anymore, and the pipes or the
+terminal which the server held are gone: their writes to stdout and stderr
+fail, which ends a process that does not handle it. A new server on the same
+runtime directory replaces the socket, but does not know these containers, its
+calls for them fail with `container not found`. Only `execSyncContainer` and
+`servePortForwardContainer` still work, they need nothing but the runtime or
+the network namespace. The containers of such a pod should be recreated.
 
 Runtime calls in progress, like the `create` of a container or an exec, get up
 to 5 seconds after the containers got killed to finish. Since unreleased, the
@@ -126,6 +138,12 @@ server exits with status 1.
 - unreleased: on SIGTERM, the server forwards the SIGTERM to the containers
   and gives them up to 5 seconds to exit on it, before it killed them right
   away.
+- unreleased: SIGQUIT shuts the server down like SIGINT, like conmon. Before,
+  it ended the server at once, without killing the containers and removing the
+  socket, and left a core dump of it. SIGABRT still does that.
+- unreleased: a server built without the `tracing` feature logs a warning at
+  its start when it runs with `--enable-tracing`, with a server log driver
+  other than `none`. Before, it ignored the flag without a word.
 - v1.2.2: the server passes `--log-level=debug` to crun for its log level
   `trace` as well, before crun kept its default there.
 - v1.2.2: `conmon.sock` gets mode `0700` on bind, before `0755` from the umask

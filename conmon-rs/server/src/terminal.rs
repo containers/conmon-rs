@@ -196,7 +196,8 @@ impl Terminal {
                     error!("Unable to listen on terminal: {e:#}");
                 }
             }
-            .instrument(debug_span!("listen")),
+            .instrument(debug_span!("listen"))
+            .in_current_span(),
         );
 
         Ok(Self {

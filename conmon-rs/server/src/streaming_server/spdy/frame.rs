@@ -8,10 +8,10 @@
 //! sends empty header blocks, the [`Encoder`] stores them uncompressed in the
 //! zlib stream instead of compressing them.
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use flate2::{Decompress, FlushDecompress, Status};
-use std::fmt;
+use std::{fmt, io};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// The protocol version of the control frames.
@@ -231,7 +231,15 @@ impl Decoder {
                 .context("read frame header")?
             {
                 0 if filled == 0 => return Ok(None),
-                0 => bail!("connection ended within a frame header"),
+                // An I/O error like the end within a payload, which tells
+                // a client which went away from a protocol violation.
+                0 => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "connection ended within a frame header",
+                    )
+                    .into());
+                }
                 n => filled += n,
             }
         }

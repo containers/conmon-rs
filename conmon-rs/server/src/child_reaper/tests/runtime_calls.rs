@@ -89,8 +89,27 @@ async fn abandoned_call_releases_its_process() -> Result<()> {
     Ok(())
 }
 
+/// Set for the test process which runs the stdin test.
+const STDIN_TEST_ENV: &str = "CONMONRS_STDIN_TEST";
+
+/// The stdin of most test runners is `/dev/null` already, which a runtime
+/// could as well inherit. The check runs in a process of its own, whose
+/// stdin is a pipe.
+#[test]
+fn runtime_without_stdin_gets_dev_null() -> Result<()> {
+    let test = "child_reaper::tests::runtime_calls::stdin_in_own_process";
+    run_in_own_process(test, STDIN_TEST_ENV, true)
+}
+
 #[tokio::test]
-async fn runtime_without_stdin_gets_dev_null() -> Result<()> {
+#[ignore = "run by runtime_without_stdin_gets_dev_null in a process of its own"]
+async fn stdin_in_own_process() -> Result<()> {
+    if std::env::var_os(STDIN_TEST_ENV).is_none() {
+        return Ok(());
+    }
+    let own = std::fs::read_link("/proc/self/fd/0")?;
+    assert!(own.to_string_lossy().starts_with("pipe:"), "{own:?}");
+
     let reaper = ChildReaper::default();
     let dir = tempfile::tempdir()?;
     let (pidfile, stdin) = (dir.path().join("pid"), dir.path().join("stdin"));
@@ -111,6 +130,43 @@ async fn runtime_without_stdin_gets_dev_null() -> Result<()> {
         .await?;
     token.cancel();
     assert_eq!(std::fs::read_to_string(stdin)?.trim(), "/dev/null");
+    Ok(())
+}
+
+/// Nothing registers the process of a failed call, which ends its stdin
+/// loop. The loop would wait for the attach clients forever otherwise, and
+/// keep the pipe or the terminal.
+#[tokio::test]
+async fn failed_calls_end_the_stdin_loop() -> Result<()> {
+    let reaper = ChildReaper::default();
+    let dir = tempfile::tempdir()?;
+    let pidfile = dir.path().join("pid");
+    // A runtime which fails, and one which hangs until its deadline.
+    for (script, timeout, expected) in [
+        ("exit 1", Duration::from_secs(600), "exited with status 1"),
+        (
+            "exec sleep 60",
+            Duration::from_millis(200),
+            "did not finish within",
+        ),
+    ] {
+        let args = ["-c".into(), script.into()];
+        let mut io = ContainerIO::new(false, ContainerLog::new())?;
+        let call = RuntimeCall {
+            stdin: true,
+            ..RuntimeCall::new(Path::new("sh"), &args, &pidfile, Instant::now() + timeout)
+        };
+        let res =
+            time::timeout(Duration::from_secs(20), reaper.create_child(call, &mut io)).await?;
+        let err = format!("{:#}", res.err().context("runtime failure expected")?);
+        assert!(err.contains(expected), "{err}");
+        // The loop closed the stdin of the attach clients at its end,
+        // which a read tells. It would wait for them otherwise.
+        let read = time::timeout(Duration::from_secs(10), io.attach().read())
+            .await
+            .with_context(|| format!("stdin loop still runs after {script:?}"))?;
+        assert!(read.is_err(), "{script}");
+    }
     Ok(())
 }
 
@@ -182,7 +238,9 @@ async fn hanging_runtime_gets_killed_at_its_deadline() -> Result<()> {
             time::timeout(Duration::from_secs(20), reaper.create_child(call, &mut io)).await?;
         let err = format!("{:#}", res.err().context("runtime failure expected")?);
         assert!(err.contains("did not finish within"), "{err}");
-        assert!(start.elapsed() < Duration::from_secs(10));
+        // Killed right away, without the grace of a runtime which failed
+        // on its own.
+        assert!(start.elapsed() < ChildReaper::RUNTIME_GRACE);
         // The call ended with it.
         assert!(!reaper.calls_in_progress());
     }

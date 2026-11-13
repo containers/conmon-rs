@@ -9,9 +9,12 @@ use super::{
     },
 };
 use anyhow::{Result, bail};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    io,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, ReadHalf},
@@ -31,7 +34,7 @@ pub(super) struct Reader<T, F> {
 
 /// Why the reader stopped.
 enum End {
-    /// The client closed the connection.
+    /// The client closed the connection, or the connection broke.
     ClientClosed,
 
     /// Nothing takes streams anymore or the connection ended otherwise, like
@@ -93,6 +96,15 @@ where
             let frame = match frame {
                 Ok(Some(frame)) => frame,
                 Ok(None) => return End::ClientClosed,
+                // A connection which broke, also within a frame, is a
+                // client which went away and not one which violated the
+                // protocol: the kubelet resets the connection when its own
+                // client went away with output it did not read. No GOAWAY
+                // reaches it anymore.
+                Err(e) if e.chain().any(|cause| cause.is::<io::Error>()) => {
+                    debug!("SPDY client connection ended: {e:#}");
+                    return End::ClientClosed;
+                }
                 Err(e) => return End::ProtocolError(e),
             };
             if Connection::is_activity(&frame) {

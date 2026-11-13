@@ -501,7 +501,10 @@ async fn read_loop_forwards_large_packets() -> Result<()> {
         vec![1],
         vec![2; PACKET_BUF_SIZE],
         vec![3; 4 * PACKET_BUF_SIZE],
-        vec![4; STDIN_PACKET_MAX_SIZE],
+        // The most the Go client writes at once, with the start of a
+        // detach key sequence it held back.
+        vec![4; 32 * 1024 + 16],
+        vec![5; STDIN_PACKET_MAX_SIZE],
     ];
     for packet in &packets {
         client.send(packet).await?;
@@ -512,9 +515,9 @@ async fn read_loop_forwards_large_packets() -> Result<()> {
     }
 
     // Larger packets get truncated.
-    client.send(&vec![5; STDIN_PACKET_MAX_SIZE + 1]).await?;
+    client.send(&vec![6; STDIN_PACKET_MAX_SIZE + 1]).await?;
     let data = timeout(Duration::from_secs(5), attach.read()).await??;
-    assert_eq!(data, vec![5; STDIN_PACKET_MAX_SIZE]);
+    assert_eq!(data, vec![6; STDIN_PACKET_MAX_SIZE]);
 
     token.cancel();
     task.await??;

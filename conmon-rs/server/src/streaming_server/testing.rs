@@ -192,21 +192,28 @@ where
     Ok(String::from_utf8_lossy(&response).to_lowercase())
 }
 
-/// Read a frame the server sent, its opcode and payload.
+/// Read a frame the server sent, its opcode and payload. The pings of the
+/// server get skipped, they come whenever a test takes long enough, like
+/// under emulation.
 pub(super) async fn server_frame<R>(stream: &mut R) -> Result<(u8, Vec<u8>)>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let mut header = [0; 2];
-    time::timeout(Duration::from_secs(5), stream.read_exact(&mut header)).await??;
-    let len = match header[1] & 0x7f {
-        126 => usize::from(stream.read_u16().await?),
-        127 => usize::try_from(stream.read_u64().await?)?,
-        len => usize::from(len),
-    };
-    let mut payload = vec![0; len];
-    stream.read_exact(&mut payload).await?;
-    Ok((header[0] & 0x0f, payload))
+    loop {
+        let mut header = [0; 2];
+        time::timeout(Duration::from_secs(5), stream.read_exact(&mut header)).await??;
+        let len = match header[1] & 0x7f {
+            126 => usize::from(stream.read_u16().await?),
+            127 => usize::try_from(stream.read_u64().await?)?,
+            len => usize::from(len),
+        };
+        let mut payload = vec![0; len];
+        stream.read_exact(&mut payload).await?;
+        let opcode = header[0] & 0x0f;
+        if opcode != 0x9 {
+            return Ok((opcode, payload));
+        }
+    }
 }
 
 /// Answer the close of the server, which waits for it while the client

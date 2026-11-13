@@ -49,6 +49,62 @@ async fn forwards_a_connection() -> Result<()> {
     Ok(())
 }
 
+/// A pod which neither answers nor closes its side after the client closed
+/// its one does not keep the streams of the request.
+#[tokio::test(start_paused = true)]
+async fn half_closed_connections_end_after_the_grace_period() -> Result<()> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let port = listener.local_addr()?.port();
+    let mut client = serve()?;
+    request(&mut client, port).await?;
+
+    client
+        .send(Frame::Data {
+            stream_id: 3,
+            fin: true,
+            data: Bytes::from_static(b"request"),
+        })
+        .await?;
+    let (mut connection, _) = listener.accept().await?;
+    let mut request = vec![];
+    connection.read_to_end(&mut request).await?;
+    assert_eq!(request, b"request");
+
+    // The pod keeps its side open. The clock is paused, so the wait for
+    // the frames takes as long as the grace period, less than the timeout
+    // of reading a frame.
+    let start = time::Instant::now();
+    let (mut reset, mut closed) = (false, false);
+    while !(reset && closed) {
+        match client.frame().await?.context("connection ended")? {
+            Frame::RstStream { stream_id: 3, .. } => reset = true,
+            // No error gets reported, like for a client which keeps its
+            // side open.
+            Frame::Data {
+                stream_id: 1,
+                fin: true,
+                data,
+            } if data.is_empty() => closed = true,
+            frame => panic!("unexpected frame {frame:?}"),
+        }
+    }
+    // The grace period which docs/protocols.md names.
+    assert!(start.elapsed() >= Duration::from_secs(30));
+
+    // The connection to the pod is gone as well.
+    let mut buf = [0; 1];
+    let gone = async {
+        while connection.write(&buf).await.is_ok() {
+            task::yield_now().await;
+        }
+    };
+    time::timeout(Duration::from_secs(5), gone)
+        .await
+        .context("connection to the pod still open")?;
+    assert_eq!(connection.read(&mut buf).await.unwrap_or_default(), 0);
+    Ok(())
+}
+
 #[tokio::test]
 async fn data_on_the_error_stream_gets_dropped() -> Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;

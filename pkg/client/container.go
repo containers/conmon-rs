@@ -14,7 +14,9 @@ import (
 type CreateContainerConfig struct {
 	// ID is the container identifier, which the runtime gets as an
 	// argument. Servers since v1.2.1 reject an empty one and one which
-	// starts with "-", which the runtime would take for an option.
+	// starts with "-", which the runtime would take for an option, servers
+	// since unreleased also one with a control character, like a line
+	// break.
 	ID string
 
 	// BundlePath is the absolute path to the filesystem bundle. Servers
@@ -33,7 +35,9 @@ type CreateContainerConfig struct {
 	// reports it, also for real-time signals since v1.2.2, which gave
 	// -1 before. Since unreleased, also a traced process, like one under
 	// strace, gets its exit code instead of -1. The paths have to be
-	// absolute, servers since v1.2.1 reject other ones.
+	// absolute, servers since v1.2.1 reject other ones. Servers since
+	// unreleased also reject a path here or in OOMExitPaths which does not
+	// name a file, like "/" or one which ends in "..", "/" or "/.".
 	ExitPaths []string
 
 	// OOMExitPaths is a slice of files that should be created if the given

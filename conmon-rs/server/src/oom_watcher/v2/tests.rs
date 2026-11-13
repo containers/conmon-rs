@@ -446,6 +446,18 @@ fn outliving_ancestors() {
     }
 }
 
+/// The pod cgroup is the parent of the leaf with runc and its grandparent
+/// with crun, also with the cgroupfs driver, whose container cgroups are no
+/// scopes which would tell.
+#[test]
+fn pod_cgroups_are_found_within_two_levels() {
+    let pod = Path::new("/kubepods/burstable/pod12ab-34cd");
+    assert_eq!(CgroupV2::pod_cgroup(&pod.join("crio-ctr")), Some(pod));
+    let leaf = pod.join("crio-ctr/container");
+    assert_eq!(CgroupV2::pod_cgroup(&leaf), Some(pod));
+    assert_eq!(CgroupV2::pod_cgroup(&leaf.join("nested")), None);
+}
+
 #[test]
 fn pod_cgroup_names() {
     for name in [

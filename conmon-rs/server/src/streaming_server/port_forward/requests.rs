@@ -2,8 +2,8 @@
 //! then the request forwards one connection.
 
 use super::{
-    CLOSE_GRACE_PERIOD, Early, PORT_HEADER, PortForward, REQUEST_ID_HEADER, STREAM_TYPE_DATA,
-    STREAM_TYPE_ERROR, namespace::Namespace,
+    CLOSE_GRACE_PERIOD, Early, HALF_CLOSE_GRACE_PERIOD, PORT_HEADER, PortForward,
+    REQUEST_ID_HEADER, STREAM_TYPE_DATA, STREAM_TYPE_ERROR, namespace::Namespace,
 };
 use crate::streaming_server::{
     spdy::{Connection, Headers, Stream, StreamReceiver, StreamSender},
@@ -298,7 +298,9 @@ impl PortForward {
     }
 
     /// Copy between the data stream and the connection in the pod, until
-    /// both sides closed or either reset. A failure resets the data stream.
+    /// both sides closed or either reset. A failure resets the data stream,
+    /// and so does a side which does not close within its grace period
+    /// after the other one did.
     async fn copy(
         early: Early,
         mut from_client: StreamReceiver,
@@ -351,7 +353,15 @@ impl PortForward {
             }
             // The client closed its side, the pod may still answer.
             result = &mut upstream => match result {
-                Ok(()) => downstream.await,
+                Ok(()) => {
+                    match time::timeout(HALF_CLOSE_GRACE_PERIOD, downstream).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            debug!("The pod did not close its side of the connection");
+                            Ok(())
+                        }
+                    }
+                }
                 Err(e) => Self::upstream_failed(e, downstream).await,
             }
         }

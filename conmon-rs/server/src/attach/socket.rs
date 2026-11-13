@@ -185,7 +185,8 @@ pub(super) fn create_listener(
             drop(cleanup);
             drop(listener);
         }
-        .instrument(debug_span!("attach")),
+        .instrument(debug_span!("attach"))
+        .in_current_span(),
     );
 
     Ok(())
@@ -228,7 +229,8 @@ async fn accept_connections(
                             error!("Attach read loop failure: {e:#}");
                         }
                     }
-                    .instrument(debug_span!("read_loop")),
+                    .instrument(debug_span!("read_loop"))
+                    .in_current_span(),
                 );
 
                 let (write_half_rx, output_ended) = attach.subscribe();
@@ -248,7 +250,8 @@ async fn accept_connections(
                             error!("Attach write loop failure: {e:#}");
                         }
                     }
-                    .instrument(debug_span!("write_loop")),
+                    .instrument(debug_span!("write_loop"))
+                    .in_current_span(),
                 );
             }
             Err(e) => accept_errors.failed(&e).await,

@@ -13,7 +13,7 @@ use crate::streaming_server::{
 };
 use bytes::Bytes;
 use futures::stream::SplitStream;
-use tracing::{debug, info, trace};
+use tracing::{debug, trace};
 
 /// How the messages of a WebSocket session look.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -97,13 +97,13 @@ impl Framing {
             Message::Text(text) => Bytes::from(text),
             Message::Close(c) => {
                 if let Some(cf) = c {
-                    info!(
-                        "Got websocket close with code {} and reason {:?}",
+                    debug!(
+                        "Got WebSocket close with code {} and reason {:?}",
                         cf.code,
                         ClientStr(&cf.reason)
                     );
                 } else {
-                    info!("Got websocket close without close frame");
+                    debug!("Got WebSocket close without close frame");
                 }
                 return Some(ClientEvent::Closed);
             }

@@ -93,6 +93,18 @@ const READ_BUFFER: usize = 32 * 1024;
 /// output after writing to it failed, like CRI-O waits.
 const CLOSE_GRACE_PERIOD: Duration = Duration::from_secs(1);
 
+/// How long the pod gets to answer and close its side of a SPDY connection
+/// after the client closed its side. A client whose local application went
+/// away looks the same as one which only finished its request: client-go
+/// closes the data stream first, and resetting a stream it closed already
+/// sends nothing. Without a bound, a pod which never stops sending would
+/// keep the streams of such a request, which count against the most streams
+/// of the connection, for as long as the connection lasts. CRI-O ends both
+/// directions [`CLOSE_GRACE_PERIOD`] after either one finished, this is long
+/// enough for the answer to a request which ends with the client closing
+/// its side.
+const HALF_CLOSE_GRACE_PERIOD: Duration = Duration::from_secs(30);
+
 /// The WebSocket subprotocol of SPDY tunneled through a WebSocket.
 const SPDY_TUNNEL_PROTOCOL: &str = "SPDY/3.1+portforward.k8s.io";
 

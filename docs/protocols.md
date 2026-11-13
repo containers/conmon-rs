@@ -183,6 +183,14 @@ established at once. Clients which connect directly, like crictl with the
 WebSocket transport, may tunnel the SPDY connection through binary WebSocket
 messages with the `SPDY/3.1+portforward.k8s.io` subprotocol.
 
+Once the client closed its side of the data stream, the pod gets 30 seconds
+(since unreleased) to answer and to close its side, then the server resets the
+stream and closes the connection to the pod. client-go closes the data stream
+the same way when its local application went away, so a pod which never stops
+sending would keep the two streams of the request otherwise. Once the pod
+closed its side first, the client gets a second to close its one. CRI-O ends
+both directions a second after either one finished.
+
 The URL also serves the older WebSocket channel protocol (`v4.channel.k8s.io`,
 `v4.base64.channel.k8s.io` or no subprotocol), which forwards one connection
 per port of the `port` query parameter, a request with too many gets a 400.
@@ -206,6 +214,9 @@ like `?port=80&port=443`, as CRI-O does.
 | What the client sent on a SPDY connection which no stream took | About 4 MiB, plus the frame which waits to be placed                  |
 | What a forwarded connection sends while it gets established    | 1 MiB per connection, from a connect budget of 16 MiB per session     |
 | Streams of a SPDY connection                                   | 1024, which count until the server let go of them, also after a reset |
+| Time for a SPDY client to open the streams it needs            | 30 seconds for a session and for the second stream of a port forward  |
+| Time to connect to a forwarded port                            | 10 seconds per address family (IPv4, then IPv6)                       |
+| Answer of the pod once the client closed a forwarded stream    | 30 seconds since unreleased, then the server ends the connection      |
 | Headers of a SPDY stream                                       | 32 in 8 KiB                                                           |
 | Ports of the WebSocket port forward protocol                   | 40                                                                    |
 | Connections which did not get upgraded yet                     | 256, see [Streaming security](#streaming-security)                    |
@@ -362,6 +373,29 @@ How to rely on them:
   Kubernetes client waiting for up to 3 seconds in `close()`.
 - unreleased: `execSyncContainer` returns at most 16 MiB less 64 KiB of output,
   stdout and stderr together. Before, stdout and stderr took up to 16 MiB each.
+- unreleased: a forwarded SPDY connection ends 30 seconds after the client
+  closed its side of the data stream, if the pod did not close its side by
+  then. Before, a pod which kept sending held the two streams of the request
+  for as long as the connection of the client lasted.
+- unreleased: the base64 channel protocols decode the payloads of the client
+  like the Go implementation of Kubernetes: line breaks get ignored and the
+  unused bits of the last symbol may be set. Before, such messages got dropped.
+- unreleased: a SPDY connection which breaks, also within a frame, ends like
+  one the client closed. Before, the server logged a warning about a protocol
+  error and queued a GOAWAY for it.
+- unreleased: the error for a runtime which could not be started names it,
+  like `spawn runtime <path>: No such file or directory (os error 2)`.
+  `createContainer` fails with it, `execSyncContainer` returns it on stderr
+  and an exec session in its status. Before, it read
+  `spawn child process: No such file or directory (os error 2)`.
+- unreleased: `createContainer` fails for an exit path or an OOM exit path
+  which does not name a file, like `/` or one ending in `..`, `/` or `/.`,
+  with `exit path "/" does not name a file`. Before, the container got created
+  and writing the file failed at its exit. `createContainer` and
+  `execSyncContainer` also fail for a container ID with a control character,
+  like a line break, with `invalid container ID "..."`, like for an empty one
+  or one which starts with `-`. Before, the server passed such an ID to the
+  runtime.
 - v1.2.2: a streaming client which takes the end of a session slowly gets all
   of it, unless it takes nothing of it for 60 seconds. Before, a client which
   did not take all of it within a few seconds lost the rest, and client-go took

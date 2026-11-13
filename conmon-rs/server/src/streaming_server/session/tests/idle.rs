@@ -115,7 +115,8 @@ async fn clients_which_stop_reading_go_idle() -> Result<()> {
 }
 
 #[test]
-fn only_one_final_status() {
+fn only_one_final_status() -> Result<()> {
+    let (log, _subscriber) = Log::capture();
     let idle = || {
         Err(anyhow!(
             "no activity on the connection for the idle timeout"
@@ -135,11 +136,19 @@ fn only_one_final_status() {
         StreamingServer::final_status(idle(), None, Operation::Exec),
         Some(Status::Error(e)) if e.contains("idle timeout")
     ));
+    // Only that failure gets logged, as a warning: mostly the client
+    // caused it. The span of the session names the container.
+    let logged = log.contents()?;
+    assert_eq!(
+        logged.trim(),
+        "WARN Unable to run exec: no activity on the connection for the idle timeout"
+    );
     // A client which went away gets none.
     assert_eq!(
         StreamingServer::final_status(Ok(()), None, Operation::Attach),
         None
     );
+    Ok(())
 }
 
 #[tokio::test]

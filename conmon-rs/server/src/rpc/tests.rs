@@ -5,7 +5,7 @@ use crate::{
     conmon_capnp::conmon::CgroupManager,
     process::Process,
     streaming_server::{DEFAULT_CAPACITY, StreamingServer},
-    test_util::{Spawned, container_child, write_script},
+    test_util::{Log, Spawned, container_child, wait_for_real, write_script},
 };
 use nix::unistd::Pid;
 use std::{fs, process::Stdio, sync::Arc};
@@ -218,8 +218,15 @@ async fn empty_retired_fields_pass() {
     );
 }
 
+/// In a local set, like the server: a request which got through a
+/// validation spawns its tasks there, and fails the comparison with the
+/// error it ends with instead of a panic.
 #[tokio::test]
 async fn requests_get_validated() -> anyhow::Result<()> {
+    LocalSet::new().run_until(check_validation()).await
+}
+
+async fn check_validation() -> anyhow::Result<()> {
     let config = Config::parse_for_test::<_, &str>([]);
     // A local capability, the requests need no socket.
     let client: conmon::Client = capnp_rpc::new_client(Server::with_config(config));
@@ -262,6 +269,23 @@ async fn requests_get_validated() -> anyhow::Result<()> {
     assert_eq!(
         failure(create("id", "/bundle", "exit", "oom")).await,
         r#"exit path "exit" is not absolute"#
+    );
+
+    // The paths which get written at the exit have to name a file, the
+    // write would fail only then otherwise.
+    assert_eq!(
+        failure(create("id", "/bundle", "/exit/", "/oom")).await,
+        r#"exit path "/exit/" does not name a file"#
+    );
+    assert_eq!(
+        failure(create("id", "/bundle", "/exit", "/dir/..")).await,
+        r#"OOM exit path "/dir/.." does not name a file"#
+    );
+    // An ID with control characters would end up in the log lines of the
+    // container as it is.
+    assert_eq!(
+        failure(create("id\n\x1b[2J", "/bundle", "/exit", "/oom")).await,
+        r#"invalid container ID "id\n\u{1b}[2J""#
     );
 
     // The checkpoint of a restore has to be absolute like the other paths,
@@ -421,12 +445,25 @@ impl Bundle {
     /// restore it from the `restore_path` if that is not empty, and return
     /// the PID of the response.
     fn create(&self, id: &str, restore_path: &str) -> impl Future<Output = capnp::Result<Pid>> {
+        self.create_with_exit_path(id, restore_path, None)
+    }
+
+    /// Like [`Bundle::create`], maybe with an exit path.
+    fn create_with_exit_path(
+        &self,
+        id: &str,
+        restore_path: &str,
+        exit_path: Option<&str>,
+    ) -> impl Future<Output = capnp::Result<Pid>> {
         let mut request = self.client.create_container_request();
         let mut req = request.get().init_request();
         req.set_id(id);
         req.set_bundle_path(self.path());
         req.set_restore_path(restore_path);
         req.set_cgroup_manager(CgroupManager::Cgroupfs);
+        if let Some(exit_path) = exit_path {
+            req.reborrow().init_exit_paths(1).set(0, exit_path);
+        }
         let mut command_args = req.init_command_args(2);
         command_args.set(0, "--no-pivot");
         command_args.set(1, "--opt=1");
@@ -525,6 +562,82 @@ async fn failed_create_reports_the_runtime_and_registers_nothing() -> anyhow::Re
             Ok(())
         })
         .await
+}
+
+/// What a container logs at the default level names it, also from the
+/// tasks which outlive its request, like its watcher.
+#[tokio::test]
+async fn lines_of_a_container_name_it_at_the_default_level() -> anyhow::Result<()> {
+    let (log, _subscriber) = Log::capture();
+    LocalSet::new()
+        .run_until(async {
+            // The process exits right away, its exit file cannot be written.
+            let bundle = Bundle::with_runtime("sleep 0 & echo $! > \"$PIDFILE\"")?;
+            let exit_path = format!("{}/missing/exit", bundle.path());
+            bundle
+                .create_with_exit_path("0123abcd", "", Some(&exit_path))
+                .await?;
+
+            let failure = "Unable to write exit file";
+            wait_for_real(|| log.contents().is_ok_and(|log| log.contains(failure))).await;
+            // The exit of the container and the failure, in the span of
+            // its request, with the ID of the request as well if any
+            // subscriber of the process logs at the debug level.
+            let log = log.contents()?;
+            for (level, message) in [("INFO", "Container exited"), ("ERROR", failure)] {
+                let line = log.lines().find(|line| line.contains(message));
+                let line = line.with_context(|| format!("no {message:?} in {log}"))?;
+                let start = format!("{level} create_container{{container_id=\"0123abcd\"");
+                assert!(line.trim_start().starts_with(&start), "{log}");
+            }
+            Ok(())
+        })
+        .await
+}
+
+/// A request which fails before it logs anything does not hide the next
+/// line: with a layer next to the one of the log driver which takes every
+/// level, like the one of OpenTelemetry, asking the subscriber whether the
+/// debug level is enabled left the filter of the log driver in a state
+/// which dropped it.
+#[tokio::test]
+async fn requests_which_fail_early_do_not_hide_the_next_line() -> anyhow::Result<()> {
+    use tracing_subscriber::{
+        Layer,
+        filter::LevelFilter,
+        layer::{Identity, SubscriberExt},
+        util::SubscriberInitExt,
+    };
+
+    // Keeps the callsites from getting cached for a single subscriber,
+    // see `Log::capture`.
+    let (_other, _subscriber) = Log::capture();
+    let log = Log::default();
+    let writer = log.clone();
+    let driver = tracing_subscriber::fmt::layer()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .without_time()
+        .with_target(false)
+        .with_filter(LevelFilter::INFO);
+    let _guard = tracing_subscriber::registry()
+        .with(Identity::new())
+        .with(driver)
+        .set_default();
+    tracing::callsite::rebuild_interest_cache();
+
+    let config = Config::parse_for_test::<_, &str>([]);
+    let client: conmon::Client = capnp_rpc::new_client(Server::with_config(config));
+    let mut request = client.exec_sync_container_request();
+    request.get().init_request().set_id("-invalid");
+    assert_eq!(
+        failure(request.send().promise).await,
+        r#"invalid container ID "-invalid""#
+    );
+    tracing::info!("next line");
+    let log = log.contents()?;
+    assert!(log.contains("INFO next line"), "{log}");
+    Ok(())
 }
 
 #[test]

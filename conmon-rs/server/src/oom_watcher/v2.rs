@@ -13,7 +13,7 @@ use std::{
 };
 use tokio::sync::mpsc::{Receiver, channel};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 /// Tell the tests how far the watch of a leaf got, see `tests::Progress`.
 /// Nothing outside of them.
@@ -280,7 +280,7 @@ impl MemoryEvents {
         self.gone = result.as_ref().is_err_and(OOMWatcher::is_not_found);
         match result {
             Ok((counters, true)) => {
-                debug!("Found OOM in {}, count {counters:?}", self.path.display());
+                info!("Found OOM in {}, count {counters:?}", self.path.display());
                 self.last = counters;
                 true
             }

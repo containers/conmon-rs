@@ -181,12 +181,37 @@ async fn spdy_attach_forwards_stdin_and_output() -> Result<()> {
         .await
 }
 
+/// A protocol error of a SPDY client names the container: the tasks of the
+/// connection run in the span of its session.
+#[tokio::test]
+async fn spdy_protocol_errors_name_the_container() -> Result<()> {
+    let (log, _subscriber) = Log::capture();
+    LocalSet::new()
+        .run_until(async {
+            let (_io, mut client) = spdy_attach_duplex(false, None, Version::V4, 64 * 1024).await?;
+            // A control frame of SPDY/2.
+            client
+                .io()
+                .write_all(&[0x80, 0x02, 0, 6, 0, 0, 0, 4, 0, 0, 0, 1])
+                .await?;
+            client
+                .frame_until(|frame| matches!(frame, Frame::GoAway { .. }))
+                .await?;
+            let log = log.contents()?;
+            let warning = r#"WARN session{container_id="id"}: Closing SPDY connection: "#;
+            assert!(log.contains(warning), "{log}");
+            Ok(())
+        })
+        .await
+}
+
 /// A session which falls behind the output by more than the attach channel
 /// holds skips the oldest output, which gets logged once until it caught up,
 /// and goes on.
 #[tokio::test]
 async fn slow_attach_sessions_skip_the_oldest_output() -> Result<()> {
-    const WARNING: &str = "WARN Attach client too slow";
+    // The span of the session names the container at every log level.
+    const WARNING: &str = r#"WARN session{container_id="id"}: Attach client too slow"#;
     let (log, _subscriber) = Log::capture();
     LocalSet::new()
         .run_until(async {

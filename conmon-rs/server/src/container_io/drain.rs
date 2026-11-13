@@ -90,7 +90,7 @@ impl Drain {
         }
         let budget = DRAIN_MAX_WAIT.saturating_sub(self.waited);
         if budget.is_zero() {
-            debug!("Dropping remaining output after waiting {DRAIN_MAX_WAIT:?} since the exit");
+            warn!("Dropping remaining output after waiting {DRAIN_MAX_WAIT:?} since the exit");
             return None;
         }
         let start = Instant::now();
