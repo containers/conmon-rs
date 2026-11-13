@@ -93,14 +93,14 @@ of the request. If the file name of the runtime is `crun`, it also adds
 of the server `--log-level=debug`, for `warn` `--log-level=warning` and for
 `error` `--log-level=error`. crun keeps its default for `info` and `off`.
 
-On SIGTERM, SIGINT or SIGQUIT (since unreleased), the server kills the
+On SIGTERM, SIGINT or SIGQUIT (since v1.2.3), the server kills the
 containers and removes `conmon.sock` within 9.5 seconds, before `Shutdown` of
 the Go client, which sends SIGINT, gives up after 10 with `ErrShutdownTimeout`.
 If any of that fails or does not finish in time, the server logs it as an error
 and exits with status 1. A server which cannot listen for these signals does
 the same cleanup right away and exits with status 1.
 
-On SIGTERM, the server (since unreleased) first forwards the SIGTERM to the
+On SIGTERM, the server (since v1.2.3) first forwards the SIGTERM to the
 containers, like conmon, and gives them up to 5 of the 9.5 seconds to exit on
 it with their own exit codes before it kills them. Another SIGTERM, a SIGINT or
 a SIGQUIT meanwhile kills them right away. Exec processes and containers
@@ -121,7 +121,7 @@ calls for them fail with `container not found`. Only `execSyncContainer` and
 the network namespace. The containers of such a pod should be recreated.
 
 Runtime calls in progress, like the `create` of a container or an exec, get up
-to 5 seconds after the containers got killed to finish. Since unreleased, the
+to 5 seconds after the containers got killed to finish. Since v1.2.3, the
 server stops the ones which did not finish by then, or 7 of the 9.5 seconds
 after the signal at the latest, so also after the 5 seconds of SIGTERM: it
 kills their runtimes and the processes they started, the calls fail, and the
@@ -129,19 +129,19 @@ server exits with status 1.
 
 ## Changes
 
-- unreleased: the server has neither the `pause` subcommand nor the fd socket
+- v1.2.3: the server has neither the `pause` subcommand nor the fd socket
   anymore, and removes the `conmon-fd.sock` of an older server from the runtime
   directory when it starts. The `createNamespaces` and `startFdSocket` requests
   which used them fail with `... is not supported by this server`, see the
   [protocol changes](protocols.md#changes). Before, `conmonrs pause` created
   the pod namespaces and the fd socket passed file descriptors to the runtime.
-- unreleased: on SIGTERM, the server forwards the SIGTERM to the containers
+- v1.2.3: on SIGTERM, the server forwards the SIGTERM to the containers
   and gives them up to 5 seconds to exit on it, before it killed them right
   away.
-- unreleased: SIGQUIT shuts the server down like SIGINT, like conmon. Before,
+- v1.2.3: SIGQUIT shuts the server down like SIGINT, like conmon. Before,
   it ended the server at once, without killing the containers and removing the
   socket, and left a core dump of it. SIGABRT still does that.
-- unreleased: a server built without the `tracing` feature logs a warning at
+- v1.2.3: a server built without the `tracing` feature logs a warning at
   its start when it runs with `--enable-tracing`, with a server log driver
   other than `none`. Before, it ignored the flag without a word.
 - v1.2.2: the server passes `--log-level=debug` to crun for its log level

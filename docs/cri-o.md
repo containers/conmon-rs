@@ -127,7 +127,7 @@ finishes on the server, which keeps watching the container. The
 calls which CRI-O makes itself, like update and checkpoint: the server runs the
 `runtime_path` of the handler for the containers it creates and the commands
 it executes in them. Restoring a checkpoint with a `pod` runtime handler needs
-a server with the `restore` [feature](protocols.md#features) (since unreleased)
+a server with the `restore` [feature](protocols.md#features) (since v1.2.3)
 and a CRI-O which restores through the client, with the `RestorePath` of
 `CreateContainerConfig`: CRI-O so far, including `main`, runs the
 `monitor_path` binary with the arguments of conmon for it, which conmon-rs

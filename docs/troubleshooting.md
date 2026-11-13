@@ -43,7 +43,7 @@ belongs to, the module and line of the source and the message. With the
  WARN exec_sync_container{container_id="<id>"}: conmonrs::rpc: <line>: Unable to start exec: runtime exited with status 1: ...
 ```
 
-Since unreleased, the span names the container at every log level, also for
+Since v1.2.3, the span names the container at every log level, also for
 what the server logs about it later, like its exit under the span of the
 `create_container` request which started it. `journalctl -t conmonrs -g <id>`
 finds the lines of one container. The lines of a streaming session have a
@@ -223,7 +223,7 @@ needs a build with the `tracing` feature:
 ```
 
 The static release binaries and the RPMs get built without it, they accept
-`--enable-tracing` and `--tracing-endpoint` and ignore them. Since unreleased,
+`--enable-tracing` and `--tracing-endpoint` and ignore them. Since v1.2.3,
 such a server logs a warning at its start when it runs with `--enable-tracing`,
 with a server log driver other than `none`, the default of CRI-O. The
 dependency tree of a binary tells whether it has the feature:
@@ -250,15 +250,15 @@ Jaeger to look at the traces.
 
 ## Changes
 
-- unreleased: the lines of the server log name the container they are about at
+- v1.2.3: the lines of the server log name the container they are about at
   every log level, through the span of its request or session, see
   [Server logs](#server-logs). Before, the spans only showed at the `debug`
   level, so a warning or an error did not tell which container it was about.
-- unreleased: a journal which took whole chunks of container output again
+- v1.2.3: a journal which took whole chunks of container output again
   after a stall gets waited for again the next time it is busy, see
   [Journal stalls](#journal-stalls). Before, the lines it did not take right
   away got dropped without the wait until it took part of a chunk.
-- unreleased: the server logs at `info` when a container exited, with its PID,
+- v1.2.3: the server logs at `info` when a container exited, with its PID,
   its exit code and whether it got OOM killed, an OOM as it happens, a runtime or an
   exec process which got killed at its timeout and the containers it signals
   and kills at its shutdown, before only at `debug`. The end of a streaming

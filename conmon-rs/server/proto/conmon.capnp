@@ -61,7 +61,7 @@ interface Conmon {
         # `streamingprotocols`, exec and attach sessions over SPDY and the
         # WebSocket protocols before `v5.channel.k8s.io`; `restore`, the
         # `restorePath` of `createContainer`, which older servers ignore and
-        # create a new container instead. Servers before unreleased also
+        # create a new container instead. Servers before v1.2.3 also
         # reported `sdnotify`, the relay of sd_notify messages requested by
         # `sdnotifySocketOld`, and `journaldfields`, the `containerName`,
         # `tagOld` and `labelsOld` of the journald logger, which got retired.
@@ -75,7 +75,7 @@ interface Conmon {
     # CreateContainer
     struct CreateContainerRequest {
         # The ID the runtime gets as an argument, since v1.2.1 an empty one and
-        # one which starts with "-" get rejected, since unreleased also one
+        # one which starts with "-" get rejected, since v1.2.3 also one
         # with a control character, like a line break.
         id @0 :Text;
         # The OCI bundle of the container, an absolute path like all paths
@@ -90,24 +90,24 @@ interface Conmon {
         # The files the server writes the exit code of the container to once
         # it exited, as decimal text, 128 plus the signal number if a signal
         # killed it, also for real-time signals since v1.2.2, which gave
-        # -1 before. Since unreleased, also a traced process, like one under
+        # -1 before. Since v1.2.3, also a traced process, like one under
         # strace, gets its exit code instead of -1. Absolute paths. Since
-        # unreleased, a path here or in `oomExitPaths` which does not name a
+        # v1.2.3, a path here or in `oomExitPaths` which does not name a
         # file gets rejected, like "/" or one which ends in "..", "/" or "/.".
         exitPaths @4 :List(Text);
         # The files the server creates empty if the container got OOM
         # killed, before it writes the exit files. Absolute paths. Servers
-        # since unreleased only detect that with cgroup v2 at
+        # since v1.2.3 only detect that with cgroup v2 at
         # `/sys/fs/cgroup`.
         oomExitPaths @5 :List(Text);
         # Where the output of the container goes, every driver gets all of
         # it, see docs/logging.md.
         logDrivers @6 :List(LogDriver);
-        # Retired in unreleased, a request which sets it fails as not
+        # Retired in v1.2.3, a request which sets it fails as not
         # supported. The command the server started once the container
         # exited before.
         cleanupCmdOld @7 :List(Text);
-        # Retired in unreleased, a request which sets it fails as not
+        # Retired in v1.2.3, a request which sets it fails as not
         # supported. Arguments of the runtime before the `create` command
         # before. The root of the runtime belongs in the `--runtime-root` of
         # the server, which applies to every call.
@@ -120,28 +120,28 @@ interface Conmon {
         # format, see the compatibility section of docs/cri-o.md.
         metadataOld @10 :Void;
         metadata @11 :Metadata;
-        # Retired in unreleased, a request which sets it fails as not
+        # Retired in v1.2.3, a request which sets it fails as not
         # supported. Environment variables of the runtime on top of the ones
         # of the server before.
         envVarsOld @12 :TextTextMap;
         # The cgroup manager of the runtime, `systemd` adds `--systemd-cgroup`
         # to the runtime arguments.
         cgroupManager @13 :CgroupManager;
-        # Retired in unreleased, a request which sets it fails as not
+        # Retired in v1.2.3, a request which sets it fails as not
         # supported. Slots of the fd socket of `startFdSocketOld` before,
         # whose file descriptors the runtime got as fd 3 and onwards.
         additionalFdsOld @14 :List(UInt64);
-        # Retired in unreleased, a request which sets it fails as not
+        # Retired in v1.2.3, a request which sets it fails as not
         # supported. Slots of the fd socket whose file descriptors the server
         # held until the container exited before.
         leakFdsOld @15 :List(UInt64);
-        # Retired in unreleased, a request which sets it fails as not
+        # Retired in v1.2.3, a request which sets it fails as not
         # supported. The host sd_notify socket which the server relayed the
-        # messages of the container to before. Servers since unreleased do
+        # messages of the container to before. Servers since v1.2.3 do
         # not report the `sdnotify` feature, which clients since v1.1.0
         # check first.
         sdnotifySocketOld @16 :Text;
-        # Since unreleased, the checkpoint to restore the container from, an
+        # Since v1.2.3, the checkpoint to restore the container from, an
         # absolute path, like conmon's `--restore`. With one, the server runs
         # the `restore` command of the runtime instead of `create`, with
         # `--detach`, `--image-path` set to it and `--work-path` set to the
@@ -172,19 +172,19 @@ interface Conmon {
         # name; older servers used `conmonrs`.
         containerName @3 :Text;
 
-        # Retired in unreleased, a request which sets it fails as not
+        # Retired in v1.2.3, a request which sets it fails as not
         # supported. The tag of the journal entries before, written as
         # CONTAINER_TAG and SYSLOG_IDENTIFIER.
         tagOld @4 :Text;
 
-        # Retired in unreleased, a request which sets it fails as not
+        # Retired in v1.2.3, a request which sets it fails as not
         # supported. Additional fields of every journal entry before.
         labelsOld @5 :TextTextMap;
 
         enum Type {
             # The CRI logger, requires `path` to be set.
             containerRuntimeInterface @0;
-            # Retired in unreleased, the JSON logger before. A request with
+            # Retired in v1.2.3, the JSON logger before. A request with
             # it fails as not supported.
             jsonOld @1;
             # The journald logger.
@@ -211,7 +211,7 @@ interface Conmon {
     # write its output to the log drivers and its exit code to the exit
     # files. The container gets started with the runtime by the caller. With
     # a `restorePath`, restore the container from the checkpoint instead
-    # (since unreleased, see the `restore` feature), it runs once the call
+    # (since v1.2.3, see the `restore` feature), it runs once the call
     # returns.
     createContainer @1 (request: CreateContainerRequest) -> (response: CreateContainerResponse);
 
@@ -232,7 +232,7 @@ interface Conmon {
         # format, see the compatibility section of docs/cri-o.md.
         metadataOld @4 :Void;
         metadata @5 :Metadata;
-        # Retired in unreleased, a request which sets it fails as not
+        # Retired in v1.2.3, a request which sets it fails as not
         # supported. Environment variables of the runtime on top of the ones
         # of the server before.
         envVarsOld @6 :TextTextMap;
@@ -244,14 +244,14 @@ interface Conmon {
     struct ExecSyncContainerResponse {
         # The exit code of the command, 128 plus the signal number if a
         # signal killed it, also for real-time signals since v1.2.2, which
-        # gave -1 before. Since unreleased, also a traced process, like one
+        # gave -1 before. Since v1.2.3, also a traced process, like one
         # under strace, gets its exit code instead of -1. -1 if the server
         # could not tell how it ended, -2 if it could not be started, then
         # `stderr` tells why, and -3 if it timed out. A server without pidfd
         # support also reports -3 if it could not get the exit status, then
         # without `timedOut`.
         exitCode @0 :Int32;
-        # The output of the command. Since unreleased, stdout and stderr
+        # The output of the command. Since v1.2.3, stdout and stderr
         # together hold at most 16 MiB less 64 KiB. Each keeps up to half of
         # it, and more if the other one leaves room, the rest gets dropped,
         # see docs/protocols.md. Before, each took up to 16 MiB.
@@ -274,7 +274,7 @@ interface Conmon {
         # on for the attach clients of the container until it exited, see
         # docs/protocols.md. Other paths get rejected since v1.2.2.
         socketPath @1 :Text;
-        # Retired in unreleased, the server ignores it. Only logged before,
+        # Retired in v1.2.3, the server ignores it. Only logged before,
         # attach sessions are per container.
         execSessionIdOld @2 :Text;
         # Close the container's stdin once the input of a client ended, the
@@ -380,8 +380,8 @@ interface Conmon {
         path @1 :Text; # Path to the bind mount of the namespace.
     }
 
-    # Retired in unreleased. It created the namespaces of a pod with the
-    # pause process of the server before, servers since unreleased fail it
+    # Retired in v1.2.3. It created the namespaces of a pod with the
+    # pause process of the server before, servers since v1.2.3 fail it
     # with an error which tells that it is not supported. The types above
     # only stay for the layout of the schema.
     createNamespacesOld @6 (request: CreateNamespacesRequest) -> (response: CreateNamespacesResponse);
@@ -396,9 +396,9 @@ interface Conmon {
         path @0 :Text; # The path to the fd socket.
     }
 
-    # Retired in unreleased. It started the fd socket, whose file
+    # Retired in v1.2.3. It started the fd socket, whose file
     # descriptors `createContainer` referenced by slot, before. Servers since
-    # unreleased fail it with an error which tells that it is not supported.
+    # v1.2.3 fail it with an error which tells that it is not supported.
     startFdSocketOld @7 (request: StartFdSocketRequest) -> (response: StartFdSocketResponse);
 
     ###############################################

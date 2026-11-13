@@ -15,7 +15,7 @@ type CreateContainerConfig struct {
 	// ID is the container identifier, which the runtime gets as an
 	// argument. Servers since v1.2.1 reject an empty one and one which
 	// starts with "-", which the runtime would take for an option, servers
-	// since unreleased also one with a control character, like a line
+	// since v1.2.3 also one with a control character, like a line
 	// break.
 	ID string
 
@@ -33,17 +33,17 @@ type CreateContainerConfig struct {
 	// gets the exit code of the container as decimal text once it exited,
 	// 128 plus the number of the signal which killed it, like a shell
 	// reports it, also for real-time signals since v1.2.2, which gave
-	// -1 before. Since unreleased, also a traced process, like one under
+	// -1 before. Since v1.2.3, also a traced process, like one under
 	// strace, gets its exit code instead of -1. The paths have to be
 	// absolute, servers since v1.2.1 reject other ones. Servers since
-	// unreleased also reject a path here or in OOMExitPaths which does not
+	// v1.2.3 also reject a path here or in OOMExitPaths which does not
 	// name a file, like "/" or one which ends in "..", "/" or "/.".
 	ExitPaths []string
 
 	// OOMExitPaths is a slice of files that should be created if the given
 	// container is OOM killed. They are created empty before the exit files
 	// get written. The paths have to be absolute, servers since v1.2.1
-	// reject other ones. Servers since unreleased only detect an OOM kill
+	// reject other ones. Servers since v1.2.3 only detect an OOM kill
 	// with cgroup v2 at /sys/fs/cgroup.
 	OOMExitPaths []string
 
@@ -64,7 +64,7 @@ type CreateContainerConfig struct {
 	// runs once CreateContainer returns, the caller does not start it. A
 	// server without FeatureRestore fails the call with an error matching
 	// ErrUnsupported, it would create a new container instead. Since
-	// unreleased. Empty for a create.
+	// v1.2.3. Empty for a create.
 	RestorePath string
 }
 
@@ -127,7 +127,7 @@ type CreateContainerResult struct {
 // context, so the caller deletes it with the runtime, and kills it first
 // after a restore, as a restored container runs. A server since v1.2.0 kills
 // a runtime which takes longer than 10 minutes to create the container (or to
-// restore it, since unreleased) and fails the call.
+// restore it, since v1.2.3) and fails the call.
 func (c *ConmonClient) CreateContainer(
 	ctx context.Context, cfg *CreateContainerConfig,
 ) (_ *CreateContainerResult, retErr error) {
@@ -236,14 +236,14 @@ type ExecSyncContainerResult struct {
 	// ExitCode specifies the returned exit status, 128 plus the number of
 	// the signal which killed the command, like a shell reports it, also
 	// for real-time signals since v1.2.2, which gave -1 before. Since
-	// unreleased, also a traced process, like one under strace, gets its
+	// v1.2.3, also a traced process, like one under strace, gets its
 	// exit code instead of -1. It is ExecExitCodeNotStarted if the server
 	// could not start the command, ExecExitCodeTimedOut if it timed out,
 	// and ExecExitCodeUnknown if the server could not tell how the command
 	// ended.
 	ExitCode int32
 
-	// Stdout contains the stdout stream result. Since unreleased, Stdout
+	// Stdout contains the stdout stream result. Since v1.2.3, Stdout
 	// and Stderr together hold at most 16 MiB less 64 KiB. Each keeps up to
 	// half of it, and more if the other one leaves room, the rest gets
 	// dropped. Before, each took up to 16 MiB.
