@@ -130,7 +130,10 @@ impl Version {
         self.cargo_tree
     }
 
-    /// The version information as text, one field per line.
+    /// The version information as text, one field per line. The format is an
+    /// interface: CRI-O takes a binary whose `--version` output starts with
+    /// `version:` for conmonrs, to reject it as the monitor of a runtime
+    /// handler of the `oci` type.
     fn text(&self) -> String {
         let tag = if self.tag().is_empty() {
             "none"

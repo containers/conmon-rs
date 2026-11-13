@@ -404,6 +404,17 @@ func (s *watchedSocket) Write(b []byte) (int, error) {
 	return n, err //nolint:wrapcheck // passed on as it is like Read
 }
 
+// connClosedOnWrite reports whether err is the one of a write to a
+// connection which got closed, by this side or by its peer, whose writes
+// fail with EPIPE or ECONNRESET then.
+func connClosedOnWrite(err error) bool {
+	var opErr *net.OpError
+
+	return errors.As(err, &opErr) && opErr.Op == "write" &&
+		(errors.Is(opErr, net.ErrClosed) || errors.Is(opErr, syscall.EPIPE) ||
+			errors.Is(opErr, syscall.ECONNRESET))
+}
+
 // resetConn closes the connection, the next call dials a new one.
 func (c *ConmonClient) resetConn() {
 	c.connMu.Lock()

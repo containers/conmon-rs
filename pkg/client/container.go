@@ -72,8 +72,10 @@ type ContainerLogDriver struct {
 	// Servers since v1.2.1 reject other ones.
 	Path string
 
-	// MaxSize is the maximum amount of bytes to be written before rotation.
-	// 0 translates to an unlimited size.
+	// MaxSize is the maximum amount of bytes of the log file. Once the next
+	// entry would exceed it, the server replaces the file with a new empty
+	// one and keeps no copy of the old one. 0 translates to an unlimited
+	// size.
 	MaxSize uint64
 
 	// ContainerName is written as CONTAINER_NAME by LogDriverTypeJournald,

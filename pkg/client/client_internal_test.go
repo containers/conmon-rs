@@ -754,7 +754,18 @@ func TestToClientMakesRunDirAbsolute(t *testing.T) {
 func bindTestSocket(t *testing.T, dir string) int {
 	t.Helper()
 
-	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	// Not every platform the package builds for has SOCK_CLOEXEC, like
+	// darwin. The lock keeps a server which another test starts meanwhile
+	// from inheriting the socket, like the net package does there.
+	syscall.ForkLock.RLock()
+
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err == nil {
+		syscall.CloseOnExec(fd)
+	}
+
+	syscall.ForkLock.RUnlock()
+
 	if err != nil {
 		t.Fatalf("socket: %v", err)
 	}

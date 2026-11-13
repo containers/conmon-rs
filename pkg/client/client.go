@@ -72,11 +72,16 @@ type ConmonServerConfig struct {
 	ConmonServerPath string
 
 	// LogLevel of the server to be used, see the LogLevel constants.
-	// Can be "trace", "debug", "info", "warn", "error" or "off".
+	// Can be "trace", "debug", "info", "warn", "error" or "off". If empty,
+	// the client passes no --log-level: the server uses the
+	// CONMON_LOG_LEVEL of its environment, see Env, or else its default
+	// "info".
 	LogLevel LogLevel
 
 	// LogDriver is the possible server logging driver, see the LogDriver
-	// constants. Can be "none", "stdout" or "systemd".
+	// constants. Can be "none", "stdout" or "systemd". If empty, the client
+	// passes no --log-driver: the server uses the CONMON_LOG_DRIVER of its
+	// environment, see Env, or else its default "systemd".
 	LogDriver LogDriver
 
 	// Runtime is the binary path of the OCI runtime to use to operate on the

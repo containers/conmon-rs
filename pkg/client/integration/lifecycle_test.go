@@ -113,11 +113,21 @@ var _ = Describe("ConmonClient", func() {
 			Expect(socket).To(BeAnExistingFile())
 
 			// The client of the old server fails fast, it does not wait for
-			// an answer.
+			// an answer. The call still uses the connection of the old
+			// server if the client did not notice its end yet, and dials
+			// the socket, which nobody listens on, otherwise.
 			start := time.Now()
 			_, err := old.Version(ctx)
-			Expect(err).To(HaveOccurred())
+			Expect(err).To(Or(
+				MatchError(client.ErrServerDisconnected),
+				MatchError(client.ErrServerUnreachable),
+			))
 			Expect(time.Since(start)).To(BeNumerically("<", time.Second))
+
+			// That call marked the connection as broken at the latest, the
+			// next one dials the socket.
+			_, err = old.Version(ctx)
+			Expect(err).To(MatchError(client.ErrServerUnreachable))
 
 			// The cleanup shuts down the new server.
 			sut = tr.configGivenEnv()
@@ -131,6 +141,12 @@ var _ = Describe("ConmonClient", func() {
 
 			_, err = sut.Version(ctx)
 			Expect(err).To(Succeed())
+
+			// The client of the old server connects to the new one with its
+			// next call, and records its PID.
+			_, err = old.Version(ctx)
+			Expect(err).To(Succeed())
+			Expect(old.PID()).To(Equal(sut.PID()))
 
 			Expect(old.Close()).To(Succeed())
 			_, err = old.Version(ctx)

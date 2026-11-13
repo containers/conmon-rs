@@ -93,6 +93,7 @@ var _ = Describe("ConmonClient", func() {
 				cfg := &client.AttachContainerConfig{
 					ID:                tr.ctrID,
 					SocketPath:        filepath.Join(tr.tmpDir, "attach"),
+					Terminal:          terminal,
 					ContainerStdin:    true,
 					StopAfterStdinEOF: !leaveStdinOpen,
 					Streams: client.AttachStreams{

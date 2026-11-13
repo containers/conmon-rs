@@ -18,7 +18,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"capnproto.org/go/capnp/v3/exc"
 	"github.com/sirupsen/logrus"
 	logrustest "github.com/sirupsen/logrus/hooks/test"
 )
@@ -781,7 +780,7 @@ func TestShutdownWithoutPID(t *testing.T) {
 
 	_, session, err := c.startAttachSession(t.Context(), &AttachContainerConfig{
 		Streams: AttachStreams{Stdin: stdin},
-	})
+	}, c.logger)
 	if err != nil {
 		t.Fatalf("start attach session: %v", err)
 	}
@@ -1178,7 +1177,7 @@ func TestClose(t *testing.T) {
 	}
 
 	// An attach session in progress ends.
-	sessionCtx, _, err := c.startAttachSession(t.Context(), &AttachContainerConfig{})
+	sessionCtx, _, err := c.startAttachSession(t.Context(), &AttachContainerConfig{}, c.logger)
 	if err != nil {
 		t.Fatalf("start attach session: %v", err)
 	}
@@ -1194,7 +1193,7 @@ func TestClose(t *testing.T) {
 	}
 
 	// One which gets set up after Close fails.
-	_, _, err = c.startAttachSession(t.Context(), &AttachContainerConfig{})
+	_, _, err = c.startAttachSession(t.Context(), &AttachContainerConfig{}, c.logger)
 	if !errors.Is(err, ErrClientClosed) {
 		t.Fatalf("got error %v starting an attach session, want %v", err, ErrClientClosed)
 	}
@@ -1261,10 +1260,8 @@ func TestCloseFailsCallInProgress(t *testing.T) {
 	select {
 	case err := <-versionErr:
 		// The call fails with the connection it used.
-		var exception *exc.Exception
-		if !errors.Is(err, ErrClientClosed) &&
-			(!errors.As(err, &exception) || exception.Type != exc.Disconnected) {
-			t.Fatalf("got error %v, want %v or a connection error", err, ErrClientClosed)
+		if !errors.Is(err, ErrClientClosed) && !errors.Is(err, ErrServerDisconnected) {
+			t.Fatalf("got error %v, want %v or %v", err, ErrClientClosed, ErrServerDisconnected)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("call still in progress after Close")
@@ -1284,6 +1281,7 @@ func TestShutdownClosesAttachStdin(t *testing.T) {
 	sessionCtx, session, err := c.startAttachSession(
 		t.Context(),
 		&AttachContainerConfig{Streams: AttachStreams{Stdin: stdin}},
+		c.logger,
 	)
 	if err != nil {
 		t.Fatalf("start attach session: %v", err)

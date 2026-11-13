@@ -3,9 +3,13 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
+	"net"
+	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 
@@ -255,6 +259,119 @@ func TestCallOnResetConnectionIsDisconnected(t *testing.T) {
 	// The next call connects again.
 	if _, err := c.Version(t.Context()); err != nil {
 		t.Fatalf("version after the reset: %v", err)
+	}
+}
+
+// goneOnWrite is a connection whose writes fail once gone is set, like the
+// ones to a server which exited, while its reads still wait.
+type goneOnWrite struct {
+	net.Conn
+
+	gone atomic.Bool
+}
+
+func (g *goneOnWrite) Write(b []byte) (int, error) {
+	if g.gone.Load() {
+		return 0, &net.OpError{
+			Op: "write", Net: "unix", Err: os.NewSyscallError("write", syscall.EPIPE),
+		}
+	}
+
+	return g.Conn.Write(b) //nolint:wrapcheck // passed on as it is
+}
+
+func TestCallWhichCannotBeSentIsDisconnected(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	serveVersionSocket(t, dir, versionConmon{pid: 1})
+
+	c := newTestClient(t, dir, logrus.New())
+
+	socket, err := dialLongSocket("unix", c.socket())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	clientEnd := &goneOnWrite{Conn: socket}
+	conn := newRPCConn(t.Context(), clientEnd, c.logger)
+
+	t.Cleanup(func() { conn.close(c.logger) })
+
+	if _, err = c.version(t.Context(), conn.client); err != nil {
+		t.Fatalf("version: %v", err)
+	}
+
+	// The server exited: the request cannot be sent, before the read of
+	// the connection noticed its end. The RPC system reports that as a
+	// failed call, not as a disconnected one.
+	clientEnd.gone.Store(true)
+
+	_, err = c.version(t.Context(), conn.client)
+	if !errors.Is(err, ErrServerDisconnected) {
+		t.Fatalf("got error %v, want %v", err, ErrServerDisconnected)
+	}
+
+	// The error of the write stays in the chain and in the message.
+	if !errors.Is(err, syscall.EPIPE) || !strings.Contains(err.Error(), "broken pipe") {
+		t.Fatalf("error %v does not carry %v", err, syscall.EPIPE)
+	}
+
+	if conn.usable() {
+		t.Fatal("connection still usable after a failed write")
+	}
+}
+
+func TestRPCErrorOfFailedSends(t *testing.T) {
+	t.Parallel()
+
+	// How the RPC system wraps the error of a request it could not send.
+	sendFailure := func(cause error) error {
+		return fmt.Errorf("get result: %w", exc.WrapError("call", &exc.Exception{
+			Type:   exc.Failed,
+			Prefix: "rpc",
+			Cause:  exc.WrapError("send message", cause),
+		}))
+	}
+
+	for name, tc := range map[string]struct {
+		cause error
+		want  bool
+	}{
+		"reset by the server": {
+			cause: &net.OpError{Op: "write", Err: os.NewSyscallError("write", syscall.ECONNRESET)},
+			want:  true,
+		},
+		"closed by the client": {
+			cause: &net.OpError{Op: "write", Err: net.ErrClosed},
+			want:  true,
+		},
+		// A request which got dropped while the connection shut down.
+		"dropped with the connection": {
+			cause: exc.New(exc.Disconnected, "rpc", "connection closed"),
+			want:  true,
+		},
+		// Other failures to send a request stay what they are.
+		"context canceled": {cause: context.Canceled},
+		"message too large": {
+			//nolint:err113 // test only
+			cause: exc.WrapError("encode", errors.New("message too large")),
+		},
+		"read error": {
+			cause: &net.OpError{Op: "read", Err: os.NewSyscallError("read", syscall.ECONNRESET)},
+		},
+	} {
+		err := rpcError(sendFailure(tc.cause))
+		if got := errors.Is(err, ErrServerDisconnected); got != tc.want {
+			t.Errorf(
+				"%s: error %v matches %v: %v, want %v",
+				name, err, ErrServerDisconnected, got, tc.want,
+			)
+		}
+
+		if !errors.Is(err, tc.cause) {
+			t.Errorf("%s: error %v does not carry its cause", name, err)
+		}
 	}
 }
 

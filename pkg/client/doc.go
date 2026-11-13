@@ -57,8 +57,10 @@
 // A call fails with an error matching ErrServerUnreachable if no server
 // listens on the socket when the client connects, with
 // ErrServerNotResponding if the backlog of the socket is full then, and with
-// ErrServerDisconnected if the connection ended during the call, for example
-// because the server exited. The next call connects again in each case.
+// ErrServerDisconnected if the connection ended before the request could be
+// sent or during the call, for example because the server exited. That error
+// does not tell whether the server got the request. The next call connects
+// again in each case.
 //
 // # Streaming
 //

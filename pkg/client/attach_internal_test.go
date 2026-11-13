@@ -86,7 +86,7 @@ func TestHandlePacket(t *testing.T) {
 		{packet: []byte{42, 'x'}, cont: true},
 		{packet: []byte{attachPipeDone}, cont: false},
 	} {
-		cont, err := c.handlePacket(cfg, tc.packet, len(tc.packet), true)
+		cont, err := c.handlePacket(cfg, c.logger, tc.packet, len(tc.packet), true)
 		if err != nil || cont != tc.cont {
 			t.Fatalf("packet %v: got %v, %v, want %v", tc.packet, cont, err, tc.cont)
 		}
@@ -103,20 +103,22 @@ func TestHandlePacket(t *testing.T) {
 	// Output for a stream which is not attached gets dropped.
 	packet := []byte{attachPipeStdout, 'x'}
 
-	cont, err := c.handlePacket(&AttachContainerConfig{}, packet, len(packet), true)
+	cont, err := c.handlePacket(&AttachContainerConfig{}, c.logger, packet, len(packet), true)
 	if err != nil || !cont {
 		t.Fatalf("got %v, %v for a missing stream, want to continue", cont, err)
 	}
 
 	cfg = &AttachContainerConfig{Streams: AttachStreams{Stdout: &testOut{err: io.ErrClosedPipe}}}
 
-	if _, err := c.handlePacket(cfg, packet, len(packet), true); !errors.Is(err, io.ErrClosedPipe) {
+	_, err = c.handlePacket(cfg, c.logger, packet, len(packet), true)
+	if !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("got error %v, want %v", err, io.ErrClosedPipe)
 	}
 
 	cfg = &AttachContainerConfig{Streams: AttachStreams{Stdout: shortOut{}}}
 
-	if _, err := c.handlePacket(cfg, packet, len(packet), true); !errors.Is(err, io.ErrShortWrite) {
+	_, err = c.handlePacket(cfg, c.logger, packet, len(packet), true)
+	if !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("got error %v, want %v", err, io.ErrShortWrite)
 	}
 }
@@ -187,7 +189,7 @@ func TestRedirectResponseToOutputStreams(t *testing.T) {
 	stdout, stderr := &testOut{}, &testOut{}
 	cfg := &AttachContainerConfig{Streams: AttachStreams{Stdout: stdout, Stderr: stderr}}
 
-	if err := c.redirectResponseToOutputStreams(t.Context(), cfg, client); err != nil {
+	if err := c.redirectResponseToOutputStreams(t.Context(), cfg, c.logger, client); err != nil {
 		t.Fatalf("redirect: %v", err)
 	}
 
@@ -210,7 +212,7 @@ func TestRedirectResponseToOutputStreams(t *testing.T) {
 	stdout = &testOut{}
 	cfg = &AttachContainerConfig{Streams: AttachStreams{Stdout: stdout}}
 
-	if err := c.redirectResponseToOutputStreams(t.Context(), cfg, client); err != nil {
+	if err := c.redirectResponseToOutputStreams(t.Context(), cfg, c.logger, client); err != nil {
 		t.Fatalf("redirect after close: %v", err)
 	}
 
@@ -249,7 +251,7 @@ func TestRedirectResponseToOutputStreamsRetriesAndSkips(t *testing.T) {
 	logger, hook := logrustest.NewNullLogger()
 	c := &ConmonClient{logger: logger}
 	stdout := &testOut{}
-	cfg := &AttachContainerConfig{Streams: AttachStreams{Stdout: stdout}}
+	cfg := &AttachContainerConfig{ID: "id", Streams: AttachStreams{Stdout: stdout}}
 	conn := &scriptedReader{reads: []scriptedRead{
 		{packet: []byte{attachPipeStdout, 'a'}},
 		// A reset connection gets read again.
@@ -261,7 +263,9 @@ func TestRedirectResponseToOutputStreamsRetriesAndSkips(t *testing.T) {
 		{packet: []byte{attachPipeStdout, 'c'}},
 	}}
 
-	if err := c.redirectResponseToOutputStreams(t.Context(), cfg, conn); err != nil {
+	if err := c.redirectResponseToOutputStreams(
+		t.Context(), cfg, c.attachLogger(cfg), conn,
+	); err != nil {
 		t.Fatalf("redirect: %v", err)
 	}
 
@@ -269,9 +273,15 @@ func TestRedirectResponseToOutputStreamsRetriesAndSkips(t *testing.T) {
 		t.Fatalf("got %q, closed %v, want %q, closed", out, closed, "abc")
 	}
 
-	const unexpected = "Received unexpected attach type +42"
-	if entry := hook.LastEntry(); entry == nil || entry.Message != unexpected {
-		t.Errorf("got log entry %v, want %q", entry, unexpected)
+	// A packet the protocol does not know is worth a warning, which names
+	// the container like every log of an attach.
+	const unexpected = "Received attach packet of unknown type 42"
+	if entry := hook.LastEntry(); entry == nil || entry.Message != unexpected ||
+		entry.Level != logrus.WarnLevel || entry.Data["container_id"] != cfg.ID {
+		t.Errorf(
+			"got log entry %v, want the warning %q for container %q",
+			entry, unexpected, cfg.ID,
+		)
 	}
 
 	// Other errors end the output.
@@ -280,7 +290,7 @@ func TestRedirectResponseToOutputStreamsRetriesAndSkips(t *testing.T) {
 	conn = &scriptedReader{reads: []scriptedRead{{err: io.ErrUnexpectedEOF}}}
 
 	if err := c.redirectResponseToOutputStreams(
-		t.Context(), cfg, conn,
+		t.Context(), cfg, c.logger, conn,
 	); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("got error %v, want %v", err, io.ErrUnexpectedEOF)
 	}
@@ -653,7 +663,7 @@ func TestStdinAfterServerClosedKeepsOutput(t *testing.T) {
 	}
 }
 
-func TestStdinPacketsBounded(t *testing.T) {
+func TestAttachBoundsStdinPacketsAndLogsContainerID(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "attach")
@@ -696,7 +706,11 @@ func TestStdinPacketsBounded(t *testing.T) {
 		_, _ = conn.Write([]byte{attachPipeDone}) //nolint:errcheck // checked by the attach
 	}()
 
-	c := newTestClient(t, t.TempDir(), logrus.New())
+	// With the logs of every packet.
+	logger, hook := logrustest.NewNullLogger()
+	logger.SetLevel(logrus.TraceLevel)
+
+	c := newTestClient(t, t.TempDir(), logger)
 	t.Cleanup(func() { c.Close() })
 
 	// The reader of io.NopCloser keeps the io.WriterTo of a bytes.Reader,
@@ -716,6 +730,19 @@ func TestStdinPacketsBounded(t *testing.T) {
 
 	if got := <-largest; got > attachStdinPacketSize {
 		t.Fatalf("got a stdin packet of %d bytes, want at most %d", got, attachStdinPacketSize)
+	}
+
+	// The logs of an attach name its container, a caller logs the attaches
+	// of many containers through one logger.
+	entries := hook.AllEntries()
+	if len(entries) == 0 {
+		t.Fatal("got no log entries of the attach")
+	}
+
+	for _, entry := range entries {
+		if entry.Data["container_id"] != cfg.ID {
+			t.Errorf("got log entry %q without the container %q", entry.Message, cfg.ID)
+		}
 	}
 }
 
@@ -825,7 +852,7 @@ func TestForwardResizeEvents(t *testing.T) {
 	t.Cleanup(func() { c.Close() })
 
 	// Without a channel nothing gets forwarded.
-	c.forwardResizeEvents(t.Context(), &AttachContainerConfig{ID: "id"}, nil)
+	c.forwardResizeEvents(t.Context(), &AttachContainerConfig{ID: "id"}, c.logger, nil)
 
 	resizes := make(chan resize.TerminalSize, 3)
 
@@ -841,7 +868,9 @@ func TestForwardResizeEvents(t *testing.T) {
 	close(resizes)
 
 	// Returns once the channel got closed.
-	c.forwardResizeEvents(t.Context(), &AttachContainerConfig{ID: "id", Resize: resizes}, nil)
+	c.forwardResizeEvents(
+		t.Context(), &AttachContainerConfig{ID: "id", Resize: resizes}, c.logger, nil,
+	)
 
 	want := request{
 		method: "SetWindowSizeContainer",
@@ -863,5 +892,7 @@ func TestForwardResizeEvents(t *testing.T) {
 	close(done)
 
 	pending := make(chan resize.TerminalSize)
-	c.forwardResizeEvents(t.Context(), &AttachContainerConfig{ID: "id", Resize: pending}, done)
+	c.forwardResizeEvents(
+		t.Context(), &AttachContainerConfig{ID: "id", Resize: pending}, c.logger, done,
+	)
 }
