@@ -141,6 +141,48 @@ fn query_ports_get_parsed() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn query_components_get_decoded() {
+    for (encoded, decoded) in [
+        ("", ""),
+        ("port", "port"),
+        ("%70ort", "port"),
+        ("81%2C82%2c83", "81,82,83"),
+        // A plus is a space, an escaped one stays.
+        ("a+b", "a b"),
+        ("a%2Bb", "a+b"),
+        ("a%20b", "a b"),
+        // Invalid escapes stay as they are, what follows gets decoded.
+        ("%", "%"),
+        ("80%", "80%"),
+        ("%4", "%4"),
+        ("%zz", "%zz"),
+        ("%4g", "%4g"),
+        ("%g1", "%g1"),
+        ("%%41", "%A"),
+        ("%4%41", "%4A"),
+        ("%+41", "% 41"),
+        ("%2+", "%2 "),
+        ("%-1", "%-1"),
+        ("%25", "%"),
+        ("%2541", "%41"),
+        // Bytes pass as they are, also the ones of several escapes.
+        ("%00", "\0"),
+        ("é", "é"),
+        ("%C3%A9", "é"),
+        ("%c3%a9", "é"),
+        ("%E2%82%AC", "€"),
+        // No UTF-8.
+        ("%ff", "\u{fffd}"),
+        ("a%C3", "a\u{fffd}"),
+        ("%C3+", "\u{fffd} "),
+        ("%E2%82", "\u{fffd}"),
+        ("%C3%28", "\u{fffd}("),
+    ] {
+        assert_eq!(PortForward::percent_decode(encoded), decoded, "{encoded:?}");
+    }
+}
+
 #[tokio::test]
 async fn channel_input_is_bounded_by_bytes() -> Result<()> {
     let budget = Budget::new(CHANNEL_BUFFER);

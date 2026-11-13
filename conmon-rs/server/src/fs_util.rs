@@ -1,17 +1,53 @@
 //! File system helpers.
 
+use crate::random_id::RandomId;
 use std::{
+    env,
     fs::{self, Metadata},
     io::{self, ErrorKind},
     os::unix::fs::MetadataExt,
-    path::Path,
+    path::{Path, PathBuf},
 };
+use tracing::debug;
 
 /// Remove a file, one which does not exist is no error.
 pub(crate) fn remove_file(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
         result => result,
+    }
+}
+
+/// A file path which gets removed on drop.
+#[derive(Debug)]
+pub(crate) struct TempFile(PathBuf);
+
+impl TempFile {
+    /// A unique path in the `directory`, or in the one for temporary files
+    /// without one, whose file does not get created but removed on drop.
+    /// This covers early returns and cancelled futures, which would leave
+    /// for example the PID file of an exec behind.
+    pub(crate) fn new(directory: Option<&Path>, prefix: &str, suffix: &str) -> Self {
+        let dir = directory.map_or_else(env::temp_dir, Path::to_path_buf);
+        let unique = RandomId::new();
+        Self(dir.join(format!("{prefix}{unique}{suffix}")))
+    }
+
+    /// The path of the file.
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        // A plain unlink does not need the runtime and cannot panic without one.
+        // The file may be gone already: the terminal listener removes its
+        // socket once it got the descriptor, and a runtime may never write a
+        // pidfile.
+        if let Err(e) = remove_file(&self.0) {
+            debug!("Unable to remove temp file {}: {}", self.0.display(), e);
+        }
     }
 }
 
@@ -100,6 +136,32 @@ mod tests {
         remove_file(&path)?;
         assert!(!path.exists());
         assert!(remove_file(dir.path()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn temp_files_get_removed_on_drop() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let file = TempFile::new(Some(dir.path()), "prefix-", ".suffix");
+        let path = file.path().to_path_buf();
+        let name = path.file_name().and_then(|name| name.to_str());
+        assert!(name.is_some_and(|n| n.starts_with("prefix-") && n.ends_with(".suffix")));
+        assert_eq!(path.parent(), Some(dir.path()));
+        assert_ne!(
+            TempFile::new(Some(dir.path()), "prefix-", ".suffix").path(),
+            path
+        );
+
+        // Only the path, the file is up to the user.
+        assert!(!path.exists());
+        fs::write(&path, "")?;
+        drop(file);
+        assert!(!path.exists());
+
+        // One which never got created, in the directory for temporary files.
+        let file = TempFile::new(None, "prefix-", ".suffix");
+        assert_eq!(file.path().parent(), Some(env::temp_dir().as_path()));
+        drop(file);
         Ok(())
     }
 

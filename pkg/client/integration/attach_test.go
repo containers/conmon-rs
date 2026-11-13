@@ -11,7 +11,6 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/opencontainers/runtime-tools/generate"
 	"go.podman.io/common/pkg/resize"
-	"go.podman.io/storage/pkg/unshare"
 )
 
 var _ = Describe("ConmonClient", func() {
@@ -412,9 +411,7 @@ var _ = Describe("ConmonClient", func() {
 		)
 
 		It("should catch out of memory (oom) events after stdin EOF", func(ctx SpecContext) {
-			if unshare.IsRootless() {
-				Skip("does not run rootless")
-			}
+			skipWithoutOOMDetection()
 
 			attachErr, _, _ := attachAll(
 				ctx, "/busybox cat; /busybox tail /dev/zero", false, true, "", true, oomSpec, nil,

@@ -18,10 +18,11 @@ holds their standard streams open, forwards their output to log files or
 journald, serves attach, exec and port forward sessions, detects out of memory
 kills and writes the exit codes once the containers terminate. The engine
 talks to it over a UNIX domain socket, so no new monitor process is needed for
-additional containers or execs. It works with cgroup v1 and v2 and any OCI
-runtime with the `create`, `exec`, `restore` and console socket conventions of
-runc, like crun. CI runs the integration tests with crun, and on amd64 with runc
-as well, on cgroup v2 only.
+additional containers or execs. It works with any OCI runtime with the
+`create`, `exec`, `restore` and console socket conventions of runc, like crun.
+It detects out of memory kills with cgroup v2 only, with cgroup v1 or a hybrid
+setup the containers run without the detection. CI runs the integration tests
+with crun, and on amd64 with runc as well.
 
 ## Documentation
 

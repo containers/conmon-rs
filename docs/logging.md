@@ -103,17 +103,20 @@ cgroup which is gone already, like a used up
 `fs.inotify.max_user_instances` or `fs.inotify.max_user_watches`, once until
 a watch works again.
 
-With cgroup v1, the server registers an eventfd for `memory.oom_control`
-through `cgroup.event_control` like conmon, and confirms an event with the
-`oom_kill` counter of `memory.oom_control`, which it reads a few more times
-within about 1.3 seconds, as the kernel signals the event before it kills. An
-event counts without a readable counter and while the cgroup is still under
-OOM, which covers a victim in a nested memory cgroup. An event which the
-counter does not confirm, like an OOM of an ancestor which killed a sibling,
-does not count.
+Without cgroup v2 at `/sys/fs/cgroup`, like on a host with cgroup v1 or a
+hybrid setup, the containers run, but the server reports no OOM kills (since
+unreleased). Each server logs a warning about that once, with its first
+container which has `oomExitPaths`. With the server log driver `none`, the
+default of CRI-O, nothing shows it, see [Server
+logs](troubleshooting.md#server-logs).
 
 ## Changes
 
+- unreleased: the server reports OOM kills with cgroup v2 only. Before, it
+  also watched the `memory.oom_control` of a cgroup v1 memory controller
+  through an eventfd. On a host with cgroup v1 or a hybrid setup, the
+  containers still run, and the server logs a warning once that it does not
+  detect their OOM kills.
 - unreleased: a `createContainer` request with the retired `json` log driver
   fails with
   `the json log driver of createContainer is not supported by this server`,

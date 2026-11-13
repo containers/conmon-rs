@@ -3,7 +3,10 @@
 //! checks the request like RFC 6455 says, a request which does not pass gets
 //! a plain text response which tells what is missing.
 
+mod accept_key;
+
 use crate::streaming_server::idle::{Activity, STALL_TIMEOUT};
+use accept_key::accept_key;
 use bytes::Bytes;
 use futures::{
     sink::{Sink, SinkExt},
@@ -37,7 +40,6 @@ use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{
         error::{CapacityError, ProtocolError},
-        handshake::derive_accept_key,
         protocol::{Role, WebSocketConfig},
     },
 };
@@ -662,7 +664,7 @@ impl WebSocketUpgrade {
         let headers = response.headers_mut();
         headers.insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
         headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
-        if let Ok(accept) = HeaderValue::from_str(&derive_accept_key(key.as_bytes())) {
+        if let Ok(accept) = HeaderValue::from_str(&accept_key(key.as_bytes())) {
             headers.insert(header::SEC_WEBSOCKET_ACCEPT, accept);
         }
         if let Some(protocol) = protocol {

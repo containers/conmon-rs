@@ -115,13 +115,14 @@ pub(crate) fn listen_private(path: &Path) -> io::Result<OwnedFd> {
 
 /// Bind a listener with `bind` at a socket path whatever its length, see
 /// [`shorten_path`]. The parent directory gets created if it does not exist.
+/// The callers name the socket in the error of a failed bind.
 pub(crate) fn bind_long_path<L>(
     path: &Path,
     bind: impl FnOnce(PathBuf) -> io::Result<L>,
 ) -> Result<L> {
     // keep parent_fd in scope until the bind, or else the socket will not work
     let (path, _parent_dir) = shorten_socket_path(path)?;
-    bind(path).context("bind server socket")
+    Ok(bind(path)?)
 }
 
 /// Like [`shorten_path`], creating the parent directory if it does not

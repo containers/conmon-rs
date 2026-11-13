@@ -96,7 +96,9 @@ interface Conmon {
         # file gets rejected, like "/" or one which ends in "..", "/" or "/.".
         exitPaths @4 :List(Text);
         # The files the server creates empty if the container got OOM
-        # killed, before it writes the exit files. Absolute paths.
+        # killed, before it writes the exit files. Absolute paths. Servers
+        # since unreleased only detect that with cgroup v2 at
+        # `/sys/fs/cgroup`.
         oomExitPaths @5 :List(Text);
         # Where the output of the container goes, every driver gets all of
         # it, see docs/logging.md.

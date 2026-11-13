@@ -1,12 +1,12 @@
-//! Watching the cgroup of a container process for OOM kills: through an
-//! eventfd of the memory controller with cgroup v1, or by watching the memory
-//! events of the unified hierarchy with cgroup v2.
+//! Watching the cgroup of a container process for OOM kills, through the
+//! memory events of the unified hierarchy of cgroup v2. A host with cgroup
+//! v1, or with both in a hybrid setup, runs its containers without the
+//! detection.
 
 mod cgroup_path;
 #[cfg(any(test, feature = "fuzzing"))]
 pub(crate) mod fuzzing;
 mod inotify;
-mod v1;
 mod v2;
 
 use anyhow::Context;
@@ -17,10 +17,17 @@ use nix::{
     },
     unistd::Pid,
 };
-use std::{num::ParseIntError, path::PathBuf, sync::LazyLock};
+use std::{
+    num::ParseIntError,
+    path::PathBuf,
+    sync::{
+        LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tokio::fs::OpenOptions;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
@@ -30,6 +37,10 @@ const WATCH_EVENT_CHANNEL_SIZE: usize = 32;
 static IS_CGROUP_V2: LazyLock<bool> = LazyLock::new(|| {
     statfs(CGROUP_ROOT).is_ok_and(|sts| sts.filesystem_type() == CGROUP2_SUPER_MAGIC)
 });
+
+/// Whether the server told that it does not watch for OOM kills, see
+/// [`OOMWatcher::supported`].
+static UNSUPPORTED_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Watches the cgroup of a process for OOM kills, see
 /// [`OOMWatcher::watch`].
@@ -42,10 +53,9 @@ pub(crate) struct OOMEvent {
 
     /// The cgroup of the process has no memory events, because it got
     /// removed or has no memory controller, which hides whether an OOM
-    /// happened, but there is a hint which may also stem from a sibling:
-    /// with cgroup v1, an event before the removal, with cgroup v2, a new
-    /// OOM kill of an outer cgroup or none to tell. So it only counts for a
-    /// process which got killed by SIGKILL, see [`OOMEvent::is_oom`].
+    /// happened, but there is a hint which may also stem from a sibling: a
+    /// new OOM kill of an outer cgroup, or none to tell. So it only counts
+    /// for a process which got killed by SIGKILL, see [`OOMEvent::is_oom`].
     pub(crate) possible_oom: bool,
 }
 
@@ -75,30 +85,41 @@ impl OOMWatcher {
     /// Watch the cgroup of the process for an OOM until `token` gets
     /// cancelled, which the exit of the process does, and return what was
     /// found. The OOM files get written for an OOM found on its own. None if
-    /// the cgroup could not be watched, or the process was gone already.
+    /// the cgroup could not be watched, like without cgroup v2, or the
+    /// process was gone already.
     pub(crate) async fn watch(
         token: &CancellationToken,
         pid: Pid,
         exit_paths: &[PathBuf],
     ) -> Option<OOMEvent> {
-        let res = if *IS_CGROUP_V2 {
-            Self::oom_handling_cgroup_v2(token, pid)
-                .await
-                .context("setup cgroupv2 oom handling")
-        } else {
-            Self::oom_handling_cgroup_v1(token, pid)
-                .await
-                .context("setup cgroupv1 oom handling")
-        };
-        let event = res
+        if !Self::supported(*IS_CGROUP_V2, &UNSUPPORTED_WARNED) {
+            return None;
+        }
+        let event = Self::oom_handling_cgroup_v2(token, pid)
+            .await
+            .context("set up cgroup v2 OOM handling")
             .inspect_err(|e| error!("Unable to watch OOM: {e:#}"))
             .ok()
             .flatten();
         if event.is_some_and(|event| event.oom) {
             Self::write_oom_files(exit_paths).await;
         }
-        debug!("Done watching for ooms");
+        debug!("Done watching for OOMs");
         event
+    }
+
+    /// Whether the OOM kills of the host can be watched, which takes the
+    /// unified hierarchy of cgroup v2 at the cgroup root. Without it, like
+    /// with cgroup v1 or a hybrid setup, the containers run without the OOM
+    /// detection, which a warning tells once per server, as noted in
+    /// `warned`, instead of with every container.
+    fn supported(cgroup_v2: bool, warned: &AtomicBool) -> bool {
+        if !cgroup_v2 && !warned.swap(true, Ordering::Relaxed) {
+            warn!(
+                "No cgroup v2 at {CGROUP_ROOT}, the OOM kills of containers do not get detected: cgroup v1 and hybrid setups are not supported"
+            );
+        }
+        cgroup_v2
     }
 
     /// The counters of a cgroup file of `key value` lines, like
@@ -133,6 +154,26 @@ impl OOMWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::Log;
+
+    #[test]
+    fn only_cgroup_v2_gets_watched() -> anyhow::Result<()> {
+        let (log, _guard) = Log::capture();
+        let warned = AtomicBool::new(false);
+        assert!(OOMWatcher::supported(true, &warned));
+        assert!(!warned.load(Ordering::Relaxed));
+
+        // Every container asks, the first one warns.
+        for _ in 0..3 {
+            assert!(!OOMWatcher::supported(false, &warned));
+        }
+        assert!(warned.load(Ordering::Relaxed));
+        assert!(OOMWatcher::supported(true, &warned));
+        let log = log.contents()?;
+        assert_eq!(log.matches("WARN").count(), 1, "{log}");
+        assert_eq!(log.matches("No cgroup v2 at").count(), 1, "{log}");
+        Ok(())
+    }
 
     #[test]
     fn oom_event_needs_kill_for_ancestor_oom() {

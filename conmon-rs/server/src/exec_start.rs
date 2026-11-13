@@ -7,8 +7,9 @@ use crate::{
     child_reaper::{ChildReaper, RuntimeCall, StartedChild, WatchedExec},
     config::Config,
     conmon_capnp::conmon::CgroupManager,
-    container_io::{ContainerIO, Message, TempFile},
+    container_io::{ContainerIO, Message},
     container_log::ContainerLog,
+    fs_util::TempFile,
     runtime_args::{ExecArgs, GenerateRuntimeArgs},
     terminal::Terminal,
 };
@@ -45,7 +46,7 @@ impl ExecStart {
     ) -> Result<Self> {
         let container_io =
             ContainerIO::new(tty, ContainerLog::new()).context("create container IO")?;
-        let pidfile = ContainerIO::temp_file(Some(config.runtime_dir()), pidfile_prefix, ".pid");
+        let pidfile = TempFile::new(Some(config.runtime_dir()), pidfile_prefix, ".pid");
         let args = GenerateRuntimeArgs {
             config,
             id,

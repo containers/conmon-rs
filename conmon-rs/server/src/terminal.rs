@@ -2,7 +2,7 @@
 
 use crate::{
     async_fd::{self, Fd},
-    container_io::{ContainerIO, TempFile},
+    fs_util::TempFile,
     listener,
     mutex::lock,
 };
@@ -13,7 +13,7 @@ use nix::{
     errno::Errno,
     fcntl::{self, FcntlArg, OFlag},
     sys::{
-        socket::{self, Backlog, ControlMessageOwned, MsgFlags, SockType, UnixAddr},
+        socket::{self, ControlMessageOwned, MsgFlags},
         termios::{self, OutputFlags, SetArg, SpecialCharacterIndices},
     },
 };
@@ -21,7 +21,7 @@ use std::{
     io::{self, IoSliceMut, Read, Write},
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
-        unix::{io::RawFd, net::UnixListener as StdUnixListener},
+        unix::io::RawFd,
     },
     path::{Path, PathBuf},
     pin::Pin,
@@ -169,17 +169,15 @@ impl Terminal {
         // runc dials the console socket by its path, which a Unix socket
         // address limits to 108 bytes, and the runtime directory of CRI-O is
         // far too long for that.
-        let temp_file = ContainerIO::temp_file(None, "conmon-term-", ".sock");
+        let temp_file = TempFile::new(None, "conmon-term-", ".sock");
         let path = temp_file.path();
 
         // Bind synchronously so that the socket exists once this returns,
         // without blocking on the listener task to get scheduled.
         debug!("Listening terminal socket on {}", path.display());
         let listener = listener::bind_long_path(path, |path| {
-            let fd = listener::private_socket(SockType::Stream)?;
-            socket::bind(fd.as_raw_fd(), &UnixAddr::new(&path)?)?;
-            socket::listen(&fd, Backlog::MAXCONN)?;
-            UnixListener::from_std(StdUnixListener::from(fd))
+            let fd = listener::listen_private(&path)?;
+            UnixListener::from_std(fd.into())
         })
         .context("bind terminal socket")?;
 
@@ -208,9 +206,10 @@ impl Terminal {
     }
 
     /// Wait for the runtime to hand over the terminal, for the loops which
-    /// read and write it, see [`ContainerIO::connect_terminal`]. A wait which
-    /// gets dropped leaves the descriptor queued for the next one. The
-    /// terminal gets the size requested before, see
+    /// read and write it, see
+    /// [`ContainerIO::connect_terminal`](crate::container_io::ContainerIO::connect_terminal).
+    /// A wait which gets dropped leaves the descriptor queued for the next
+    /// one. The terminal gets the size requested before, see
     /// [`TerminalResizer::resize`].
     pub(crate) async fn connect(&mut self) -> Result<TerminalIo> {
         debug!("Waiting for terminal socket connection");
