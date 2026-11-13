@@ -392,6 +392,14 @@ How to rely on them:
   64 KiB.
 - v1.2.2: the attach socket path and the `netNsPath` of port forwarding have
   to be absolute.
+- v1.2.1: `createContainer` rejects a bundle path, exit paths, OOM exit paths
+  and log paths which are not absolute with `<what> "<path>" is not absolute`,
+  like `bundle path "bundle" is not absolute` (an OOM exit path is an
+  `exit path` there up to v1.2.2 and an `OOM exit path` since unreleased), and
+  `createContainer` and `execSyncContainer` reject a container ID which is empty
+  or starts with `-` with `invalid container ID "<ID>"`. Before, the server
+  resolved such a path in its working directory and passed such an ID on to the
+  runtime, which takes one with a leading `-` for an option.
 - v1.2.1: at most 256 connections to the streaming server which did not get
   upgraded yet get served at once.
 - v1.2.1: exec and attach tokens only work on the path of their kind, before

@@ -31,8 +31,8 @@ as well, on cgroup v2 only.
   of the server, its threading and memory use, and how the pieces connect.
 - [docs/cri-o.md](docs/cri-o.md): configuring CRI-O, the compatibility between
   CRI-O and server versions, upgrades and the use on Red Hat OpenShift.
-- [docs/server.md](docs/server.md): the command line of the server, what it
-  does when it starts and stops.
+- [docs/server.md](docs/server.md): the command line of the server, the files
+  it creates and what it does when it starts and stops.
 - [docs/protocols.md](docs/protocols.md): the Cap'n Proto RPC, the attach
   socket, the streaming server for exec, attach and port forwarding with its
   limits and security, and the features a server reports.

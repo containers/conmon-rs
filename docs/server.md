@@ -29,13 +29,14 @@ environment variable in parentheses:
 take a boolean: `1`, `true`, `yes`, `y`, `t` or `on` for true and `0`, `false`,
 `no`, `n`, `f` or `off` for false, in any case.
 
-Before it forks, the server sets its umask to 022 and removes `NOTIFY_SOCKET`
-from its environment, so that the runtime does not get the sd_notify socket of
-the caller. It lowers its own OOM score to -1000, turns transparent huge pages
-off for itself and raises its soft limit of open files to the hard one. The OCI
-runtime gets the OOM score, the huge pages setting and the open files limits the
-server started with, so the container processes get the OOM score of the client
-unless it sets `process.oomScoreAdj` in the OCI configuration, like CRI-O does.
+Before it forks, the server sets its umask to 022. It keeps the `NOTIFY_SOCKET`
+of the caller from the runtime, which would otherwise hand the sd_notify socket
+of the caller on to the container. It lowers its own OOM score to -1000, turns
+transparent huge pages off for itself and raises its soft limit of open files to
+the hard one. The OCI runtime gets the OOM score, the huge pages setting and the
+open files limits the server started with, so the container processes get the
+OOM score of the client unless it sets `process.oomScoreAdj` in the OCI
+configuration, like CRI-O does.
 
 When the server forks, the parent writes the child's PID to `pidfile` in the
 runtime directory and exits. With a server log driver other than `stdout`, the
@@ -45,6 +46,44 @@ anymore. The server closes the other file descriptors it inherited, changes into
 `/`, acts as child subreaper for the containers and listens on `conmon.sock` in
 the runtime directory. `conmon.sock` gets mode `0700` on bind, like the attach
 sockets.
+
+Files which the server creates, in the runtime directory unless the path tells
+otherwise, `<random>` stands for 32 hex digits:
+
+- `conmon.sock`, the RPC socket. The server removes it when it shuts down, a
+  server which crashed leaves it behind and the next one replaces it.
+- `pidfile`, the PID of the forked server. The Go client removes it once it
+  read it.
+- `exec_sync<random>.pid` and `exec_streaming<random>.pid`, where the runtime
+  writes the PID of the process of an `execSyncContainer` or of a streaming
+  exec. The server removes each once the runtime finished.
+- `<bundle>/pidfile`, where the runtime writes the PID of a container. The
+  server removes one left from before, and leaves the new one in place.
+- `conmon-term-<random>.sock` in `$TMPDIR`, or in `/tmp` without it, the
+  console socket of a container or an exec with a terminal, on which the
+  runtime hands the terminal over. It is not in the runtime directory, whose
+  path may be too long for the runtime to connect to. The server removes it
+  once it got the terminal. A `TMPDIR` which does not exist gets created. With
+  one which the server can neither create nor write to, every container and
+  exec with a terminal fails with an error which names `bind terminal socket`.
+- The exit files at the `exitPaths` of a container, each written as
+  `.<name>.tmp` next to it and renamed, and an empty file at each of its
+  `oomExitPaths` if the server detected an OOM kill of it, see [OOM
+  reporting](logging.md#oom-reporting).
+- The log files of the container log drivers, and `.<name>.conmonrs-tmp` next
+  to one while it gets replaced, see [Logging](logging.md#logging).
+- The attach sockets at the `socketPath` of each `attachContainer`, which the
+  server removes when the container exits, see [Attach
+  socket](protocols.md#attach-socket).
+
+The server also creates the directories it needs: the runtime directory and
+the runtime root when it starts, and the parent directory of a socket it binds
+if that is missing, like the one of an attach socket or of the console socket.
+
+The streaming server has no file: it listens on a random TCP port of
+`127.0.0.1` once the first `serveExecContainer`, `serveAttachContainer` or
+`servePortForwardContainer` asked for a URL, see [Streaming
+server](protocols.md#streaming-server).
 
 The server adds arguments of its own to every runtime call for a container or
 an exec, before the arguments of the request: `--root=<RUNTIME_ROOT>`

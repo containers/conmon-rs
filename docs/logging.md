@@ -9,13 +9,15 @@ size, the server writes the entries read before it to the old file and
 replaces the log file with a new empty one, like conmon: it creates
 `.<name>.conmonrs-tmp` next to it, a name which the log cleanup of the kubelet
 does not match, and renames it over the path, so that a reader which follows
-the log, like `kubectl logs -f`, reads the old file to its end first.
-`reopenLogContainer`, which CRI-O calls after the kubelet rotated the log,
-starts a new file at the path the same way. The server appends to the log
-files, so a file which gets truncated in place, for example to free disk
-space, continues at its new end. A log file which exists when the container
-gets created is appended to like with conmon, its content counts for the
-maximum size. A write which fails in the
+the log, like `kubectl logs -f`, reads the old file to its end first. The
+rename unlinks the old file, the server keeps no rotated copy: its content is
+gone once no reader holds it open anymore. Keeping rotated logs is up to the
+caller, which renames the log file and then calls `reopenLogContainer`, as the
+kubelet does through CRI-O: the server then starts a new file at the path the
+same way. The server appends to the log files, so a file which gets truncated
+in place, for example to free disk space, continues at its new end. A log file
+which exists when the container gets created is appended to like with conmon,
+its content counts for the maximum size. A write which fails in the
 middle of an entry, like on a full disk, drops the rest of the entries read
 with it, the next entry starts on a line of its own, and so does the first
 entry after existing content without a final newline. A rotation which fails

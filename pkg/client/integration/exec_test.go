@@ -424,7 +424,7 @@ var _ = Describe("ConmonClient", func() {
 				Expect(result).NotTo(BeNil())
 				Expect(result.TimedOut).To(BeTrue())
 				// The killed command reports no exit code of its own.
-				Expect(result.ExitCode).To(BeNumerically("<", 0))
+				Expect(result.ExitCode).To(Equal(client.ExecExitCodeTimedOut))
 			}, SpecTimeout(specTimeout))
 
 			It(

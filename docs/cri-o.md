@@ -50,13 +50,29 @@ DEBU[…] Using conmonrs version: …, tag: …, commit: …, build: …, \
 …
 ```
 
-CRI-O serves exec, attach and port forwarding itself by default. Only with
-`stream_websockets = true` in the runtime handler, since v1.34, it hands exec
-and attach to the [streaming server](protocols.md#streaming-server) of
-conmon-rs, the sections about it apply only then. CRI-O v1.38, `main` and the
-releases of the 1.37 branch after v1.37.2 hand port forwarding to a binary with
-the `portforward` [feature](protocols.md#features) as well, and turn
-`stream_websockets` off with a warning for a binary without the
+Whether CRI-O serves exec, attach and port forwarding itself or hands them to
+the [streaming server](protocols.md#streaming-server) of conmon-rs depends on
+`stream_websockets` of the runtime handler, the sections about the streaming
+server only apply to a handler which has it on:
+
+- Up to v1.37, CRI-O serves them itself by default. Only with
+  `stream_websockets = true`, since v1.34, it hands exec and attach to
+  conmon-rs.
+- v1.38 and `main` turn `stream_websockets` on for a `pod` runtime handler which
+  does not set it and whose binary reports the `streamingprotocols`
+  [feature](protocols.md#features), and log
+  `Enabling streaming over websockets for runtime handler "…" by default`. They
+  leave it off if `stream_enable_tls` or `infra_ctr_cpuset` of CRI-O or
+  `exec_cpu_affinity` of the handler is set: the streaming server speaks plain
+  HTTP, and the server neither runs the exec sessions it serves in the exec
+  cgroup of `exec_cpu_affinity` nor pins them to the `infra_ctr_cpuset`. An
+  explicit `stream_websockets = true` stays on with these options, CRI-O only
+  warns about them, and `stream_websockets = false` keeps the streaming of
+  CRI-O.
+
+CRI-O v1.38, `main` and the releases of the 1.37 branch after v1.37.2 hand port
+forwarding to a binary with the `portforward` feature as well, and turn a
+`stream_websockets = true` off with a warning for a binary without the
 `streamingprotocols` feature. v1.34 to v1.37.2 only do that for a binary before
 v0.7.0, so leave it off there with a server before v1.2.0: those servers only
 speak `v5.channel.k8s.io`, while the kubelet talks SPDY to them. The
@@ -97,9 +113,11 @@ v1.2.1, which the CRI-O releases up to v1.37 vendor, pass them on to the server,
 which then hangs or fails every pod. The client of v1.2.2, which CRI-O v1.38 and
 `main` vendor, drops them.
 
-Some CRI-O options do not reach the server. CRI-O passes `no_pivot` only to
-conmon, the server creates the containers without `--no-pivot`. CRI-O applies
-the `container_create_timeout` of a runtime handler only to conmon and VM
+Some CRI-O options do not reach the server, or only in newer versions. Up to
+v1.37, CRI-O passes `no_pivot` only to conmon, the server creates the
+containers without `--no-pivot`. v1.38 and `main` pass `--no-pivot` to the
+server as well, in the `CommandArgs` of the create. CRI-O applies the
+`container_create_timeout` of a runtime handler only to conmon and VM
 runtimes: with a `pod` runtime handler, it waits for the server as long as the
 CRI request lasts, and a server since v1.2.0 kills a runtime which takes longer
 than its own limit of 10 minutes to create a container, see [Cap'n Proto
@@ -180,6 +198,11 @@ CRI-O with the client of v1.2.1 or newer serves exec, attach and port
 forwarding for these pods with its own streaming server instead. Drain the node
 before an upgrade or downgrade across the break, or recreate its pods after it,
 to give them servers of the new version.
+
+An upgrade to CRI-O v1.38 turns `stream_websockets` on for the `pod` runtime
+handlers which do not set it, unless the binary or one of the options named in
+[Configure CRI-O](#configure-cri-o) keeps it off. Set
+`stream_websockets = false` to keep the streaming of CRI-O.
 
 ## Red Hat OpenShift
 

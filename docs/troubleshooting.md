@@ -195,16 +195,28 @@ needs a build with the `tracing` feature:
 ```
 
 The static release binaries and the RPMs get built without it, they accept
-`--enable-tracing` and `--tracing-endpoint` and ignore them. With the feature,
-`--enable-tracing` exports to `--tracing-endpoint`, `http://127.0.0.1:4317` by
-default. The Go client starts the server with these flags if its
-configuration has `Tracing: client.Tracing{Enabled: true}`. It then passes the
-span of the context of a call along with the RPC, if there is one, through the
-global propagator of OpenTelemetry (`otel.SetTextMapPropagator`), which does
-nothing unless the caller registers one, like CRI-O does. The server reads the
-W3C Trace Context, so the propagator has to write it, like
-`propagation.TraceContext{}`.
-[contrib/tracing](../contrib/tracing) runs a local Jaeger to look at the traces.
+`--enable-tracing` and `--tracing-endpoint` and ignore them. The dependency
+tree of a binary tells whether it has the feature:
+
+```console
+> conmonrs --version full | grep opentelemetry
+├── opentelemetry v…
+…
+```
+
+A build without the feature prints nothing here. Neither does one which got
+built without the dependency tree, whose `cargo tree:` line of `--version full`
+is empty, see [Build from source](install.md#build-from-source).
+
+With the feature, `--enable-tracing` exports to `--tracing-endpoint`,
+`http://127.0.0.1:4317` by default. The Go client starts the server with these
+flags if its configuration has `Tracing: client.Tracing{Enabled: true}`. It then
+passes the span of the context of a call along with the RPC, if there is one,
+through the global propagator of OpenTelemetry (`otel.SetTextMapPropagator`),
+which does nothing unless the caller registers one, like CRI-O does. The server
+reads the W3C Trace Context, so the propagator has to write it, like
+`propagation.TraceContext{}`. [contrib/tracing](../contrib/tracing) runs a local
+Jaeger to look at the traces.
 
 ## Changes
 

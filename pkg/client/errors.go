@@ -77,12 +77,14 @@ var (
 	ErrServerPIDUnknown = errors.New("server PID unknown")
 
 	// ErrServerDisconnected gets matched by the error of a method if the
-	// connection to the server ended during the call, for example because
-	// the server exited, unlike a request which the server rejected. Calls
-	// in flight while Close, Shutdown or Kill reset the connection match it
-	// as well, or fail with ErrClientClosed. The next call connects again,
-	// also to a server which replaced the exited one, after Close it fails
-	// with ErrClientClosed instead. Use errors.Is to check for it.
+	// connection to the server ended before the request could be sent or
+	// during the call, for example because the server exited, unlike a
+	// request which the server rejected. The error does not tell whether
+	// the server got the request. Calls in flight while Close, Shutdown or
+	// Kill reset the connection match it as well, or fail with
+	// ErrClientClosed. The next call connects again, also to a server which
+	// replaced the exited one, after Close it fails with ErrClientClosed
+	// instead. Use errors.Is to check for it.
 	ErrServerDisconnected = errors.New("disconnected from the server")
 
 	// ErrServerUnreachable gets matched by the error of a method if no
@@ -121,8 +123,28 @@ func (unsupportedError) Is(target error) bool {
 // they do not know: since the message got stable, and before.
 var containerNotFoundMessages = []string{ErrContainerNotFound.Error(), "child not available"}
 
-// matchedError is a failure the server reported, which also matches an
-// exported error.
+// requestLostWithConn reports whether a call failed because its request
+// could not be sent on a connection which ended: its write failed, like with
+// EPIPE right after the server exited, before the read of the connection
+// noticed that, or the RPC system dropped the request while it shut the
+// connection down. It reports both as a failed call which wraps the reason,
+// not as a disconnected one. A failure of the server only carries a message.
+func requestLostWithConn(exception *exc.Exception) bool {
+	if connClosedOnWrite(exception) {
+		return true
+	}
+
+	for inner := exception; errors.As(inner.Cause, &inner); {
+		if inner.Type == exc.Disconnected {
+			return true
+		}
+	}
+
+	return false
+}
+
+// matchedError is the failure of a call which also matches an exported
+// error, its message stays the one of the failure.
 type matchedError struct {
 	err    error
 	target error
@@ -151,14 +173,15 @@ func rpcResult[T any](future interface{ Struct() (T, error) }) (T, error) {
 
 // rpcError makes the failure of a call match the exported error for it, if
 // any. The server reports every failure as an exception with a message, an
-// ended connection fails calls with a disconnected one.
+// ended connection fails calls with a disconnected one, or with a failed one
+// for a request which could not be sent, see requestLostWithConn.
 func rpcError(err error) error {
 	var exception *exc.Exception
 	if !errors.As(err, &exception) {
 		return err
 	}
 
-	if exception.Type == exc.Disconnected {
+	if exception.Type == exc.Disconnected || requestLostWithConn(exception) {
 		return &matchedError{err: err, target: ErrServerDisconnected}
 	}
 

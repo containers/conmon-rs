@@ -162,7 +162,9 @@ var _ = Describe("StreamingServer", func() {
 						)
 						Expect(err).To(Succeed())
 
-						// The runtime fails to start the command, the session reports it.
+						// The runtime fails to start the command, the session
+						// reports it with the error of the runtime, which names
+						// the command. A connection which failed would not.
 						Expect(
 							streamURLOver(
 								ctx,
@@ -174,7 +176,13 @@ var _ = Describe("StreamingServer", func() {
 									Tty:    terminal,
 								},
 							),
-						).NotTo(Succeed())
+						).To(MatchError(And(
+							ContainSubstring(
+								"Internal error occurred: error executing command in container: "+
+									"create new child process: runtime exited with status",
+							),
+							ContainSubstring("/does/not/exist"),
+						)))
 
 						Eventually(func() []string { return execPIDFiles(tr.tmpDir) }).
 							WithTimeout(10 * time.Second).

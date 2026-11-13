@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/containers/conmon-rs/internal/proto"
+	"github.com/sirupsen/logrus"
 	"go.podman.io/common/pkg/resize"
 )
 
@@ -106,11 +107,18 @@ type attachSession struct {
 	stdinClosed atomic.Bool
 }
 
+// attachLogger returns the logger of an attach, which names its container:
+// every client logs through the standard logger of logrus, so the logs of
+// the attaches of all containers and pods of a caller end up in one place.
+func (c *ConmonClient) attachLogger(cfg *AttachContainerConfig) *logrus.Entry {
+	return c.logger.WithField("container_id", cfg.ID)
+}
+
 // startAttachSession registers an attach session, which Close ends through
 // the returned context, until endAttachSession. It fails with
 // ErrClientClosed after Close.
 func (c *ConmonClient) startAttachSession(
-	ctx context.Context, cfg *AttachContainerConfig,
+	ctx context.Context, cfg *AttachContainerConfig, logger logrus.Ext1FieldLogger,
 ) (context.Context, *attachSession, error) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	session := &attachSession{
@@ -119,7 +127,7 @@ func (c *ConmonClient) startAttachSession(
 	}
 	session.closeStdin = sync.OnceFunc(func() {
 		session.stdinClosed.Store(true)
-		c.closeStdin(cfg)
+		c.closeStdin(cfg, logger)
 	})
 
 	// Checked under the lock, Close takes the sessions out after it got
@@ -192,9 +200,10 @@ func (c *ConmonClient) AttachContainer(
 }
 
 func (c *ConmonClient) attach(ctx context.Context, cfg *AttachContainerConfig) error {
-	c.logger.Debugf("Attaching to container %s", cfg.ID)
+	logger := c.attachLogger(cfg)
+	logger.Debug("Attaching to container")
 
-	ctx, session, err := c.startAttachSession(ctx, cfg)
+	ctx, session, err := c.startAttachSession(ctx, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -204,7 +213,7 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachContainerConfig) e
 	resizeDone := make(chan struct{})
 	defer close(resizeDone)
 
-	go c.forwardResizeEvents(ctx, cfg, resizeDone)
+	go c.forwardResizeEvents(ctx, cfg, logger, resizeDone)
 
 	conn, err := dialLongSocket("unixpacket", cfg.SocketPath)
 	if err != nil {
@@ -213,13 +222,15 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachContainerConfig) e
 
 	defer func() {
 		if err := conn.Close(); err != nil {
-			c.logger.Errorf("unable to close socket: %q", err)
+			logger.WithError(err).Error("Unable to close attach socket")
 		}
 	}()
 
-	receiveStdoutError, stdinDone := c.setupStdioChannels(ctx, cfg, conn, session)
+	receiveStdoutError, stdinDone := c.setupStdioChannels(ctx, cfg, logger, conn, session)
 
-	if err := c.readStdio(ctx, cfg, conn, session, receiveStdoutError, stdinDone); err != nil {
+	if err := c.readStdio(
+		ctx, cfg, logger, conn, session, receiveStdoutError, stdinDone,
+	); err != nil {
 		return fmt.Errorf("read stdio: %w", err)
 	}
 
@@ -232,6 +243,7 @@ func (c *ConmonClient) attach(ctx context.Context, cfg *AttachContainerConfig) e
 func (c *ConmonClient) forwardResizeEvents(
 	ctx context.Context,
 	cfg *AttachContainerConfig,
+	logger logrus.Ext1FieldLogger,
 	done <-chan struct{},
 ) {
 	if cfg.Resize == nil {
@@ -251,17 +263,21 @@ func (c *ConmonClient) forwardResizeEvents(
 				continue
 			}
 
-			c.logger.Debugf("Got a resize event: %+v", size)
+			logger.Debugf("Got a resize event: %+v", size)
 
 			if err := c.setWindowSize(ctx, cfg.ID, size); err != nil {
-				c.logger.Debugf("Failed to write to control file to resize terminal: %v", err)
+				logger.WithError(err).Debug("Unable to resize the terminal")
 			}
 		}
 	}
 }
 
 func (c *ConmonClient) setupStdioChannels(
-	ctx context.Context, cfg *AttachContainerConfig, conn *net.UnixConn, session *attachSession,
+	ctx context.Context,
+	cfg *AttachContainerConfig,
+	logger logrus.Ext1FieldLogger,
+	conn *net.UnixConn,
+	session *attachSession,
 ) (receiveStdoutError, stdinDone chan error) {
 	ctx, span := c.startSpan(ctx, "setupStdioChannels")
 	if span != nil {
@@ -273,7 +289,7 @@ func (c *ConmonClient) setupStdioChannels(
 	receiveStdoutError = make(chan error, 1)
 
 	go func() {
-		receiveStdoutError <- c.redirectResponseToOutputStreams(ctx, cfg, conn)
+		receiveStdoutError <- c.redirectResponseToOutputStreams(ctx, cfg, logger, conn)
 	}()
 
 	stdinDone = make(chan error, 1)
@@ -307,19 +323,11 @@ func (c *ConmonClient) setupStdioChannels(
 // errors of reading the stdin of the caller as they are, which may be a
 // connection as well.
 func stdinConnClosed(err error) bool {
-	if errors.Is(err, io.ErrClosedPipe) {
-		return true
-	}
-
-	var opErr *net.OpError
-
-	return errors.As(err, &opErr) && opErr.Op == "write" &&
-		(errors.Is(opErr, net.ErrClosed) || errors.Is(opErr, syscall.EPIPE) ||
-			errors.Is(opErr, syscall.ECONNRESET))
+	return errors.Is(err, io.ErrClosedPipe) || connClosedOnWrite(err)
 }
 
 func (c *ConmonClient) redirectResponseToOutputStreams(
-	ctx context.Context, cfg *AttachContainerConfig, conn io.Reader,
+	ctx context.Context, cfg *AttachContainerConfig, logger logrus.Ext1FieldLogger, conn io.Reader,
 ) (err error) {
 	_, span := c.startSpan(ctx, "redirectResponseToOutputStreams")
 	defer endSpan(span, &err)
@@ -334,16 +342,16 @@ func (c *ConmonClient) redirectResponseToOutputStreams(
 
 	for {
 		if trace {
-			c.logger.Trace("Waiting to read from attach connection")
+			logger.Trace("Waiting to read from attach connection")
 		}
 
 		nr, er := conn.Read(buf)
 		if trace {
-			c.logger.WithError(er).Tracef("Got %d bytes from attach connection", nr)
+			logger.WithError(er).Tracef("Got %d bytes from attach connection", nr)
 		}
 
 		if nr > 0 {
-			cont, ew := c.handlePacket(cfg, buf, nr, trace)
+			cont, ew := c.handlePacket(cfg, logger, buf, nr, trace)
 			if ew != nil {
 				return ew
 			}
@@ -359,7 +367,7 @@ func (c *ConmonClient) redirectResponseToOutputStreams(
 
 		if errors.Is(er, syscall.ECONNRESET) {
 			if trace {
-				c.logger.WithError(er).Trace("Connection reset, retrying to read")
+				logger.WithError(er).Trace("Connection reset, retrying to read")
 			}
 
 			continue
@@ -414,21 +422,21 @@ func sameWriter(a, b io.Writer) (same bool) {
 // runs for every packet, the span of redirectResponseToOutputStreams covers
 // all of them, trace tells whether to log them.
 func (c *ConmonClient) handlePacket(
-	cfg *AttachContainerConfig, buf []byte, nr int, trace bool,
+	cfg *AttachContainerConfig, logger logrus.Ext1FieldLogger, buf []byte, nr int, trace bool,
 ) (cont bool, err error) {
 	var dst io.Writer
 
 	switch buf[0] {
 	case attachPipeDone:
 		if trace {
-			c.logger.Trace("Received done packet")
+			logger.Trace("Received done packet")
 		}
 
 		return false, nil
 
 	case attachPipeStdout:
 		if cfg.Streams.Stdout == nil {
-			c.logger.Debug("stdout for packet is nil")
+			logger.Debug("Dropping stdout packet, the attach has no stdout")
 
 			return true, nil
 		}
@@ -436,12 +444,12 @@ func (c *ConmonClient) handlePacket(
 		dst = cfg.Streams.Stdout
 
 		if trace {
-			c.logger.Trace("Received stdout packet")
+			logger.Trace("Received stdout packet")
 		}
 
 	case attachPipeStderr:
 		if cfg.Streams.Stderr == nil {
-			c.logger.Debug("stderr for packet is nil")
+			logger.Debug("Dropping stderr packet, the attach has no stderr")
 
 			return true, nil
 		}
@@ -449,18 +457,18 @@ func (c *ConmonClient) handlePacket(
 		dst = cfg.Streams.Stderr
 
 		if trace {
-			c.logger.Trace("Received stderr packet")
+			logger.Trace("Received stderr packet")
 		}
 
 	default:
-		c.logger.Infof("Received unexpected attach type %+d", buf[0])
+		logger.Warnf("Received attach packet of unknown type %d", buf[0])
 
 		return true, nil
 	}
 
 	nw, ew := dst.Write(buf[1:nr])
 	if trace {
-		c.logger.WithError(ew).Tracef("Wrote %d bytes to destination", nw)
+		logger.WithError(ew).Tracef("Wrote %d bytes to destination", nw)
 	}
 
 	if ew != nil {
@@ -478,19 +486,20 @@ func (c *ConmonClient) handlePacket(
 // The attach socket stays, the server keeps listening on it until the
 // container exits and removes it then. Use the closeStdin of the session,
 // which closes it once.
-func (c *ConmonClient) closeStdin(cfg *AttachContainerConfig) {
+func (c *ConmonClient) closeStdin(cfg *AttachContainerConfig, logger logrus.Ext1FieldLogger) {
 	if cfg.Streams.Stdin == nil {
 		return
 	}
 
 	if err := cfg.Streams.Stdin.Close(); err != nil {
-		c.logger.WithError(err).Warn("Unable to close attach stdin")
+		logger.WithError(err).Warn("Unable to close attach stdin")
 	}
 }
 
 func (c *ConmonClient) readStdio(
 	ctx context.Context,
 	cfg *AttachContainerConfig,
+	logger logrus.Ext1FieldLogger,
 	conn *net.UnixConn,
 	session *attachSession,
 	receiveStdoutError, stdinDone chan error,
@@ -498,19 +507,19 @@ func (c *ConmonClient) readStdio(
 	_, span := c.startSpan(ctx, "readStdio")
 	defer endSpan(span, &err)
 
-	c.logger.Trace("Read stdio on attach")
+	logger.Trace("Read stdio on attach")
 
 	// Stopping the output can happen on stdin EOF and once more if the
 	// context ends while waiting for the output.
 	closeRead := sync.OnceFunc(func() {
 		if closeErr := conn.CloseRead(); closeErr != nil {
-			c.logger.Errorf("Unable to close conn: %v", closeErr)
+			logger.WithError(closeErr).Error("Unable to close the read side of the attach socket")
 		}
 	})
 
 	select {
 	case err = <-receiveStdoutError:
-		c.logger.WithError(err).Trace("Received message on output channel")
+		logger.WithError(err).Trace("Received message on output channel")
 		session.closeStdin()
 
 		if closeErr := conn.CloseWrite(); closeErr != nil {
@@ -524,7 +533,7 @@ func (c *ConmonClient) readStdio(
 		return nil
 
 	case err = <-stdinDone:
-		c.logger.WithError(err).Trace("Received message on input channel")
+		logger.WithError(err).Trace("Received message on input channel")
 
 		session.closeStdin()
 
@@ -536,13 +545,13 @@ func (c *ConmonClient) readStdio(
 		// A failed stdin copy ends the attach right away, the output stops
 		// before it returns.
 		if err != nil {
-			c.stopOutput(closeRead, receiveStdoutError)
+			c.stopOutput(logger, closeRead, receiveStdoutError)
 
 			return errors.Join(closeErr, fmt.Errorf("copy stdin: %w", err))
 		}
 
 		if closeErr != nil {
-			c.logger.Errorf("Unable to close conn: %v", closeErr)
+			logger.WithError(closeErr).Error("Unable to close the write side of the attach socket")
 		}
 
 		// The server never closes a terminal, and closes the container stdin
@@ -554,22 +563,22 @@ func (c *ConmonClient) readStdio(
 			(!cfg.Terminal && cfg.ContainerStdin && !cfg.StopAfterStdinEOF) {
 			closeRead()
 
-			if err := c.waitForOutput(ctx, closeRead, receiveStdoutError); err != nil {
-				c.logger.WithError(err).Debug("Output failed after stdin EOF")
+			if err := c.waitForOutput(ctx, logger, closeRead, receiveStdoutError); err != nil {
+				logger.WithError(err).Debug("Output failed after stdin EOF")
 			}
 
 			return nil
 		}
 
 		if cfg.Streams.Stdout != nil || cfg.Streams.Stderr != nil {
-			return c.waitForOutput(ctx, closeRead, receiveStdoutError)
+			return c.waitForOutput(ctx, logger, closeRead, receiveStdoutError)
 		}
 
 	case <-ctx.Done():
-		c.logger.WithError(ctx.Err()).Trace("Context done while attached")
+		logger.WithError(ctx.Err()).Trace("Context done while attached")
 
 		session.closeStdin()
-		c.stopOutput(closeRead, receiveStdoutError)
+		c.stopOutput(logger, closeRead, receiveStdoutError)
 
 		return fmt.Errorf("attach: %w", context.Cause(ctx))
 	}
@@ -582,6 +591,7 @@ func (c *ConmonClient) readStdio(
 // connection.
 func (c *ConmonClient) waitForOutput(
 	ctx context.Context,
+	logger logrus.Ext1FieldLogger,
 	closeRead func(),
 	receiveStdoutError <-chan error,
 ) error {
@@ -589,7 +599,7 @@ func (c *ConmonClient) waitForOutput(
 	case err := <-receiveStdoutError:
 		return err
 	case <-ctx.Done():
-		c.stopOutput(closeRead, receiveStdoutError)
+		c.stopOutput(logger, closeRead, receiveStdoutError)
 
 		return fmt.Errorf("wait for output: %w", context.Cause(ctx))
 	}
@@ -599,14 +609,16 @@ func (c *ConmonClient) waitForOutput(
 // which closes the output streams, so that nothing writes to or closes them
 // after the attach returned. A write blocked by a stream nobody reads can
 // only be waited for a while, it may still finish afterwards.
-func (c *ConmonClient) stopOutput(closeRead func(), receiveStdoutError <-chan error) {
+func (c *ConmonClient) stopOutput(
+	logger logrus.Ext1FieldLogger, closeRead func(), receiveStdoutError <-chan error,
+) {
 	closeRead()
 
 	select {
 	case err := <-receiveStdoutError:
-		c.logger.WithError(err).Trace("Output stopped")
+		logger.WithError(err).Trace("Output stopped")
 	case <-time.After(attachOutputStopTimeout):
-		c.logger.Warn("Output still blocked, returning anyway")
+		logger.Warn("Output stream of the attach still blocked, returning without waiting for it")
 	}
 }
 

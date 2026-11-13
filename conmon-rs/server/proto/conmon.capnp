@@ -156,7 +156,9 @@ interface Conmon {
         # one.
         path @1 :Text;
 
-        # The maximum log size in bytes, 0 means unlimited.
+        # The maximum log size in bytes, 0 means unlimited. Once the next
+        # entry would exceed it, the server replaces the log file with a new
+        # empty one and keeps no copy of the old one.
         maxSize @2 :UInt64;
 
         # The name of the container, which the journald logger writes as
