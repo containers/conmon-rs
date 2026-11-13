@@ -12,7 +12,7 @@ env:
   CARGO_TERM_COLOR: always
   # cargo-fuzz needs a nightly toolchain, a pinned one keeps new lints and
   # compiler changes out of unrelated pull requests.
-  FUZZ_TOOLCHAIN: "nightly-2026-10-15"
+  FUZZ_TOOLCHAIN: "nightly-2026-11-12"
   # Built from the crate of the release, see build-fuzz.
   CARGO_FUZZ_VERSION: "0.13.2"
   # Like SAVE_CACHE of the ci workflow, only main saves the build caches.

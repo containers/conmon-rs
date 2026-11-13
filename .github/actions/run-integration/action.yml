@@ -65,8 +65,11 @@ runs:
         path: |
           /tmp/conmon-test-images-0
         key: integration-test-files-${{ runner.os }}-${{ hashFiles('pkg/client/integration/files_test.go') }}
+    # The token is the one of the download, see .github/download-release.
     - shell: bash
       run: .github/install-crun
+      env:
+        GH_TOKEN: ${{ github.token }}
     - name: Runtime version
       shell: bash
       env:

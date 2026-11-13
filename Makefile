@@ -53,9 +53,9 @@ export CI_TAG
 GOLANGCI_LINT_VERSION := v2.15.0
 # The images run pinned by the digest of their index, which a bump of the
 # version updates as well, see dependencies.yaml and verify-digests.
-PRETTIER_VERSION := 3.9.10
-NODE_VERSION := 26.13.0
-NODE_DIGEST := sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072
+PRETTIER_VERSION := 3.10.1
+NODE_VERSION := 26.13.1
+NODE_DIGEST := sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc
 NODE_IMAGE := docker.io/library/node:$(NODE_VERSION)-slim@$(NODE_DIGEST)
 PRETTIER = $(CONTAINER_RUNTIME) run --rm -v $(CURDIR):/w:z -w /w --entrypoint npx \
 	$(NODE_IMAGE) --yes prettier@$(PRETTIER_VERSION)
@@ -130,6 +130,18 @@ release-static: ## Build the static release binary for the local architecture (x
 unit: ## Run the unit tests with the default and with the tracing feature.
 	cargo test --locked --no-fail-fast
 	cargo test --locked --no-fail-fast --features tracing
+
+# Like the test-unit job of CI, without its coverage: with both sets of
+# features and the ci profile of .config/nextest.toml, whose report keeps the
+# output of the passed tests. A test still passes if a task which it does not
+# wait for panics, and make unit hides its output then, see
+# .github/verify-panics.
+.PHONY: unit-panics
+unit-panics: ## Run the unit tests with cargo-nextest (has to be installed) and fail if a passed test printed a panic.
+	cargo nextest run --locked --profile ci
+	.github/verify-panics target/nextest/ci/junit.xml
+	cargo nextest run --locked --profile ci --features tracing
+	.github/verify-panics target/nextest/ci/junit.xml
 
 .PHONY: unit-go
 unit-go: ## Run the unit tests of the Go client, which need no server.

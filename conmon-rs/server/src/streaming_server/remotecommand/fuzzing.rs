@@ -52,11 +52,11 @@ pub(crate) fn messages(input: &[u8], mut event: impl FnMut(ClientEvent)) {
         input = next;
         let data = Bytes::copy_from_slice(payload);
         let message = match typ % 5 {
-            0 => Message::Binary(data.clone()),
+            0 => Message::Binary(data),
             1 => Message::Text(String::from_utf8_lossy(payload).into_owned().into()),
             2 => Message::Close(None),
-            3 => Message::Ping(data.clone()),
-            _ => Message::Pong(data.clone()),
+            3 => Message::Ping(data),
+            _ => Message::Pong(data),
         };
         let binary = matches!(message, Message::Binary(_));
         let Some(got) = framing.event(message) else {

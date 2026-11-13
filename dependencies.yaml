@@ -48,7 +48,7 @@ dependencies:
   # cargo-nextest-X.Y.Z, which zeitgeist cannot match, see
   # https://github.com/nextest-rs/nextest/releases.
   - name: cargo-nextest
-    version: 0.9.150
+    version: 0.9.151
     refPaths:
       - path: .github/workflows/ci.yml
         match: "tool: cargo-nextest@"
@@ -78,7 +78,7 @@ dependencies:
         match: "CARGO_FUZZ_VERSION:"
 
   - name: prettier
-    version: 3.9.10
+    version: 3.10.1
     upstream:
       flavour: github
       url: prettier/prettier
@@ -91,7 +91,7 @@ dependencies:
   # The toolchain of the CI jobs. The static binaries get built with the
   # rustc of flake.lock, which the build-static jobs print.
   - name: rust
-    version: 1.99.1
+    version: 1.100.0
     upstream:
       flavour: github
       url: rust-lang/rust
@@ -105,7 +105,7 @@ dependencies:
   # dated nightlies, so bump it together with the stable rust version above to
   # a recent nightly with which the build-fuzz job passes.
   - name: rust-nightly
-    version: 2026-10-15
+    version: 2026-11-12
     scheme: alpha
     refPaths:
       - path: .github/workflows/fuzz.yml
@@ -167,9 +167,13 @@ dependencies:
         match: CRI_TOOLS_VERSION=
 
   # A bump updates NIX_INSTALL_SHA256 of the action as well, the sha256 of the
-  # install script of the release, which its install.sha256 file has.
+  # install script of the release, which its install.sha256 file has. The
+  # repository has no releases, zeitgeist reads its tags instead.
   - name: nix
-    version: 2.35.3
+    version: 2.35.6
+    upstream:
+      flavour: github
+      url: NixOS/nix
     refPaths:
       - path: .github/actions/setup-nix/action.yml
         match: releases.nixos.org/nix/nix-
@@ -236,13 +240,16 @@ dependencies:
   # October after its first release. The constraint shows the next LTS major:
   # move the pin to it once a release of it is LTS, which
   # https://nodejs.org/dist/index.json names with its codename, and raise the
-  # constraint by one major then.
+  # constraint by one major then. Upstream publishes the alphas of a major as
+  # regular releases, which zeitgeist would report instead of the releases
+  # of the pinned major, so the constraint leaves out the ones of the next
+  # two majors: X.0.0-0 is lower than every prerelease of X.0.0.
   - name: node
-    version: 26.13.0
+    version: 26.13.1
     upstream:
       flavour: github
       url: nodejs/node
-      constraints: < 28.0.0
+      constraints: "< 27.0.0-0 || >= 27.0.0 < 28.0.0-0"
     refPaths:
       - path: .github/workflows/ci.yml
         match: "node-version:"

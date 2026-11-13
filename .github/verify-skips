@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Fail if a spec of a ginkgo JSON report got skipped which the caller does
+# not expect to skip. The specs skip themselves if the host lacks what they
+# need, like criu, a journal or transparent huge pages, and the suite passes
+# without them, so a runner which lost one of these would go unnoticed.
+#
+# Every EXPECTED is the full text of a spec which may skip, the texts of its
+# containers and its own joined by spaces, like the flaky specs of
+# .github/report-flakes. One which ran after all only warns: its entry is
+# stale and would hide the spec skipping again. A report without any passed
+# spec fails as well.
+#
+# Every -p SPEC is the full text of a spec which has to have passed. That
+# also fails for a spec which the report does not have at all, like after a
+# rename or with a focus, which no skip would show.
+usage() {
+    echo "usage: $0 [-p SPEC]... REPORT [EXPECTED...]" >&2
+    exit 1
+}
+
+REQUIRED=()
+while getopts "p:" OPT; do
+    case $OPT in
+    p) REQUIRED+=("$OPTARG") ;;
+    *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+if (($# == 0)); then
+    usage
+fi
+REPORT=$1
+shift
+EXPECTED=("$@")
+
+# One line per spec: its state, its text and the message of its failure,
+# which a skip has as well, separated by tabs.
+SPECS=$(jq -r '
+    .[].SpecReports // [] | .[] | select(.LeafNodeType == "It") |
+    [
+        .State,
+        ((.ContainerHierarchyTexts // []) + [.LeafNodeText] | join(" ")),
+        (.Failure.Message // "" | if . == "" then "no message" else . end)
+    ] |
+    map(gsub("[\t\r\n]"; " ")) | join("\t")
+' "$REPORT")
+PASSED=$(grep -c $'^passed\t' <<<"$SPECS" || true)
+# Pending specs do not run either.
+SKIPPED=$(grep -E $'^(skipped|pending)\t' <<<"$SPECS" || true)
+echo "$PASSED specs passed, $(grep -c . <<<"$SKIPPED" || true) did not run"
+
+# Print a message, as the error or warning with the title of the workflow
+# there, whose commands need the % escaped.
+annotate() {
+    if [[ -n ${GITHUB_ACTIONS:-} ]]; then
+        echo "::$1 title=$2::${3//%/%25}"
+    else
+        echo "$3"
+    fi
+}
+
+FAILED=0
+fail() {
+    annotate error "$@" >&2
+    FAILED=1
+}
+
+if ((PASSED == 0)); then
+    fail "No passed spec" "No spec of $REPORT passed"
+fi
+
+PASSED_SPECS=$(grep $'^passed\t' <<<"$SPECS" | cut -f2 || true)
+for SPEC in "${REQUIRED[@]}"; do
+    if grep -qxF -- "$SPEC" <<<"$PASSED_SPECS"; then
+        echo "Passed as required: $SPEC"
+    else
+        fail "Spec did not pass" "Has to pass, but did not or is missing: $SPEC"
+    fi
+done
+
+# The expected skips which a spec used, by their index.
+USED=()
+UNEXPECTED=0
+while IFS=$'\t' read -r _ SPEC MESSAGE; do
+    if [[ $SPEC == "" ]]; then
+        continue
+    fi
+    for INDEX in "${!EXPECTED[@]}"; do
+        if [[ $SPEC == "${EXPECTED[INDEX]}" ]]; then
+            echo "Skipped as expected: $SPEC ($MESSAGE)"
+            USED[INDEX]=1
+            continue 2
+        fi
+    done
+    fail "Unexpected skip" "Not expected to skip: $SPEC ($MESSAGE)"
+    UNEXPECTED=1
+done <<<"$SKIPPED"
+
+for INDEX in "${!EXPECTED[@]}"; do
+    if [[ ${USED[INDEX]:-} == "" ]]; then
+        annotate warning "Stale expected skip" "Expected to skip, but did not: ${EXPECTED[INDEX]}"
+    fi
+done
+
+if ((UNEXPECTED)); then
+    echo "A spec skips itself if the host lacks what it needs, see its message. List a spec which cannot run here as expected where $0 gets called." >&2
+fi
+exit "$FAILED"

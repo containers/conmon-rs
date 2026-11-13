@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install Debian packages with apt-get, which takes the ones it finds in
+# CACHE_DIR from there instead of downloading them, and leaves the ones it
+# downloaded there. A workflow caches the directory, so that a slow mirror
+# only costs the packages which changed since.
+#
+# apt-get takes a package from its archives directory if the file has the
+# size of the package index, it only checks the checksums of what it
+# downloads. So every file of CACHE_DIR gets checked here before, against
+# the SHA256 of the package index, which apt-get update verified the
+# signature of: one with another checksum gets removed, like anything else
+# which is no package of the install, and apt-get downloads the package. The
+# directory cannot bring in anything the mirror would not. Nor can the name
+# of a file in it, which only gets printed if it is the one of a package
+# file: another one could hold a workflow command.
+#
+# apt-get downloads as the user _apt, which has to reach CACHE_DIR, it warns
+# and downloads as root otherwise. The home of the runner user is closed to
+# other users, so the workflow keeps the directory in /tmp.
+#
+# Prints the checksum of the names, sizes and checksums of the packages of the
+# install, as the debs output of the step in a workflow as well: the key of a
+# cache entry which holds exactly these.
+if (($# < 2)); then
+    echo "usage: $0 CACHE_DIR PACKAGE..." >&2
+    exit 1
+fi
+# apt-get takes a relative path as one below its own cache directory.
+mkdir -p "$1"
+CACHE_DIR=$(cd "$1" && pwd)
+shift
+
+APT_GET=(apt-get -o Acquire::Retries=5)
+sudo "${APT_GET[@]}" update
+
+# One line per package to download: its quoted URL, the name of its file in
+# the archives directory, its size and its checksum, the SHA256 of the index
+# instead of the weaker one apt-get may print by default.
+URIS=$("${APT_GET[@]}" -o Acquire::ForceHash=SHA256 install -y -qq --print-uris "$@")
+DEBS=$(awk '{ print $2, $3, $4 }' <<<"$URIS" | sort)
+
+# Print a message, as the error or warning with the title of the workflow
+# there, whose commands need the % escaped.
+annotate() {
+    if [[ -n ${GITHUB_ACTIONS:-} ]]; then
+        echo "::$1 title=$2::${3//%/%25}"
+    else
+        echo "$3"
+    fi
+}
+
+# The name of a package file: the package, its version, where apt-get
+# encodes the colon of an epoch, and its architecture.
+PACKAGE_FILE='^[a-z0-9][a-z0-9.+-]*_[A-Za-z0-9.+~%-]+_[a-z0-9-]+\.deb$'
+OTHERS=0
+while IFS= read -r -d '' FILE; do
+    NAME=${FILE##*/}
+    if [[ ! $NAME =~ $PACKAGE_FILE || ! -f $FILE || -L $FILE ]]; then
+        OTHERS=$((OTHERS + 1))
+        rm -rf "$FILE"
+        continue
+    fi
+    SUM=$(NAME=$NAME awk '$1 == ENVIRON["NAME"] { print $3 }' <<<"$DEBS")
+    if [[ ! $SUM =~ ^SHA256:[0-9a-f]{64}$ ]]; then
+        echo "Removing $NAME, which is no package of the install"
+        rm -f "$FILE"
+    elif ! echo "${SUM#SHA256:}  $FILE" | sha256sum -c --status -; then
+        annotate warning "Package cache" "Removing $NAME, which does not match its checksum ${SUM#SHA256:} of the package index"
+        rm -f "$FILE"
+    else
+        echo "Verified $NAME"
+    fi
+done < <(find "$CACHE_DIR" -mindepth 1 -maxdepth 1 -print0)
+if ((OTHERS)); then
+    annotate warning "Package cache" "Removed $OTHERS entries of $CACHE_DIR which are no package files"
+fi
+
+sudo "${APT_GET[@]}" -o Dir::Cache::Archives="$CACHE_DIR" install -y "$@"
+
+# apt-get leaves its lock and the directory of its partial downloads behind,
+# which only root reads. The directory holds the packages alone, as the
+# calling user, who saves it.
+sudo rm -rf "$CACHE_DIR/lock" "$CACHE_DIR/partial"
+sudo chown -R "$(id -u):$(id -g)" "$CACHE_DIR"
+
+# Without the output, the workflow saves no cache entry, which would not hold
+# what its key says.
+while read -r NAME _; do
+    if [[ $NAME != "" && ! -f $CACHE_DIR/$NAME ]]; then
+        annotate warning "Package cache" "apt-get left no $NAME in $CACHE_DIR, which cannot be cached"
+        exit 0
+    fi
+done <<<"$DEBS"
+
+KEY=$(sha256sum <<<"$DEBS" | cut -c1-16)
+echo "Packages of the install: $KEY"
+if [[ -n ${GITHUB_OUTPUT:-} ]]; then
+    echo "debs=$KEY" >>"$GITHUB_OUTPUT"
+fi
