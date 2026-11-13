@@ -8,7 +8,6 @@ import (
 	"github.com/containers/conmon-rs/pkg/client"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"go.podman.io/storage/pkg/unshare"
 )
 
 var _ = Describe("ConmonClient", func() {
@@ -77,9 +76,7 @@ var _ = Describe("ConmonClient", func() {
 			It(
 				testName("should catch out of memory (oom) events", terminal),
 				func(ctx SpecContext) {
-					if unshare.IsRootless() {
-						Skip("does not run rootless")
-					}
+					skipWithoutOOMDetection()
 
 					tr = newTestRunner()
 					tr.createRuntimeConfigWithProcessArgs(

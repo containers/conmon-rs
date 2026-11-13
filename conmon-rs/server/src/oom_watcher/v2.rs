@@ -43,8 +43,7 @@ impl OomCounters {
     /// Whether a process got killed since `baseline`. The kernel counts an
     /// `oom` before the OOM killer runs, which may kill nothing, if reclaim
     /// freed enough memory meanwhile or a victim is exiting already, so only
-    /// kernels without the kill counter fall back to it. The cgroup v1
-    /// watcher waits for a kill as well.
+    /// kernels without the kill counter fall back to it.
     fn increased_since(&self, baseline: &Self) -> bool {
         if self.has_kill {
             self.oom_kill > baseline.oom_kill

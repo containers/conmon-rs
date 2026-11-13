@@ -2,18 +2,13 @@
 //! server reads into the log drivers, the attach clients and the output of the
 //! execs.
 
-use crate::{
-    attach::SharedContainerAttach, container_log::SharedContainerLog, fs_util, random_id::RandomId,
-    terminal::Terminal,
-};
+use crate::{attach::SharedContainerAttach, container_log::SharedContainerLog, terminal::Terminal};
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use std::{
     fmt,
-    path::{Path, PathBuf},
     sync::{Arc, Mutex, atomic::AtomicBool},
 };
-use tracing::debug;
 
 mod drain;
 mod read_loop;
@@ -44,29 +39,6 @@ pub(crate) const STDERR_TAIL_SIZE: usize = 64 * 1024;
 /// A container IO shared by its users, like the watcher, the attach
 /// endpoints and the consumer of the output of an exec.
 pub(crate) type SharedContainerIO = Arc<ContainerIO>;
-
-/// A file path which gets removed on drop.
-#[derive(Debug)]
-pub(crate) struct TempFile(PathBuf);
-
-impl TempFile {
-    /// The path of the file.
-    pub(crate) fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        // A plain unlink does not need the runtime and cannot panic without one.
-        // The file may be gone already: the terminal listener removes its
-        // socket once it got the descriptor, and a runtime may never write a
-        // pidfile.
-        if let Err(e) = fs_util::remove_file(&self.0) {
-            debug!("Unable to remove temp file {}: {}", self.0.display(), e);
-        }
-    }
-}
 
 /// The stdio of a container or exec, a terminal or pipes, and the log
 /// drivers and attach endpoints its output goes to.
@@ -213,22 +185,6 @@ impl ContainerIO {
             consumed,
             collector: Mutex::default(),
         })
-    }
-
-    /// Generate a unique temp file path without creating the file.
-    fn temp_file_name(directory: Option<&Path>, prefix: &str, suffix: &str) -> PathBuf {
-        let dir = directory
-            .map(Path::to_path_buf)
-            .unwrap_or_else(std::env::temp_dir);
-        let unique = RandomId::new();
-        dir.join(format!("{prefix}{unique}{suffix}"))
-    }
-
-    /// A unique file path like [`ContainerIO::temp_file_name`], whose file
-    /// gets removed on drop. This covers early returns and cancelled futures,
-    /// which would leave for example the PID file of an exec behind.
-    pub(crate) fn temp_file(directory: Option<&Path>, prefix: &str, suffix: &str) -> TempFile {
-        TempFile(Self::temp_file_name(directory, prefix, suffix))
     }
 }
 

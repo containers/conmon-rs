@@ -193,6 +193,11 @@ impl ChildReaper {
 
     /// Spawn the runtime, see [`ChildReaper::create_child`].
     fn spawn_runtime(runtime: &Path, args: &[String], stdin: bool) -> Result<RuntimeChild> {
+        Ok(Self::runtime_command(runtime, args, stdin).spawn()?)
+    }
+
+    /// The command of a runtime, see [`ChildReaper::spawn_runtime`].
+    pub(super) fn runtime_command(runtime: &Path, args: &[String], stdin: bool) -> Command {
         let mut cmd = Command::new(runtime);
         // A runtime which gets dropped, for example on a panic, must not keep
         // running unobserved.
@@ -208,9 +213,15 @@ impl ChildReaper {
         cmd.stdin(if stdin { Stdio::piped() } else { Stdio::null() });
 
         cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        // The sd_notify socket of whoever started the server is not for the
+        // runtime, which would add a notify socket mount of its own and
+        // `NOTIFY_SOCKET` to the container. The server does not talk to
+        // systemd itself and starts no other process, so nothing else sees
+        // the variable.
+        cmd.env_remove("NOTIFY_SOCKET");
         // Lowers the open files limit to the one the server started with.
         init::reset_inherited(&mut cmd);
-        Ok(cmd.spawn()?)
+        cmd
     }
 
     /// How long a runtime gets for what follows its exit or its failure: one

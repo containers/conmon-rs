@@ -14,7 +14,6 @@ use crate::streaming_server::{
 use anyhow::{Context, Result, ensure};
 use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
-use percent_encoding::percent_decode_str;
 use std::{pin::pin, sync::Arc};
 use tokio::{
     net::TcpStream,
@@ -80,11 +79,33 @@ impl PortForward {
         Ok(ports)
     }
 
-    /// Decode a query component, invalid escapes stay as they are.
-    fn percent_decode(s: &str) -> String {
-        percent_decode_str(&s.replace('+', " "))
-            .decode_utf8_lossy()
-            .into_owned()
+    /// Decode a query component: a `+` is a space and `%XX` the byte of the
+    /// two hex digits. Invalid escapes stay as they are, and bytes which are
+    /// no UTF-8 become the replacement character.
+    pub(super) fn percent_decode(s: &str) -> String {
+        let hex = |digit: u8| match digit {
+            b'0'..=b'9' => Some(digit - b'0'),
+            b'a'..=b'f' => Some(digit - b'a' + 10),
+            b'A'..=b'F' => Some(digit - b'A' + 10),
+            _ => None,
+        };
+        let mut decoded = Vec::with_capacity(s.len());
+        let mut rest = s.as_bytes();
+        while let [byte, tail @ ..] = rest {
+            rest = tail;
+            decoded.push(match (byte, tail) {
+                (b'%', [high, low, tail @ ..]) => match (hex(*high), hex(*low)) {
+                    (Some(high), Some(low)) => {
+                        rest = tail;
+                        (high << 4) | low
+                    }
+                    _ => b'%',
+                },
+                (b'+', _) => b' ',
+                (byte, _) => *byte,
+            });
+        }
+        String::from_utf8_lossy(&decoded).into_owned()
     }
 
     /// Serve the channel protocol: forward a connection per port until all

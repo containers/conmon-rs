@@ -97,7 +97,7 @@ async fn eof_char_ends_the_input() -> Result<()> {
     let stream = UnixStream::connect(sut.path()).await?;
     send_fd(&stream, b"x", res.master.as_fd()).await?;
     let io = sut.connect().await?;
-    task::spawn(ContainerIO::read_loop_stdin(
+    task::spawn(crate::container_io::ContainerIO::read_loop_stdin(
         io,
         attach.clone(),
         tokio_util::sync::CancellationToken::new(),

@@ -370,6 +370,15 @@ async fn runtime_with_terminal_gets_no_stdin_pipe() -> Result<()> {
     Ok(())
 }
 
+/// Checks the command instead of a runtime: setting the variable for one
+/// would change the environment of the tests in parallel.
+#[test]
+fn runtime_does_not_get_the_notify_socket() {
+    let cmd = ChildReaper::runtime_command(Path::new("sh"), &[], false);
+    let envs: Vec<_> = cmd.as_std().get_envs().collect();
+    assert_eq!(envs, [("NOTIFY_SOCKET".as_ref(), None)]);
+}
+
 /// The tests are no subreaper, so the processes of their runtimes are no
 /// children of theirs, see `abandoned_call_releases_its_process`. The check
 /// of the server gets its flag.

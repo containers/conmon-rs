@@ -39,9 +39,8 @@ operations against it:
 
 The server is single threaded: a tokio `current_thread` runtime drives all I/O
 and runs the Cap'n Proto RPC on the same thread, and blocking work like file I/O
-goes to a small bounded pool. With cgroup v2, all containers of a pod share one
-inotify instance for OOM detection, with cgroup v1 every container gets an
-eventfd on its `memory.oom_control`. The read loops of all containers and the
+goes to a small bounded pool. All containers of a pod share one inotify instance
+for OOM detection with cgroup v2. The read loops of all containers and the
 readers of runtime output share one scratch buffer of the runtime thread, 8 KiB,
 or 33 KiB once an attach client sent stdin, so an idle container holds no read
 buffer. Per container, the server keeps the channels for exec output and a few

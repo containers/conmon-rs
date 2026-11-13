@@ -29,6 +29,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"go.podman.io/storage/pkg/stringid"
 	"go.podman.io/storage/pkg/unshare"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -447,6 +448,26 @@ func skipWithoutJournald(ctx context.Context) {
 
 	if _, err := os.Stat("/run/systemd/journal/socket"); err != nil {
 		Skip("no journal runs: " + err.Error())
+	}
+}
+
+// skipWithoutOOMDetection skips the spec if the OOM kill of a container
+// cannot be told here: rootless, where the memory limit of the container
+// needs permissions for the cgroups, or without the unified hierarchy of
+// cgroup v2 at /sys/fs/cgroup, like with cgroup v1 or a hybrid setup, where
+// the server does not watch for OOM kills. It is the check of the server.
+func skipWithoutOOMDetection() {
+	if unshare.IsRootless() {
+		Skip("does not run rootless")
+	}
+
+	var cgroupRoot unix.Statfs_t
+	if err := unix.Statfs("/sys/fs/cgroup", &cgroupRoot); err != nil {
+		Skip("no cgroup v2 at /sys/fs/cgroup: " + err.Error())
+	}
+
+	if cgroupRoot.Type != unix.CGROUP2_SUPER_MAGIC {
+		Skip("no cgroup v2 at /sys/fs/cgroup")
 	}
 }
 

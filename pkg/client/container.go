@@ -43,7 +43,8 @@ type CreateContainerConfig struct {
 	// OOMExitPaths is a slice of files that should be created if the given
 	// container is OOM killed. They are created empty before the exit files
 	// get written. The paths have to be absolute, servers since v1.2.1
-	// reject other ones.
+	// reject other ones. Servers since unreleased only detect an OOM kill
+	// with cgroup v2 at /sys/fs/cgroup.
 	OOMExitPaths []string
 
 	// LogDrivers is a slice of selected log drivers.

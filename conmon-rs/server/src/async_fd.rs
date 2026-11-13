@@ -1,5 +1,5 @@
 //! Waiting for descriptors which tokio has no type of its own for, like
-//! pidfds, terminals, epoll, inotify and eventfd instances.
+//! pidfds, terminals, epoll and inotify instances.
 
 use std::{
     io,
@@ -32,14 +32,21 @@ impl<T> AsRawFd for Fd<T> {
 
 /// Register the descriptor of a value with the reactor of the runtime, the
 /// returned [`AsyncFd`] owns the value.
+///
+/// The [`Fd`] has to stay in its [`AsyncFd`]: the mutable accessors of it,
+/// like [`AsyncFd::get_mut`], must not be used to swap it with the one of
+/// another registration, see the safety comment below.
 pub(crate) fn register<T: AsFd>(inner: T, interest: Interest) -> io::Result<AsyncFd<Fd<T>>> {
     let raw = inner.as_fd().as_raw_fd();
     #[expect(unsafe_code, reason = "registering a descriptor with tokio")]
-    // SAFETY: the descriptor stays open and refers to the same file for as
-    // long as the value lives, which the `AsyncFd` owns: I/O safety does not
-    // let anything else close or replace the descriptor of an `AsFd` while
-    // it lives, and only shared access to the value gets handed out. The
-    // descriptor is the one taken here.
+    // SAFETY: the descriptor is the one taken here, which `Fd` returns from
+    // then on. It stays open and refers to the same file for as long as the
+    // value lives: I/O safety does not let shared access close or replace
+    // the descriptor of an `AsFd`, and `Fd` hands out nothing else of the
+    // value. The `AsyncFd` owns the `Fd`, but nothing enforces that it keeps
+    // it: its mutable accessors would let safe code swap two of them, each
+    // registration would have the descriptor of the other one then. No
+    // caller uses them, and none may.
     let fd = unsafe { AsyncFd::register_with_interest(Fd { inner, raw }, interest) }?;
     Ok(fd)
 }

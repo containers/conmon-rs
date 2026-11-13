@@ -1,8 +1,8 @@
-//! The setup of the server process before it serves: umask, environment, OOM
-//! score, open files limit, malloc and transparent huge pages, the standard
-//! streams and the descriptors it inherited, its working directory and the
-//! subreaper flag, and giving the runtime calls the OOM score, huge pages
-//! setting and open files limits the server started with.
+//! The setup of the server process before it serves: umask, OOM score, open
+//! files limit, malloc and transparent huge pages, the standard streams and
+//! the descriptors it inherited, its working directory and the subreaper
+//! flag, and giving the runtime calls the OOM score, huge pages setting and
+//! open files limits the server started with.
 
 use crate::config::LogDriver;
 use anyhow::{Context, Result};
@@ -17,7 +17,6 @@ use nix::{
     unistd::{chdir, dup2_stderr, dup2_stdin, dup2_stdout, write},
 };
 use std::{
-    env,
     fs::OpenOptions,
     io::{ErrorKind, Write},
     os::fd::{AsRawFd, IntoRawFd, RawFd},
@@ -32,14 +31,13 @@ use tokio::process::Command;
 /// The OOM score adjustment of the server.
 const OOM_SCORE_ADJ: &str = "/proc/self/oom_score_adj";
 
-/// Set up the process before it forks: drop the notify socket, remember the
-/// OOM score and raise the open files limit for the runtimes, configure
-/// malloc and protect the server from the OOM killer. The server keeps the C
-/// locale, unlike conmon, so that the errors it returns to CRI-O do not
-/// depend on the environment. The umask is set before the configuration
-/// prepares the runtime directories, see `crate::run`.
+/// Set up the process before it forks: remember the OOM score and raise the
+/// open files limit for the runtimes, configure malloc and protect the
+/// server from the OOM killer. The server keeps the C locale, unlike conmon,
+/// so that the errors it returns to CRI-O do not depend on the environment.
+/// The umask is set before the configuration prepares the runtime
+/// directories, see `crate::run`.
 pub(crate) fn set_up_process() -> Result<()> {
-    unset_notify_socket();
     save_oom_score();
     raise_nofile_limit();
     configure_malloc();
@@ -94,7 +92,13 @@ pub(crate) fn close_inherited_fds() {
         //
         // SAFETY: both calls are defined for any integer; a stale or invalid
         // descriptor number fails with `EBADF` rather than affecting anything
-        // else.
+        // else. Closing an open one takes it from nobody, as no live value
+        // owns a descriptor above stderr at this point: nothing the setup
+        // opened before is kept. Only the journal sockets in the statics of
+        // `crate::journal` get created that early, by `Server::log_early`,
+        // whose error ends the start before it gets here, and by the panic
+        // hook, which only a panic runs and which gets installed right
+        // before this call.
         if unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1 {
             // SAFETY: as above.
             unsafe { libc::close(fd) };
@@ -171,17 +175,6 @@ fn set_oom_score_at(path: &Path, score: &str) -> Result<()> {
 /// Set the default umask.
 pub(crate) fn set_default_umask() {
     umask(Mode::from_bits_truncate(0o022));
-}
-
-/// Drop the sd_notify socket of whoever started the server. The server
-/// does not talk to systemd itself, but every process it runs would
-/// inherit the socket: the runtime then adds its own notify socket mount
-/// and `NOTIFY_SOCKET` to the container.
-#[expect(unsafe_code, reason = "changing the environment")]
-fn unset_notify_socket() {
-    // SAFETY: the server is still single threaded, the runtime and its
-    // threads start later.
-    unsafe { env::remove_var("NOTIFY_SOCKET") }
 }
 
 /// The most malloc arenas of the server. glibc gives every thread an arena

@@ -19,7 +19,6 @@ use futures::{
     AsyncReadExt, FutureExt, TryFutureExt,
     io::{BufReader, BufWriter},
 };
-use libc::_exit;
 use nix::{
     sys::signal::{Signal, kill},
     unistd::{ForkResult, Pid, fork},
@@ -32,6 +31,7 @@ use std::{
     fs::File,
     io::{ErrorKind, Write},
     path::Path,
+    process,
     sync::Arc,
 };
 use tokio::{
@@ -201,8 +201,11 @@ impl Server {
     }
 
     /// Write the PID of the forked `child` to the PID file and exit, which
-    /// is all the parent does.
-    #[expect(unsafe_code, reason = "exiting without cleanup after the fork")]
+    /// is all the parent does. It is the process which got started, still
+    /// with its only thread, so it can exit the usual way: nothing but the
+    /// profile runtime of a coverage build registered an exit handler, stdout
+    /// holds no output, and the destructors of the thread locals, which the
+    /// libc may run, only free memory.
     fn exit_parent(&self, child: Pid) -> ! {
         let pidfile = self.config().conmon_pidfile();
         if let Err(e) = File::create(&pidfile).and_then(|mut f| write!(f, "{child}")) {
@@ -210,12 +213,9 @@ impl Server {
             // running behind a failure.
             eprintln!("Unable to write PID file {}: {e}", pidfile.display());
             let _ = kill(child, Signal::SIGKILL);
-            // SAFETY: _exit(2) ends the process right away, the parent has
-            // nothing to flush or clean up.
-            unsafe { _exit(1) };
+            process::exit(1);
         }
-        // SAFETY: as above.
-        unsafe { _exit(0) };
+        process::exit(0);
     }
 
     /// The runtime of the server, see [`Server::MAX_BLOCKING_THREADS`].
