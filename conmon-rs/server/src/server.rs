@@ -131,7 +131,8 @@ impl Server {
     /// blocks for an unbounded time, like waiting for a process, must run on
     /// a dedicated thread instead, or be capped, like
     /// [`ContainerLog::sync`](crate::container_log::ContainerLog::sync),
-    /// otherwise it can starve the pool.
+    /// otherwise it can starve the pool. Log file operations share a budget
+    /// of half the pool, separate from the quarter reserved for log syncs.
     pub(crate) const MAX_BLOCKING_THREADS: usize = 16;
 
     /// Stack size of the threads of the blocking pool, which only run short

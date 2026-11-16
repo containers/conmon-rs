@@ -30,6 +30,18 @@ pub(super) async fn cri_logger(max_size: Option<usize>) -> Result<(NamedTempFile
     Ok((file, logger))
 }
 
+/// A CRI logger writing to an already open descriptor, such as a pipe
+/// whose reader can stall the writes in a test.
+pub(crate) fn log_to_file(file: fs::File) -> SharedContainerLog {
+    let mut driver = CriLogger::new("/unused", None);
+    driver.freeze_timestamp(TIMESTAMP);
+    driver.file().file = Some(Arc::new(file));
+    Arc::new(tokio::sync::Mutex::new(ContainerLog {
+        drivers: vec![Driver::Cri(driver)],
+        ..ContainerLog::default()
+    }))
+}
+
 /// A socket in place of the one of journald, in a directory of its own.
 /// Its entries get read back as one JSON object per entry with its `pipe`,
 /// its `message` and whether it is `partial`. They wait on the socket until

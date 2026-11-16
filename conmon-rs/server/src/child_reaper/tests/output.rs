@@ -2,6 +2,71 @@
 
 use super::*;
 
+const STALLED_LOG_TEST_ENV: &str = "CONMONRS_STALLED_LOG_TEST";
+
+#[test]
+fn stalled_log_writes_leave_room_for_container_exit() -> Result<()> {
+    run_in_own_process(
+        "child_reaper::tests::output::stalled_log_writes_in_own_process",
+        STALLED_LOG_TEST_ENV,
+        false,
+    )
+}
+
+/// Use the real production budget and pool size without other tests sharing
+/// the log admission semaphore or the blocking pool.
+#[test]
+#[ignore = "run by stalled_log_writes_leave_room_for_container_exit in a process of its own"]
+fn stalled_log_writes_in_own_process() -> Result<()> {
+    use crate::{container_io::Pipe, container_log, server::Server};
+    use std::fs::File;
+    use tokio::{runtime::Builder, task::JoinSet};
+
+    if std::env::var_os(STALLED_LOG_TEST_ENV).is_none() {
+        return Ok(());
+    }
+    let rt = Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(Server::MAX_BLOCKING_THREADS)
+        .build()?;
+    rt.block_on(async {
+        let mut readers = vec![];
+        let mut writes = JoinSet::new();
+        // More writers than the pool can run. Each pipe fills and leaves a
+        // real blocking write stalled until its reader is closed below.
+        for _ in 0..2 * Server::MAX_BLOCKING_THREADS {
+            let (reader, writer) = nix::unistd::pipe()?;
+            let capacity = nix::fcntl::fcntl(&writer, nix::fcntl::FcntlArg::F_GETPIPE_SZ)?;
+            let data = bytes::Bytes::from(vec![b'x'; usize::try_from(capacity)? + 8192]);
+            readers.push(reader);
+            let log = container_log::testing::log_to_file(File::from(writer));
+            writes.spawn(async move { log.lock().await.write(Pipe::StdOut, &data).await });
+        }
+        wait_for(|| container_log::available_log_io() == 0).await?;
+        assert!(writes.try_join_next().is_none());
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("exit");
+        let sh = spawn_sh("exit 7")?;
+        let (_, reapable, exit) = ReapableChild::from_child(child(sh.pid, None, &path)?);
+        let mut exit_rx = reapable.watch(exit, || {});
+        let exit = time::timeout(Duration::from_secs(5), exit_rx.recv()).await??;
+        assert_eq!(exit.exit_code, 7);
+        assert_eq!(std::fs::read_to_string(&path)?, "7");
+
+        // Cancelling the async callers must not release the slots of their
+        // still-blocked kernel writes.
+        writes.abort_all();
+        while let Some(result) = writes.join_next().await {
+            assert!(result.is_err_and(|e| e.is_cancelled()));
+        }
+        assert_eq!(container_log::available_log_io(), 0);
+        drop(readers);
+        wait_for(|| container_log::available_log_io() == Server::MAX_BLOCKING_THREADS / 2).await?;
+        Ok(())
+    })
+}
+
 #[tokio::test(start_paused = true)]
 async fn exit_files_wait_for_quiet_output() -> Result<()> {
     let attach = SharedContainerAttach::default();

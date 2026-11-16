@@ -60,6 +60,13 @@ cannot be turned off. The exit files wait up to 5 seconds for the log drivers
 to take the last output and for the sync, a slower disk does not hold them
 back longer.
 
+Log file opens, writes, replacements and deferred closes share an admission
+limit of 8 blocking tasks. Log syncing has a separate limit of 4, leaving 4
+of the server's 16 blocking threads available for lifecycle work such as exit
+files, even if file logging stalls. Work waiting for admission does not occupy a
+blocking thread, and a cancelled caller keeps its slot occupied until the
+underlying operation ends.
+
 The server's own logs go to the server log driver, see [Server
 logs](troubleshooting.md#server-logs). Running with `--log-level debug` prints
 every RPC and I/O decision and is the first thing to try when debugging a

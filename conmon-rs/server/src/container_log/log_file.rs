@@ -1,5 +1,6 @@
 //! Writing a log file on disk, see [`LogFile`].
 
+use super::blocking;
 use crate::fs_util;
 use anyhow::{Context, Result};
 use std::{
@@ -103,7 +104,7 @@ impl LogFile {
         debug!("Open log file {}", self.path.display());
         let options = self.open_options(false);
         let path = self.path.clone();
-        let (file, torn) = task::spawn_blocking(move || {
+        let (file, torn) = blocking::run(move || {
             let tmp = Self::tmp_path(&path);
             if let Err(e) = fs_util::remove_file(&tmp) {
                 debug!("Unable to remove {}: {e}", tmp.display());
@@ -153,7 +154,7 @@ impl LogFile {
         let options = self.open_options(true);
         let path = self.path.clone();
         let tmp = Self::tmp_path(&path);
-        let file = task::spawn_blocking(move || Self::create_at(&options, &tmp, &path))
+        let file = blocking::run(move || Self::create_at(&options, &tmp, &path))
             .await
             .context("join log file replace")??;
         // Closing the old file frees the blocks of a file which got unlinked,
@@ -161,7 +162,11 @@ impl LogFile {
         // not stay locked meanwhile. A sync which still holds it closes it
         // on its own blocking thread.
         if let Some(old) = self.file.replace(Arc::new(file)).and_then(Arc::into_inner) {
-            task::spawn_blocking(move || drop(old));
+            task::spawn(async move {
+                if let Err(e) = blocking::run(move || drop(old)).await {
+                    debug!("Unable to close old log file: {e:#}");
+                }
+            });
         }
         self.bytes_written = 0;
         self.torn = false;
@@ -330,7 +335,7 @@ impl LogFile {
         };
         let buf = mem::take(&mut self.buf);
         let torn = self.torn;
-        let (buf, newline, written, res) = match task::spawn_blocking(move || {
+        let (buf, newline, written, res) = match blocking::run(move || {
             let (newline, written, res) = Self::write_out(&file, torn, &buf);
             (buf, newline, written, res)
         })
