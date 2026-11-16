@@ -6,7 +6,7 @@ require (
 	github.com/containers/conmon-rs v0.0.0-00010101000000-000000000000
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
-	github.com/onsi/ginkgo/v2 v2.33.1
+	github.com/onsi/ginkgo/v2 v2.34.0
 	github.com/onsi/gomega v1.44.0
 	github.com/opencontainers/runc v1.5.2
 	github.com/opencontainers/runtime-spec v1.3.0
@@ -14,7 +14,7 @@ require (
 	github.com/sirupsen/logrus v1.10.2
 	go.podman.io/common v0.70.0
 	go.podman.io/storage v1.65.0
-	golang.org/x/sys v0.49.0
+	golang.org/x/sys v0.50.0
 	k8s.io/apimachinery v0.37.2
 	k8s.io/client-go v0.37.2
 	k8s.io/streaming v0.37.2
