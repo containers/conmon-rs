@@ -8,6 +8,7 @@ use crate::{
     child_reaper::ChildReaper,
     config::{Config, LogDriver},
     container_io::DRAIN_MAX_WAIT,
+    fs_util::{FileId, RemoveError},
     init,
     journal::{self, Journal},
     listener,
@@ -27,15 +28,8 @@ use nix::{
 use opentelemetry::trace::{FutureExt as OpenTelemetryFutureExt, TracerProvider};
 #[cfg(feature = "tracing")]
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use std::{
-    fs::File,
-    io::{ErrorKind, Write},
-    path::Path,
-    process,
-    sync::Arc,
-};
+use std::{fs::File, io::Write, path::Path, process, sync::Arc};
 use tokio::{
-    fs,
     net::UnixListener,
     runtime::{Builder, Runtime},
     signal::unix::{Signal as SignalStream, SignalKind, signal},
@@ -396,9 +390,14 @@ impl Server {
         let socket = self.config().socket();
         let reaper = self.reaper.clone();
         self.reaper.clone().start_orphan_sweep();
-        // Before the backend binds the socket, a signal which arrives once a
-        // client can connect must shut the server down, not kill it.
+        // Register the handlers before binding: a signal after the socket
+        // becomes reachable must shut the server down, not kill it.
         let signals = Self::listen_for_signals();
+        let backend_span = debug_span!("backend");
+        let (listener, socket_file) = {
+            let _entered = backend_span.enter();
+            self.bind_backend()?
+        };
 
         // The RPC system is not `Send`, so the backend and the tasks of the
         // calls run on a local set. It runs on the thread of the runtime
@@ -406,13 +405,13 @@ impl Server {
         // signal handler next to it.
         let local = LocalSet::new();
         local.spawn_local(Self::traced(
-            Self::start_signal_handler(signals, reaper, socket, shutdown_tx),
+            Self::start_signal_handler(signals, reaper, socket, socket_file, shutdown_tx),
             debug_span!("signal_handler"),
         ));
         local
             .run_until(Self::traced(
-                self.start_backend(shutdown_rx),
-                debug_span!("backend"),
+                self.start_backend(listener, shutdown_rx),
+                backend_span,
             ))
             .await
     }
@@ -438,6 +437,7 @@ impl Server {
         signals: Result<[SignalStream; 3]>,
         reaper: Arc<ChildReaper>,
         socket: T,
+        socket_file: FileId,
         shutdown_tx: oneshot::Sender<Result<()>>,
     ) {
         let signalled = Self::wait_for_signal(signals, &reaper).await;
@@ -448,7 +448,7 @@ impl Server {
                 Instant::now() + Self::CLEANUP_TIMEOUT
             }
         };
-        let shutdown = Self::shutdown(reaper, socket, deadline).await;
+        let shutdown = Self::shutdown(reaper, socket, socket_file, deadline).await;
         let result = Self::all_ok([signalled.map(drop), shutdown]);
         // The backend returns it, the server exits non-zero on a failure.
         debug!("Sending shutdown message");
@@ -526,9 +526,10 @@ impl Server {
     async fn shutdown<T: AsRef<Path>>(
         reaper: Arc<ChildReaper>,
         socket: T,
+        socket_file: FileId,
         deadline: Instant,
     ) -> Result<()> {
-        let result = Self::cleanup(reaper, socket, deadline).await;
+        let result = Self::cleanup(reaper, socket, socket_file, deadline).await;
         if let Err(e) = &result {
             error!("Shutdown did not finish: {e:#}");
         }
@@ -549,6 +550,7 @@ impl Server {
     async fn cleanup<T: AsRef<Path>>(
         reaper: Arc<ChildReaper>,
         socket: T,
+        socket_file: FileId,
         deadline: Instant,
     ) -> Result<()> {
         debug!("Starting grandchildren cleanup task");
@@ -559,14 +561,16 @@ impl Server {
             .await
             .context("kill grandchildren");
 
-        debug!("Removing socket file {}", socket.as_ref().display());
-        let socket_removed = Self::until(deadline, async {
-            // One which got removed already, like with its directory, is
-            // fine.
-            match fs::remove_file(socket).await {
-                Err(e) if e.kind() != ErrorKind::NotFound => Err(e.into()),
-                _ => Ok(()),
-            }
+        let socket = socket.as_ref().to_path_buf();
+        debug!("Removing socket file {}", socket.display());
+        let socket_removed = Self::until(deadline, async move {
+            task::spawn_blocking(move || socket_file.remove_at(&socket))
+                .await
+                .context("join socket cleanup")?
+                .map_err(|e| match e {
+                    RemoveError::Stat(e) => format_err!("check socket file: {e}"),
+                    RemoveError::Remove(e) => e.into(),
+                })
         })
         .await
         .context("remove socket file");
@@ -598,20 +602,28 @@ impl Server {
     /// fit into. Larger segments bypass them.
     const RPC_BUFFER_SIZE: usize = 4096;
 
-    /// Serve the RPC socket until the shutdown message, see
-    /// [`Server::logged`] for the result.
-    async fn start_backend(
-        self,
-        mut shutdown_rx: oneshot::Receiver<Result<()>>,
-    ) -> Result<Result<()>> {
+    /// Return the listener with the identity of its socket file, which stays
+    /// unique while the listener is open, so cleanup only unlinks this
+    /// server's socket.
+    fn bind_backend(&self) -> Result<(UnixListener, FileId)> {
         let socket = self.config().socket();
         // Not with_context, which the FutureExt of OpenTelemetry makes
         // ambiguous with the tracing feature.
-        let listener = listener::bind_long_path(&socket, |path| {
+        listener::bind_long_path(&socket, |path| {
             let fd = listener::listen_private(&path)?;
-            UnixListener::from_std(fd.into())
+            let socket_file = FileId::new(&std::fs::symlink_metadata(&path)?);
+            Ok((UnixListener::from_std(fd.into())?, socket_file))
         })
-        .context(format!("bind socket {}", socket.display()))?;
+        .context(format!("bind socket {}", socket.display()))
+    }
+
+    /// Serve the bound RPC socket until the shutdown message, see
+    /// [`Server::logged`] for the result.
+    async fn start_backend(
+        self,
+        listener: UnixListener,
+        mut shutdown_rx: oneshot::Receiver<Result<()>>,
+    ) -> Result<Result<()>> {
         let client: conmon::Client = capnp_rpc::new_client(self);
         let mut accept_errors = listener::AcceptErrors::default();
 

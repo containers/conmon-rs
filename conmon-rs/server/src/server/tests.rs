@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     child_reaper::{Child, InFlight},
+    fs_util::FileId,
     test_util::{Log, container_child, run_in_own_process, spawn_sh, wait_for_real},
 };
 use nix::sys::{prctl, signal::raise};
@@ -10,18 +11,31 @@ async fn cleanup_removes_the_socket() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let socket = dir.path().join("conmon.sock");
     File::create(&socket)?;
+    let socket_file = FileId::new(&std::fs::symlink_metadata(&socket)?);
 
     let reaper = Arc::new(ChildReaper::default());
     let deadline = || Instant::now() + Duration::from_secs(10);
-    Server::cleanup(reaper.clone(), &socket, deadline()).await?;
+    Server::cleanup(reaper.clone(), &socket, socket_file, deadline()).await?;
     assert!(!socket.exists());
 
     // A socket which got removed already, like with its directory, is fine.
-    Server::cleanup(reaper.clone(), &socket, deadline()).await?;
+    Server::cleanup(reaper.clone(), &socket, socket_file, deadline()).await?;
+
+    // A server which replaced the socket while this one was shutting down
+    // keeps its socket.
+    let _original = std::os::unix::net::UnixListener::bind(&socket)?;
+    let socket_file = FileId::new(&std::fs::symlink_metadata(&socket)?);
+    std::fs::remove_file(&socket)?;
+    let replacement = std::os::unix::net::UnixListener::bind(&socket)?;
+    Server::cleanup(reaper.clone(), &socket, socket_file, deadline()).await?;
+    assert!(socket.exists());
+    drop(replacement);
+    std::fs::remove_file(&socket)?;
 
     // Other failures are reported.
     std::fs::create_dir(&socket)?;
-    let err = Server::cleanup(reaper, &socket, deadline())
+    let socket_file = FileId::new(&std::fs::symlink_metadata(&socket)?);
+    let err = Server::cleanup(reaper, &socket, socket_file, deadline())
         .await
         .err()
         .map(|e| format!("{e:#}"));
@@ -64,6 +78,7 @@ async fn unfinished_shutdown_is_logged_and_ends_the_server_with_it() -> Result<(
     let result = Server::shutdown(
         Arc::new(ChildReaper::default()),
         &socket,
+        FileId::new(&std::fs::symlink_metadata(&socket)?),
         Instant::now() + Server::CLEANUP_TIMEOUT,
     )
     .await;
@@ -112,6 +127,7 @@ async fn signal_handler_sends_the_failures_to_the_backend() -> Result<()> {
         Err(format_err!("no signals")),
         Arc::new(ChildReaper::default()),
         &socket,
+        FileId::new(&std::fs::symlink_metadata(&socket)?),
         tx,
     )
     .await;
@@ -124,11 +140,10 @@ async fn signal_handler_sends_the_failures_to_the_backend() -> Result<()> {
     Ok(())
 }
 
-/// The server logs a backend which fails, like one which cannot bind its
-/// socket. With the journal as log driver, the standard streams are gone
-/// after the fork.
+/// Socket bind errors retain their context when logged. With the journal
+/// as log driver, the standard streams are gone after the fork.
 #[tokio::test]
-async fn backend_failures_get_logged() -> Result<()> {
+async fn socket_bind_errors_get_logged_with_context() -> Result<()> {
     let (log, _subscriber) = Log::capture();
     let dir = tempfile::tempdir()?;
     let config = Config::parse_for_test([
@@ -139,12 +154,7 @@ async fn backend_failures_get_logged() -> Result<()> {
     ]);
     // Taken, like by another server.
     std::fs::create_dir(config.socket())?;
-    let (_shutdown_tx, shutdown_rx) = oneshot::channel();
-    let result = time::timeout(
-        Duration::from_secs(10),
-        Server::with_config(config).start_backend(shutdown_rx),
-    )
-    .await?;
+    let result = Server::with_config(config).bind_backend().map(|_| Ok(()));
     let err = Server::logged(result).err().context("bind succeeded")?;
     assert!(format!("{err:#}").starts_with("bind socket "), "{err:#}");
     let log = log.contents()?;
