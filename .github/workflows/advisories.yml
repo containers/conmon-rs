@@ -23,7 +23,7 @@ jobs:
       # Only the advisories, the other checks of cargo-deny depend on the
       # sources alone, which the ci workflow checks. See verify-deny there.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-deny@0.20.2
           fallback: none

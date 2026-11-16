@@ -320,7 +320,7 @@ jobs:
       # cargo deny only reads the metadata of the workspace, which the cargo
       # of the runner image does.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-deny@0.20.2
           fallback: none
@@ -546,7 +546,7 @@ jobs:
       # install-action, a version without one fails instead of falling back to
       # cargo-binstall. See dependencies.yaml.
       - name: Install cargo-llvm-cov and cargo-nextest
-        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: |
             cargo-llvm-cov@0.9.1
@@ -676,7 +676,7 @@ jobs:
           path: /tmp/conmon-apt-debs
           key: ${{ steps.debs-key.outputs.prefix }}${{ steps.install.outputs.debs }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-nextest@0.9.151
           fallback: none
@@ -879,7 +879,7 @@ jobs:
           components: llvm-tools-preview
           save-if: ${{ env.SAVE_CACHE }}
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-llvm-cov@0.9.1
           fallback: none
