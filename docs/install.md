@@ -22,6 +22,13 @@ through the GitHub API, which needs [`jq`](https://jqlang.org):
     bash -s -- -l vX.Y.Z -a arm64 -o $OUTPUT_PATH -n
 ```
 
+The download is staged beside the output path and made executable before a
+rename replaces the destination, so an interrupted download or verification
+failure leaves an existing installation intact.
+If the script is killed without cleanup, for example by SIGKILL or power loss,
+its hidden `.conmonrs.XXXXXX` staging directory may remain beside the binary
+and can be removed.
+
 The script verifies the sigstore signature of the binary if the local system
 has [`cosign`](https://github.com/sigstore/cosign) available in its `$PATH`.
 That needs cosign v2.4.2 or newer, older versions cannot read the bundles of the
