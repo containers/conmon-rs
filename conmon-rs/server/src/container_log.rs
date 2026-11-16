@@ -1,12 +1,16 @@
 //! The log drivers of the containers, which write the container output to
 //! the CRI log files or to journald.
 
+mod blocking;
 mod cri;
 mod journald;
 mod line_buffer;
 mod log_file;
 #[cfg(test)]
 pub(crate) mod testing;
+
+#[cfg(test)]
+pub(crate) use blocking::available as available_log_io;
 
 use crate::conmon_capnp::conmon::log_driver::{self, Owned, Type};
 use crate::{
