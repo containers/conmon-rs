@@ -114,12 +114,13 @@ impl Server {
     /// A server for the configuration without the setup of the process,
     /// which tests must not change.
     pub(crate) fn with_config(config: Config) -> Self {
+        let streaming_server = Arc::new(StreamingServer::new(config.max_streaming_sessions()));
         Self {
             config: Arc::new(config),
             reaper: Default::default(),
             #[cfg(feature = "tracing")]
             tracer: Default::default(),
-            streaming_server: Default::default(),
+            streaming_server,
         }
     }
 

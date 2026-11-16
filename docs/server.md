@@ -12,18 +12,19 @@ clients.
 The server takes these flags, every flag can also be set through the
 environment variable in parentheses:
 
-| Flag                              | Environment               | Default                 | Purpose                                                                              |
-| --------------------------------- | ------------------------- | ----------------------- | ------------------------------------------------------------------------------------ |
-| `-r, --runtime <RUNTIME>`         | `CONMON_RUNTIME`          |                         | Binary path of the OCI runtime, required for running the server.                     |
-| `--runtime-dir <RUNTIME_DIR>`     | `CONMON_RUNTIME_DIR`      |                         | Directory for `conmon.sock`, the `pidfile` and the PID files of the execs, required. |
-| `--runtime-root <RUNTIME_ROOT>`   | `CONMON_RUNTIME_ROOT`     |                         | Root directory passed to the OCI runtime (`--root`).                                 |
-| `-l, --log-level <LEVEL>`         | `CONMON_LOG_LEVEL`        | `info`                  | `trace`, `debug`, `info`, `warn`, `error` or `off`.                                  |
-| `-d, --log-driver <DRIVER>`       | `CONMON_LOG_DRIVER`       | `systemd`               | Where the server logs to: `systemd` (journald), `stdout` or `none`.                  |
-| `--skip-fork`                     | `CONMON_SKIP_FORK`        | `false`                 | Stay in the foreground instead of forking into the background.                       |
-| `-e, --enable-tracing`            | `CONMON_ENABLE_TRACING`   | `false`                 | Export OpenTelemetry traces (needs a build with the `tracing` feature).              |
-| `-t, --tracing-endpoint <URL>`    | `CONMON_TRACING_ENDPOINT` | `http://127.0.0.1:4317` | OpenTelemetry gRPC endpoint.                                                         |
-| `-v, --version [full]`            | `CONMON_VERSION`          |                         | Print the version, `full` includes the dependency tree.                              |
-| `-j, --version-json, --vj [full]` | `CONMON_VERSION_JSON`     |                         | Print the version as JSON.                                                           |
+| Flag                               | Environment                     | Default                 | Purpose                                                                              |
+| ---------------------------------- | ------------------------------- | ----------------------- | ------------------------------------------------------------------------------------ |
+| `-r, --runtime <RUNTIME>`          | `CONMON_RUNTIME`                |                         | Binary path of the OCI runtime, required for running the server.                     |
+| `--runtime-dir <RUNTIME_DIR>`      | `CONMON_RUNTIME_DIR`            |                         | Directory for `conmon.sock`, the `pidfile` and the PID files of the execs, required. |
+| `--runtime-root <RUNTIME_ROOT>`    | `CONMON_RUNTIME_ROOT`           |                         | Root directory passed to the OCI runtime (`--root`).                                 |
+| `-l, --log-level <LEVEL>`          | `CONMON_LOG_LEVEL`              | `info`                  | `trace`, `debug`, `info`, `warn`, `error` or `off`.                                  |
+| `-d, --log-driver <DRIVER>`        | `CONMON_LOG_DRIVER`             | `systemd`               | Where the server logs to: `systemd` (journald), `stdout` or `none`.                  |
+| `--skip-fork`                      | `CONMON_SKIP_FORK`              | `false`                 | Stay in the foreground instead of forking into the background.                       |
+| `-e, --enable-tracing`             | `CONMON_ENABLE_TRACING`         | `false`                 | Export OpenTelemetry traces (needs a build with the `tracing` feature).              |
+| `-t, --tracing-endpoint <URL>`     | `CONMON_TRACING_ENDPOINT`       | `http://127.0.0.1:4317` | OpenTelemetry gRPC endpoint.                                                         |
+| `--max-streaming-sessions <COUNT>` | `CONMON_MAX_STREAMING_SESSIONS` | `256`                   | Combined limit for active exec, attach and port forward streams, from 1 to 65535.    |
+| `-v, --version [full]`             | `CONMON_VERSION`                |                         | Print the version, `full` includes the dependency tree.                              |
+| `-j, --version-json, --vj [full]`  | `CONMON_VERSION_JSON`           |                         | Print the version as JSON.                                                           |
 
 `--skip-fork` and `--enable-tracing` take no value. Their environment variables
 take a boolean: `1`, `true`, `yes`, `y`, `t` or `on` for true and `0`, `false`,

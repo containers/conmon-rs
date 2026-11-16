@@ -287,6 +287,13 @@ up the file descriptors of the server. The head of a request may take at most 64
 KiB, a larger one gets a 431, so that these connections hold about 16 MiB at
 most.
 
+Active exec, attach and port forward sessions share a separate limit of 256,
+configurable with `--max-streaming-sessions` (`CONMON_MAX_STREAMING_SESSIONS`).
+A valid upgrade beyond this limit gets HTTP 429 and leaves its token available
+for retry until it expires. A slot stays occupied through the upgrade and the
+entire session, and becomes available again when the session ends or the
+upgrade fails.
+
 The logs show only the first 8 hex digits of a token, which tell the sessions
 apart but are not enough to use one. Responses never name the token: a request
 for a token which is unknown, used or expired gets a bare 404, one whose token

@@ -23,7 +23,7 @@ use std::{
 use stream_protocol::ClientStr;
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{OnceCell, Semaphore},
+    sync::{OnceCell, OwnedSemaphorePermit, Semaphore},
     task,
     time::{self, Duration},
 };
@@ -94,10 +94,14 @@ const UPGRADE_TIMEOUT: Duration = HEADER_READ_TIMEOUT.saturating_mul(2);
 /// The most connections which did not get upgraded yet. More wait to be
 /// accepted, so that local processes which open connections without a
 /// request cannot use up the descriptors the whole pod needs. Upgraded
-/// connections do not count, their tokens bound them. There is no limit per
-/// peer, the server listens on the loopback address only, where the kubelet
-/// and a local process which holds connections look the same.
+/// connections do not count, a separate active session budget bounds them.
+/// There is no limit per peer, the server listens on the loopback address
+/// only, where the kubelet and a local process which holds connections look
+/// the same.
 const MAX_CONNECTIONS: usize = if cfg!(test) { 8 } else { 256 };
+
+/// Default limit shared by active exec, attach and port forward sessions.
+pub(crate) const DEFAULT_MAX_ACTIVE_SESSIONS: u16 = 256;
 
 /// The most a connection buffers of the head of its request, the request
 /// line and the headers, see [`MAX_CONNECTIONS`]. A longer one gets a 431
@@ -141,7 +145,7 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 /// Serves the exec, attach and port forward sessions over HTTP on the
 /// loopback address, each under a one time URL, see
 /// [`StreamingServer::exec_url`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct StreamingServer {
     /// The port the server listens on, once it got started for the first
     /// session.
@@ -151,10 +155,15 @@ pub(crate) struct StreamingServer {
 
 /// State handled by the streaming server, the sessions waiting for their
 /// client by token. Never locked across an await.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct State {
     sessions: BoundedMap<RandomId, Session>,
     port_forwards: BoundedMap<RandomId, PortForward>,
+
+    /// Held from a valid upgrade request until its session finishes,
+    /// including the wait for the HTTP connection to upgrade.
+    active: Arc<Semaphore>,
+    max_active_sessions: usize,
 
     /// Whether a task drops the sessions whose client did not come in time,
     /// see [`StreamingServer::sweep`].
@@ -178,7 +187,28 @@ pub(crate) struct SessionCommon {
     pub(crate) idle_timeout: Option<Duration>,
 }
 
+#[cfg(test)]
+impl Default for StreamingServer {
+    fn default() -> Self {
+        Self::new(usize::from(DEFAULT_MAX_ACTIVE_SESSIONS))
+    }
+}
+
 impl StreamingServer {
+    /// A server with a shared budget for all active streaming sessions.
+    pub(crate) fn new(max_active_sessions: usize) -> Self {
+        Self {
+            port: OnceCell::new(),
+            state: Arc::new(Mutex::new(State {
+                sessions: BoundedMap::default(),
+                port_forwards: BoundedMap::default(),
+                active: Arc::new(Semaphore::new(max_active_sessions)),
+                max_active_sessions,
+                sweeping: false,
+            })),
+        }
+    }
+
     /// Start the streaming server if not already running and return its
     /// port.
     async fn start_if_required(&self) -> Result<u16> {
@@ -410,11 +440,17 @@ impl StreamingServer {
 
     /// Take the exec or attach session of a valid request. Requests which get
     /// rejected before leave the token, so that the client can retry.
-    fn take_session(state: &Mutex<State>, token: RandomId) -> Option<Session> {
-        let Some(session) = lock(state).sessions.remove(&token) else {
+    fn take_session(
+        state: &Mutex<State>,
+        token: RandomId,
+    ) -> Result<(Session, OwnedSemaphorePermit), StatusCode> {
+        let mut state = lock(state);
+        if !state.sessions.contains_key(&token) {
             debug!("Session got taken by another request or expired");
-            return None;
-        };
+            return Err(StatusCode::NOT_FOUND);
+        }
+        let permit = Self::active_permit(&state)?;
+        let session = state.sessions.remove(&token).ok_or(StatusCode::NOT_FOUND)?;
         // Only what identifies the session, the command of an exec may carry
         // secrets.
         info!(
@@ -422,18 +458,39 @@ impl StreamingServer {
             session.typ(),
             session.common().container_id
         );
-        Some(session)
+        Ok((session, permit))
     }
 
     /// Take the session of a valid request. Requests which get rejected
     /// before leave the token, so that the client can retry. Another request
     /// may have taken it meanwhile.
-    fn take_port_forward(state: &Mutex<State>, token: RandomId) -> Option<PortForward> {
-        let session = lock(state).port_forwards.remove(&token);
-        if session.is_none() {
+    fn take_port_forward(
+        state: &Mutex<State>,
+        token: RandomId,
+    ) -> Result<(PortForward, OwnedSemaphorePermit), StatusCode> {
+        let mut state = lock(state);
+        if !state.port_forwards.contains_key(&token) {
             debug!("Port forward session got taken by another request or expired");
+            return Err(StatusCode::NOT_FOUND);
         }
-        session
+        let permit = Self::active_permit(&state)?;
+        let session = state
+            .port_forwards
+            .remove(&token)
+            .ok_or(StatusCode::NOT_FOUND)?;
+        Ok((session, permit))
+    }
+
+    /// Reject excess sessions before consuming their token, allowing retry
+    /// once another session ends.
+    fn active_permit(state: &State) -> Result<OwnedSemaphorePermit, StatusCode> {
+        state.active.clone().try_acquire_owned().map_err(|_| {
+            debug!(
+                limit = state.max_active_sessions,
+                "Active streaming session limit reached"
+            );
+            StatusCode::TOO_MANY_REQUESTS
+        })
     }
 }
 
