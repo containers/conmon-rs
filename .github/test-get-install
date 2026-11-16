@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Exercise publication without fetching a release or executing its binary.
+SCRIPT=$(realpath "$(dirname "$0")/../scripts/get")
+TEST_DIR=$(mktemp -d)
+trap 'rm -rf -- "$TEST_DIR"' EXIT
+
+for CASE in success relative verification permissions; do
+    DEST="$TEST_DIR/$CASE/output dir/conmonrs"
+    mkdir -p "$(dirname "$DEST")"
+    printf old >"$DEST"
+    if bash -euo pipefail -c '
+        source "$1"
+        OUTPUT=$2
+        TEST_OUTPUT=$2
+        TEST_CASE=$3
+        ARCH=amd64
+        NO_EXEC=1
+        if [[ $TEST_CASE == relative ]]; then
+            cd "$(dirname "$OUTPUT")"
+            OUTPUT=conmonrs
+        fi
+        # Installation must not depend on the system temporary directory.
+        export TMPDIR=/nonexistent/conmonrs-installer-test
+        curl_retry() { printf new >"conmonrs.$ARCH"; }
+        verify_checksum() {
+            [[ $(<"$TEST_OUTPUT") == old ]]
+            [[ $TEST_CASE != verification ]]
+        }
+        verify_signature() { verify_checksum; }
+        print_verify_hint() { :; }
+        chmod() {
+            [[ $(<"$TEST_OUTPUT") == old ]]
+            [[ $TEST_CASE != permissions ]] || return 1
+            command chmod "$@"
+        }
+        mv() {
+            # The complete binary must be executable before publication,
+            # with staging on the same filesystem as the destination.
+            [[ $1 == -T && $2 == -- && -x $3 ]]
+            [[ $(stat -c %d "$3") == $(stat -c %d "$(dirname "$4")") ]]
+            [[ $(<"$4") == old ]]
+            command mv "$@"
+        }
+        download_binary
+    ' _ "$SCRIPT" "$DEST" "$CASE"; then
+        [[ $CASE == success || $CASE == relative ]]
+        [[ $(<"$DEST") == new && -x $DEST ]]
+    else
+        [[ $CASE == verification || $CASE == permissions ]]
+        [[ $(<"$DEST") == old ]]
+    fi
+    # Success and failures must both remove the staging directory.
+    [[ $(find "$(dirname "$DEST")" -mindepth 1 -maxdepth 1 | wc -l) == 1 ]]
+done
+
+# A directory is rejected before requirements or network access are needed.
+if MESSAGE=$(bash "$SCRIPT" -o "$TEST_DIR" 2>&1); then
+    echo "Accepted a directory as the output path" >&2
+    exit 1
+fi
+[[ $MESSAGE == *"Output path is a directory: $TEST_DIR"* ]]

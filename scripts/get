@@ -13,6 +13,7 @@ NO_EXEC=
 MARKER=
 INSECURE=
 OUTPUT=conmonrs
+INSTALL_TMPDIR=
 GITHUB_TOKEN=${GITHUB_TOKEN:-}
 # How much older the commit of the latest-main.txt marker may be than the head
 # of main without a warning, in seconds.
@@ -91,6 +92,10 @@ parse_args() {
 
     if [[ $TAG != "" && $COMMIT != "" ]]; then
         echo "Use either -t or -l, not both"
+        exit 1
+    fi
+    if [[ -d $OUTPUT ]]; then
+        echo "Output path is a directory: $OUTPUT" >&2
         exit 1
     fi
 }
@@ -320,9 +325,11 @@ print_verify_hint() {
 
 download_binary() {
     mkdir -p "$(dirname "$OUTPUT")"
-    TMPDIR=$(mktemp -d)
-    trap 'rm -rf "$TMPDIR"' EXIT
-    pushd "$TMPDIR" >/dev/null
+    # Keep the verified binary on the destination filesystem so publishing
+    # it is a rename, even when the system temporary directory is elsewhere.
+    INSTALL_TMPDIR=$(mktemp -d "$(realpath "$(dirname "$OUTPUT")")/.conmonrs.XXXXXX")
+    trap 'rm -rf -- "$INSTALL_TMPDIR"' EXIT
+    pushd "$INSTALL_TMPDIR" >/dev/null
 
     curl_retry "$BASE_URL/$COMMIT/conmonrs.$ARCH" -o "conmonrs.$ARCH"
     if command -v cosign >/dev/null; then
@@ -332,9 +339,9 @@ download_binary() {
         print_verify_hint
     fi
 
+    chmod +x "conmonrs.$ARCH"
     popd >/dev/null
-    mv "$TMPDIR/conmonrs.$ARCH" "$OUTPUT"
-    chmod +x "$OUTPUT"
+    mv -T -- "$INSTALL_TMPDIR/conmonrs.$ARCH" "$OUTPUT"
     printf "Installed binary into: %s\n" "$OUTPUT"
 
     # The binary of another architecture does not run here.
@@ -347,7 +354,9 @@ download_binary() {
     fi
 }
 
-parse_args "$@"
-verify_requirements
-resolve_commit
-download_binary
+if [[ ${BASH_SOURCE[0]:-$0} == "$0" ]]; then
+    parse_args "$@"
+    verify_requirements
+    resolve_commit
+    download_binary
+fi
