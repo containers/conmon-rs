@@ -21,7 +21,7 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use std::{future::Future, sync::Mutex};
-use tokio::task;
+use tokio::{sync::OwnedSemaphorePermit, task};
 use tracing::{Instrument, Span, debug, debug_span};
 
 /// The upgrade SPDY clients ask for, of exec, attach and port forwarding.
@@ -91,7 +91,7 @@ impl StreamingServer {
         mut request: Request<Incoming>,
         subprotocol: Option<&'static str>,
         max_message_size: usize,
-        take_session: impl FnOnce() -> Option<S>,
+        take_session: impl FnOnce() -> Result<(S, OwnedSemaphorePermit), StatusCode>,
         serve: impl FnOnce(WebSocket, S) -> F + Send + 'static,
     ) -> Response
     where
@@ -102,12 +102,16 @@ impl StreamingServer {
             Ok(ws) => ws,
             Err(rejection) => return *rejection,
         };
-        let Some(session) = take_session() else {
-            return web::status(StatusCode::NOT_FOUND);
+        let (session, permit) = match take_session() {
+            Ok(session) => session,
+            Err(status) => return web::status(status),
         };
         ws.protocol(subprotocol)
             .max_message_size(max_message_size)
-            .on_upgrade(move |socket| serve(socket, session))
+            .on_upgrade(move |socket| async move {
+                let _permit = permit;
+                serve(socket, session).await;
+            })
     }
 
     /// Answer a SPDY upgrade request with one of the supported protocols and
@@ -117,7 +121,7 @@ impl StreamingServer {
     fn upgrade_spdy<S, T, F>(
         mut request: Request<Incoming>,
         supported: &[(&'static str, T)],
-        take_session: impl FnOnce() -> Option<S>,
+        take_session: impl FnOnce() -> Result<(S, OwnedSemaphorePermit), StatusCode>,
         serve: impl FnOnce(TokioIo<Upgraded>, S, T) -> F + Send + 'static,
         span: Span,
     ) -> Response
@@ -144,11 +148,13 @@ impl StreamingServer {
                 "unable to upgrade: connection does not support upgrades",
             );
         };
-        let Some(session) = take_session() else {
-            return web::status(StatusCode::NOT_FOUND);
+        let (session, permit) = match take_session() {
+            Ok(session) => session,
+            Err(status) => return web::status(status),
         };
         task::spawn(
             async move {
+                let _permit = permit;
                 match on_upgrade.await {
                     Ok(upgraded) => serve(TokioIo::new(upgraded), session, value).await,
                     Err(e) => debug!("Unable to upgrade connection: {e}"),

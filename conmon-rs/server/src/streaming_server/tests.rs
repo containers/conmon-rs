@@ -23,6 +23,105 @@ use tokio::{
 };
 
 #[tokio::test]
+async fn active_sessions_share_a_budget_and_release_it_on_disconnect() -> Result<()> {
+    use super::{
+        ExecSession, SessionCommon,
+        testing::{PROTOCOL_V5, websocket_headers},
+    };
+    use crate::{config::Config, conmon_capnp::conmon::CgroupManager, test_util::wait_for};
+    use std::sync::Arc;
+
+    LocalSet::new()
+        .run_until(async {
+            for headers in [websocket_headers(PROTOCOL_V5), SPDY_EXEC_UPGRADE.to_owned()] {
+                let server = StreamingServer::new(1);
+                let (_io, child, _stop) = attach_child(false)?;
+                let url = server
+                    .attach_url(attach_config(child, true, false, None))
+                    .await?;
+                let (response, held) = upgrade(&server, &url, "GET", &headers).await?;
+                assert!(response.starts_with("http/1.1 101"), "{response}");
+                assert_eq!(lock(&server.state).active.available_permits(), 0);
+
+                // Taking a token frees a pending slot, but must not free the
+                // active budget. All kinds of session and both transports
+                // reject new upgrades without consuming their tokens.
+                let (_other_io, child, _other_stop) = attach_child(false)?;
+                let attach_url = server
+                    .attach_url(attach_config(child, true, false, None))
+                    .await?;
+                let port_url = server
+                    .port_forward_url("/proc/self/ns/net".into(), None)
+                    .await?;
+                let exec_url = server
+                    .exec_url(ExecSession {
+                        child_reaper: Arc::default(),
+                        tty: false,
+                        server_config: Arc::new(Config::parse_for_test(["--runtime", "/bin/true"])),
+                        cgroup_manager: CgroupManager::Cgroupfs,
+                        command: vec!["true".into()],
+                        common: SessionCommon {
+                            container_id: "id".into(),
+                            stdin: true,
+                            stdout: true,
+                            stderr: false,
+                            idle_timeout: None,
+                        },
+                    })
+                    .await?;
+                let port_headers = [
+                    websocket_headers("SPDY/3.1+portforward.k8s.io"),
+                    concat!(
+                        "Connection: Upgrade\r\nUpgrade: SPDY/3.1\r\n",
+                        "X-Stream-Protocol-Version: portforward.k8s.io\r\n",
+                    )
+                    .to_owned(),
+                ];
+                let session_headers =
+                    [websocket_headers(PROTOCOL_V5), SPDY_EXEC_UPGRADE.to_owned()];
+                for (url, attempts) in [
+                    (&attach_url, session_headers.to_vec()),
+                    (&exec_url, session_headers.to_vec()),
+                    (&port_url, port_headers.to_vec()),
+                ] {
+                    for attempt in attempts {
+                        let (response, _) = upgrade(&server, url, "GET", &attempt).await?;
+                        assert!(response.starts_with("http/1.1 429"), "{response}");
+                    }
+                }
+                assert_eq!(lock(&server.state).sessions.len(), 2);
+                assert_eq!(lock(&server.state).port_forwards.len(), 1);
+
+                drop(held);
+                wait_for(|| lock(&server.state).active.available_permits() == 1).await?;
+                let (response, _retried) = upgrade(&server, &attach_url, "GET", &headers).await?;
+                assert!(response.starts_with("http/1.1 101"), "{response}");
+            }
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
+async fn invalid_upgrades_do_not_consume_active_slots() -> Result<()> {
+    LocalSet::new()
+        .run_until(async {
+            let server = StreamingServer::new(1);
+            let (_io, child, _stop) = attach_child(false)?;
+            let url = server
+                .attach_url(attach_config(child, true, false, None))
+                .await?;
+            let (response, _) = upgrade(&server, &url, "GET", "").await?;
+            assert!(response.starts_with("http/1.1 400"), "{response}");
+            assert_eq!(lock(&server.state).active.available_permits(), 1);
+            let (response, _client) = upgrade(&server, &url, "GET", SPDY_EXEC_UPGRADE).await?;
+            assert!(response.starts_with("http/1.1 101"), "{response}");
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
 async fn accepted_connections_have_no_delay() -> Result<()> {
     let listener = TcpListener::bind((ADDR, 0)).await?;
     let client = TcpStream::connect(listener.local_addr()?);

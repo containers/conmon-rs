@@ -145,9 +145,24 @@ pub(crate) struct Config {
     /// OpenTelemetry gRPC endpoint to be used for tracing. Builds without the
     /// `tracing` feature ignore it.
     tracing_endpoint: String,
+
+    #[arg(
+        default_value_t = crate::streaming_server::DEFAULT_MAX_ACTIVE_SESSIONS,
+        env(concat!(prefix!(), "MAX_STREAMING_SESSIONS")),
+        long("max-streaming-sessions"),
+        value_parser = clap::value_parser!(u16).range(1..),
+        value_name("COUNT")
+    )]
+    /// Maximum active exec, attach and port forward streaming sessions.
+    max_streaming_sessions: u16,
 }
 
 impl Config {
+    /// The combined limit for active streaming sessions.
+    pub(crate) fn max_streaming_sessions(&self) -> usize {
+        usize::from(self.max_streaming_sessions)
+    }
+
     /// Show version information.
     pub(crate) fn version(&self) -> Option<Verbosity> {
         self.version

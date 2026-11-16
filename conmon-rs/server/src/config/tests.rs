@@ -11,6 +11,18 @@ fn config(args: &[&str]) -> Config {
 }
 
 #[test]
+fn streaming_session_limit_is_positive_and_configurable() {
+    assert_eq!(config(&[]).max_streaming_sessions(), 256);
+    assert_eq!(
+        config(&["--max-streaming-sessions", "7"]).max_streaming_sessions(),
+        7
+    );
+    for limit in ["0", "-1", "65536"] {
+        assert!(Config::try_parse_from(["conmonrs", "--max-streaming-sessions", limit]).is_err());
+    }
+}
+
+#[test]
 fn validate_requires_the_runtime_flags() {
     let dir = tempfile::tempdir().expect("tempdir");
     let runtime = dir.path().join("runtime");
