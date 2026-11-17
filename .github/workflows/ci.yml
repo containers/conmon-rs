@@ -255,7 +255,7 @@ jobs:
           ZIZMOR_FLAGS: --format=github
       - name: Typos
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        uses: crate-ci/typos@4c8b7f51ca60df14e3c5ca82770dfbbe6c3dae85 # v1.52.0
+        uses: crate-ci/typos@2611abd15acb0c2e317fb9e45855aabb8b35a414 # v1.52.1
         with:
           config: .github/typos.toml
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
