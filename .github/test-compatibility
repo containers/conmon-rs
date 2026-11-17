@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Fixture tests for the compatibility policy, without a module proxy or an
+# installed gorelease/capnp. The fake releases and worktrees stay in TMP.
+SCRIPTS=$(dirname "$(realpath "$0")")
+# A hook exports these for its repository. Clear them before creating or
+# entering fixtures, so git init/add/reset cannot target the caller instead.
+GIT_LOCAL_ENV=$(git rev-parse --local-env-vars)
+while IFS= read -r variable; do
+    unset "$variable"
+done <<<"$GIT_LOCAL_ENV"
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+mkdir "$TMP/repo"
+cd "$TMP/repo"
+git init -q
+git config user.name 'Compatibility test'
+git config user.email 'test@example.com'
+git config commit.gpgsign false
+git config tag.gpgsign false
+
+commit() {
+    git add .
+    git commit -qs -m "$1"
+}
+
+# Execute outside a conditional: wrapping a script function in `if` would
+# disable errexit inside it and could hide a failed setup step.
+expect_status() {
+    local expected=$1 actual=0
+    shift
+    "$@" >"$TMP/output" 2>&1 || actual=$?
+    if [[ $actual != "$expected" ]]; then
+        cat "$TMP/output" >&2
+        echo "Expected status $expected, got $actual: $*" >&2
+        exit 1
+    fi
+}
+expect_output() {
+    if ! grep -qF -- "$1" "$TMP/output"; then
+        cat "$TMP/output" >&2
+        echo "Missing output: $1" >&2
+        exit 1
+    fi
+}
+expect_no_output() {
+    if grep -qF -- "$1" "$TMP/output"; then
+        cat "$TMP/output" >&2
+        echo "Unexpected output: $1" >&2
+        exit 1
+    fi
+}
+
+mkdir -p conmon-rs/server/proto .github
+LAYOUT=conmon-rs/server/proto/conmon.capnp.layout
+cat >Cargo.toml <<'TOML'
+[workspace.package]
+version = "1.0.0"
+TOML
+cat >"$TMP/generated" <<'LAYOUT'
+@0xffaaf7385bc4adad;
+struct Request @0xad2a33d6b9304413 {  # 0 bytes, 1 ptrs
+  value @0 :Text;  # ptr[0]
+}
+LAYOUT
+"$SCRIPTS/verify-schema-layout" --update "$LAYOUT" "$TMP/generated"
+printf 'v1.0.0\nThing: removed\n' >.github/go-api-break
+commit 'Initial release'
+git tag v1.0.0
+cp "$TMP/generated" "$TMP/released"
+
+expect_status 0 "$SCRIPTS/verify-schema-release" "$TMP/generated"
+# Retiring a field and adding a new pointer is compatible, but needs a new
+# committed snapshot as well.
+sed -i -e 's/value @0/valueOld @0/' -e 's/1 ptrs/2 ptrs/' \
+    -e '/^}/i\  next @1 :Text;  # ptr[1]' "$TMP/generated"
+expect_status 0 "$SCRIPTS/verify-schema-release" "$TMP/generated"
+expect_status 1 "$SCRIPTS/verify-schema-layout" "$LAYOUT" "$TMP/generated"
+"$SCRIPTS/verify-schema-layout" --update "$LAYOUT" "$TMP/generated"
+commit 'Compatible schema changes'
+expect_status 0 "$SCRIPTS/verify-schema-layout" "$LAYOUT" "$TMP/generated"
+expect_status 0 "$SCRIPTS/verify-schema-release" "$TMP/generated"
+# Updating both files cannot hide a type change, moved pointer, removed
+# member or changed type ID from the independent release comparison.
+cp "$TMP/generated" "$TMP/compatible"
+for mutation in 's/:Text/:Data/' 's/ptr\[0\]/ptr[2]/' '/valueOld/d' 's/0xad2a33d6b9304413/0xad2a33d6b9304414/'; do
+    sed "$mutation" "$TMP/compatible" >"$TMP/generated"
+    "$SCRIPTS/verify-schema-layout" --update "$LAYOUT" "$TMP/generated"
+    commit "Incompatible schema fixture: $mutation"
+    expect_status 0 "$SCRIPTS/verify-schema-layout" "$LAYOUT" "$TMP/generated"
+    expect_status 1 "$SCRIPTS/verify-schema-release" "$TMP/generated"
+    expect_output 'breaks the wire compatibility'
+    expect_output 'requires a new major version in Cargo.toml'
+    expect_no_output 'run make update-schema-layout'
+    expect_no_output "${TMPDIR:-/tmp}/tmp."
+done
+sed -i 's/1.0.0/2.0.0/' Cargo.toml
+expect_status 0 "$SCRIPTS/verify-schema-release" "$TMP/generated"
+expect_output 'New major version'
+sed -i 's/2.0.0/0.9.0/' Cargo.toml
+expect_status 1 "$SCRIPTS/verify-schema-release" "$TMP/generated"
+expect_output 'older than the major version'
+sed -i 's/0.9.0/1.0.0/' Cargo.toml
+# Return to the actual release, not the most recent incompatible HEAD.
+# The immutable tag must keep naming the original layout in every fixture.
+git reset --hard -q v1.0.0
+cp "$TMP/released" "$TMP/generated"
+# Missing tags fail closed.
+git tag -d v1.0.0 >/dev/null
+expect_status 1 "$SCRIPTS/verify-schema-release" "$TMP/generated"
+expect_output 'Cannot find a release baseline'
+git tag v1.0.0
+# A newer reachable prerelease must not replace the stable baseline for
+# either checker, even when it is the tag nearest HEAD.
+printf 'Prerelease fixture\n' >README
+commit 'Prerelease fixture'
+git tag v1.1.0-rc.1
+expect_status 0 "$SCRIPTS/verify-schema-release" "$TMP/generated"
+expect_output 'Checking wire compatibility with v1.0.0'
+
+cat >"$TMP/gorelease" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $1 == -base="$API_TEST_BASE" ]]
+cat "$API_TEST_REPORT"
+exit "$API_TEST_STATUS"
+STUB
+chmod +x "$TMP/gorelease"
+export API_TEST_REPORT=$TMP/report API_TEST_STATUS=0 API_TEST_BASE=v1.0.0
+printf 'No incompatible changes were detected.\n' >"$TMP/report"
+expect_status 0 "$SCRIPTS/verify-go-api" "$TMP/gorelease"
+expect_output 'no longer reports'
+cat >"$TMP/report" <<'REPORT'
+# example.com/module
+## incompatible changes
+Thing: removed
+
+# summary
+Incompatible changes were detected.
+REPORT
+export API_TEST_STATUS=1
+expect_status 0 "$SCRIPTS/verify-go-api" "$TMP/gorelease"
+expect_output 'are intended'
+# Working-tree edits to the allowlist must not affect committed HEAD.
+printf 'v0.9.0\nOther: removed\n' >.github/go-api-break
+expect_status 0 "$SCRIPTS/verify-go-api" "$TMP/gorelease"
+git restore .github/go-api-break
+cp "$TMP/report" "$TMP/allowed-report"
+sed -i 's/Thing/Other/' "$TMP/report"
+expect_status 1 "$SCRIPTS/verify-go-api" "$TMP/gorelease"
+expect_output 'does not list'
+cp "$TMP/allowed-report" "$TMP/report"
+printf '\n# diagnostics\nmissing checksum\n' >>"$TMP/report"
+expect_status 1 "$SCRIPTS/verify-go-api" "$TMP/gorelease"
+expect_output 'has diagnostics'
+cp "$TMP/allowed-report" "$TMP/report"
+sed -i '/Incompatible changes were detected./d' "$TMP/report"
+expect_status 1 "$SCRIPTS/verify-go-api" "$TMP/gorelease"
+expect_output 'lacks the line'
+printf 'Incompatible changes were detected.\n' >"$TMP/report"
+expect_status 1 "$SCRIPTS/verify-go-api" "$TMP/gorelease"
+expect_output 'lists no incompatible changes'
+cp "$TMP/allowed-report" "$TMP/report"
+export API_TEST_STATUS=2
+expect_status 2 "$SCRIPTS/verify-go-api" "$TMP/gorelease"
+expect_output 'gorelease exited with 2'
+export API_TEST_STATUS=1
+sed -i 's/v1.0.0/v0.9.0/' .github/go-api-break
+commit 'Stale exception baseline'
+expect_status 1 "$SCRIPTS/verify-go-api" "$TMP/gorelease"
+expect_output 'names v0.9.0, not v1.0.0'
+rm .github/go-api-break
+commit 'No exceptions'
+expect_status 1 "$SCRIPTS/verify-go-api" "$TMP/gorelease"
+expect_output 'No compatibility exceptions in .github/go-api-break'
+expect_output 'Incompatible changes were detected.'
+expect_no_output 'names v0.9.0'
+expect_status 1 "$SCRIPTS/verify-go-api" "$TMP/missing-tool"
+expect_output 'Not an executable gorelease'
+expect_status 1 "$SCRIPTS/verify-go-api" "$TMP/missing-directory/gorelease"
+expect_output 'Not an executable gorelease'
+git tag -d v1.0.0 >/dev/null
+expect_status 1 "$SCRIPTS/verify-go-api" "$TMP/gorelease"
+expect_output 'Cannot find a release baseline'
+
+# A later merge of an older patch release is nearer HEAD, but must not
+# replace a higher released version which added a wire field.
+git tag v1.2.0
+git branch old-release
+sed -i -e 's/1 ptrs/2 ptrs/' -e '/^}/i\  next @1 :Text;  # ptr[1]' "$TMP/generated"
+"$SCRIPTS/verify-schema-layout" --update "$LAYOUT" "$TMP/generated"
+sed -i 's/1.0.0/1.3.0/' Cargo.toml
+commit 'New field released in v1.3.0'
+git tag v1.3.0
+MAIN=$(git symbolic-ref --short HEAD)
+printf 'Main continues\n' >main-only
+commit 'Continue after the minor release'
+git checkout -q old-release
+# Several old-branch commits make its tag strictly nearer, independent of
+# tag dates or tie-breaking between equally distant candidates.
+for patch in 1 2 3; do
+    printf 'Older patch %s\n' "$patch" >patch-only
+    commit "Patch $patch of the older release"
+done
+git tag v1.2.1
+git checkout -q "$MAIN"
+git merge -q --no-ff --signoff -m 'Merge older patch release' old-release
+# This ensures the fixture distinguishes version sorting from git describe.
+[[ $(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*-*') == v1.2.1 ]]
+expect_status 0 "$SCRIPTS/verify-schema-release" "$TMP/generated"
+expect_output 'Checking wire compatibility with v1.3.0'
+cp "$TMP/released" "$TMP/generated"
+"$SCRIPTS/verify-schema-layout" --update "$LAYOUT" "$TMP/generated"
+commit 'Remove the field released in v1.3.0'
+expect_status 1 "$SCRIPTS/verify-schema-release" "$TMP/generated"
+expect_output 'Checking wire compatibility with v1.3.0'
+expect_output 'breaks the wire compatibility'
+export API_TEST_BASE=v1.3.0 API_TEST_STATUS=0
+printf 'No incompatible changes were detected.\n' >"$TMP/report"
+expect_status 0 "$SCRIPTS/verify-go-api" "$TMP/gorelease"
+expect_output 'Comparing the Go module of HEAD with v1.3.0'
+# Neither suffixes nor tags outside HEAD's history are release baselines.
+git tag v9.0.0-rc.1
+git tag v9.0.0extra
+git checkout -qb unreachable-release
+printf 'Unmerged release\n' >unmerged
+commit 'Release outside HEAD history'
+git tag v8.0.0
+git checkout -q "$MAIN"
+expect_status 1 "$SCRIPTS/verify-schema-release" "$TMP/generated"
+expect_output 'Checking wire compatibility with v1.3.0'
+expect_output 'breaks the wire compatibility'
+expect_status 0 "$SCRIPTS/verify-go-api" "$TMP/gorelease"
+expect_output 'Comparing the Go module of HEAD with v1.3.0'
+# Sort numeric version components, not tag names lexically.
+git tag v1.9.0
+git tag v1.10.0
+expect_status 0 "$SCRIPTS/release-baseline"
+expect_output 'v1.10.0'
+# Every invocation must remove its temporary worktree, including failures.
+[[ $(git worktree list --porcelain | grep -c '^worktree ') == 1 ]]
+
+if [[ ${1:-} != --fixtures-only ]]; then
+    # Run the suite as a hook of a different repository, with both staged
+    # and unstaged changes. Its refs, indexes, config and files must survive.
+    OUTER=$TMP/outer
+    git init -q "$OUTER"
+    cd "$OUTER"
+    git config user.name 'Outer repository'
+    git config user.email 'outer@example.com'
+    git config commit.gpgsign false
+    git config tag.gpgsign false
+    printf 'Committed\n' >sentinel
+    commit 'Outer repository must not change'
+    printf 'Staged\n' >sentinel
+    git add sentinel
+    printf 'Unstaged\n' >>sentinel
+    cp .git/index .git/hook-index
+    for file in HEAD index hook-index config; do
+        cp ".git/$file" "$TMP/outer-$file"
+    done
+    cp sentinel "$TMP/outer-sentinel"
+    git show-ref >"$TMP/outer-refs"
+    expect_status 0 env GIT_DIR="$OUTER/.git" GIT_WORK_TREE="$OUTER" \
+        GIT_INDEX_FILE="$OUTER/.git/hook-index" "$SCRIPTS/test-compatibility" --fixtures-only
+    expect_output 'Schema and Go API compatibility checks passed their fixtures'
+    for file in HEAD index hook-index config; do
+        cmp "$TMP/outer-$file" ".git/$file"
+    done
+    cmp "$TMP/outer-sentinel" sentinel
+    git show-ref >"$TMP/outer-refs-after"
+    cmp "$TMP/outer-refs" "$TMP/outer-refs-after"
+fi
+echo 'Schema and Go API compatibility checks passed their fixtures'

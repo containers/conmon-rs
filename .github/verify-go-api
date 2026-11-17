@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export LC_ALL=C
+
+# Compare committed HEAD against the highest reachable release version with
+# gorelease.
+# A clean temporary worktree keeps local edits out of both the comparison and
+# its allowlist. Setup failures stop immediately, before report parsing.
+GORELEASE=${1:?usage: $0 GORELEASE [BREAK_FILE]}
+BREAK_FILE=${2:-.github/go-api-break}
+if [[ ! -x $GORELEASE ]]; then
+    echo "Not an executable gorelease: $GORELEASE" >&2
+    exit 1
+fi
+GORELEASE=$(realpath "$GORELEASE")
+SCRIPT_DIR=$(dirname "$(realpath "$0")")
+ROOT=$(git rev-parse --show-toplevel)
+BASE=$("$SCRIPT_DIR/release-baseline")
+TMP=$(mktemp -d)
+WORKTREE=$TMP/worktree
+trap 'git -C "$ROOT" worktree remove --force "$WORKTREE" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+
+git worktree add -q --detach "$WORKTREE" HEAD
+cd "$WORKTREE"
+echo "Comparing the Go module of HEAD with $BASE"
+touch "$TMP/break"
+if [[ -f $BREAK_FILE ]]; then
+    sed -e '/^#/d' -e '/^$/d' "$BREAK_FILE" >"$TMP/break"
+fi
+ALLOWED=$(head -n 1 "$TMP/break")
+tail -n +2 "$TMP/break" | sort >"$TMP/allowed"
+STATUS=0
+"$GORELEASE" -base="$BASE" >"$TMP/report" 2>&1 || STATUS=$?
+cat "$TMP/report"
+sed -n '/^## incompatible changes$/,/^#/{/^#/d;/^$/d;p}' "$TMP/report" | sort >"$TMP/found"
+comm -23 "$TMP/found" "$TMP/allowed" >"$TMP/unlisted"
+comm -13 "$TMP/found" "$TMP/allowed" >"$TMP/stale"
+SUMMARY=0
+if grep -qx 'Incompatible changes were detected.' "$TMP/report"; then SUMMARY=1; fi
+DIAGNOSTICS=0
+if grep -qx '# diagnostics' "$TMP/report"; then DIAGNOSTICS=1; fi
+if [[ -n $ALLOWED && $ALLOWED == "$BASE" && $DIAGNOSTICS == 0 ]] &&
+    { [[ $STATUS == 0 || $SUMMARY == 1 ]]; } && [[ -s $TMP/stale ]]; then
+    echo "Warning: $BREAK_FILE lists changes which gorelease no longer reports against $BASE, remove them:"
+    cat "$TMP/stale"
+fi
+if [[ $STATUS != 0 && -z $ALLOWED ]]; then
+    echo "No compatibility exceptions in $BREAK_FILE; the gorelease failure is not forgiven."
+elif [[ $STATUS != 0 && $ALLOWED != "$BASE" ]]; then
+    echo "$BREAK_FILE names $ALLOWED, not $BASE which gorelease compares with, see release.md"
+elif [[ $STATUS != 0 && -n $ALLOWED ]]; then
+    FORGIVE=1
+    if [[ $STATUS != 1 ]]; then
+        echo "Not forgiven: gorelease exited with $STATUS"
+        FORGIVE=0
+    fi
+    if [[ $SUMMARY == 0 ]]; then
+        echo "Not forgiven: the report lacks the line 'Incompatible changes were detected.'"
+        FORGIVE=0
+    fi
+    if [[ $DIAGNOSTICS == 1 ]]; then
+        echo "Not forgiven: the report has diagnostics"
+        FORGIVE=0
+    fi
+    if [[ ! -s $TMP/found ]]; then
+        echo "Not forgiven: the report lists no incompatible changes"
+        FORGIVE=0
+    fi
+    if [[ -s $TMP/unlisted ]]; then
+        echo "Not forgiven: incompatible changes against $BASE which $BREAK_FILE does not list:"
+        cat "$TMP/unlisted"
+        FORGIVE=0
+    fi
+    if [[ $FORGIVE == 1 ]]; then
+        echo "The incompatible changes against $BASE are intended, see $BREAK_FILE"
+        STATUS=0
+    fi
+fi
+exit "$STATUS"

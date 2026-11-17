@@ -22,15 +22,21 @@ set -euo pipefail
 # layout depends on the version of capnp, the Makefile uses the one of
 # flake.lock.
 #
-# Usage: verify-schema-layout [--update] COMMITTED GENERATED
+# --compatible only checks wire compatibility, for comparing a released
+# baseline with the new layout. It does not require an identical snapshot.
+# Usage: verify-schema-layout [--update|--compatible] COMMITTED GENERATED
 
 UPDATE=false
+COMPATIBLE=false
 if [[ ${1:-} == --update ]]; then
     UPDATE=true
     shift
+elif [[ ${1:-} == --compatible ]]; then
+    COMPATIBLE=true
+    shift
 fi
-COMMITTED=${1:?usage: $0 [--update] COMMITTED GENERATED}
-GENERATED=${2:?usage: $0 [--update] COMMITTED GENERATED}
+COMMITTED=${1:?usage: $0 [--update|--compatible] COMMITTED GENERATED}
+GENERATED=${2:?usage: $0 [--update|--compatible] COMMITTED GENERATED}
 
 # Print the generated layout with the header of the committed one.
 layout() {
@@ -80,7 +86,11 @@ if [[ $UPDATE == true ]]; then
 fi
 
 if [[ ! -s $COMMITTED ]]; then
-    echo "The layout $COMMITTED is empty, run make update-schema-layout." >&2
+    if [[ $COMPATIBLE == true ]]; then
+        echo 'The released schema layout is empty; verify the release baseline before checking compatibility.' >&2
+    else
+        echo "The layout $COMMITTED is empty, run make update-schema-layout." >&2
+    fi
     exit 1
 fi
 
@@ -96,13 +106,19 @@ while IFS= read -r LINE; do
 done < <(LC_ALL=C comm -23 <(normalize "$COMMITTED") - <<<"$NEW")
 
 if ((${#BROKEN[@]} != 0)); then
-    echo "The schema moved, changed the type or ID of or removed these parts of the layout in $COMMITTED, which breaks the wire compatibility with older clients and servers:" >&2
-    printf '%s\n' "${BROKEN[@]}" >&2
-    echo "Retire a field by renaming it with its type unchanged and add a new one instead. For a deliberate break, which needs a new major version, run make update-schema-layout." >&2
+    if [[ $COMPATIBLE == true ]]; then
+        echo 'The schema moved, changed the type or ID of or removed these parts of the released layout, which breaks the wire compatibility within this major version:' >&2
+        printf '%s\n' "${BROKEN[@]}" >&2
+        echo 'Preserve the released fields, ordinals, types and IDs. Retire a field by renaming it with its type unchanged and add a new one instead. A deliberate wire-format break requires a new major version in Cargo.toml as part of the coordinated release version bump in release.md; regenerating the layout cannot make it compatible.' >&2
+    else
+        echo "The schema moved, changed the type or ID of or removed these parts of the layout in $COMMITTED, which breaks the wire compatibility with older clients and servers:" >&2
+        printf '%s\n' "${BROKEN[@]}" >&2
+        echo 'Retire a field by renaming it with its type unchanged and add a new one instead. A deliberate break needs the coordinated major-version release in release.md and an updated layout from make update-schema-layout.' >&2
+    fi
     exit 1
 fi
 
-if ! diff -u "$COMMITTED" <(layout) >&2; then
+if [[ $COMPATIBLE == false ]] && ! diff -u "$COMMITTED" <(layout) >&2; then
     echo "$COMMITTED differs from the generated layout by the renames, additions or reordering above, which keep the wire compatibility. Run make update-schema-layout and commit the result, so that they are guarded from then on." >&2
     exit 1
 fi

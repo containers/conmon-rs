@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export LC_ALL=C
+
+# A later merge of an older patch release must not lower the compatibility
+# baseline. Ignore prereleases and other tags even if they sort first.
+BASE=$(git tag --merged HEAD --sort=-v:refname |
+    sed -n '/^v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$/p' | sed -n '1p')
+if [[ -z $BASE ]]; then
+    echo 'Cannot find a release baseline; fetch the tags before verifying compatibility.' >&2
+    exit 1
+fi
+printf '%s\n' "$BASE"

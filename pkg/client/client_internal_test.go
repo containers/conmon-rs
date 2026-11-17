@@ -49,7 +49,7 @@ func newTestConn(t *testing.T, withBootstrap bool) (*rpcConn, net.Conn) {
 	peer := rpc.NewConn(rpc.NewStreamTransport(remote), serverOptions(withBootstrap))
 
 	t.Cleanup(func() {
-		conn.conn.Close()
+		conn.close(logrus.New())
 		peer.Close()
 	})
 

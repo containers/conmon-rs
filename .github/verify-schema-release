@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Check against a baseline outside the working tree as well: regenerating
+# the committed layout must not forgive a wire break within a major version.
+# Use the highest reachable release version, like verify-go-api. A new major
+# version may deliberately break the wire format, but still has to update its layout.
+LAYOUT=${1:?usage: $0 GENERATED}
+SCRIPT_DIR=$(dirname "$(realpath "$0")")
+BASE=$("$SCRIPT_DIR/release-baseline")
+VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+if [[ ! $BASE =~ ^v([0-9]+)\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Not a release tag: $BASE" >&2
+    exit 1
+fi
+BASE_MAJOR=${BASH_REMATCH[1]}
+if [[ ! $VERSION =~ ^([0-9]+)\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Not a release version in Cargo.toml: $VERSION" >&2
+    exit 1
+fi
+MAJOR=${BASH_REMATCH[1]}
+if ((10#$MAJOR > 10#$BASE_MAJOR)); then
+    echo "New major version $VERSION may break wire compatibility with $BASE"
+    exit 0
+elif ((10#$MAJOR < 10#$BASE_MAJOR)); then
+    echo "Version $VERSION is older than the major version of $BASE" >&2
+    exit 1
+fi
+
+TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
+git show "$BASE:conmon-rs/server/proto/conmon.capnp.layout" >"$TMP" || {
+    echo "Cannot read the schema layout of $BASE" >&2
+    exit 1
+}
+echo "Checking wire compatibility with $BASE"
+"$SCRIPT_DIR/verify-schema-layout" --compatible "$TMP" "$LAYOUT"
