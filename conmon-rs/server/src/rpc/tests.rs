@@ -64,7 +64,8 @@ async fn too_many_streaming_sessions_fail_with_the_bare_message() -> anyhow::Res
                 // matches `ErrTooManyRequests` of the Go client.
                 assert_eq!(err.kind, capnp::ErrorKind::Failed, "{kind}");
                 assert_eq!(
-                    err.extra, "maximum number of in-flight requests exceeded",
+                    err.extra(),
+                    "maximum number of in-flight requests exceeded",
                     "{kind}"
                 );
             }
@@ -82,7 +83,7 @@ async fn failure_of_kind<T>(
         Ok(_) => panic!("request succeeded"),
         Err(e) => {
             assert_eq!(e.kind, kind, "{e}");
-            e.extra
+            e.extra().to_owned()
         }
     }
 }
