@@ -9,16 +9,12 @@ use crate::{
 use anyhow::{Context as _, Result};
 use libc::{TIOCSWINSZ, winsize};
 use nix::{
-    cmsg_space,
     errno::Errno,
     fcntl::{self, FcntlArg, OFlag},
-    sys::{
-        socket::{self, ControlMessageOwned, MsgFlags},
-        termios::{self, OutputFlags, SetArg, SpecialCharacterIndices},
-    },
+    sys::termios::{self, OutputFlags, SetArg, SpecialCharacterIndices},
 };
 use std::{
-    io::{self, IoSliceMut, Read, Write},
+    io::{self, Read, Write},
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
         unix::io::RawFd,
@@ -310,35 +306,83 @@ impl Terminal {
     /// Receive the descriptor of the terminal. It gets close-on-exec right
     /// away, the runtimes which other threads spawn meanwhile would inherit
     /// the terminal of the container otherwise.
-    #[expect(unsafe_code, reason = "taking received descriptors")]
+    #[expect(unsafe_code, reason = "receiving and owning even truncated SCM_RIGHTS")]
     fn recv_fd(socket: BorrowedFd) -> io::Result<Option<OwnedFd>> {
-        // The kernel truncates a message with more descriptors than fit,
-        // which nix reports as an error before they could be closed. One
-        // message carries at most SCM_MAX_FD of them. A server at its limit
-        // of open files gets a truncated message as well, the descriptors
-        // received up to then leak.
-        let mut cmsg_buffer = cmsg_space!([RawFd; 253]);
-        let mut iov = [IoSliceMut::new(&mut [])];
-        let msg = socket::recvmsg::<()>(
-            socket.as_raw_fd(),
-            &mut iov,
-            Some(&mut cmsg_buffer),
-            MsgFlags::MSG_CMSG_CLOEXEC,
-        )?;
-        let mut fds = vec![];
-        for cmsg in msg.cmsgs()? {
-            if let ControlMessageOwned::ScmRights(raw_fds) = cmsg {
-                // SAFETY: the descriptors were just received over the socket
-                // and nothing else owns them, taking ownership right away
-                // closes the ones which are not used.
-                fds.extend(
-                    raw_fds
-                        .into_iter()
-                        .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) }),
-                );
-            }
+        // Aligned space for SCM_MAX_FD descriptors. Even with enough space,
+        // RLIMIT_NOFILE can truncate the rights. nix rejects such a message
+        // before exposing the descriptors which the kernel did install, so
+        // receive directly and close those before reporting the truncation.
+        #[repr(C)]
+        struct Control {
+            header: libc::cmsghdr,
+            fds: [RawFd; 253],
         }
-        Ok(fds.into_iter().next())
+        // SAFETY: both structures consist of integers and pointers, for
+        // which zero is valid. The control buffer is aligned for cmsghdr.
+        let mut control: Control = unsafe { std::mem::zeroed() };
+        // SAFETY: see above; the buffers are set before recvmsg uses them.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        // Keep one empty iovec, as nix's recvmsg did. qemu-user returns
+        // without receiving ancillary data when msg_iovlen is zero.
+        let mut iov = libc::iovec {
+            iov_base: std::ptr::null_mut(),
+            iov_len: 0,
+        };
+        msg.msg_iov = &raw mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = (&raw mut control).cast();
+        // musl uses u32 here, glibc usize. The fixed buffer fits both.
+        const { assert!(std::mem::size_of::<Control>() <= u32::MAX as usize) };
+        msg.msg_controllen = std::mem::size_of::<Control>() as _;
+        // SAFETY: msg points to writable storage and describes the live,
+        // aligned control buffer and the empty iovec. No payload or address
+        // is requested. The borrowed socket stays open for the call.
+        Errno::result(unsafe {
+            libc::recvmsg(socket.as_raw_fd(), &raw mut msg, libc::MSG_CMSG_CLOEXEC)
+        })?;
+
+        let mut first = None;
+        // SAFETY: recvmsg filled msg and its control buffer. The CMSG helpers
+        // walk the headers within msg_controllen, including a partial rights
+        // message, whose complete descriptors must still be closed.
+        let mut header = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+        while !header.is_null() {
+            // SAFETY: the CMSG helper returned a header within the buffer.
+            let cmsg = unsafe { &*header };
+            if cmsg.cmsg_level == libc::SOL_SOCKET && cmsg.cmsg_type == libc::SCM_RIGHTS {
+                // SAFETY: the kernel wrote this header and its descriptor
+                // array. cmsg_len includes the header and only the rights
+                // actually installed, even with MSG_CTRUNC. Each descriptor
+                // is taken once, and no other owner exists in this process.
+                // cmsg_len is u32 on musl and usize on glibc. Both fit the
+                // address space, where the descriptor offsets are counted.
+                let len: usize = cmsg.cmsg_len as _;
+                // SAFETY: CMSG_LEN only computes the size of an empty payload.
+                let count =
+                    (len - unsafe { libc::CMSG_LEN(0) } as usize) / std::mem::size_of::<RawFd>();
+                for i in 0..count {
+                    // SAFETY: i is within the kernel's descriptor array,
+                    // see above. Reading unaligned imposes no extra alignment.
+                    let raw = unsafe {
+                        libc::CMSG_DATA(header)
+                            .cast::<RawFd>()
+                            .add(i)
+                            .read_unaligned()
+                    };
+                    // SAFETY: this is the newly received descriptor, see above.
+                    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+                    if first.is_none() {
+                        first = Some(fd);
+                    }
+                }
+            }
+            // SAFETY: header belongs to msg's control buffer, see above.
+            header = unsafe { libc::CMSG_NXTHDR(&msg, header) };
+        }
+        if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+            return Err(Errno::ENOBUFS.into());
+        }
+        Ok(first)
     }
 }
 

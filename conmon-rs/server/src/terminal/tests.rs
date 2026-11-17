@@ -1,10 +1,22 @@
 use super::*;
 use crate::{
     attach::SharedContainerAttach,
-    test_util::{open_pty, send_fd},
+    test_util::{open_pty, run_in_own_process, send_fd},
 };
-use nix::fcntl::FdFlag;
-use std::{os::unix::fs::PermissionsExt, time::Duration};
+use nix::{
+    fcntl::FdFlag,
+    sys::{
+        resource::{Resource, getrlimit, setrlimit},
+        socket::{ControlMessage, MsgFlags, sendmsg},
+    },
+    unistd::pipe2,
+};
+use std::{
+    fs::File,
+    io::IoSlice,
+    os::unix::{fs::PermissionsExt, net::UnixStream as StdUnixStream},
+    time::Duration,
+};
 
 /// The width and height of a terminal.
 #[expect(unsafe_code, reason = "the TIOCGWINSZ ioctl")]
@@ -169,5 +181,103 @@ async fn listen_stops_without_terminal() -> Result<()> {
     let _stream = UnixStream::connect(dir.path().join("term.sock")).await?;
     drop(connected_rx);
     tokio::time::timeout(Duration::from_secs(5), listen).await???;
+    Ok(())
+}
+
+const RIGHTS_CLEANUP_TEST_ENV: &str = "CONMONRS_RIGHTS_CLEANUP_TEST";
+
+#[test]
+fn receiving_rights_closes_extras_and_sets_cloexec() -> Result<()> {
+    run_in_own_process(
+        "terminal::tests::receiving_rights_in_own_process",
+        RIGHTS_CLEANUP_TEST_ENV,
+        false,
+    )
+}
+
+#[test]
+#[ignore = "run by receiving_rights_closes_extras_and_sets_cloexec in a process of its own"]
+fn receiving_rights_in_own_process() -> Result<()> {
+    if std::env::var_os(RIGHTS_CLEANUP_TEST_ENV).is_none() {
+        return Ok(());
+    }
+    // EOF counts every writer, including copies inherited by a concurrent
+    // fork before exec closes CLOEXEC descriptors. Keep this assertion in
+    // a process which runs no other tests and does not spawn children.
+    let (sender, receiver) = StdUnixStream::pair()?;
+    let (read, write) = pipe2(OFlag::O_CLOEXEC)?;
+    let rights = [write.as_raw_fd(); 3];
+    sendmsg::<()>(
+        sender.as_raw_fd(),
+        &[IoSlice::new(b"x")],
+        &[ControlMessage::ScmRights(&rights)],
+        MsgFlags::empty(),
+        None,
+    )?;
+    drop(write);
+    let received = Terminal::recv_fd(receiver.as_fd())?.context("received rights")?;
+    let flags = FdFlag::from_bits_truncate(fcntl::fcntl(&received, FcntlArg::F_GETFD)?);
+    assert!(flags.contains(FdFlag::FD_CLOEXEC));
+    drop(received);
+    // EOF proves that the other received copies were closed as well.
+    fcntl::fcntl(&read, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))?;
+    let mut read = File::from(read);
+    assert_eq!(read.read(&mut [0; 1])?, 0);
+
+    let (mut sender, receiver) = StdUnixStream::pair()?;
+    sender.write_all(b"no rights")?;
+    assert!(Terminal::recv_fd(receiver.as_fd())?.is_none());
+    Ok(())
+}
+
+const RIGHTS_LIMIT_TEST_ENV: &str = "CONMONRS_RIGHTS_LIMIT_TEST";
+
+#[test]
+fn truncated_rights_do_not_leak_descriptors() -> Result<()> {
+    run_in_own_process(
+        "terminal::tests::truncated_rights_in_own_process",
+        RIGHTS_LIMIT_TEST_ENV,
+        false,
+    )
+}
+
+#[test]
+#[ignore = "run by truncated_rights_do_not_leak_descriptors in a process of its own"]
+fn truncated_rights_in_own_process() -> Result<()> {
+    if std::env::var_os(RIGHTS_LIMIT_TEST_ENV).is_none() {
+        return Ok(());
+    }
+    let (sender, receiver) = StdUnixStream::pair()?;
+    let file = File::open("/dev/null")?;
+    let (soft, hard) = getrlimit(Resource::RLIMIT_NOFILE)?;
+    setrlimit(Resource::RLIMIT_NOFILE, soft.min(64), hard)?;
+    let mut fillers = Vec::new();
+    loop {
+        match File::open("/dev/null") {
+            Ok(file) => fillers.push(file),
+            Err(e) if e.raw_os_error() == Some(libc::EMFILE) => break,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    // Leave only two slots for three rights. The kernel installs two,
+    // discards the third and sets MSG_CTRUNC, regardless of buffer space.
+    assert!(fillers.len() >= 2);
+    drop(fillers.pop());
+    drop(fillers.pop());
+    sendmsg::<()>(
+        sender.as_raw_fd(),
+        &[IoSlice::new(b"x")],
+        &[ControlMessage::ScmRights(&[file.as_raw_fd(); 3])],
+        MsgFlags::empty(),
+        None,
+    )?;
+    let received = Terminal::recv_fd(receiver.as_fd());
+    let first = File::open("/dev/null");
+    let second = File::open("/dev/null");
+    let third = File::open("/dev/null");
+    setrlimit(Resource::RLIMIT_NOFILE, soft, hard)?;
+    assert_eq!(received.unwrap_err().raw_os_error(), Some(libc::ENOBUFS));
+    assert!(first.is_ok() && second.is_ok(), "partial rights leaked");
+    assert_eq!(third.unwrap_err().raw_os_error(), Some(libc::EMFILE));
     Ok(())
 }
