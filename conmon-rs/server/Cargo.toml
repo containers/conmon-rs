@@ -12,8 +12,8 @@ publish = false
 [dependencies]
 anyhow = { version = "1.0.104", default-features = false }
 bytes = { version = "1.12.1", default-features = false }
-capnp = { version = "0.27.2", default-features = false }
-capnp-rpc = { version = "0.27.1", default-features = false }
+capnp = { version = "0.28.0", default-features = false }
+capnp-rpc = { version = "0.28.0", default-features = false }
 clap = { version = "4.6.7", default-features = false, features = ["derive", "env", "error-context", "help", "std", "usage"] }
 data-encoding = { version = "2.11.1", default-features = false, features = ["alloc"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
@@ -23,7 +23,7 @@ hyper = { version = "1.12.0", default-features = false, features = ["http1", "se
 hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
 libc = { version = "0.2.191", default-features = false }
 memchr = { version = "2.8.3", default-features = false }
-nix = { version = "0.31.3", default-features = false, features = ["event", "fs", "inotify", "poll", "process", "resource", "sched", "signal", "socket", "term", "uio"] }
+nix = { version = "0.32.0", default-features = false, features = ["event", "fs", "inotify", "poll", "process", "resource", "sched", "signal", "socket", "term", "uio"] }
 opentelemetry = { version = "0.33.1", default-features = false, optional = true }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "trace"], optional = true }
@@ -53,13 +53,13 @@ fuzzing = ["tokio/test-util"]
 
 [dev-dependencies]
 data-encoding = { version = "2.11.1", default-features = false, features = ["std"] }
-nix = { version = "0.31.3", default-features = false, features = ["user"] }
+nix = { version = "0.32.0", default-features = false, features = ["user"] }
 tempfile = { version = "3.27.0", default-features = false }
 time = { version = "0.3.55", default-features = false, features = ["parsing"] }
 tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "test-util"] }
 
 [build-dependencies]
-capnpc = { version = "0.27.0", default-features = false }
+capnpc = { version = "0.28.1", default-features = false }
 
 [lints]
 workspace = true
