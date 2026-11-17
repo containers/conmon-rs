@@ -38,6 +38,11 @@ the comment of the `Conmon` interface in the schema lists stay stable, like
 `container not found` for a container the server does not know, the Go client
 matches them with errors like `ErrContainerNotFound`.
 
+A runtime which fails without a terminal carries the last 64 KiB of its
+stderr in the error. Since unreleased, that tail includes output still
+queued after an exec's startup output exceeded 16 MiB, where older servers
+could lose the final diagnostic.
+
 ## Attach socket
 
 `attachContainer` makes the server listen on a `SOCK_SEQPACKET` UNIX socket at
@@ -335,6 +340,10 @@ How to rely on them:
 
 ## Changes
 
+- Unreleased: errors of failed runtimes without a terminal keep the final
+  stderr diagnostic even when output exceeded the exec startup limit.
+  Before, the error could carry an older tail and omit the last output
+  still queued for the server.
 - v1.2.3: the attach clients get the output which the log drivers still
   held when the container exited, for up to 5 seconds. Before, output which
   the log did not take within 100 ms after the exit got cut off for them.

@@ -6,3 +6,7 @@ extend-ignore-re = [
 [default.extend-words]
 # in-toto, the format of the attestation bundles.
 intoto = "intoto"
+
+[default.extend-identifiers]
+# The libc msghdr field holding the ancillary buffer length.
+msg_controllen = "msg_controllen"

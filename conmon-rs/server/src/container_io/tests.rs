@@ -522,9 +522,13 @@ async fn dropped_stdio_frees_the_channels_of_quiet_pipes() -> Result<()> {
 async fn runtime_errors_stop_the_output() -> Result<()> {
     // A runtime which left a process behind holding the pipes.
     let io = ContainerIO::new(false, ContainerLog::new())?;
+    let start = Instant::now();
     let e = io.runtime_error(anyhow::anyhow!("failed")).await;
     assert_eq!(format!("{e:#}"), "failed");
+    assert_eq!(start.elapsed(), DRAIN_TIMEOUT);
     assert!(io.attach().output_stopped().is_cancelled());
+    let (stdout, stderr) = io.stdio()?;
+    assert!(stdout.is_closed() && stderr.is_closed());
     Ok(())
 }
 
@@ -555,6 +559,93 @@ async fn runtime_errors_carry_the_end_of_stderr() -> Result<()> {
         "{e:.20}"
     );
     assert_eq!(e.len(), "failed: ".len() + STDERR_TAIL_SIZE);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_errors_keep_the_diagnostic_after_the_output_limit() -> Result<()> {
+    for early_chunks in [
+        ContainerIO::MAX_STDIO_STREAM_SIZE / READ_BUFFER_SIZE - 2,
+        ContainerIO::MAX_STDIO_STREAM_SIZE / READ_BUFFER_SIZE + 1,
+    ] {
+        let io = ContainerIO::new(false, ContainerLog::new())?;
+        io.collect_stdio(true, true)?;
+        let tx = &io.stderr.tx.as_ref().context("stderr sender")?.tx;
+        let chunk = Bytes::from(vec![b'x'; READ_BUFFER_SIZE]);
+        for _ in 0..early_chunks {
+            tx.send(Message::Data(chunk.clone(), Pipe::StdErr)).await?;
+        }
+        wait_for(|| tx.len() == 0).await?;
+
+        // Stop the collector before it can take these messages, as when
+        // the runtime exit wins the race with its last output. The first
+        // case crosses the output limit in the drain, the second before.
+        for _ in 0..3 {
+            tx.send(Message::Data(chunk.clone(), Pipe::StdErr)).await?;
+        }
+        // A code point split across chunks must be joined before decoding.
+        for bytes in [&b"\xe2\x82"[..], &b"\xac final diagnostic\n"[..]] {
+            tx.send(Message::Data(Bytes::copy_from_slice(bytes), Pipe::StdErr))
+                .await?;
+        }
+        tx.send(Message::Done).await?;
+        let error = format!("{:#}", io.runtime_error(anyhow::anyhow!("failed")).await);
+        assert!(
+            error.ends_with("\u{20ac} final diagnostic"),
+            "{early_chunks}"
+        );
+        assert_eq!(error.len(), "failed: ".len() + STDERR_TAIL_SIZE - 1);
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_errors_bound_continuous_stderr_and_discard_stdout() -> Result<()> {
+    let io = ContainerIO::new(false, ContainerLog::new())?;
+    let stdout = io.stdout.tx.as_ref().context("stdout sender")?.tx.clone();
+    let stderr = io.stderr.tx.as_ref().context("stderr sender")?.tx.clone();
+    let write = task::spawn(async move {
+        let data = Bytes::from(vec![b'x'; READ_BUFFER_SIZE]);
+        let message = Message::Data(data.clone(), Pipe::StdOut);
+        // Fill stdout, which the diagnostic reader closes without keeping.
+        for _ in 0..STDIO_CHANNEL_SIZE {
+            stdout.send(message.clone()).await.expect("stdout");
+        }
+        let mut chunks = 0;
+        while stderr
+            .send(Message::Data(data.clone(), Pipe::StdErr))
+            .await
+            .is_ok()
+        {
+            chunks += 1;
+        }
+        (chunks, stdout)
+    });
+    task::yield_now().await;
+    let error = format!("{:#}", io.runtime_error(anyhow::anyhow!("failed")).await);
+    assert_eq!(error.len(), "failed: ".len() + STDERR_TAIL_SIZE);
+    let (chunks, stdout) = write.await?;
+    assert!(chunks >= DRAIN_MAX_MESSAGES);
+    assert!(chunks <= DRAIN_MAX_MESSAGES + STDIO_CHANNEL_SIZE);
+    assert_eq!(stdout.len(), 0);
+    assert!(stdout.send(Message::Done).await.is_err());
+    assert!(io.attach().output_stopped().is_cancelled());
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_errors_decode_an_incomplete_unicode_tail() -> Result<()> {
+    let io = ContainerIO::new(false, ContainerLog::new())?;
+    let tx = &io.stderr.tx.as_ref().context("stderr sender")?.tx;
+    // Cutting to the byte budget leaves only the last byte of the euro sign.
+    let mut data = "\u{20ac}".as_bytes().to_vec();
+    data.extend(vec![b'x'; STDERR_TAIL_SIZE - 1]);
+    tx.send(Message::Data(Bytes::from(data), Pipe::StdErr))
+        .await?;
+    tx.send(Message::Done).await?;
+    let error = format!("{:#}", io.runtime_error(anyhow::anyhow!("failed")).await);
+    assert!(error.starts_with("failed: \u{fffd}xxx"));
+    assert_eq!(error.len(), "failed: ".len() + STDERR_TAIL_SIZE + 2);
     Ok(())
 }
 

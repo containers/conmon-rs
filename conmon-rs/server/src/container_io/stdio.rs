@@ -287,35 +287,43 @@ impl ContainerIO {
     /// [`SharedContainerAttach::stop_output`]: crate::attach::SharedContainerAttach::stop_output
     pub(crate) async fn runtime_error(&self, e: anyhow::Error) -> anyhow::Error {
         let stderr = match self.terminal {
-            None => {
-                // The runtime exited, only its remaining output is of
-                // interest. Its error is at the end, also of output which
-                // exceeded the size limit.
-                self.consume_stdio();
-                let early = self.take_early_stdio().await;
-                if early.stderr.truncated {
-                    early.stderr.end()
-                } else {
-                    let exited = CancellationToken::new();
-                    exited.cancel();
-                    match self.read_all_with_early(&exited, early).await {
-                        // Only the end, like of truncated output, the error
-                        // must not carry up to the size limit.
-                        Ok((_, mut stderr)) => {
-                            stderr.drain(..stderr.len().saturating_sub(STDERR_TAIL_SIZE));
-                            stderr
-                        }
-                        Err(read_err) => {
-                            debug!("Unable to read runtime output: {read_err:#}");
-                            vec![]
-                        }
-                    }
-                }
-            }
+            None => self.runtime_stderr().await.unwrap_or_else(|read_err| {
+                debug!("Unable to read runtime output: {read_err:#}");
+                vec![]
+            }),
             Some(_) => vec![],
         };
         self.attach.stop_output();
         with_stderr(e, &stderr)
+    }
+
+    /// Keep the end of a failed runtime's stderr, including what is still
+    /// queued or in its pipe after the collector stopped. The successful
+    /// output limit does not apply: the last bytes hold the diagnostic,
+    /// even if the collector or the remaining output crossed that limit.
+    /// Only a bounded tail is kept, and the usual drain bounds the wait for
+    /// descendants which keep writing or hold the pipe open.
+    async fn runtime_stderr(&self) -> Result<Vec<u8>> {
+        self.consume_stdio();
+        let EarlyStdio { stderr: early, .. } = self.take_early_stdio().await;
+        let (stdout, stderr) = self.receivers()?;
+        // No stdout is needed for the error. Closing its channel also lets
+        // a read loop blocked on forwarding discard the remaining output.
+        stdout.close();
+        while stdout.try_recv().is_ok() {}
+        let _close = CloseOnDrop(stderr);
+        let mut tail = Tail::<STDERR_TAIL_SIZE>::default();
+        tail.push(&early.end());
+        let done = early.done;
+        // Release the collected output before waiting for anything else.
+        drop(early);
+        if !done {
+            let mut drain = Drain::default();
+            while let Some(Message::Data(data, _)) = drain.recv_stdio(stderr).await {
+                tail.push(&data);
+            }
+        }
+        Ok(tail.into_end())
     }
 
     /// Read the output until it ended. Once `exited` got cancelled, the
