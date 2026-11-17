@@ -28,8 +28,8 @@ set -euo pipefail
 # go: whether the API of the Go client may have changed, which make
 # verify-go-api compares with the latest release: the client module (its
 # sources, go.mod and go.sum), the generated code of the schema, the allowed
-# breaks and the Makefile which runs the comparison. The integration suite
-# is a module of its own and not part of the API.
+# breaks, release baseline and the Makefile which runs the comparison. The
+# integration suite is a module of its own and not part of the API.
 #
 # Anything this cannot tell, like a commit without a parent, or one which
 # changes no file, prints true for all: when in doubt, run.
@@ -66,7 +66,7 @@ while IFS= read -r FILE; do
     esac
     case $FILE in
     pkg/client/integration/*) ;;
-    pkg/client/* | internal/proto/* | go.mod | go.sum | .github/go-api-break | Makefile)
+    pkg/client/* | internal/proto/* | go.mod | go.sum | .github/go-api-break | .github/verify-go-api | .github/release-baseline | Makefile)
         GO=true
         ;;
     esac

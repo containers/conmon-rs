@@ -1,9 +1,7 @@
 package client_test
 
 import (
-	"bufio"
 	"bytes"
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -53,6 +51,11 @@ const (
 	sttyAwait = `while [ "$(/busybox stty size)" != "40 30" ]; do /busybox sleep 0.1; done; ` +
 		"/busybox stty size"
 )
+
+// Keep the directories even after a spec removes them: a server left behind
+// still names its directory in argv. Record before New, which may fail after
+// starting the server. Other suites and unrelated servers are not ours.
+var suiteRuntimeDirs = map[string]struct{}{}
 
 var (
 	runtimePath = os.Getenv("RUNTIME_BINARY")
@@ -105,28 +108,11 @@ var _ = AfterSuite(func() {
 	goroutines := pprof.Lookup("goroutine")
 	Expect(goroutines.WriteTo(os.Stdout, 1)).To(Succeed())
 
-	By("Verifying that no conmonrs processes are still running in the background")
+	By("verifying that no server of this suite is still running")
 
-	cmd := exec.CommandContext(context.Background(), "ps", "aux")
-
-	var stdout bytes.Buffer
-
-	cmd.Stdout = &stdout
-	Expect(cmd.Run()).To(Succeed())
-
-	// Without CONMON_BINARY the client runs the conmonrs of the PATH, an
-	// empty substring would match every line.
-	binary := cmp.Or(conmonPath, "conmonrs")
-
-	scanner := bufio.NewScanner(strings.NewReader(stdout.String()))
-	for scanner.Scan() {
-		text := scanner.Text()
-		if strings.Contains(text, conmonBinaryKey) {
-			continue
-		}
-
-		Expect(text).NotTo(ContainSubstring(binary))
-	}
+	servers, err := serversInRunDirs("/proc", suiteRuntimeDirs, os.ReadFile)
+	Expect(err).To(Succeed())
+	Expect(servers).To(BeEmpty(), "servers left in the runtime directories of this suite")
 })
 
 type testRunner struct {
@@ -663,6 +649,11 @@ func (tr *testRunner) configGivenEnvWith(
 	if changeConfig != nil {
 		changeConfig(cfg)
 	}
+
+	runDir, err := filepath.Abs(cfg.ServerRunDir)
+	Expect(err).To(Succeed())
+
+	suiteRuntimeDirs[runDir] = struct{}{}
 
 	sut, err := client.New(cfg)
 	Expect(err).To(Succeed())

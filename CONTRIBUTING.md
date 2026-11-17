@@ -94,9 +94,10 @@ be installed), actionlint and zizmor, some of them in containers.
 
 The Go client has to stay compatible with the latest release within its major
 version, see [release.md](release.md). `make verify-go-api`, which `make
-verify` runs as well, compares its API with the one of the latest release tag
-with gorelease and fails for incompatible changes, like a removed exported
-function. It checks the committed changes, uncommitted ones are left out.
+verify` runs as well, compares its API with the highest stable release version
+reachable from HEAD with gorelease and fails for incompatible changes, like a
+removed exported function. It checks the committed changes, uncommitted ones
+are left out.
 
 For a PR which only changes Markdown files and the documents in [docs](docs),
 CI only runs the checks of the files, like prettier, typos and the links. It
@@ -187,8 +188,32 @@ compatible on the wire:
   operator has to check the version to rely on it, and list what changed, with
   the previous behavior, in the "Changes" section at their end, newest first.
 
-`make verify-schema-layout`, which CI runs, guards these rules: it fails if a
-change moves an existing field of the schema to another slot.
+`make verify-schema-layout`, which CI runs, guards these rules: it checks the
+committed snapshot and compares the generated layout against the highest
+stable release version reachable from HEAD. Both compatibility checks only
+consider exact `vX.Y.Z` tags, excluding prereleases and other suffixes. A later
+merge of an older patch release cannot lower their baseline. Fetch the release
+tags before running the checks. `make test-compatibility` exercises the schema
+and Go API checks with local fixtures, without network access.
+
+Updating the snapshot cannot forgive a wire break within the same major
+version. A deliberate break belongs in a coordinated major-version release
+PR, following [release.md](release.md#creating-a-new-release): update
+dependencies.yaml, Cargo.toml, Cargo.lock, the RPM spec, release markers and
+the Go module path together with the schema and generated files. Changing
+only Cargo.toml to bypass the comparison is not a valid version bump. The
+release must explain how clients and servers migrate across the wire break.
+
+The layout text depends on the pinned Cap'n Proto compiler. If an upgrade
+changes its output format without changing the wire format, first teach
+`.github/verify-schema-layout` to normalize both formats in that upgrade PR.
+Add fixtures generated from the same released schema with the old and new
+compilers, proving that the layouts compare as compatible and that actual
+changes to field types, ordinals, slots and type IDs still fail. Then regenerate
+the current snapshot with the new pinned compiler and run both compatibility
+checks. Keep the released tag and its original snapshot unchanged. Do not
+raise the major version or skip the released-layout comparison just to accept
+a compiler formatting change.
 
 ### Sign your PRs
 

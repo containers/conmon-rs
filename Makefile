@@ -143,6 +143,10 @@ unit-panics: ## Run the unit tests with cargo-nextest (has to be installed) and 
 	cargo nextest run --locked --profile ci --features tracing
 	.github/verify-panics target/nextest/ci/junit.xml
 
+.PHONY: test-compatibility
+test-compatibility: ## Test the schema and Go API compatibility checks without network access.
+	.github/test-compatibility
+
 .PHONY: unit-go
 unit-go: ## Run the unit tests of the Go client, which need no server.
 	go test -race ./pkg/client
@@ -235,7 +239,7 @@ lint-links: ## Check the links within the repository of the Markdown files with 
 	lychee --offline --include-fragments --no-progress $$(git ls-files '*.md')
 
 .PHONY: verify
-verify: verify-dependencies verify-spec verify-unreleased verify-vex verify-proto verify-schema-layout verify-go-api verify-prettier verify-deny lint-typos lint-links lint-workflows ## Run the checks of CI besides make lint and the tests.
+verify: test-compatibility verify-dependencies verify-spec verify-unreleased verify-vex verify-proto verify-schema-layout verify-go-api verify-prettier verify-deny lint-typos lint-links lint-workflows ## Run the checks of CI besides make lint and the tests.
 
 .PHONY: verify-dependencies
 verify-dependencies: .install.zeitgeist ## Verify the local dependencies.
@@ -286,10 +290,11 @@ schema-layout:
 .PHONY: verify-schema-layout
 verify-schema-layout: schema-layout ## Verify that the Cap'n Proto schema keeps the layout of its fields.
 	.github/verify-schema-layout $(SCHEMA_LAYOUT) $(BUILD_DIR)/conmon.capnp.layout
+	.github/verify-schema-release $(BUILD_DIR)/conmon.capnp.layout
 
 # CRI-O vendors the Go client, which has to stay compatible within a major
 # version, see release.md. gorelease compares the API of the root module at
-# HEAD with the one of the latest release tag before it, which it downloads
+# HEAD with the highest stable release version reachable from it, downloaded
 # through the module proxy, and fails for incompatible changes, like a removed
 # or changed exported identifier, and for problems of the module, like missing
 # sums or a retracted requirement. It refuses a working tree with changes or
@@ -310,52 +315,7 @@ GO_API_BREAK := .github/go-api-break
 
 .PHONY: verify-go-api
 verify-go-api: .install.gorelease ## Verify that the Go client is compatible with the latest release.
-	BASE=$$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*') && \
-	DIR=$$(mktemp -d) && TMP=$$(mktemp -d) && \
-	trap 'git worktree remove --force "$$DIR" 2>/dev/null; rm -rf "$$DIR" "$$TMP"' EXIT && \
-	git worktree add -q --detach "$$DIR" HEAD && \
-	echo "Comparing the Go module of HEAD with $$BASE" && \
-	cd "$$DIR" && touch "$$TMP/break" && \
-	if [ -f "$(GO_API_BREAK)" ]; then sed -e '/^#/d' -e '/^$$/d' "$(GO_API_BREAK)" >"$$TMP/break"; fi && \
-	ALLOWED=$$(head -n 1 "$$TMP/break") && \
-	tail -n +2 "$$TMP/break" | sort >"$$TMP/allowed" && \
-	STATUS=0 && "$(abspath $(GOTOOLS_BINDIR))/gorelease" -base="$$BASE" >"$$TMP/report" 2>&1 || STATUS=$$? ; \
-	cat "$$TMP/report" ; \
-	sed -n '/^## incompatible changes$$/,/^#/{/^#/d;/^$$/d;p}' "$$TMP/report" | sort >"$$TMP/found" ; \
-	comm -23 "$$TMP/found" "$$TMP/allowed" >"$$TMP/unlisted" ; \
-	comm -13 "$$TMP/found" "$$TMP/allowed" >"$$TMP/stale" ; \
-	SUMMARY=0 ; grep -qx 'Incompatible changes were detected.' "$$TMP/report" && SUMMARY=1 ; \
-	DIAGNOSTICS=0 ; grep -qx '# diagnostics' "$$TMP/report" && DIAGNOSTICS=1 ; \
-	if [ -n "$$ALLOWED" ] && [ "$$ALLOWED" = "$$BASE" ] && [ "$$DIAGNOSTICS" = 0 ] && \
-		{ [ "$$STATUS" = 0 ] || [ "$$SUMMARY" = 1 ]; } && [ -s "$$TMP/stale" ]; then \
-		echo "Warning: $(GO_API_BREAK) lists changes which gorelease no longer reports against $$BASE, remove them:" ; \
-		cat "$$TMP/stale" ; \
-	fi ; \
-	if [ "$$STATUS" != 0 ] && [ -n "$$ALLOWED" ] && [ "$$ALLOWED" != "$$BASE" ]; then \
-		echo "$(GO_API_BREAK) names $$ALLOWED, not $$BASE which gorelease compares with, see release.md" ; \
-	elif [ "$$STATUS" != 0 ] && [ -n "$$ALLOWED" ]; then \
-		FORGIVE=1 ; \
-		if [ "$$STATUS" != 1 ]; then \
-			echo "Not forgiven: gorelease exited with $$STATUS" ; FORGIVE=0 ; \
-		fi ; \
-		if [ "$$SUMMARY" = 0 ]; then \
-			echo "Not forgiven: the report lacks the line 'Incompatible changes were detected.'" ; FORGIVE=0 ; \
-		fi ; \
-		if [ "$$DIAGNOSTICS" = 1 ]; then \
-			echo "Not forgiven: the report has diagnostics" ; FORGIVE=0 ; \
-		fi ; \
-		if [ ! -s "$$TMP/found" ]; then \
-			echo "Not forgiven: the report lists no incompatible changes" ; FORGIVE=0 ; \
-		fi ; \
-		if [ -s "$$TMP/unlisted" ]; then \
-			echo "Not forgiven: incompatible changes against $$BASE which $(GO_API_BREAK) does not list:" ; \
-			cat "$$TMP/unlisted" ; FORGIVE=0 ; \
-		fi ; \
-		if [ "$$FORGIVE" = 1 ]; then \
-			echo "The incompatible changes against $$BASE are intended, see $(GO_API_BREAK)" ; STATUS=0 ; \
-		fi ; \
-	fi ; \
-	exit "$$STATUS"
+	.github/verify-go-api "$(abspath $(GOTOOLS_BINDIR))/gorelease" "$(GO_API_BREAK)"
 
 .PHONY: verify-deny
 verify-deny: ## Check the dependencies with cargo-deny (has to be installed), all checks or only $DENY_CHECKS.

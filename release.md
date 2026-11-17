@@ -102,8 +102,11 @@ consumers like CRI-O pick the release up with `go get
 github.com/containers/conmon-rs@vX.Y.Z`. The Go module has no separate
 versioning, which means the Go client must stay backwards compatible within a
 major version. `make verify-go-api`, which the ci workflow runs, checks that
-with gorelease against the latest release tag. An incompatible change needs a
-new major version, whose module path gets the major version as a suffix, like
+with gorelease against the highest stable release version reachable from HEAD.
+The Go and wire checks share this baseline selection: only exact `vX.Y.Z` tags
+qualify, and merging an older patch release later cannot lower the baseline.
+An incompatible change needs a new major version, whose module path gets the
+major version as a suffix, like
 `github.com/containers/conmon-rs/v2`, see [the Go
 documentation](https://go.dev/doc/modules/major-version). The PR which moves to
 it adapts the target, whose latest release tag is one of the previous module
@@ -117,12 +120,19 @@ it reports is listed. A PR which adds another one updates the list, the target
 warns about listed lines which gorelease no longer reports, which the PR
 removes. The version bump PR keeps the file, its base is still that tag. Once
 the next release got tagged, the target compares with the new tag and enforces
-the compatibility again, the file is a no-op then and the next PR deletes it. A
-patch release tagged on a commit which main contains, like a version bump
-branched off main before the break and merged afterwards, becomes the latest tag
-which `git describe` finds in the history of HEAD and so the base of gorelease.
-Its tag has to replace the one of the file first, with the lines of the report
-against it, otherwise the target stops forgiving the changes for every PR.
+the compatibility again, the file is a no-op then and the next PR deletes it.
+When a higher stable version becomes reachable from HEAD, its tag has to
+replace the one in an exception file that is still needed, with the lines of
+the report against it. Otherwise the target stops forgiving those changes.
+
+A deliberate wire-format break requires a major-version release PR with all
+the version updates listed at the start of this document, the schema and its
+generated files, and a client/server migration plan. The schema check uses the
+major version in Cargo.toml to recognize that release transition; changing
+that file alone does not satisfy the release process. Compiler output-format
+changes instead follow the normalization and fixture procedure in
+[CONTRIBUTING.md](CONTRIBUTING.md#changing-the-schema), preserving the released
+baseline and its compatibility check.
 
 The release after such a break raises the minor version, like v1.3.0 after
 v1.2.x, by policy: the module path keeps its major version, although semantic
