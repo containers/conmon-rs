@@ -142,6 +142,7 @@ async fn written_input_gives_its_budget_back() -> Result<()> {
     let mut data = HeldBuf::default();
     data.push(connect_budget.hold(Bytes::from_static(b"ab")).await);
     let early = Early {
+        connection: None,
         data,
         last: Some(client_budget.hold(Bytes::from_static(b"c")).await),
         ended: false,
@@ -419,6 +420,92 @@ async fn disconnected_spdy_cancels_pending_connects() -> Result<()> {
             .is_err(),
         "a connection was established after its streaming session ended"
     );
+    Ok(())
+}
+
+/// Different sessions share admission, including connections still being
+/// established. A failed connect and an aborted connect give the slot back.
+#[tokio::test]
+async fn connections_share_the_server_limit_and_release_it() -> Result<()> {
+    let resources = Resources::new(64 * 1024 * 1024, 1);
+    let first = Namespace::with_resources(NETNS.into(), resources.clone());
+    let second = Namespace::with_resources(NETNS.into(), resources.clone());
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let port = listener.local_addr()?.port();
+    let (_tx, mut input) = mpsc::channel(1);
+    let (connection, early) = PortForward::establish(&first, port, &mut input).await?;
+    let _pod = listener.accept().await?;
+    let error = PortForward::establish(&second, port, &mut input)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("maximum active port forward connections")
+    );
+    assert!(
+        time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
+    drop((connection, early));
+    wait_for(|| resources.connection().is_ok()).await?;
+    let (connection, early) = PortForward::establish(&second, port, &mut input).await?;
+    let _pod2 = listener.accept().await?;
+    drop((connection, early));
+    wait_for(|| resources.connection().is_ok()).await?;
+    let bad = Namespace::with_resources("/nonexistent".into(), resources.clone());
+    let error = PortForward::establish(&bad, port, &mut input)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("open network namespace"));
+    wait_for(|| resources.connection().is_ok()).await?;
+
+    // Fill a local accept backlog so the next connection stays pending.
+    let socket = TcpSocket::new_v4()?;
+    socket.bind((Ipv4Addr::LOCALHOST, 0).into())?;
+    let blocked = socket.listen(1)?;
+    let addr = blocked.local_addr()?;
+    let _filler1 = TcpStream::connect(addr).await?;
+    let _filler2 = TcpStream::connect(addr).await?;
+    let connecting =
+        task::spawn(async move { PortForward::establish(&second, addr.port(), &mut input).await });
+    wait_for(|| resources.connection().is_err()).await?;
+    connecting.abort();
+    let _ = connecting.await;
+    wait_for(|| resources.connection().is_ok()).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_half_closed_forward_keeps_its_connection_slot() -> Result<()> {
+    let resources = Resources::new(64 * 1024 * 1024, 1);
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let port = listener.local_addr()?.port();
+    let (mut client, server) = Client::pair()?;
+    let serving = task::spawn(
+        PortForward::with_resources(NETNS.into(), None, resources.clone())
+            .without_pings()
+            .serve_spdy(server),
+    );
+    request(&mut client, port).await?;
+    let (mut pod, _) = listener.accept().await?;
+    client
+        .send(Frame::Data {
+            stream_id: 3,
+            fin: true,
+            data: Bytes::new(),
+        })
+        .await?;
+    // The upload is done, but the pod has not sent its response yet.
+    let mut input = Vec::new();
+    time::timeout(Duration::from_secs(5), pod.read_to_end(&mut input)).await??;
+    assert!(resources.connection().is_err());
+    pod.write_all(b"answer").await?;
+    pod.shutdown().await?;
+    wait_for(|| resources.connection().is_ok()).await?;
+    drop(client);
+    time::timeout(Duration::from_secs(5), serving).await??;
     Ok(())
 }
 

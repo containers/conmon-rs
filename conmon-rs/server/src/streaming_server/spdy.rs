@@ -22,7 +22,7 @@ mod stream;
 use crate::{
     mutex::lock,
     streaming_server::{
-        budget::{Budget, Held},
+        budget::{Budget, Held, SharedBudget},
         idle::{Activity, STALL_TIMEOUT},
     },
 };
@@ -70,6 +70,11 @@ const STREAM_QUEUE: usize = 16;
 /// reader waits to place comes on top.
 const DATA_BUFFER: u32 = 4 * 1024 * 1024;
 
+/// Bound head-of-line blocking while input waits for the shared buffer
+/// budget. Pings cannot extend this wait: the reader cannot
+/// reach them while it is delivering the current data frame.
+const INPUT_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// How many accepted streams wait for [`Connection::accept`].
 const ACCEPT_QUEUE: usize = 16;
 
@@ -107,11 +112,55 @@ impl Connection {
     /// Nothing waits for the echoes of the pings. Only the frames of the
     /// client keep the connection active, except for these echoes, and the
     /// data of the server, not its control frames, see [`Self::is_activity`].
+    #[cfg(any(test, feature = "fuzzing"))]
     pub(super) fn serve<T, F>(
         io: T,
         idle_timeout: Option<Duration>,
         ping_interval: Option<Duration>,
         accept: F,
+    ) -> Self
+    where
+        T: AsyncRead + AsyncWrite + Send + 'static,
+        F: Fn(&Headers) -> Result<()> + Send + 'static,
+    {
+        Self::serve_with_input(
+            io,
+            idle_timeout,
+            ping_interval,
+            accept,
+            Budget::new(DATA_BUFFER),
+        )
+    }
+
+    /// Serve a connection whose input also counts against a server budget.
+    pub(super) fn serve_with_budget<T, F>(
+        io: T,
+        idle_timeout: Option<Duration>,
+        ping_interval: Option<Duration>,
+        accept: F,
+        shared_budget: SharedBudget,
+    ) -> Self
+    where
+        T: AsyncRead + AsyncWrite + Send + 'static,
+        F: Fn(&Headers) -> Result<()> + Send + 'static,
+    {
+        Self::serve_with_input(
+            io,
+            idle_timeout,
+            ping_interval,
+            accept,
+            Budget::with_shared(DATA_BUFFER, shared_budget),
+        )
+    }
+
+    /// Standalone protocol tests use only a local budget; they may pass
+    /// their streams to a namespace constructed outside a streaming server.
+    fn serve_with_input<T, F>(
+        io: T,
+        idle_timeout: Option<Duration>,
+        ping_interval: Option<Duration>,
+        accept: F,
+        budget: Budget,
     ) -> Self
     where
         T: AsyncRead + AsyncWrite + Send + 'static,
@@ -127,7 +176,7 @@ impl Connection {
             control: control_tx,
             data: data_tx,
             streams: Mutex::default(),
-            budget: Budget::new(DATA_BUFFER),
+            budget,
             resets: Mutex::default(),
             resets_ready: Notify::new(),
             closing: CancellationToken::new(),
@@ -523,7 +572,9 @@ impl Shared {
 
     /// Hand the data of the client to its stream. Waits while the stream
     /// does not take it or the streams hold all of the budget, which stops
-    /// reading the connection.
+    /// reading the connection. Only contention for the server-wide budget
+    /// is bounded by [`INPUT_STALL_TIMEOUT`]; local backpressure remains
+    /// governed by the session's optional idle timeout.
     async fn deliver(&self, stream_id: u32, data: Bytes) {
         let Some((tx, reset)) = self
             .lock_streams()
@@ -539,12 +590,20 @@ impl Shared {
         select! {
             // A stream which went away drops its data, which gives its share
             // of the budget back.
-            result = async { tx.send(self.budget.hold(data).await).await } => {
+            result = async {
+                let held = self.budget.hold_with_shared_timeout(data, INPUT_STALL_TIMEOUT).await?;
+                Ok::<_, time::error::Elapsed>(tx.send(held).await)
+            } => {
                 // A stream which takes its data slowly keeps the connection
                 // active, only one which does not take it at all lets it
                 // go idle.
-                if result.is_ok() {
-                    self.activity.touch();
+                match result {
+                    Ok(Ok(())) => self.activity.touch(),
+                    Ok(Err(_)) => {}
+                    Err(_) => {
+                        debug!("Closing SPDY connection: input for stream {stream_id} stalled waiting for shared buffer space");
+                        self.go_away(GOAWAY_OK);
+                    }
                 }
             }
             // A stream which went away while waiting for the budget.

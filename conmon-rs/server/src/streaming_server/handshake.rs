@@ -73,11 +73,12 @@ impl StreamingServer {
                 );
             }
 
+            let budget = lock(state).resources.buffer.clone();
             Self::upgrade_spdy(
                 request,
                 &SPDY_PROTOCOLS,
                 || Self::take_session(state, token),
-                Self::handle_spdy,
+                move |io, session, version| Self::handle_spdy(io, session, version, budget),
                 debug_span!("spdy", ?token),
             )
         })

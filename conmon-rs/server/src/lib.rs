@@ -45,9 +45,9 @@ pub fn run() -> Result<()> {
     // Before the runtime directories get created, they would get the umask
     // of the caller otherwise.
     init::set_default_umask();
-    config.prepare().context("prepare runtime directories")?;
+    let startup = config.prepare().context("prepare runtime directories")?;
 
-    Server::new(config)
+    Server::new(config, startup)
         .context("create server")?
         .start()
         .context("start server")

@@ -372,7 +372,12 @@ pub(super) async fn spdy_attach_duplex(
         stop_after_stdin_eof,
         idle_timeout,
     ));
-    task::spawn_local(StreamingServer::handle_spdy(server, session, version));
+    task::spawn_local(StreamingServer::handle_spdy(
+        server,
+        session,
+        version,
+        super::resources::Resources::default().buffer,
+    ));
     let client = open_attach_streams(Client::new(client)?).await?;
     Ok((io, client))
 }

@@ -6,7 +6,7 @@ use crate::conmon_capnp::conmon::{self};
 use crate::telemetry;
 use crate::{
     child_reaper::ChildReaper,
-    config::{Config, LogDriver},
+    config::{Config, LogDriver, StartupLock},
     container_io::DRAIN_MAX_WAIT,
     fs_util::{FileId, RemoveError},
     init,
@@ -81,6 +81,7 @@ const _: () = assert!(
 #[derive(Debug)]
 pub(crate) struct Server {
     config: Arc<Config>,
+    startup: Option<StartupLock>,
     reaper: Arc<ChildReaper>,
 
     /// The tracer provider which exports the spans, if tracing is enabled.
@@ -106,17 +107,24 @@ impl Server {
     }
 
     /// Create a new server for a validated and prepared configuration.
-    pub(crate) fn new(config: Config) -> Result<Self> {
+    pub(crate) fn new(config: Config, startup: StartupLock) -> Result<Self> {
         init::set_up_process().context("set up process")?;
-        Ok(Self::with_config(config))
+        let mut server = Self::with_config(config);
+        server.startup = Some(startup);
+        Ok(server)
     }
 
     /// A server for the configuration without the setup of the process,
     /// which tests must not change.
     pub(crate) fn with_config(config: Config) -> Self {
-        let streaming_server = Arc::new(StreamingServer::new(config.max_streaming_sessions()));
+        let streaming_server = Arc::new(StreamingServer::with_limits(
+            config.max_streaming_sessions(),
+            config.max_streaming_buffer_bytes(),
+            config.max_port_forward_connections(),
+        ));
         Self {
             config: Arc::new(config),
+            startup: None,
             reaper: Default::default(),
             #[cfg(feature = "tracing")]
             tracer: Default::default(),
@@ -168,7 +176,7 @@ impl Server {
 
         // Deliberately outside the `skip_fork` check above: the server outlives
         // its parent either way, so the descriptors have to go either way.
-        init::close_inherited_fds();
+        init::close_inherited_fds(self.startup.as_ref().map(StartupLock::fd));
 
         let rt = match Self::build_runtime() {
             Ok(rt) => rt,
@@ -387,7 +395,7 @@ impl Server {
 
     /// Run the backend and the signal handler until the server ends, see
     /// [`Server::logged`] for the result.
-    async fn run_tasks(self) -> Result<Result<()>> {
+    async fn run_tasks(mut self) -> Result<Result<()>> {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let socket = self.config().socket();
         let reaper = self.reaper.clone();
@@ -400,6 +408,10 @@ impl Server {
             let _entered = backend_span.enter();
             self.bind_backend()?
         };
+
+        // No competing start can remove the socket before it is bound.
+        // A later start sees the listener and leaves it intact.
+        drop(self.startup.take());
 
         // The RPC system is not `Send`, so the backend and the tasks of the
         // calls run on a local set. It runs on the thread of the runtime

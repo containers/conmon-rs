@@ -74,11 +74,11 @@ pub(crate) fn redirect_stdio(log_driver: LogDriver) -> Result<()> {
 /// harness waiting for its own pipe to close.
 ///
 /// conmon does the same thing, see `close_all_fds_ge_than(3)` there. Any
-/// descriptor conmon-rs actually needs is created after this point, so
-/// nothing above stderr is worth keeping.
+/// descriptor conmon-rs actually needs is created after this point, except
+/// the startup directory lock, which must survive through binding.
 #[expect(unsafe_code, reason = "closing descriptors which may be gone")]
-pub(crate) fn close_inherited_fds() {
-    for fd in inherited_fds() {
+pub(crate) fn close_inherited_fds(keep: Option<RawFd>) {
+    for fd in inherited_fds().into_iter().filter(|fd| Some(*fd) != keep) {
         // The descriptor used to enumerate them is already closed by now, so
         // check before closing to avoid closing an unrelated descriptor that
         // reused the number. This runs before tokio starts, so nothing else
@@ -93,8 +93,8 @@ pub(crate) fn close_inherited_fds() {
         // SAFETY: both calls are defined for any integer; a stale or invalid
         // descriptor number fails with `EBADF` rather than affecting anything
         // else. Closing an open one takes it from nobody, as no live value
-        // owns a descriptor above stderr at this point: nothing the setup
-        // opened before is kept. Only the journal sockets in the statics of
+        // owns a descriptor being closed: the startup lock is excluded.
+        // Only the journal sockets in the statics of
         // `crate::journal` get created that early, by `Server::log_early`,
         // whose error ends the start before it gets here, and by the panic
         // hook, which only a panic runs and which gets installed right

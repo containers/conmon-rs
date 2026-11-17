@@ -15,7 +15,12 @@ async fn incomplete_spdy_sessions_time_out() -> Result<()> {
     // Stdin and stdout never come.
     client.open(1, [("streamType", "error")].into()).await?;
     let start = time::Instant::now();
-    let served = task::spawn(StreamingServer::handle_spdy(server, session, Version::V4));
+    let served = task::spawn(StreamingServer::handle_spdy(
+        server,
+        session,
+        Version::V4,
+        crate::streaming_server::resources::Resources::default().buffer,
+    ));
 
     // The server pings the client meanwhile.
     time::timeout(STREAM_CREATION_TIMEOUT * 2, async {

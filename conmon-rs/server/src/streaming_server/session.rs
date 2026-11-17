@@ -235,18 +235,28 @@ impl StreamingServer {
     /// Handle a connection which got upgraded to SPDY, in the span of its
     /// session, which the tasks of the connection inherit: a protocol error
     /// of the client names the container as well.
-    pub(super) async fn handle_spdy<T>(io: T, session: Session, version: Version)
-    where
+    pub(super) async fn handle_spdy<T>(
+        io: T,
+        session: Session,
+        version: Version,
+        budget: super::budget::SharedBudget,
+    ) where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
     {
         let span = Self::session_span(&session);
-        Self::run_spdy(io, session, version).instrument(span).await;
+        Self::run_spdy(io, session, version, budget)
+            .instrument(span)
+            .await;
     }
 
     /// Wait for the streams of the client of a SPDY connection, then run the
     /// session on them.
-    async fn run_spdy<T>(io: T, session: Session, version: Version)
-    where
+    async fn run_spdy<T>(
+        io: T,
+        session: Session,
+        version: Version,
+        budget: super::budget::SharedBudget,
+    ) where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
     {
         let terminal = session.terminal();
@@ -259,9 +269,13 @@ impl StreamingServer {
         };
         // The session ends the connection once it was idle, which reports
         // the timeout to the client first.
-        let mut connection = Connection::serve(io, None, Some(PING_INTERVAL), move |headers| {
-            SpdyStreams::accept(headers, version)
-        });
+        let mut connection = Connection::serve_with_budget(
+            io,
+            None,
+            Some(PING_INTERVAL),
+            move |headers| SpdyStreams::accept(headers, version),
+            budget,
+        );
         let activity = connection.activity();
         let streams = match SpdyStreams::wait(&mut connection, expected).await {
             Ok(streams) => streams,
