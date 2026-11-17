@@ -203,6 +203,61 @@ async fn incomplete_requests_time_out() -> Result<()> {
     Ok(())
 }
 
+/// Ending the session cancels an expired request's error writer even if
+/// its transport stays open and the peer has stopped reading.
+#[tokio::test(start_paused = true)]
+async fn ending_session_cancels_blocked_error_writer() -> Result<()> {
+    let (client, server) = tokio::io::duplex(128);
+    let mut client = Client::new(client)?;
+    let mut connection = Connection::serve(server, None, None, PortForward::accept);
+    let transport = connection.handle();
+
+    // Keep one stream outside the session to fill the output queue. The
+    // session receives only the error stream of an incomplete request.
+    client.open(1, headers(STREAM_TYPE_DATA, 80)).await?;
+    let mut filler = connection.accept().await.context("missing filler stream")?;
+    client.frame().await?;
+    client.open(3, headers(STREAM_TYPE_ERROR, 80)).await?;
+    client.frame().await?;
+
+    let fill = async {
+        for _ in 0..1024 {
+            filler.send(Bytes::from_static(&[0; 1024])).await?;
+        }
+        anyhow::Ok(())
+    };
+    assert!(time::timeout(Duration::from_secs(1), fill).await.is_err());
+
+    let session = task::spawn(PortForward::serve_requests(
+        connection,
+        Namespace::new(NETNS.into()),
+    ));
+    // Paused time advances only when all ready tasks have been polled.
+    // The request expires first, and its error writer blocks on the full
+    // output queue before this later timer ends the session.
+    time::sleep(2 * crate::streaming_server::stream_protocol::STREAM_CREATION_TIMEOUT).await;
+    session.abort();
+    assert!(session.await.unwrap_err().is_cancelled());
+    assert!(!transport.done().is_cancelled());
+
+    // Resuming reads must reveal a reset, not the diagnostic and FIN that
+    // a detached writer would send after its session ended.
+    let frame = client
+        .frame_until(|frame| {
+            matches!(
+                frame,
+                Frame::RstStream { stream_id: 3, .. } | Frame::Data { stream_id: 3, .. }
+            )
+        })
+        .await?;
+    assert!(
+        matches!(frame, Frame::RstStream { stream_id: 3, .. }),
+        "{frame:?}"
+    );
+    transport.abort();
+    Ok(())
+}
+
 #[tokio::test]
 async fn invalid_streams_get_rejected() -> Result<()> {
     let mut client = serve()?;
@@ -284,6 +339,7 @@ async fn pending_requests_let_go_of_reset_streams() -> Result<()> {
     let (mut client, server) = Client::pair()?;
     let mut connection = Connection::serve(server, None, None, PortForward::accept);
     let namespace = Namespace::new(NETNS.into());
+    let mut tasks = JoinSet::new();
     let mut pending = Pending::new();
     // Requests a and c, whose only streams the client resets, and b.
     for (stream_id, typ, request_id) in [
@@ -303,7 +359,7 @@ async fn pending_requests_let_go_of_reset_streams() -> Result<()> {
             )
             .await?;
         let stream = connection.accept().await.context("stream")?;
-        PortForward::add(&mut pending, stream, &namespace);
+        PortForward::add(&mut pending, stream, &namespace, &mut tasks);
     }
     assert_eq!(pending.resets.len(), 3);
     for stream_id in [1, 5] {
@@ -330,7 +386,7 @@ async fn pending_requests_let_go_of_reset_streams() -> Result<()> {
         )
         .await?;
     let stream = connection.accept().await.context("stream")?;
-    PortForward::add(&mut pending, stream, &namespace);
+    PortForward::add(&mut pending, stream, &namespace, &mut tasks);
     assert!(pending.requests.is_empty());
     assert_eq!(pending.resets.next().await, Some(None));
     assert!(pending.resets.is_empty());

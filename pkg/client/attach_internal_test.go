@@ -896,3 +896,64 @@ func TestForwardResizeEvents(t *testing.T) {
 		t.Context(), &AttachContainerConfig{ID: "id", Resize: pending}, c.logger, done,
 	)
 }
+
+func TestStdinEOFKeepsOutputAndCancellationErrors(t *testing.T) {
+	t.Parallel()
+
+	for _, terminal := range []bool{false, true} {
+		for _, want := range []error{io.ErrUnexpectedEOF, context.Canceled, ErrClientClosed} {
+			t.Run(fmt.Sprintf("terminal %v error %v", terminal, want), func(t *testing.T) {
+				t.Parallel()
+
+				c := newTestClient(t, t.TempDir(), logrus.New())
+				conn, _ := packetPair(t)
+				cfg := &AttachContainerConfig{
+					Terminal:          terminal,
+					StopAfterStdinEOF: terminal,
+					ContainerStdin:    true,
+				}
+
+				ctx, cancel := context.WithCancelCause(t.Context())
+				defer cancel(nil)
+
+				// The stdin completion must win the first select. Closing the
+				// stdin acknowledges that the EOF branch is waiting for output.
+				stdinClosed := make(chan struct{})
+				session := &attachSession{closeStdin: func() { close(stdinClosed) }}
+
+				stdinDone, outputDone := make(chan error, 1), make(chan error, 1)
+				stdinDone <- nil
+
+				done := make(chan error, 1)
+				go func() {
+					done <- c.readStdio(ctx, cfg, c.logger, conn, session, outputDone, stdinDone)
+				}()
+
+				<-stdinClosed
+
+				if errors.Is(want, io.ErrUnexpectedEOF) {
+					outputDone <- want
+				} else {
+					// The output stays blocked through the bounded cleanup wait.
+					cancel(want)
+				}
+
+				select {
+				case err := <-done:
+					if !errors.Is(err, want) {
+						t.Fatalf("got %v, want %v", err, want)
+					}
+
+					if errors.Is(want, io.ErrUnexpectedEOF) {
+						expected := "got stdout error: " + want.Error()
+						if err.Error() != expected {
+							t.Errorf("missing stdout context: %v", err)
+						}
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("attach did not end")
+				}
+			})
+		}
+	}
+}

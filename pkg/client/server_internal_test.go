@@ -1892,3 +1892,119 @@ func TestAttachHeaptrackFromPath(t *testing.T) {
 		t.Fatalf("got arguments %q, want %q", got, want)
 	}
 }
+
+func TestStopDoesNotSignalReusedPID(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		observation string
+		kill        bool
+	}{
+		{observation: "pickUpReplacement"},
+		{observation: "pickUpReplacement", kill: true},
+		{observation: "waitUntilServerUp"},
+		{observation: "waitUntilServerUp", kill: true},
+		{observation: "refreshServer"},
+		{observation: "refreshServer", kill: true},
+	} {
+		t.Run(tc.observation+"/kill "+strconv.FormatBool(tc.kill), func(t *testing.T) {
+			t.Parallel()
+
+			cmd := exec.CommandContext(context.Background(), "sleep", "60")
+			if err := cmd.Start(); err != nil {
+				t.Fatalf("start unrelated process: %v", err)
+			}
+
+			done := make(chan error, 1)
+			waited := make(chan struct{})
+
+			go func() {
+				done <- cmd.Wait()
+
+				close(waited)
+			}()
+
+			t.Cleanup(func() {
+				if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+					t.Errorf("kill unrelated process: %v", err)
+				}
+
+				<-waited
+			})
+
+			pid := uint32(cmd.Process.Pid)
+
+			start := processStartTime(pid)
+			if start == 0 {
+				t.Skip("/proc not readable")
+			}
+
+			c := newTestClient(t, t.TempDir(), logrus.New())
+			t.Cleanup(func() { c.Close() })
+			// Without pidfds, a different start time identifies the process
+			// which inherited the PID of the server. No replacement server
+			// answers on the socket, so stopping must leave this one alone.
+			c.server = &serverProcess{pid: pid, startTime: start - 1}
+
+			switch tc.observation {
+			case "waitUntilServerUp":
+				if _, err := c.waitUntilServerUp(t.Context()); !errors.Is(err, ErrServerExited) {
+					t.Fatalf("wait for server: got %v, want %v", err, ErrServerExited)
+				}
+			case "refreshServer":
+				stopSocket := serveVersionSocket(t, c.runDir, versionConmon{pid: pid})
+
+				conn, rpcClient, _, err := c.usableConn(t.Context())
+				if err != nil {
+					t.Fatalf("connect: %v", err)
+				}
+				defer rpcClient.Release()
+				defer conn.close(c.logger)
+
+				// A refresh from a connection no longer in use still observes
+				// the exit, but must not install its answer as a replacement.
+				c.connMu.Lock()
+				c.conn = nil
+				c.connMu.Unlock()
+				recorded := c.currentServer()
+				c.refreshServer(t.Context(), conn, rpcClient)
+
+				if c.currentServer() != recorded {
+					t.Fatal("obsolete connection replaced the recorded server")
+				}
+
+				stopSocket()
+			}
+
+			if tc.observation != "pickUpReplacement" {
+				if !c.server.done.Load() {
+					t.Error("observed exit not remembered before stopping")
+				}
+
+				// Remove the identity clue so the stop cannot rediscover the
+				// exit. The remembered exit must protect the PID even when a
+				// later check cannot compare start times.
+				c.server.startTime = 0
+			}
+
+			stop := c.Shutdown
+			if tc.kill {
+				stop = c.Kill
+			}
+
+			if err := stop(t.Context()); err != nil {
+				t.Fatalf("stop exited server: %v", err)
+			}
+
+			if !c.server.done.Load() {
+				t.Error("observed exit not remembered")
+			}
+
+			select {
+			case err := <-done:
+				t.Fatalf("unrelated process terminated: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+		})
+	}
+}

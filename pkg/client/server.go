@@ -519,11 +519,13 @@ func processStat(pid uint32) [][]byte {
 // It fails with ErrServerPIDUnknown if the server PID is unknown, without
 // signaling anything or touching the attach sessions and the connection.
 // Where the kernel supports pidfds, the signal cannot reach another process
-// which got the PID after the server exited. It closes the stdin of the
-// attach sessions of the client and its connection first, the attach
-// sessions end once the server exited. If the recorded server exited and
-// another one, for example a restarted one, answers on the socket of the run
-// directory within a few seconds, that one gets stopped.
+// which got the PID after the server exited. Since unreleased, an observed
+// exit or PID reuse also prevents further signals without pidfds.
+//
+// It closes the stdin of the attach sessions of the client and its connection
+// first. The attach sessions end once the server exited. If the recorded
+// server exited and another one, for example a restarted one, answers on the
+// socket of the run directory within a few seconds, that one gets stopped.
 func (c *ConmonClient) Shutdown(ctx context.Context) (retErr error) {
 	ctx, span := c.startSpan(ctx, "Shutdown")
 	defer endSpan(span, &retErr)
@@ -806,8 +808,6 @@ func (c *ConmonClient) waitServerExited(
 	for interval := minWaitInterval; ; interval = nextWaitInterval(interval) {
 		// A zombie server, which nobody reaped yet, is gone as well.
 		if c.serverExited(server) {
-			c.serverGoneForGood(server)
-
 			return nil
 		}
 
@@ -839,16 +839,25 @@ func (s *serverProcess) signal(sig syscall.Signal) error {
 	return pidfdSendSignal(s.pidfd, sig)
 }
 
-// serverExited reports whether the server exited or is a zombie. Without a
-// pidfd, or without usePidfd, which keeps it from getting closed
+// serverExited reports and remembers whether the server exited or is a
+// zombie, releasing its pidfd once nothing uses it. Without a pidfd, or
+// without usePidfd, which keeps it from getting closed
 // concurrently, the check falls back to the PID. A process which got the PID
 // later counts as an exited server if its start time differs, which cannot
 // be read everywhere, so that an exited server can still look running. Only
 // Shutdown and Kill, which keep the pidfd open, signal a server based on it.
-func (c *ConmonClient) serverExited(server *serverProcess) bool {
+func (c *ConmonClient) serverExited(server *serverProcess) (exited bool) {
 	if server.done.Load() {
 		return true
 	}
+
+	// Remember every observed exit, including PID reuse. A replacement
+	// probe may fail, but that must never make the old PID safe to signal.
+	defer func() {
+		if exited {
+			c.serverGoneForGood(server)
+		}
+	}()
 
 	if server.pidfd != nil {
 		exited, err := pidfdExited(server.pidfd)
