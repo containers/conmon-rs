@@ -18,12 +18,18 @@ use std::{
     pin::{Pin, pin},
     sync::Arc,
 };
-use tokio::{io::AsyncWriteExt, net::TcpStream, select, task, time};
+use tokio::{
+    io::AsyncWriteExt,
+    net::TcpStream,
+    select,
+    task::{JoinError, JoinSet},
+    time,
+};
 use tokio_util::{
     sync::{CancellationToken, DropGuard},
     time::{DelayQueue, delay_queue::Key},
 };
-use tracing::debug;
+use tracing::{debug, error};
 
 /// The streams of a request, until both arrived.
 pub(super) struct PendingRequest {
@@ -139,26 +145,48 @@ impl PortForward {
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
     {
-        let mut connection =
-            Connection::serve(io, self.idle_timeout, self.ping_interval, Self::accept);
-        let namespace = Namespace::new(self.netns_path);
+        let connection = Connection::serve(io, self.idle_timeout, self.ping_interval, Self::accept);
+        Self::serve_requests(connection, Namespace::new(self.netns_path)).await;
+    }
+
+    /// Serve and own the requests on a connection in the given namespace.
+    pub(super) async fn serve_requests(mut connection: Connection, namespace: Arc<Namespace>) {
         let mut pending = Pending::new();
+        // A forwarding request and an expired request's error writer belong
+        // to this session, including while connecting to the pod.
+        let mut tasks = JoinSet::new();
 
         loop {
             select! {
+                Some(result) = tasks.join_next() => Self::request_finished(result),
                 Some(reset) = pending.resets.next() => if let Some(request_id) = reset {
                     pending.remove_reset(&request_id);
                 },
                 stream = connection.accept() => match stream {
-                    Some(stream) => Self::add(&mut pending, stream, &namespace),
+                    Some(stream) => Self::add(&mut pending, stream, &namespace, &mut tasks),
                     None => break,
                 },
                 Some(expired) = pending.deadlines.next() => {
-                    Self::expire(&mut pending, expired.into_inner());
+                    Self::expire(&mut pending, expired.into_inner(), &mut tasks);
                 }
             }
         }
+        // Session cancellation discards input not yet written to the pod.
+        // Only a normal data-stream FIN drains queued input before EOF.
+        tasks.abort_all();
+        while let Some(result) = tasks.join_next().await {
+            Self::request_finished(result);
+        }
         debug!("Port forward connection ended");
+    }
+
+    /// Cancellation is expected at shutdown; a panicking request is not.
+    fn request_finished(result: Result<(), JoinError>) {
+        if let Err(error) = result
+            && !error.is_cancelled()
+        {
+            error!("Port forward request task failed: {error}");
+        }
     }
 
     /// Whether a stream is part of a valid request, by its headers.
@@ -201,7 +229,12 @@ impl PortForward {
     }
 
     /// Add a stream to its request, which starts once both streams arrived.
-    pub(super) fn add(pending: &mut Pending, stream: Stream, namespace: &Arc<Namespace>) {
+    pub(super) fn add(
+        pending: &mut Pending,
+        stream: Stream,
+        namespace: &Arc<Namespace>,
+        tasks: &mut JoinSet<()>,
+    ) {
         let request_id = Self::request_id(&stream);
         let is_error = Self::is_error_stream(&stream);
         let (stream, watch) = Pending::wait(&request_id, stream);
@@ -236,7 +269,7 @@ impl PortForward {
             ..
         }) = pending.remove(&request_id)
         {
-            task::spawn(Self::forward(
+            tasks.spawn(Self::forward(
                 request_id,
                 data.stream,
                 error.stream,
@@ -246,7 +279,7 @@ impl PortForward {
     }
 
     /// Fail a request whose second stream did not arrive in time.
-    fn expire(pending: &mut Pending, request_id: Arc<str>) {
+    fn expire(pending: &mut Pending, request_id: Arc<str>, tasks: &mut JoinSet<()>) {
         let Some(mut request) = pending.requests.remove(&request_id) else {
             return;
         };
@@ -256,7 +289,7 @@ impl PortForward {
         );
         if let Some((_, mut error)) = request.error.take().map(|error| error.stream.split()) {
             let message = format!("request {request_id}: timed out waiting for streams");
-            task::spawn(async move {
+            tasks.spawn(async move {
                 let _ = error.send(message.into()).await;
                 let _ = error.close().await;
             });
@@ -272,8 +305,19 @@ impl PortForward {
         // it gets dropped instead of holding up the connection.
         let (_, mut error) = error.split();
 
+        // A reset ends the request even while its TCP connection is still
+        // pending. A FIN only ends the input, the pod may still answer.
+        let reset = data.reset_watch();
         let (mut from_client, to_client) = data.split();
-        let result = match Self::establish(&namespace, port, &mut from_client).await {
+        let established = select! {
+            biased;
+            () = reset => {
+                debug!("Port forward request {id:?} reset while connecting to port {port}");
+                return;
+            },
+            result = Self::establish(&namespace, port, &mut from_client) => result,
+        };
+        let result = match established {
             Ok((connection, early)) => Self::copy(early, from_client, to_client, connection).await,
             Err(e) => {
                 // Dropping the sending side resets the data stream, what the

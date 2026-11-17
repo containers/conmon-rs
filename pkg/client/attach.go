@@ -160,7 +160,8 @@ func (c *ConmonClient) endAttachSession(session *attachSession) {
 // Once the context is done, the attach returns its error, after Close it
 // fails with ErrClientClosed. The output streams are closed before, unless
 // a write to them stays blocked for longer than a second, which then may
-// still finish and close them afterwards.
+// still finish and close them afterwards. Since unreleased, cancellation
+// and output errors also get returned while finishing output after stdin EOF.
 func (c *ConmonClient) AttachContainer(
 	ctx context.Context, cfg *AttachContainerConfig,
 ) (retErr error) {
@@ -563,11 +564,7 @@ func (c *ConmonClient) readStdio(
 			(!cfg.Terminal && cfg.ContainerStdin && !cfg.StopAfterStdinEOF) {
 			closeRead()
 
-			if err := c.waitForOutput(ctx, logger, closeRead, receiveStdoutError); err != nil {
-				logger.WithError(err).Debug("Output failed after stdin EOF")
-			}
-
-			return nil
+			return c.waitForOutput(ctx, logger, closeRead, receiveStdoutError)
 		}
 
 		if cfg.Streams.Stdout != nil || cfg.Streams.Stderr != nil {
@@ -597,7 +594,11 @@ func (c *ConmonClient) waitForOutput(
 ) error {
 	select {
 	case err := <-receiveStdoutError:
-		return err
+		if err != nil {
+			return fmt.Errorf("got stdout error: %w", err)
+		}
+
+		return nil
 	case <-ctx.Done():
 		c.stopOutput(logger, closeRead, receiveStdoutError)
 

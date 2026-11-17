@@ -295,3 +295,156 @@ async fn too_much_input_while_connecting_fails() -> Result<()> {
     );
     Ok(())
 }
+
+/// A full accept queue keeps a local TCP connect pending without requiring
+/// a firewall or a separate network namespace.
+async fn full_listener() -> Result<(TcpListener, [TcpStream; 2])> {
+    let socket = TcpSocket::new_v4()?;
+    socket.bind((Ipv4Addr::LOCALHOST, 0).into())?;
+    let listener = socket.listen(1)?;
+    let address = listener.local_addr()?;
+    // Linux allows the backlog plus one connection in the accept queue.
+    let first = time::timeout(Duration::from_secs(5), TcpStream::connect(address)).await??;
+    let second = time::timeout(Duration::from_secs(5), TcpStream::connect(address)).await??;
+    Ok((listener, [first, second]))
+}
+
+#[tokio::test]
+async fn reset_cancels_connect_but_fin_keeps_the_response() -> Result<()> {
+    for (fin, reset) in [(false, true), (true, true), (true, false)] {
+        let (listener, _fillers) = full_listener().await?;
+        let port = listener.local_addr()?.port();
+        let (mut client, server) = Client::pair()?;
+        let mut connection = Connection::serve(server, None, None, PortForward::accept);
+        let namespace = Namespace::new(NETNS.into());
+        let mut pending = Pending::new();
+        let mut tasks = JoinSet::new();
+        for (stream_id, typ) in [(1, STREAM_TYPE_ERROR), (3, STREAM_TYPE_DATA)] {
+            client.open(stream_id, headers(typ, port)).await?;
+            let stream = connection.accept().await.context("stream")?;
+            PortForward::add(&mut pending, stream, &namespace, &mut tasks);
+            assert!(matches!(
+                client.frame().await?,
+                Some(Frame::SynReply { .. })
+            ));
+        }
+        client
+            .send(Frame::Data {
+                stream_id: 3,
+                fin,
+                data: Bytes::from_static(b"request"),
+            })
+            .await?;
+        // The request reached establish and holds its input while the TCP
+        // connect waits. This also checks that a FIN did not cancel it.
+        wait_for(|| namespace.connect_budget.available() < CONNECT_BUDGET as usize).await?;
+
+        if reset {
+            client
+                .send(Frame::RstStream {
+                    stream_id: 3,
+                    status: 5,
+                })
+                .await?;
+            time::timeout(Duration::from_secs(1), tasks.join_next())
+                .await
+                .context("reset did not cancel the pending connect")?
+                .context("forward task")??;
+        } else {
+            // FIN closes only the input. Once the TCP connect succeeds, the
+            // buffered request and its EOF must still reach the pod, and its
+            // answer must still reach the client.
+            let _first = listener.accept().await?;
+            let _second = listener.accept().await?;
+            let (mut pod, _) = time::timeout(Duration::from_secs(5), listener.accept()).await??;
+            let mut input = vec![];
+            time::timeout(Duration::from_secs(5), pod.read_to_end(&mut input)).await??;
+            assert_eq!(input, b"request");
+            pod.write_all(b"response").await?;
+            drop(pod);
+            assert_eq!(
+                client.frame().await?,
+                Some(Frame::Data {
+                    stream_id: 3,
+                    fin: false,
+                    data: Bytes::from_static(b"response"),
+                })
+            );
+            time::timeout(Duration::from_secs(5), tasks.join_next())
+                .await?
+                .context("forward task")??;
+        }
+        assert_eq!(
+            namespace.connect_budget.available(),
+            CONNECT_BUDGET as usize
+        );
+        assert!(tasks.is_empty());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn disconnected_spdy_cancels_pending_connects() -> Result<()> {
+    let (listener, _fillers) = full_listener().await?;
+    let (mut client, server_io) = Client::pair()?;
+    let connection = Connection::serve(server_io, None, None, PortForward::accept);
+    let namespace = Namespace::new(NETNS.into());
+    let server = task::spawn(PortForward::serve_requests(connection, namespace.clone()));
+    request(&mut client, listener.local_addr()?.port()).await?;
+    client
+        .send(Frame::Data {
+            stream_id: 3,
+            fin: false,
+            data: Bytes::from_static(b"request"),
+        })
+        .await?;
+    // The forwarding task is inside establish, retaining input while the
+    // connect waits. The client must not leave before that task starts.
+    wait_for(|| namespace.connect_budget.available() < CONNECT_BUDGET as usize).await?;
+    drop(client);
+    time::timeout(Duration::from_secs(1), server).await??;
+    assert_eq!(
+        namespace.connect_budget.available(),
+        CONNECT_BUDGET as usize
+    );
+
+    // A connect which ignored the stream's reset could still succeed on
+    // the next SYN retry once there is room. This checks disconnect-driven
+    // reset cancellation; session task ownership is covered separately.
+    let _first = listener.accept().await?;
+    let _second = listener.accept().await?;
+    assert!(
+        time::timeout(Duration::from_secs(3), listener.accept())
+            .await
+            .is_err(),
+        "a connection was established after its streaming session ended"
+    );
+    Ok(())
+}
+
+/// Dropping the session itself must cancel established forwarding tasks,
+/// even while the transport is still alive and no stream reset arrived.
+#[tokio::test]
+async fn ending_session_cancels_established_forward() -> Result<()> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let (mut client, server) = Client::pair()?;
+    let connection = Connection::serve(server, None, None, PortForward::accept);
+    let transport = connection.handle();
+    let session = task::spawn(PortForward::serve_requests(
+        connection,
+        Namespace::new(NETNS.into()),
+    ));
+    request(&mut client, listener.local_addr()?.port()).await?;
+    let (mut pod, _) = time::timeout(Duration::from_secs(5), listener.accept()).await??;
+    session.abort();
+    assert!(session.await.unwrap_err().is_cancelled());
+    assert!(!transport.done().is_cancelled());
+    let mut byte = [0];
+    assert_eq!(
+        time::timeout(Duration::from_secs(5), pod.read(&mut byte)).await??,
+        0,
+        "the ended session retained its forwarded socket"
+    );
+    transport.abort();
+    Ok(())
+}

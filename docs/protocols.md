@@ -196,6 +196,16 @@ sending would keep the two streams of the request otherwise. Once the pod
 closed its side first, the client gets a second to close its one. CRI-O ends
 both directions a second after either one finished.
 
+Since unreleased, resetting a SPDY data stream cancels a pending connection
+to the pod, and ending the session cancels all its forwarding tasks. Closing
+only the input with a FIN still lets the connection finish and the pod answer.
+Ending the session discards input still buffered in the server instead of
+draining it to the pod. The pod can receive a normal TCP EOF after this
+truncated input, so EOF alone does not confirm that a complete request was
+delivered. Protocols which need that guarantee must check their own request
+length or application acknowledgement. A normal data-stream FIN still drains
+queued input before closing the pod's input.
+
 The URL also serves the older WebSocket channel protocol (`v4.channel.k8s.io`,
 `v4.base64.channel.k8s.io` or no subprotocol), which forwards one connection
 per port of the `port` query parameter, a request with too many gets a 400.
@@ -340,6 +350,9 @@ How to rely on them:
 
 ## Changes
 
+- Unreleased: a reset SPDY data stream or an ended port forward session cancels
+  pending connections to the pod. Before, they could connect after their client
+  left and held their sockets and buffered input until the connect timeout.
 - Unreleased: errors of failed runtimes without a terminal keep the final
   stderr diagnostic even when output exceeded the exec startup limit.
   Before, the error could carry an older tail and omit the last output
