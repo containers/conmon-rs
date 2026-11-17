@@ -240,6 +240,7 @@ like `?port=80&port=443`, as CRI-O does.
 | Exec output while the runtime starts the process               | 16 MiB per stream, the session fails above, see above                 |
 | End of a session the client takes nothing of                   | 60 seconds or a longer exec or attach idle timeout                    |
 | Stdin before a clean close which the process takes none of     | 5 seconds since v1.2.3                                                |
+| SPDY input waiting for shared buffer space                     | 60 seconds since unreleased, then the entire connection closes        |
 | Idle connection                                                | The `idleTimeoutSec` of the request, see below                        |
 
 `idleTimeoutSec` ends a connection which got no frame of the client and no
@@ -309,6 +310,46 @@ for retry until it expires. A slot stays occupied through the upgrade and the
 entire session, and becomes available again when the session ends or the
 upgrade fails.
 
+Since unreleased, sessions also share two server-wide resource limits:
+
+- Queued SPDY input, the client data of port forward WebSockets and the buffers
+  of connections being established share 64 MiB, configured with
+  `--max-streaming-buffer-mib` (`CONMON_MAX_STREAMING_BUFFER_MIB`, 16 to 4095).
+  At capacity their readers wait for buffered data to drain. This is shared
+  across the pod when CRI-O uses one server per pod: stalled input can delay
+  unrelated sessions, including their SPDY control and reset frames. A SPDY
+  input delivery which waits 60 seconds for shared buffer space closes its
+  entire connection, even without an idle timeout. Waiting for its local byte
+  budget or stream queue retains the session's existing idle timeout behavior,
+  including unlimited waits when that timeout is disabled. The shared wait is
+  bounded, but there is no capacity reservation for each client. One SPDY
+  port-forward session can retain about 20 MiB (4 MiB of queued input plus
+  16 MiB of connect buffers), so a few sessions can exhaust the default
+  64 MiB. An otherwise healthy connection can time out while those sessions
+  hold the budget. Moving input into
+  a connect buffer preserves its reservation; it does not charge the same
+  data twice. Existing per-session limits still apply.
+- Pending and established forwarded TCP connections share 128 slots, configured
+  with `--max-port-forward-connections` (`CONMON_MAX_PORT_FORWARD_CONNECTIONS`,
+  1 to 65535). Excess forwards fail on their existing error stream or channel;
+  the session remains usable. Refusal is immediate, with no wait for a slot.
+  A channel WebSocket forwarding 40 ports starts 40 connections and can occupy
+  40 slots, rather than one slot for the WebSocket. A slot stays held through
+  connection setup and both copy directions, including a half-close. Setup
+  creates one socket per address family, so at most twice the connection limit
+  are reserved for these sockets; an established forward holds one.
+
+These are capacity controls, not an RSS or total file descriptor limit. The
+byte budget excludes exec and attach WebSocket stdin, output queues, protocol
+and kernel buffers, headers, and the input frame waiting for a reservation.
+Buffer growth also temporarily holds the old allocation while copying it.
+The server's RPC, attach and runtime descriptors are outside the forwarded
+connection limit. Raising either setting raises the monitor's possible resource
+use; lowering the byte budget increases backpressure, and lowering the
+connection limit rejects more forwards. Saturation produces warnings with the
+limit and cumulative waits or refusals at exponential milestones, so repeated
+requests cannot flood the log with warnings.
+
 The logs show only the first 8 hex digits of a token, which tell the sessions
 apart but are not enough to use one. Responses never name the token: a request
 for a token which is unknown, used or expired gets a bare 404, one whose token
@@ -357,6 +398,13 @@ How to rely on them:
   stderr diagnostic even when output exceeded the exec startup limit.
   Before, the error could carry an older tail and omit the last output
   still queued for the server.
+- Unreleased: queued SPDY input and port forward buffers share a configurable
+  64 MiB budget, and pending and established forwarded connections share a
+  configurable limit of 128. Previously these resources were bounded only per
+  session, allowing their use to multiply across active sessions. A SPDY
+  connection closes after an input delivery waits 60 seconds for shared buffer
+  space. Local byte budget and stream queue waits retain their existing idle
+  timeout behavior.
 - v1.2.3: the attach clients get the output which the log drivers still
   held when the container exited, for up to 5 seconds. Before, output which
   the log did not take within 100 ms after the exit got cut off for them.

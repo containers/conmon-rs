@@ -135,6 +135,7 @@ pub fn spdy(input: &[u8]) {
         let linger = STREAM_CREATION_TIMEOUT + Duration::from_secs(1);
         let (server, client) = spawn_client(frames, linger);
         let session = PortForward {
+            resources: Arc::default(),
             netns_path: "/proc/self/ns/none".into(),
             idle_timeout: None,
             ping_interval: None,

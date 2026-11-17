@@ -23,6 +23,147 @@ fn accept_data(headers: &Headers) -> Result<()> {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn slow_local_queue_survives_with_a_shared_budget() -> Result<()> {
+    let budget = SharedBudget::new(2 * DATA_BUFFER);
+    let (mut client, io) = Client::pair()?;
+    let mut connection = Connection::serve_with_budget(io, None, None, accept_data, budget.clone());
+    client.open(1, [("streamtype", "data")].into()).await?;
+    let mut stream = connection.accept().await.context("stream")?;
+    client.frame().await?;
+    for _ in 0..=STREAM_QUEUE {
+        client
+            .send(Frame::Data {
+                stream_id: 1,
+                fin: false,
+                data: Bytes::from_static(b"x"),
+            })
+            .await?;
+    }
+    client.send(Frame::Ping { id: 1 }).await?;
+    assert!(
+        time::timeout(Duration::from_secs(1), client.frame())
+            .await
+            .is_err()
+    );
+    // The last frame already owns shared bytes but cannot enter the full
+    // local queue. Waiting for the consumer must not impose a new deadline.
+    assert_eq!(
+        budget.available(),
+        2 * DATA_BUFFER as usize - STREAM_QUEUE - 1
+    );
+    time::sleep(2 * INPUT_STALL_TIMEOUT).await;
+    assert!(!connection.handle().done().is_cancelled());
+    for _ in 0..=STREAM_QUEUE {
+        assert_eq!(stream.receiver.recv().await, Some(Bytes::from_static(b"x")));
+    }
+    assert_eq!(client.frame().await?, Some(Frame::Ping { id: 1 }));
+    assert_eq!(budget.available(), 2 * DATA_BUFFER as usize);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_local_budget_survives_with_a_shared_budget() -> Result<()> {
+    let budget = SharedBudget::new(2 * DATA_BUFFER);
+    let (mut client, io) = Client::pair()?;
+    let mut connection = Connection::serve_with_budget(io, None, None, accept_data, budget.clone());
+    client.open(1, [("streamtype", "data")].into()).await?;
+    let mut stream = connection.accept().await.context("stream")?;
+    client.frame().await?;
+    // Model input retained by other streams of this connection. There is
+    // still room in the shared budget and in the destination stream queue.
+    let held = connection
+        .shared
+        .budget
+        .hold(Bytes::from(vec![0; DATA_BUFFER as usize]))
+        .await;
+    client
+        .send(Frame::Data {
+            stream_id: 1,
+            fin: false,
+            data: Bytes::from_static(b"x"),
+        })
+        .await?;
+    client.send(Frame::Ping { id: 1 }).await?;
+    assert!(
+        time::timeout(Duration::from_secs(1), client.frame())
+            .await
+            .is_err()
+    );
+    assert_eq!(connection.shared.budget.available(), 0);
+    assert_eq!(budget.available(), DATA_BUFFER as usize);
+    time::sleep(2 * INPUT_STALL_TIMEOUT).await;
+    assert!(!connection.handle().done().is_cancelled());
+    drop(held);
+    assert_eq!(stream.receiver.recv().await, Some(Bytes::from_static(b"x")));
+    assert_eq!(client.frame().await?, Some(Frame::Ping { id: 1 }));
+    assert_eq!(budget.available(), 2 * DATA_BUFFER as usize);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn shared_buffer_wait_cannot_block_a_connection_forever() -> Result<()> {
+    let budget = SharedBudget::new(8);
+    let (mut first, io) = Client::pair()?;
+    let mut first_connection =
+        Connection::serve_with_budget(io, None, None, accept_data, budget.clone());
+    first.open(1, [("streamtype", "data")].into()).await?;
+    let mut held = first_connection.accept().await.context("first stream")?;
+    first.frame().await?;
+    first
+        .send(Frame::Data {
+            stream_id: 1,
+            fin: false,
+            data: Bytes::from_static(b"12345678"),
+        })
+        .await?;
+    first.send(Frame::Ping { id: 1 }).await?;
+    assert_eq!(first.frame().await?, Some(Frame::Ping { id: 1 }));
+    assert_eq!(budget.available(), 0);
+
+    let (mut second, io) = Client::pair()?;
+    let mut second_connection =
+        Connection::serve_with_budget(io, None, None, accept_data, budget.clone());
+    second.open(1, [("streamtype", "data")].into()).await?;
+    let waiting = second_connection.accept().await.context("second stream")?;
+    second.frame().await?;
+    second
+        .send(Frame::Data {
+            stream_id: 1,
+            fin: false,
+            data: Bytes::from_static(b"x"),
+        })
+        .await?;
+    second.send(Frame::Ping { id: 3 }).await?;
+    // The shared budget is exhausted by another connection. Even control
+    // frames wait behind this data, despite an empty local stream queue.
+    assert!(
+        time::timeout(Duration::from_secs(1), second.frame())
+            .await
+            .is_err()
+    );
+    assert!(!waiting.is_reset());
+    time::advance(INPUT_STALL_TIMEOUT).await;
+    time::timeout(
+        Duration::from_secs(1),
+        second_connection.handle().done().cancelled(),
+    )
+    .await?;
+    assert!(waiting.is_reset());
+    assert!(second_connection.accept().await.is_none());
+
+    // The other connection can still drain its input and continue. The
+    // cancelled reservation from the timed-out reader leaves no permits.
+    assert_eq!(
+        held.receiver.recv().await,
+        Some(Bytes::from_static(b"12345678"))
+    );
+    assert_eq!(budget.available(), 8);
+    first.send(Frame::Ping { id: 5 }).await?;
+    assert_eq!(first.frame().await?, Some(Frame::Ping { id: 5 }));
+    Ok(())
+}
+
 #[tokio::test]
 async fn streams_carry_data_both_ways() -> Result<()> {
     let (mut client, mut connection) = connect(accept_data, None)?;

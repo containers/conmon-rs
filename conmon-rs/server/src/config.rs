@@ -16,6 +16,7 @@ use nix::{
 use std::{
     ffi::OsStr,
     fmt, fs,
+    fs::File,
     os::fd::{AsFd, AsRawFd},
     path::{self, Path, PathBuf},
 };
@@ -155,12 +156,41 @@ pub(crate) struct Config {
     )]
     /// Maximum active exec, attach and port forward streaming sessions.
     max_streaming_sessions: u16,
+
+    #[arg(
+        default_value_t = crate::streaming_server::DEFAULT_BUFFER_MIB,
+        env(concat!(prefix!(), "MAX_STREAMING_BUFFER_MIB")),
+        long("max-streaming-buffer-mib"),
+        value_parser = clap::value_parser!(u16).range(16..=4095),
+        value_name("MIB")
+    )]
+    /// Shared limit of queued SPDY input and port forward buffers, in MiB.
+    max_streaming_buffer_mib: u16,
+
+    #[arg(
+        default_value_t = crate::streaming_server::DEFAULT_FORWARD_CONNECTIONS,
+        env(concat!(prefix!(), "MAX_PORT_FORWARD_CONNECTIONS")),
+        long("max-port-forward-connections"),
+        value_parser = clap::value_parser!(u16).range(1..),
+        value_name("COUNT")
+    )]
+    /// Shared limit of pending and established forwarded TCP connections.
+    max_port_forward_connections: u16,
 }
 
 impl Config {
     /// The combined limit for active streaming sessions.
     pub(crate) fn max_streaming_sessions(&self) -> usize {
         usize::from(self.max_streaming_sessions)
+    }
+
+    /// The shared budget of queued streaming input and connect buffers.
+    pub(crate) fn max_streaming_buffer_bytes(&self) -> u32 {
+        u32::from(self.max_streaming_buffer_mib) * 1024 * 1024
+    }
+
+    pub(crate) fn max_port_forward_connections(&self) -> usize {
+        usize::from(self.max_port_forward_connections)
     }
 
     /// Show version information.
@@ -377,8 +407,10 @@ impl Config {
 
     /// Create the runtime directories and remove stale sockets. Separate from
     /// [`Config::validate`], which only checks and changes nothing on disk.
-    pub(crate) fn prepare(&self) -> Result<()> {
+    /// Keep the returned lock until the backend socket is bound.
+    pub(crate) fn prepare(&self) -> Result<StartupLock> {
         fs::create_dir_all(self.runtime_dir()).context("create runtime dir")?;
+        let lock = StartupLock::acquire(self.runtime_dir())?;
 
         if let Some(rr) = self.runtime_root() {
             fs::create_dir_all(rr).context("create runtime root")?;
@@ -410,7 +442,7 @@ impl Config {
             );
         }
 
-        Ok(())
+        Ok(lock)
     }
 
     /// Whether a server accepts connections on the socket. The connect does
@@ -473,6 +505,56 @@ impl Config {
     /// The PID file the parent writes for the forked server.
     pub(crate) fn conmon_pidfile(&self) -> PathBuf {
         self.runtime_dir().join(PIDFILE)
+    }
+}
+
+/// Serializes socket inspection, cleanup and binding in a runtime directory.
+/// The directory itself is locked, so there is no lock file to remove or
+/// replace. Closing the last copy releases it, including after a failed
+/// start. Across fork the parent keeps its copy through the PID file write.
+#[derive(Debug)]
+pub(crate) struct StartupLock(File);
+
+impl StartupLock {
+    #[expect(
+        unsafe_code,
+        reason = "flock without an explicit unlock on drop, shared across fork"
+    )]
+    fn acquire(path: &Path) -> Result<Self> {
+        let mut files = vec![File::open(path).context("open runtime directory for startup lock")?];
+        // A caller may have closed standard descriptors. Keep the lock above
+        // stderr, where daemon redirection cannot replace it. Rust opens and
+        // clones files with CLOEXEC, so OCI runtimes never inherit the lock.
+        while files.last().expect("directory open").as_raw_fd() <= libc::STDERR_FILENO {
+            files.push(
+                files
+                    .last()
+                    .expect("directory open")
+                    .try_clone()
+                    .context("duplicate startup lock")?,
+            );
+        }
+        let file = files.pop().expect("directory open");
+        drop(files);
+        // SAFETY: the owned file stays open throughout flock. Only closing
+        // the last descriptor releases the lock: an explicit LOCK_UN in a
+        // child's destructor would also unlock the parent's copy after fork.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                bail!(listener::SocketInUse(format!(
+                    "another server is starting in runtime directory {}",
+                    path.display()
+                )));
+            }
+            return Err(error).context("lock runtime directory during startup");
+        }
+        Ok(Self(file))
+    }
+
+    /// Kept by inherited descriptor cleanup until the backend is bound.
+    pub(crate) fn fd(&self) -> std::os::fd::RawFd {
+        self.0.as_raw_fd()
     }
 }
 

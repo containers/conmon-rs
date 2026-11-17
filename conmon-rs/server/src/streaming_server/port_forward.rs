@@ -20,6 +20,7 @@
 
 use crate::streaming_server::{
     budget::{Budget, Held, HeldBuf},
+    resources::Resources,
     spdy::{PING_INTERVAL, StreamReceiver},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -29,6 +30,7 @@ use std::{
     io,
     path::PathBuf,
     pin::pin,
+    sync::Arc,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -37,7 +39,7 @@ use tokio::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
     select,
-    sync::mpsc,
+    sync::{OwnedSemaphorePermit, mpsc},
     time::{self, Duration},
 };
 use tracing::debug;
@@ -162,6 +164,8 @@ impl Input for mpsc::Receiver<Held> {
 /// into one buffer, small data does not take an allocation each.
 #[derive(Debug, Default)]
 struct Early {
+    /// Kept by the forwarding loop through both copy directions.
+    connection: Option<Arc<OwnedSemaphorePermit>>,
     data: HeldBuf,
 
     /// What the client sent last, which did not get into the connect budget
@@ -175,6 +179,7 @@ struct Early {
 /// A port forward session of a pod.
 #[derive(Debug)]
 pub(super) struct PortForward {
+    resources: Arc<Resources>,
     netns_path: PathBuf,
     idle_timeout: Option<Duration>,
     ping_interval: Option<Duration>,
@@ -183,8 +188,18 @@ pub(super) struct PortForward {
 impl PortForward {
     /// A session for the network namespace at `netns_path`, which ends once it
     /// was idle for `idle_timeout`.
+    #[cfg(test)]
     pub(super) fn new(netns_path: PathBuf, idle_timeout: Option<Duration>) -> Self {
+        Self::with_resources(netns_path, idle_timeout, Arc::default())
+    }
+
+    pub(super) fn with_resources(
+        netns_path: PathBuf,
+        idle_timeout: Option<Duration>,
+        resources: Arc<Resources>,
+    ) -> Self {
         Self {
+            resources,
             netns_path,
             idle_timeout,
             ping_interval: Some(PING_INTERVAL),
@@ -205,12 +220,15 @@ impl PortForward {
         port: u16,
         input: &mut impl Input,
     ) -> Result<(TcpStream, Early)> {
-        Self::drain_until(
-            Self::connect(namespace, port),
+        let permit = Arc::new(namespace.resources.connection()?);
+        let (connection, mut early) = Self::drain_until(
+            Self::connect_reserved(namespace, port, permit.clone()),
             &namespace.connect_budget,
             input,
         )
-        .await
+        .await?;
+        early.connection = Some(permit);
+        Ok((connection, early))
     }
 
     /// Wait for the connection to the pod while taking what the client sends
@@ -236,10 +254,10 @@ impl PortForward {
                     return Ok((result?, early));
                 }
                 held = async {
-                    match &taken {
+                    match &mut taken {
                         Some(data) => {
                             let cost = early.data.cost(data.len());
-                            connect_budget.hold_as(Bytes::clone(data), cost).await
+                            connect_budget.transfer(data, cost).await
                         }
                         None => future::pending().await,
                     }
@@ -290,7 +308,12 @@ impl PortForward {
         input: &mut impl Input,
         to_container: &mut OwnedWriteHalf,
     ) -> Result<()> {
-        let Early { data, last, ended } = early;
+        let Early {
+            data,
+            last,
+            ended,
+            connection: _connection,
+        } = early;
         to_container
             .write_all(&data)
             .await
@@ -332,9 +355,18 @@ impl PortForward {
     /// listen on either family, they get tried one after the other like CRI-O
     /// does. Nagle's algorithm is off like in Go, so that request frames
     /// which get written one by one do not wait for a delayed ACK.
+    #[cfg(test)]
     async fn connect(namespace: &Namespace, port: u16) -> Result<TcpStream> {
+        Self::connect_reserved(namespace, port, Arc::new(namespace.resources.connection()?)).await
+    }
+
+    async fn connect_reserved(
+        namespace: &Namespace,
+        port: u16,
+        permit: Arc<OwnedSemaphorePermit>,
+    ) -> Result<TcpStream> {
         let mut errors = vec![];
-        for (ip, socket) in namespace.sockets().await? {
+        for (ip, socket) in namespace.sockets_with(permit).await? {
             let result = match socket {
                 Ok(socket) => {
                     let socket = TcpSocket::from_std_stream(socket);

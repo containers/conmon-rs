@@ -143,8 +143,8 @@ impl PortForward {
             web::send_close(sink, writer_too_large.is_cancelled()).await
         });
 
-        let namespace = Namespace::new(self.netns_path);
-        let budget = Budget::new(CHANNEL_BUFFER);
+        let namespace = Namespace::with_resources(self.netns_path, self.resources.clone());
+        let budget = Budget::with_shared(CHANNEL_BUFFER, self.resources.buffer.clone());
         let mut inputs = Vec::with_capacity(ports.len());
         let mut forwards = JoinSet::new();
         for (i, port) in ports.into_iter().enumerate() {
@@ -298,11 +298,12 @@ impl PortForward {
     /// protocol has no way to close a channel, the input after the pod closed
     /// the connection does not matter.
     async fn copy_channel(
-        early: Early,
+        mut early: Early,
         input: &mut mpsc::Receiver<Held>,
         output: &ChannelOutput,
         connection: TcpStream,
     ) -> Result<()> {
+        let _permit = early.connection.take();
         let (mut from_container, mut to_container) = connection.into_split();
         let upstream = Self::write_input(early, input, &mut to_container);
 

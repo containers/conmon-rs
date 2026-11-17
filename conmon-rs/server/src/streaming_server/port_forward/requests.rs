@@ -145,8 +145,15 @@ impl PortForward {
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
     {
-        let connection = Connection::serve(io, self.idle_timeout, self.ping_interval, Self::accept);
-        Self::serve_requests(connection, Namespace::new(self.netns_path)).await;
+        let connection = Connection::serve_with_budget(
+            io,
+            self.idle_timeout,
+            self.ping_interval,
+            Self::accept,
+            self.resources.buffer.clone(),
+        );
+        let namespace = Namespace::with_resources(self.netns_path, self.resources);
+        Self::serve_requests(connection, namespace).await;
     }
 
     /// Serve and own the requests on a connection in the given namespace.
@@ -346,11 +353,12 @@ impl PortForward {
     /// and so does a side which does not close within its grace period
     /// after the other one did.
     async fn copy(
-        early: Early,
+        mut early: Early,
         mut from_client: StreamReceiver,
         mut to_client: StreamSender,
         connection: TcpStream,
     ) -> Result<()> {
+        let _permit = early.connection.take();
         let (mut from_container, mut to_container) = connection.into_split();
 
         let upstream = async {

@@ -2,7 +2,10 @@
 //! namespace of its pod.
 
 use super::{CONNECT_BUDGET, SOCKET_THREAD_LINGER, SOCKET_THREAD_STACK_SIZE};
-use crate::{mutex::lock, streaming_server::budget::Budget};
+use crate::{
+    mutex::lock,
+    streaming_server::{budget::Budget, resources::Resources},
+};
 use anyhow::{Context, Result, bail};
 use nix::{
     sched::{CloneFlags, setns},
@@ -19,13 +22,17 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, mpsc as std_mpsc},
     thread,
 };
-use tokio::{sync::oneshot, time::Duration};
+use tokio::{
+    sync::{OwnedSemaphorePermit, oneshot},
+    time::Duration,
+};
 
 /// The sockets for a connection into the pod, one per address family.
 type Sockets = Vec<(IpAddr, io::Result<StdTcpStream>)>;
 
 /// The requests for sockets to the thread in the network namespace.
-type SocketRequests = std_mpsc::Sender<oneshot::Sender<Result<Sockets>>>;
+type SocketRequest = (oneshot::Sender<Result<Sockets>>, Arc<OwnedSemaphorePermit>);
+type SocketRequests = std_mpsc::Sender<SocketRequest>;
 
 /// Creates the sockets of a session in its network namespace, which stay in
 /// the namespace they got created in. The runtime connects them. A thread
@@ -34,6 +41,7 @@ type SocketRequests = std_mpsc::Sender<oneshot::Sender<Result<Sockets>>>;
 /// session ends. Failures are not kept, every connection which fails gets its
 /// own error.
 pub(super) struct Namespace {
+    pub(super) resources: Arc<Resources>,
     pub(super) path: PathBuf,
     linger: Duration,
 
@@ -54,17 +62,32 @@ pub(super) struct Namespace {
 impl Namespace {
     /// The network namespace at `path`, whose thread lingers for
     /// [`SOCKET_THREAD_LINGER`].
+    #[cfg(test)]
     pub(super) fn new(path: PathBuf) -> Arc<Self> {
         Self::with_linger(path, SOCKET_THREAD_LINGER)
     }
 
     /// The network namespace at `path`, whose thread lingers for `linger`.
+    #[cfg(test)]
     pub(super) fn with_linger(path: PathBuf, linger: Duration) -> Arc<Self> {
+        Self::with_resources_and_linger(path, Arc::default(), linger)
+    }
+
+    pub(super) fn with_resources(path: PathBuf, resources: Arc<Resources>) -> Arc<Self> {
+        Self::with_resources_and_linger(path, resources, SOCKET_THREAD_LINGER)
+    }
+
+    fn with_resources_and_linger(
+        path: PathBuf,
+        resources: Arc<Resources>,
+        linger: Duration,
+    ) -> Arc<Self> {
         Arc::new(Self {
             path,
             linger,
             requests: Mutex::default(),
-            connect_budget: Budget::new(CONNECT_BUDGET),
+            connect_budget: Budget::with_shared(CONNECT_BUDGET, resources.buffer.clone()),
+            resources,
             #[cfg(test)]
             threads: AtomicUsize::new(0),
             #[cfg(test)]
@@ -74,12 +97,12 @@ impl Namespace {
 
     /// New sockets in the namespace from its thread, which gets started if it
     /// ended.
-    pub(super) async fn sockets(&self) -> Result<Sockets> {
+    pub(super) async fn sockets_with(&self, permit: Arc<OwnedSemaphorePermit>) -> Result<Sockets> {
         // A thread which ended before it took the request gets replaced
         // once.
         for _ in 0..2 {
             let (tx, rx) = oneshot::channel();
-            self.send(tx)?;
+            self.send((tx, permit.clone()))?;
             if let Ok(sockets) = rx.await {
                 return sockets;
             }
@@ -88,7 +111,7 @@ impl Namespace {
     }
 
     /// Send a request to the thread, which gets started if it ended.
-    fn send(&self, reply: oneshot::Sender<Result<Sockets>>) -> Result<()> {
+    fn send(&self, reply: SocketRequest) -> Result<()> {
         let running = self.lock().clone();
         let reply = match running {
             Some(requests) => match requests.send(reply) {
@@ -132,13 +155,14 @@ impl Namespace {
     /// session is gone. The thread enters the namespace for its first
     /// request, a request which finds it outside of the namespace tries again
     /// and gets its own error.
-    fn serve(
-        path: &Path,
-        linger: Duration,
-        requests: &std_mpsc::Receiver<oneshot::Sender<Result<Sockets>>>,
-    ) {
+    fn serve(path: &Path, linger: Duration, requests: &std_mpsc::Receiver<SocketRequest>) {
         let mut entered = false;
-        while let Ok(reply) = requests.recv_timeout(linger) {
+        // A cancelled caller may leave a request queued. Its permit stays
+        // with the request until the worker drops any sockets it creates.
+        while let Ok((reply, _permit)) = requests.recv_timeout(linger) {
+            if reply.is_closed() {
+                continue;
+            }
             if !entered {
                 if let Err(e) = Self::enter(path) {
                     let _ = reply.send(Err(e));

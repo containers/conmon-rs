@@ -23,6 +23,172 @@ use tokio::{
 };
 
 #[tokio::test]
+async fn upgraded_port_forwards_share_the_server_connection_limit() -> Result<()> {
+    use super::{
+        spdy::testing::{Client, Frame},
+        testing::{close_first, port_forward_websocket},
+    };
+    use bytes::Bytes;
+
+    LocalSet::new()
+        .run_until(async {
+            let server = StreamingServer::with_limits(2, 8, 1);
+            let listener = TcpListener::bind((ADDR, 0)).await?;
+            let port = listener.local_addr()?.port();
+            let (response, mut websocket) =
+                port_forward_websocket(&server, &format!("?port={port}"), "").await?;
+            assert!(response.starts_with("http/1.1 101"), "{response}");
+            // An accepted connection proves that the first session owns
+            // its slot before the second session attempts to connect.
+            let (_first, _) = time::timeout(Duration::from_secs(5), listener.accept()).await??;
+
+            let url = server
+                .port_forward_url("/proc/self/ns/net".into(), None)
+                .await?;
+            let (response, stream) = upgrade(
+                &server,
+                &url,
+                "POST",
+                concat!(
+                    "Connection: Upgrade\r\nUpgrade: SPDY/3.1\r\n",
+                    "X-Stream-Protocol-Version: portforward.k8s.io\r\n",
+                ),
+            )
+            .await?;
+            assert!(response.starts_with("http/1.1 101"), "{response}");
+            let mut client = Client::new(stream)?;
+            let port = port.to_string();
+            for (stream_id, typ) in [(1, "error"), (3, "data")] {
+                client
+                    .open(
+                        stream_id,
+                        [("streamType", typ), ("port", &port), ("requestID", "0")].into(),
+                    )
+                    .await?;
+            }
+            let error = time::timeout(
+                Duration::from_secs(5),
+                client.frame_until(|frame| {
+                    matches!(frame, Frame::Data { stream_id: 1, data, .. } if !data.is_empty())
+                }),
+            )
+            .await??;
+            let Frame::Data { data, .. } = error else {
+                unreachable!()
+            };
+            assert!(
+                String::from_utf8_lossy(&data)
+                    .contains("maximum active port forward connections reached (1)"),
+                "{data:?}"
+            );
+
+            // Closing one transport releases the server-wide slot for a
+            // new request on the other, without reconnecting its session.
+            close_first(&mut websocket).await?;
+            for (stream_id, typ) in [(5, "error"), (7, "data")] {
+                client
+                    .open(
+                        stream_id,
+                        [("streamType", typ), ("port", &port), ("requestID", "1")].into(),
+                    )
+                    .await?;
+            }
+            let (mut accepted, _) =
+                time::timeout(Duration::from_secs(5), listener.accept()).await??;
+            client
+                .send(Frame::Data {
+                    stream_id: 7,
+                    fin: false,
+                    data: Bytes::from_static(b"shared"),
+                })
+                .await?;
+            let mut received = [0; 6];
+            time::timeout(Duration::from_secs(5), accepted.read_exact(&mut received)).await??;
+            assert_eq!(&received, b"shared");
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
+async fn upgraded_exec_and_attach_share_the_server_buffer_limit() -> Result<()> {
+    use super::{
+        ExecSession, SessionCommon,
+        spdy::testing::{Client, Frame},
+    };
+    use crate::{config::Config, conmon_capnp::conmon::CgroupManager, test_util::wait_for};
+    use bytes::Bytes;
+    use std::sync::Arc;
+
+    LocalSet::new()
+        .run_until(async {
+            let server = StreamingServer::with_limits(2, 8, 1);
+            let budget = lock(&server.state).resources.buffer.clone();
+            let (_io, child, _stop) = attach_child(false)?;
+            let attach_url = server
+                .attach_url(attach_config(child, true, false, None))
+                .await?;
+            let exec_url = server
+                .exec_url(ExecSession {
+                    child_reaper: Arc::default(),
+                    tty: false,
+                    server_config: Arc::new(Config::parse_for_test(["--runtime", "/bin/true"])),
+                    cgroup_manager: CgroupManager::Cgroupfs,
+                    command: vec!["true".into()],
+                    common: SessionCommon {
+                        container_id: "id".into(),
+                        stdin: true,
+                        stdout: true,
+                        stderr: false,
+                        idle_timeout: None,
+                    },
+                })
+                .await?;
+            let mut clients = vec![];
+            for (url, remaining) in [(attach_url, 4), (exec_url, 0)] {
+                let (response, stream) = upgrade(&server, &url, "POST", SPDY_EXEC_UPGRADE).await?;
+                assert!(response.starts_with("http/1.1 101"), "{response}");
+                let mut client = Client::new(stream)?;
+                // Keep stdin queued by leaving the required output and
+                // error streams unopened. No process or pipe must block
+                // to observe the bytes retained by the transport.
+                client.open(1, [("streamType", "stdin")].into()).await?;
+                client
+                    .send(Frame::Data {
+                        stream_id: 1,
+                        fin: false,
+                        data: Bytes::from_static(b"data"),
+                    })
+                    .await?;
+                wait_for(|| budget.available() == remaining).await?;
+                clients.push(client);
+            }
+
+            // The second session needs room freed by the first. A ping
+            // after its data acknowledges that the reader enqueued it.
+            let mut exec = clients.pop().context("exec client")?;
+            exec.send(Frame::Data {
+                stream_id: 1,
+                fin: false,
+                data: Bytes::from_static(b"more"),
+            })
+            .await?;
+            exec.send(Frame::Ping { id: 1 }).await?;
+            drop(clients);
+            time::timeout(
+                Duration::from_secs(5),
+                exec.frame_until(|frame| matches!(frame, Frame::Ping { id: 1 })),
+            )
+            .await??;
+            assert_eq!(budget.available(), 0);
+            drop(exec);
+            wait_for(|| budget.available() == 8).await?;
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
 async fn active_sessions_share_a_budget_and_release_it_on_disconnect() -> Result<()> {
     use super::{
         ExecSession, SessionCommon,

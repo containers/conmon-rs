@@ -12,23 +12,34 @@ clients.
 The server takes these flags, every flag can also be set through the
 environment variable in parentheses:
 
-| Flag                               | Environment                     | Default                 | Purpose                                                                              |
-| ---------------------------------- | ------------------------------- | ----------------------- | ------------------------------------------------------------------------------------ |
-| `-r, --runtime <RUNTIME>`          | `CONMON_RUNTIME`                |                         | Binary path of the OCI runtime, required for running the server.                     |
-| `--runtime-dir <RUNTIME_DIR>`      | `CONMON_RUNTIME_DIR`            |                         | Directory for `conmon.sock`, the `pidfile` and the PID files of the execs, required. |
-| `--runtime-root <RUNTIME_ROOT>`    | `CONMON_RUNTIME_ROOT`           |                         | Root directory passed to the OCI runtime (`--root`).                                 |
-| `-l, --log-level <LEVEL>`          | `CONMON_LOG_LEVEL`              | `info`                  | `trace`, `debug`, `info`, `warn`, `error` or `off`.                                  |
-| `-d, --log-driver <DRIVER>`        | `CONMON_LOG_DRIVER`             | `systemd`               | Where the server logs to: `systemd` (journald), `stdout` or `none`.                  |
-| `--skip-fork`                      | `CONMON_SKIP_FORK`              | `false`                 | Stay in the foreground instead of forking into the background.                       |
-| `-e, --enable-tracing`             | `CONMON_ENABLE_TRACING`         | `false`                 | Export OpenTelemetry traces (needs a build with the `tracing` feature).              |
-| `-t, --tracing-endpoint <URL>`     | `CONMON_TRACING_ENDPOINT`       | `http://127.0.0.1:4317` | OpenTelemetry gRPC endpoint.                                                         |
-| `--max-streaming-sessions <COUNT>` | `CONMON_MAX_STREAMING_SESSIONS` | `256`                   | Combined limit for active exec, attach and port forward streams, from 1 to 65535.    |
-| `-v, --version [full]`             | `CONMON_VERSION`                |                         | Print the version, `full` includes the dependency tree.                              |
-| `-j, --version-json, --vj [full]`  | `CONMON_VERSION_JSON`           |                         | Print the version as JSON.                                                           |
+| Flag                                     | Environment                           | Default                 | Purpose                                                                                     |
+| ---------------------------------------- | ------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------- |
+| `-r, --runtime <RUNTIME>`                | `CONMON_RUNTIME`                      |                         | Binary path of the OCI runtime, required for running the server.                            |
+| `--runtime-dir <RUNTIME_DIR>`            | `CONMON_RUNTIME_DIR`                  |                         | Directory for `conmon.sock`, the `pidfile` and the PID files of the execs, required.        |
+| `--runtime-root <RUNTIME_ROOT>`          | `CONMON_RUNTIME_ROOT`                 |                         | Root directory passed to the OCI runtime (`--root`).                                        |
+| `-l, --log-level <LEVEL>`                | `CONMON_LOG_LEVEL`                    | `info`                  | `trace`, `debug`, `info`, `warn`, `error` or `off`.                                         |
+| `-d, --log-driver <DRIVER>`              | `CONMON_LOG_DRIVER`                   | `systemd`               | Where the server logs to: `systemd` (journald), `stdout` or `none`.                         |
+| `--skip-fork`                            | `CONMON_SKIP_FORK`                    | `false`                 | Stay in the foreground instead of forking into the background.                              |
+| `-e, --enable-tracing`                   | `CONMON_ENABLE_TRACING`               | `false`                 | Export OpenTelemetry traces (needs a build with the `tracing` feature).                     |
+| `-t, --tracing-endpoint <URL>`           | `CONMON_TRACING_ENDPOINT`             | `http://127.0.0.1:4317` | OpenTelemetry gRPC endpoint.                                                                |
+| `--max-streaming-sessions <COUNT>`       | `CONMON_MAX_STREAMING_SESSIONS`       | `256`                   | Combined limit for active exec, attach and port forward streams, from 1 to 65535.           |
+| `--max-streaming-buffer-mib <MIB>`       | `CONMON_MAX_STREAMING_BUFFER_MIB`     | `64`                    | Shared queued SPDY input and port forward buffer budget, 16 to 4095 MiB (since unreleased). |
+| `--max-port-forward-connections <COUNT>` | `CONMON_MAX_PORT_FORWARD_CONNECTIONS` | `128`                   | Shared pending and established forwarded TCP connections, 1 to 65535 (since unreleased).    |
+| `-v, --version [full]`                   | `CONMON_VERSION`                      |                         | Print the version, `full` includes the dependency tree.                                     |
+| `-j, --version-json, --vj [full]`        | `CONMON_VERSION_JSON`                 |                         | Print the version as JSON.                                                                  |
 
 `--skip-fork` and `--enable-tracing` take no value. Their environment variables
 take a boolean: `1`, `true`, `yes`, `y`, `t` or `on` for true and `0`, `false`,
 `no`, `n`, `f` or `off` for false, in any case.
+
+The forwarded-connection limit applies across the server, normally one pod
+with CRI-O. Excess connections fail immediately rather than waiting for a
+slot. A port-forward WebSocket requesting 40 ports starts 40 connections and
+can occupy 40 of the default 128 slots. The shared byte budget can delay
+unrelated sessions, and SPDY closes a connection after 60 seconds waiting for
+shared buffer space. Local byte budget and stream queue waits retain their
+existing idle timeout behavior. See
+[Streaming security](protocols.md#streaming-security).
 
 Before it forks, the server sets its umask to 022. It keeps the `NOTIFY_SOCKET`
 of the caller from the runtime, which would otherwise hand the sd_notify socket
@@ -38,6 +49,17 @@ the hard one. The OCI runtime gets the OOM score, the huge pages setting and the
 open files limits the server started with, so the container processes get the
 OOM score of the client unless it sets `process.oomScoreAdj` in the OCI
 configuration, like CRI-O does.
+
+Since unreleased, the server locks the runtime directory before inspecting or
+removing stale sockets, and holds that lock until it has bound `conmon.sock`.
+Another server starting in the same directory fails without removing its
+sockets or writing a PID file. The lock survives the daemon fork and descriptor
+cleanup; it is released automatically on failure and does not pass to OCI
+runtimes. This coordinates direct binary starts. Callers must still serialize
+Go client `New` calls for a runtime directory, because those calls also clean up
+and consume the PID file outside the server. The runtime directory must be on
+a filesystem that supports `flock` on directories; a lock failure aborts
+startup.
 
 When the server forks, the parent writes the child's PID to `pidfile` in the
 runtime directory and exits. With a server log driver other than `stdout`, the
@@ -130,6 +152,12 @@ server exits with status 1.
 
 ## Changes
 
+- Unreleased: concurrent binary starts in the same runtime directory cannot
+  remove each other's sockets before binding. Previously only an already
+  listening server was protected.
+- Unreleased: `--max-streaming-buffer-mib` and
+  `--max-port-forward-connections` bound shared streaming buffers and
+  forwarded connections, see [Streaming security](protocols.md#streaming-security).
 - v1.2.3: the server has neither the `pause` subcommand nor the fd socket
   anymore, and removes the `conmon-fd.sock` of an older server from the runtime
   directory when it starts. The `createNamespaces` and `startFdSocket` requests

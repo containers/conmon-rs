@@ -22,6 +22,63 @@ fn streaming_session_limit_is_positive_and_configurable() {
     }
 }
 
+/// Exercise clap's actual environment lookup in child processes, without
+/// mutating the environment of parallel tests or inheriting user overrides.
+#[test]
+fn streaming_limits_from_environment() -> Result<()> {
+    const CHILD: &str = "CONMONRS_LIMIT_ENV_TEST";
+    if let Ok(expected) = std::env::var(CHILD) {
+        let parsed = Config::try_parse_from(["conmonrs"]);
+        if expected == "valid" {
+            let parsed = parsed?;
+            assert_eq!(parsed.max_streaming_sessions(), 17);
+            assert_eq!(parsed.max_streaming_buffer_bytes(), 32 * 1024 * 1024);
+            assert_eq!(parsed.max_port_forward_connections(), 3);
+            let override_config =
+                Config::try_parse_from(["conmonrs", "--max-streaming-buffer-mib", "48"])?;
+            assert_eq!(
+                override_config.max_streaming_buffer_bytes(),
+                48 * 1024 * 1024
+            );
+        } else {
+            assert!(parsed.is_err(), "invalid environment accepted: {expected}");
+        }
+        return Ok(());
+    }
+
+    let names = [
+        "CONMON_MAX_STREAMING_SESSIONS",
+        "CONMON_MAX_STREAMING_BUFFER_MIB",
+        "CONMON_MAX_PORT_FORWARD_CONNECTIONS",
+    ];
+    for (expected, values) in [
+        ("valid", ["17", "32", "3"]),
+        ("zero sessions", ["0", "32", "3"]),
+        ("small buffer", ["17", "15", "3"]),
+        ("large buffer", ["17", "4096", "3"]),
+        ("zero forwards", ["17", "32", "0"]),
+        ("nonnumeric forwards", ["17", "32", "many"]),
+    ] {
+        let mut child = std::process::Command::new(std::env::current_exe()?);
+        child.args([
+            "--exact",
+            "config::tests::streaming_limits_from_environment",
+            "--nocapture",
+        ]);
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("CONMON_") {
+                child.env_remove(key);
+            }
+        }
+        child
+            .env(CHILD, expected)
+            .envs(names.into_iter().zip(values));
+        let output = child.output()?;
+        assert!(output.status.success(), "{expected}: {output:?}");
+    }
+    Ok(())
+}
+
 #[test]
 fn validate_requires_the_runtime_flags() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -87,13 +144,13 @@ async fn prepare_keeps_the_socket_of_a_running_server() -> Result<()> {
     // And the fd socket of an older server.
     let fd_socket = dir.path().join("conmon-fd.sock");
     drop(tokio_seqpacket::UnixSeqpacketListener::bind(&fd_socket)?);
-    retry_while_in_use(|| config.prepare()).await?;
+    retry_while_in_use(|| config.prepare().map(drop)).await?;
     assert!(!config.socket().exists());
     assert!(!fd_socket.exists());
 
     // One which cannot be removed does not stop the server.
     std::fs::create_dir(&fd_socket)?;
-    config.prepare()?;
+    retry_while_in_use(|| config.prepare().map(drop)).await?;
     std::fs::remove_dir(&fd_socket)?;
 
     // A running server keeps it.
@@ -106,7 +163,7 @@ async fn prepare_keeps_the_socket_of_a_running_server() -> Result<()> {
 
     // A socket of another type is no server of this kind.
     let other_type = tokio_seqpacket::UnixSeqpacketListener::bind(config.socket())?;
-    config.prepare()?;
+    retry_while_in_use(|| config.prepare().map(drop)).await?;
     assert!(!config.socket().exists());
     drop(other_type);
 
@@ -114,7 +171,7 @@ async fn prepare_keeps_the_socket_of_a_running_server() -> Result<()> {
     if !nix::unistd::geteuid().is_root() {
         let _inaccessible = std::os::unix::net::UnixListener::bind(config.socket())?;
         std::fs::set_permissions(config.socket(), Permissions::from_mode(0o000))?;
-        config.prepare()?;
+        retry_while_in_use(|| config.prepare().map(drop)).await?;
         assert!(!config.socket().exists());
     }
     Ok(())
@@ -262,4 +319,103 @@ fn boolean_environment_variables() {
         }
         assert!(parse("maybe").is_err(), "{id}");
     }
+}
+
+/// A second start must fail before either one creates a listener, without
+/// removing the artifacts the first start is preparing. Separate opens of
+/// the same directory, including through a symlink, share the lock.
+#[tokio::test]
+async fn startup_lock_covers_preparation_through_bind() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("run");
+    let alias = root.path().join("alias");
+    std::os::unix::fs::symlink(&path, &alias)?;
+    let config = Config::parse_for_test(["--runtime-dir".as_ref(), path.as_os_str()]);
+    let other = Config::parse_for_test(["--runtime-dir".as_ref(), alias.as_os_str()]);
+    let guard = config.prepare()?;
+    let old_socket = path.join(OLD_FD_SOCKET);
+    fs::write(&old_socket, b"owned by first start")?;
+    let err = other.prepare().unwrap_err();
+    assert!(err.is::<listener::SocketInUse>(), "{err:#}");
+    assert_eq!(fs::read(&old_socket)?, b"owned by first start");
+    let listener = std::os::unix::net::UnixListener::bind(config.socket())?;
+    drop(guard);
+    assert!(other.prepare().unwrap_err().is::<listener::SocketInUse>());
+    drop(listener);
+    fs::remove_file(config.socket())?;
+    retry_while_in_use(|| other.prepare().map(drop)).await?;
+    assert!(!old_socket.exists());
+    Ok(())
+}
+
+#[test]
+fn streaming_resource_limits() {
+    let config = Config::parse_for_test(Vec::<String>::new());
+    assert_eq!(config.max_streaming_buffer_bytes(), 64 * 1024 * 1024);
+    assert_eq!(config.max_port_forward_connections(), 128);
+    let config = Config::parse_for_test([
+        "--max-streaming-buffer-mib",
+        "32",
+        "--max-port-forward-connections",
+        "7",
+    ]);
+    assert_eq!(config.max_streaming_buffer_bytes(), 32 * 1024 * 1024);
+    assert_eq!(config.max_port_forward_connections(), 7);
+    for value in ["0", "15", "4096"] {
+        assert!(Config::try_parse_from(["conmonrs", "--max-streaming-buffer-mib", value]).is_err());
+    }
+    for value in ["0", "65536"] {
+        assert!(
+            Config::try_parse_from(["conmonrs", "--max-port-forward-connections", value]).is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn startup_lock_lasts_until_the_last_inherited_copy_closes() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let first = StartupLock::acquire(dir.path())?;
+    let inherited = StartupLock(first.0.try_clone()?);
+    drop(first);
+    assert!(
+        StartupLock::acquire(dir.path())
+            .unwrap_err()
+            .is::<listener::SocketInUse>()
+    );
+    drop(inherited);
+    // A parallel test may have forked with the descriptor before CLOEXEC
+    // closed its copy. Like stale socket checks, wait for that child.
+    retry_while_in_use(|| StartupLock::acquire(dir.path()).map(drop)).await?;
+    Ok(())
+}
+
+#[test]
+fn startup_lock_survives_descriptor_cleanup() -> Result<()> {
+    crate::test_util::run_in_own_process(
+        "config::tests::startup_lock_cleanup_child",
+        "CONMONRS_LOCK_CLEANUP_TEST",
+        false,
+    )
+}
+
+#[test]
+#[ignore = "run in a separate process by startup_lock_survives_descriptor_cleanup"]
+fn startup_lock_cleanup_child() -> Result<()> {
+    if std::env::var_os("CONMONRS_LOCK_CLEANUP_TEST").is_none() {
+        return Ok(());
+    }
+    let dir = tempfile::tempdir()?;
+    let guard = StartupLock::acquire(dir.path())?;
+    crate::init::close_inherited_fds(Some(guard.fd()));
+    assert!(
+        StartupLock::acquire(dir.path())
+            .unwrap_err()
+            .is::<listener::SocketInUse>()
+    );
+    // The lock's descriptor has CLOEXEC, so a runtime inherits none.
+    let flags = nix::fcntl::fcntl(&guard.0, nix::fcntl::FcntlArg::F_GETFD)?;
+    assert_ne!(flags & libc::FD_CLOEXEC, 0);
+    drop(guard);
+    drop(StartupLock::acquire(dir.path())?);
+    Ok(())
 }

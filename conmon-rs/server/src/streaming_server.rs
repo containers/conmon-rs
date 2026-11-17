@@ -13,6 +13,8 @@ use hyper::{
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
 use port_forward::PortForward;
+use resources::Resources;
+pub(crate) use resources::{DEFAULT_BUFFER_MIB, DEFAULT_FORWARD_CONNECTIONS};
 use std::{
     convert::Infallible,
     io,
@@ -39,6 +41,7 @@ mod handshake;
 mod idle;
 mod port_forward;
 mod remotecommand;
+mod resources;
 mod session;
 mod spdy;
 mod stream_protocol;
@@ -164,6 +167,7 @@ struct State {
     /// including the wait for the HTTP connection to upgrade.
     active: Arc<Semaphore>,
     max_active_sessions: usize,
+    resources: Arc<Resources>,
 
     /// Whether a task drops the sessions whose client did not come in time,
     /// see [`StreamingServer::sweep`].
@@ -196,7 +200,20 @@ impl Default for StreamingServer {
 
 impl StreamingServer {
     /// A server with a shared budget for all active streaming sessions.
+    #[cfg(test)]
     pub(crate) fn new(max_active_sessions: usize) -> Self {
+        Self::with_limits(
+            max_active_sessions,
+            u32::from(DEFAULT_BUFFER_MIB) * 1024 * 1024,
+            usize::from(DEFAULT_FORWARD_CONNECTIONS),
+        )
+    }
+
+    pub(crate) fn with_limits(
+        max_active_sessions: usize,
+        buffer_bytes: u32,
+        connections: usize,
+    ) -> Self {
         Self {
             port: OnceCell::new(),
             state: Arc::new(Mutex::new(State {
@@ -204,6 +221,7 @@ impl StreamingServer {
                 port_forwards: BoundedMap::default(),
                 active: Arc::new(Semaphore::new(max_active_sessions)),
                 max_active_sessions,
+                resources: Resources::new(buffer_bytes, connections),
                 sweeping: false,
             })),
         }
@@ -407,10 +425,11 @@ impl StreamingServer {
         netns_path: PathBuf,
         idle_timeout: Option<Duration>,
     ) -> Result<String> {
+        let resources = lock(&self.state).resources.clone();
         self.wait_for_client(
             PORT_FORWARD_PATH,
             |state| &mut state.port_forwards,
-            PortForward::new(netns_path, idle_timeout),
+            PortForward::with_resources(netns_path, idle_timeout, resources),
         )
         .await
     }
