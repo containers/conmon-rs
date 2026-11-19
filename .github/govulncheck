@@ -15,7 +15,7 @@ if [[ $MODE != warn && $MODE != fail ]]; then
     echo "usage: $0 warn|fail" >&2
     exit 1
 fi
-GOVULNCHECK_VERSION=v1.9.0
+GOVULNCHECK_VERSION=v1.10.0
 BIN=${RUNNER_TEMP:-$(mktemp -d)}
 
 for ATTEMPT in 1 2 3; do

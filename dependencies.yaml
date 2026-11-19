@@ -31,7 +31,7 @@ dependencies:
         match: "GOLANGCI_LINT_VERSION :="
 
   - name: cargo-deny
-    version: 0.20.2
+    version: 0.21.0
     upstream:
       flavour: github
       url: EmbarkStudios/cargo-deny
@@ -48,7 +48,7 @@ dependencies:
   # cargo-nextest-X.Y.Z, which zeitgeist cannot match, see
   # https://github.com/nextest-rs/nextest/releases.
   - name: cargo-nextest
-    version: 0.9.151
+    version: 0.9.152
     refPaths:
       - path: .github/workflows/ci.yml
         match: "tool: cargo-nextest@"
@@ -123,7 +123,7 @@ dependencies:
   # A bump updates ZEITGEIST_CHECKSUMS_SHA256 of the Makefile as well, the
   # sha256 of the checksums.txt of the release.
   - name: zeitgeist
-    version: 0.8.0
+    version: 0.9.0
     upstream:
       flavour: github
       url: kubernetes-sigs/zeitgeist
@@ -260,7 +260,7 @@ dependencies:
   # could check. Bump it to the pseudo-version of a newer commit, which `go
   # list -m golang.org/x/exp@latest` prints.
   - name: gorelease
-    version: 0.0.0-20261014143641-f0251eb4aa3e
+    version: 0.0.0-20261118215729-2791e4028fd4
     refPaths:
       - path: Makefile
         match: "GORELEASE_VERSION :="
@@ -276,13 +276,13 @@ dependencies:
         match: "LYCHEE_VERSION:"
 
   - name: govulncheck
-    version: 1.9.0
+    version: 1.10.0
     refPaths:
       - path: .github/govulncheck
         match: GOVULNCHECK_VERSION=v
 
   - name: grype
-    version: 0.121.3
+    version: 0.122.1
     upstream:
       flavour: github
       url: anchore/grype
