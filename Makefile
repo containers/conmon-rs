@@ -59,10 +59,10 @@ NODE_DIGEST := sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b
 NODE_IMAGE := docker.io/library/node:$(NODE_VERSION)-slim@$(NODE_DIGEST)
 PRETTIER = $(CONTAINER_RUNTIME) run --rm -v $(CURDIR):/w:z -w /w --entrypoint npx \
 	$(NODE_IMAGE) --yes prettier@$(PRETTIER_VERSION)
-ZEITGEIST_VERSION := v0.8.0
+ZEITGEIST_VERSION := v0.9.0
 # The sha256 of the checksums.txt of the release, a bump of the version
 # updates it as well, see .install.zeitgeist.
-ZEITGEIST_CHECKSUMS_SHA256 := ec1a11bcdb987d7095ec8beb87c339b99671455be523af17e41b3402ae3407d4
+ZEITGEIST_CHECKSUMS_SHA256 := 6b509a4f5a81b9c221c224bd55c582896936ec73e639c6a391bfdc7d3ce4ef75
 ACTIONLINT_VERSION := v1.7.12
 # The sha256 of the checksums file of the release, a bump of the version
 # updates it as well, see .install.actionlint.
@@ -74,9 +74,9 @@ ZIZMOR_IMAGE := ghcr.io/zizmorcore/zizmor:$(ZIZMOR_VERSION)@$(ZIZMOR_DIGEST)
 ZIZMOR_FLAGS ?=
 # gorelease has no releases, the version is a commit of golang.org/x/exp,
 # see dependencies.yaml.
-GORELEASE_VERSION := v0.0.0-20261014143641-f0251eb4aa3e
-GRYPE_VERSION := v0.121.3
-GRYPE_DIGEST := sha256:13113eeceab017260370cf540e1d25442c59665fd07d1b09b66d63bb0c282887
+GORELEASE_VERSION := v0.0.0-20261118215729-2791e4028fd4
+GRYPE_VERSION := v0.122.1
+GRYPE_DIGEST := sha256:661583704a253c0448ed63998b5ea2cd9d5a76ee71eedc4aed439b8ce3e93a1c
 GRYPE_IMAGE := docker.io/anchore/grype:$(GRYPE_VERSION)@$(GRYPE_DIGEST)
 # The SPDX SBOMs make scan checks, like the conmonrs.$ARCH.spdx.json files of
 # the bucket.
