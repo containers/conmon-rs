@@ -89,7 +89,7 @@ jobs:
           fetch-depth: 0 # the released schema is the compatibility baseline
           persist-credentials: false
       # Only builds capnpc-go, which is not worth a cache entry of its own.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           cache: false
@@ -394,7 +394,7 @@ jobs:
           persist-credentials: false
       # The latest Go release changes the key of a cache, which would keep
       # adding entries.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: stable
           cache: false
@@ -982,7 +982,7 @@ jobs:
           persist-credentials: false
       # ginkgo has a cache of its own, a Go cache saved here would lack the
       # modules of the integration jobs which share its key.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           cache: false
